@@ -14,7 +14,8 @@ namespace Vorticity.Benchmarks.Queries;
 /// a second, partitioned by hour and sorted by the instant, a terabyte and more on the disk.
 /// Each hour is drawn by a generator of its own, seeded by the hour, several hours at once, each written into
 /// objects of <c>partMinutes</c> minutes while the hours before it are appended in the order of their instants,
-/// each followed by the compaction it made due; the objects the compactions replaced are then vacuumed.
+/// each followed by the compaction it made due; the objects the compactions replaced are then vacuumed. Under the design's
+/// layout (<see cref="IdiomLayouts.Requests"/>) the days are tiered and consolidated by the data's clock.
 /// </summary>
 internal static class DesignBuild
 {
@@ -33,15 +34,18 @@ internal static class DesignBuild
     };
 
     internal static async Task<(long Rows, string Needle)> FillAsync(
-        IObjectStore store, int hours, double rate, int budget, int parallel, int writeDegree, int partMinutes, string scratch, bool randomIds = false)
+        IObjectStore store, int hours, double rate, int budget, int parallel, int writeDegree, int partMinutes, string scratch, bool randomIds = false, bool idiom = false)
     {
         // The runs the writers move to disk wait beside the store, on its disk.
         System.IO.Directory.CreateDirectory(scratch);
         await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = writeDegree);
+        IdiomLayouts.DataClock? clock = idiom ? new IdiomLayouts.DataClock() : null;
         VortexDataset dataset = await VortexDataset.CreateAsync(store, GeneratedRequest.Schema, new DatasetOptions
         {
             Session = session,
-            Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(GeneratedRequest.At)).Truncate(CalendarUnit.Hour), SortKey = [LayoutValue.Column(nameof(GeneratedRequest.At))], Organization = LayoutOrganization.Leveled },
+            Layout = idiom ? IdiomLayouts.Requests
+                : new DatasetLayout { Partition = LayoutValue.Column(nameof(GeneratedRequest.At)).Truncate(CalendarUnit.Hour), SortKey = [LayoutValue.Column(nameof(GeneratedRequest.At))], Organization = LayoutOrganization.Leveled },
+            TimeProvider = clock ?? TimeProvider.System,
             Identifiers = [nameof(GeneratedRequest.RequestId)],
             Write = WriteOptions(budget, scratch),
         });
@@ -77,6 +81,11 @@ internal static class DesignBuild
 
                 Volatile.Write(ref s_appended, hour + 1);
                 Start();
+                if (clock is not null)
+                {
+                    clock.Now = QuestionBench.Start.AddHours(hour + 1);
+                }
+
                 while (await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 2 }) is not null)
                 {
                 }
@@ -92,6 +101,12 @@ internal static class DesignBuild
                 {
                     await VacuumAsync(dataset);
                 }
+            }
+
+            // Every day calm by the end, consolidated as a sealed day is.
+            if (clock is not null)
+            {
+                clock.Now = QuestionBench.Start.AddHours(hours + 2);
             }
 
             await QuestionBench.CompactAsync(dataset);

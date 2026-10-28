@@ -20,10 +20,12 @@ internal static class IncrementalBuild
     /// <summary>
     /// <paramref name="hours"/> hours of <paramref name="perHour"/> rows each, the rows of an hour drawn by the generator
     /// <paramref name="hourly"/> gives for it, <paramref name="parallel"/> hours written at once, objects of
-    /// <paramref name="partMinutes"/> minutes; the rows written.
+    /// <paramref name="partMinutes"/> minutes; the rows written. A <paramref name="clock"/> the handle runs by is set to the
+    /// end of each hour once it is appended, before its compactions.
     /// </summary>
     internal static async Task<long> FillAsync<TRecord>(
-        IObjectStore store, DatasetOptions options, int hours, long perHour, int parallel, int partMinutes, Func<int, Func<DateTimeOffset, TRecord>> hourly)
+        IObjectStore store, DatasetOptions options, int hours, long perHour, int parallel, int partMinutes, Func<int, Func<DateTimeOffset, TRecord>> hourly,
+        IdiomLayouts.DataClock? clock = null)
         where TRecord : IVortexRecord<TRecord>
     {
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, TRecord.Schema, options);
@@ -55,6 +57,11 @@ internal static class IncrementalBuild
 
             Volatile.Write(ref appended, hour + 1);
             Start();
+            if (clock is not null)
+            {
+                clock.Now = QuestionBench.Start.AddHours(hour + 1);
+            }
+
             long compacting = Stopwatch.GetTimestamp();
             int jobs = 0;
             while (await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 2 }) is not null)

@@ -88,6 +88,12 @@ internal static partial class PathsBench
         /// <summary>Whether the bench asks the client's questions, QP-1 to QP-10, over the requests and the client's spans and log records (<c>--qp</c>).</summary>
         internal bool Qp { get; init; }
 
+        /// <summary>
+        /// Whether the bench asks the questions of the design's table of costs that one table answers (<c>--study</c>,
+        /// <see cref="StudyQuestions"/>), over the requests and the client's spans and log records.
+        /// </summary>
+        internal bool Study { get; init; }
+
         /// <summary>The hours of the client's spans and log records (<c>--qp-hours</c>): a day in objects of its own, and the hours of the next still being compacted.</summary>
         internal int QpHours { get; init; } = 30;
 
@@ -99,6 +105,13 @@ internal static partial class PathsBench
         /// feature flag shredded, on append too, for QP-3, QP-9 and QP-10. Their stores are named apart.
         /// </summary>
         internal bool Declared { get; init; }
+
+        /// <summary>
+        /// Whether the stores take the layouts the design recommends (<c>--idiom</c>, <see cref="IdiomLayouts"/>): each table
+        /// partitioned by day and sorted by its service first, tiered and consolidated by the data's clock, rather than in the
+        /// order the rows arrive. Their stores are named apart.
+        /// </summary>
+        internal bool Idiom { get; init; }
 
         internal bool BuildOnly { get; init; }
 
@@ -195,14 +208,10 @@ internal static partial class PathsBench
             return await WriteOneAsync(settings, kind);
         }
 
-        Built requests = await EnsureAsync(
-            settings,
-            $"requests-{(settings.Design ? "design-" : string.Empty)}clustered-h{settings.Hours}-r{settings.Rate:0}-b{settings.Budget}{(settings.RandomIds ? "-rid" : string.Empty)}",
-            store => !settings.Design ? FillRequestsAsync(store, settings)
-                : DesignBuild.FillAsync(store, settings.Hours, settings.Rate, settings.Budget, settings.ParallelHours, settings.WriteDegree, settings.PartMinutes, Path.Combine(settings.Store, "scratch"), settings.RandomIds));
+        Built requests = await EnsureAsync(settings, RequestsName(settings), store => FillAnyRequestsAsync(store, settings));
         Built logs = await EnsureAsync(settings, $"logs-clustered-h{settings.LogHours}-r{settings.LogRate:0}-b{settings.Budget}", store => FillLogsAsync(store, settings));
-        Built? spans = !settings.Qp ? null : await EnsureAsync(settings, SpansName(settings), store => FillSpansAsync(store, settings));
-        Built? logs2 = !settings.Qp ? null : await EnsureAsync(settings, LogsV2Name(settings), store => FillLogsV2Async(store, settings));
+        Built? spans = !settings.Qp && !settings.Study ? null : await EnsureAsync(settings, SpansName(settings), store => FillSpansAsync(store, settings));
+        Built? logs2 = !settings.Qp && !settings.Study ? null : await EnsureAsync(settings, LogsV2Name(settings), store => FillLogsV2Async(store, settings));
         if (settings.BuildOnly)
         {
             return 0;
@@ -271,7 +280,11 @@ internal static partial class PathsBench
             Asked<LogRow>("logs", "status_code ToInt64() >= 500, per service, text parsed", scan => scan.Where(r => r.Attributes["http.response.status_code"].ToInt64() >= 500).GroupBy(r => r.ServiceName).Select(g => (g.Key, g.Count()))),
         ];
 
-        if (settings.Qp)
+        if (settings.Study)
+        {
+            questions = StudyQuestions(settings, requests.Needle);
+        }
+        else if (settings.Qp)
         {
             questions = QpQuestions(settings, requests.Needle, spans!.Needle, half);
         }
@@ -798,16 +811,28 @@ internal static partial class PathsBench
     /// as a client's ingestion does, partitioned by day, their trace and span ids declared identifiers; and the trace id of
     /// a span in the middle, a needle.
     /// </summary>
+    /// <summary>The name of the requests' store under <see cref="Settings.Store"/>, as the settings build it.</summary>
+    private static string RequestsName(Settings settings) =>
+        $"requests-{(settings.Design ? "design-" : string.Empty)}clustered-h{settings.Hours}-r{settings.Rate:0}-b{settings.Budget}{(settings.RandomIds ? "-rid" : string.Empty)}{Idiom(settings)}";
+
+    /// <summary>The requests, by the design's parallel build at its scale or under its layout, by appends of a minute otherwise.</summary>
+    private static Task<(long Rows, string Needle)> FillAnyRequestsAsync(IObjectStore store, Settings settings) =>
+        !settings.Design && !settings.Idiom ? FillRequestsAsync(store, settings)
+            : DesignBuild.FillAsync(store, settings.Hours, settings.Rate, settings.Budget, settings.ParallelHours, settings.WriteDegree, settings.PartMinutes, Path.Combine(settings.Store, "scratch"), settings.RandomIds, settings.Idiom);
+
     /// <summary>The name of the client's spans' store under <see cref="Settings.Store"/>, as the settings build it.</summary>
     private static string SpansName(Settings settings) =>
-        $"spans-v2-clustered-h{settings.QpHours}-r{settings.QpRate:0}-b{settings.Budget}";
+        $"spans-v2-clustered-h{settings.QpHours}-r{settings.QpRate:0}-b{settings.Budget}{Idiom(settings)}";
 
     /// <summary>The name of the client's log records' store under <see cref="Settings.Store"/>, as the settings build it.</summary>
     private static string LogsV2Name(Settings settings) =>
-        $"logs-v2{(settings.Declared ? "-declared" : string.Empty)}-clustered-h{settings.QpHours}-r{settings.QpRate:0}-b{settings.Budget}";
+        $"logs-v2{(settings.Declared ? "-declared" : string.Empty)}-clustered-h{settings.QpHours}-r{settings.QpRate:0}-b{settings.Budget}{Idiom(settings)}";
+
+    /// <summary>What names a store of the design's layouts apart (<see cref="Settings.Idiom"/>).</summary>
+    private static string Idiom(Settings settings) => settings.Idiom ? "-idiom" : string.Empty;
 
     /// <summary>
-    /// <c>--qp-write spans|logs</c>: that one of the client's stores alone, built as <c>--qp</c> builds it, in a process of
+    /// <c>--qp-write spans|logs|requests</c>: that one of the stores alone, built as <c>--qp</c> builds it, in a process of
     /// its own, so that the processors' time, the bytes allocated and the peak in memory it gives are its build's alone;
     /// the store is kept, under the name <c>--qp</c> reads it by.
     /// </summary>
@@ -817,7 +842,8 @@ internal static partial class PathsBench
         {
             "spans" => SpansName(settings),
             "logs" => LogsV2Name(settings),
-            _ => throw new ArgumentException($"--qp-write takes spans or logs, not '{kind}'."),
+            "requests" => RequestsName(settings),
+            _ => throw new ArgumentException($"--qp-write takes spans, logs or requests, not '{kind}'."),
         };
         if (!settings.Rebuild && System.IO.File.Exists(Path.Combine(settings.Store, name) + ".built"))
         {
@@ -829,9 +855,12 @@ internal static partial class PathsBench
         TimeSpan cpu = self.TotalProcessorTime;
         long allocated = GC.GetTotalAllocatedBytes();
         long begin = Stopwatch.GetTimestamp();
-        Built built = kind == "spans"
-            ? await EnsureAsync(settings, name, store => FillSpansAsync(store, settings))
-            : await EnsureAsync(settings, name, store => FillLogsV2Async(store, settings));
+        Built built = await EnsureAsync(settings, name, store => kind switch
+        {
+            "spans" => FillSpansAsync(store, settings),
+            "logs" => FillLogsV2Async(store, settings),
+            _ => FillAnyRequestsAsync(store, settings),
+        });
         double seconds = Stopwatch.GetElapsedTime(begin).TotalSeconds;
         self.Refresh();
         double busy = (self.TotalProcessorTime - cpu).TotalSeconds;
@@ -849,10 +878,13 @@ internal static partial class PathsBench
         long perHour = (long)(settings.QpRate * 3_600);
         int middle = settings.QpHours / 2;
         string needle = string.Empty;
+        IdiomLayouts.DataClock? clock = settings.Idiom ? new IdiomLayouts.DataClock() : null;
         DatasetOptions options = new DatasetOptions
         {
             Session = session,
-            Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(GeneratedSpanV2.At)).Truncate(CalendarUnit.Day), SortKey = [LayoutValue.Column(nameof(GeneratedSpanV2.At))], Organization = LayoutOrganization.Leveled },
+            Layout = settings.Idiom ? IdiomLayouts.Spans
+                : new DatasetLayout { Partition = LayoutValue.Column(nameof(GeneratedSpanV2.At)).Truncate(CalendarUnit.Day), SortKey = [LayoutValue.Column(nameof(GeneratedSpanV2.At))], Organization = LayoutOrganization.Leveled },
+            TimeProvider = clock ?? TimeProvider.System,
             Identifiers = [nameof(GeneratedSpanV2.TraceId), nameof(GeneratedSpanV2.SpanId)],
             Write = new VortexWriteOptions { Indexes = IndexPolicy.Auto.WithBudgetPerMille(settings.Budget), ScratchDirectory = Path.Combine(settings.Store, "scratch") },
         };
@@ -870,7 +902,7 @@ internal static partial class PathsBench
 
                 return span;
             };
-        });
+        }, clock);
         return (rows, needle);
     }
 
@@ -886,10 +918,13 @@ internal static partial class PathsBench
         Directory.CreateDirectory(Path.Combine(settings.Store, "scratch"));
         await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = settings.WriteDegree);
         long perHour = (long)(settings.QpRate * 3_600);
+        IdiomLayouts.DataClock? clock = settings.Idiom ? new IdiomLayouts.DataClock() : null;
         DatasetOptions options = new DatasetOptions
         {
             Session = session,
-            Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(LogRow.At)).Truncate(CalendarUnit.Day), SortKey = [LayoutValue.Column(nameof(LogRow.At))], Organization = LayoutOrganization.Leveled },
+            Layout = settings.Idiom ? IdiomLayouts.Logs
+                : new DatasetLayout { Partition = LayoutValue.Column(nameof(LogRow.At)).Truncate(CalendarUnit.Day), SortKey = [LayoutValue.Column(nameof(LogRow.At))], Organization = LayoutOrganization.Leveled },
+            TimeProvider = clock ?? TimeProvider.System,
             Write = new VortexWriteOptions { Indexes = IndexPolicy.Auto.WithBudgetPerMille(settings.Budget), ScratchDirectory = Path.Combine(settings.Store, "scratch") },
 
             // --declared: the keys of the attributes QP-3, QP-9 and QP-10 filter by, shredded by every job and every append.
@@ -900,7 +935,7 @@ internal static partial class PathsBench
         {
             LogGeneratorV2 generator = new LogGeneratorV2(3_000 + hour);
             return generator.Next;
-        });
+        }, clock);
         return (rows, string.Empty);
     }
 
