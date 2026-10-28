@@ -2771,6 +2771,7 @@ Vorticity:     property VortexSessionOptions Options { get; }
 Vorticity: sealed class Vorticity.VortexSessionOptions
 Vorticity:     property MemoryPool<byte> MemoryPool { get; set; }
 Vorticity:     property ObjectStoreRegistry ObjectStores { get; }
+Vorticity:     property QueryMemoryBudget JobMemoryBudget { get; set; }
 Vorticity:     property QueryMemoryBudget MemoryBudget { get; set; }
 Vorticity:     property ScratchBudget ScratchBudget { get; set; }
 Vorticity:     property SegmentCache SegmentCache { get; set; }
@@ -3048,13 +3049,16 @@ Vorticity.Dataset:     property CompactionStyle Style { get; init; }
 Vorticity.Dataset:     property CompactionTrigger Trigger { get; init; }
 Vorticity.Dataset:     property OperationOutcome Outcome { get; init; }
 Vorticity.Dataset:     property int FromLevel { get; init; }
+Vorticity.Dataset:     property int RangesAtOnce { get; init; }
 Vorticity.Dataset:     property int ToLevel { get; init; }
 Vorticity.Dataset:     property long BytesIn { get; init; }
 Vorticity.Dataset:     property long BytesOut { get; init; }
+Vorticity.Dataset:     property long MemoryReserved { get; init; }
 Vorticity.Dataset:     property long ObjectsIn { get; init; }
 Vorticity.Dataset:     property long ObjectsMoved { get; init; }
 Vorticity.Dataset:     property long ObjectsOut { get; init; }
 Vorticity.Dataset:     property long Rows { get; init; }
+Vorticity.Dataset:     property long ScratchBytes { get; init; }
 Vorticity.Dataset:     property ulong Version { get; init; }
 Vorticity.Dataset: sealed class Vorticity.Dataset.CompactionSchedule : IEquatable<CompactionSchedule>
 Vorticity.Dataset:     ctor CompactionSchedule()
