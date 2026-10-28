@@ -563,6 +563,11 @@ Where the code stops short of this design, measured or known:
   the model.
 - **Views** that an application chooses, a joint precomputation of several columns, a degraded history and derived
   datasets, are specified and built when an application asks for them.
+- **The memory of jobs** is reserved from an estimate, its inputs' rows and open chunks and its writer's targets, not
+  measured: a consolidation's range over a day of logs reserves 1.4 GB for about 1.5 held, over small inputs 1.65 for
+  about 1.0 ([the memory of a job](15-compaction.md#the-memory-of-a-job)). The shared pool keeps up to 256 MiB a
+  processor of idle blocks parked, which the process's peak counts until the budget refuses, a minute passes without a
+  rent, or the machine's memory runs high.
 
 ## 14. Decisions, and the alternatives weighed
 
