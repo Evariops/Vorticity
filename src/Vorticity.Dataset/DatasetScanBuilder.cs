@@ -829,7 +829,7 @@ internal sealed partial class DatasetScanBuilder
             if (asked.IsCompletedSuccessfully && (ahead is null || ahead.Count == 0))
             {
                 (List<(int First, int End)> Ranges, Indexes.GranuleKeys Keys)? kept = await asked.ConfigureAwait(false);
-                if (Whole(kept))
+                if (Whole(kept) || Narrows(held, kept))
                 {
                     yield return held;
                     continue;
@@ -856,7 +856,7 @@ internal sealed partial class DatasetScanBuilder
 #pragma warning disable VSTHRD003
             (List<(int First, int End)> Ranges, Indexes.GranuleKeys Keys)? read = next.Reading is { } reading ? await reading.ConfigureAwait(false) : next.Kept;
 #pragma warning restore VSTHRD003
-            if (Whole(read))
+            if (Whole(read) || Narrows(next.Held, read))
             {
                 yield return next.Held;
                 continue;
@@ -873,7 +873,7 @@ internal sealed partial class DatasetScanBuilder
 #pragma warning disable VSTHRD003
             (List<(int First, int End)> Ranges, Indexes.GranuleKeys Keys)? read = last.Reading is { } reading ? await reading.ConfigureAwait(false) : last.Kept;
 #pragma warning restore VSTHRD003
-            if (Whole(read))
+            if (Whole(read) || Narrows(last.Held, read))
             {
                 yield return last.Held;
                 continue;
@@ -919,6 +919,34 @@ internal sealed partial class DatasetScanBuilder
         }
 
         return ranges.Count == 1 && ranges[0] == (0, keys.Granules);
+    }
+
+    /// <summary>
+    /// Whether <paramref name="held"/> is read once by the granules its index keeps, <paramref name="kept"/>, noted where
+    /// its read takes them alone (<see cref="Narrow(PositionedObject, ulong[])"/>): an object of the version's columns, with
+    /// no row marked, under the scan's filter, whose index keeps several ranges of them. A part a range waited a round trip
+    /// each, read one after the other: the last quarter of an hour of 600 services under a key they lead was 600 ranges an
+    /// object.
+    /// </summary>
+    private bool Narrows(in PositionedObject held, (List<(int First, int End)> Ranges, Indexes.GranuleKeys Keys)? kept)
+    {
+        if (kept is not ({ Count: > 1 } ranges, { } keys) || held.Entry.HasDeletions || _take is not null || _filter is null
+            || !_version.Schema.Holds(held.Entry))
+        {
+            return false;
+        }
+
+        ulong[] granules = new ulong[(keys.Granules + 63) / 64];
+        foreach ((int from, int end) in ranges)
+        {
+            for (int granule = from; granule < end; granule++)
+            {
+                granules[granule >> 6] |= 1UL << (granule & 63);
+            }
+        }
+
+        Narrow(held, granules);
+        return true;
     }
 
     /// <summary><paramref name="held"/> read by its granules from <paramref name="from"/> to <paramref name="end"/>.</summary>
@@ -1039,13 +1067,16 @@ internal sealed partial class DatasetScanBuilder
         }
     }
 
-    /// <summary>Keeps the granules of the object <paramref name="held"/> a selected row may lie in, which its read takes alone.</summary>
+    /// <summary>
+    /// Keeps the granules of the object <paramref name="held"/> a selected row may lie in, which its read takes alone: those
+    /// both its key's index and its sheets keep, when each narrowed it.
+    /// </summary>
     private void Narrow(PositionedObject held, ulong[] granules)
     {
         System.Collections.Concurrent.ConcurrentDictionary<UInt128, ulong[]> narrowed = Volatile.Read(ref _narrowed)
             ?? Interlocked.CompareExchange(ref _narrowed, new System.Collections.Concurrent.ConcurrentDictionary<UInt128, ulong[]>(), null)
             ?? _narrowed!;
-        narrowed[held.Entry.Uid] = granules;
+        narrowed.AddOrUpdate(held.Entry.Uid, static (_, granules) => granules, static (_, before, granules) => before.Length == granules.Length ? Both(before, granules) : granules, granules);
     }
 }
 
