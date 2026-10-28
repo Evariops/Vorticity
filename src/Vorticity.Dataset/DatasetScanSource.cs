@@ -364,6 +364,7 @@ internal sealed partial class DatasetScanSource
         }
 
         HashSet<long> answered = [];
+        List<(PositionedObject Held, RowRange Rows, List<RowRange>? Kept, Task<List<RowRange>>? Reading)> walked = [];
         await foreach (PositionedObject held in _version.WalkAsync(pruner, from, to, null, cancellationToken).ConfigureAwait(false))
         {
             long start = System.Math.Max(from, held.FirstRow);
@@ -376,17 +377,35 @@ internal sealed partial class DatasetScanSource
             // An object its counts answer is read whole, as states: a piece of its own, never cut.
             if (answer is not null && start == held.FirstRow && end == held.FirstRow + held.Entry.Rows && answer.FieldOf(held) is not null)
             {
-                objects.Add((held, new RowRange(start, end)));
+                walked.Add((held, new RowRange(start, end), null, null));
                 answered.Add(held.FirstRow);
                 continue;
             }
 
             // An object reads the granules the key's pruning keeps alone, by its sparse index: those are the rows its lanes
-            // share, where pieces cut over every row of it would leave most lanes reading nothing.
-            foreach (RowRange kept in await KeptAsync(held, pruning, planner, new RowRange(start, end), cancellationToken).ConfigureAwait(false))
+            // share, where pieces cut over every row of it would leave most lanes reading nothing. The indexes are asked as
+            // the walk finds their objects and read side by side, a wave of requests, where one awaited at a time cost a
+            // round trip each: fourteen for a time window over seven objects.
+            ValueTask<List<RowRange>> keeping = KeptAsync(held, pruning, planner, new RowRange(start, end), cancellationToken);
+            walked.Add(keeping.IsCompletedSuccessfully ? (held, new RowRange(start, end), await keeping.ConfigureAwait(false), null) : (held, new RowRange(start, end), null, keeping.AsTask()));
+        }
+
+        foreach ((PositionedObject held, RowRange rows, List<RowRange>? done, Task<List<RowRange>>? reading) in walked)
+        {
+            if (done is null && reading is null)
             {
-                objects.Add((held, kept));
-                total += kept.Length;
+                objects.Add((held, rows));
+                continue;
+            }
+
+            // The read was asked by this walk, above.
+#pragma warning disable VSTHRD003
+            List<RowRange> read = done ?? await reading!.ConfigureAwait(false);
+#pragma warning restore VSTHRD003
+            foreach (RowRange range in read)
+            {
+                objects.Add((held, range));
+                total += range.Length;
             }
         }
 

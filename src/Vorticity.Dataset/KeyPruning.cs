@@ -35,12 +35,21 @@ internal sealed class KeyPruning
     private readonly int _skip;
     private readonly SummaryPruner _pruner;
 
-    private KeyPruning(SortKey tree, LayoutColumn?[] sources, int skip, SummaryPruner pruner)
+    // The filter as the key reads it, and its conjuncts that read the components' columns alone, as one predicate, made at the
+    // first object whose index it would spare: Unkeyed for none.
+    private readonly VortexExpr _judged;
+    private SummaryPruner? _keyed;
+
+    /// <summary>What <see cref="_keyed"/> holds for a filter none of whose conjuncts reads the key's columns alone.</summary>
+    private static readonly SummaryPruner Unkeyed = new SummaryPruner(Expr.Literal(FilterLiteral.From(true)));
+
+    private KeyPruning(SortKey tree, LayoutColumn?[] sources, int skip, SummaryPruner pruner, VortexExpr judged)
     {
         _tree = tree;
         _sources = sources;
         _skip = skip;
         _pruner = pruner;
+        _judged = judged;
     }
 
     /// <summary>
@@ -74,11 +83,61 @@ internal sealed class KeyPruning
         {
             if (source is not null && Reads(pruner, NameOf(source)))
             {
-                return new KeyPruning(tree, sources, skip, pruner);
+                return new KeyPruning(tree, sources, skip, pruner, judged);
             }
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// The conjuncts of <paramref name="judged"/> that read the columns of <paramref name="sources"/> alone, as one predicate:
+    /// what a box of the key judges whole; <see cref="Unkeyed"/> when none does.
+    /// </summary>
+    private static SummaryPruner Keyed(VortexExpr judged, LayoutColumn?[] sources)
+    {
+        HashSet<string> names = new HashSet<string>(StringComparer.Ordinal);
+        foreach (LayoutColumn? source in sources)
+        {
+            if (source is not null)
+            {
+                names.Add(NameOf(source));
+            }
+        }
+
+        VortexExpr? keyed = null;
+        List<string> paths = [];
+        foreach (VortexExpr conjunct in Conjuncts(judged))
+        {
+            paths.Clear();
+            conjunct.CollectFields(paths);
+            if (paths.Count > 0 && paths.TrueForAll(names.Contains))
+            {
+                keyed = keyed is null ? conjunct : Expr.And(keyed, conjunct);
+            }
+        }
+
+        return keyed is null ? Unkeyed : new SummaryPruner(keyed);
+
+        static IEnumerable<VortexExpr> Conjuncts(VortexExpr expr)
+        {
+            if (expr is LogicalExpr { IsAnd: true } and)
+            {
+                foreach (VortexExpr left in Conjuncts(and.Left))
+                {
+                    yield return left;
+                }
+
+                foreach (VortexExpr right in Conjuncts(and.Right))
+                {
+                    yield return right;
+                }
+            }
+            else
+            {
+                yield return expr;
+            }
+        }
     }
 
     /// <summary>
@@ -121,6 +180,24 @@ internal sealed class KeyPruning
     /// </summary>
     internal bool MayHold(ReadOnlySpan<byte> first, ReadOnlySpan<byte> last) =>
         last.IsEmpty || Judge(first, last, 0, default);
+
+    /// <summary>
+    /// Whether every row of an object whose rows lie from tree key <paramref name="first"/> to tree key <paramref name="last"/>
+    /// keeps the filter's conjuncts on the key's columns: no granule of its sparse index can then be refuted, and the index
+    /// has nothing to prune. A time window that holds a day's objects whole, under a key the instant leads, reads none of
+    /// their indexes.
+    /// </summary>
+    internal bool HoldsWhole(ReadOnlySpan<byte> first, ReadOnlySpan<byte> last)
+    {
+        SummaryPruner keyed = _keyed ??= Keyed(_judged, _sources);
+        if (ReferenceEquals(keyed, Unkeyed) || last.IsEmpty)
+        {
+            return false;
+        }
+
+        List<ColumnSummary> box = Box(first, last, 0, default, nonNull: true);
+        return box.Count > 0 && keyed.MustMatch(Merged(box), 1);
+    }
 
     /// <summary>
     /// The granules of an object's sparse index that may hold a row the filter keeps, in ranges <c>[first, end)</c>, ascending;
@@ -214,11 +291,22 @@ internal sealed class KeyPruning
     /// </summary>
     private bool Judge(ReadOnlySpan<byte> low, ReadOnlySpan<byte> high, int from, ReadOnlySpan<byte> partition)
     {
+        List<ColumnSummary> box = Box(low, high, from, partition, nonNull: false);
+        return box.Count == 0 || _pruner.MayMatch(Merged(box), 1);
+    }
+
+    /// <summary>
+    /// What rows between <paramref name="low"/> and <paramref name="high"/> hold of the components' columns, as
+    /// <see cref="Judge"/> reads them; with <paramref name="nonNull"/>, a column bounded on both sides by values holds no
+    /// null, which the order puts after every value.
+    /// </summary>
+    private List<ColumnSummary> Box(ReadOnlySpan<byte> low, ReadOnlySpan<byte> high, int from, ReadOnlySpan<byte> partition, bool nonNull)
+    {
         List<ColumnSummary> box = [];
         if (from > 0 && !partition.IsEmpty)
         {
             FilterLiteral value = RowEncoder.ReadFirstValue(partition, _tree.TypeAt(0));
-            Bound(box, 0, value, value);
+            Bound(box, 0, value, value, nonNull);
         }
 
         int lowAt = 0;
@@ -235,7 +323,7 @@ internal sealed class KeyPruning
 
             ReadOnlySpan<byte> lowValue = low.Slice(lowAt, lowLength);
             ReadOnlySpan<byte> highValue = high.Slice(highAt, highLength);
-            Bound(box, position, RowEncoder.ReadFirstValue(lowValue, type), RowEncoder.ReadFirstValue(highValue, type));
+            Bound(box, position, RowEncoder.ReadFirstValue(lowValue, type), RowEncoder.ReadFirstValue(highValue, type), nonNull);
 
             // Past the first component the two keys part on, the next ones are free.
             if (!lowValue.SequenceEqual(highValue))
@@ -247,15 +335,16 @@ internal sealed class KeyPruning
             highAt += highLength;
         }
 
-        return box.Count == 0 || _pruner.MayMatch(Merged(box), 1);
+        return box;
     }
 
     /// <summary>
     /// Adds to <paramref name="box"/> what values from <paramref name="low"/> to <paramref name="high"/> of the component at
     /// <paramref name="position"/> say of its source: its bounds, through the function's preimage for a function's. A null
-    /// bound, which the order puts last, leaves its side open.
+    /// bound, which the order puts last, leaves its side open. With <paramref name="nonNull"/>, a column bounded on both
+    /// sides holds no null.
     /// </summary>
-    private void Bound(List<ColumnSummary> box, int position, FilterLiteral low, FilterLiteral high)
+    private void Bound(List<ColumnSummary> box, int position, FilterLiteral low, FilterLiteral high, bool nonNull)
     {
         if (_sources[position] is not { } source || low.Kind == FilterLiteralKind.Null)
         {
@@ -263,10 +352,11 @@ internal sealed class KeyPruning
         }
 
         bool hasHigh = high.Kind != FilterLiteralKind.Null;
+        bool noNull = nonNull && hasHigh;
         string path = NameOf(source);
         if (source.Function is not { } function)
         {
-            box.Add(new ColumnSummary(path, low, true, hasHigh ? high : default, hasHigh, false, 0, false));
+            box.Add(new ColumnSummary(path, low, true, hasHigh ? high : default, hasHigh, false, 0, noNull));
             return;
         }
 
@@ -285,7 +375,7 @@ internal sealed class KeyPruning
             to = past - 1;
         }
 
-        box.Add(new ColumnSummary(path, function.Literal(from), true, bounded ? function.Literal(to) : default, bounded, false, 0, false));
+        box.Add(new ColumnSummary(path, function.Literal(from), true, bounded ? function.Literal(to) : default, bounded, false, 0, noNull && bounded));
     }
 
     /// <summary>The box's bounds, those of one column intersected.</summary>
@@ -306,7 +396,7 @@ internal sealed class KeyPruning
                 bool hasMax = left.HasMax || right.HasMax;
                 FilterLiteral min = !left.HasMin ? right.Min : !right.HasMin ? left.Min : KeyOrder.Ieee(left.Min, right.Min) >= 0 ? left.Min : right.Min;
                 FilterLiteral max = !left.HasMax ? right.Max : !right.HasMax ? left.Max : KeyOrder.Ieee(left.Max, right.Max) <= 0 ? left.Max : right.Max;
-                box[i] = new ColumnSummary(left.Path, min, hasMin, max, hasMax, false, 0, false);
+                box[i] = new ColumnSummary(left.Path, min, hasMin, max, hasMax, false, 0, left.HasNullCount || right.HasNullCount);
                 box.RemoveAt(j);
             }
         }

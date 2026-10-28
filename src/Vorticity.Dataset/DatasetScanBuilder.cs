@@ -806,6 +806,9 @@ internal sealed partial class DatasetScanBuilder
     private async IAsyncEnumerable<PositionedObject> KeyPrunedAsync(
         IAsyncEnumerable<PositionedObject> walk, KeyPruning pruning, [EnumeratorCancellation] CancellationToken cancellationToken)
     {
+        // The indexes of the next objects are asked while the walk goes on, their reads in one wave rather than a round trip
+        // each; an index in hand, with nothing asked before it still waiting, answers at once and makes no task.
+        Queue<Ahead>? ahead = null;
         await foreach (PositionedObject held in walk.WithCancellation(cancellationToken).ConfigureAwait(false))
         {
             if (KeyRefutes(pruning, held, out ReadOnlyMemory<byte> first))
@@ -818,51 +821,120 @@ internal sealed partial class DatasetScanBuilder
                 continue;
             }
 
-            if (await KeptGranulesAsync(held, pruning, first, read: true, cancellationToken).ConfigureAwait(false) is not ({ } ranges, { } keys))
+            ValueTask<(List<(int First, int End)> Ranges, Indexes.GranuleKeys Keys)?> asked = KeptGranulesAsync(held, pruning, first, read: true, cancellationToken);
+            if (asked.IsCompletedSuccessfully && (ahead is null || ahead.Count == 0))
             {
-                yield return held;
-                continue;
-            }
-
-            int kept = 0;
-            foreach ((int from, int end) in ranges)
-            {
-                kept += end - from;
-            }
-
-            if (_considers && _metrics is { } metrics)
-            {
-                metrics.GranulesPrunedByKey += keys.Granules - kept;
-                metrics.ObjectsPrunedByKey += ranges.Count == 0 ? 1 : 0;
-            }
-
-            if (ranges.Count == 1 && ranges[0] == (0, keys.Granules))
-            {
-                yield return held;
-                continue;
-            }
-
-            foreach ((int from, int end) in ranges)
-            {
-                yield return held with
+                (List<(int First, int End)> Ranges, Indexes.GranuleKeys Keys)? kept = await asked.ConfigureAwait(false);
+                if (Whole(kept))
                 {
-                    Granules = new RowRange((long)from * keys.GranuleRows, Math.Min((long)end * keys.GranuleRows, keys.Rows)),
-                };
+                    yield return held;
+                    continue;
+                }
+
+                foreach ((int from, int end) in kept!.Value.Ranges)
+                {
+                    yield return ByGranules(held, kept.Value.Keys, from, end);
+                }
+
+                continue;
+            }
+
+            ahead ??= new Queue<Ahead>(KeysAhead);
+            ahead.Enqueue(asked.IsCompletedSuccessfully ? new Ahead(held, await asked.ConfigureAwait(false), null) : new Ahead(held, null, asked.AsTask()));
+            if (ahead.Count < KeysAhead)
+            {
+                continue;
+            }
+
+            Ahead next = ahead.Dequeue();
+
+            // Each read was asked by this walk, a few objects before.
+#pragma warning disable VSTHRD003
+            (List<(int First, int End)> Ranges, Indexes.GranuleKeys Keys)? read = next.Reading is { } reading ? await reading.ConfigureAwait(false) : next.Kept;
+#pragma warning restore VSTHRD003
+            if (Whole(read))
+            {
+                yield return next.Held;
+                continue;
+            }
+
+            foreach ((int from, int end) in read!.Value.Ranges)
+            {
+                yield return ByGranules(next.Held, read.Value.Keys, from, end);
+            }
+        }
+
+        while (ahead is not null && ahead.TryDequeue(out Ahead last))
+        {
+#pragma warning disable VSTHRD003
+            (List<(int First, int End)> Ranges, Indexes.GranuleKeys Keys)? read = last.Reading is { } reading ? await reading.ConfigureAwait(false) : last.Kept;
+#pragma warning restore VSTHRD003
+            if (Whole(read))
+            {
+                yield return last.Held;
+                continue;
+            }
+
+            foreach ((int from, int end) in read!.Value.Ranges)
+            {
+                yield return ByGranules(last.Held, read.Value.Keys, from, end);
             }
         }
     }
 
+    /// <summary>The objects whose sparse indexes <see cref="KeyPrunedAsync"/> asks for ahead of the one it hands out.</summary>
+    private const int KeysAhead = 16;
+
+    /// <summary>An object whose index <see cref="KeyPrunedAsync"/> asked for ahead: what it kept, when in hand, or its read.</summary>
+    private readonly record struct Ahead(
+        PositionedObject Held,
+        (List<(int First, int End)> Ranges, Indexes.GranuleKeys Keys)? Kept,
+        Task<(List<(int First, int End)> Ranges, Indexes.GranuleKeys Keys)?>? Reading);
+
+    /// <summary>
+    /// Whether an object is read whole, <paramref name="kept"/> the ranges of granules its index keeps: none read, or all kept;
+    /// the granules and objects pruned counted.
+    /// </summary>
+    private bool Whole((List<(int First, int End)> Ranges, Indexes.GranuleKeys Keys)? kept)
+    {
+        if (kept is not ({ } ranges, { } keys))
+        {
+            return true;
+        }
+
+        int granules = 0;
+        foreach ((int from, int end) in ranges)
+        {
+            granules += end - from;
+        }
+
+        if (_considers && _metrics is { } metrics)
+        {
+            metrics.GranulesPrunedByKey += keys.Granules - granules;
+            metrics.ObjectsPrunedByKey += ranges.Count == 0 ? 1 : 0;
+        }
+
+        return ranges.Count == 1 && ranges[0] == (0, keys.Granules);
+    }
+
+    /// <summary><paramref name="held"/> read by its granules from <paramref name="from"/> to <paramref name="end"/>.</summary>
+    private static PositionedObject ByGranules(PositionedObject held, Indexes.GranuleKeys keys, int from, int end) => held with
+    {
+        Granules = new RowRange((long)from * keys.GranuleRows, Math.Min((long)end * keys.GranuleRows, keys.Rows)),
+    };
+
     /// <summary>
     /// The ranges of the granules of the object <paramref name="held"/>, <paramref name="first"/> its first key, that its key's
     /// sparse index keeps under <paramref name="pruning"/>, with that index; null when the object has rows marked, keeps no
-    /// index, or reading it weighs more than it may spare (<see cref="ReadsKeyIndex"/>), and, unless <paramref name="read"/>,
-    /// when the handle does not hold it.
+    /// index, its key range keeps every granule (<see cref="KeyPruning.HoldsWhole"/>), or reading the index weighs more than
+    /// it may spare (<see cref="ReadsKeyIndex"/>), and, unless <paramref name="read"/>, when the handle does not hold it.
     /// </summary>
     internal async ValueTask<(List<(int First, int End)> Ranges, Indexes.GranuleKeys Keys)?> KeptGranulesAsync(
         PositionedObject held, KeyPruning pruning, ReadOnlyMemory<byte> first, bool read, CancellationToken cancellationToken)
     {
         if (!held.Entry.Deletions.IsEmpty || held.Entry.Contents is not { KeyIndex: { } index } contents
             || (!read && contents.Keys is not { HoldsEvery: true }) || !ReadsKeyIndex(held)
+            || (contents.Keys is not { HoldsEvery: true } && pruning.HoldsWhole(first.Span, held.Entry.LastKey.Span))
             || await KeysAsync(held, contents, index, cancellationToken).ConfigureAwait(false) is not { } keys
             || keys.Rows != held.Entry.PhysicalRows)
         {
