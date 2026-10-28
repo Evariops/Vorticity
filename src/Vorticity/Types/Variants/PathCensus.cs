@@ -26,7 +26,9 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
 {
     private byte[] _metadata = [];
     private int _metadataLength = -1;
-    private string?[] _names = [];
+
+    // The name of the key being looked up, decoded: a key met before is found by it, without a string.
+    private char[] _chars = new char[64];
 
     // The run of rows of the same metadata being counted, which the counts' field ids are kept for; and the ids the counts
     // keep, every count together.
@@ -120,7 +122,6 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
 
             metadata.CopyTo(_metadata);
             _metadataLength = metadata.Length;
-            Array.Clear(_names);
             _epoch++;
         }
 
@@ -147,15 +148,16 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
         Root.Merge(this, other.Root);
     }
 
-    /// <summary>Key <paramref name="id"/> of the current metadata, decoded once per run of rows that share it.</summary>
-    private string Name(in VariantDictionary dictionary, int id)
+    /// <summary>The UTF-8 name <paramref name="utf8"/> decoded into the census's scratch, valid until the next name decoded.</summary>
+    private ReadOnlySpan<char> Chars(ReadOnlySpan<byte> utf8)
     {
-        if (_names.Length < dictionary.Count)
+        int most = Encoding.UTF8.GetMaxCharCount(utf8.Length);
+        if (_chars.Length < most)
         {
-            _names = new string?[Math.Max(dictionary.Count, 2 * _names.Length)];
+            _chars = new char[Math.Max(most, 2 * _chars.Length)];
         }
 
-        return _names[id] ??= Encoding.UTF8.GetString(dictionary[id]);
+        return _chars.AsSpan(0, Encoding.UTF8.GetChars(utf8, _chars));
     }
 
     /// <summary>
@@ -331,8 +333,11 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
                         PathCount? key = (uint)id < (uint)_keptIds ? _byId[id] : null;
                         if (key is null)
                         {
-                            string name = census.Name(in dictionary, id);
-                            if (!_keys.TryGetValue(name, out key))
+                            // Found by the name's characters, decoded into the census's scratch: rows of a merge come from
+                            // sources of their own metadata, a run of one row each, and a string a key a row was half of what
+                            // a consolidation allocated. A name met for the first time takes a string.
+                            ReadOnlySpan<char> name = census.Chars(dictionary[id]);
+                            if (!_keys.GetAlternateLookup<ReadOnlySpan<char>>().TryGetValue(name, out key))
                             {
                                 if (census._keyCount >= MaxKeys)
                                 {
@@ -340,7 +345,7 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
                                 }
                                 else
                                 {
-                                    _keys[name] = key = new PathCount();
+                                    _keys[new string(name)] = key = new PathCount();
                                     census._keyCount++;
                                 }
                             }
