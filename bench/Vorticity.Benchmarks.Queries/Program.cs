@@ -169,6 +169,7 @@ Dictionary<string, (string Help, Func<Task<int>> Run)> micros = new Dictionary<s
         Qp = args.Contains("--qp"),
         Study = args.Contains("--study"),
         Bounded = args.Contains("--bounded"),
+        Sets = Text(args, "--sets")?.Split(','),
         Declared = args.Contains("--declared"),
         Idiom = args.Contains("--idiom"),
         QpHours = Option(args, "--qp-hours", 30),

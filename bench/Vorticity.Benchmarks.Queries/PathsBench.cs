@@ -97,6 +97,9 @@ internal static partial class PathsBench
         /// <summary>Whether each windowed question is also asked cold over its whole window at once, with a part's bounds (<c>--bounded</c>).</summary>
         internal bool Bounded { get; init; }
 
+        /// <summary>The stores the run builds and asks, by name (<c>--sets requests,logs,spans,logs2</c>); null for all.</summary>
+        internal string[]? Sets { get; init; }
+
         /// <summary>The hours of the client's spans and log records (<c>--qp-hours</c>): a day in objects of its own, and the hours of the next still being compacted.</summary>
         internal int QpHours { get; init; } = 30;
 
@@ -211,10 +214,11 @@ internal static partial class PathsBench
             return await WriteOneAsync(settings, kind);
         }
 
-        Built requests = await EnsureAsync(settings, RequestsName(settings), store => FillAnyRequestsAsync(store, settings));
-        Built logs = await EnsureAsync(settings, $"logs-clustered-h{settings.LogHours}-r{settings.LogRate:0}-b{settings.Budget}", store => FillLogsAsync(store, settings));
-        Built? spans = !settings.Qp && !settings.Study ? null : await EnsureAsync(settings, SpansName(settings), store => FillSpansAsync(store, settings));
-        Built? logs2 = !settings.Qp && !settings.Study ? null : await EnsureAsync(settings, LogsV2Name(settings), store => FillLogsV2Async(store, settings));
+        // A store the run leaves out (--sets) is neither built nor read: its questions are passed over.
+        Built requests = Asks(settings, "requests") ? await EnsureAsync(settings, RequestsName(settings), store => FillAnyRequestsAsync(store, settings)) : Skipped;
+        Built logs = Asks(settings, "logs") ? await EnsureAsync(settings, $"logs-clustered-h{settings.LogHours}-r{settings.LogRate:0}-b{settings.Budget}", store => FillLogsAsync(store, settings)) : Skipped;
+        Built? spans = !settings.Qp && !settings.Study ? null : Asks(settings, "spans") ? await EnsureAsync(settings, SpansName(settings), store => FillSpansAsync(store, settings)) : Skipped;
+        Built? logs2 = !settings.Qp && !settings.Study ? null : Asks(settings, "logs2") ? await EnsureAsync(settings, LogsV2Name(settings), store => FillLogsV2Async(store, settings)) : Skipped;
         if (settings.BuildOnly)
         {
             return 0;
@@ -312,6 +316,11 @@ internal static partial class PathsBench
                 }
 
                 Built built = question.Set switch { "logs" => logs, "spans" => spans!, "logs2" => logs2!, _ => requests };
+                if (ReferenceEquals(built, Skipped))
+                {
+                    continue;
+                }
+
                 string? synopsesDigest = null;
                 foreach (bool synopses in question.Aggregates ? new[] { true, false } : [false])
                 {
@@ -789,6 +798,13 @@ internal static partial class PathsBench
 
     /// <summary>A dataset written under the store: its directory, its rows, and a request id in its middle.</summary>
     private sealed record Built(string Directory, long Rows, string Needle);
+
+    /// <summary>A store the run leaves out: no directory, no rows.</summary>
+    private static readonly Built Skipped = new Built(string.Empty, 0, string.Empty);
+
+    /// <summary>Whether the run asks the questions of store <paramref name="set"/>: every store, unless <c>--sets</c> names some.</summary>
+    private static bool Asks(Settings settings, string set) =>
+        settings.Sets is not { } sets || Array.IndexOf(sets, set) >= 0;
 
     /// <summary>
     /// The dataset <paramref name="name"/> under the store, written by <paramref name="fill"/> unless a note beside it says
