@@ -601,7 +601,7 @@ internal static partial class PathsBench
                 await asked.Batches.DisposeAsync();
                 foreach (UnitStep step in (await explain()).Units)
                 {
-                    Console.WriteLine($"    plan {step.Unit}: {step.Alternative} {step.Detail} x{step.Requests}");
+                    Console.WriteLine($"    plan {step.Unit}: {step.Alternative} {step.Detail} x{step.Requests}, weighs {step.Weight:F0}{(step.Rejected.IsEmpty ? string.Empty : "; " + string.Join("; ", step.Rejected))}");
                 }
             }
 
