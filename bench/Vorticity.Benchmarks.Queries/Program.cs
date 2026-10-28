@@ -139,6 +139,8 @@ Dictionary<string, (string Help, Func<Task<int>> Run)> micros = new Dictionary<s
         PeerCacheMicro.Run(Text(args, "--store") ?? BenchStores.Of("peercache"), (int)Option(args, "--objects", 16), (int)Option(args, "--rows", 200_000), rounds)),
     ["needles"] = ("what a needle's index weighs and what a probe costs, sorted run against a hashed index (NeedleMicro.cs)", () =>
         NeedleMicro.Run((int)Option(args, "--rows", 4_000_000), rounds)),
+    ["inputs"] = ("--store DIR: what the inputs of a merge hold while it reads them, 1 to 8 of a dataset's largest objects in lockstep (InputMemoryMicro.cs)", () =>
+        InputMemoryMicro.Run(Text(args, "--store") ?? throw new ArgumentException("--micro inputs needs --store DIR, a dataset's directory."), (int)Option(args, "--objects", 8))),
     ["paths"] = ("every query path of datasets partitioned by hour or by day at scale, over a store that waits a round trip per request (PathsBench.cs)", () => PathsBench.Run(new PathsBench.Settings
     {
         Store = Text(args, "--store") ?? new PathsBench.Settings().Store,
