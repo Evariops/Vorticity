@@ -123,7 +123,8 @@ public sealed class QueryMemoryBudget
     /// <summary>
     /// Reserves <paramref name="bytes"/> under this budget and the process's; false, and nothing reserved,
     /// when either would pass its ceiling. Short of room, the process's shelf lets its large arrays go
-    /// first, for the collection that follows to take them.
+    /// first, for the collection that follows to take them, and the pool the native blocks it keeps for
+    /// the next rents, which a container's limit counts.
     /// </summary>
     internal bool TryReserve(long bytes)
     {
@@ -136,6 +137,12 @@ public sealed class QueryMemoryBudget
             }
 
             Aggregating.ArrayShelf.Retained.Relieve();
+            AlignedBufferPool.Shared.Trim();
+            if (TryAdd(ref _reserved, bytes, Available()))
+            {
+                return true;
+            }
+
             return Collect(bytes) is long after && TryAdd(ref _reserved, bytes, after);
         }
 
