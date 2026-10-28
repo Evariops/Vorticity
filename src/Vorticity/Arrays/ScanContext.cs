@@ -1569,13 +1569,17 @@ internal sealed class ScanContext : IDisposable
     /// <summary>Clears the arena of the slice just written, its blocks kept idle for the next slice's.</summary>
     internal void NextSlice() => _memory!.Slice!.ResetKeepingBlocks();
 
-    /// <summary>Ends the redirect <see cref="BeginSlice"/> made, its arena cleared and its blocks kept for the next decode that slices.</summary>
+    /// <summary>
+    /// Ends the redirect <see cref="BeginSlice"/> made, its arena's blocks given back to the pool: the inputs of a merge each
+    /// scan in a context of their own and decode in turn, and blocks each kept for its next decode would be a slice's
+    /// columns for each of them, where the pool keeps them for whichever decodes next.
+    /// </summary>
     internal void EndSlice()
     {
         BatchMemory memory = _memory!;
         memory.Slicing = false;
         memory.SliceBuilding = null;
-        memory.Slice!.ResetKeepingBlocks();
+        memory.Slice!.Reset();
     }
 
     /// <summary>

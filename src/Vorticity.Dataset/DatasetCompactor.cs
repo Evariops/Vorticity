@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.Diagnostics;
 using System.Linq;
+using System.Numerics;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
@@ -612,18 +613,19 @@ internal static partial class DatasetCompactor
     /// <paramref name="rows"/>, those rows of it alone, which a range of the key reads.
     /// </summary>
     private static IAsyncEnumerable<RecordBatch> RowsOfAsync(
-        ObjectLease lease, ObjectEntry entry, DatasetSchema schema, CancellationToken cancellationToken, int[]? fields = null, RowRange? rows = null)
+        ObjectLease lease, ObjectEntry entry, DatasetSchema schema, CancellationToken cancellationToken, int[]? fields = null, RowRange? rows = null,
+        int batchRows = 0)
     {
         VortexFile file = lease.File;
         FieldMask projection = fields is null ? FieldMask.All : Layouts.FieldMasks.Of(fields);
         if (schema.ColumnsOf(file.DType, entry.Key) is not { } columns)
         {
-            return LiveRowsAsync(Ranged(fields is null ? file.ScanBuilder() : file.ScanBuilder().ProjectMask(projection), rows), entry, cancellationToken);
+            return LiveRowsAsync(Ranged(Batched(fields is null ? file.ScanBuilder() : file.ScanBuilder().ProjectMask(projection), batchRows), rows), entry, cancellationToken);
         }
 
         ObjectReadPlan read = columns.Read(null, projection);
         return ObjectColumns.ReshapeAsync(
-            LiveRowsAsync(Ranged(file.ScanBuilder().ProjectMask(read.Shape.Source).WithEncodings(false, false), rows), entry, cancellationToken),
+            LiveRowsAsync(Ranged(Batched(file.ScanBuilder().ProjectMask(read.Shape.Source).WithEncodings(false, false), batchRows), rows), entry, cancellationToken),
             read.Shape,
             null,
             0,
@@ -633,6 +635,24 @@ internal static partial class DatasetCompactor
 
     /// <summary>The scan of <paramref name="rows"/> alone, or of every row.</summary>
     private static ScanBuilder Ranged(ScanBuilder scan, RowRange? rows) => rows is { } range ? scan.Rows(range) : scan;
+
+    /// <summary>The scan in batches of <paramref name="rows"/> rows, each decoded on its own, or of the scan's own size when 0.</summary>
+    private static ScanBuilder Batched(ScanBuilder scan, int rows) => rows > 0 ? scan.WithMaxBatchRows(rows).WithWindowRows(rows) : scan;
+
+    /// <summary>
+    /// The rows a merge's inputs hold at once together, about: each input holds a batch of its rows while the others step,
+    /// so a merge of many inputs reads each in smaller batches than a merge of a few. A million rows of a log's columns,
+    /// their attributes rebuilt, held some 360 MB as eight inputs of a window each.
+    /// </summary>
+    private const int MergeRows = 1 << 20;
+
+    /// <summary>
+    /// The rows of an input's batch in a merge of <paramref name="inputs"/>: <see cref="MergeRows"/> over the inputs, a power
+    /// of two between a block of 8 192 rows and a window (<see cref="FlatLayoutReader.WindowRows"/>). Decoded on its own, a
+    /// batch costs what its columns' fixed costs come to once more, a few per cent of a merge's decode at 8 192 rows.
+    /// </summary>
+    private static int InputBatchRows(int inputs) =>
+        Math.Clamp(1 << BitOperations.Log2((uint)Math.Max(MergeRows / Math.Max(1, inputs), 1)), 8_192, FlatLayoutReader.WindowRows);
 
     /// <summary>
     /// An input's rows through <paramref name="scan"/>, in their order, without the rows it deleted: a compaction is also
@@ -877,12 +897,13 @@ internal static partial class DatasetCompactor
         }
 
         inputs.Sort(static (left, right) => left.Key.Span.SequenceCompareTo(right.Key.Span));
+        int batchRows = InputBatchRows(inputs.Count);
         return new KeyOrderedMerge(
             dataset.Snapshot,
             inputs.Select(static held => held.Object).ToAsyncEnumerable(),
             schema.Tree!,
             rankedTies: false,
-            (lease, entry) => RowsOfAsync(lease, entry, schema, cancellationToken, fields, rows?[entry.Key]),
+            (lease, entry) => RowsOfAsync(lease, entry, schema, cancellationToken, fields, rows?[entry.Key], batchRows),
             opened: null,
             cancellationToken,
             ranges?.Low(range) ?? default,
