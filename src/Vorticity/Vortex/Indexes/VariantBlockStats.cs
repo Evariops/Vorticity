@@ -61,13 +61,32 @@ internal sealed class ChunkBlockBounds
         return [.. keys];
     }
 
+    /// <summary>Empties the counts for the chunk that follows, their buffers kept: a writer counts a column's chunks in one.</summary>
+    internal ChunkBlockBounds Cleared()
+    {
+        foreach (KeyBlocks key in _keys)
+        {
+            key.Clear();
+        }
+
+        return this;
+    }
+
     /// <summary>
     /// One key and class over a chunk: its blocks that hold a value, each its count and bounds, a block counted at a time
-    /// as the rows come in order.
+    /// as the rows come in order, and encoded as it closes the way the file's statistics hold it, each block's distance
+    /// from the one before counted from the chunk's first.
     /// </summary>
     internal sealed class KeyBlocks(int index, PathClass @class, int blockRows, int stringBoundBytes)
     {
-        private readonly List<BlockBounds> _blocks = [];
+        // The blocks closed, encoded: their count, the first and the last, and the bytes of the first one's distance,
+        // which the file's statistics count from the block before the chunk instead.
+        private byte[] _bytes = [];
+        private int _length;
+        private int _count;
+        private int _first;
+        private int _last;
+        private int _firstBytes;
 
         // The block being counted, -1 before its first value: its values and their bounds, an integer's least and
         // greatest, a boolean's values seen, a text's least and greatest cut to the bound, in buffers of that length.
@@ -85,14 +104,50 @@ internal sealed class ChunkBlockBounds
         /// <summary>The key's index among the shredding's keys.</summary>
         internal int Index => index;
 
-        /// <summary>The blocks of the chunk that hold a value, in order, each counted from the chunk's first, once its rows are all noted.</summary>
-        internal IReadOnlyList<BlockBounds> Blocks
+        /// <summary>The blocks of the chunk that hold a value, once its rows are all noted.</summary>
+        internal int Count
         {
             get
             {
                 Close();
-                return _blocks;
+                return _count;
             }
+        }
+
+        /// <summary>The first block that holds a value, counted from the chunk's first.</summary>
+        internal int First => _first;
+
+        /// <summary>The last block that holds a value, counted from the chunk's first.</summary>
+        internal int Last => _last;
+
+        /// <summary>The blocks encoded, the first one's distance counted from the chunk's first block.</summary>
+        internal ReadOnlySpan<byte> Body
+        {
+            get
+            {
+                Close();
+                return _bytes.AsSpan(0, _length);
+            }
+        }
+
+        /// <summary>The bytes of the first block's distance at the head of <see cref="Body"/>.</summary>
+        internal int FirstBytes => _firstBytes;
+
+        /// <summary>Empties the counts for the chunk that follows.</summary>
+        internal void Clear()
+        {
+            _length = 0;
+            _count = 0;
+            _first = 0;
+            _last = 0;
+            _firstBytes = 0;
+            _block = -1;
+            _values = 0;
+            _low = long.MaxValue;
+            _high = long.MinValue;
+            _booleans = 0;
+            _minTextLength = _maxTextLength = -1;
+            _maxTextCut = false;
         }
 
         /// <summary>Counts the value <paramref name="scalar"/> of row <paramref name="row"/> of the chunk, a value of the key's class.</summary>
@@ -159,7 +214,10 @@ internal sealed class ChunkBlockBounds
             }
         }
 
-        /// <summary>Ends the block being counted, its bounds kept as a path directory gives them, and starts none.</summary>
+        /// <summary>
+        /// Ends the block being counted, its bounds encoded as a path directory gives them -- an integer's least and
+        /// greatest, a boolean's values seen, a text's least and the least text above its greatest -- and starts none.
+        /// </summary>
         private void Close()
         {
             if (_block < 0)
@@ -167,15 +225,62 @@ internal sealed class ChunkBlockBounds
                 return;
             }
 
-            (long low, long high, byte[]? min, byte[]? max) = @class switch
+            bool text = @class == PathClass.String && _minTextLength >= 0;
+            ReadOnlySpan<byte> max = text ? _maxText.AsSpan(0, _maxTextLength) : default;
+
+            // A greatest text cut to the bound bounds nothing: the least text above it does, its last byte below 0xFF
+            // raised and the bytes after it dropped, and there is none when every byte is 0xFF.
+            int maxLength = !text ? -1 : !_maxTextCut ? max.Length : max.LastIndexOfAnyExcept(byte.MaxValue) + 1;
+            if (maxLength == 0 && _maxTextCut)
             {
-                PathClass.Integer => (_low, _high, null, null),
-                PathClass.Boolean => ((long)_booleans, 0L, null, null),
-                PathClass.String when _minTextLength >= 0 => (0L, 0L, _minText.AsSpan(0, _minTextLength).ToArray(),
-                    _maxTextCut ? VariantDirectory.Above(_maxText.AsSpan(0, _maxTextLength)) : _maxText.AsSpan(0, _maxTextLength).ToArray()),
-                _ => (0L, 0L, (byte[]?)null, (byte[]?)null),
+                maxLength = -1;
+            }
+
+            int most = (5 * 10) + (text ? _minTextLength : 0) + Math.Max(maxLength, 0) + 10;
+            if (_length + most > _bytes.Length)
+            {
+                Array.Resize(ref _bytes, Math.Max(_length + most, Math.Max(256, _bytes.Length * 2)));
+            }
+
+            int start = _length;
+            Write((ulong)(_block - (_count == 0 ? 0 : _last)));
+            if (_count == 0)
+            {
+                _first = _block;
+                _firstBytes = _length - start;
+            }
+
+            (long low, long high) = @class switch
+            {
+                PathClass.Integer => (_low, _high),
+                PathClass.Boolean => ((long)_booleans, 0L),
+                _ => (0L, 0L),
             };
-            _blocks.Add(new BlockBounds(_block, _values, low, high, min, max));
+            Write((ulong)_values);
+            Write(Varint.ZigZagEncode64(low));
+            Write(Varint.ZigZagEncode64(high));
+            Write((text ? 1UL : 0) | (maxLength >= 0 ? 2UL : 0));
+            if (text)
+            {
+                Write((ulong)_minTextLength);
+                _minText.AsSpan(0, _minTextLength).CopyTo(_bytes.AsSpan(_length));
+                _length += _minTextLength;
+            }
+
+            if (maxLength >= 0)
+            {
+                Write((ulong)maxLength);
+                max[..maxLength].CopyTo(_bytes.AsSpan(_length));
+                if (_maxTextCut)
+                {
+                    _bytes[_length + maxLength - 1]++;
+                }
+
+                _length += maxLength;
+            }
+
+            _last = _block;
+            _count++;
             _block = -1;
             _values = 0;
             _low = long.MaxValue;
@@ -184,15 +289,10 @@ internal sealed class ChunkBlockBounds
             _minTextLength = _maxTextLength = -1;
             _maxTextCut = false;
         }
+
+        private void Write(ulong value) => _length += Varint.Write(_bytes.AsSpan(_length), value);
     }
 }
-
-/// <summary>
-/// One block's values of a shredded key of one class: how many, and their bounds there as a path directory's entry
-/// holds them, an integer's least and greatest, a boolean's values seen (1 for false, 2 for true), a text's least and
-/// the least text above its greatest, both cut to the census's bound.
-/// </summary>
-internal readonly record struct BlockBounds(int Block, long Values, long Low, long High, byte[]? MinText, byte[]? MaxText);
 
 /// <summary>
 /// The block statistics of a variant column's shredded keys: per key and class, for each block of the
@@ -466,10 +566,7 @@ internal sealed class VariantBlockStats
         {
             for (int key = 0; key < keys.Count; key++)
             {
-                foreach (BlockBounds bounds in chunk.Keys[key].Blocks)
-                {
-                    _streams[key].Append(firstBlock + bounds.Block, bounds);
-                }
+                _streams[key].Append(firstBlock, chunk.Keys[key]);
             }
         }
 
@@ -630,24 +727,30 @@ internal sealed class VariantBlockStats
 
             internal ReadOnlySpan<byte> Body => _bytes.AsSpan(0, _length);
 
-            /// <summary>Holds the bounds <paramref name="bounds"/> of block <paramref name="block"/>, one past the last held.</summary>
-            internal void Append(int block, in BlockBounds bounds)
+            /// <summary>
+            /// Holds a chunk's blocks of the key, <paramref name="chunk"/>, past the last held, the chunk's first block
+            /// being the file's <paramref name="firstBlock"/>: its blocks as it encoded them, the first one's distance
+            /// counted again from the last block held.
+            /// </summary>
+            internal void Append(int firstBlock, ChunkBlockBounds.KeyBlocks chunk)
             {
-                int most = (5 * 10) + (bounds.MinText?.Length ?? 0) + (bounds.MaxText?.Length ?? 0) + 10;
-                if (_length + most > _bytes.Length)
+                int count = chunk.Count;
+                if (count == 0)
                 {
-                    Array.Resize(ref _bytes, Math.Max(_length + most, Math.Max(256, _bytes.Length * 2)));
+                    return;
                 }
 
-                Write((ulong)(block - _previous));
-                _previous = block;
-                Write((ulong)bounds.Values);
-                Write(Varint.ZigZagEncode64(bounds.Low));
-                Write(Varint.ZigZagEncode64(bounds.High));
-                Write((bounds.MinText is null ? 0 : 1UL) | (bounds.MaxText is null ? 0 : 2UL));
-                Text(bounds.MinText);
-                Text(bounds.MaxText);
-                Count++;
+                ReadOnlySpan<byte> rest = chunk.Body[chunk.FirstBytes..];
+                if (_length + 10 + rest.Length > _bytes.Length)
+                {
+                    Array.Resize(ref _bytes, Math.Max(_length + 10 + rest.Length, Math.Max(256, _bytes.Length * 2)));
+                }
+
+                Write((ulong)(firstBlock + chunk.First - _previous));
+                rest.CopyTo(_bytes.AsSpan(_length));
+                _length += rest.Length;
+                _previous = firstBlock + chunk.Last;
+                Count += count;
             }
 
             /// <summary>The blocks held, read back in order.</summary>
@@ -655,15 +758,6 @@ internal sealed class VariantBlockStats
 
             private void Write(ulong value) => _length += Varint.Write(_bytes.AsSpan(_length), value);
 
-            private void Text(byte[]? text)
-            {
-                if (text is not null)
-                {
-                    Write((ulong)text.Length);
-                    text.CopyTo(_bytes, _length);
-                    _length += text.Length;
-                }
-            }
         }
 
         /// <summary>The blocks of a key's stream, one at a time, their texts views of its bytes.</summary>

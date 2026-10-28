@@ -413,6 +413,9 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// <summary>By column, the shredded keys whose values are counted block by block; null when no column shreds one.</summary>
     private (int Index, string Key, Types.Variants.PathClass Class)[]?[]? _countedKeys;
 
+    /// <summary>By column, the counts of its shredded keys over the chunk being written, emptied for each (BoundsFor).</summary>
+    private ChunkBlockBounds?[]? _chunkBounds;
+
     /// <summary>By column, the block statistics of its shredded keys as its chunks are written.</summary>
     private VariantBlockStats.Builder?[]? _blockStats;
 
@@ -964,6 +967,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             if (ChunkBlockBounds.Counted(column.Value) is { Length: > 0 } counted)
             {
                 (writer._countedKeys ??= new (int, string, Types.Variants.PathClass)[]?[writer._fieldCount])[field] = counted;
+                writer._chunkBounds ??= new ChunkBlockBounds?[writer._fieldCount];
                 writer._variantTextBound = options.StringBoundBytes;
             }
 
@@ -2195,9 +2199,14 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         return keys;
     }
 
-    /// <summary>Where a chunk of column <paramref name="field"/> counts its shredded keys block by block; null when it counts none.</summary>
+    /// <summary>
+    /// Where a chunk of column <paramref name="field"/> counts its shredded keys block by block, the column's counts
+    /// emptied of the chunk before, which the file's statistics took as its blob went out; null when it counts none.
+    /// </summary>
     private ChunkBlockBounds? BoundsFor(int field) =>
-        _countedKeys?[field] is { } keys ? new ChunkBlockBounds(keys, _blockRows, _variantTextBound) : null;
+        _countedKeys?[field] is { } keys
+            ? (_chunkBounds![field] ??= new ChunkBlockBounds(keys, _blockRows, _variantTextBound)).Cleared()
+            : null;
 
     /// <summary>
     /// The ingest statistics of column <paramref name="field"/> over the chunk, counted for the
