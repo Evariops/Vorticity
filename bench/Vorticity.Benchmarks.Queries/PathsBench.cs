@@ -94,6 +94,9 @@ internal static partial class PathsBench
         /// </summary>
         internal bool Study { get; init; }
 
+        /// <summary>Whether each windowed question is also asked cold over its whole window at once, with a part's bounds (<c>--bounded</c>).</summary>
+        internal bool Bounded { get; init; }
+
         /// <summary>The hours of the client's spans and log records (<c>--qp-hours</c>): a day in objects of its own, and the hours of the next still being compacted.</summary>
         internal int QpHours { get; init; } = 30;
 
@@ -331,7 +334,11 @@ internal static partial class PathsBench
 
                     if (synopses && question.Window is { } window && settings.Temperatures is "all" or "cold")
                     {
-                        Print(settings, label, question, path, "first", degree, await FirstAsync(settings, built, window, degree));
+                        Print(settings, label, question, path, "first", degree, await FirstAsync(settings, built, window, degree, bounded: false));
+                        if (settings.Bounded)
+                        {
+                            Print(settings, label, question, path, "bound", degree, await FirstAsync(settings, built, window, degree, bounded: true));
+                        }
                     }
 
                     string digest = warm.Digest ?? cold.Digest ?? string.Empty;
@@ -666,11 +673,12 @@ internal static partial class PathsBench
     /// an empty synopsis cache, the window asked a partition value at a time, newest first
     /// (<see cref="VortexDataset.AskByValuesAsync{TValue, TAnswer}"/>), and
     /// the time its first part took to arrive. The other figures are the whole asking's, its groups the parts, its rows the
-    /// answers' rows.
+    /// answers' rows. <paramref name="bounded"/>: the whole window asked at once with the bounds a part's question takes
+    /// (<c>--bounded</c>), which tells what the parts cost from what the bounds do.
     /// </summary>
     private static async Task<Measured> FirstAsync(
         Settings settings, Built built, (DateTimeOffset From, DateTimeOffset To, Func<VortexDataset, ScanOptions, DateTimeOffset, DateTimeOffset, Asking> Ask) window,
-        int degree)
+        int degree, bool bounded)
     {
         ScanOptions options = new ScanOptions { UseSynopses = true, DegreeOfParallelism = degree };
         await using FileObjectStore files = new FileObjectStore(built.Directory);
@@ -694,13 +702,31 @@ internal static partial class PathsBench
             });
             await using VortexDataset dataset = await VortexDataset.OpenAsync(store, new DatasetOptions { Session = session });
             store.Reset();
+            using TextWriter? trace = bounded && settings.TraceReads is { } traced ? TextWriter.Synchronized(new StreamWriter(traced, append: true)) : null;
+            trace?.WriteLine($"# bounded, degree {degree}");
+            remote.Trace = trace;
             long allocated = GC.GetTotalAllocatedBytes(precise: true);
             double cpu = ProcessCpu.Milliseconds();
             long begin = Stopwatch.GetTimestamp();
             double first = 0;
             long parts = 0;
             long rows = 0;
-            await foreach (ValuePart<DateTimeOffset, long> part in dataset.AskByValuesAsync(window.From, window.To, async (from, to, ct) =>
+            if (bounded)
+            {
+                Asking asking = window.Ask(dataset, options, window.From, window.To);
+                await using (asking.Batches)
+                {
+                    while (await asking.Batches.MoveNextAsync())
+                    {
+                        rows += asking.Batches.Current.SelectedRows;
+                    }
+                }
+
+                first = Stopwatch.GetElapsedTime(begin).TotalMilliseconds;
+                parts = 1;
+            }
+
+            await foreach (ValuePart<DateTimeOffset, long> part in bounded ? AsyncEnumerable.Empty<ValuePart<DateTimeOffset, long>>() : dataset.AskByValuesAsync(window.From, window.To, async (from, to, ct) =>
             {
                 Asking asking = window.Ask(dataset, options, from, to);
                 long answered = 0;
