@@ -109,7 +109,6 @@ public sealed partial class VortexFileWriter
     {
         ChunkColumns columns = _chunkColumns ??= ChunkColumns.Take(this);
         columns.Prepare(_fieldCount, _arrayEncodings);
-        columns.Flush();
         int count = 0;
         for (int field = 0; field < gathering.Length; field++)
         {
@@ -127,6 +126,7 @@ public sealed partial class VortexFileWriter
 
         try
         {
+            columns.Flush();
             Span<int> items = fan.Items(count);
             int next = 0;
             for (int field = 0; field < gathering.Length; field++)
@@ -454,12 +454,12 @@ public sealed partial class VortexFileWriter
             _rows = rows;
             _firstBlock = firstBlock;
             _blocks = blocks;
-            _flushing = false;
         }
 
         /// <summary>
         /// Readies a flush: the columns given to their gatherings (see <see cref="Gather"/>) write
-        /// what they hold, whatever their targets, and no other column writes anything.
+        /// what they hold, whatever their targets, and no other column writes anything, until the run
+        /// drops what it held (<see cref="Drop"/>).
         /// </summary>
         internal void Flush() => _flushing = true;
 
@@ -681,8 +681,11 @@ public sealed partial class VortexFileWriter
                 _blobs[field] = default;
             }
 
-            // A failed ingest across leaves counts behind; the next chunk starts from none.
+            // A failed ingest across leaves counts behind; the next chunk starts from none. A flush ends
+            // with its run: left set, the next run, this writer's or the next one's that takes the
+            // columns from the spares, would write none of its chunk's columns.
             _fused = false;
+            _flushing = false;
             Array.Clear(_parts);
         }
     }
