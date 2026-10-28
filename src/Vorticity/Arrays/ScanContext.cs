@@ -289,9 +289,13 @@ internal sealed class ScanContext : IDisposable
     /// <see cref="BeginRetainedDecode"/> redirects this property for the duration of that one
     /// decode and <see cref="EndRetainedDecode"/> puts it back. The redirect is never observable
     /// from outside a single <c>LayoutReader.Execute</c> call, and every node the redirected decode
-    /// produces is reachable only through the index that call returns.
+    /// produces is reachable only through the index that call returns. A decode that builds its
+    /// rows a slice at a time redirects it too, at an arena it clears between slices
+    /// (<see cref="BeginSlice"/>), until a retained decode it begins takes it over.
     /// </remarks>
-    public CanonicalArena Canonical => _child?.Arena ?? _building?.Arena ?? _batchCanonical;
+    public CanonicalArena Canonical =>
+        _child?.Arena ??
+        (_memory is { Slicing: true } memory && memory.SliceBuilding == _building ? memory.Slice! : _building?.Arena ?? _batchCanonical);
 
     /// <summary>The batch's own arena, which <see cref="ResetBatch"/> clears.</summary>
     private readonly CanonicalArena _batchCanonical;
@@ -938,8 +942,9 @@ internal sealed class ScanContext : IDisposable
 
     /// <summary>
     /// What this context remembers of the file's bytes from one batch to the next: the nodes whose
-    /// O(n) validation has already passed, and the blobs it keeps parsed. Null until a reader opens
-    /// a node-check scope or a blob is kept.
+    /// O(n) validation has already passed, and the blobs it keeps parsed; and the arena a decode
+    /// builds a slice of its rows in. Null until a reader opens a node-check scope, a blob is kept or
+    /// a decode slices.
     /// </summary>
     /// <remarks>
     /// One field, and allocated on first use, because the scan paths hold tight allocation
@@ -1132,6 +1137,14 @@ internal sealed class ScanContext : IDisposable
         /// would otherwise walk each of them again at every batch.
         /// </summary>
         internal NodeFacts? More;
+
+        /// <summary>The arena a decode builds a slice of its rows in (<see cref="BeginSlice"/>), made on the first.</summary>
+        internal CanonicalArena? Slice;
+
+        /// <summary>Whether a decode builds a slice of its rows, and the retained decode that was in flight when it began.</summary>
+        internal bool Slicing;
+
+        internal RetainedChunk? SliceBuilding;
     }
 
     /// <summary>
@@ -1529,6 +1542,43 @@ internal sealed class ScanContext : IDisposable
     }
 
     /// <summary>
+    /// Redirects <see cref="Canonical"/> at an arena of this context's own, for a decode that builds
+    /// its rows a slice at a time and throws away, once a slice is written, what it built for it:
+    /// <see cref="NextSlice"/> clears the arena between slices and <see cref="EndSlice"/> ends the
+    /// redirect. A retained decode begun inside it takes the redirect over until it ends, as it does
+    /// from the batch's arena.
+    /// </summary>
+    /// <returns>
+    /// False when a slice is already being built, or a retained child is being decoded, in whose
+    /// arena the decode then builds its rows whole.
+    /// </returns>
+    internal bool BeginSlice()
+    {
+        BatchMemory memory = _memory ??= new BatchMemory();
+        if (memory.Slicing || _child is not null)
+        {
+            return false;
+        }
+
+        memory.Slice ??= new CanonicalArena();
+        memory.SliceBuilding = _building;
+        memory.Slicing = true;
+        return true;
+    }
+
+    /// <summary>Clears the arena of the slice just written, its blocks kept idle for the next slice's.</summary>
+    internal void NextSlice() => _memory!.Slice!.ResetKeepingBlocks();
+
+    /// <summary>Ends the redirect <see cref="BeginSlice"/> made, its arena cleared and its blocks kept for the next decode that slices.</summary>
+    internal void EndSlice()
+    {
+        BatchMemory memory = _memory!;
+        memory.Slicing = false;
+        memory.SliceBuilding = null;
+        memory.Slice!.ResetKeepingBlocks();
+    }
+
+    /// <summary>
     /// Releases every segment held for the previous batch and resets every arena but those holding
     /// flat layouts' blobs, which the next batch finds parsed when it holds the same bytes.
     /// </summary>
@@ -1660,6 +1710,9 @@ internal sealed class ScanContext : IDisposable
             memory.Blobs?.Forget();
             memory.RankKey = 0;
             memory.More?.Clear();
+            memory.Slice?.Reset();
+            memory.Slicing = false;
+            memory.SliceBuilding = null;
         }
 
         if (_pushed is { } pushed)
@@ -1688,6 +1741,7 @@ internal sealed class ScanContext : IDisposable
 
         _disposed = true;
         _batchCanonical.Reset();
+        _memory?.Slice?.Reset();
         AbandonRetained();
         if (_ownsRetained)
         {

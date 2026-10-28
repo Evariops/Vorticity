@@ -132,7 +132,7 @@ internal sealed class ShreddedVariant
         int metadata = node.GetFieldIndex(_metadata);
         int value = _root.Kind == ShredKind.Value && !arena.GetNode(node.GetFieldIndex(_root.Value)).DType.IsNullable
             ? node.GetFieldIndex(_root.Value)
-            : Rebuild(arena, group, rows, metadata);
+            : Rebuild(arena, group, rows);
         Span<int> fields = stackalloc int[2];
         fields[0] = metadata;
         fields[1] = value;
@@ -140,58 +140,97 @@ internal sealed class ShreddedVariant
     }
 
     /// <summary>The binary node of the group's rows' values: a null row's empty, every other one's as <c>construct_variant</c> builds it.</summary>
-    private int Rebuild(CanonicalArena arena, int group, int rows, int metadata)
+    private int Rebuild(CanonicalArena arena, int group, int rows)
     {
-        Shred root = _root;
-        Bind(arena, root, group);
-        ReadOnlySpan<byte> metadataViews = default;
-        ReadOnlySpan<VortexBuffer> metadataBuffers = default;
-        if (_objects)
-        {
-            CanonicalNode node = arena.GetNode(metadata);
-            metadataViews = node.Views.Span;
-            metadataBuffers = node.DataBuffers;
-        }
-
         int bytes = checked(rows * ViewSize);
         VortexBuffer views = arena.AllocateUninitialized(Math.Max(bytes, 1), 64, out Span<byte> into).Slice(0, bytes);
-        ReadOnlySpan<byte> values = root.Value >= 0 ? root.ValueViews.Span : default;
 
-        // The written values' buffer follows the value column's, whose views a row taking its value keeps.
-        int own = root.ValueBufferCount;
+        // The scratch goes back to the pool however the rows end, a malformed one included.
+        BeginSlices();
+        try
+        {
+            WriteSlice(arena, group, into);
+            Shred root = _root;
+            return CompleteSlices(arena, rows, views, root.ValueBuffers.AsSpan(0, root.Value >= 0 ? root.ValueBufferCount : 0));
+        }
+        finally
+        {
+            EndSlices();
+        }
+    }
+
+    /// <summary>
+    /// Begins the values of rows rebuilt a slice at a time: <see cref="WriteSlice"/> for each slice in turn, then
+    /// <see cref="CompleteSlices"/>, and <see cref="EndSlices"/> however they end.
+    /// </summary>
+    internal void BeginSlices()
+    {
         _used = 0;
         _top = 0;
         if (_scratch.Length == 0)
         {
             _scratch = System.Buffers.ArrayPool<byte>.Shared.Rent(256);
         }
+    }
 
-        // The scratch goes back to the pool however the rows end, a malformed one included.
-        int count = own;
-        try
+    /// <summary>
+    /// The views of the group node <paramref name="group"/>'s rows written into <paramref name="into"/>, the values rebuilt
+    /// after those of the slices before: a row that takes its value as it is keeps the value column's view, whose data
+    /// buffers every slice's value column holds alike, those of the node it is a slice of.
+    /// </summary>
+    internal void WriteSlice(CanonicalArena arena, int group, Span<byte> into)
+    {
+        Shred root = _root;
+        Bind(arena, root, group);
+        ReadOnlySpan<byte> metadataViews = default;
+        ReadOnlySpan<VortexBuffer> metadataBuffers = default;
+        CanonicalNode node = arena.GetNode(group);
+        if (_objects)
         {
-            WriteRows(root, rows, into, values, metadataViews, metadataBuffers, own);
-            if (_buffers.Length < own + 1)
-            {
-                _buffers = new VortexBuffer[own + 1];
-            }
-
-            root.ValueBuffers.AsSpan(0, own).CopyTo(_buffers);
-            if (_used > 0)
-            {
-                VortexBuffer data = arena.AllocateUninitialized(_used, 64, out Span<byte> written).Slice(0, _used);
-                _scratch.AsSpan(0, _used).CopyTo(written);
-                _buffers[count++] = data;
-            }
+            CanonicalNode metadata = arena.GetNode(node.GetFieldIndex(_metadata));
+            metadataViews = metadata.Views.Span;
+            metadataBuffers = metadata.DataBuffers;
         }
-        finally
+
+        // The written values' buffer follows the value column's, whose views a row taking its value keeps.
+        ReadOnlySpan<byte> values = root.Value >= 0 ? root.ValueViews.Span : default;
+        WriteRows(root, node.Length, into, values, metadataViews, metadataBuffers, root.Value >= 0 ? root.ValueBufferCount : 0);
+    }
+
+    /// <summary>
+    /// The binary node of the <paramref name="rows"/> rows the slices wrote: their <paramref name="views"/> over the value
+    /// column's <paramref name="valueBuffers"/> and the values rebuilt, copied into <paramref name="arena"/> in one buffer.
+    /// </summary>
+    internal int CompleteSlices(CanonicalArena arena, int rows, VortexBuffer views, ReadOnlySpan<VortexBuffer> valueBuffers)
+    {
+        int own = valueBuffers.Length;
+        int count = own;
+        if (_buffers.Length < own + 1)
         {
-            System.Buffers.ArrayPool<byte>.Shared.Return(_scratch);
-            _scratch = [];
-            _used = 0;
+            _buffers = new VortexBuffer[own + 1];
+        }
+
+        valueBuffers.CopyTo(_buffers);
+        if (_used > 0)
+        {
+            VortexBuffer data = arena.AllocateUninitialized(_used, 64, out Span<byte> written).Slice(0, _used);
+            _scratch.AsSpan(0, _used).CopyTo(written);
+            _buffers[count++] = data;
         }
 
         return arena.AddVarBinView(_binary, rows, Validity.NonNullable, views, _buffers.AsSpan(0, count));
+    }
+
+    /// <summary>Gives back the scratch the slices' values were written in.</summary>
+    internal void EndSlices()
+    {
+        if (_scratch.Length != 0)
+        {
+            System.Buffers.ArrayPool<byte>.Shared.Return(_scratch);
+        }
+
+        _scratch = [];
+        _used = 0;
     }
 
     /// <summary>Each row's view into <paramref name="into"/>, its value written into the scratch where the row is rebuilt.</summary>

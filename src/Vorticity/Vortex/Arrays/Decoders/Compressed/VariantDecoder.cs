@@ -35,7 +35,25 @@ internal sealed class VariantDecoder : ArrayDecoder
     public override int Decode(ArrayDecodeContext context, in ArrayNode node, DType dtype, int length)
     {
         ArgumentNullException.ThrowIfNull(context);
-        return Core(context, in node, dtype, length, wanted: default, selective: false);
+        return Core(context, in node, dtype, length, wanted: default, ChildRows.Whole, 0, length);
+    }
+
+    /// <summary>
+    /// A range of the rows is its storage's range and its shredded child's, put back together, when both decode one: the
+    /// flat reader then decodes a chunk a window at a time. Decoded whole, a chunk of a log's attributes, half a million rows
+    /// and a run-end column of views for each of its fields, held one input of a merge at 8 GB.
+    /// </summary>
+    public override bool DecodesRange(ArrayDecodeContext context, in ArrayNode node)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        return context.ChildrenDecodeRange(in node);
+    }
+
+    /// <inheritdoc/>
+    public override int DecodeRange(ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, int start, int count)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        return Core(context, in node, dtype, length, wanted: default, ChildRows.Range, start, count);
     }
 
     /// <summary>
@@ -53,7 +71,7 @@ internal sealed class VariantDecoder : ArrayDecoder
         ReadOnlySpan<int> wanted)
     {
         ArgumentNullException.ThrowIfNull(context);
-        return Core(context, in node, dtype, length, wanted, selective: true);
+        return Core(context, in node, dtype, length, wanted, ChildRows.Selected, 0, wanted.Length);
     }
 
     /// <inheritdoc/>
@@ -61,7 +79,7 @@ internal sealed class VariantDecoder : ArrayDecoder
 
     private static int Core(
         ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
-        ReadOnlySpan<int> wanted, bool selective)
+        ReadOnlySpan<int> wanted, ChildRows rows, int start, int count)
     {
         ArrayDecodeContext.RequireBufferCount(node.BufferCount, 0, Id);
         VariantMetadata metadata = VariantMetadata.Read(node.Metadata);
@@ -77,11 +95,9 @@ internal sealed class VariantDecoder : ArrayDecoder
         // The core storage wears the same dtype as the node, so the child decodes at the variant
         // dtype and whatever encoding it uses has to produce the `Struct{metadata, value}` form.
         // An encoding that does not is refused below rather than reinterpreted.
-        int core = selective
-            ? context.DecodeChildSelected(in node, 0, dtype, length, wanted)
-            : context.DecodeChild(in node, 0, dtype, length);
+        int core = context.DecodeChildRows(in node, 0, dtype, length, start, count, wanted, rows);
         CanonicalNode storage = context.Canonical.GetNode(core);
-        VariantStorage.Require(storage, selective ? wanted.Length : length, Id);
+        VariantStorage.Require(storage, count, Id);
         if (!metadata.HasShreddedDType)
         {
             return core;
@@ -96,10 +112,206 @@ internal sealed class VariantDecoder : ArrayDecoder
             return core;
         }
 
-        int shredded = selective
-            ? context.DecodeChildSelected(in node, 1, shreddedType, length, wanted)
-            : context.DecodeChild(in node, 1, shreddedType, length);
+        bool sliceable = rows == ChildRows.Selected
+            ? context.ChildSelectsWithoutFullDecode(in node, 1, shreddedType)
+            : context.ChildDecodesRange(in node, 1);
+        if (sliceable && ShreddedSlices.TryBegin(context, count, shreddedType, ShreddedTree.Malformed, out ShreddedSlices slices))
+        {
+            try
+            {
+                for (int at = 0; at < count; at += slices.Rows)
+                {
+                    int part = Math.Min(slices.Rows, count - at);
+                    int coreSlice = slices.Narrow(context, core, at, part);
+                    int shreddedSlice = rows == ChildRows.Selected
+                        ? context.DecodeChildSelected(in node, 1, shreddedType, length, wanted.Slice(at, part))
+                        : context.DecodeChildRange(in node, 1, shreddedType, length, start + at, part);
+                    int group = ShreddedTree.Group(context, dtype, coreSlice, shreddedSlice, out DType groupType);
+                    slices.Write(context, group, groupType, at);
+                }
+
+                return slices.Complete(dtype, storage.GetFieldIndex(0), storage.GetFieldIndex(1), storage.Validity);
+            }
+            finally
+            {
+                slices.End(context);
+            }
+        }
+
+        int shredded = context.DecodeChildRows(in node, 1, shreddedType, length, start, count, wanted, rows);
         return ShreddedTree.Assemble(context, dtype, core, shredded);
+    }
+}
+
+/// <summary>
+/// A shredded variant's rows rebuilt a slice at a time: its shredded columns decoded for a slice of the rows in an arena
+/// the scan clears between slices (<see cref="ScanContext.BeginSlice"/>), and each slice's values written after the last
+/// one's, so that what a decode builds to throw away is a slice of a wide shredding and not every row of it. The columns
+/// left whole -- the metadata, the residual values, the validity -- are decoded for every row first, and each slice reads
+/// a window of them.
+/// </summary>
+/// <remarks>
+/// The rebuild reads a shredded column a view or a value a row, so a column a run-end or a dictionary holds in a few bytes
+/// is expanded for it: a log's attributes shredded into some four hundred keys came to seven kilobytes a row, and the
+/// window of 131 072 rows a merge's input decodes to 900 MB built and thrown away.
+/// </remarks>
+internal ref struct ShreddedSlices
+{
+    /// <summary>A slice is whole blocks of this many rows, a FastLanes block's.</summary>
+    private const int BlockRows = 1024;
+
+    private const int ViewSize = CanonicalSupport.ViewSize;
+
+    private readonly CanonicalArena _destination;
+    private readonly VortexBuffer _views;
+    private readonly Span<byte> _into;
+    private readonly int _rows;
+    private readonly string _refusal;
+    private ShreddedVariant? _plan;
+    private DType _planned;
+
+    private ShreddedSlices(CanonicalArena destination, VortexBuffer views, Span<byte> into, int rows, int slice, string refusal)
+    {
+        _destination = destination;
+        _views = views;
+        _into = into;
+        _rows = rows;
+        _refusal = refusal;
+        Rows = slice;
+    }
+
+    /// <summary>The rows of a slice, the last one's at most.</summary>
+    internal int Rows { get; }
+
+    /// <summary>The arena the rows are rebuilt into, where the columns left whole lie.</summary>
+    internal readonly CanonicalArena Destination => _destination;
+
+    /// <summary>
+    /// Begins rebuilding the <paramref name="rows"/> rows of a variant shredded into <paramref name="typed"/> a slice at a
+    /// time, when they are more than a slice holds and the scan can redirect its arena; the decode builds them whole
+    /// otherwise.
+    /// </summary>
+    /// <param name="context">The decode context, whose arena the rows are rebuilt into.</param>
+    /// <param name="rows">The rows the decode produces.</param>
+    /// <param name="typed">The type of the columns shredded out of the variant.</param>
+    /// <param name="refusal">What a malformed shredding is refused as.</param>
+    /// <param name="slices">The slices, to be ended by <see cref="End"/>.</param>
+    internal static bool TryBegin(ArrayDecodeContext context, int rows, DType typed, string refusal, out ShreddedSlices slices)
+    {
+        slices = default;
+        int slice = SliceRows(typed, context.Scan.Options.VariantSliceBytes);
+        if (rows <= slice)
+        {
+            return false;
+        }
+
+        CanonicalArena destination = context.Canonical;
+        VortexBuffer views = destination.AllocateUninitialized(checked(rows * ViewSize), 64, out Span<byte> into);
+        if (!context.Scan.BeginSlice())
+        {
+            return false;
+        }
+
+        slices = new ShreddedSlices(destination, views, into, rows, slice, refusal);
+        return true;
+    }
+
+    /// <summary>The destination's node <paramref name="node"/>, a column left whole, narrowed to a slice's rows in the slice's arena.</summary>
+    internal readonly int Narrow(ArrayDecodeContext context, int node, int at, int count) =>
+        Layouts.CanonicalSlice.SliceAcross(_destination, context.Canonical, node, at, count);
+
+    /// <summary>
+    /// Writes the values of the slice whose group node, in the slice's arena, is <paramref name="group"/> of
+    /// <paramref name="type"/>, the slice starting at row <paramref name="at"/>, and clears the slice's arena.
+    /// </summary>
+    internal void Write(ArrayDecodeContext context, int group, DType type, int at)
+    {
+        CanonicalArena arena = context.Canonical;
+        try
+        {
+            if (_plan is null)
+            {
+                _plan = ShreddedVariant.Compile(VortexTypes.FromDType(type), context.Types);
+                _plan.BeginSlices();
+                _planned = type;
+            }
+            else if (type != _planned)
+            {
+                throw new VortexFormatException("a slice of its rows is shredded otherwise than the one before.");
+            }
+
+            int rows = arena.GetNode(group).Length;
+            _plan.WriteSlice(arena, group, _into.Slice(at * ViewSize, rows * ViewSize));
+        }
+        catch (VortexFormatException malformed)
+        {
+            CompressedThrow.Format($"{_refusal}: {malformed.Message}");
+            throw;
+        }
+
+        context.Scan.NextSlice();
+        context.Scan.Metrics?.AddVariantSlice();
+    }
+
+    /// <summary>
+    /// The variant node of the rows the slices rebuilt, in the destination: a struct of the <paramref name="metadata"/>
+    /// column and of the values, valid as <paramref name="validity"/> says, over the buffers of the residual
+    /// <paramref name="value"/> column when there is one (-1 otherwise).
+    /// </summary>
+    internal readonly int Complete(DType variant, int metadata, int value, Validity validity)
+    {
+        ReadOnlySpan<VortexBuffer> buffers = value >= 0 ? _destination.GetNode(value).DataBuffers : default;
+        Span<int> fields = stackalloc int[2];
+        fields[0] = metadata;
+        fields[1] = _plan!.CompleteSlices(_destination, _rows, _views, buffers);
+        return _destination.AddStruct(variant, _rows, validity, fields);
+    }
+
+    /// <summary>Ends the slices however they ended: the plan's scratch given back, the scan's arena redirected back.</summary>
+    internal readonly void End(ArrayDecodeContext context)
+    {
+        _plan?.EndSlices();
+        context.Scan.EndSlice();
+    }
+
+    /// <summary>The rows of a slice of a shredding of <paramref name="typed"/>: whole blocks, as many as <paramref name="bytes"/> reads, one at least.</summary>
+    private static int SliceRows(DType typed, long bytes)
+    {
+        long rows = bytes / Math.Max(ViewSize, RowBytes(typed));
+        return (int)Math.Max(BlockRows, Math.Min(rows, int.MaxValue) / BlockRows * BlockRows);
+    }
+
+    /// <summary>
+    /// The bytes a row of a shredded column of <paramref name="type"/> is read in, about: a view or a value for each column,
+    /// two views for a nested variant, whose own shredding the type does not tell, and a list's offset beside an element.
+    /// </summary>
+    private static long RowBytes(DType type)
+    {
+        switch (type.Kind)
+        {
+            case DTypeKind.Struct:
+            {
+                long bytes = 0;
+                for (int i = 0; i < type.FieldCount; i++)
+                {
+                    bytes += RowBytes(type.GetField(i));
+                }
+
+                return bytes;
+            }
+
+            case DTypeKind.List:
+                return ViewSize + RowBytes(type.ElementType);
+
+            case DTypeKind.Extension:
+                return RowBytes(type.StorageType);
+
+            case DTypeKind.Variant:
+                return 2 * ViewSize;
+
+            default:
+                return ViewSize;
+        }
     }
 }
 
@@ -120,6 +332,9 @@ internal sealed class VariantDecoder : ArrayDecoder
 /// </remarks>
 internal static class ShreddedTree
 {
+    /// <summary>What a shredded child no shredding builds is refused as.</summary>
+    internal const string Malformed = Id + "'s shredded child is not what a shredding builds";
+
     private const string Id = "vortex.variant";
 
     /// <summary>Fields a struct holds before its scratch goes to the heap.</summary>
@@ -134,6 +349,31 @@ internal static class ShreddedTree
     /// <exception cref="VortexFormatException">The tree is not one a shredding builds.</exception>
     internal static int Assemble(ArrayDecodeContext context, DType variant, int core, int shredded)
     {
+        int node = Group(context, variant, core, shredded, out DType group);
+        try
+        {
+            return ShreddedVariant.Compile(VortexTypes.FromDType(group), context.Types).Assemble(context.Canonical, variant, node);
+        }
+        catch (VortexFormatException malformed)
+        {
+            CompressedThrow.Format($"{Malformed}: {malformed.Message}");
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// The group the Parquet standard shreds a variant into, of the core storage <paramref name="core"/> and the shredded
+    /// tree <paramref name="shredded"/>: a struct of the storage's metadata and value and of the tree as the typed value,
+    /// valid where the storage is.
+    /// </summary>
+    /// <param name="context">The decode context both were decoded in.</param>
+    /// <param name="variant">The variant dtype the rows wear.</param>
+    /// <param name="core">The core storage, <c>Struct{metadata, value}</c>.</param>
+    /// <param name="shredded">The shredded tree, of the same rows.</param>
+    /// <param name="group">The group's type, which the plan rebuilding its rows is compiled from.</param>
+    /// <returns>The group node.</returns>
+    internal static int Group(ArrayDecodeContext context, DType variant, int core, int shredded, out DType group)
+    {
         CanonicalArena arena = context.Canonical;
         DTypeArena types = context.Types;
         CanonicalNode storage = arena.GetNode(core);
@@ -145,21 +385,12 @@ internal static class ShreddedTree
         int metadata = storage.GetFieldIndex(0);
         int value = storage.GetFieldIndex(1);
         int typed = Typed(arena, types, shredded, depth: 1, out DType typedType);
-        DType group = types.Struct(
+        group = types.Struct(
             ["metadata", "value", "typed_value"],
             [arena.GetNode(metadata).DType, arena.GetNode(value).DType, typedType],
             variant.Nullability);
         Span<int> fields = [metadata, value, typed];
-        int node = arena.AddStruct(group, storage.Length, storage.Validity, fields);
-        try
-        {
-            return ShreddedVariant.Compile(VortexTypes.FromDType(group), types).Assemble(arena, variant, node);
-        }
-        catch (VortexFormatException malformed)
-        {
-            CompressedThrow.Format($"{Id}'s shredded child is not what a shredding builds: {malformed.Message}");
-            throw;
-        }
+        return arena.AddStruct(group, storage.Length, storage.Validity, fields);
     }
 
     /// <summary>The group a node of the tree stands for: of its value alone when it is a nested variant, of it as the typed value otherwise.</summary>
@@ -278,6 +509,8 @@ internal sealed class ParquetVariantDecoder : ArrayDecoder
 {
     private const string Id = "vortex.parquet.variant";
 
+    private const string Malformed = Id + "'s shredded children are not what the Parquet standard allows";
+
     /// <summary>The shared, stateless instance.</summary>
     public static readonly ParquetVariantDecoder Instance = new();
 
@@ -291,7 +524,24 @@ internal sealed class ParquetVariantDecoder : ArrayDecoder
     public override int Decode(ArrayDecodeContext context, in ArrayNode node, DType dtype, int length)
     {
         ArgumentNullException.ThrowIfNull(context);
-        return Core(context, in node, dtype, length, wanted: default, selective: false);
+        return Core(context, in node, dtype, length, wanted: default, ChildRows.Whole, 0, length);
+    }
+
+    /// <summary>
+    /// A range is each child's range, put back together as a whole node is, so a chunk is read window by window instead
+    /// of whole, the same as <see cref="VariantDecoder"/>.
+    /// </summary>
+    public override bool DecodesRange(ArrayDecodeContext context, in ArrayNode node)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        return context.ChildrenDecodeRange(in node);
+    }
+
+    /// <inheritdoc/>
+    public override int DecodeRange(ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, int start, int count)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        return Core(context, in node, dtype, length, wanted: default, ChildRows.Range, start, count);
     }
 
     /// <summary>
@@ -313,7 +563,7 @@ internal sealed class ParquetVariantDecoder : ArrayDecoder
         ReadOnlySpan<int> wanted)
     {
         ArgumentNullException.ThrowIfNull(context);
-        return Core(context, in node, dtype, length, wanted, selective: true);
+        return Core(context, in node, dtype, length, wanted, ChildRows.Selected, 0, wanted.Length);
     }
 
     /// <inheritdoc/>
@@ -321,7 +571,7 @@ internal sealed class ParquetVariantDecoder : ArrayDecoder
 
     private static int Core(
         ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
-        ReadOnlySpan<int> wanted, bool selective)
+        ReadOnlySpan<int> wanted, ChildRows rows, int start, int count)
     {
         ArrayDecodeContext.RequireBufferCount(node.BufferCount, 0, Id);
         ParquetVariantMetadata metadata = ParquetVariantMetadata.Read(node.Metadata);
@@ -350,22 +600,16 @@ internal sealed class ParquetVariantDecoder : ArrayDecoder
         // The validity child comes first, where the shared helpers expect it last.
         Validity validity = first == 0
             ? Validity.FromNullability(dtype.Nullability)
-            : selective
-                ? context.DecodeValidityChildSelected(in node, 0, length, wanted)
-                : context.DecodeValidityChild(in node, 0, length);
+            : context.DecodeValidityChildRows(in node, 0, length, start, count, wanted, rows);
 
-        int produced = selective ? wanted.Length : length;
+        int produced = count;
 
-        int metadataChild = selective
-            ? context.DecodeChildSelected(in node, first, metadataType, length, wanted)
-            : context.DecodeChild(in node, first, metadataType, length);
+        int metadataChild = context.DecodeChildRows(in node, first, metadataType, length, start, count, wanted, rows);
         metadataChild = RequireBinary(context, metadataChild, produced, "metadata");
         int valueChild = -1;
         if (metadata.HasValue)
         {
-            valueChild = selective
-                ? context.DecodeChildSelected(in node, first + 1, valueType, length, wanted)
-                : context.DecodeChild(in node, first + 1, valueType, length);
+            valueChild = context.DecodeChildRows(in node, first + 1, valueType, length, start, count, wanted, rows);
             valueChild = RequireBinary(context, valueChild, produced, "value");
         }
 
@@ -385,27 +629,64 @@ internal sealed class ParquetVariantDecoder : ArrayDecoder
         // variant is; the plan that rebuilds each row's value from them is the Parquet reader's.
         DType typedType = DTypeProtobuf.Read(metadata.TypedValueDType, types);
         int typed = first + (metadata.HasValue ? 2 : 1);
-        int typedChild = selective
-            ? context.DecodeChildSelected(in node, typed, typedType, length, wanted)
-            : context.DecodeChild(in node, typed, typedType, length);
+        DType group = metadata.HasValue
+            ? types.Struct(["metadata", "value", "typed_value"], [metadataType, valueType, typedType], dtype.Nullability)
+            : types.Struct(["metadata", "typed_value"], [metadataType, typedType], dtype.Nullability);
+        int width = metadata.HasValue ? 2 : 1;
+        Span<int> children = stackalloc int[3];
+        children[0] = metadataChild;
+        children[1] = valueChild;
+        bool sliceable = rows == ChildRows.Selected
+            ? context.ChildSelectsWithoutFullDecode(in node, typed, typedType)
+            : context.ChildDecodesRange(in node, typed);
+        if (sliceable && ShreddedSlices.TryBegin(context, produced, typedType, Malformed, out ShreddedSlices slices))
+        {
+            try
+            {
+                // The columns left whole, in one struct with the validity, which each slice reads a window of.
+                DType whole = metadata.HasValue
+                    ? types.Struct(["metadata", "value"], [metadataType, valueType], dtype.Nullability)
+                    : types.Struct(["metadata"], [metadataType], dtype.Nullability);
+                int left = slices.Destination.AddStruct(whole, produced, validity, children[..width]);
+                for (int at = 0; at < produced; at += slices.Rows)
+                {
+                    int part = Math.Min(slices.Rows, produced - at);
+                    int columns = slices.Narrow(context, left, at, part);
+                    int typedSlice = rows == ChildRows.Selected
+                        ? context.DecodeChildSelected(in node, typed, typedType, length, wanted.Slice(at, part))
+                        : context.DecodeChildRange(in node, typed, typedType, length, start + at, part);
+                    CanonicalArena arena = context.Canonical;
+                    if (arena.GetNode(typedSlice).Kind == CanonicalKind.Constant)
+                    {
+                        typedSlice = arena.MaterializeConstant(typedSlice);
+                    }
+
+                    CanonicalNode window = arena.GetNode(columns);
+                    for (int i = 0; i < width; i++)
+                    {
+                        children[i] = window.GetFieldIndex(i);
+                    }
+
+                    children[width] = typedSlice;
+                    slices.Write(context, arena.AddStruct(group, part, window.Validity, children[..(width + 1)]), group, at);
+                }
+
+                return slices.Complete(dtype, metadataChild, valueChild, validity);
+            }
+            finally
+            {
+                slices.End(context);
+            }
+        }
+
+        int typedChild = context.DecodeChildRows(in node, typed, typedType, length, start, count, wanted, rows);
         if (context.Canonical.GetNode(typedChild).Kind == CanonicalKind.Constant)
         {
             typedChild = context.Canonical.MaterializeConstant(typedChild);
         }
 
-        DType group = metadata.HasValue
-            ? types.Struct(["metadata", "value", "typed_value"], [metadataType, valueType, typedType], dtype.Nullability)
-            : types.Struct(["metadata", "typed_value"], [metadataType, typedType], dtype.Nullability);
-        Span<int> children = stackalloc int[3];
-        int count = 0;
-        children[count++] = metadataChild;
-        if (metadata.HasValue)
-        {
-            children[count++] = valueChild;
-        }
-
-        children[count++] = typedChild;
-        int groupNode = context.Canonical.AddStruct(group, produced, validity, children[..count]);
+        children[width] = typedChild;
+        int groupNode = context.Canonical.AddStruct(group, produced, validity, children[..(width + 1)]);
         try
         {
             return ShreddedVariant.Compile(VortexTypes.FromDType(group), types)
@@ -413,7 +694,7 @@ internal sealed class ParquetVariantDecoder : ArrayDecoder
         }
         catch (VortexFormatException malformed)
         {
-            CompressedThrow.Format($"{Id}'s shredded children are not what the Parquet standard allows: {malformed.Message}");
+            CompressedThrow.Format($"{Malformed}: {malformed.Message}");
             throw;
         }
     }
