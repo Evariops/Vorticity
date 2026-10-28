@@ -582,24 +582,27 @@ public sealed partial class VortexFileWriter
                 // statistics of its rows as they came do not describe; a column written against an
                 // object dictionary's, its codes.
                 ChunkStats stats = _stats[field];
-                if (writer.Codes(field))
+                Types.Variants.VariantShredding? plan = writer._shredding?[field];
+                if (plan is null && writer.Codes(field))
                 {
                     local = writer.Coded(field, lane.Arena, local);
                     stats = default;
                 }
-                else if (writer._shredding?[field] is { } plan)
+
+                lane.Blobs.ColumnLevel = writer.ZstdLevelOf(field);
+                if (plan is not null)
                 {
                     Indexes.ChunkBlockBounds? bounds = writer.BoundsFor(field);
-                    local = VariantShredder.Shred(lane.Arena, new Types.DTypeArena(), local, plan, bounds);
-                    stats = default;
+                    _blobs[field] = VariantShredder.Write(lane.Blobs, lane.Arena, local, plan, bounds, lane.Encodings, writer._compress);
                     if (bounds is not null)
                     {
                         _bounds![field] = bounds;
                     }
                 }
-
-                lane.Blobs.ColumnLevel = writer.ZstdLevelOf(field);
-                _blobs[field] = ArrayBlobWriter.Write(lane.Blobs, lane.Arena, local, lane.Encodings, writer._compress, stats);
+                else
+                {
+                    _blobs[field] = ArrayBlobWriter.Write(lane.Blobs, lane.Arena, local, lane.Encodings, writer._compress, stats);
+                }
                 KeepFresh(field, lane.Encodings);
             }
             finally

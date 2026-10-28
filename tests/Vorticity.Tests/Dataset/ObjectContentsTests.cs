@@ -189,7 +189,7 @@ public sealed partial class ObjectContentsTests
         }
     }
 
-    /// <summary>The rows of <paramref name="batches"/>, each holding its variant column alone, whose object holds <paramref name="key"/>.</summary>
+    /// <summary>The rows of <paramref name="batches"/>, each holding its variant column alone, whose object holds <paramref name="key"/> as a text.</summary>
     private static long Held(List<RecordBatch> batches, string key)
     {
         long held = 0;
@@ -197,11 +197,20 @@ public sealed partial class ObjectContentsTests
         {
             using (batch)
             {
-                int column = batch.Arena.GetNode(batch.RootIndex).GetFieldIndex(0);
-                int values = Vorticity.Writing.VariantShredder.KeyColumns(batch.Arena, new Vorticity.Types.DTypeArena(), column, [(key, Vorticity.Types.Variants.VariantClass.String)])[0];
+                CanonicalArena arena = batch.Arena;
+                int column = arena.GetNode(batch.RootIndex).GetFieldIndex(0);
+                CanonicalNode metadata = arena.GetNode(Vorticity.Writing.ArrayBlobWriter.Materialize(arena, arena.GetNode(column).GetFieldIndex(0)));
+                int value = Vorticity.Writing.ArrayBlobWriter.Materialize(arena, arena.GetNode(column).GetFieldIndex(1));
                 for (int row = 0; row < batch.RowCount; row++)
                 {
-                    held += ArenaWords.IsValid(batch.Arena, values, row) ? 1 : 0;
+                    if (ArenaWords.IsValid(arena, column, row) && ArenaWords.IsValid(arena, value, row)
+                        && Variant.FromBytes(Vorticity.Compute.LiteralReader.ViewAt(metadata, row), Vorticity.Compute.LiteralReader.ViewAt(arena.GetNode(value), row))
+                            is { Kind: VariantKind.Object } document
+                        && document[key] is { } text
+                        && Vorticity.Types.Variants.VariantClasses.Of(text.Kind) == Vorticity.Types.Variants.VariantClass.String)
+                    {
+                        held++;
+                    }
                 }
             }
         }

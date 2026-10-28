@@ -480,6 +480,14 @@ column does, as runs where it has few of them, as a bitmap otherwise. A path map
 attributes, counting and choosing cost 256 ns a row, and the shredded write 310 ns a row more than the
 whole one (`vortex-queries --micro shredwrite`).
 
+A chunk's write holds its values and one typed column. The shredder takes each key's values at the rows
+that hold it, and nothing at the others, and the blob writer lays a typed column out over the chunk's
+rows only when it comes to it, in an arena emptied before the next. Laid out all at once, the columns
+of a chunk of a million rows of log attributes cost a slot a row a key, sixteen bytes of view for a
+text: a consolidation of 72 million such rows held 9.9 GB at its writer's peak, and allocated 1 145
+bytes a row; written a column at a time, 3.1 GB and 56 bytes, its write 8 % shorter
+(`vortex-queries --micro consolidation`).
+
 A body is a variant too: a line of text keeps its text, which the trigram and token indexes search, and
 an object is shredded as attributes are, and shown again from its columns and residual, keys in order.
 

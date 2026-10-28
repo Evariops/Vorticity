@@ -2129,10 +2129,10 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         // statistics of its rows as they came do not describe.
         ChunkStats stats = default;
         ChunkBlockBounds? bounds = null;
-        if (_shredding?[field] is { } plan)
+        VariantShredding? plan = _shredding?[field];
+        if (plan is not null)
         {
             bounds = BoundsFor(field);
-            node = VariantShredder.Shred(arena, new DTypeArena(), node, plan, bounds);
         }
         else if (Codes(field))
         {
@@ -2149,7 +2149,9 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         blobs.ColumnLevel = ZstdLevelOf(field);
         try
         {
-            blob = ArrayBlobWriter.Write(blobs, arena, node, _arrayEncodings, _compress, stats);
+            blob = plan is not null
+                ? VariantShredder.Write(blobs, arena, node, plan, bounds, _arrayEncodings, _compress)
+                : ArrayBlobWriter.Write(blobs, arena, node, _arrayEncodings, _compress, stats);
         }
         finally
         {
