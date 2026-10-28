@@ -88,6 +88,7 @@ internal static class VariantShredder
             root.Present(in dictionary, epoch, bytes);
         }
 
+        root.Pad(rows);
         int tree = root.Typed(arena, types, rows, metadata, out _);
         int residual = root.Values.Build(arena, types, types.Binary(Nullability.Nullable), rows);
         return arena.AddStruct(variant.DType, rows, variant.Validity, [metadata, residual, tree]);
@@ -213,6 +214,25 @@ internal static class VariantShredder
         internal abstract void Absent();
 
         /// <summary>
+        /// The rows before <paramref name="rows"/> the node has not taken, taken as rows that do not hold it, in one run: an
+        /// object's node is handed the rows that hold it alone, and its keys a run of nulls when one comes, where a null a key a
+        /// row made the shredding of hundreds of keys cost each row as many appends.
+        /// </summary>
+        internal void Pad(int rows)
+        {
+            if (Held.Count < rows)
+            {
+                PadTo(rows);
+            }
+        }
+
+        /// <summary>Takes rows up to <paramref name="rows"/>, past those taken, as rows that do not hold the node.</summary>
+        protected abstract void PadTo(int rows);
+
+        /// <summary>The rows the node took.</summary>
+        internal int Rows => Held.Count;
+
+        /// <summary>
         /// A row whose node holds <paramref name="value"/>, its keys named by <paramref name="dictionary"/>, the same as every
         /// row of its run of <paramref name="epoch"/>.
         /// </summary>
@@ -228,6 +248,7 @@ internal static class VariantShredder
         /// </summary>
         internal int Field(CanonicalArena arena, DTypeArena types, int rows, int metadata, out DType dtype)
         {
+            Pad(rows);
             int typed = Typed(arena, types, rows, metadata, out DType typedType);
             if (!Values.HoldsAny)
             {
@@ -256,6 +277,14 @@ internal static class VariantShredder
             Values.AppendNull();
         }
 
+        protected override void PadTo(int rows)
+        {
+            int count = rows - Held.Count;
+            Held.AppendFalse(count);
+            _typed.AppendNulls(count);
+            Values.AppendNulls(count);
+        }
+
         internal override void Present(in VariantDictionary dictionary, int epoch, ReadOnlySpan<byte> value)
         {
             Held.Append(true);
@@ -281,7 +310,6 @@ internal static class VariantShredder
     {
         private readonly VariantShredding _plan;
         private readonly Group[] _fields;
-        private readonly int[] _found;
         private readonly Bits _objects = new Bits();
         private int[] _kept = new int[8];
 
@@ -302,32 +330,30 @@ internal static class VariantShredder
                 _fields[i] = For(plan.Keys[i].Field);
             }
 
-            _found = new int[_fields.Length];
         }
 
         internal override void Absent()
         {
             Held.Append(false);
             _objects.Append(false);
-            foreach (Group field in _fields)
-            {
-                field.Absent();
-            }
-
             Values.AppendNull();
+        }
+
+        protected override void PadTo(int rows)
+        {
+            int count = rows - Held.Count;
+            Held.AppendFalse(count);
+            _objects.AppendFalse(count);
+            Values.AppendNulls(count);
         }
 
         internal override void Present(in VariantDictionary dictionary, int epoch, ReadOnlySpan<byte> value)
         {
             Held.Append(true);
+            int row = Held.Count - 1;
             if ((value[0] & 0x03) != ParquetVariant.BasicObject)
             {
                 _objects.Append(false);
-                foreach (Group field in _fields)
-                {
-                    field.Absent();
-                }
-
                 Values.Append(value);
                 return;
             }
@@ -350,7 +376,7 @@ internal static class VariantShredder
                 _keyOf.AsSpan(0, dictionary.Count).Fill(-2);
             }
 
-            _found.AsSpan().Fill(-1);
+            _objects.Append(true);
             int kept = 0;
             for (int i = 0; i < fields.Count; i++)
             {
@@ -370,26 +396,20 @@ internal static class VariantShredder
                     key = _plan.IndexOf(dictionary[id]);
                 }
 
+                // A key's node takes the rows before this one it was not handed, then this one; a key an object holds twice
+                // keeps its first.
                 if (key >= 0)
                 {
-                    _found[key] = i;
+                    Group field = _fields[key];
+                    if (field.Rows <= row)
+                    {
+                        field.Pad(row);
+                        field.Present(in dictionary, epoch, fields.ValueAt(i));
+                    }
                 }
                 else
                 {
                     _kept[kept++] = i;
-                }
-            }
-
-            _objects.Append(true);
-            for (int k = 0; k < _fields.Length; k++)
-            {
-                if (_found[k] >= 0)
-                {
-                    _fields[k].Present(in dictionary, epoch, fields.ValueAt(_found[k]));
-                }
-                else
-                {
-                    _fields[k].Absent();
                 }
             }
 
@@ -452,6 +472,21 @@ internal static class VariantShredder
             _lists.Append(false);
             Size(0);
             Values.AppendNull();
+        }
+
+        protected override void PadTo(int rows)
+        {
+            int count = rows - Held.Count;
+            Held.AppendFalse(count);
+            _lists.AppendFalse(count);
+            if (_rows + count > _sizes.Length)
+            {
+                Array.Resize(ref _sizes, Math.Max(2 * _sizes.Length, _rows + count));
+            }
+
+            _sizes.AsSpan(_rows, count).Clear();
+            _rows += count;
+            Values.AppendNulls(count);
         }
 
         internal override void Present(in VariantDictionary dictionary, int epoch, ReadOnlySpan<byte> value)
@@ -544,6 +579,9 @@ internal static class VariantShredder
 
         internal abstract void AppendNull();
 
+        /// <summary>Appends <paramref name="count"/> nulls.</summary>
+        internal abstract void AppendNulls(int count);
+
         internal abstract int Build(CanonicalArena arena, DTypeArena types, int rows, out DType dtype);
     }
 
@@ -555,6 +593,8 @@ internal static class VariantShredder
         internal override void Append(in VariantScalar scalar) => Add((long)scalar.Integer, true);
 
         internal override void AppendNull() => Add(0, false);
+
+        internal override void AppendNulls(int count) => Nulls(ref _values, Valid, count);
 
         internal override int Build(CanonicalArena arena, DTypeArena types, int rows, out DType dtype)
         {
@@ -583,6 +623,8 @@ internal static class VariantShredder
         internal override void Append(in VariantScalar scalar) => Add(scalar.Number, true);
 
         internal override void AppendNull() => Add(0, false);
+
+        internal override void AppendNulls(int count) => Nulls(ref _values, Valid, count);
 
         internal override int Build(CanonicalArena arena, DTypeArena types, int rows, out DType dtype)
         {
@@ -620,6 +662,12 @@ internal static class VariantShredder
             Valid.Append(false);
         }
 
+        internal override void AppendNulls(int count)
+        {
+            _values.AppendFalse(count);
+            Valid.AppendFalse(count);
+        }
+
         internal override int Build(CanonicalArena arena, DTypeArena types, int rows, out DType dtype)
         {
             dtype = types.Bool(Nullability.Nullable);
@@ -644,11 +692,31 @@ internal static class VariantShredder
             Valid.Append(false);
         }
 
+        internal override void AppendNulls(int count)
+        {
+            _values.AppendNulls(count);
+            Valid.AppendFalse(count);
+        }
+
         internal override int Build(CanonicalArena arena, DTypeArena types, int rows, out DType dtype)
         {
             dtype = types.Utf8(Nullability.Nullable);
             return _values.Build(arena, types, dtype, rows);
         }
+    }
+
+    /// <summary><paramref name="count"/> nulls appended to a fixed-width column of <paramref name="values"/>, <paramref name="valid"/> its validity.</summary>
+    private static void Nulls<T>(ref T[] values, Bits valid, int count)
+        where T : unmanaged
+    {
+        int row = valid.Count;
+        if (row + count > values.Length)
+        {
+            Array.Resize(ref values, Math.Max(2 * values.Length, row + count));
+        }
+
+        values.AsSpan(row, count).Clear();
+        valid.AppendFalse(count);
     }
 
     /// <summary>A fixed-width column of <paramref name="values"/>, copied into the arena.</summary>
@@ -689,6 +757,27 @@ internal static class VariantShredder
             else if (_set != _count && _set != 0)
             {
                 Mix(at, bit);
+            }
+        }
+
+        /// <summary>Appends <paramref name="count"/> clear bits: their words zero, as words not written are, when the bits are laid out.</summary>
+        internal void AppendFalse(int count)
+        {
+            if (count <= 0)
+            {
+                return;
+            }
+
+            int at = _count;
+            _count += count;
+            if (!_mixed && _set != 0)
+            {
+                Mix(at, false);
+            }
+
+            if (_mixed && ((_count - 1) >> 6) >= _words.Length)
+            {
+                Array.Resize(ref _words, Math.Max(2 * _words.Length, ((_count - 1) >> 6) + 1));
             }
         }
 
@@ -782,6 +871,28 @@ internal static class VariantShredder
         }
 
         internal void AppendNull() => Close(_used, false);
+
+        /// <summary>Appends <paramref name="count"/> nulls, each ending where the bytes before them do.</summary>
+        internal void AppendNulls(int count)
+        {
+            if (count <= 0)
+            {
+                return;
+            }
+
+            int row = _valid.Count;
+            if (_used != 0)
+            {
+                if (row + count + 1 > _starts.Length)
+                {
+                    Array.Resize(ref _starts, Math.Max(2 * _starts.Length, row + count + 1));
+                }
+
+                _starts.AsSpan(row + 1, count).Fill(_used);
+            }
+
+            _valid.AppendFalse(count);
+        }
 
         /// <summary>Appends the object of the fields <paramref name="kept"/> of <paramref name="fields"/>, in their order, which is their keys'.</summary>
         internal void AppendObject(VariantNested fields, ReadOnlySpan<int> kept)
