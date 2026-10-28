@@ -907,10 +907,16 @@ internal sealed class SpanReader : IDisposable
             long to = Math.Min(span.End, chunk.EndRow);
             if (read.Ranges.Length == 0)
             {
+                // A chunk read whole for a few of its rows, as a column of few values holds a million of them in a few
+                // kilobytes, decodes those rows alone where its encoding can: decoded whole, a million strings' views each,
+                // the needle of a trace held 860 MB at once.
                 context.Decode.LoadBlob(context.Segments.GetBuffer(read.Whole));
                 ArrayNode root = context.Nodes.Root;
-                int node = context.Decode.DecodeRoot(in root, chunkType, checked((int)chunk.Rows));
-                parts[i] = CanonicalSlice.Slice(context.Decode, node, (int)(from - chunk.FirstRow), (int)(to - from));
+                int start = (int)(from - chunk.FirstRow);
+                int count = (int)(to - from);
+                parts[i] = count < chunk.Rows && context.Decode.DecodesRange(in root)
+                    ? context.Decode.DecodeRootRange(in root, chunkType, checked((int)chunk.Rows), start, count, keepEncoding: false)
+                    : CanonicalSlice.Slice(context.Decode, context.Decode.DecodeRoot(in root, chunkType, checked((int)chunk.Rows)), start, count);
                 continue;
             }
 
