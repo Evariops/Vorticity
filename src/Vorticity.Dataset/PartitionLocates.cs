@@ -199,7 +199,7 @@ internal sealed class PartitionLocates
                     }
 
                     found.Clear();
-                    PartitionIndex.Find(opened.Page, held.FirstHash, hash, found);
+                    located.Find(opened.Page, held, hash, found);
                     foreach ((int rank, uint granule) in found)
                     {
                         if (!granules.TryGetValue(rank, out Dictionary<ulong, List<uint>>? byHash))

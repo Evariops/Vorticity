@@ -240,8 +240,9 @@ internal sealed class PartitionPostings : IDisposable
                         covered[rank >> 6] |= 1UL << (rank & 63);
                     }
 
-                    writer.Begin(_identifiers[i], PartitionIndex.EntryKind.Postings, _unitBlocks[i], covered);
-                    await MergeAsync(writer, i, ranks, held, before, renamed, cancellationToken).ConfigureAwait(false);
+                    int hashBits = HashBits(i, ranks, held);
+                    writer.Begin(_identifiers[i], PartitionIndex.EntryKind.Postings, _unitBlocks[i], covered, hashBits, objects);
+                    await MergeAsync(writer, i, ranks, held, before, renamed, hashBits, cancellationToken).ConfigureAwait(false);
                     await writer.EndAsync(cancellationToken).ConfigureAwait(false);
                 }
 
@@ -263,8 +264,9 @@ internal sealed class PartitionPostings : IDisposable
 
                     if (any)
                     {
-                        writer.Begin(_columns[field], PartitionIndex.EntryKind.Locate, 1, covered);
-                        await MergeAsync(writer, -1 - field, ranks, held, before, renamed, cancellationToken).ConfigureAwait(false);
+                        int hashBits = HashBits(-1 - field, ranks, held);
+                        writer.Begin(_columns[field], PartitionIndex.EntryKind.Locate, 1, covered, hashBits, objects);
+                        await MergeAsync(writer, -1 - field, ranks, held, before, renamed, hashBits, cancellationToken).ConfigureAwait(false);
                         await writer.EndAsync(cancellationToken).ConfigureAwait(false);
                     }
                 }
@@ -296,6 +298,26 @@ internal sealed class PartitionPostings : IDisposable
                 await before.DisposeAsync().ConfigureAwait(false);
             }
         }
+    }
+
+    /// <summary>
+    /// The bits entry <paramref name="entry"/> keeps of each hash: those its postings need, the outputs' pairs and the ones the
+    /// entry <paramref name="held"/> of the index before holds, but no more than that entry keeps, whose cut hashes are not
+    /// whole any more.
+    /// </summary>
+    private int HashBits(int entry, Dictionary<UInt128, int> ranks, PartitionIndex.Entry? held)
+    {
+        long pairs = held?.Postings ?? 0;
+        foreach (Run run in _runs)
+        {
+            if (run.Entry == entry && ranks.ContainsKey(run.Uid))
+            {
+                pairs += run.Pairs;
+            }
+        }
+
+        int bits = PartitionIndex.HashBitsFor(pairs);
+        return held is null ? bits : Math.Min(bits, held.HashBits);
     }
 
     /// <summary>The ranks of the new index the entry <paramref name="held"/> of the one before covers, renamed by <paramref name="renamed"/>, a bit a rank of <paramref name="objects"/>.</summary>
@@ -416,7 +438,8 @@ internal sealed class PartitionPostings : IDisposable
     /// <summary>
     /// Merges entry <paramref name="entry"/>'s postings into <paramref name="writer"/>, an identifier's place or a located
     /// column's, <c>-1 - field</c>: those of the outputs' runs, an output's at its rank, and those of the previous index's
-    /// pages, each at its object's new rank, the ones of objects it no longer covers left out.
+    /// pages, each at its object's new rank, the ones of objects it no longer covers left out; every hash cut to
+    /// <paramref name="hashBits"/>, which keeps their order.
     /// </summary>
     private async ValueTask MergeAsync(
         PartitionIndex.Writer writer,
@@ -425,6 +448,7 @@ internal sealed class PartitionPostings : IDisposable
         PartitionIndex.Entry? held,
         ISegmentReader? before,
         int[] renamed,
+        int hashBits,
         CancellationToken cancellationToken)
     {
         List<Cursor> cursors = [];
@@ -432,13 +456,13 @@ internal sealed class PartitionPostings : IDisposable
         {
             if (run.Entry == entry && ranks.TryGetValue(run.Uid, out int rank))
             {
-                cursors.Add(new RunCursor(_scratch, run, rank));
+                cursors.Add(new RunCursor(_scratch, run, rank, hashBits));
             }
         }
 
         if (held is not null && before is not null && held.Pages.Count > 0)
         {
-            cursors.Add(new PageCursor(before, held, renamed));
+            cursors.Add(new PageCursor(before, held, renamed, hashBits));
         }
 
         PriorityQueue<Cursor, PartitionIndex.Posting> heap = new PriorityQueue<Cursor, PartitionIndex.Posting>(cursors.Count);
@@ -600,8 +624,8 @@ internal sealed class PartitionPostings : IDisposable
         internal abstract ValueTask<bool> MoveNextAsync(CancellationToken cancellationToken);
     }
 
-    /// <summary>An output's run, its pairs at the output's rank, read a block of pairs at a time.</summary>
-    private sealed class RunCursor(RunScratch scratch, Run run, int rank) : Cursor
+    /// <summary>An output's run, its pairs at the output's rank, each hash cut to <paramref name="hashBits"/>, read a block of pairs at a time.</summary>
+    private sealed class RunCursor(RunScratch scratch, Run run, int rank, int hashBits) : Cursor
     {
         private readonly byte[] _buffer = new byte[ReadPairs * Unsafe.SizeOf<Pair>()];
         private int _read;
@@ -635,15 +659,16 @@ internal sealed class PartitionPostings : IDisposable
         {
             Pair pair = Unsafe.As<byte, Pair>(ref _buffer[_at * Unsafe.SizeOf<Pair>()]);
             _at++;
-            Current = new PartitionIndex.Posting(pair.Hash, rank, pair.Block);
+            Current = new PartitionIndex.Posting(hashBits >= 64 ? pair.Hash : pair.Hash >> (64 - hashBits), rank, pair.Block);
         }
     }
 
     /// <summary>
     /// The pages of the previous index's postings of an entry, read a few mebibytes at a time, each posting at its object's
-    /// new rank, those of an object no longer covered left out.
+    /// new rank and its hash cut to <paramref name="hashBits"/>, fewer than the entry keeps or as many, those of an object no
+    /// longer covered left out.
     /// </summary>
-    private sealed class PageCursor(ISegmentReader reader, PartitionIndex.Entry identifier, int[] renamed) : Cursor
+    private sealed class PageCursor(ISegmentReader reader, PartitionIndex.Entry identifier, int[] renamed, int hashBits) : Cursor
     {
         private readonly List<PartitionIndex.Posting> _postings = [];
         private int _page;
@@ -659,7 +684,7 @@ internal sealed class PartitionPostings : IDisposable
                     int rank = (uint)posting.Rank < (uint)renamed.Length ? renamed[posting.Rank] : -1;
                     if (rank >= 0)
                     {
-                        Current = posting with { Rank = rank };
+                        Current = new PartitionIndex.Posting(posting.Hash >> (identifier.HashBits - hashBits), rank, posting.Block);
                         return true;
                     }
                 }
@@ -698,7 +723,7 @@ internal sealed class PartitionPostings : IDisposable
                     throw new VortexFormatException($"Page {page} of the postings of '{identifier.Name}' in an index of a partition fails its checksum.");
                 }
 
-                PartitionIndex.Decode(span, held.FirstHash, _postings);
+                identifier.Decode(span, held, _postings);
             }
 
             _page = end;

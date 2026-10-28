@@ -162,7 +162,7 @@ internal sealed class PartitionLookup
                 }
 
                 found.Clear();
-                PartitionIndex.Find(opened.Page, held.FirstHash, hash, found);
+                postings.Find(opened.Page, held, hash, found);
                 foreach ((int rank, uint block) in found)
                 {
                     if (!blocks.TryGetValue(rank, out SortedSet<uint>? of))

@@ -199,7 +199,7 @@ field once retired is never reused.
 | counts of the deleted rows | out of line in the commit object that made them, which the entry's field 5 names | 1 | none |
 | fragment bundle, `VXFB` | an object's index fragments, side by side | 1 | none |
 | partition index entry | a leaf of the tree of partition indexes, which the header's field 28 names ([the index of a consolidated partition](13-dataset.md#44-the-index-of-a-consolidated-partition)) | 1 | none |
-| partition index, `vorticity.partition.index.v1`, its pages to `VXPI` | the index of a consolidated partition, an object of the store beside its objects | 1 | none |
+| partition index, `vorticity.partition.index.v1`, its pages to `VXPI` | the index of a consolidated partition, an object of the store beside its objects | 4: each entry keeps the bits of its hashes its postings need and ten more, its pages pack gaps and places at their bits | versions 1 to 3, which kept whole hashes coded as varints |
 
 ### 7.2 Files
 

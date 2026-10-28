@@ -637,8 +637,8 @@ that holds about a mebibyte of the identifier's values, from the width of its ty
 itself for a dataset whose questions are mostly lookups (`DatasetOptions.IdentifierLocation`); the
 entry's block length says the unit. A lookup reads the identifier's units, then the other columns at the
 rows it kept. Once a partition is consolidated, its objects' postings go to the partition's index instead
-([13-dataset.md](13-dataset.md#44-the-index-of-a-consolidated-partition)), where they take 9.9 bytes a
-row, their hashes whole in its pages.
+([13-dataset.md](13-dataset.md#44-the-index-of-a-consolidated-partition)), where a unique identifier
+takes 2.25 bytes a row, its hashes cut as an object's are and packed at their bits.
 
 ### 5.8 `vorticity.postings.tokens.v1`: words to blocks
 

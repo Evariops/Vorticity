@@ -552,8 +552,6 @@ Where the code stops short of this design, measured or known:
 - **Bytes of a filtered read.** The planner prices the rows of a filter that the sparse key index does not narrow from
   their columns' whole bytes, and a second pass reads whole a chunk worth less than a request, as the profile prices it,
   where the model counts its granules: a row found by an identifier takes 0.3 to 0.75 MB where the model says 0.3 to 0.4.
-- **Identifier postings.** The index object holds 9.9 bytes a row of a unique identifier, against about 3.4 in the
-  model: its pages keep the whole hash, its gaps coded as varints, where the model keeps about 13 bits.
 - **Exact sets.** The granules a filter keeps whole come from the zone maps' proofs and the granule statistics alone; the
   locating indexes and the postings give the granules a row may lie in.
 - **A filtered count** decodes its columns and counts, where a scan pushes its predicates to the encodings.

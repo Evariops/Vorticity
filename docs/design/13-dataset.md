@@ -252,10 +252,15 @@ that holds none of the values sought is passed over unread. An object outside th
 with rows marked, is looked up by its own postings, or read.
 
 The object holds each identifier's postings in pages of about 64 KiB: hashes ascending, each the
-XXH3-64 of a value's bytes as hashed postings key it, coded forward, then the blocks that hold it,
-each as the rank of its object and the block there. A directory follows: the objects the index was
-written for, by uid, rows and rows a block, a rank being a place among them; for each identifier, the
-ranks it covers and its pages, each by its first hash, length and XXH3-64. A tail of 24 bytes ends it:
+XXH3-64 of a value's bytes as hashed postings key it, cut to the bits that number the entry's postings
+and ten more, so that a value the index lacks meets a hash of it about once in a thousand lookups.
+Each posting is the gap to the hash before, 0 for another place of the same hash, and its place: the
+units of every object in rank order, each object's followed by one that says the value lies in most of
+its granules. A page packs its gaps, then its places, at the bits the largest of each needs, about 14 and
+12 to 16: a unique identifier takes 2.25 bytes a row on a day of 600 000 rows, where hashes whole and
+varints took 9.9. A directory follows: the objects the index was written for, by uid, rows and rows a
+block, a rank being a place among them; for each identifier, the bits it keeps of each hash, its
+postings, the ranks it covers and its pages, each by its first hash, length and XXH3-64. A tail of 24 bytes ends it:
 the directory's offset, length and XXH3-64, and the magic `VXPI`. A sealed dataset seals it as it
 seals a data object.
 
@@ -266,7 +271,7 @@ it, and the uids of the objects it answers for. The consolidation puts its index
 replacement, over the index it merged it from, or not at all: a partition that holds another index by
 then abandons the replacement, whose objects keep no postings. The new index carries the postings the
 one before holds of the objects the job leaves, read from its pages at their new ranks, then those of
-its own objects. A replacement that takes a covered object away, a purge, takes its uid out of the
+its own objects, its hashes cut to no more bits than the index before kept. A replacement that takes a covered object away, a purge, takes its uid out of the
 entry in the same commit; the objects written in its place keep their own postings, as every object
 written since the consolidation does. A vacuum keeps the index objects the versions it keeps name.
 

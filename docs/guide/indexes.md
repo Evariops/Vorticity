@@ -254,8 +254,8 @@ what one filter holds.
 
 On a consolidated day of 600 000 rows, a lookup of one id found its row in five or six dependent steps
 and under 1.1 MB, places at units of granules, and in four or five steps and under 0.8 MB at granules.
-The partition's index took 9.9 bytes a row, its fingerprints whole; an object's own postings take 1.9
-to 3.3. Declare a column whose values questions look up one at a time, and no other: a column they
+The partition's index takes 2.25 bytes a row, its fingerprints cut as an object's are; an object's own
+postings take 1.9 to 3.3. Declare a column whose values questions look up one at a time, and no other: a column they
 filter or group by is read, its granules pruned by their zone maps, and a key of a variant column they
 filter on is declared shredded, below.
 

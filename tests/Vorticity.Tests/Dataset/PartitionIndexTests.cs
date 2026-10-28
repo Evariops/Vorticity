@@ -166,7 +166,7 @@ public sealed partial class PartitionIndexTests
                         PartitionIndex.Page at = sequence.Pages[page];
                         using Vorticity.Buffers.SegmentOwner owner = await reader.ReadAsync(
                             new Vorticity.Serialization.Schemas.SegmentSpec((ulong)at.Offset, (uint)at.Length, 0, 0, 0), Ct);
-                        PartitionIndex.Find(owner.Buffer.Span, at.FirstHash, hash, found);
+                        sequence.Find(owner.Buffer.Span, at, hash, found);
                     }
 
                     long place = row / ((long)covered.BlockRows * sequence.UnitBlocks);
