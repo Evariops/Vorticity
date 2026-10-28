@@ -374,8 +374,12 @@ internal sealed partial class DatasetScanSource
                 continue;
             }
 
-            // An object its counts answer is read whole, as states: a piece of its own, never cut.
-            if (answer is not null && start == held.FirstRow && end == held.FirstRow + held.Entry.Rows && answer.FieldOf(held) is not null)
+            // An object its counts or a partial of the question's family answer is read whole, as states: a piece of its own,
+            // never cut. Cut over its rows, each piece of an object a partial answered read them: the exception groups of a
+            // pod's errors at 32 lanes read 121 MB in 473 requests where one lane read 1.1 MB in 4.
+            bool whole = start == held.FirstRow && end == held.FirstRow + held.Entry.Rows;
+            if (whole && ((answer is not null && answer.FieldOf(held) is not null)
+                || (spec.Answering?.Family is not null && await planner.PartialAnswersAsync(held, cancellationToken).ConfigureAwait(false))))
             {
                 walked.Add((held, new RowRange(start, end), null, null));
                 answered.Add(held.FirstRow);

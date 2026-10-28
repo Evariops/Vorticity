@@ -18,6 +18,29 @@ namespace Vorticity.Dataset;
 internal sealed partial class DatasetScanBuilder
 {
     /// <summary>
+    /// Whether a partial of the scan's family answers the object <paramref name="held"/> whole, its own or those of the objects
+    /// a compaction merged into it, as a plan covers it (<see cref="PartialAlternative"/>): the store's partials of the family
+    /// listed first. A lane's piece cut over its rows would read them, where the partial answers the object at no read.
+    /// </summary>
+    internal async ValueTask<bool> PartialAnswersAsync(PositionedObject held, CancellationToken cancellationToken)
+    {
+        if (!Learns(held) || FamilyOf(held) is not { } own)
+        {
+            return false;
+        }
+
+        if (_dataset.LearnedStore is { } store)
+        {
+            await _dataset.Partials.ListAsync(store, own.Key, cancellationToken).ConfigureAwait(false);
+        }
+
+        SynopsisCache? cache = _dataset.Session.Options.SynopsisCache;
+        return _dataset.Partials.Holds(held.Entry.Uid, own.Key, cache)
+            || (_dataset.Partials.MergedInto(held.Entry.Uid, cache) is { } inputs
+                && Array.TrueForAll(inputs, input => _dataset.Partials.Holds(input, own.Key, cache)));
+    }
+
+    /// <summary>
     /// Whether the object <paramref name="held"/> learns its partial of the scan's family, or answers from it: one the scan
     /// covers whole, with no row marked, of the version's columns, whose added keys widen no read. A column the family adds
     /// that is the key's first, which the object holds more than one value of, would read every value's rows where the

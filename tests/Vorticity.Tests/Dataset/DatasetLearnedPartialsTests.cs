@@ -65,6 +65,43 @@ public sealed partial class DatasetLearnedPartialsTests
     }
 
     /// <summary>
+    /// At several lanes, an object a partial of the question's family answers is a piece of its own, never cut over its rows:
+    /// cut, each piece read its rows where the partial answered the object at no read. The exception groups of a pod's errors
+    /// over S1's spans at 32 lanes read 121 MB in 473 requests where one lane read 1.1 MB in 4.
+    /// </summary>
+    [Fact]
+    public async Task AtSeveralLanesTheObjectsAPartialAnswersAreNotCut()
+    {
+        // Objects of several chunks each, which a lane's piece may be cut between.
+        await using MemoryObjectStore memory = new MemoryObjectStore();
+        await (await CreateAsync(memory, chunkTargetBytes: 16 << 10)).DisposeAsync();
+        (string[] keys, string[] results, string[] filters) = Families[0];
+
+        // Learned on one lane, which reads each object whole.
+        await using (VortexDataset learning = await VortexDataset.OpenAsync(memory, new DatasetOptions(), Ct))
+        {
+            await DatasetPlannerTests.AskAsync(learning, keys, results, filters[0], synopses: true, lanes: 1);
+        }
+
+        // Asked with another value on eight lanes, each by a handle of its own, which holds no segment another ask read:
+        // through the partials, then through the rows.
+        (List<string> Answer, long Bytes) partials = await AskAfreshAsync(synopses: true);
+        (List<string> Answer, long Bytes) rows = await AskAfreshAsync(synopses: false);
+        Assert.NotEmpty(rows.Answer);
+        Assert.Equal(rows.Answer, partials.Answer);
+        Assert.True(partials.Bytes * 10 < rows.Bytes, $"{partials.Bytes} bytes through the partials at 8 lanes, {rows.Bytes} through the rows");
+
+        async Task<(List<string>, long)> AskAfreshAsync(bool synopses)
+        {
+            await using CountingObjectStore store = new CountingObjectStore(memory);
+            await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = 8);
+            await using VortexDataset dataset = await VortexDataset.OpenAsync(store, new DatasetOptions { Session = session, LeastPieceRows = 1_000 }, Ct);
+            List<string> answer = await DatasetPlannerTests.AskAsync(dataset, keys, results, filters[1], synopses, lanes: 8);
+            return (answer, store.BytesRead);
+        }
+    }
+
+    /// <summary>
     /// The objects a job wrote of an hour learn the family; their level, past its size, is rewritten into the next, each
     /// object into one of the same rows under another identity, whose partial is its input's. Asked after, with another
     /// value, the family reads no row, and answers as the rows do.
@@ -346,7 +383,7 @@ public sealed partial class DatasetLearnedPartialsTests
     /// Four services, each 20 000 calls over two hours from noon, from three hosts and on six routes of its own, keyed by the
     /// service then the instant, appended in parts and compacted.
     /// </summary>
-    private static async Task<VortexDataset> CreateAsync(MemoryObjectStore store)
+    private static async Task<VortexDataset> CreateAsync(MemoryObjectStore store, int chunkTargetBytes = 0)
     {
         Random random = new Random(0xF1);
         List<Call> rows = [];
@@ -371,6 +408,7 @@ public sealed partial class DatasetLearnedPartialsTests
             Layout = new DatasetLayout { SortKey = [LayoutValue.Column(nameof(Call.Service)), LayoutValue.Column(nameof(Call.At))], IndexedPrefix = 1, ObjectBytes = 256 << 10 },
             ContentsObjectBytes = 1,
             SheetObjectBytes = 0,
+            Write = chunkTargetBytes > 0 ? new VortexWriteOptions { ChunkTargetBytes = chunkTargetBytes } : new VortexWriteOptions(),
         }, Ct);
         for (int from = 0; from < rows.Count; from += 20_000)
         {
