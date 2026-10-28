@@ -136,6 +136,9 @@ internal sealed partial class DatasetScanBuilder
         /// <summary>Its partial, being learned ahead; null before or after.</summary>
         internal Task<AggregationPartial>? Learning { get; set; }
 
+        /// <summary>The read of the partial its family learned, begun ahead; null before or after.</summary>
+        internal Task<AggregationPartial>? Partial { get; set; }
+
         /// <summary>Its open, begun ahead; null before or after.</summary>
         internal Task? Opened { get; set; }
     }

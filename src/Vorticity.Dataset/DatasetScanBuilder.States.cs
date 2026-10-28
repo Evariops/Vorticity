@@ -390,14 +390,17 @@ internal sealed partial class DatasetScanBuilder
 
                 if (path == AnswerPath.Partial || Learns(held))
                 {
-                    // An object of the question's family answers from the partial it learned, or learns it from its rows; the
-                    // partials of the objects after it that learn theirs from their rows are learned ahead.
-                    Task<AggregationPartial>? learned = unit.Learning;
-                    if (learned is not null)
+                    // An object of the question's family answers from the partial it learned, read ahead with the counts, or
+                    // learns it from its rows; the partials of the objects after it that learn theirs from their rows are
+                    // learned ahead. Each partial read in turn cost a round trip an object at one lane: 15 for QP-3.
+                    Task<AggregationPartial>? learned = unit.Learning ?? unit.Partial;
+                    if (unit.Learning is not null)
                     {
                         unit.Learning = null;
                         learningAhead--;
                     }
+
+                    unit.Partial = null;
 
                     for (learnSeen = Math.Max(learnSeen, o + 1); learnSeen < units.Count && learningAhead < _options.Prefetch; learnSeen++)
                     {
@@ -445,7 +448,7 @@ internal sealed partial class DatasetScanBuilder
             List<Task> begun = [];
             foreach (Planned left in units)
             {
-                foreach (Task? task in (ReadOnlySpan<Task?>)[left.Opened, left.Learning, left.Statistics, left.Counts])
+                foreach (Task? task in (ReadOnlySpan<Task?>)[left.Opened, left.Learning, left.Partial, left.Statistics, left.Counts])
                 {
                     if (task is not null)
                     {
@@ -495,6 +498,9 @@ internal sealed partial class DatasetScanBuilder
                 break;
             case AnswerPath.Granules:
                 unit.Statistics = _dataset.ReadGranuleStatsAsync(unit.Held.Entry, GranuleAnswer()!.Fields, GranuleAnswer()!.Histogrammed, cancellationToken).AsTask();
+                break;
+            case AnswerPath.Partial:
+                unit.Partial = PartialAsync(unit.Held, cancellationToken);
                 break;
         }
     }
