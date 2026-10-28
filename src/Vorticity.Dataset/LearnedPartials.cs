@@ -470,17 +470,63 @@ internal sealed class LearnedPartials
         }
     }
 
-    /// <summary>Waits for the partials on their way to the store: what a handle's disposal does, so that its learning outlives it.</summary>
-    internal async ValueTask FlushAsync()
+    /// <summary>
+    /// Merges <paramref name="pieces"/>, the partials of <paramref name="family"/> over pieces of the object
+    /// <paramref name="uid"/> that tile its rows in order, into the object's, and keeps it under <paramref name="key"/> as
+    /// one learned whole (<see cref="Keep"/>): in the background, which the question does not wait for and the handle's
+    /// disposal does. <paramref name="source"/> is the source they were learned over.
+    /// </summary>
+    internal void KeepMerged(
+        UInt128 uid, UInt128 key, Aggregating.LearnedFamily family, AggregationPartial[] pieces, ScanSource source, ScanOptions options,
+        SynopsisCache? cache, long objectBytes, IObjectStore? store)
     {
-        Task[] writes;
+        Task merging = MergeAsync(uid, key, family, pieces, source, options, cache, objectBytes, store);
         lock (_writes)
         {
-            writes = [.. _writes];
-            _writes.Clear();
+            _writes.RemoveAll(static task => task.IsCompleted);
+            _writes.Add(merging);
         }
+    }
 
-        await Task.WhenAll(writes).ConfigureAwait(false);
+    /// <summary>The merge of <see cref="KeepMerged"/>, on one lane; one that fails leaves the object unlearned, to learn again.</summary>
+    private async Task MergeAsync(
+        UInt128 uid, UInt128 key, Aggregating.LearnedFamily family, AggregationPartial[] pieces, ScanSource source, ScanOptions options,
+        SynopsisCache? cache, long objectBytes, IObjectStore? store)
+    {
+        try
+        {
+            AggregationPartial merged = await family.MergeAsync(pieces, null, source, options with { DegreeOfParallelism = 1 }, CancellationToken.None)
+                .ConfigureAwait(false);
+            Keep(uid, key, merged, cache, objectBytes, store, family.Text);
+        }
+        catch (Exception failure) when (failure is VortexException or InvalidDataException)
+        {
+            // A merge past the memory the session gives it, or of partials whose columns the family's text did not say.
+        }
+    }
+
+    /// <summary>
+    /// Waits for the partials on their way to the store, and the merges whose partials go there after them: what a handle's
+    /// disposal does, so that its learning outlives it.
+    /// </summary>
+    internal async ValueTask FlushAsync()
+    {
+        while (true)
+        {
+            Task[] writes;
+            lock (_writes)
+            {
+                if (_writes.Count == 0)
+                {
+                    return;
+                }
+
+                writes = [.. _writes];
+                _writes.Clear();
+            }
+
+            await Task.WhenAll(writes).ConfigureAwait(false);
+        }
     }
 
     /// <summary>Whether the family's listing names the object's partial.</summary>

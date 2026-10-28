@@ -27,6 +27,11 @@ internal sealed partial class DatasetScanSource
         _version = version;
     }
 
+    /// <summary>The partials the question's lanes learn of the pieces of the objects cut between them, until each object's tile it.</summary>
+    internal PiecePartials Pieces => LazyInitializer.EnsureInitialized(ref _pieces);
+
+    private PiecePartials? _pieces;
+
     internal override VortexSchema Schema => _version.Schema.Columns;
 
     internal override VortexSession Session => _dataset.Session;
@@ -364,6 +369,7 @@ internal sealed partial class DatasetScanSource
         }
 
         HashSet<long> answered = [];
+        HashSet<long> learning = [];
         List<(PositionedObject Held, RowRange Rows, List<RowRange>? Kept, Task<List<RowRange>>? Reading)> walked = [];
         await foreach (PositionedObject held in _version.WalkAsync(pruner, from, to, null, cancellationToken).ConfigureAwait(false))
         {
@@ -386,6 +392,17 @@ internal sealed partial class DatasetScanSource
                 continue;
             }
 
+            // An object that learns the partial of the question's family is cut over all its rows, whatever the key's pruning
+            // keeps: each piece learns the partial of its rows, and once they tile the object they merge into its partial
+            // (PiecePartials), which the next question finds whole. Cut over the granules its index keeps, the pieces would
+            // cover a part of it, and nothing would be learned at several lanes.
+            if (whole && spec.Answering?.Family is not null && planner.Learns(held))
+            {
+                walked.Add((held, new RowRange(start, end), null, null));
+                learning.Add(held.FirstRow);
+                continue;
+            }
+
             // An object reads the granules the key's pruning keeps alone, by its sparse index: those are the rows its lanes
             // share, where pieces cut over every row of it would leave most lanes reading nothing. The indexes are asked as
             // the walk finds their objects and read side by side, a wave of requests, where one awaited at a time cost a
@@ -398,7 +415,9 @@ internal sealed partial class DatasetScanSource
         {
             if (done is null && reading is null)
             {
+                // An object answered whole reads no rows; one that learns reads them all, which the lanes share.
                 objects.Add((held, rows));
+                total += learning.Contains(held.FirstRow) ? rows.Length : 0;
                 continue;
             }
 
@@ -460,7 +479,15 @@ internal sealed partial class DatasetScanSource
         {
             if (cuts[o] is { } cut)
             {
-                pieces.AddRange(await cut.ConfigureAwait(false));
+                RowRange[] its = await cut.ConfigureAwait(false);
+                pieces.AddRange(its);
+                if (learning.Contains(objects[o].Held.FirstRow))
+                {
+                    foreach (RowRange piece in its)
+                    {
+                        Pieces.Expect(piece);
+                    }
+                }
             }
             else
             {
@@ -665,6 +692,10 @@ internal sealed partial class DatasetScanSource
         if (spec.Answering is { Family: { } family, States: not null } && options.UseSynopses)
         {
             builder.WithFamily(family, this);
+            if (spec.Rows is { } piece && _pieces is { } cut && cut.Expects(piece))
+            {
+                builder.AsPiece();
+            }
         }
 
         return counters is null ? builder : builder.WithCounters(counters);

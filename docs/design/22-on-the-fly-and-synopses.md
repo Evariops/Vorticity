@@ -395,6 +395,18 @@ family's plan over their states, to the bits their rows would give), found so in
 deep, and keeps the sum as the output's: an object rewritten into the next level is answered with no row
 read *(measured)*.
 
+At several lanes, a question cuts an object it would read as rows between its lanes, where the chunks of
+the columns it reads end together. Each lane's piece of an object that learns runs the family over its own
+rows, on its lane, and serves that partial; the question's source (`PiecePartials`) keeps the pieces'
+partials until they tile the object, then has the handle merge them in the background, to the bits the
+object's rows would give, and keep the sum as the object's partial, which the handle's disposal waits for.
+An object that learns is cut over all its rows, as one lane reads them all to learn it, not over the
+granules its key's index keeps; a scan whose rows cut an object without the question's lanes, a window's
+edge, learns nothing of it. Objects of blocks of a thousand rows, cut into ten pieces each at 32 lanes: a
+family asked there alone is learned, asked again with another value it reads 43 KB where the rows read
+1.1 MB, and each partial holds the groups and states of the one a lane learns of its object whole
+*(measured, `DatasetLearnedPartialsTests`)*.
+
 Each object makes its own family (`FamilyProof`): the conjuncts its summaries prove true over its every
 row leave it, so that a window that moves keeps the partials of the objects it holds whole; an object a
 conjunct on the key's first column alone neither proves nor refutes, an edge of such a window, is read as

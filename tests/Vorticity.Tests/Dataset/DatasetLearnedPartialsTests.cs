@@ -11,6 +11,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Dataset;
+using Vorticity.Scanning;
 using Vorticity.Tests.Writing;
 using Xunit;
 
@@ -98,6 +99,78 @@ public sealed partial class DatasetLearnedPartialsTests
             await using VortexDataset dataset = await VortexDataset.OpenAsync(store, new DatasetOptions { Session = session, LeastPieceRows = 1_000 }, Ct);
             List<string> answer = await DatasetPlannerTests.AskAsync(dataset, keys, results, filters[1], synopses, lanes: 8);
             return (answer, store.BytesRead);
+        }
+    }
+
+    /// <summary>
+    /// A family asked at several lanes alone is learned there: each lane's piece of an object learns the partial of its rows,
+    /// and the pieces of an object, once they tile it, merge into its partial. Asked again at 32 lanes by a handle of its own,
+    /// with another value, the family answers from the partials as the rows do; and each partial holds the groups and the
+    /// states of the one a lane learns of its object whole.
+    /// </summary>
+    [Fact]
+    public async Task AFamilyAskedAtSeveralLanesAloneIsLearnedThere()
+    {
+        // Objects of blocks of a thousand rows whose columns end together every thousand rows or so, which 32 lanes cut into
+        // ten pieces each.
+        await using MemoryObjectStore memory = new MemoryObjectStore();
+        await (await CreateAsync(memory, chunkTargetBytes: 16 << 10)).DisposeAsync();
+        (string[] keys, string[] results, string[] filters) = Families[0];
+
+        await AskAfreshAsync(filters[0], synopses: true, lanes: 32);
+        Dictionary<string, List<string>> merged = await PartialsAsync();
+        (List<string> Answer, long Bytes) partials = await AskAfreshAsync(filters[1], synopses: true, lanes: 32);
+        (List<string> Answer, long Bytes) rows = await AskAfreshAsync(filters[1], synopses: false, lanes: 32);
+        Assert.NotEmpty(merged);
+        Assert.NotEmpty(rows.Answer);
+        Assert.Equal(rows.Answer, partials.Answer);
+        Assert.True(partials.Bytes * 10 < rows.Bytes, $"{partials.Bytes} bytes through the partials learned at 32 lanes, {rows.Bytes} through the rows");
+
+        // The family learned again on one lane, each object read whole: the same partials, object by object.
+        await memory.DeleteAsync([.. merged.Keys], Ct);
+        await AskAfreshAsync(filters[0], synopses: true, lanes: 1);
+        Dictionary<string, List<string>> whole = await PartialsAsync();
+        Assert.Equal(merged.Keys.Order(StringComparer.Ordinal), whole.Keys.Order(StringComparer.Ordinal));
+        foreach ((string key, List<string> groups) in merged)
+        {
+            Assert.Equal(whole[key], groups);
+        }
+
+        async Task<(List<string>, long)> AskAfreshAsync(string filter, bool synopses, int lanes)
+        {
+            await using CountingObjectStore store = new CountingObjectStore(memory);
+            await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = lanes);
+            await using VortexDataset dataset = await VortexDataset.OpenAsync(store, new DatasetOptions { Session = session, LeastPieceRows = 250 }, Ct);
+            List<string> answer = await DatasetPlannerTests.AskAsync(dataset, keys, results, filter, synopses, lanes: lanes);
+            return (answer, store.BytesRead);
+        }
+
+        // The partials the store keeps, by their keys, each as its groups in order.
+        async Task<Dictionary<string, List<string>>> PartialsAsync()
+        {
+            Dictionary<string, List<string>> kept = [];
+            await foreach (Vorticity.IO.ObjectListing listing in memory.ListAsync("learned/", null, Ct))
+            {
+                if (!listing.Key.EndsWith(".vxp", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                // A partial's bytes, then their hash.
+                byte[] bytes = new byte[listing.Head.Length];
+                await memory.ReadAsync(listing.Key, 0, bytes, null, Ct);
+                await using VortexFile file = await VortexFile.OpenAsync(new Vorticity.Tests.File.TestSegmentSource(bytes[..^16]), VortexOpenOptions.Default, Ct);
+                List<string> groups = [];
+                await foreach (RecordBatch batch in file.ScanBuilder().ExecuteAsync().WithCancellation(Ct))
+                {
+                    ListShapes.Describe(batch, groups);
+                }
+
+                groups.Sort(StringComparer.Ordinal);
+                kept[listing.Key] = groups;
+            }
+
+            return kept;
         }
     }
 
@@ -408,7 +481,12 @@ public sealed partial class DatasetLearnedPartialsTests
             Layout = new DatasetLayout { SortKey = [LayoutValue.Column(nameof(Call.Service)), LayoutValue.Column(nameof(Call.At))], IndexedPrefix = 1, ObjectBytes = 256 << 10 },
             ContentsObjectBytes = 1,
             SheetObjectBytes = 0,
-            Write = chunkTargetBytes > 0 ? new VortexWriteOptions { ChunkTargetBytes = chunkTargetBytes } : new VortexWriteOptions(),
+            Write = chunkTargetBytes > 0 ? new VortexWriteOptions { ChunkTargetBytes = chunkTargetBytes, BlockRows = 1_024 } : new VortexWriteOptions(),
+
+            // Each column gathers its chunks to the same bytes, and they all end together every thousand rows or so: where the
+            // lanes cut an object.
+            ChunkBytes = chunkTargetBytes > 0 ? chunkTargetBytes : 1 << 20,
+            GroupRows = chunkTargetBytes > 0 ? 1_000 : 1L << 22,
         }, Ct);
         for (int from = 0; from < rows.Count; from += 20_000)
         {

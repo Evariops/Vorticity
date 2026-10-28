@@ -474,7 +474,7 @@ internal sealed partial class DatasetScanBuilder
     private PathCosts.Cost RowsCost(in PositionedObject held, double kept = 1)
     {
         PathCosts costs = _version.Costs;
-        bool learns = _states is not null && Learns(held);
+        bool learns = _states is not null && (Learns(held) || Piece(held) is not null);
         int[] fields = learns ? FamilyFields() : FieldsRead();
         double share = learns ? 1 : Math.Clamp(kept, 0, 1);
         PathCosts.Cost rows = share < 1 ? costs.Share(held.Entry, fields, share) : costs.Rows(held.Entry, fields);

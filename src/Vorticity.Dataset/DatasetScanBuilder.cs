@@ -345,9 +345,21 @@ internal sealed partial class DatasetScanBuilder
         return this;
     }
 
-    // The family of the aggregation the scan asks states for, whose partials it learns, and the source its runs read.
+    /// <summary>
+    /// Makes the scan a lane's piece of an object its question cut between its lanes, which learns the partial of the
+    /// family over its rows where it would read them (<see cref="PiecePartials"/>).
+    /// </summary>
+    internal DatasetScanBuilder AsPiece()
+    {
+        _piece = true;
+        return this;
+    }
+
+    // The family of the aggregation the scan asks states for, whose partials it learns, and the source its runs read;
+    // whether the scan is a lane's piece of an object, which learns the partial of its rows.
     private LearnedFamily? _family;
     private ScanSource? _familySource;
+    private bool _piece;
 
     /// <summary>The top-level columns the scan's filter reads but the key's first, by name, which a sort key led by it would narrow; found once.</summary>
     private List<string> FilterColumns()

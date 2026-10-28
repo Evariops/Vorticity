@@ -42,13 +42,19 @@ internal sealed partial class DatasetScanBuilder
 
     /// <summary>
     /// Whether the object <paramref name="held"/> learns its partial of the scan's family, or answers from it: one the scan
-    /// covers whole, with no row marked, of the version's columns, whose added keys widen no read. A column the family adds
-    /// that is the key's first, which the object holds more than one value of, would read every value's rows where the
-    /// question reads its own, and the object is read as the question reads it.
+    /// covers whole that may learn one (<see cref="MayLearn"/>).
     /// </summary>
-    private bool Learns(in PositionedObject held)
+    internal bool Learns(in PositionedObject held) => Covered(held) == held.Entry.Rows && MayLearn(held);
+
+    /// <summary>
+    /// Whether the scan's family may learn a partial of the object <paramref name="held"/>: one with no row marked, of the
+    /// version's columns, whose added keys widen no read. A column the family adds that is the key's first, which the object
+    /// holds more than one value of, would read every value's rows where the question reads its own, and the object is read
+    /// as the question reads it.
+    /// </summary>
+    private bool MayLearn(in PositionedObject held)
     {
-        if (_family is not { } family || Covered(held) != held.Entry.Rows || held.Entry.HasDeletions
+        if (_family is not { } family || held.Entry.HasDeletions
             || FamilyOf(held) is not { } own || _dataset.Partials.TooLarge(held.Entry.Uid, own.Key))
         {
             return false;
@@ -120,17 +126,50 @@ internal sealed partial class DatasetScanBuilder
     }
 
     /// <summary>
-    /// The states of the object <paramref name="held"/> under the scan's family: its partial, from the handle or the
-    /// session's cache, or learned now from its rows and kept; the groups of the values the question asks.
+    /// The states of the object <paramref name="held"/> under the scan's family, its rows numbered from
+    /// <paramref name="firstRow"/>: its partial, from the handle or the session's cache, or learned now from its rows and
+    /// kept, or the partial of the scan's piece of it; the groups of the values the question asks.
     /// </summary>
     private async IAsyncEnumerable<RecordBatch> LearnedAsync(
-        PositionedObject held, Task<AggregationPartial>? learning, [EnumeratorCancellation] CancellationToken cancellationToken)
+        PositionedObject held, Task<AggregationPartial>? learning, long firstRow, [EnumeratorCancellation] CancellationToken cancellationToken)
     {
         AggregationPartial partial = await (learning ?? PartialAsync(held, cancellationToken)).ConfigureAwait(false);
-        await foreach (RecordBatch batch in FamilyOf(held)!.Value.Family.ServeAsync(partial, _dataset.Session, held.FirstRow, cancellationToken).ConfigureAwait(false))
+        await foreach (RecordBatch batch in FamilyOf(held)!.Value.Family.ServeAsync(partial, _dataset.Session, firstRow, cancellationToken).ConfigureAwait(false))
         {
             yield return batch;
         }
+    }
+
+    /// <summary>
+    /// The rows of the object <paramref name="held"/> the scan covers when it is a lane's piece of it, which learns the partial
+    /// of the scan's family over them (<see cref="PiecePartials"/>); null for a scan that covers the object whole or none of
+    /// it, or for an object that may learn none.
+    /// </summary>
+    private RowRange? Piece(in PositionedObject held)
+    {
+        if (!_piece || _take is not null || _familySource is not DatasetScanSource || Whole(held))
+        {
+            return null;
+        }
+
+        long start = Math.Max(_from, held.FirstRow);
+        long end = Math.Min(_to, held.FirstRow + held.Entry.Rows);
+        return end > start && MayLearn(held) ? new RowRange(start, end) : null;
+    }
+
+    /// <summary>
+    /// The partial of the scan's family over <paramref name="piece"/>, a lane's piece of the object <paramref name="held"/>:
+    /// learned from its rows on the lane, and handed to the question's source, which has the object's partial merged once
+    /// its pieces tile it.
+    /// </summary>
+    private async Task<AggregationPartial> PiecePartialAsync(PositionedObject held, RowRange piece, CancellationToken cancellationToken)
+    {
+        (LearnedFamily family, UInt128 key) = FamilyOf(held)!.Value;
+        DatasetScanSource source = (DatasetScanSource)_familySource!;
+        AggregationPartial partial = await family.LearnAsync(source, piece, _options with { DegreeOfParallelism = 1 }, cancellationToken)
+            .ConfigureAwait(false);
+        source.Pieces.Learned(_dataset, source, held, family, key, piece, partial, _options);
+        return partial;
     }
 
     /// <summary>
@@ -423,12 +462,14 @@ internal sealed partial class DatasetScanBuilder
                     continue;
                 }
 
-                if (path == AnswerPath.Partial || Learns(held))
+                RowRange? piece = path == AnswerPath.Partial ? null : Piece(held);
+                if (path == AnswerPath.Partial || Learns(held) || piece is not null)
                 {
                     // An object of the question's family answers from the partial it learned, read ahead with the counts, or
-                    // learns it from its rows; the partials of the objects after it that learn theirs from their rows are
-                    // learned ahead. Each partial read in turn cost a round trip an object at one lane: 15 for QP-3.
-                    Task<AggregationPartial>? learned = unit.Learning ?? unit.Partial;
+                    // learns it from its rows, or a lane's piece of it the partial of its rows; the partials of the objects
+                    // after it that learn theirs from their rows are learned ahead. Each partial read in turn cost a round
+                    // trip an object at one lane: 15 for QP-3.
+                    Task<AggregationPartial>? learned = unit.Learning ?? unit.Partial ?? (piece is { } rows ? PiecePartialAsync(held, rows, stopped.Token) : null);
                     if (unit.Learning is not null)
                     {
                         unit.Learning = null;
@@ -447,7 +488,7 @@ internal sealed partial class DatasetScanBuilder
                         }
                     }
 
-                    await foreach (RecordBatch batch in LearnedAsync(held, learned, cancellationToken).ConfigureAwait(false))
+                    await foreach (RecordBatch batch in LearnedAsync(held, learned, piece?.Start ?? held.FirstRow, cancellationToken).ConfigureAwait(false))
                     {
                         yield return batch;
                     }
@@ -460,7 +501,7 @@ internal sealed partial class DatasetScanBuilder
                 // where the rows the walk passed over begin, which a rollup answers.
                 int last = o;
                 while (last + 1 < units.Count && units[last + 1].Run is null && units[last + 1].Chosen.Path is AnswerPath.Rows or AnswerPath.Zones
-                    && !Learns(units[last + 1].Held)
+                    && !Learns(units[last + 1].Held) && Piece(units[last + 1].Held) is null
                     && (rollups is null || units[last + 1].Held.FirstRow == units[last].Held.FirstRow + units[last].Held.Entry.Rows))
                 {
                     last++;
