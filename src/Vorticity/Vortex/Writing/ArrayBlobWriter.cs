@@ -399,7 +399,7 @@ internal static class ArrayBlobWriter
         // underneath: compressed rather than written flat.
         int values = plan.Table is not null
             ? plan.Table.BuildValues(arena, arena.GetNode(nodeIndex), plan.Entries)
-            : CanonicalFilter.Apply(arena, nodeIndex, plan.Gather);
+            : CanonicalFilter.Apply(arena, nodeIndex, plan.Scheme == ColumnScheme.RunEnd ? plan.RunStarts : plan.Gather);
 
         if (plan.Scheme == ColumnScheme.RunEnd)
         {
@@ -1703,15 +1703,25 @@ internal static class ArrayBlobWriter
         int length = arena.GetNode(nodeIndex).Length;
         PType endsPType = IndexPType(length);
 
-        int ends = WriteIndexColumn(
-            blob, arena, nodeIndex, plan.Codes, endsPType, encodings, Cascade.RunEndEnds());
+        // The ends are laid out in the arena and the values gathered there already: the runs the plan rented go back.
+        int ends;
+        try
+        {
+            ends = WriteIndexColumn(
+                blob, arena, nodeIndex, plan.RunEnds, endsPType, encodings, Cascade.RunEndEnds());
+        }
+        finally
+        {
+            plan.ReleaseCodes();
+        }
+
         int valuesNode = WriteCompressed(blob, arena, values, encodings, cascade: Cascade.ValuesChild(owner));
 
         Span<int> children = stackalloc int[2];
         children[0] = ends;
         children[1] = valuesNode;
         return Node(
-            blob, encodings, "vortex.runend"u8, RunEndBytes(blob, endsPType, (ulong)plan.Codes.Length),
+            blob, encodings, "vortex.runend"u8, RunEndBytes(blob, endsPType, (ulong)plan.RunCount),
             children, []);
     }
 

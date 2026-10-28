@@ -206,7 +206,26 @@ internal readonly struct ColumnPlan
     internal int[] Codes { get; }
 
     internal static ColumnPlan Runs(int[] starts, int[] ends) =>
-        new ColumnPlan(ColumnScheme.RunEnd, starts, ends);
+        new ColumnPlan(ColumnScheme.RunEnd, starts, ends) { RunCount = ends.Length };
+
+    /// <summary>
+    /// The same, over <paramref name="runs"/> runs of arrays rented longer than them, which go back to the pool once the
+    /// plan is written, or let go (<see cref="ReleaseCodes"/>).
+    /// </summary>
+    internal static ColumnPlan RentedRuns(int[] starts, int[] ends, int runs) =>
+        new ColumnPlan(ColumnScheme.RunEnd, starts, ends) { RunCount = runs, RunsRented = true };
+
+    /// <summary>For <see cref="ColumnScheme.RunEnd"/>, the runs <see cref="Gather"/> and <see cref="Codes"/> hold.</summary>
+    internal int RunCount { get; init; }
+
+    /// <summary>Whether a run-end plan's <see cref="Gather"/> and <see cref="Codes"/> are rented, longer than its runs.</summary>
+    internal bool RunsRented { get; init; }
+
+    /// <summary>Each run's first row, for a run-end plan.</summary>
+    internal ReadOnlySpan<int> RunStarts => Gather.AsSpan(0, RunCount);
+
+    /// <summary>Each run's exclusive end row, for a run-end plan.</summary>
+    internal ReadOnlySpan<int> RunEnds => Codes.AsSpan(0, RunCount);
 
     internal static ColumnPlan Dictionary(int[] firstOccurrences, int[] codes) =>
         new ColumnPlan(ColumnScheme.Dict, firstOccurrences, codes) { Rows = codes.Length };
@@ -258,11 +277,17 @@ internal readonly struct ColumnPlan
     internal static ColumnPlan ForDateTimeParts(DateTimePartsPlan plan) =>
         new ColumnPlan(ColumnScheme.DateTimeParts, [], []) { DateTimeParts = plan, PredictedBytes = plan.EncodedSize };
 
-    /// <summary>Hands a rented codes array back, for a plan that will not be written.</summary>
+    /// <summary>Hands a rented codes array back, and a run-end plan's rented runs, for a plan written or that will not be.</summary>
     internal void ReleaseCodes()
     {
         if (CodesRented)
         {
+            ArrayPool<int>.Shared.Return(Codes);
+        }
+
+        if (RunsRented)
+        {
+            ArrayPool<int>.Shared.Return(Gather);
             ArrayPool<int>.Shared.Return(Codes);
         }
     }
@@ -296,7 +321,7 @@ internal readonly struct ColumnPlan
     {
         ColumnScheme.None => "canonical",
         ColumnScheme.RunEnd =>
-            $"runend runs={Codes.Length} ends={Fingerprint(Codes):x} starts={Fingerprint(Gather):x}",
+            $"runend runs={RunCount} ends={Fingerprint(RunEnds):x} starts={Fingerprint(RunStarts):x}",
         ColumnScheme.Dict when Table is not null =>
             $"dict entries={Entries} rows={Rows} codes={Fingerprint(Table.Codes[..Rows]):x} " +
             $"first={Fingerprint(Table.FirstRows[..Entries]):x}",
@@ -389,32 +414,27 @@ internal static class ColumnCompressor
             return ColumnPlan.Canonical;
         }
 
-        int[] runStarts = ArrayPool<int>.Shared.Rent(Math.Max(length, 1));
-        int[] runEnds = ArrayPool<int>.Shared.Rent(Math.Max(length, 1));
-        try
-        {
-            int runCount = node.Kind == CanonicalKind.Bool && node.Validity.IsAllValid
-                ? BitmapRuns(node.Bits.Span, node.BitOffset, length, ceiling, runStarts, runEnds)
-                : FixedRuns(in node, length, ceiling, runStarts, runEnds, out int fixedRuns)
-                    ? fixedRuns
-                    : ViewRuns(in node, length, ceiling, runStarts, runEnds, out int viewRuns)
-                        ? viewRuns
-                        : ComparedRuns(in comparer, length, ceiling, runStarts, runEnds);
+        // Each count stops before it writes a run past the ceiling, so the runs are rented to it, and given to the plan
+        // that wins: a column of a million rows took two arrays of its rows to count, and two more of its runs to keep.
+        int[] runStarts = ArrayPool<int>.Shared.Rent(ceiling + 1);
+        int[] runEnds = ArrayPool<int>.Shared.Rent(ceiling + 1);
+        int runCount = node.Kind == CanonicalKind.Bool && node.Validity.IsAllValid
+            ? BitmapRuns(node.Bits.Span, node.BitOffset, length, ceiling, runStarts, runEnds)
+            : FixedRuns(in node, length, ceiling, runStarts, runEnds, out int fixedRuns)
+                ? fixedRuns
+                : ViewRuns(in node, length, ceiling, runStarts, runEnds, out int viewRuns)
+                    ? viewRuns
+                    : ComparedRuns(in comparer, length, ceiling, runStarts, runEnds);
 
-            if (runCount > ceiling)
-            {
-                return ColumnPlan.Canonical;
-            }
-
-            runEnds[runCount - 1] = length;
-            return ColumnPlan.Runs(
-                runStarts.AsSpan(0, runCount).ToArray(), runEnds.AsSpan(0, runCount).ToArray());
-        }
-        finally
+        if (runCount > ceiling)
         {
             ArrayPool<int>.Shared.Return(runStarts);
             ArrayPool<int>.Shared.Return(runEnds);
+            return ColumnPlan.Canonical;
         }
+
+        runEnds[runCount - 1] = length;
+        return ColumnPlan.RentedRuns(runStarts, runEnds, runCount);
     }
 
     /// <summary>Runs by comparing adjacent rows, abandoning once run-end has already lost.</summary>
@@ -1783,7 +1803,7 @@ internal static class ColumnCompressor
         if (runEndAllowed && !runsCounted)
         {
             walkedRuns = TryRuns(in node, in comparer, length);
-            runs = walkedRuns.Scheme == ColumnScheme.None ? long.MaxValue : walkedRuns.Codes.Length;
+            runs = walkedRuns.Scheme == ColumnScheme.None ? long.MaxValue : walkedRuns.RunCount;
             runEndCost = RunEndCostOf(runs, length, plain);
             if (!runEndCompetes && runEndCost != long.MaxValue)
             {
@@ -1847,6 +1867,8 @@ internal static class ColumnCompressor
                 : Dictionary(arena, node, comparer, length, best);
             if (dictionary.Scheme != ColumnScheme.None)
             {
+                // The runs walked when run-end competes, which the dictionary beat, go back to the pool.
+                walkedRuns.ReleaseCodes();
                 temporal?.Release();
                 if (sizeFirst && dictionary.PredictedBytes > 0
                     && SmallestTrial(arena, nodeIndex, node, target, dictionary.PredictedBytes, cascade.IsValuesChild, workspace) is { Scheme: not ColumnScheme.None } smaller)
@@ -1874,6 +1896,11 @@ internal static class ColumnCompressor
             walkedRuns.ReleaseCodes();
             temporal?.Release();
             return trial with { DisplacedExact = true };
+        }
+
+        if (bestScheme != ColumnScheme.RunEnd)
+        {
+            walkedRuns.ReleaseCodes();
         }
 
         switch (bestScheme)
