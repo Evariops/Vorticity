@@ -977,10 +977,10 @@ internal static partial class PathsBench
     }
 
     /// <summary>The log records' status code as QP-3 and QP-9 read it.</summary>
-    private const string StatusCode = "Attributes['http.response.status_code'].AsInt64()";
+    internal const string StatusCode = "Attributes['http.response.status_code'].AsInt64()";
 
     /// <summary>The feature flag QP-10 reads.</summary>
-    private const string NewCart = "Attributes['feature.flag.new-cart'].AsString()";
+    internal const string NewCart = "Attributes['feature.flag.new-cart'].AsString()";
 
     /// <summary>The client's log records (<see cref="LogGeneratorV2"/>) of <c>--qp-hours</c> at <c>--qp-rate</c>, as the spans.</summary>
     private static async Task<(long Rows, string Needle)> FillLogsV2Async(IObjectStore store, Settings settings)

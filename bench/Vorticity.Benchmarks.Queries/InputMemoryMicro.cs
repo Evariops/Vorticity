@@ -26,6 +26,31 @@ internal static class InputMemoryMicro
 
     internal static async Task<int> Run(string directory, int objects)
     {
+        List<string> files = await LargestAsync(directory, objects);
+        Console.WriteLine("what                          rows   batches   seconds   private MB    native MB    parked MB   managed MB");
+        await using (VortexFile largest = await VortexFile.OpenAsync(files[0]))
+        {
+            Types.DType schema = largest.LayoutTree.Root.DType;
+            for (int field = 0; field < schema.FieldCount; field++)
+            {
+                await MeasureAsync(schema.GetField(field) is var dtype ? $"{schema.GetFieldName(field)} ({dtype.Kind})" : string.Empty, [files[0]], FieldMask.Single(field));
+            }
+        }
+
+        foreach (int count in new[] { 1, 2, 4, 8 })
+        {
+            if (count <= files.Count)
+            {
+                await MeasureAsync($"{count} inputs, every column", [.. files.Take(count)], FieldMask.All);
+            }
+        }
+
+        return 0;
+    }
+
+    /// <summary>The <paramref name="objects"/> largest data objects of the dataset directory <paramref name="directory"/>, largest first, said.</summary>
+    internal static async Task<List<string>> LargestAsync(string directory, int objects)
+    {
         List<string> files = [];
         foreach (string file in Directory.EnumerateFiles(Path.Combine(directory, "data"), "*.vortex").OrderByDescending(static file => new FileInfo(file).Length))
         {
@@ -49,25 +74,7 @@ internal static class InputMemoryMicro
         Console.WriteLine(string.Create(
             CultureInfo.InvariantCulture,
             $"{directory}: the {files.Count} largest data objects, {files.Sum(static file => new FileInfo(file).Length) / 1e6:F0} MB"));
-        Console.WriteLine("what                          rows   batches   seconds   private MB    native MB    parked MB   managed MB");
-        await using (VortexFile largest = await VortexFile.OpenAsync(files[0]))
-        {
-            Types.DType schema = largest.LayoutTree.Root.DType;
-            for (int field = 0; field < schema.FieldCount; field++)
-            {
-                await MeasureAsync(schema.GetField(field) is var dtype ? $"{schema.GetFieldName(field)} ({dtype.Kind})" : string.Empty, [files[0]], FieldMask.Single(field));
-            }
-        }
-
-        foreach (int count in new[] { 1, 2, 4, 8 })
-        {
-            if (count <= files.Count)
-            {
-                await MeasureAsync($"{count} inputs, every column", [.. files.Take(count)], FieldMask.All);
-            }
-        }
-
-        return 0;
+        return files;
     }
 
     private static async Task MeasureAsync(string what, string[] files, FieldMask fields)
