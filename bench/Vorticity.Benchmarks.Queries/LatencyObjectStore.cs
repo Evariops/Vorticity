@@ -2,6 +2,7 @@ using System;
 using System.Buffers;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO.Pipelines;
 using System.Runtime.CompilerServices;
 using System.Threading;
@@ -53,14 +54,28 @@ internal sealed class LatencyObjectStore(IObjectStore inner) : IObjectStore
     /// <summary>The bytes a second one read receives at most, as one connection; zero for no limit.</summary>
     internal double BytesPerSecond { get; set; }
 
-    /// <summary>Where each read is written down, its key, offset and length, one line each; null for none.</summary>
-    internal System.IO.TextWriter? Trace { get; set; }
+    /// <summary>
+    /// Where each read is written down, its key, offset and length, and the milliseconds since the trace was set when it was
+    /// sent, which tell the waves of reads one round trip apart; one line each; null for none.
+    /// </summary>
+    internal System.IO.TextWriter? Trace
+    {
+        get => _trace;
+        set
+        {
+            _trace = value;
+            _traced = Stopwatch.GetTimestamp();
+        }
+    }
+
+    private System.IO.TextWriter? _trace;
+    private long _traced;
 
     public ObjectStoreCapabilities Capabilities => inner.Capabilities;
 
     public async ValueTask<ObjectRead> ReadAsync(string key, long offset, Memory<byte> destination, string? ifToken, CancellationToken cancellationToken)
     {
-        Trace?.WriteLine($"{key}\t{offset}\t{destination.Length}");
+        Trace?.WriteLine(string.Create(CultureInfo.InvariantCulture, $"{key}\t{offset}\t{destination.Length}\t{Stopwatch.GetElapsedTime(_traced).TotalMilliseconds:F1}"));
         if (Trace is not null && Environment.GetEnvironmentVariable("VORTICITY_TRACE_STACKS") == "1")
         {
             Trace.WriteLine(Environment.StackTrace);
@@ -76,7 +91,7 @@ internal sealed class LatencyObjectStore(IObjectStore inner) : IObjectStore
 
     public async ValueTask<ObjectRead> ReadTailAsync(string key, Memory<byte> destination, CancellationToken cancellationToken)
     {
-        Trace?.WriteLine($"{key}\ttail\t{destination.Length}");
+        Trace?.WriteLine(string.Create(CultureInfo.InvariantCulture, $"{key}\ttail\t{destination.Length}\t{Stopwatch.GetElapsedTime(_traced).TotalMilliseconds:F1}"));
         long answered = Answered(key, read: true);
         Task answer = PreciseDelay.Until(answered);
         ObjectRead read = await inner.ReadTailAsync(key, destination, cancellationToken).ConfigureAwait(false);
