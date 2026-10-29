@@ -293,6 +293,78 @@ public sealed partial class DatasetLearnedPartialsTests
     }
 
     /// <summary>
+    /// A family answered through the statistics of an object's granules, which leave most of them: by service and hour, over
+    /// an object of a hundred granules, one service holding 40 % of two hours of hits, its granules answered by their
+    /// statistics, and 300 others the rest, a granule of them mixing several services, read as rows at each asking. Asked
+    /// first, the object reads its statistics and the granules they leave, 3.3 MB of its 5.4, and learns nothing; asked
+    /// again by the same handle, it learns, the granules each asking reads again having paid for it; then it answers from
+    /// its partial. The answers are the rows'. Three objects of S2's requests answered T6, the p99 of a service's durations
+    /// by hour, through their granules at every asking, 258 MB each, and never learned.
+    /// </summary>
+    [Fact]
+    public async Task AFamilyAnsweredThroughItsGranulesLearnsOnceTheirRowsReadAgainPayForIt()
+    {
+        await using MemoryObjectStore memory = new MemoryObjectStore();
+        Random random = new Random(0xF3);
+        Hit[] hits = [.. Enumerable.Range(0, 800_000).Select(_ => new Hit(
+            random.Next(10) < 4 ? "svc-000" : $"svc-{1 + random.Next(300):D3}",
+            Noon.UtcDateTime.AddTicks(random.NextInt64(TimeSpan.FromHours(2).Ticks)),
+            random.Next(1_000_000)))];
+        await using (VortexDataset created = await VortexDataset.CreateAsync(memory, Hit.Schema, new DatasetOptions
+        {
+            Layout = new DatasetLayout { SortKey = [LayoutValue.Column(nameof(Hit.Service)), LayoutValue.Column(nameof(Hit.At))], IndexedPrefix = 1, ObjectBytes = 64 << 20 },
+            ContentsObjectBytes = 1,
+            SheetObjectBytes = 0,
+        }, Ct))
+        {
+            for (int from = 0; from < hits.Length; from += 200_000)
+            {
+                await using ObjectDraft draft = created.StartObject();
+                await draft.Writer.WriteAsync<Hit>(hits[from..(from + 200_000)], Ct);
+                await created.AppendAsync(draft, Ct);
+            }
+
+            // One object of a hundred granules.
+            while (await created.CompactAsync(new CompactionOptions { LevelZeroCeiling = 1, TargetBytesAtLevelOne = 1L << 30 }, Ct) is not null)
+            {
+            }
+        }
+
+        await using VortexDataset asked = await VortexDataset.OpenAsync(memory, cancellationToken: Ct);
+        List<string> rows = await AnswerAsync(asked, synopses: false);
+        List<string[]> chosen = [];
+        for (int ask = 0; ask < 3; ask++)
+        {
+            ScanPlan plan = await Question(asked, synopses: true).ExplainAsync(analyze: true, Ct);
+            chosen.Add([.. plan.Units.Select(static unit => $"{unit.Alternative}: {unit.Detail}")]);
+            Assert.Equal(rows, await AnswerAsync(asked, synopses: true));
+        }
+
+        Console.WriteLine($"THROUGH THE GRANULES: {string.Join(" | ", chosen.Select(static units => string.Join(", ", units)))}");
+        Assert.Single(chosen[0]);
+        Assert.StartsWith("granules:", chosen[0][0], StringComparison.Ordinal);
+        Assert.All(chosen[2], static unit => Assert.StartsWith("partial:", unit, StringComparison.Ordinal));
+
+        static Vorticity.Aggregation Question(VortexDataset handle, bool synopses) => handle.Scan<Hit>().With(new ScanOptions { UseSynopses = synopses })
+            .GroupBy(h => (h.Service, h.At.Truncate(CalendarUnit.Hour))).Select(g => (g.Key.Service, g.Key.Item2, g.Count(), g.Sum(h => h.Size)));
+
+        static async Task<List<string>> AnswerAsync(VortexDataset handle, bool synopses)
+        {
+            List<string> lines = [];
+            await using (IAsyncEnumerator<RecordBatch> batches = Question(handle, synopses).Query.Batches(Ct))
+            {
+                while (await batches.MoveNextAsync())
+                {
+                    Values.DescribeRows(batches.Current, lines);
+                }
+            }
+
+            lines.Sort(StringComparer.Ordinal);
+            return lines;
+        }
+    }
+
+    /// <summary>
     /// The objects a job wrote of an hour learn the family; their level, past its size, is rewritten into the next, each
     /// object into one of the same rows under another identity, whose partial is its input's. Asked after, with another
     /// value, the family reads no row, and answers as the rows do.
@@ -626,4 +698,7 @@ public sealed partial class DatasetLearnedPartialsTests
 
     [VortexRecord]
     public partial record struct Call(string Service, DateTimeOffset At, string Host, string Route, short Status, double Latency, long Size);
+
+    [VortexRecord]
+    public partial record struct Hit(string Service, DateTime At, long Size);
 }

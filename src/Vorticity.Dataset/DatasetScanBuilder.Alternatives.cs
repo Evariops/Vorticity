@@ -167,6 +167,12 @@ internal sealed partial class DatasetScanBuilder
         /// <summary>What answering <paramref name="unit"/> through it costs.</summary>
         internal abstract PathCosts.Cost Cost(Planned unit);
 
+        /// <summary>
+        /// What each later asking of the family reads of <paramref name="unit"/> again through it, of its <paramref name="cost"/>:
+        /// nothing for a synopsis, which it finds read; what learning the object's partial would spare (<see cref="Choose"/>).
+        /// </summary>
+        internal virtual PathCosts.Cost Rereads(Planned unit, PathCosts.Cost cost) => default;
+
         /// <summary>What it reads of <paramref name="unit"/>, in words.</summary>
         internal abstract string Describe(Planned unit, PathCosts.Cost cost);
     }
@@ -337,9 +343,10 @@ internal sealed partial class DatasetScanBuilder
     /// An object's rows of the family's columns, every one, from which it learns the partial of the question's family and
     /// answers through it: one that may learn (<see cref="Learns"/>). Learning is a placement: the partial answers the
     /// family's later askings at no read (<see cref="Choose"/>). Asked first, an object learns where its rows weigh no more
-    /// than what answers it otherwise; asked again, where they weigh no more than reading again, at each asking of the
-    /// family before, the rows it is read through otherwise; an object its synopses answer, which a later asking finds read,
-    /// learns where it costs no more.
+    /// than what answers it otherwise; asked again, where they weigh no more than that and, at each asking of the family
+    /// before, what each asking reads again of the object otherwise (<see cref="Alternative.Rereads"/>): its rows, or the
+    /// granules its statistics leave; an object its synopses answer whole, which a later asking finds read, learns where it
+    /// costs no more.
     /// </summary>
     private sealed class LearnAlternative(DatasetScanBuilder scan) : Alternative(scan, AnswerPath.Learn, UnitLevel.Object)
     {
@@ -366,6 +373,9 @@ internal sealed partial class DatasetScanBuilder
             return statistics + unanswered + Scan.SheetsCost(unit.Held);
         }
 
+        /// <summary>The rows of the granules the statistics do not answer: the statistics, a synopsis, a later asking finds read.</summary>
+        internal override PathCosts.Cost Rereads(Planned unit, PathCosts.Cost cost) => Scan.GranuleAnswer()!.Costs(unit.Held).Unanswered;
+
         internal override string Describe(Planned unit, PathCosts.Cost cost)
         {
             (PathCosts.Cost statistics, PathCosts.Cost unanswered, _) = Scan.GranuleAnswer()!.Costs(unit.Held);
@@ -388,6 +398,8 @@ internal sealed partial class DatasetScanBuilder
 
         internal override PathCosts.Cost Cost(Planned unit) => Scan.RowsCost(unit.Held, unit.Kept);
 
+        internal override PathCosts.Cost Rereads(Planned unit, PathCosts.Cost cost) => cost;
+
         internal override string Describe(Planned unit, PathCosts.Cost cost) =>
             $"{RowsOf(unit)}, {cost.Bytes} bytes in {cost.Requests} requests, the blocks its zone maps settle taken from them";
     }
@@ -398,6 +410,8 @@ internal sealed partial class DatasetScanBuilder
         internal override Coverage Covers(Planned unit) => Coverage.Whole;
 
         internal override PathCosts.Cost Cost(Planned unit) => Scan.RowsCost(unit.Held, unit.Kept);
+
+        internal override PathCosts.Cost Rereads(Planned unit, PathCosts.Cost cost) => cost;
 
         internal override string Describe(Planned unit, PathCosts.Cost cost) => $"{RowsOf(unit)}, {cost.Bytes} bytes in {cost.Requests} requests";
     }
@@ -467,14 +481,15 @@ internal sealed partial class DatasetScanBuilder
             }
         }
 
-        // Learning is a placement: the partial answers the family's later askings at no read. Its weight is held against the
-        // rows the object is read through otherwise, which each later asking reads again, as many times as the family was
-        // asked before this one, and against a synopsis, which a later asking finds read, once: it learns where it costs no
-        // more, and once the family asked again would have paid for it.
+        // Learning is a placement: the partial answers the family's later askings at no read. Its weight is held against what
+        // answers the object otherwise, and what each later asking reads of it again, as many times as the family was asked
+        // before this one: its rows, or the granules its statistics leave, a synopsis being found read: it learns where it
+        // costs no more, and once the family asked again would have paid for it.
         if (learn is not null)
         {
+            double again = best is null ? 0 : _version.Costs.Weight(best.Rereads(unit, cost));
             double weight = _version.Costs.Weight(learning);
-            if (weight <= least + (best?.Path is AnswerPath.Rows or AnswerPath.Zones ? AskedBefore() * least : 0))
+            if (weight <= least + AskedBefore() * again)
             {
                 if (best is not null)
                 {

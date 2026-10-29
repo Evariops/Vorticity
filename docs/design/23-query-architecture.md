@@ -434,7 +434,8 @@ alternatives that cover it whole, of those that cover part of it plus the best o
 children. Every alternative is exact and sums are reproducible, so the choice changes the cost of an answer and never a
 bit of it. Choosing costs about 3 ms for 30 days of the reference table and about 45 ms for 13 months, before any data is
 read *(computed)*. Learning is weighed last, as a placement: against the alternative chosen, it is taken where it costs no
-more, or, against rows that each later asking of the family reads again, once the askings before would have paid for it
+more, or, against what each later asking of the family reads again of it, all its rows or the rows of the granules their
+statistics leave, once the askings before would have paid for it
 ([22, 5.6](22-on-the-fly-and-synopses.md#56-partials-learned-after-the-fact)). The lanes that cut an object learn what
 one lane learns.
 

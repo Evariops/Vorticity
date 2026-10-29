@@ -389,9 +389,13 @@ Learning is a placement, an alternative of the plan beside the others (`learn`, 
 learned): it reads every row of the object, where the rows' alternatives read the granules its key's
 index keeps of the question's value, and a synopsis reads less. Asked first, an object learns where that
 costs no more than what answers it otherwise; asked again by the handle, within the hour it keeps a
-family up, it learns once the askings before would have read its rows again for as much: its rows weigh
-no more than those it is read through otherwise, times the askings of the family so far. Against a
-synopsis, which a later asking finds read, it learns only where it costs no more. A family that asks the
+family up, it learns once the askings before would have read again for as much what answers it
+otherwise: its rows weigh no more than that, plus what each asking reads of it again, times the askings
+of the family so far. A read of rows reads them all again; the granules' statistics are found read, the
+rows of the granules they leave are not. Against a synopsis that answers the object whole, which a later
+asking finds read, it learns only where it costs no more. Three objects of the month of requests answered
+the p99 of a service's durations by hour through their granules at every asking, 258 MB each, and never
+learned, until their granules' rows counted *(measured)*. A family that asks the
 key's second column for a value learns that value's groups and every other's: on three objects keeping
 48, 19 and 28 % of their rows for a host, the first asking reads those granules and learns nothing, the
 second learns the first object, the third the second, the fourth the last, and a handle opened after
