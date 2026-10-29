@@ -239,8 +239,9 @@ public sealed partial class DatasetPlanAlternativesTests
     /// <summary>
     /// Six hours partitioned by the hour, keyed by the service, consolidated: each question's plan, worked out by a handle of
     /// its own, predicts what a cold handle asks of the store (spec B, 9): a count by service its granules' statistics answer,
-    /// to the request and the byte; a sum under a filter read as rows, to the request, its bytes to a thousandth, the padding
-    /// between segments being what the table of contents does not keep.
+    /// to the request and the byte; a sum under a filter read as rows, each object learning its family's partial from them,
+    /// which costs no more where the key keeps every row, to the request, its bytes to a thousandth, the padding between
+    /// segments being what the table of contents does not keep.
     /// </summary>
     [Fact]
     public async Task ThePlanPredictsWhatAColdReadAsksOfTheStore()
@@ -263,7 +264,7 @@ public sealed partial class DatasetPlanAlternativesTests
             async dataset => Assert.Equal(
                 all.Where(static row => row.Value > 0.9).Sum(static row => row.Sequence),
                 (await dataset.Scan<Row>().Where(r => r.Value > 0.9).GroupBy(r => r.Service).Select(g => g.Sum(r => r.Sequence)).ToListAsync(Ct)).Sum()));
-        Assert.All(summed.Units, static unit => Assert.Equal("rows", unit.Alternative));
+        Assert.All(summed.Units, static unit => Assert.Equal("learn", unit.Alternative));
         Assert.Equal(summed.Cost!.Requests, reads);
         Assert.InRange(bytes, summed.Cost.Bytes - (summed.Cost.Bytes / 1000), summed.Cost.Bytes + (summed.Cost.Bytes / 1000));
     }

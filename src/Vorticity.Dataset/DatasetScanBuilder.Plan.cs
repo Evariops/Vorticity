@@ -127,10 +127,10 @@ internal sealed partial class DatasetScanBuilder
             explained.Add(new UnitStep(
                 unit.Name, unit.Level == UnitLevel.Run ? "run" : "object", unit.Chosen.Name, unit.Chosen.Describe(unit, unit.Cost),
                 unit.Cost.Requests, unit.Cost.Bytes, unit.Weight, [.. unit.Rejected ?? []]));
-            if (unit.Chosen.Path is not (AnswerPath.Rows or AnswerPath.Zones))
+            if (unit.Chosen.Path is not (AnswerPath.Rows or AnswerPath.Zones or AnswerPath.Learn))
             {
                 // A unit its synopses answer reads what its alternative says: a rollup the rows of the buckets the filter
-                // keeps, an object the rows the scan covers.
+                // keeps, an object the rows the scan covers. One that learns is planned as its rows.
                 long answered = unit.Run is { } rollup ? RowsOf(rollup, unit.Buckets) : Covered(unit.Held);
                 keptRows += answered;
                 segments += unit.Cost.Requests;

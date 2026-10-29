@@ -175,6 +175,124 @@ public sealed partial class DatasetLearnedPartialsTests
     }
 
     /// <summary>
+    /// At several lanes an object learns where one lane's plan would: one whose granules' statistics answer it for less than
+    /// its rows is read as they choose, and learns nothing. Cut over all its rows to learn, each lane read the family's
+    /// columns over its piece: the routes of a service under 5xx by hour over S1's spans read 343 MB at 32 lanes the first
+    /// time, where the granules the key's index keeps hold 47.
+    /// </summary>
+    [Fact]
+    public async Task AtSeveralLanesAnObjectLearnsWhatOneLaneLearns()
+    {
+        // Keyed by the status first: the objects of the statuses past 500 alone, whose granules each hold an hour of a service
+        // or two, which their statistics answer.
+        await using MemoryObjectStore memory = new MemoryObjectStore();
+        await (await CreateAsync(memory, chunkTargetBytes: 16 << 10, sortKey: [nameof(Call.Status), nameof(Call.Service), nameof(Call.At)])).DisposeAsync();
+        (List<string> Answer, long Bytes, int Learned) one = await AskAfreshAsync(synopses: true, lanes: 1);
+        (List<string> Answer, long Bytes, int Learned) many = await AskAfreshAsync(synopses: true, lanes: 32);
+        (List<string> Answer, long Bytes, int Learned) rows = await AskAfreshAsync(synopses: false, lanes: 32);
+        Console.WriteLine($"LANES one lane {one.Bytes:N0} bytes, 32 lanes {many.Bytes:N0}, the rows at 32 lanes {rows.Bytes:N0}; {many.Learned} partials learned");
+        Assert.NotEmpty(rows.Answer);
+        Assert.Equal(rows.Answer, one.Answer);
+        Assert.Equal(rows.Answer, many.Answer);
+        Assert.True(one.Learned == 0, $"one lane learned {one.Learned} partials, where the granules answer the objects");
+        Assert.True(many.Learned == 0, $"32 lanes learned {many.Learned} partials, where one lane learns none");
+
+        async Task<(List<string>, long, int)> AskAfreshAsync(bool synopses, int lanes)
+        {
+            long bytes;
+            List<string> answer = [];
+            await using (CountingObjectStore store = new CountingObjectStore(memory))
+            {
+                await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = lanes);
+                await using VortexDataset dataset = await VortexDataset.OpenAsync(store, new DatasetOptions { Session = session, LeastPieceRows = 250 }, Ct);
+                Vorticity.Aggregation asked = dataset.Scan<Call>().With(new ScanOptions { UseSynopses = synopses, DegreeOfParallelism = lanes })
+                    .Where(c => c.Status >= 500).GroupBy(c => (c.Route, c.At.Truncate(CalendarUnit.Hour))).Select(g => (g.Key.Route, g.Key.Item2, g.Count()));
+                await using (IAsyncEnumerator<RecordBatch> batches = asked.Query.Batches(Ct))
+                {
+                    while (await batches.MoveNextAsync())
+                    {
+                        Values.DescribeRows(batches.Current, answer);
+                    }
+                }
+
+                bytes = store.BytesRead;
+            }
+
+            answer.Sort(StringComparer.Ordinal);
+            int learned = 0;
+            await foreach (Vorticity.IO.ObjectListing listing in memory.ListAsync("learned/", null, Ct))
+            {
+                learned += listing.Key.EndsWith(".vxp", StringComparison.Ordinal) ? 1 : 0;
+            }
+
+            return (answer, bytes, learned);
+        }
+    }
+
+    /// <summary>
+    /// Learning is a placement. A family that asks a column of the key for a value, the second, learns that value's groups
+    /// and every other's, and so reads every row of an object, where the question reads the granules the key's index keeps
+    /// of its value. Asked first, each object reads those granules and learns nothing; asked again by the same handle, with
+    /// other values, each learns once the askings before would have read its kept rows again for as much as all its rows
+    /// cost: of three objects, one keeping 48 % of its rows at the second asking, one keeping 19 % at the third, one keeping
+    /// 28 % at the fourth. A handle opened after answers from the partials. At one lane and at several, whose lanes cut the
+    /// objects as one lane chooses. The first asking of an emitter's errors per hour over S2's requests read 4.7 GB at 32
+    /// lanes, where the key keeps 75 MB.
+    /// </summary>
+    [Theory]
+    [InlineData(1)]
+    [InlineData(32)]
+    public async Task AFamilyAskedFirstReadsWhatTheKeyKeepsAndLearnsOnceAskedAgain(int lanes)
+    {
+        // Keyed by the service, the host and the instant, the first two indexed: a host keeps a third of its service's rows.
+        await using MemoryObjectStore memory = new MemoryObjectStore();
+        await (await CreateAsync(memory, chunkTargetBytes: 16 << 10, sortKey: [nameof(Call.Service), nameof(Call.Host), nameof(Call.At)], indexedPrefix: 2)).DisposeAsync();
+        string[] results = ["Route", "count()", "avg(Latency)"];
+        List<string[]> chosen = [];
+        await using (VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = lanes))
+        {
+            await using VortexDataset asked = await VortexDataset.OpenAsync(memory, new DatasetOptions { Session = session, LeastPieceRows = 250 }, Ct);
+            foreach (string host in (string[])["h-1-0", "h-1-1", "h-1-2", "h-1-0"])
+            {
+                ScanPlan plan = await DatasetPlannerTests.Ask(asked, ["Route"], results, $"Host = '{host}'", synopses: true).ExplainAsync(analyze: true, Ct);
+                chosen.Add([.. plan.Units.Select(static unit => unit.Alternative)]);
+                Assert.Equal(
+                    (await AskAfreshAsync(host, synopses: false)).Answer,
+                    await DatasetPlannerTests.AskAsync(asked, ["Route"], results, $"Host = '{host}'", synopses: true, lanes: lanes));
+            }
+        }
+
+        // A handle opened after finds every object of each host learned, and answers from the partials as the rows do.
+        string[] after;
+        await using (VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = lanes))
+        {
+            await using VortexDataset fresh = await VortexDataset.OpenAsync(memory, new DatasetOptions { Session = session, LeastPieceRows = 250 }, Ct);
+            after = [.. (await DatasetPlannerTests.Ask(fresh, ["Route"], results, "Host = 'h-1-2'", synopses: true).ExplainAsync(analyze: true, Ct)).Units
+                .Select(static unit => unit.Alternative)];
+            Assert.Equal(
+                (await AskAfreshAsync("h-1-2", synopses: false)).Answer,
+                await DatasetPlannerTests.AskAsync(fresh, ["Route"], results, "Host = 'h-1-2'", synopses: true, lanes: lanes));
+        }
+
+        Console.WriteLine($"PLACEMENT {lanes} lanes: {string.Join(" | ", chosen.Select(static units => string.Join(", ", units)))}; a handle after: {string.Join(", ", after)}");
+        Assert.All(chosen[0], static alternative => Assert.Equal("rows", alternative));
+        Assert.Contains("learn", chosen[1]);
+        Assert.Contains("rows", chosen[1]);
+        Assert.All(chosen[3], static alternative => Assert.Contains(alternative, (string[])["learn", "partial"]));
+        Assert.NotEmpty(after);
+        Assert.All(after, static alternative => Assert.Equal("partial", alternative));
+
+        async Task<(List<string> Answer, long Bytes)> AskAfreshAsync(string host, bool synopses)
+        {
+            await using CountingObjectStore store = new CountingObjectStore(memory);
+            await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = lanes);
+            await using VortexDataset dataset = await VortexDataset.OpenAsync(store, new DatasetOptions { Session = session, LeastPieceRows = 250 }, Ct);
+            List<string> answer = await DatasetPlannerTests.AskAsync(dataset, ["Route"], results, $"Host = '{host}'", synopses, lanes: lanes);
+            return (answer, store.BytesRead);
+        }
+    }
+
+    /// <summary>
     /// The objects a job wrote of an hour learn the family; their level, past its size, is rewritten into the next, each
     /// object into one of the same rows under another identity, whose partial is its input's. Asked after, with another
     /// value, the family reads no row, and answers as the rows do.
@@ -454,9 +572,10 @@ public sealed partial class DatasetLearnedPartialsTests
 
     /// <summary>
     /// Four services, each 20 000 calls over two hours from noon, from three hosts and on six routes of its own, keyed by the
-    /// service then the instant, appended in parts and compacted.
+    /// service then the instant, or by <paramref name="sortKey"/>, its first <paramref name="indexedPrefix"/> columns
+    /// indexed, appended in parts and compacted.
     /// </summary>
-    private static async Task<VortexDataset> CreateAsync(MemoryObjectStore store, int chunkTargetBytes = 0)
+    private static async Task<VortexDataset> CreateAsync(MemoryObjectStore store, int chunkTargetBytes = 0, string[]? sortKey = null, int indexedPrefix = 1)
     {
         Random random = new Random(0xF1);
         List<Call> rows = [];
@@ -478,7 +597,10 @@ public sealed partial class DatasetLearnedPartialsTests
         random.Shuffle(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(rows));
         VortexDataset dataset = await VortexDataset.CreateAsync(store, Call.Schema, new DatasetOptions
         {
-            Layout = new DatasetLayout { SortKey = [LayoutValue.Column(nameof(Call.Service)), LayoutValue.Column(nameof(Call.At))], IndexedPrefix = 1, ObjectBytes = 256 << 10 },
+            Layout = new DatasetLayout
+            {
+                SortKey = [.. (sortKey ?? [nameof(Call.Service), nameof(Call.At)]).Select(LayoutValue.Column)], IndexedPrefix = indexedPrefix, ObjectBytes = 256 << 10,
+            },
             ContentsObjectBytes = 1,
             SheetObjectBytes = 0,
             Write = chunkTargetBytes > 0 ? new VortexWriteOptions { ChunkTargetBytes = chunkTargetBytes, BlockRows = 1_024 } : new VortexWriteOptions(),

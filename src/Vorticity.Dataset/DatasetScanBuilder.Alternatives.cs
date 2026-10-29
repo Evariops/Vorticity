@@ -56,6 +56,9 @@ internal enum AnswerPath
     /// <summary>The partial of the question's family an object learned, or the sum of those of the objects merged into it.</summary>
     Partial,
 
+    /// <summary>An object's rows of the family's columns, every one, from which it learns the partial of the question's family.</summary>
+    Learn,
+
     /// <summary>The statistics of an object's columns over its granules, the granules they do not answer read as rows.</summary>
     Granules,
 
@@ -260,7 +263,7 @@ internal sealed partial class DatasetScanBuilder
 
     /// <summary>
     /// The partial of the question's family an object learned, or the sum of those of the objects a compaction merged into it,
-    /// each held; an object whose partial is to be learned from its rows is the rows' (<see cref="RowsAlternative"/>).
+    /// each held; an object whose partial is to be learned from its rows is <see cref="LearnAlternative"/>'s.
     /// </summary>
     private sealed class PartialAlternative(DatasetScanBuilder scan) : Alternative(scan, AnswerPath.Partial, UnitLevel.Object)
     {
@@ -330,6 +333,24 @@ internal sealed partial class DatasetScanBuilder
         }
     }
 
+    /// <summary>
+    /// An object's rows of the family's columns, every one, from which it learns the partial of the question's family and
+    /// answers through it: one that may learn (<see cref="Learns"/>). Learning is a placement: the partial answers the
+    /// family's later askings at no read (<see cref="Choose"/>). Asked first, an object learns where its rows weigh no more
+    /// than what answers it otherwise; asked again, where they weigh no more than reading again, at each asking of the
+    /// family before, the rows it is read through otherwise; an object its synopses answer, which a later asking finds read,
+    /// learns where it costs no more.
+    /// </summary>
+    private sealed class LearnAlternative(DatasetScanBuilder scan) : Alternative(scan, AnswerPath.Learn, UnitLevel.Object)
+    {
+        internal override Coverage Covers(Planned unit) => Scan.Learns(unit.Held) ? Coverage.Whole : Coverage.None;
+
+        internal override PathCosts.Cost Cost(Planned unit) => Scan.RowsCost(unit.Held, 1, learning: true);
+
+        internal override string Describe(Planned unit, PathCosts.Cost cost) =>
+            $"its rows, {cost.Bytes} bytes in {cost.Requests} requests, the partial of the question's family learned from them";
+    }
+
     /// <summary>The statistics of an object's columns over its granules, the granules they do not answer read as rows (<see cref="GranuleAnswer"/>).</summary>
     private sealed class GranulesAlternative(DatasetScanBuilder scan) : Alternative(scan, AnswerPath.Granules, UnitLevel.Object)
     {
@@ -371,35 +392,36 @@ internal sealed partial class DatasetScanBuilder
             $"{RowsOf(unit)}, {cost.Bytes} bytes in {cost.Requests} requests, the blocks its zone maps settle taken from them";
     }
 
-    /// <summary>An object's rows: those of the question's columns, or, for an object that learns its family's partial, the family's.</summary>
+    /// <summary>An object's rows of the question's columns, the granules its key's index keeps of them: nothing learned.</summary>
     private sealed class RowsAlternative(DatasetScanBuilder scan) : Alternative(scan, AnswerPath.Rows, UnitLevel.Object)
     {
         internal override Coverage Covers(Planned unit) => Coverage.Whole;
 
         internal override PathCosts.Cost Cost(Planned unit) => Scan.RowsCost(unit.Held, unit.Kept);
 
-        internal override string Describe(Planned unit, PathCosts.Cost cost) =>
-            Scan.Learns(unit.Held)
-                ? $"its rows, {cost.Bytes} bytes in {cost.Requests} requests, the partial of the question's family learned from them"
-                : $"{RowsOf(unit)}, {cost.Bytes} bytes in {cost.Requests} requests";
+        internal override string Describe(Planned unit, PathCosts.Cost cost) => $"{RowsOf(unit)}, {cost.Bytes} bytes in {cost.Requests} requests";
     }
 
     /// <summary>What a unit read as rows reads of them: all, or the granules its key's sparse index keeps.</summary>
     private static string RowsOf(Planned unit) =>
         unit.Kept < 1 ? string.Create(CultureInfo.InvariantCulture, $"the {unit.Kept:P1} of its rows its key's index keeps") : "its rows";
 
-    /// <summary>The alternatives of a unit, in the order that breaks a tie: today's cascade (spec B, 6.3).</summary>
+    /// <summary>
+    /// The alternatives of a unit, in the order that breaks a tie: today's cascade (spec B, 6.3), learning before the reads
+    /// that weigh as much and learn nothing.
+    /// </summary>
     private Alternative[] Alternatives => _alternatives ??=
     [
         new EntryAlternative(this), new RollupAlternative(this), new CountsAlternative(this), new PartialAlternative(this),
-        new GranulesAlternative(this), new ZonesAlternative(this), new RowsAlternative(this),
+        new LearnAlternative(this), new GranulesAlternative(this), new ZonesAlternative(this), new RowsAlternative(this),
     ];
 
     private Alternative[]? _alternatives;
 
     /// <summary>
     /// Chooses how <paramref name="unit"/> is answered: of the alternatives that cover it, the one of least weight at the
-    /// dataset's profile, the first in their order at a tie; with <paramref name="explain"/>, why each other lost.
+    /// dataset's profile, the first in their order at a tie; with <paramref name="explain"/>, why each other lost. Learning
+    /// is weighed last, against the one chosen (<see cref="LearnAlternative"/>).
     /// </summary>
     private void Choose(Planned unit, bool explain)
     {
@@ -407,6 +429,8 @@ internal sealed partial class DatasetScanBuilder
         PathCosts.Cost cost = default;
         double least = double.PositiveInfinity;
         List<string>? rejected = explain ? [] : null;
+        Alternative? learn = null;
+        PathCosts.Cost learning = default;
         foreach (Alternative alternative in Alternatives)
         {
             if (alternative.Level != unit.Level)
@@ -421,6 +445,12 @@ internal sealed partial class DatasetScanBuilder
             }
 
             PathCosts.Cost its = alternative.Cost(unit);
+            if (alternative.Path == AnswerPath.Learn)
+            {
+                (learn, learning) = (alternative, its);
+                continue;
+            }
+
             double weight = _version.Costs.Weight(its);
             if (weight < least)
             {
@@ -434,6 +464,28 @@ internal sealed partial class DatasetScanBuilder
             else
             {
                 rejected?.Add(Weighs(alternative.Name, weight));
+            }
+        }
+
+        // Learning is a placement: the partial answers the family's later askings at no read. Its weight is held against the
+        // rows the object is read through otherwise, which each later asking reads again, as many times as the family was
+        // asked before this one, and against a synopsis, which a later asking finds read, once: it learns where it costs no
+        // more, and once the family asked again would have paid for it.
+        if (learn is not null)
+        {
+            double weight = _version.Costs.Weight(learning);
+            if (weight <= least + (best?.Path is AnswerPath.Rows or AnswerPath.Zones ? AskedBefore() * least : 0))
+            {
+                if (best is not null)
+                {
+                    rejected?.Add(Weighs(best.Name, least));
+                }
+
+                (best, cost, least) = (learn, learning, weight);
+            }
+            else
+            {
+                rejected?.Add(Weighs(learn.Name, weight));
             }
         }
 
@@ -466,15 +518,22 @@ internal sealed partial class DatasetScanBuilder
     }
 
     /// <summary>
-    /// What reading the rows of the object <paramref name="held"/> costs the scan: the question's columns, or the family's for
-    /// an object that learns its partial, each value decoded, the filter's columns judged, and, under an aggregation, each
-    /// value of the columns read folded; and its sheets, read first when the filter asks values of a column. Of an object
-    /// that learns no partial, the <paramref name="kept"/> share of its rows its key's sparse index keeps alone.
+    /// What reading the rows of the object <paramref name="held"/> costs the scan: the question's columns, of the
+    /// <paramref name="kept"/> share of its rows its key's sparse index keeps alone, or, for a lane's piece of an object
+    /// that learns its partial, the family's over every row (<see cref="Piece"/>).
     /// </summary>
-    private PathCosts.Cost RowsCost(in PositionedObject held, double kept = 1)
+    private PathCosts.Cost RowsCost(in PositionedObject held, double kept = 1) => RowsCost(held, kept, learning: Piece(held) is not null);
+
+    /// <summary>
+    /// What reading the rows of the object <paramref name="held"/> costs the scan: the question's columns, or, with
+    /// <paramref name="learning"/>, the family's, each value decoded, the filter's columns judged, and, under an aggregation,
+    /// each value of the columns read folded; and its sheets, read first when the filter asks values of a column. Read to
+    /// learn, every row; otherwise the <paramref name="kept"/> share of them its key's sparse index keeps alone.
+    /// </summary>
+    private PathCosts.Cost RowsCost(in PositionedObject held, double kept, bool learning)
     {
         PathCosts costs = _version.Costs;
-        bool learns = _states is not null && (Learns(held) || Piece(held) is not null);
+        bool learns = learning && _states is not null;
         int[] fields = learns ? FamilyFields() : FieldsRead();
         double share = learns ? 1 : Math.Clamp(kept, 0, 1);
         PathCosts.Cost rows = share < 1 ? costs.Share(held.Entry, fields, share) : costs.Rows(held.Entry, fields);

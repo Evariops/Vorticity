@@ -47,6 +47,44 @@ internal sealed partial class DatasetScanBuilder
     internal bool Learns(in PositionedObject held) => Covered(held) == held.Entry.Rows && MayLearn(held);
 
     /// <summary>
+    /// Whether the object <paramref name="held"/>, which the scan covers whole, learns its partial as one lane's plan answers
+    /// it (<see cref="LearnAlternative"/>), the <paramref name="kept"/> share of its rows its key's sparse index keeps known,
+    /// or 1; and, that share unknown, whether it could change the choice, which then reads the index first, as
+    /// <see cref="UnitsAsync"/> does. The lanes that cut an object learn what one lane learns.
+    /// </summary>
+    internal (bool Learns, bool AsksKept) LearnsAsChosen(in PositionedObject held, double kept)
+    {
+        if (!Learns(held))
+        {
+            return (false, false);
+        }
+
+        Planned unit = new Planned(held, Answer() is { } answer ? AnsweredBy(answer, held) : null) { Kept = kept };
+        Choose(unit, explain: false);
+        return (unit.Chosen.Path == AnswerPath.Learn, kept >= 1 && unit.Weight > _version.Costs.Weight(RowsCost(held, double.Epsilon)));
+    }
+
+    /// <summary>
+    /// How many questions before this one the handle saw ask the scan's family, in a row no hour apart, its own not counted
+    /// (<see cref="LearnedPartials.AskedBefore"/>): found once.
+    /// </summary>
+    private int AskedBefore()
+    {
+        if (_askedBefore is not { } asked)
+        {
+            long now = _dataset.Options.TimeProvider.GetUtcNow().UtcTicks;
+            asked = _family is { } family && _familySource is DatasetScanSource source
+                ? _dataset.Partials.AskedBefore(family.Identity, source.Asking, now - VortexDataset.KeptUpFor.Ticks)
+                : 0;
+            _askedBefore = asked;
+        }
+
+        return asked;
+    }
+
+    private int? _askedBefore;
+
+    /// <summary>
     /// Whether the scan's family may learn a partial of the object <paramref name="held"/>: one with no row marked, of the
     /// version's columns, whose added keys widen no read. A column the family adds that is the key's first, which the object
     /// holds more than one value of, would read every value's rows where the question reads its own, and the object is read
@@ -284,7 +322,7 @@ internal sealed partial class DatasetScanBuilder
         {
             Planned unit = new Planned(held, AnsweredBy(answer, held));
             Choose(unit, explain: false);
-            if (unit.Chosen.Path is not (AnswerPath.Rows or AnswerPath.Zones))
+            if (unit.Chosen.Path is not (AnswerPath.Rows or AnswerPath.Zones or AnswerPath.Learn))
             {
                 return true;
             }
@@ -306,9 +344,11 @@ internal sealed partial class DatasetScanBuilder
     private async IAsyncEnumerable<RecordBatch> StatesAsync(CountsAnswer answer, [EnumeratorCancellation] CancellationToken cancellationToken)
     {
         // The question's family is kept up by the handle a while: the objects it appends learn its partials as they are written.
+        // And it counts once among the family's askings, which share the cost of learning an object (LearnAlternative).
         if (_family is { } asked)
         {
-            _dataset.Partials.Asked(asked, _dataset.Options.TimeProvider.GetUtcNow().UtcTicks);
+            long now = _dataset.Options.TimeProvider.GetUtcNow().UtcTicks;
+            _dataset.Partials.Asked(asked, now, _familySource is DatasetScanSource source ? source.Asking : 0, now - VortexDataset.KeptUpFor.Ticks);
         }
 
         (RollupChoice? rollups, List<Planned> units) = await UnitsAsync(answer, explain: false, read: true, cancellationToken).ConfigureAwait(false);
@@ -336,7 +376,7 @@ internal sealed partial class DatasetScanBuilder
                 for (; openSeen < units.Count && openSeen < o + opensAhead; openSeen++)
                 {
                     Planned next = units[openSeen];
-                    if (next.Chosen.Path is AnswerPath.Rows or AnswerPath.Zones && next.Opened is null && !_version.HoldsOpen(next.Held.Entry))
+                    if (next.Chosen.Path is AnswerPath.Rows or AnswerPath.Zones or AnswerPath.Learn && next.Opened is null && !_version.HoldsOpen(next.Held.Entry))
                     {
                         next.Opened = OpenAheadAsync(next.Held, stopped.Token);
                     }
@@ -462,8 +502,8 @@ internal sealed partial class DatasetScanBuilder
                     continue;
                 }
 
-                RowRange? piece = path == AnswerPath.Partial ? null : Piece(held);
-                if (path == AnswerPath.Partial || Learns(held) || piece is not null)
+                RowRange? piece = path is AnswerPath.Partial or AnswerPath.Learn ? null : Piece(held);
+                if (path is AnswerPath.Partial or AnswerPath.Learn || piece is not null)
                 {
                     // An object of the question's family answers from the partial it learned, read ahead with the counts, or
                     // learns it from its rows, or a lane's piece of it the partial of its rows; the partials of the objects
@@ -481,7 +521,7 @@ internal sealed partial class DatasetScanBuilder
                     for (learnSeen = Math.Max(learnSeen, o + 1); learnSeen < units.Count && learningAhead < _options.Prefetch; learnSeen++)
                     {
                         Planned next = units[learnSeen];
-                        if (next.Chosen.Path is AnswerPath.Rows or AnswerPath.Zones && next.Learning is null && Learns(next.Held))
+                        if (next.Chosen.Path == AnswerPath.Learn && next.Learning is null)
                         {
                             learningAhead++;
                             next.Learning = PartialAsync(next.Held, stopped.Token);
@@ -501,7 +541,7 @@ internal sealed partial class DatasetScanBuilder
                 // where the rows the walk passed over begin, which a rollup answers.
                 int last = o;
                 while (last + 1 < units.Count && units[last + 1].Run is null && units[last + 1].Chosen.Path is AnswerPath.Rows or AnswerPath.Zones
-                    && !Learns(units[last + 1].Held) && Piece(units[last + 1].Held) is null
+                    && Piece(units[last + 1].Held) is null
                     && (rollups is null || units[last + 1].Held.FirstRow == units[last].Held.FirstRow + units[last].Held.Entry.Rows))
                 {
                     last++;

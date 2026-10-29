@@ -162,19 +162,29 @@ internal sealed class LearnedPartials
     /// </summary>
     internal const int MaxLive = 64;
 
-    // The families the handle's questions asked, by their identity, with when each was asked last: an object it appends learns
-    // their partials as it is written (KeptUpAsync).
-    private readonly ConcurrentDictionary<UInt128, (Aggregating.LearnedFamily Family, long Ticks)> _live = new();
+    // The families the handle's questions asked, by their identity, with when each was asked last, how many questions asked
+    // it since it was asked after an hour or more without, and the last of them: an object it appends learns their partials
+    // as it is written (KeptUpAsync), and a family asked again shares the cost of learning an object with its askings
+    // (DatasetScanBuilder.LearnAlternative).
+    private readonly ConcurrentDictionary<UInt128, (Aggregating.LearnedFamily Family, long Ticks, int Askings, long Asking)> _live = new();
 
-    /// <summary>Notes that a question asked <paramref name="family"/> at <paramref name="ticks"/>, the least recent of the families kept up let go past <see cref="MaxLive"/>.</summary>
-    internal void Asked(Aggregating.LearnedFamily family, long ticks)
+    /// <summary>
+    /// Notes that the question <paramref name="asking"/> asked <paramref name="family"/> at <paramref name="ticks"/>: once a
+    /// question, whatever its lanes and passes; a family last asked before <paramref name="since"/> counts from one again.
+    /// The least recent of the families kept up is let go past <see cref="MaxLive"/>.
+    /// </summary>
+    internal void Asked(Aggregating.LearnedFamily family, long ticks, long asking, long since)
     {
-        _live[family.Identity] = (family, ticks);
+        _live.AddOrUpdate(
+            family.Identity,
+            static (_, now) => (now.Family, now.Ticks, 1, now.Asking),
+            static (_, last, now) => (now.Family, now.Ticks, last.Asking == now.Asking ? last.Askings : last.Ticks >= now.Since ? last.Askings + 1 : 1, now.Asking),
+            (Family: family, Ticks: ticks, Asking: asking, Since: since));
         if (_live.Count > MaxLive)
         {
             UInt128 oldest = default;
             long least = long.MaxValue;
-            foreach (KeyValuePair<UInt128, (Aggregating.LearnedFamily Family, long Ticks)> live in _live)
+            foreach (KeyValuePair<UInt128, (Aggregating.LearnedFamily Family, long Ticks, int Askings, long Asking)> live in _live)
             {
                 if (live.Value.Ticks < least)
                 {
@@ -186,11 +196,20 @@ internal sealed class LearnedPartials
         }
     }
 
+    /// <summary>
+    /// How many questions other than <paramref name="asking"/> asked the family <paramref name="identity"/> at or after
+    /// <paramref name="since"/>, in ticks, in a row of askings no hour apart: none for one asked first.
+    /// </summary>
+    internal int AskedBefore(UInt128 identity, long asking, long since) =>
+        _live.TryGetValue(identity, out (Aggregating.LearnedFamily Family, long Ticks, int Askings, long Asking) live) && live.Ticks >= since
+            ? live.Askings - (live.Asking == asking ? 1 : 0)
+            : 0;
+
     /// <summary>The families the handle keeps up: asked at or after <paramref name="since"/>, in ticks.</summary>
     internal List<Aggregating.LearnedFamily> Live(long since)
     {
         List<Aggregating.LearnedFamily> live = [];
-        foreach ((Aggregating.LearnedFamily family, long ticks) in _live.Values)
+        foreach ((Aggregating.LearnedFamily family, long ticks, _, _) in _live.Values)
         {
             if (ticks >= since)
             {

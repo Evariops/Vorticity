@@ -373,18 +373,31 @@ the same columns, with its equality filters on columns of few values in the obje
 Built so far (`LearnedFamily`, `LearnedPartials`): the core forms the family of a question whose
 aggregates a part's states answer whole, the plan's keys followed by a key for each conjunct that asks a
 top-level column for a value or a few, and names it on the pass that asks states (`ScanSpec.Family`).
-The dataset learns the partial of each object it would read as rows, one with no row marked whose added
-keys widen no read: a value of the key's first column that the object holds with others is read as the
-question reads it, since the family would read every value's rows. It runs the family over the object's
-rows as a part (`AggregationPartials.ExportAsync`), with the synopses off, keeps the partial in the
-handle (64 MiB) and the session's synopsis cache, under the object's identity and the family's, its
-bytes checked by their XXH3-128, and serves it as a partial's states, the groups of the values asked
-selected; a partial past 1 MiB, some 10⁴ groups, answers its question and is not kept, and the object
-learns that family no more. The plan says `partial`, learned or to learn. Learning reads the object's
-rows of the family's columns, which a question with a scattered column's value reads anyway: on four
-services of 20 000 calls, counts and sums by route under one status read 542 KB the first time, as the
-rows do, and nothing under another status, nor from a handle opened later on the same cache
-*(measured, `DatasetLearnedPartialsTests`)*. Only the objects a job wrote learn, on a version that keeps
+An object with no row marked whose added keys widen no read may learn the family's partial: a value of
+the key's first column that the object holds with others is read as the question reads it, since the
+family would read every value's rows. It runs the family over the object's rows as a part
+(`AggregationPartials.ExportAsync`), with the synopses off, keeps the partial in the handle (64 MiB) and
+the session's synopsis cache, under the object's identity and the family's, its bytes checked by their
+XXH3-128, and serves it as a partial's states, the groups of the values asked selected; a partial past
+1 MiB, some 10⁴ groups, answers its question and is not kept, and the object learns that family no
+more. Learning reads the object's rows of the family's columns, which a question with a scattered
+column's value reads anyway: on four services of 20 000 calls, counts and sums by route under one status
+read 542 KB the first time, as the rows do, and nothing under another status, nor from a handle opened
+later on the same cache *(measured, `DatasetLearnedPartialsTests`)*.
+
+Learning is a placement, an alternative of the plan beside the others (`learn`, then `partial` once
+learned): it reads every row of the object, where the rows' alternatives read the granules its key's
+index keeps of the question's value, and a synopsis reads less. Asked first, an object learns where that
+costs no more than what answers it otherwise; asked again by the handle, within the hour it keeps a
+family up, it learns once the askings before would have read its rows again for as much: its rows weigh
+no more than those it is read through otherwise, times the askings of the family so far. Against a
+synopsis, which a later asking finds read, it learns only where it costs no more. A family that asks the
+key's second column for a value learns that value's groups and every other's: on three objects keeping
+48, 19 and 28 % of their rows for a host, the first asking reads those granules and learns nothing, the
+second learns the first object, the third the second, the fourth the last, and a handle opened after
+answers each from its partial *(measured, `DatasetLearnedPartialsTests`)*. Learned at any price, the first
+asking of an emitter's errors per hour over a month of requests at a hundredth of the target rate read
+4.7 GB at 32 lanes, where the key kept 75 MB, and took 3.9 s where the rows take 0.19 *(measured)*. Only the objects a job wrote learn, on a version that keeps
 counts: letting appended objects learn too, and versions without counts, raised what a dozen ratchets of
 the rows' path allocate warm two to five times, and made the test of 5.7 million groups learn partials
 past its budget. Through a compaction, a job notes which outputs each input's rows went to, the merge's
@@ -402,10 +415,14 @@ partials until they tile the object, then has the handle merge them in the backg
 object's rows would give, and keep the sum as the object's partial, which the handle's disposal waits for.
 An object that learns is cut over all its rows, as one lane reads them all to learn it, not over the
 granules its key's index keeps; a scan whose rows cut an object without the question's lanes, a window's
-edge, learns nothing of it. Objects of blocks of a thousand rows, cut into ten pieces each at 32 lanes: a
-family asked there alone is learned, asked again with another value it reads 43 KB where the rows read
-1.1 MB, and each partial holds the groups and states of the one a lane learns of its object whole
-*(measured, `DatasetLearnedPartialsTests`)*.
+edge, learns nothing of it. The lanes learn what one lane learns: the source weighs each object as one
+lane's plan does, its key's index read first, beside the others', where the share it keeps could change
+the choice. Cut to learn whatever one lane would, the first asking of a service's routes under 5xx by hour
+read 343 MB at 32 lanes, where its granules' statistics settle all but 47, and its first answer took
+358 ms where it takes 108 *(measured)*. Objects of blocks of a thousand rows, cut into ten pieces each at
+32 lanes: a family asked there alone is learned, asked again with another value it reads 43 KB where the
+rows read 1.1 MB, and each partial holds the groups and states of the one a lane learns of its object
+whole *(measured, `DatasetLearnedPartialsTests`)*.
 
 Each object makes its own family (`FamilyProof`): the conjuncts its summaries prove true over its every
 row leave it, so that a window that moves keeps the partials of the objects it holds whole; an object a

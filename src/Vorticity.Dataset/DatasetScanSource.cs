@@ -32,6 +32,11 @@ internal sealed partial class DatasetScanSource
 
     private PiecePartials? _pieces;
 
+    /// <summary>The question's number in the process, which counts it once among the askings of its family, whatever its lanes.</summary>
+    internal long Asking { get; } = Interlocked.Increment(ref s_askings);
+
+    private static long s_askings;
+
     internal override VortexSchema Schema => _version.Schema.Columns;
 
     internal override VortexSession Session => _dataset.Session;
@@ -370,6 +375,7 @@ internal sealed partial class DatasetScanSource
 
         HashSet<long> answered = [];
         HashSet<long> learning = [];
+        HashSet<long> undecided = [];
         List<(PositionedObject Held, RowRange Rows, List<RowRange>? Kept, Task<List<RowRange>>? Reading)> walked = [];
         await foreach (PositionedObject held in _version.WalkAsync(pruner, from, to, null, cancellationToken).ConfigureAwait(false))
         {
@@ -395,12 +401,19 @@ internal sealed partial class DatasetScanSource
             // An object that learns the partial of the question's family is cut over all its rows, whatever the key's pruning
             // keeps: each piece learns the partial of its rows, and once they tile the object they merge into its partial
             // (PiecePartials), which the next question finds whole. Cut over the granules its index keeps, the pieces would
-            // cover a part of it, and nothing would be learned at several lanes.
-            if (whole && spec.Answering?.Family is not null && planner.Learns(held))
+            // cover a part of it, and nothing would be learned at several lanes. It learns where one lane's plan would, its
+            // key's index read first where the share it keeps could weigh less than learning: cut to learn whatever that
+            // share, the routes of a service under 5xx read 343 MB at 32 lanes the first time, where the kept granules hold 47.
+            bool deciding = false;
+            if (whole && spec.Answering?.Family is not null)
             {
-                walked.Add((held, new RowRange(start, end), null, null));
-                learning.Add(held.FirstRow);
-                continue;
+                (bool learns, deciding) = planner.LearnsAsChosen(held, kept: 1);
+                if (learns && !deciding)
+                {
+                    walked.Add((held, new RowRange(start, end), null, null));
+                    learning.Add(held.FirstRow);
+                    continue;
+                }
             }
 
             // An object reads the granules the key's pruning keeps alone, by its sparse index: those are the rows its lanes
@@ -409,6 +422,10 @@ internal sealed partial class DatasetScanSource
             // round trip each: fourteen for a time window over seven objects.
             ValueTask<List<RowRange>> keeping = KeptAsync(held, pruning, planner, new RowRange(start, end), cancellationToken);
             walked.Add(keeping.IsCompletedSuccessfully ? (held, new RowRange(start, end), await keeping.ConfigureAwait(false), null) : (held, new RowRange(start, end), null, keeping.AsTask()));
+            if (deciding)
+            {
+                undecided.Add(held.FirstRow);
+            }
         }
 
         foreach ((PositionedObject held, RowRange rows, List<RowRange>? done, Task<List<RowRange>>? reading) in walked)
@@ -425,6 +442,16 @@ internal sealed partial class DatasetScanSource
 #pragma warning disable VSTHRD003
             List<RowRange> read = done ?? await reading!.ConfigureAwait(false);
 #pragma warning restore VSTHRD003
+
+            // An object that may learn, judged once its index said the share of its rows the question would read otherwise.
+            if (undecided.Contains(held.FirstRow) && planner.LearnsAsChosen(held, Share(held, read)).Learns)
+            {
+                objects.Add((held, rows));
+                learning.Add(held.FirstRow);
+                total += rows.Length;
+                continue;
+            }
+
             foreach (RowRange range in read)
             {
                 objects.Add((held, range));
@@ -581,6 +608,18 @@ internal sealed partial class DatasetScanSource
         }
 
         return kept;
+    }
+
+    /// <summary>The share of the rows of the object <paramref name="held"/> that <paramref name="kept"/>, ranges of the dataset's rows inside it, hold.</summary>
+    private static double Share(in PositionedObject held, List<RowRange> kept)
+    {
+        long rows = 0;
+        foreach (RowRange range in kept)
+        {
+            rows += range.Length;
+        }
+
+        return (double)rows / System.Math.Max(held.Entry.Rows, 1);
     }
 
     /// <summary>The rows <paramref name="rows"/> of an object as an estimate's ranges, between its chunks: a deleted row counts for none.</summary>
