@@ -360,7 +360,11 @@ decoded, through the selective decoders the encodings already have. For scattere
 that is 9.7 % of the blocks of 1 024 against 56 % of the granules *(computed)*. A second pass runs only when it spares
 what it costs: while the blocks kept lie farther apart than the profile's joined gap in the widest column it reads,
 which the summaries estimate before the first pass and the first pass follows. Under an order and a limit, the column
-of the order is read first, the positions kept, and the other columns read for those positions alone.
+of the order is read first, the positions kept, and the other columns read for those positions alone. With no filter,
+the objects' granule statistics are read side by side first: each granule holds a value at its bound, so the `k`-th best
+bound among them is a floor no row of the top falls below. Only the granules that reach it are read, side by side. A
+filter may leave out the row that holds a granule's bound, so a filtered top reads object after object, under the bound
+its rows set.
 
 ---
 

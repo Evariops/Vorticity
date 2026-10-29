@@ -170,6 +170,45 @@ public sealed partial class DatasetGranuleReadsTests
     }
 
     /// <summary>
+    /// The ten largest of the random sequences over the seven hourly partitions, by a cold handle on one lane: the objects'
+    /// granules' statistics read side by side set a floor, the tenth best of their greatest values, and the granules that
+    /// reach it alone are read, side by side, 19 blocks decoded of 73 granules and 7 round trips waited on, where the best
+    /// object's best granule set an edge that most granules passed, read object after object: 83 blocks and 21 round trips.
+    /// The answer is LINQ's.
+    /// </summary>
+    [Fact]
+    public async Task ATopReadsTheGranulesWhoseBoundsReachItsFloor()
+    {
+        await using MemoryObjectStore memory = new MemoryObjectStore();
+        await using CountingObjectStore store = new CountingObjectStore(memory);
+        (VortexDataset dataset, Row[] rows) = await DayAsync(store, identifiers: null, IdentifierLocation.Granule, CalendarUnit.Hour, shuffled: true);
+        await dataset.DisposeAsync();
+        await using VortexSession session = VortexSession.Create(static options => options.MaxDegreeOfParallelism = 1);
+        await using VortexDataset cold = await VortexDataset.OpenAsync(store, new DatasetOptions { Session = session }, Ct);
+        int objects = await cold.ScanBuilder().ObjectsAsync(Ct).CountAsync(Ct);
+
+        memory.Latency = TimeSpan.FromMilliseconds(20);
+        List<long> top;
+        Projection<long> asked = cold.Scan<Row>().OrderByDescending(r => r.Sequence).Select(r => r.Sequence).Take(10);
+        try
+        {
+            store.Reset();
+            top = await asked.ToListAsync(Ct);
+        }
+        finally
+        {
+            memory.Latency = TimeSpan.Zero;
+        }
+
+        long granules = rows.Length / 8192;
+        Console.WriteLine($"TOP OVER {objects} OBJECTS: {store.CountOf(ObjectOperation.Read)} reads, {store.BytesRead} bytes, {store.DependentSteps} dependent steps, {asked.Metrics.BlocksDecoded} blocks decoded of {granules} granules");
+        Assert.Equal(7, objects);
+        Assert.Equal(rows.Select(static r => r.Sequence).OrderDescending().Take(10), top);
+        Assert.True(asked.Metrics.BlocksDecoded <= granules / 3, $"{asked.Metrics.BlocksDecoded} blocks decoded of {granules} granules");
+        Assert.InRange(store.DependentSteps, 1, 8);
+    }
+
+    /// <summary>
     /// Ids that lie in different units of one object, looked up together: their spans are read in one set of requests, and a
     /// buffer each of them reads whole, the ends of a sorted column's runs, is one request both share; each span's other
     /// ranges keep their own. The rows are LINQ's, at units of granules and at granules.

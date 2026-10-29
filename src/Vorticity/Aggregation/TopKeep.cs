@@ -60,6 +60,9 @@ internal sealed class TopKeep : IDisposable
         (_store, _arena) = Create();
     }
 
+    /// <summary>The rows kept.</summary>
+    internal int Keep => _keep;
+
     /// <summary>
     /// The value of the last row kept, once the top holds every row it keeps: what a reader may push into its filter, a row
     /// past it entering no more. Null before, or when that value is null, or of a type no filter compares.

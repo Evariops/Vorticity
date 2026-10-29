@@ -90,16 +90,17 @@ internal static class TopRows
     {
         using QueryMemory memory = new QueryMemory(source.Session.Options.MemoryBudget ?? QueryMemoryBudget.Process);
         using TopKeep top = new TopKeep(source.Session, TypeOf(source, path), descending, Kept(keep), memory);
-        await FeedAsync(source, spec, path, top, metrics, cancellationToken).ConfigureAwait(false);
+        await FeedAsync(source, spec, path, top, null, metrics, cancellationToken).ConfigureAwait(false);
         return top.Places(cancellationToken);
     }
 
     /// <summary>
     /// Gives <paramref name="top"/> the rows <paramref name="spec"/> keeps of <paramref name="source"/>: the column of the
-    /// order read alone beside the filter, the batches whole with their selection, which number their rows.
+    /// order read alone beside the filter, the batches whole with their selection, which number their rows; each under
+    /// <paramref name="gate"/>, when reads beside this one feed the same top.
     /// </summary>
     internal static async ValueTask FeedAsync(
-        ScanSource source, ScanSpec spec, string path, TopKeep top, ScanCounters metrics, CancellationToken cancellationToken)
+        ScanSource source, ScanSpec spec, string path, TopKeep top, Lock? gate, ScanCounters metrics, CancellationToken cancellationToken)
     {
         ScanSpec pass = spec with
         {
@@ -117,7 +118,16 @@ internal static class TopRows
         {
             int rows = batch.RowCount;
             int node = FilterEvaluator.Resolve(batch.Arena, batch.RootIndex, column, rows);
-            top.Add(batch.Arena, node, rows, batch.SelectionWords, batch.StartRow, cancellationToken);
+            if (gate is null)
+            {
+                top.Add(batch.Arena, node, rows, batch.SelectionWords, batch.StartRow, cancellationToken);
+                continue;
+            }
+
+            lock (gate)
+            {
+                top.Add(batch.Arena, node, rows, batch.SelectionWords, batch.StartRow, cancellationToken);
+            }
         }
     }
 
