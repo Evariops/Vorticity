@@ -72,6 +72,65 @@ public sealed partial class DatasetTwoPhaseTests
         Assert.True(equalReads * 3 < rangeReads, $"{equalReads} reads in two passes, {rangeReads} in one");
     }
 
+    /// <summary>
+    /// The same over a variant: 100 000 events whose attributes hold a user of twenty thousand and a body of 294 random
+    /// bytes, in objects of some 5 000 rows whose jobs shred both keys, and a rare user's thirty events in a row, which one
+    /// object holds, asked by a prefix that no locate of the user answers. Each object's first pass judges the filter on the
+    /// user's ranges alone, where it read the attributes whole: the rare user's records read 3.2 MB where they read 35.2,
+    /// less than a quarter of the bytes the bodies alone take.
+    /// </summary>
+    [Fact]
+    public async Task ARareKeyOfAVariantIsJudgedOnItsRangesAlone()
+    {
+        Random random = new Random(0xD6D);
+        Hit[] rows = [.. Enumerable.Range(0, 100_000).Select(i => new Hit(Start.AddSeconds(i), Variant.Object(
+        [
+            ("user", Variant.From(i is >= 61_000 and < 61_030 ? "rare" : $"u-{random.Next(20_000)}")),
+            ("body", Variant.From(Convert.ToBase64String(RandomBytes(random, 294)))),
+        ])))];
+        await using MemoryObjectStore memory = new MemoryObjectStore();
+        await using CountingObjectStore store = new CountingObjectStore(memory);
+        DatasetOptions options = new DatasetOptions
+        {
+            Layout = new DatasetLayout { SortKey = [LayoutValue.Column(nameof(Hit.At))], ObjectBytes = 2 << 20 },
+            ContentsObjectBytes = 1,
+            ChunkBytes = 64 << 10,
+            Write = new VortexWriteOptions { BlockRows = 512, ChunkTargetBytes = 64 << 10 },
+        };
+        await using (VortexDataset writing = await VortexDataset.CreateAsync(store, Hit.Schema, options, Ct))
+        {
+            for (int from = 0; from < rows.Length; from += 25_000)
+            {
+                await using ObjectDraft draft = writing.StartObject();
+                await draft.Writer.WriteAsync<Hit>(rows.AsSpan(from, 25_000).ToArray(), Ct);
+                await writing.AppendAsync(draft, Ct);
+            }
+
+            while (await writing.CompactAsync(new CompactionOptions { LevelZeroCeiling = 1 }, Ct) is not null)
+            {
+            }
+        }
+
+        string[] expected = [.. rows[61_000..61_030].Select(r => r.Attributes["body"]?.AsString()!)];
+        await using VortexSession session = VortexSession.Create(_ => { });
+        await using VortexDataset dataset = await VortexDataset.OpenAsync(store, options with { Session = session }, Ct);
+        store.Reset();
+        List<string> bodies = [];
+        await foreach (Hit row in dataset.Scan<Hit>().Where(r => r.Attributes["user"].AsString().StartsWith("rare")).ToRecordsAsync(Ct))
+        {
+            bodies.Add(row.Attributes["body"]?.AsString()!);
+        }
+
+        long needle = store.BytesRead;
+        store.Reset();
+        int read = (await dataset.Scan<Hit>().Select(r => r.Attributes["body"].AsString()).ToListAsync(Ct)).Count;
+        long whole = store.BytesRead;
+        Console.WriteLine($"TWO PASSES OVER A KEY: {expected.Length} rows, {needle:N0} bytes; the bodies {whole:N0} bytes");
+        Assert.Equal(expected, bodies);
+        Assert.Equal(rows.Length, read);
+        Assert.True(needle * 4 < whole, $"{needle} bytes for the rare user, {whole} for the bodies");
+    }
+
     /// <summary>A code of twenty thousand, any but the rare one, which lies among them: no zone map leaves it out.</summary>
     private static int Other(Random random) => random.Next(20_000) is var code && code != Rare ? code : Rare + 1;
 
@@ -99,4 +158,7 @@ public sealed partial class DatasetTwoPhaseTests
 
     [VortexRecord]
     public partial record struct Event(DateTimeOffset At, int Code, string Body);
+
+    [VortexRecord]
+    public partial record struct Hit(DateTimeOffset At, Variant Attributes);
 }

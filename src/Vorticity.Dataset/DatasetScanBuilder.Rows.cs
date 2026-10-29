@@ -1025,6 +1025,27 @@ internal sealed partial class DatasetScanBuilder
     private readonly record struct FirstPass(long Kept, ulong[] Granules, bool ByPlaces, long[] Rows);
 
     /// <summary>
+    /// The keys a first pass reads the variant columns of <paramref name="filter"/> through: those the filter names alone
+    /// (<see cref="Indexes.VariantKeyReads.Of"/>), worked out once for the filter the objects share.
+    /// </summary>
+    private IReadOnlyDictionary<string, string[]>? FilterKeys(VortexExpr filter)
+    {
+        if (Volatile.Read(ref _filterKeys) is { } known && ReferenceEquals(known.Filter, filter))
+        {
+            return known.Keys;
+        }
+
+        IReadOnlyDictionary<string, string[]>? keys = Indexes.VariantKeyReads.Of([], filter);
+        Volatile.Write(ref _filterKeys, new KeysOf(filter, keys));
+        return keys;
+    }
+
+    private KeysOf? _filterKeys;
+
+    /// <summary>A filter and the keys its first pass reads its variant columns through.</summary>
+    private sealed record KeysOf(VortexExpr Filter, IReadOnlyDictionary<string, string[]>? Keys);
+
+    /// <summary>
     /// The first of two passes over the object <paramref name="held"/> (spec D, 5): its columns <paramref name="filtered"/>
     /// alone, from the granules <paramref name="granted"/> leaves, what <paramref name="filter"/> keeps: the granules of
     /// <paramref name="granuleRows"/> rows that hold a row it kept, and, while the rows kept are no more than the object's
@@ -1070,10 +1091,15 @@ internal sealed partial class DatasetScanBuilder
         RowRange[] parts = cut > 0 && cut - lower <= (upper - lower) / 2
             ? [new RowRange(lower, cut), new RowRange(cut, upper)]
             : [new RowRange(lower, upper)];
+
+        // The pass reads the filter's columns alone, so a variant of them through the keys the filter names, where the
+        // projection may read it whole: put back together row by row, a user's records over a week of log records spent
+        // three quarters of their cycles there.
+        IReadOnlyDictionary<string, string[]>? keys = FilterKeys(filter);
         for (int p = 0; p < parts.Length; p++)
         {
             ScanBuilder scan = Of(file, held, filter, filtered, canonical: false, within: parts[p])
-                .WithCompaction(false).WithGranuleMask(granted).WithGranules(GeometryOf(held));
+                .WithCompaction(false).WithGranuleMask(granted).WithGranules(GeometryOf(held)).WithVariantKeys(keys);
             await foreach (RecordBatch batch in scan.ExecuteAsync().WithCancellation(cancellationToken).ConfigureAwait(false))
             {
                 ReadOnlySpan<ulong> words = batch.SelectionWords;
