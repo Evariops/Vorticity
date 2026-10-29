@@ -456,9 +456,10 @@ internal static partial class PathsBench
 
     /// <summary>
     /// <c>--loop-cold</c>: the cold ask again and again for as long, for a profiler, and its mean: each by a session and a
-    /// handle opened for it, with an empty synopsis cache, disposed and deleted after it.
+    /// handle opened for it, with an empty synopsis cache, disposed and deleted after it; under <c>--forget-learned</c>, each
+    /// the family's first.
     /// </summary>
-    private static async Task LoopColdAsync(Settings settings, CountingObjectStore store, Question question, ScanOptions options, int degree)
+    private static async Task LoopColdAsync(Settings settings, CountingObjectStore store, Built built, Question question, ScanOptions options, int degree)
     {
         if (settings.LoopColdSeconds <= 0)
         {
@@ -468,6 +469,7 @@ internal static partial class PathsBench
         long until = Stopwatch.GetTimestamp() + (long)(settings.LoopColdSeconds * Stopwatch.Frequency);
         int asks = 0;
         double milliseconds = 0;
+        double cpu = 0;
         long allocated = 0;
         while (Stopwatch.GetTimestamp() < until)
         {
@@ -480,10 +482,12 @@ internal static partial class PathsBench
                     o.MaxConcurrentReads = settings.MaxReads > 0 ? settings.MaxReads : o.MaxConcurrentReads;
                     o.SynopsisCache = new SynopsisCache(cache, 8L << 30);
                 });
+                ForgetLearned(settings, built);
                 await using VortexDataset dataset = await VortexDataset.OpenAsync(store, new DatasetOptions { Session = session });
                 Measured again = await MeasureAsync(store, dataset, question, options, !settings.NoDigest);
                 asks++;
                 milliseconds += again.Milliseconds;
+                cpu += again.CpuMilliseconds;
                 allocated += again.Allocated;
             }
             finally
@@ -499,7 +503,8 @@ internal static partial class PathsBench
         }
 
         Console.WriteLine(string.Create(
-            CultureInfo.InvariantCulture, $"    cold loop: {asks} asks, {milliseconds / asks:F3} ms and {allocated / (double)asks / 1e3:F1} KB allocated each"));
+            CultureInfo.InvariantCulture,
+            $"    cold loop: {asks} asks, {milliseconds / asks:F3} ms, {cpu / asks:F1} ms of processor and {allocated / (double)asks / 1e3:F1} KB allocated each"));
     }
 
     /// <summary>
@@ -510,9 +515,18 @@ internal static partial class PathsBench
     private static void ForgetLearned(Settings settings, Built built)
     {
         string learned = Path.Combine(built.Directory, "learned");
-        if (settings.ForgetLearned && Directory.Exists(learned))
+        for (int attempt = 0; settings.ForgetLearned && Directory.Exists(learned); attempt++)
         {
-            Directory.Delete(learned, recursive: true);
+            // A partial written a moment before may still be held open, by the scanner of a machine that opens each new
+            // file: under --loop-cold, which forgets dozens of times a minute, a deletion failed so one run in three.
+            try
+            {
+                Directory.Delete(learned, recursive: true);
+            }
+            catch (IOException) when (attempt < 50)
+            {
+                System.Threading.Thread.Sleep(100);
+            }
         }
     }
 
@@ -574,7 +588,7 @@ internal static partial class PathsBench
             remote.Trace = trace;
             Measured cold = settings.Temperatures is "all" or "cold" ? await MeasureAsync(store, dataset, question, options, !settings.NoDigest) : default;
             remote.Trace = null;
-            await LoopColdAsync(settings, store, question, options, degree);
+            await LoopColdAsync(settings, store, built, question, options, degree);
             if (settings.Temperatures is "cold")
             {
                 return (cold, default);
