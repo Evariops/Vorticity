@@ -250,7 +250,9 @@ internal sealed partial class DatasetScanBuilder
         SemaphoreSlim? reading = null;
 
         // The objects the index of a consolidated partition covers are found by it, a page a partition; an object whose blocks
-        // hold no value sought is passed over unread.
+        // hold no value sought is passed over unread. The walk asks the index of each partition it meets before any is awaited:
+        // read side by side, thirty days of indexes in one wave, where each awaited in turn cost two round trips, its
+        // directory then its page, 61 for the rows of a request over a month.
         PartitionLookup? partitions = PartitionLookup.Of(_dataset, _version, lookup);
         try
         {
@@ -259,28 +261,41 @@ internal sealed partial class DatasetScanBuilder
             {
                 if (Covered(held) > 0)
                 {
-                    if (partitions is not null && Covered(held) == held.Entry.Rows && !held.Entry.HasDeletions && OwnColumns(held)
-                        && await partitions.BlocksAsync(held, cancellationToken).ConfigureAwait(false) is { } located)
+                    objects.Add((held, null, false));
+                    if (partitions is not null && Covered(held) == held.Entry.Rows && !held.Entry.HasDeletions && OwnColumns(held))
                     {
-                        if (located.Blocks.Length == 0)
-                        {
-                            if (_metrics is { } metrics)
-                            {
-                                metrics.ObjectsPassedByPartitionIndex++;
-                            }
+                        partitions.Ahead(held, stopped.Token);
+                    }
+                }
+            }
 
-                            continue;
+            int kept = 0;
+            for (int o = 0; o < objects.Count; o++)
+            {
+                PositionedObject held = objects[o].Held;
+                if (partitions is not null && Covered(held) == held.Entry.Rows && !held.Entry.HasDeletions && OwnColumns(held)
+                    && await partitions.BlocksAsync(held, cancellationToken).ConfigureAwait(false) is { } located)
+                {
+                    if (located.Blocks.Length == 0)
+                    {
+                        if (_metrics is { } metrics)
+                        {
+                            metrics.ObjectsPassedByPartitionIndex++;
                         }
 
-                        objects.Add((held, _dataset.ReadBlocksAsync(held.Entry, located.Blocks, located.BlockRows, lookup, columns, stopped.Token).AsTask(), true));
                         continue;
                     }
 
-                    bool looked = LookupFor(held) is not null;
-                    objects.Add((held, looked ? _dataset.LookupAsync(held.Entry, lookup, columns, stopped.Token).AsTask() : null, looked));
-                    read += looked ? 0 : 1;
+                    objects[kept++] = (held, _dataset.ReadBlocksAsync(held.Entry, located.Blocks, located.BlockRows, lookup, columns, stopped.Token).AsTask(), true);
+                    continue;
                 }
+
+                bool looked = LookupFor(held) is not null;
+                objects[kept++] = (held, looked ? _dataset.LookupAsync(held.Entry, lookup, columns, stopped.Token).AsTask() : null, looked);
+                read += looked ? 0 : 1;
             }
+
+            objects.RemoveRange(kept, objects.Count - kept);
 
             // Objects read as rows, two or more, read ahead together; one alone is read when its turn comes, as a scan reads it.
             for (int i = 0; i < objects.Count && read > 1; i++)
@@ -323,8 +338,13 @@ internal sealed partial class DatasetScanBuilder
         finally
         {
             // A scan stopped or failed: the lookups and the reads still on their way are called off and end, and what they
-            // found is let go.
+            // found is let go; so are the partitions' indexes asked ahead.
             await stopped.CancelAsync().ConfigureAwait(false);
+            if (partitions is not null)
+            {
+                await partitions.SettleAsync().ConfigureAwait(false);
+            }
+
             foreach ((_, Task<List<RecordBatch>?>? found, _) in objects)
             {
                 if (found is null)

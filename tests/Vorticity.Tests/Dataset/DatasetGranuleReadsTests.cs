@@ -120,6 +120,56 @@ public sealed partial class DatasetGranuleReadsTests
     }
 
     /// <summary>
+    /// The same rows partitioned by the hour, seven partitions each consolidated with its index, the sequences drawn at random
+    /// as a request's ids are, so that no object's bounds pass over a needle: on one lane, it asks the index of every
+    /// partition before it awaits any, and waits on six round trips at most, as over one, where each partition's index read
+    /// in turn cost two, its directory then its page, sixteen in all; the rows of a request over a month waited on 63 (T4 of
+    /// S2), on 4 once read side by side.
+    /// </summary>
+    [Fact]
+    public async Task ANeedleReadsThePartitionsIndexesSideBySide()
+    {
+        await using MemoryObjectStore memory = new MemoryObjectStore();
+        await using CountingObjectStore store = new CountingObjectStore(memory);
+        (VortexDataset dataset, Row[] rows) = await DayAsync(store, identifiers: [nameof(Row.Sequence)], IdentifierLocation.Chunk, CalendarUnit.Hour, shuffled: true);
+        await dataset.DisposeAsync();
+
+        // One lane, which walks every partition: lanes would each read their own side by side.
+        await using VortexSession session = VortexSession.Create(static options => options.MaxDegreeOfParallelism = 1);
+        await using VortexDataset cold = await VortexDataset.OpenAsync(store, new DatasetOptions { Session = session }, Ct);
+        HashSet<string> partitions = [];
+        int indexed = 0;
+        await foreach (PositionedObject held in cold.ScanBuilder().ObjectsAsync(Ct))
+        {
+            byte[] partition = PartitionLookup.PartitionOf(cold.Snapshot, held);
+            if (partitions.Add(Convert.ToHexString(partition)) && await cold.Snapshot.PartitionIndexAsync(partition, Ct) is not null)
+            {
+                indexed++;
+            }
+        }
+
+        // A store that answers in 20 ms, so that the reads in flight together count one step, and those one after another one each.
+        memory.Latency = TimeSpan.FromMilliseconds(20);
+        List<Row> found;
+        Row sought = rows[512_345];
+        try
+        {
+            store.Reset();
+            found = await cold.Scan<Row>().Where(r => r.Sequence == sought.Sequence).ToRecordsAsync(Ct).ToListAsync(Ct);
+        }
+        finally
+        {
+            memory.Latency = TimeSpan.Zero;
+        }
+
+        Console.WriteLine($"NEEDLE OVER {indexed} INDEXED PARTITIONS OF {partitions.Count}: {store.CountOf(ObjectOperation.Read)} reads, {store.DependentSteps} dependent steps");
+        Assert.Equal(7, partitions.Count);
+        Assert.Equal(7, indexed);
+        Assert.Equal([sought], found);
+        Assert.InRange(store.DependentSteps, 1, 6);
+    }
+
+    /// <summary>
     /// Ids that lie in different units of one object, looked up together: their spans are read in one set of requests, and a
     /// buffer each of them reads whole, the ends of a sorted column's runs, is one request both share; each span's other
     /// ranges keep their own. The rows are LINQ's, at units of granules and at granules.
@@ -230,17 +280,26 @@ public sealed partial class DatasetGranuleReadsTests
 
     /// <summary>
     /// A day of 600 000 rows, a row every 37 ms, sorted by the service then the instant, appended in two halves, merged and
-    /// consolidated: one object, and the index of its partition when <paramref name="identifiers"/> names one.
+    /// consolidated: one object, and the index of its partition when <paramref name="identifiers"/> names one; or, partitioned
+    /// by a finer <paramref name="partition"/>, an object and an index of each. A row's sequence is its rank, or, when
+    /// <paramref name="shuffled"/>, a rank drawn at random.
     /// </summary>
-    private static async Task<(VortexDataset Dataset, Row[] Rows)> DayAsync(IObjectStore store, string[]? identifiers, IdentifierLocation location)
+    private static async Task<(VortexDataset Dataset, Row[] Rows)> DayAsync(
+        IObjectStore store, string[]? identifiers, IdentifierLocation location, CalendarUnit partition = CalendarUnit.Day, bool shuffled = false)
     {
         Random random = new Random(103);
-        Row[] rows = [.. Enumerable.Range(0, 600_000).Select(i => new Row(random.Next(0, 7), $"svc-{random.Next(0, 50):D2}", Start.AddMilliseconds(i * 37L), i, random.NextDouble()))];
+        long[] sequences = [.. Enumerable.Range(0, 600_000).Select(static i => (long)i)];
+        if (shuffled)
+        {
+            new Random(5).Shuffle(sequences);
+        }
+
+        Row[] rows = [.. Enumerable.Range(0, 600_000).Select(i => new Row(random.Next(0, 7), $"svc-{random.Next(0, 50):D2}", Start.AddMilliseconds(i * 37L), sequences[i], random.NextDouble()))];
         VortexDataset dataset = await VortexDataset.CreateAsync(store, Row.Schema, new DatasetOptions
         {
             Layout = new DatasetLayout
             {
-                Partition = LayoutValue.Column(nameof(Row.At)).Truncate(CalendarUnit.Day),
+                Partition = LayoutValue.Column(nameof(Row.At)).Truncate(partition),
                 SortKey = [LayoutValue.Column(nameof(Row.Service)), LayoutValue.Column(nameof(Row.At))],
                 ObjectBytes = 256 << 20,
                 MergeFanout = 4,
@@ -253,14 +312,19 @@ public sealed partial class DatasetGranuleReadsTests
         }, Ct);
         try
         {
-            foreach ((int from, int to) in (ValueTuple<int, int>[])[(0, rows.Length / 2), (rows.Length / 2, rows.Length)])
+            // Partitioned by the day, the rows are appended in two halves and merged; finer, a row of two each time, so that
+            // every partition merges two objects as it is consolidated, where one alone would be moved up unindexed.
+            Row[][] parts = partition == CalendarUnit.Day
+                ? [rows[..(rows.Length / 2)], rows[(rows.Length / 2)..]]
+                : [[.. rows.Where(static (_, i) => i % 2 == 0)], [.. rows.Where(static (_, i) => i % 2 == 1)]];
+            foreach (Row[] part in parts)
             {
                 await using ObjectDraft draft = dataset.StartObject();
-                await draft.Writer.WriteAsync<Row>(rows[from..to], Ct);
+                await draft.Writer.WriteAsync<Row>(part, Ct);
                 await dataset.AppendAsync(draft, Ct);
             }
 
-            while (await dataset.CompactAsync(cancellationToken: Ct) is not null)
+            while (partition == CalendarUnit.Day && await dataset.CompactAsync(cancellationToken: Ct) is not null)
             {
             }
 

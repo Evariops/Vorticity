@@ -22,7 +22,7 @@ internal sealed class PartitionLookup
     private readonly DatasetSnapshot _version;
     private readonly string _identifier;
     private readonly ulong[] _hashes;
-    private readonly Dictionary<byte[], Partition?> _partitions = new Dictionary<byte[], Partition?>(Buffers.ByteKeys.Instance);
+    private readonly Dictionary<byte[], Task<Partition?>> _partitions = new Dictionary<byte[], Task<Partition?>>(Buffers.ByteKeys.Instance);
 
     private PartitionLookup(VortexDataset dataset, DatasetSnapshot version, string identifier, ulong[] hashes)
     {
@@ -85,13 +85,7 @@ internal sealed class PartitionLookup
     /// </summary>
     internal async ValueTask<(uint[] Blocks, int BlockRows)?> BlocksAsync(PositionedObject held, CancellationToken cancellationToken)
     {
-        byte[] partition = PartitionOf(held);
-        if (!_partitions.TryGetValue(partition, out Partition? known))
-        {
-            known = await LoadAsync(partition, cancellationToken).ConfigureAwait(false);
-            _partitions[partition] = known;
-        }
-
+        Partition? known = await LoadingAsync(held, cancellationToken).ConfigureAwait(false);
         if (known is null || !known.Entry.Covers(held.Entry.Uid) || !known.Ranks.TryGetValue(held.Entry.Uid, out int rank)
             || !known.Postings.Covers(rank) || known.Index.Objects[rank].Rows != held.Entry.PhysicalRows)
         {
@@ -100,6 +94,49 @@ internal sealed class PartitionLookup
 
         return (known.Blocks.TryGetValue(rank, out SortedSet<uint>? blocks) ? [.. blocks] : [],
             known.Index.Objects[rank].BlockRows * known.Postings.UnitBlocks);
+    }
+
+    /// <summary>
+    /// Begins reading the index of the partition of <paramref name="held"/>, when no read of it began: a walk that asks each
+    /// object's partition before it awaits any reads the indexes side by side, thirty days in one wave, where each awaited
+    /// in turn cost two round trips, its directory then its page.
+    /// </summary>
+    internal void Ahead(PositionedObject held, CancellationToken cancellationToken) => _ = LoadingAsync(held, cancellationToken);
+
+    /// <summary>The read of the index of the partition of <paramref name="held"/>, begun once.</summary>
+    private Task<Partition?> LoadingAsync(PositionedObject held, CancellationToken cancellationToken)
+    {
+        byte[] partition = PartitionOf(held);
+        lock (_partitions)
+        {
+            if (!_partitions.TryGetValue(partition, out Task<Partition?>? loading))
+            {
+                _partitions[partition] = loading = LoadAsync(partition, cancellationToken);
+            }
+
+            return loading;
+        }
+    }
+
+    /// <summary>Waits for the reads of the partitions' indexes begun ahead, whatever they found: a scan that stopped lets them go.</summary>
+    internal async ValueTask SettleAsync()
+    {
+        Task<Partition?>[] loads;
+        lock (_partitions)
+        {
+            loads = [.. _partitions.Values];
+        }
+
+        foreach (Task<Partition?> load in loads)
+        {
+            try
+            {
+                await load.ConfigureAwait(false);
+            }
+            catch (Exception) when (load.IsFaulted || load.IsCanceled)
+            {
+            }
+        }
     }
 
     /// <summary>The partition <paramref name="held"/>'s rows hold, row-encoded as its tree key leads with it; empty for a dataset without one.</summary>
@@ -122,7 +159,7 @@ internal sealed class PartitionLookup
     /// pages they lie in read once each, in one request a page, each against its checksum; null when the partition keeps no
     /// index of the identifier.
     /// </summary>
-    private async ValueTask<Partition?> LoadAsync(byte[] partition, CancellationToken cancellationToken)
+    private async Task<Partition?> LoadAsync(byte[] partition, CancellationToken cancellationToken)
     {
         if (await _version.PartitionIndexAsync(partition, cancellationToken).ConfigureAwait(false) is not { } entry)
         {
