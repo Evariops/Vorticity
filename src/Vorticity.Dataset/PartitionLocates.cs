@@ -115,17 +115,38 @@ internal sealed class PartitionLocates
     internal async ValueTask<IValueGranules?[]?> LocatesAsync(PositionedObject held, CancellationToken cancellationToken)
     {
         byte[] key = PartitionLookup.PartitionOf(_version, held);
-        Task<Partition?> load;
-        lock (_partitions)
+        Partition? known;
+        while (true)
         {
-            if (!_partitions.TryGetValue(key, out load!))
+            Task<Partition?> load;
+            lock (_partitions)
             {
-                _partitions[key] = load = LoadAsync(key, cancellationToken);
+                if (!_partitions.TryGetValue(key, out load!))
+                {
+                    _partitions[key] = load = LoadAsync(key, cancellationToken);
+                }
+            }
+
+            // The lanes of a question share the lookup: a load another lane's caller cancelled is not this one's failure,
+            // and is begun again.
+            try
+            {
+                known = await load.WaitAsync(cancellationToken).ConfigureAwait(false);
+                break;
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                lock (_partitions)
+                {
+                    if (_partitions.TryGetValue(key, out Task<Partition?>? failed) && ReferenceEquals(failed, load))
+                    {
+                        _partitions.Remove(key);
+                    }
+                }
             }
         }
 
-        if (await load.ConfigureAwait(false) is not { } known || !known.Entry.Covers(held.Entry.Uid)
-            || !known.Ranks.TryGetValue(held.Entry.Uid, out int rank))
+        if (known is null || !known.Entry.Covers(held.Entry.Uid) || !known.Ranks.TryGetValue(held.Entry.Uid, out int rank))
         {
             return null;
         }

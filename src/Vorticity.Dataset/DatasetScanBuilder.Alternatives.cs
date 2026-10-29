@@ -732,7 +732,7 @@ internal sealed partial class DatasetScanBuilder
 
         List<PositionedObject> batch = new List<PositionedObject>(SheetBatch);
         DatasetScanCounters? metrics = _considers ? _metrics : null;
-        PartitionLocates? partitions = PartitionLocates.Of(_dataset, _version, filter, columns);
+        PartitionLocates? partitions = LocatesOf(filter, columns);
         Func<PositionedObject, bool> consulted = held => !answered.Contains(held.FirstRow) && ReadsSheets(held);
         for (int from = first; from < units.Count; from += SheetBatch)
         {

@@ -37,6 +37,29 @@ internal sealed partial class DatasetScanSource
 
     private static long s_askings;
 
+    // The lookup of the partitions' indexes for the filter the question's lanes ask it with, made by the first that asks.
+    private Locates? _locates;
+
+    /// <summary>
+    /// The lookup of the values <paramref name="filter"/> seeks of <paramref name="columns"/> over the version's partition
+    /// indexes (<see cref="PartitionLocates.Of"/>), one for every lane of the question, which asks it with the question's
+    /// filter: each partition's index read once for the question. Each lane's own, QP-2's pods of a route at 32 lanes read
+    /// the same three regions of their partition's index 36 times, 37 MB of the 220 the question read.
+    /// </summary>
+    internal PartitionLocates? LocatesOf(VortexExpr filter, List<int> columns)
+    {
+        if (Volatile.Read(ref _locates) is { } held && ReferenceEquals(held.Filter, filter))
+        {
+            return held.Lookup;
+        }
+
+        Locates made = new Locates(filter, PartitionLocates.Of(_dataset, _version, filter, columns));
+        return Interlocked.CompareExchange(ref _locates, made, null) is { } raced && ReferenceEquals(raced.Filter, filter) ? raced.Lookup : made.Lookup;
+    }
+
+    /// <summary>The lookup of the partitions' indexes made for <see cref="Filter"/>; null where none answers it.</summary>
+    private sealed record Locates(VortexExpr Filter, PartitionLocates? Lookup);
+
     internal override VortexSchema Schema => _version.Schema.Columns;
 
     internal override VortexSession Session => _dataset.Session;
@@ -690,7 +713,7 @@ internal sealed partial class DatasetScanSource
     {
         _dataset.Promotions.Asked(spec.VariantKeys);
         DatasetScanBuilder builder = new DatasetScanBuilder(_dataset, _version)
-            .WithVariantKeys(spec.VariantKeys).WithReadAhead(spec.ReadAhead).WithShape(spec.Query?.Shape);
+            .WithVariantKeys(spec.VariantKeys).WithReadAhead(spec.ReadAhead).WithShape(spec.Query?.Shape).OfQuestion(this);
         if (spec.Projection is { } mask)
         {
             builder.Project(in mask);

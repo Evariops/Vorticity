@@ -270,6 +270,76 @@ public sealed partial class DatasetPlanAlternativesTests
     }
 
     /// <summary>
+    /// Two hours of calls partitioned by the hour, keyed by the service then the instant, consolidated, in short chunks: the
+    /// hosts of one route, a service's alone, at eight lanes, whose pieces of each object plan their states through their
+    /// sheets and the lookup of the question's partitions' indexes: each partition's index is read once, where each piece
+    /// read it again. QP-2's pods of a route at 32 lanes read three regions of their partition's index 36 times, 37 MB of
+    /// the 220 the question read.
+    /// </summary>
+    [Fact]
+    public async Task AQuestionsLanesReadEachPartitionsIndexOnce()
+    {
+        Random random = new Random(0xA9);
+        await using MemoryObjectStore memory = new MemoryObjectStore();
+        DatasetOptions options = new DatasetOptions
+        {
+            Layout = new DatasetLayout
+            {
+                Partition = LayoutValue.Column(nameof(DatasetLearnedPartialsTests.Call.At)).Truncate(CalendarUnit.Hour),
+                SortKey = [LayoutValue.Column(nameof(DatasetLearnedPartialsTests.Call.Service)), LayoutValue.Column(nameof(DatasetLearnedPartialsTests.Call.At))],
+                IndexedPrefix = 1,
+                ObjectBytes = 1 << 18,
+                MergeFanout = 4,
+                CalmAfter = null,
+            },
+            ContentsObjectBytes = 0,
+            SheetObjectBytes = 0,
+            Write = new VortexWriteOptions { ChunkTargetBytes = 16 << 10, BlockRows = 1_024 },
+            ChunkBytes = 16 << 10,
+            GroupRows = 1_000,
+        };
+        await using (VortexDataset writing = await VortexDataset.CreateAsync(memory, DatasetLearnedPartialsTests.Call.Schema, options, Ct))
+        {
+            for (int part = 0; part < 4; part++)
+            {
+                DatasetLearnedPartialsTests.Call[] rows = [.. Enumerable.Range(0, 20_000).Select(i =>
+                {
+                    int service = random.Next(4);
+                    return new DatasetLearnedPartialsTests.Call(
+                        $"svc-{service}", Start.AddTicks(random.NextInt64(TimeSpan.FromHours(2).Ticks)), $"h-{service}-{random.Next(3)}",
+                        $"/svc{service}/r{random.Next(6)}", (short)200, random.Next(4_000) / 4.0, random.Next(1_000_000));
+                })];
+                await using ObjectDraft draft = writing.StartObject();
+                await draft.Writer.WriteAsync<DatasetLearnedPartialsTests.Call>(rows, Ct);
+                await writing.AppendAsync(draft, Ct);
+            }
+
+            while (await writing.CompactAsync(cancellationToken: Ct) is not null)
+            {
+            }
+
+            await writing.ConsolidateAsync(Ct);
+        }
+
+        LoggingStore logged = new LoggingStore(memory);
+        await using VortexSession session = VortexSession.Create(o => o.MaxDegreeOfParallelism = 8);
+        await using VortexDataset dataset = await VortexDataset.OpenAsync(logged, options with { Session = session, LeastPieceRows = 250 }, Ct);
+        HashSet<string> objects = [];
+        await foreach (DataObject held in dataset.ListObjectsAsync(Ct))
+        {
+            objects.Add(held.Key);
+        }
+
+        logged.Reads.Clear();
+        List<string> hosts = await DatasetPlannerTests.AskAsync(dataset, ["Host"], ["Host", "count()"], "Route = '/svc1/r3'", synopses: true, lanes: 8);
+        IGrouping<string, (string Key, long Offset, long Length, long Size)>[] indexes = [.. logged.Reads.GroupBy(static access => access.Key).Where(reads => !objects.Contains(reads.Key))];
+        Assert.Equal(await DatasetPlannerTests.AskAsync(dataset, ["Host"], ["Host", "count()"], "Route = '/svc1/r3'", synopses: false, lanes: 8), hosts);
+        Assert.Equal(3, hosts.Count);
+        Assert.Equal(2, indexes.Length);
+        Assert.All(indexes, static reads => Assert.True(reads.Count() == 1, $"{reads.Key}: {reads.Count()} reads"));
+    }
+
+    /// <summary>
     /// The same six hours: the rows of one service, found through each partition's index (D13), read each index in one
     /// request, whole, and each object in three at most, its open, the granules of its key's column, the other columns' at
     /// the rows kept: the marks of its columns, in the tail its open reads, cost no request of their own.

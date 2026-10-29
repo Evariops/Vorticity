@@ -361,6 +361,25 @@ internal sealed partial class DatasetScanBuilder
     private ScanSource? _familySource;
     private bool _piece;
 
+    /// <summary>
+    /// Makes the scan one of the question <paramref name="source"/> asks, whose lanes share what the question reads once:
+    /// the lookup of its partitions' indexes (<see cref="DatasetScanSource.LocatesOf"/>).
+    /// </summary>
+    internal DatasetScanBuilder OfQuestion(DatasetScanSource source)
+    {
+        _question = source;
+        return this;
+    }
+
+    private DatasetScanSource? _question;
+
+    /// <summary>
+    /// The lookup of the values <paramref name="filter"/> seeks of <paramref name="columns"/> over the partitions' indexes:
+    /// the question's, shared by its lanes, or the scan's own.
+    /// </summary>
+    private PartitionLocates? LocatesOf(VortexExpr filter, List<int> columns) =>
+        _question is { } question ? question.LocatesOf(filter, columns) : PartitionLocates.Of(_dataset, _version, filter, columns);
+
     /// <summary>The top-level columns the scan's filter reads but the key's first, by name, which a sort key led by it would narrow; found once.</summary>
     private List<string> FilterColumns()
     {
@@ -700,6 +719,7 @@ internal sealed partial class DatasetScanBuilder
             _readAheadGranted = _readAheadGranted,
             _settles = _settles,
             _geometries = LazyInitializer.EnsureInitialized(ref _geometries),
+            _question = _question,
         };
 
     /// <summary>
@@ -1050,7 +1070,7 @@ internal sealed partial class DatasetScanBuilder
                 if (columns is null)
                 {
                     columns = SheetPruning.Columns(filter, schema);
-                    partitions = PartitionLocates.Of(_dataset, _version, filter, columns);
+                    partitions = LocatesOf(filter, columns);
                 }
 
                 foreach (PositionedObject kept in await SheetPruning.KeptAsync(
@@ -1069,7 +1089,7 @@ internal sealed partial class DatasetScanBuilder
             if (columns is null)
             {
                 columns = SheetPruning.Columns(filter, schema);
-                partitions = PartitionLocates.Of(_dataset, _version, filter, columns);
+                partitions = LocatesOf(filter, columns);
             }
 
             foreach (PositionedObject kept in await SheetPruning.KeptAsync(
