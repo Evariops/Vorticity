@@ -124,6 +124,12 @@ internal static partial class PathsBench
         internal bool Declared { get; init; }
 
         /// <summary>
+        /// Whether the client's log records declare the user's id among their attributes an identifier (<c>--user-ids</c>),
+        /// which T9 looks up: its index places a user's rows by granules. Their stores are named apart.
+        /// </summary>
+        internal bool UserIds { get; init; }
+
+        /// <summary>
         /// Whether the stores take the layouts the design recommends (<c>--idiom</c>, <see cref="IdiomLayouts"/>): each table
         /// partitioned by day and sorted by its service first, tiered and consolidated by the data's clock, rather than in the
         /// order the rows arrive. Their stores are named apart.
@@ -910,7 +916,7 @@ internal static partial class PathsBench
 
     /// <summary>The name of the client's log records' store under <see cref="Settings.Store"/>, as the settings build it.</summary>
     private static string LogsV2Name(Settings settings) =>
-        $"logs-v2{(settings.Declared ? "-declared" : string.Empty)}-clustered-h{settings.QpHours}-r{settings.QpRate:0}-b{settings.Budget}{Idiom(settings)}";
+        $"logs-v2{(settings.Declared ? "-declared" : string.Empty)}{(settings.UserIds ? "-users" : string.Empty)}-clustered-h{settings.QpHours}-r{settings.QpRate:0}-b{settings.Budget}{Idiom(settings)}";
 
     /// <summary>What names a store of the design's layouts apart (<see cref="Settings.Idiom"/>).</summary>
     private static string Idiom(Settings settings) => settings.Idiom ? "-idiom" : string.Empty;
@@ -996,6 +1002,9 @@ internal static partial class PathsBench
     /// <summary>The feature flag QP-10 reads.</summary>
     internal const string NewCart = "Attributes['feature.flag.new-cart'].AsString()";
 
+    /// <summary>The user's id T9 looks up, an identifier among the attributes under <c>--user-ids</c>.</summary>
+    internal const string UserId = "Attributes['user.id'].AsString()";
+
     /// <summary>The client's log records (<see cref="LogGeneratorV2"/>) of <c>--qp-hours</c> at <c>--qp-rate</c>, as the spans.</summary>
     private static async Task<(long Rows, string Needle)> FillLogsV2Async(IObjectStore store, Settings settings)
     {
@@ -1014,6 +1023,9 @@ internal static partial class PathsBench
             // --declared: the keys of the attributes QP-3, QP-9 and QP-10 filter by, shredded by every job and every append.
             ShreddedPaths = !settings.Declared ? null : [StatusCode, NewCart],
             ShredOnAppend = settings.Declared,
+
+            // --user-ids: the user's id an identifier, which a lookup of one user reads the index of.
+            Identifiers = settings.UserIds ? [UserId] : null,
         };
         long rows = await IncrementalBuild.FillAsync<LogRow>(store, options, settings.QpHours, perHour, settings.ParallelHours, settings.PartMinutes, hour =>
         {

@@ -182,6 +182,7 @@ Dictionary<string, (string Help, Func<Task<int>> Run)> micros = new Dictionary<s
         PrintJobs = args.Contains("--print-jobs"),
         Sets = Text(args, "--sets")?.Split(','),
         Declared = args.Contains("--declared"),
+        UserIds = args.Contains("--user-ids"),
         Idiom = args.Contains("--idiom"),
         QpHours = Option(args, "--qp-hours", 30),
         QpRate = Option(args, "--qp-rate", 5_000),
