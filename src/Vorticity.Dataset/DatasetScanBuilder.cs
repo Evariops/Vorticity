@@ -585,6 +585,16 @@ internal sealed partial class DatasetScanBuilder
             yield break;
         }
 
+        if (_take is { Length: <= TakeAheadPlaces } && _options.Compact)
+        {
+            await foreach (RecordBatch batch in TakenAsync(cancellationToken).ConfigureAwait(false))
+            {
+                yield return batch;
+            }
+
+            yield break;
+        }
+
         IAsyncEnumerator<PositionedObject> walk = WalkAsync(cancellationToken, granules: true).GetAsyncEnumerator(cancellationToken);
         await using (walk.ConfigureAwait(false))
         {

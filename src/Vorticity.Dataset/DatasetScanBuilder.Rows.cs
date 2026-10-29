@@ -371,6 +371,74 @@ internal sealed partial class DatasetScanBuilder
     /// <summary>The objects a lookup's scan reads as rows at once, those that do not take the lookup.</summary>
     private const int LookupReads = 16;
 
+    /// <summary>The places of a take whose objects are read ahead together, at most: the rows they copy.</summary>
+    private const int TakeAheadPlaces = 1 << 16;
+
+    /// <summary>
+    /// The rows of a take of a few places, compacted (<see cref="TakeAheadPlaces"/> at most), its objects read ahead together,
+    /// <see cref="LookupReads"/> at once, each one's rows copied, and given in the tree's order: a top's rows lie in many
+    /// objects, a few each, and one object after another waited on its open, then its granules, two round trips an object,
+    /// 100 for the 100 slowest of a month of requests. An object alone is read as a scan reads it.
+    /// </summary>
+    private async IAsyncEnumerable<RecordBatch> TakenAsync([EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        List<PositionedObject> objects = [];
+        await foreach (PositionedObject held in WalkAsync(cancellationToken, granules: true).ConfigureAwait(false))
+        {
+            if (Covered(held) > 0)
+            {
+                objects.Add(held);
+            }
+        }
+
+        if (objects.Count == 1)
+        {
+            await foreach (RecordBatch batch in RowsAsync(objects[0], 1, cancellationToken).ConfigureAwait(false))
+            {
+                yield return batch;
+            }
+
+            yield break;
+        }
+
+        using CancellationTokenSource stopped = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        using SemaphoreSlim reading = new SemaphoreSlim(LookupReads);
+        List<Task<List<RecordBatch>?>> found = new List<Task<List<RecordBatch>?>>(objects.Count);
+        try
+        {
+            foreach (PositionedObject held in objects)
+            {
+                found.Add(ReadAheadAsync(held, reading, stopped.Token));
+            }
+
+            foreach (Task<List<RecordBatch>?> rows in found)
+            {
+                foreach (RecordBatch batch in await rows.ConfigureAwait(false) ?? [])
+                {
+                    yield return batch;
+                }
+            }
+        }
+        finally
+        {
+            // A scan stopped or failed: the reads still on their way are called off and end, and what they found is let go.
+            await stopped.CancelAsync().ConfigureAwait(false);
+            foreach (Task<List<RecordBatch>?> rows in found)
+            {
+                try
+                {
+                    foreach (RecordBatch batch in await rows.ConfigureAwait(false) ?? [])
+                    {
+                        batch.Dispose();
+                    }
+                }
+                catch (Exception) when (rows.IsFaulted || rows.IsCanceled)
+                {
+                }
+            }
+        }
+    }
+
     /// <summary>
     /// The rows of <paramref name="held"/> the scan keeps, read as the scan reads any object once <paramref name="reading"/>
     /// lets one more be read, each batch that keeps a row copied, the scan's own batches being let go as it moves on.

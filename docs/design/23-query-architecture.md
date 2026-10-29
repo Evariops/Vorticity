@@ -362,9 +362,11 @@ what it costs: while the blocks kept lie farther apart than the profile's joined
 which the summaries estimate before the first pass and the first pass follows. Under an order and a limit, the column
 of the order is read first, the positions kept, and the other columns read for those positions alone. With no filter,
 the objects' granule statistics are read side by side first: each granule holds a value at its bound, so the `k`-th best
-bound among them is a floor no row of the top falls below. Only the granules that reach it are read, side by side. A
-filter may leave out the row that holds a granule's bound, so a filtered top reads object after object, under the bound
-its rows set.
+bound among them is a floor no row of the top falls below. Only the granules that reach it are read, side by side, and
+then the objects that hold the positions are read together. The 100 slowest of a month of requests wait on about ten
+round trips, where reading object after object waited on 370 at 32 lanes and on 1 960 on one. A filter may leave out the
+row that holds a granule's bound, so a
+filtered top reads object after object, under the bound its rows set.
 
 ---
 

@@ -172,9 +172,10 @@ public sealed partial class DatasetGranuleReadsTests
     /// <summary>
     /// The ten largest of the random sequences over the seven hourly partitions, by a cold handle on one lane: the objects'
     /// granules' statistics read side by side set a floor, the tenth best of their greatest values, and the granules that
-    /// reach it alone are read, side by side, 19 blocks decoded of 73 granules and 7 round trips waited on, where the best
-    /// object's best granule set an edge that most granules passed, read object after object: 83 blocks and 21 round trips.
-    /// The answer is LINQ's.
+    /// reach it alone are read, side by side, then the rows at the places kept, their objects together: 19 blocks decoded of
+    /// 73 granules and 4 round trips waited on, 7 while the take read its objects one after another, where the best object's
+    /// best granule set an edge that most granules passed, read object after object: 83 blocks and 21 round trips. The
+    /// answer is LINQ's.
     /// </summary>
     [Fact]
     public async Task ATopReadsTheGranulesWhoseBoundsReachItsFloor()
@@ -205,7 +206,7 @@ public sealed partial class DatasetGranuleReadsTests
         Assert.Equal(7, objects);
         Assert.Equal(rows.Select(static r => r.Sequence).OrderDescending().Take(10), top);
         Assert.True(asked.Metrics.BlocksDecoded <= granules / 3, $"{asked.Metrics.BlocksDecoded} blocks decoded of {granules} granules");
-        Assert.InRange(store.DependentSteps, 1, 8);
+        Assert.InRange(store.DependentSteps, 1, 5);
     }
 
     /// <summary>
