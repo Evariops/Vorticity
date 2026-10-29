@@ -612,8 +612,11 @@ internal sealed class GranuleAnswer
             hi++;
         }
 
-        // Which granules their statistics answer, then those answered between two read as rows that cost less read as rows
-        // too than a part of the scan more, which would read again the chunks the two parts share.
+        // Which granules their statistics answer, then, for an object with rows marked, whose granules left a part of the scan
+        // reads a run each, those answered between two read as rows that cost less read as rows too than a part of the scan
+        // more, which would read again the chunks the two parts share. Any other object's granules left are read in one part,
+        // by a mask of them (DatasetScanBuilder.UnsettledPart), a run between two no part more: bridged, two hours of four
+        // services by service and hour read 2.37 MB, where the granules left and the statistics hold 0.51, the rows 3.04.
         GranuleStateRows states = new GranuleStateRows(this);
         List<ColumnSummary> judged = new List<ColumnSummary>(Fields.Length + summaries.Columns.Count);
         bool[] answers = new bool[any.Count];
@@ -625,7 +628,11 @@ internal sealed class GranuleAnswer
             states.Truncate(0);
         }
 
-        Bridge(held.Entry, any, answers, lo, hi);
+        if (!deletions.IsEmpty)
+        {
+            Bridge(held.Entry, any, answers, lo, hi);
+        }
+
         List<RowRange> unsettled = [];
         int settled = 0;
         for (int b = lo; b < hi; b++)

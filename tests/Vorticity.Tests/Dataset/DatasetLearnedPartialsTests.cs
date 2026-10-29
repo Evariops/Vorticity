@@ -418,6 +418,40 @@ public sealed partial class DatasetLearnedPartialsTests
     }
 
     /// <summary>
+    /// The granules an object's statistics leave in runs apart, those where a service or an hour ends, are read alone, the
+    /// runs between them answered, as the rows answer: read in one part by a mask of them, a run between two costs no part
+    /// more. Bridged as if it did, two hours of four services by service and hour read 2.37 MB, where the granules left and
+    /// the statistics hold 0.51, and the rows 3.04.
+    /// </summary>
+    [Fact]
+    public async Task TheRunsBetweenTheGranulesLeftAreNotRead()
+    {
+        await using MemoryObjectStore memory = new MemoryObjectStore();
+        await PartitionedHitsAsync(memory);
+        (List<string> Answer, long Bytes, string Plan) rows = await AskAfreshAsync(synopses: false);
+        (List<string> Answer, long Bytes, string Plan) granules = await AskAfreshAsync(synopses: true);
+        Console.WriteLine($"RUNS BETWEEN: {granules.Bytes:N0} bytes through the granules, {rows.Bytes:N0} through the rows; {granules.Plan}");
+        Assert.NotEmpty(rows.Answer);
+        Assert.Equal(rows.Answer, granules.Answer);
+        Assert.StartsWith("granules:", granules.Plan, StringComparison.Ordinal);
+        Assert.True(granules.Bytes * 3 < rows.Bytes, $"{granules.Bytes} bytes through the granules, {rows.Bytes} through the rows");
+
+        async Task<(List<string>, long, string)> AskAfreshAsync(bool synopses)
+        {
+            await using CountingObjectStore store = new CountingObjectStore(memory);
+            await using VortexDataset dataset = await VortexDataset.OpenAsync(store, cancellationToken: Ct);
+            string plan = string.Join(" | ", (await Question(dataset, synopses).ExplainAsync(analyze: false, Ct)).Units.Select(static unit => $"{unit.Alternative}: {unit.Detail}"));
+            store.Reset();
+            List<string> answer = await LinesAsync(Question(dataset, synopses));
+            return (answer, store.BytesRead, plan);
+        }
+
+        static Vorticity.Aggregation Question(VortexDataset handle, bool synopses) =>
+            handle.Scan<Hit>().With(new ScanOptions { UseSynopses = synopses, DegreeOfParallelism = 1 })
+                .GroupBy(h => (h.Service, h.At.Truncate(CalendarUnit.Hour))).Select(g => (g.Key.Service, g.Key.Item2, g.Count()));
+    }
+
+    /// <summary>
     /// One object of a hundred granules of 800 000 hits over two hours, sorted by service then instant: one service holds
     /// 40 % of them, 300 others the rest, and a size drawn at random each. With <paramref name="chunked"/>, each column's
     /// chunks of 16 KiB, all ending together at each granule: a granule's rows are read alone, and lanes cut the object there.
@@ -449,6 +483,49 @@ public sealed partial class DatasetLearnedPartialsTests
         while (await created.CompactAsync(new CompactionOptions { LevelZeroCeiling = 1, TargetBytesAtLevelOne = 1L << 30 }, Ct) is not null)
         {
         }
+    }
+
+    /// <summary>
+    /// 400 000 hits over two hours from noon, in partitions of a day sorted by service then instant, of four services, a size
+    /// drawn at random each and declared an identifier; appended in eight parts of the order they were drawn in, so that the
+    /// day is consolidated from several objects with the index of its partition, which holds the sizes' postings. The hits,
+    /// in that order.
+    /// </summary>
+    private static async Task<Hit[]> PartitionedHitsAsync(MemoryObjectStore memory)
+    {
+        Random random = new Random(0xF5);
+        Hit[] hits = [.. Enumerable.Range(0, 400_000).Select(_ => new Hit(
+            $"svc-{random.Next(4)}",
+            Noon.UtcDateTime.AddTicks(random.NextInt64(TimeSpan.FromHours(2).Ticks)),
+            random.Next(1_000_000_000)))];
+        await using VortexDataset created = await VortexDataset.CreateAsync(memory, Hit.Schema, new DatasetOptions
+        {
+            Layout = new DatasetLayout
+            {
+                Partition = LayoutValue.Column(nameof(Hit.At)).Truncate(CalendarUnit.Day),
+                SortKey = [LayoutValue.Column(nameof(Hit.Service)), LayoutValue.Column(nameof(Hit.At))],
+                IndexedPrefix = 1,
+                ObjectBytes = 64 << 20,
+                MergeFanout = 4,
+                CalmAfter = null,
+            },
+            ContentsObjectBytes = 1,
+            SheetObjectBytes = 0,
+            Identifiers = [nameof(Hit.Size)],
+            Write = new VortexWriteOptions { ChunkTargetBytes = 16 << 10 },
+            ChunkBytes = 16 << 10,
+            GroupRows = 8_192,
+        }, Ct);
+        for (int from = 0; from < hits.Length; from += 50_000)
+        {
+            await using ObjectDraft draft = created.StartObject();
+            await draft.Writer.WriteAsync<Hit>(hits[from..(from + 50_000)], Ct);
+            await created.AppendAsync(draft, Ct);
+        }
+
+        // The day's appends consolidated together, with the index of its partition.
+        await created.ConsolidateAsync(Ct);
+        return hits;
     }
 
     /// <summary>The rows of <paramref name="question"/>, each a line of its values, sorted.</summary>
