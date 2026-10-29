@@ -396,10 +396,11 @@ internal sealed partial class DatasetScanSource
             return null;
         }
 
-        HashSet<long> answered = [];
-        HashSet<long> learning = [];
-        HashSet<long> undecided = [];
-        List<(PositionedObject Held, RowRange Rows, List<RowRange>? Kept, Task<List<RowRange>>? Reading)> walked = [];
+        // The objects answered whole, those cut to learn, and those whose learning waits on their index, made as each is met.
+        HashSet<long>? answered = null;
+        HashSet<long>? learning = null;
+        HashSet<long>? undecided = null;
+        List<(PositionedObject Held, RowRange Rows, List<RowRange>? Kept, Task<List<RowRange>?>? Reading)> walked = [];
         await foreach (PositionedObject held in _version.WalkAsync(pruner, from, to, null, cancellationToken).ConfigureAwait(false))
         {
             long start = System.Math.Max(from, held.FirstRow);
@@ -417,7 +418,7 @@ internal sealed partial class DatasetScanSource
                 || (spec.Answering?.Family is not null && await planner.PartialAnswersAsync(held, cancellationToken).ConfigureAwait(false))))
             {
                 walked.Add((held, new RowRange(start, end), null, null));
-                answered.Add(held.FirstRow);
+                (answered ??= []).Add(held.FirstRow);
                 continue;
             }
 
@@ -434,7 +435,7 @@ internal sealed partial class DatasetScanSource
                 if (learns && !deciding)
                 {
                     walked.Add((held, new RowRange(start, end), null, null));
-                    learning.Add(held.FirstRow);
+                    (learning ??= []).Add(held.FirstRow);
                     continue;
                 }
             }
@@ -442,35 +443,47 @@ internal sealed partial class DatasetScanSource
             // An object reads the granules the key's pruning keeps alone, by its sparse index: those are the rows its lanes
             // share, where pieces cut over every row of it would leave most lanes reading nothing. The indexes are asked as
             // the walk finds their objects and read side by side, a wave of requests, where one awaited at a time cost a
-            // round trip each: fourteen for a time window over seven objects.
-            ValueTask<List<RowRange>> keeping = KeptAsync(held, pruning, planner, new RowRange(start, end), cancellationToken);
-            walked.Add(keeping.IsCompletedSuccessfully ? (held, new RowRange(start, end), await keeping.ConfigureAwait(false), null) : (held, new RowRange(start, end), null, keeping.AsTask()));
+            // round trip each: fourteen for a time window over seven objects. An object kept whole is marked so, no list
+            // made for it.
+            ValueTask<List<RowRange>?> keeping = KeptAsync(held, pruning, planner, new RowRange(start, end), cancellationToken);
+            walked.Add(keeping.IsCompletedSuccessfully
+                ? (held, new RowRange(start, end), await keeping.ConfigureAwait(false) ?? AllKept, null)
+                : (held, new RowRange(start, end), null, keeping.AsTask()));
             if (deciding)
             {
-                undecided.Add(held.FirstRow);
+                (undecided ??= []).Add(held.FirstRow);
             }
         }
 
-        foreach ((PositionedObject held, RowRange rows, List<RowRange>? done, Task<List<RowRange>>? reading) in walked)
+        foreach ((PositionedObject held, RowRange rows, List<RowRange>? done, Task<List<RowRange>?>? reading) in walked)
         {
             if (done is null && reading is null)
             {
                 // An object answered whole reads no rows; one that learns reads them all, which the lanes share.
                 objects.Add((held, rows));
-                total += learning.Contains(held.FirstRow) ? rows.Length : 0;
+                total += learning?.Contains(held.FirstRow) == true ? rows.Length : 0;
                 continue;
             }
 
             // The read was asked by this walk, above.
 #pragma warning disable VSTHRD003
-            List<RowRange> read = done ?? await reading!.ConfigureAwait(false);
+            List<RowRange> read = done ?? await reading!.ConfigureAwait(false) ?? AllKept;
 #pragma warning restore VSTHRD003
+            bool whole = ReferenceEquals(read, AllKept);
 
             // An object that may learn, judged once its index said the share of its rows the question would read otherwise.
-            if (undecided.Contains(held.FirstRow) && planner.LearnsAsChosen(held, Share(held, read)).Learns)
+            if (undecided?.Contains(held.FirstRow) == true
+                && planner.LearnsAsChosen(held, whole ? (double)rows.Length / System.Math.Max(held.Entry.Rows, 1) : Share(held, read)).Learns)
             {
                 objects.Add((held, rows));
-                learning.Add(held.FirstRow);
+                (learning ??= []).Add(held.FirstRow);
+                total += rows.Length;
+                continue;
+            }
+
+            if (whole)
+            {
+                objects.Add((held, rows));
                 total += rows.Length;
                 continue;
             }
@@ -491,7 +504,7 @@ internal sealed partial class DatasetScanSource
             List<PositionedObject> held = objects.ConvertAll(static o => o.Held);
             List<int> columns = SheetPruning.Columns(asked, _version.Schema.DType);
             List<PositionedObject> kept = await SheetPruning.KeptAsync(
-                _dataset, _version.Schema, held, asked, columns, null, o => !answered.Contains(o.FirstRow) && planner.ReadsSheets(o), cancellationToken)
+                _dataset, _version.Schema, held, asked, columns, null, o => answered?.Contains(o.FirstRow) != true && planner.ReadsSheets(o), cancellationToken)
                 .ConfigureAwait(false);
             if (kept.Count < held.Count)
             {
@@ -515,7 +528,7 @@ internal sealed partial class DatasetScanSource
         List<Task> cutting = [];
         for (int o = 0; o < objects.Count; o++)
         {
-            if (objects[o].Rows.Length >= 2 * share && !answered.Contains(objects[o].Held.FirstRow)
+            if (objects[o].Rows.Length >= 2 * share && answered?.Contains(objects[o].Held.FirstRow) != true
                 && !(lookingUp && planner.LooksUp(objects[o].Held)))
             {
                 cuts[o] = CutAsync(objects[o].Held, objects[o].Rows, share, spec.Projection, cancellationToken);
@@ -531,7 +544,7 @@ internal sealed partial class DatasetScanSource
             {
                 RowRange[] its = await cut.ConfigureAwait(false);
                 pieces.AddRange(its);
-                if (learning.Contains(objects[o].Held.FirstRow))
+                if (learning?.Contains(objects[o].Held.FirstRow) == true)
                 {
                     foreach (RowRange piece in its)
                     {
@@ -579,7 +592,13 @@ internal sealed partial class DatasetScanSource
             long end = System.Math.Min(to, held.FirstRow + held.Entry.Rows);
 
             // An object reads the granules the key's pruning keeps alone, by its sparse index.
-            foreach (RowRange kept in await KeptAsync(held, pruning, planner, new RowRange(start, end), cancellationToken).ConfigureAwait(false))
+            if (await KeptAsync(held, pruning, planner, new RowRange(start, end), cancellationToken).ConfigureAwait(false) is not { } ranges)
+            {
+                objects.Add(ClustersAsync(held, new RowRange(start, end), pass.Projection, rangeBytes, cancellationToken));
+                continue;
+            }
+
+            foreach (RowRange kept in ranges)
             {
                 objects.Add(ClustersAsync(held, kept, pass.Projection, rangeBytes, cancellationToken));
             }
@@ -588,38 +607,42 @@ internal sealed partial class DatasetScanSource
         return await Task.WhenAll(objects).ConfigureAwait(false);
     }
 
+    /// <summary>The ranges of an object that keeps none of the rows asked: one list for every such object, never added to.</summary>
+    private static readonly List<RowRange> NoneKept = [];
+
+    /// <summary>The mark of an object a walk keeps whole, the rows it asked: one list, never read nor added to.</summary>
+    private static readonly List<RowRange> AllKept = [];
+
     /// <summary>
     /// The parts of <paramref name="rows"/>, rows of the dataset inside an object's, that the key's pruning keeps of it
     /// (<see cref="KeyPruning"/>): none when the filter refutes its key range, the ranges of the granules it may keep a row of
-    /// by its sparse index when <paramref name="planner"/>'s rule reads it, and the rows whole otherwise, or for an object
-    /// with marked rows, whose index counts the rows before the marks.
+    /// by its sparse index when <paramref name="planner"/>'s rule reads it, and the rows whole otherwise, null then, no list
+    /// made, or for an object with marked rows, whose index counts the rows before the marks.
     /// </summary>
-    private async ValueTask<List<RowRange>> KeptAsync(PositionedObject held, KeyPruning? pruning, DatasetScanBuilder planner, RowRange rows, CancellationToken cancellationToken)
+    private async ValueTask<List<RowRange>?> KeptAsync(PositionedObject held, KeyPruning? pruning, DatasetScanBuilder planner, RowRange rows, CancellationToken cancellationToken)
     {
-        List<RowRange> kept = [];
         if (rows.IsEmpty)
         {
-            return kept;
+            return NoneKept;
         }
 
         ReadOnlyMemory<byte> first = held.TreeKey.Length > VortexDataset.UidBytes ? VortexDataset.OrderOf(held.TreeKey) : default;
         if (pruning is null || first.IsEmpty)
         {
-            kept.Add(rows);
-            return kept;
+            return null;
         }
 
         if (!pruning.MayHold(first.Span, held.Entry.LastKey.Span))
         {
-            return kept;
+            return NoneKept;
         }
 
         if (await planner.KeptGranulesAsync(held, pruning, first, read: true, cancellationToken).ConfigureAwait(false) is not ({ } ranges, { } keys))
         {
-            kept.Add(rows);
-            return kept;
+            return null;
         }
 
+        List<RowRange> kept = [];
         foreach ((int from, int end) in ranges)
         {
             long start = System.Math.Max(rows.Start, held.FirstRow + ((long)from * keys.GranuleRows));
