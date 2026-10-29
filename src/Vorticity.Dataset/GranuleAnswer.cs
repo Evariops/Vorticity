@@ -413,12 +413,19 @@ internal sealed class GranuleAnswer
                 }
             }
 
+            // A filtered column outside the sort key lies spread over every granule, however pure its runs of the key's first
+            // columns, and a granule's statistics bound it by its extremes alone: a granule answers only where it lists the
+            // column's values. A filter leaving one request of S1 out, its ids drawn at random, read an object's rows at every
+            // asking, priced at a sixth of them, and the object never learned.
+            double spread = 0;
             foreach (int field in proven ? [] : _filtered)
             {
                 if (!Keyed(field) && Array.IndexOf(_ranged, field) < 0)
                 {
                     varying++;
                     listing = field;
+                    spread = Sorted(_schema, field) ? spread
+                        : Math.Max(spread, 1 - Math.Clamp(contents.ListedRowsOf(field) / (double)entry.PhysicalRows, 0, 1));
                 }
             }
 
@@ -426,6 +433,7 @@ internal sealed class GranuleAnswer
                 : varying == 1 && listing >= 0 ? 1 - Math.Clamp(contents.ListedRowsOf(listing) / (double)entry.PhysicalRows, 0, 1)
                 : varying == 1 ? changing
                 : 0;
+            share = Math.Max(share, spread);
         }
 
         // A granule that holds a row a delete marked is read as rows: the deleted rows taken to lie apart, as an erasure's do,

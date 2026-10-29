@@ -305,31 +305,7 @@ public sealed partial class DatasetLearnedPartialsTests
     public async Task AFamilyAnsweredThroughItsGranulesLearnsOnceTheirRowsReadAgainPayForIt()
     {
         await using MemoryObjectStore memory = new MemoryObjectStore();
-        Random random = new Random(0xF3);
-        Hit[] hits = [.. Enumerable.Range(0, 800_000).Select(_ => new Hit(
-            random.Next(10) < 4 ? "svc-000" : $"svc-{1 + random.Next(300):D3}",
-            Noon.UtcDateTime.AddTicks(random.NextInt64(TimeSpan.FromHours(2).Ticks)),
-            random.Next(1_000_000)))];
-        await using (VortexDataset created = await VortexDataset.CreateAsync(memory, Hit.Schema, new DatasetOptions
-        {
-            Layout = new DatasetLayout { SortKey = [LayoutValue.Column(nameof(Hit.Service)), LayoutValue.Column(nameof(Hit.At))], IndexedPrefix = 1, ObjectBytes = 64 << 20 },
-            ContentsObjectBytes = 1,
-            SheetObjectBytes = 0,
-        }, Ct))
-        {
-            for (int from = 0; from < hits.Length; from += 200_000)
-            {
-                await using ObjectDraft draft = created.StartObject();
-                await draft.Writer.WriteAsync<Hit>(hits[from..(from + 200_000)], Ct);
-                await created.AppendAsync(draft, Ct);
-            }
-
-            // One object of a hundred granules.
-            while (await created.CompactAsync(new CompactionOptions { LevelZeroCeiling = 1, TargetBytesAtLevelOne = 1L << 30 }, Ct) is not null)
-            {
-            }
-        }
-
+        await GranulesObjectAsync(memory);
         await using VortexDataset asked = await VortexDataset.OpenAsync(memory, cancellationToken: Ct);
         List<string> rows = await AnswerAsync(asked, synopses: false);
         List<string[]> chosen = [];
@@ -348,20 +324,84 @@ public sealed partial class DatasetLearnedPartialsTests
         static Vorticity.Aggregation Question(VortexDataset handle, bool synopses) => handle.Scan<Hit>().With(new ScanOptions { UseSynopses = synopses })
             .GroupBy(h => (h.Service, h.At.Truncate(CalendarUnit.Hour))).Select(g => (g.Key.Service, g.Key.Item2, g.Count(), g.Sum(h => h.Size)));
 
-        static async Task<List<string>> AnswerAsync(VortexDataset handle, bool synopses)
-        {
-            List<string> lines = [];
-            await using (IAsyncEnumerator<RecordBatch> batches = Question(handle, synopses).Query.Batches(Ct))
-            {
-                while (await batches.MoveNextAsync())
-                {
-                    Values.DescribeRows(batches.Current, lines);
-                }
-            }
+        static Task<List<string>> AnswerAsync(VortexDataset handle, bool synopses) => LinesAsync(Question(handle, synopses));
+    }
 
-            lines.Sort(StringComparer.Ordinal);
-            return lines;
+    /// <summary>
+    /// The same object under a filter that leaves one size out, a column outside the sort key that the hits draw at random:
+    /// no granule's statistics decide it, its granules weigh all its rows, and the object learns at its first asking, then
+    /// answers from its partial. Its granules were priced at the three fifths of its rows the one service does not keep
+    /// whole, read whole at each asking, and learned only at the second. QP-5 of S1, every request but one, read an object
+    /// so at every asking, 1.3 GB priced at 129 MB.
+    /// </summary>
+    [Fact]
+    public async Task AFilterNoGranuleDecidesLearnsAtItsFirstAsking()
+    {
+        await using MemoryObjectStore memory = new MemoryObjectStore();
+        await GranulesObjectAsync(memory);
+        await using VortexDataset asked = await VortexDataset.OpenAsync(memory, cancellationToken: Ct);
+        List<string> rows = await AnswerAsync(asked, synopses: false);
+        List<string[]> chosen = [];
+        for (int ask = 0; ask < 2; ask++)
+        {
+            ScanPlan plan = await Question(asked, synopses: true).ExplainAsync(analyze: true, Ct);
+            chosen.Add([.. plan.Units.Select(static unit => $"{unit.Alternative}: {unit.Detail}")]);
+            Assert.Equal(rows, await AnswerAsync(asked, synopses: true));
         }
+
+        Console.WriteLine($"A FILTER NO GRANULE DECIDES: {string.Join(" | ", chosen.Select(static units => string.Join(", ", units)))}");
+        Assert.All(chosen[1], static unit => Assert.StartsWith("partial:", unit, StringComparison.Ordinal));
+
+        static Vorticity.Aggregation Question(VortexDataset handle, bool synopses) => handle.Scan<Hit>().With(new ScanOptions { UseSynopses = synopses })
+            .Where(h => h.Size != 123_456).GroupBy(h => (h.Service, h.At.Truncate(CalendarUnit.Hour))).Select(g => (g.Key.Service, g.Key.Item2, g.Count()));
+
+        static Task<List<string>> AnswerAsync(VortexDataset handle, bool synopses) => LinesAsync(Question(handle, synopses));
+    }
+
+    /// <summary>
+    /// One object of a hundred granules of 800 000 hits over two hours, sorted by service then instant: one service holds
+    /// 40 % of them, 300 others the rest, and a size drawn at random each.
+    /// </summary>
+    private static async Task GranulesObjectAsync(MemoryObjectStore memory)
+    {
+        Random random = new Random(0xF3);
+        Hit[] hits = [.. Enumerable.Range(0, 800_000).Select(_ => new Hit(
+            random.Next(10) < 4 ? "svc-000" : $"svc-{1 + random.Next(300):D3}",
+            Noon.UtcDateTime.AddTicks(random.NextInt64(TimeSpan.FromHours(2).Ticks)),
+            random.Next(1_000_000)))];
+        await using VortexDataset created = await VortexDataset.CreateAsync(memory, Hit.Schema, new DatasetOptions
+        {
+            Layout = new DatasetLayout { SortKey = [LayoutValue.Column(nameof(Hit.Service)), LayoutValue.Column(nameof(Hit.At))], IndexedPrefix = 1, ObjectBytes = 64 << 20 },
+            ContentsObjectBytes = 1,
+            SheetObjectBytes = 0,
+        }, Ct);
+        for (int from = 0; from < hits.Length; from += 200_000)
+        {
+            await using ObjectDraft draft = created.StartObject();
+            await draft.Writer.WriteAsync<Hit>(hits[from..(from + 200_000)], Ct);
+            await created.AppendAsync(draft, Ct);
+        }
+
+        // One object of a hundred granules.
+        while (await created.CompactAsync(new CompactionOptions { LevelZeroCeiling = 1, TargetBytesAtLevelOne = 1L << 30 }, Ct) is not null)
+        {
+        }
+    }
+
+    /// <summary>The rows of <paramref name="question"/>, each a line of its values, sorted.</summary>
+    private static async Task<List<string>> LinesAsync(Vorticity.Aggregation question)
+    {
+        List<string> lines = [];
+        await using (IAsyncEnumerator<RecordBatch> batches = question.Query.Batches(Ct))
+        {
+            while (await batches.MoveNextAsync())
+            {
+                Values.DescribeRows(batches.Current, lines);
+            }
+        }
+
+        lines.Sort(StringComparer.Ordinal);
+        return lines;
     }
 
     /// <summary>
