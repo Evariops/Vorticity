@@ -1642,7 +1642,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
             }
         }
 
-        if (FilterReadsAlone(out FieldMask columns))
+        if (FilterReadsAlone(lane.Context, out FieldMask columns))
         {
             if (!proven)
             {
@@ -1660,21 +1660,24 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     }
 
     /// <summary>Whether the filter is evaluated on its own columns, read in a pass of their own.</summary>
+    /// <param name="context">The lane's context, which tells whether the filter's pass reads keys of a variant apart.</param>
     /// <param name="columns">The filter's columns.</param>
     /// <remarks>
     /// Not while a comparison may still be answered by its column's encoding, which decodes nothing
     /// for the filter at all, nor with a take, whose rows are pushed down already.
     /// </remarks>
-    private bool FilterReadsAlone(out FieldMask columns)
+    private bool FilterReadsAlone(ScanContext context, out FieldMask columns)
     {
+        // A pass of the filter's columns reads each through the root's child of its own: a file laid out whole in one flat
+        // segment has none.
         if (_evaluator is not { } evaluator || _take is not null || _filterProven ||
-            (_push != PushDeclined && Pushable() is not null))
+            (_push != PushDeclined && Pushable() is not null) || _tree.Root.Encoding != LayoutEncodingId.Struct)
         {
             columns = default;
             return false;
         }
 
-        return evaluator.TryOwnColumns(_tree.Root.DType, Shape, out columns);
+        return evaluator.TryOwnColumns(_tree.Root.DType, Shape, context.VariantKeys?.FilterPass is not null, out columns);
     }
 
     /// <summary>The dtype of the batches: the file's own when the projection keeps everything.</summary>
@@ -1725,16 +1728,28 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         // derived per scan.
         bool alone = columns.NamedFieldCount == 1;
         int first;
-        FilterWindow(context, split);
-        if (alone)
+
+        // A variant the projection reads whole is read by the filter through its keys, where its rows' variants put back
+        // together cost a filter on a user's id over a week of log records 2 µs a row; the projection decodes the rows kept.
+        Indexes.VariantKeyReads? projected = context.VariantKeys;
+        context.VariantKeys = projected?.FilterPass ?? projected;
+        try
         {
-            LayoutNode column = _tree.Root.GetChild(columns.GetNamedField(0));
-            FieldMask whole = FieldMask.All;
-            first = LayoutReaderTable.Require(in column).Execute(in column, split, in whole, context);
+            FilterWindow(context, split);
+            if (alone)
+            {
+                LayoutNode column = _tree.Root.GetChild(columns.GetNamedField(0));
+                FieldMask whole = FieldMask.All;
+                first = LayoutReaderTable.Require(in column).Execute(in column, split, in whole, context);
+            }
+            else
+            {
+                first = SplitExecution.Execute(context, _tree, in columns, split, null);
+            }
         }
-        else
+        finally
         {
-            first = SplitExecution.Execute(context, _tree, in columns, split, null);
+            context.VariantKeys = projected;
         }
 
         ProjectionWindow(context, split);

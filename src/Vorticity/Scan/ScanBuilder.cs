@@ -591,20 +591,69 @@ internal sealed class ScanBuilder
     {
         IAsyncEnumerable<RecordBatch> scan = WholeAsync(excluded, out BatchAsyncEnumerable batches);
         batches.Granules = _granules;
-        return _variantKeys is { } keys ? new KeyedBatches(scan, batches, _file, keys) : scan;
+        IReadOnlyDictionary<string, string[]>? filtered = FilterOnlyKeys();
+        return _variantKeys is not null || filtered is not null ? new KeyedBatches(scan, batches, _file, _variantKeys, filtered) : scan;
     }
 
     /// <summary>
-    /// A scan whose variant columns are read through some shredded keys alone: the file's path maps
-    /// are read once, before its first batch, and the lanes told which chunks they read by keys.
+    /// The keys of the variant columns the filter alone reads through top-level keys, those the projection reads whole: what
+    /// the filter's own pass reads them through (<see cref="Indexes.VariantKeyReads"/>); null for none, and for a file of no
+    /// variant column or a filter whose paths all lie in columns the scan reads by keys, with nothing made.
+    /// </summary>
+    private IReadOnlyDictionary<string, string[]>? FilterOnlyKeys()
+    {
+        VariantPathSeeker seeker = new VariantPathSeeker(_variantKeys);
+        if (_filter is null || !HoldsVariant(_file.DType) || VisitFields(_filter, ref seeker) || Indexes.VariantKeyReads.Of([], _filter) is not { } asked)
+        {
+            return null;
+        }
+
+        Dictionary<string, string[]>? filtered = null;
+        foreach ((string column, string[] keys) in asked)
+        {
+            if (_variantKeys?.ContainsKey(column) != true)
+            {
+                (filtered ??= new Dictionary<string, string[]>(StringComparer.Ordinal))[column] = keys;
+            }
+        }
+
+        return filtered;
+
+        static bool HoldsVariant(DType schema)
+        {
+            for (int f = 0; schema.Kind == DTypeKind.Struct && f < schema.FieldCount; f++)
+            {
+                if (schema.GetField(f).Kind == DTypeKind.Variant)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// A walk of a filter's columns that stops at the first path into a variant the scan does not read by keys already
+    /// (<paramref name="keyed"/>): none met, it walks them all.
+    /// </summary>
+    private readonly struct VariantPathSeeker(IReadOnlyDictionary<string, string[]>? keyed) : IFieldVisitor
+    {
+        public bool Visit(FieldExpr field) => field is not Compute.VariantFieldExpr path || keyed?.ContainsKey(path.Column.Path) == true;
+    }
+
+    /// <summary>
+    /// A scan whose variant columns are read through some shredded keys alone, by the scan or by its filter's own pass: the
+    /// file's path maps are read once, before its first batch, and the lanes told which chunks they read by keys.
     /// </summary>
     private sealed class KeyedBatches(
-        IAsyncEnumerable<RecordBatch> scan, BatchAsyncEnumerable batches, VortexFile file, IReadOnlyDictionary<string, string[]> keys)
+        IAsyncEnumerable<RecordBatch> scan, BatchAsyncEnumerable batches, VortexFile file,
+        IReadOnlyDictionary<string, string[]>? keys, IReadOnlyDictionary<string, string[]>? filtered)
         : IAsyncEnumerable<RecordBatch>
     {
         public async IAsyncEnumerator<RecordBatch> GetAsyncEnumerator(CancellationToken cancellationToken = default)
         {
-            batches.VariantKeys ??= await Indexes.VariantKeyReads.LoadAsync(file, keys, cancellationToken).ConfigureAwait(false);
+            batches.VariantKeys ??= await Indexes.VariantKeyReads.LoadAsync(file, keys, filtered, cancellationToken).ConfigureAwait(false);
             await foreach (RecordBatch batch in scan.WithCancellation(cancellationToken).ConfigureAwait(false))
             {
                 yield return batch;

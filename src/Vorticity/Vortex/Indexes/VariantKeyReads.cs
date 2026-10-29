@@ -51,6 +51,33 @@ internal sealed class VariantKeyReads
     }
 
     /// <summary>
+    /// The reads the scan's filter makes in a pass of its own, before the scan reads the rows it kept: the keys the filter
+    /// alone reads of columns the scan reads whole, beside those the scan reads by keys; null when it makes none apart.
+    /// </summary>
+    internal VariantKeyReads? FilterPass { get; private init; }
+
+    /// <summary>
+    /// The reads of a scan that reads <paramref name="columns"/> through their keys and whose filter alone reads
+    /// <paramref name="filtered"/>, columns the scan reads whole, through theirs: the scan's own, and its filter's pass
+    /// reading both (<see cref="FilterPass"/>); null when neither is read by keys.
+    /// </summary>
+    internal static async ValueTask<VariantKeyReads?> LoadAsync(
+        VortexFile file, IReadOnlyDictionary<string, string[]>? columns, IReadOnlyDictionary<string, string[]>? filtered,
+        CancellationToken cancellationToken)
+    {
+        VariantKeyReads? scan = columns is null ? null : await LoadAsync(file, columns, cancellationToken).ConfigureAwait(false);
+        if (filtered is null || await LoadAsync(file, filtered, cancellationToken).ConfigureAwait(false) is not { } alone)
+        {
+            return scan;
+        }
+
+        Chunk[] both = [.. scan?._chunks ?? [], .. alone._chunks];
+        Array.Sort(both, static (left, right) => left.Start.CompareTo(right.Start));
+        VariantKeyReads pass = new VariantKeyReads(both, [.. scan?._residual ?? [], .. alone._residual]);
+        return new VariantKeyReads(scan?._chunks ?? [], scan?._residual ?? []) { FilterPass = pass };
+    }
+
+    /// <summary>
     /// The variant columns, by name, that a reader of <paramref name="uses"/> and of the filter
     /// <paramref name="filter"/> reads through top-level keys alone, with those keys; null for none.
     /// A column any other use names, whole or by a deeper path, is read whole.

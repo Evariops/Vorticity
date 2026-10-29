@@ -54,9 +54,17 @@ internal static class CanonicalFill
     /// encoding, which another reader may not take as a constant.
     /// </summary>
     /// <param name="dtype">The dtype.</param>
-    internal static bool CanBuild(DType dtype) => CanBuild(dtype, depth: 1);
+    internal static bool CanBuild(DType dtype) => CanBuild(dtype, depth: 1, variants: false);
 
-    private static bool CanBuild(DType dtype, int depth)
+    /// <summary>
+    /// Whether <see cref="BuildZeroed(ArrayDecodeContext, DType, int, Validity)"/> builds a column of <paramref name="dtype"/>:
+    /// every dtype <see cref="CanBuild(DType)"/> takes, and a variant, as the batch a reader hands on for rows it kept none of, which
+    /// no writer writes.
+    /// </summary>
+    /// <param name="dtype">The dtype.</param>
+    internal static bool Builds(DType dtype) => CanBuild(dtype, depth: 1, variants: true);
+
+    private static bool CanBuild(DType dtype, int depth, bool variants)
     {
         if (depth > VortexLimits.MaxDTypeDepth)
         {
@@ -72,17 +80,19 @@ internal static class CanonicalFill
             case DTypeKind.Utf8:
             case DTypeKind.Binary:
                 return true;
+            case DTypeKind.Variant:
+                return variants;
             case DTypeKind.List:
             case DTypeKind.FixedSizeList:
-                return CanBuild(dtype.ElementType, depth + 1);
+                return CanBuild(dtype.ElementType, depth + 1, variants);
             case DTypeKind.Extension:
-                return CanBuild(dtype.StorageType, depth + 1);
+                return CanBuild(dtype.StorageType, depth + 1, variants);
             case DTypeKind.Map:
-                return CanBuild(dtype.KeyType, depth + 1) && CanBuild(dtype.ValueType, depth + 1);
+                return CanBuild(dtype.KeyType, depth + 1, variants) && CanBuild(dtype.ValueType, depth + 1, variants);
             case DTypeKind.Struct:
                 for (int i = 0; i < dtype.FieldCount; i++)
                 {
-                    if (!CanBuild(dtype.GetField(i), depth + 1))
+                    if (!CanBuild(dtype.GetField(i), depth + 1, variants))
                     {
                         return false;
                     }

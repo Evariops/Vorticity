@@ -165,14 +165,18 @@ internal sealed class FilterEvaluator
     /// </summary>
     /// <param name="root">The file's dtype.</param>
     /// <param name="shape">The dtype of the batches the scan delivers.</param>
+    /// <param name="variants">
+    /// Whether batches that hold a variant are read in two passes: where the filter's pass reads keys of a variant the
+    /// projection reads whole. A variant both passes read by its keys is decoded by each, and judged in one pass.
+    /// </param>
     /// <param name="columns">The filter's columns, each whole.</param>
     /// <returns>
     /// Whether the filter reads only fields of a non-nullable root struct, each named by itself, and
     /// every column of the batch has a zero-row form.
     /// </returns>
-    internal bool TryOwnColumns(DType root, DType shape, out Layouts.FieldMask columns)
+    internal bool TryOwnColumns(DType root, DType shape, bool variants, out Layouts.FieldMask columns)
     {
-        FilterColumns planned = _columns ??= FilterColumns.Plan(_filter, root, shape);
+        FilterColumns planned = _columns ??= FilterColumns.Plan(_filter, root, shape, variants);
         columns = planned.Mask;
         return !ReferenceEquals(planned, FilterColumns.None);
     }
@@ -224,9 +228,9 @@ internal sealed class FilterEvaluator
 
         internal Layouts.FieldMask Mask { get; }
 
-        internal static FilterColumns Plan(VortexExpr filter, DType root, DType shape)
+        internal static FilterColumns Plan(VortexExpr filter, DType root, DType shape, bool variants)
         {
-            if (root.Kind != DTypeKind.Struct || root.IsNullable || !CanonicalFill.CanBuild(shape))
+            if (root.Kind != DTypeKind.Struct || root.IsNullable || !(variants ? CanonicalFill.Builds(shape) : CanonicalFill.CanBuild(shape)))
             {
                 return None;
             }

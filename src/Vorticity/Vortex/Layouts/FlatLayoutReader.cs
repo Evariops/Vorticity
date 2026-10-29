@@ -64,6 +64,12 @@ internal sealed class FlatLayoutReader : LayoutReader
                 chunk.Register(segments, rows);
                 return;
             }
+
+            // The keys the filter's own pass reads of a chunk the scan reads whole: their ranges beside the segment.
+            if (reads.FilterPass?.Find(spec.Offset, spec.Length) is { Residual: false } keyed)
+            {
+                keyed.Register(segments, rows);
+            }
         }
 
         // A chunk the split reads a part of, whose geometry the scan knows: the ranges of the part's granules, not the
