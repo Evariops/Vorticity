@@ -157,6 +157,24 @@ internal sealed class VariantKeyReads
             if (Column(map, wanted, types) is { } read)
             {
                 chunks.AddRange(read);
+                long keyed = 0;
+                foreach (Chunk chunk in read)
+                {
+                    keyed += chunk.Rows;
+                }
+
+                // The chunks that shred none of these keys hold them in their residuals alone: read for their residuals,
+                // the keys they shred not put back, where read whole each rebuilt every row's variant. Sought only where
+                // the chunks that shred them leave rows, a column whose every chunk shreds one walking no layout.
+                if (keyed < file.RowCount && Laid(file, field, Shredding(map, wanted)) is { Count: > 0 } others)
+                {
+                    chunks.AddRange(others);
+                    foreach (string key in wanted)
+                    {
+                        residual.Add(System.Text.Encoding.UTF8.GetBytes(key));
+                    }
+                }
+
                 continue;
             }
 
@@ -230,6 +248,52 @@ internal sealed class VariantKeyReads
         }
 
         return false;
+    }
+
+    /// <summary>The first rows of the chunks of <paramref name="map"/> that shred one of <paramref name="wanted"/>.</summary>
+    private static HashSet<long> Shredding(VariantPathMap map, string[] wanted)
+    {
+        HashSet<long> rows = [];
+        for (int i = 0; i < map.Keys.Count; i++)
+        {
+            if (Array.IndexOf(wanted, map.Keys[i]) >= 0)
+            {
+                foreach (PathChunk part in map.Chunks[i])
+                {
+                    rows.Add(part.FirstRow);
+                }
+            }
+        }
+
+        return rows;
+    }
+
+    /// <summary>
+    /// The chunks of the column at top-level field <paramref name="field"/> but those whose first rows <paramref name="apart"/>
+    /// holds, each read for its residual: found by the segment the file's layout lays it in, which the layout tree holds
+    /// read, and of its rows; none when the column is laid out otherwise than in chunks of one segment each.
+    /// </summary>
+    private static List<Chunk> Laid(VortexFile file, int field, HashSet<long> apart)
+    {
+        List<Chunk> chunks = [];
+        try
+        {
+            ReadOnlySpan<SegmentSpec> specs = file.SegmentSpecs;
+            (List<(Layouts.LayoutNode Flat, long Start)> laid, _) = VortexFileWriter.AppendPlan.ColumnChunks(file.LayoutTree, field);
+            foreach ((Layouts.LayoutNode flat, long start) in laid)
+            {
+                if (!apart.Contains(start) && flat.Segments is [uint segment] && segment < (uint)specs.Length)
+                {
+                    chunks.Add(Chunk.ResidualOf(specs[(int)segment].Offset, checked((int)flat.RowCount)));
+                }
+            }
+        }
+        catch (VortexUnsupportedException)
+        {
+            return [];
+        }
+
+        return chunks;
     }
 
     /// <summary>
