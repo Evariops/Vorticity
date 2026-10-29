@@ -348,6 +348,74 @@ public sealed partial class IdentifierPostingsTests
         Assert.Equal(1, await dataset.Scan<Visit>().Where(r => r.Attributes["user"].AsString() == needle).CountAsync(Ct));
     }
 
+    /// <summary>
+    /// The records of a user among the attributes, 48 000 visits over three hours and more of five thousand other users, each
+    /// with a body of 300 random bytes, the user's eight in the second hour, the user's id declared an identifier and each
+    /// hour consolidated with the index of its partition: the scan looks the user up through the partitions' indexes, read
+    /// side by side, as it does a column's, and waits on three round trips where it waited on five, the objects' own indexes
+    /// read one after another.
+    /// </summary>
+    [Fact]
+    public async Task TheRecordsOfAUserAmongTheAttributesAreLookedUp()
+    {
+        await using MemoryObjectStore inner = new MemoryObjectStore();
+        await using CountingObjectStore store = new CountingObjectStore(inner);
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Visit.Schema, new DatasetOptions
+        {
+            Layout = new DatasetLayout
+            {
+                Partition = LayoutValue.Column(nameof(Visit.At)).Truncate(CalendarUnit.Hour),
+                SortKey = [LayoutValue.Column(nameof(Visit.At))],
+                ObjectBytes = 256 << 20,
+                MergeFanout = 4,
+                CalmAfter = null,
+            },
+            Identifiers = ["Attributes['user'].AsString()"],
+            ContentsObjectBytes = 0,
+        }, Ct);
+        const string User = "u-needle";
+        Random random = new Random(37);
+        List<Visit> visits = [];
+        for (int part = 0; part < 24; part++)
+        {
+            Visit[] rows = [.. Enumerable.Range(part * 2_000, 2_000).Select(i => new Visit(
+                Noon.AddSeconds(i * 0.25),
+                Variant.Object(("user", Variant.From(i is >= 20_000 and < 20_008 ? User : $"u-{random.Next(5_000)}")), ("body", Variant.From(Body(random))))))];
+            visits.AddRange(rows);
+            await using ObjectDraft draft = dataset.StartObject();
+            await draft.Writer.WriteAsync<Visit>(rows, Ct);
+            await dataset.AppendAsync(draft, Ct);
+        }
+
+        // Each hour's appends consolidated together, with the index of its partition.
+        await dataset.ConsolidateAsync(Ct);
+
+        // A store that answers in 20 ms, so that the reads in flight together count one step, and those one after another one each.
+        inner.Latency = TimeSpan.FromMilliseconds(20);
+        List<Visit> found;
+        try
+        {
+            store.Reset();
+            found = await dataset.Scan<Visit>().Where(r => r.Attributes["user"].AsString() == User).ToRecordsAsync(Ct).ToListAsync(Ct);
+        }
+        finally
+        {
+            inner.Latency = TimeSpan.Zero;
+        }
+
+        Console.Out.Write(FormattableString.Invariant(
+            $"PATH IDENTIFIER RECORDS: {found.Count} visits, {store.CountOf(ObjectOperation.Read)} reads, {store.DependentSteps} dependent steps, {store.BytesRead} bytes.\n"));
+        Assert.Equal(visits[20_000..20_008], found);
+        Assert.InRange(store.DependentSteps, 1, 3);
+
+        static string Body(Random random)
+        {
+            byte[] bytes = new byte[300];
+            random.NextBytes(bytes);
+            return Convert.ToBase64String(bytes);
+        }
+    }
+
     [Theory]
     [InlineData("Status")]
     [InlineData("Attributes['user']")]

@@ -44,14 +44,13 @@ internal sealed class PartitionLookup
             return null;
         }
 
-        (FieldExpr field, FilterLiteral[] values) = lookup switch
+        (FieldExpr field, FilterLiteral[] values) = (lookup is Compute.VariantFilterExpr fenced ? fenced.Inner : lookup) switch
         {
             ComparisonExpr comparison => (comparison.Field, new[] { comparison.Value }),
             InExpr list => (list.Field, list.Literals),
             _ => (null!, []),
         };
-        int index = field is null ? -1 : version.Schema.DType.IndexOfField(field.Path);
-        if (index < 0 || !KeyLayout.TryOf(version.Schema.DType.GetField(index), out KeyLayout layout))
+        if (field is null || Identified(version.Schema.DType, field) is not (string identifier, KeyLayout layout))
         {
             return null;
         }
@@ -75,7 +74,25 @@ internal sealed class PartitionLookup
         }
 
         hashes.Sort();
-        return new PartitionLookup(dataset, version, field!.Path, [.. hashes]);
+        return new PartitionLookup(dataset, version, identifier, [.. hashes]);
+    }
+
+    /// <summary>
+    /// The identifier <paramref name="field"/> names, as the postings name it, and the layout its values are hashed in: a
+    /// column's own, or a key of the attributes read in its class, whose texts are the bytes of their UTF-8 and whose integers
+    /// are eight signed bytes; null for any other field.
+    /// </summary>
+    private static (string Identifier, KeyLayout Layout)? Identified(DType schema, FieldExpr field)
+    {
+        if (field is Compute.VariantFieldExpr path)
+        {
+            return VortexDataset.IdentifierPath(path.Text, schema) is { } key
+                ? (key.Text, key.Class == Types.Variants.VariantClass.String ? new KeyLayout(KeyShape.Bytes, 0, default) : new KeyLayout(KeyShape.Signed, sizeof(long), PType.I64))
+                : null;
+        }
+
+        int index = schema.IndexOfField(field.Path);
+        return index >= 0 && KeyLayout.TryOf(schema.GetField(index), out KeyLayout layout) ? (field.Path, layout) : null;
     }
 
     /// <summary>

@@ -72,8 +72,9 @@ internal sealed partial class DatasetScanBuilder
 
     /// <summary>
     /// The conjunct of <paramref name="filter"/> that looks one value of a declared identifier up, or a few,
-    /// <c>id == v</c> or <c>id IN (…)</c> on a column of its own, never null: what the identifier's index answers object
-    /// by object with no open of the object (<see cref="VortexDataset.LookupAsync"/>). Null for any other filter.
+    /// <c>id == v</c> or <c>id IN (…)</c> on a column of its own or a key of the attributes read in its class
+    /// (<c>Attributes['user'].AsString()</c>), never null: what the identifier's index answers object by object with no open
+    /// of the object (<see cref="VortexDataset.LookupAsync"/>). Null for any other filter.
     /// </summary>
     internal static VortexExpr? LookupOf(VortexExpr? filter, IReadOnlyList<string> identifiers)
     {
@@ -86,20 +87,29 @@ internal sealed partial class DatasetScanBuilder
         GroupPredicates.Conjuncts(filter, conjuncts);
         foreach (VortexExpr conjunct in conjuncts)
         {
-            FieldExpr? field = conjunct switch
+            // A key's comparison stands behind the fence of a path, which a lookup reads through as an evaluation does.
+            FieldExpr? field = (conjunct is VariantFilterExpr fenced ? fenced.Inner : conjunct) switch
             {
                 ComparisonExpr { Op: ComparisonOp.Equal } equal when equal.Value.Kind != FilterLiteralKind.Null => equal.Field,
                 InExpr inList when inList.Values.Count > 0 && !HoldsNull(inList.Literals) => inList.Field,
                 _ => null,
             };
-            if (field is ColumnFieldExpr)
+            string? named = field switch
             {
-                foreach (string identifier in identifiers)
+                ColumnFieldExpr => field.Path,
+                VariantFieldExpr path => path.Text,
+                _ => null,
+            };
+            if (named is null)
+            {
+                continue;
+            }
+
+            foreach (string identifier in identifiers)
+            {
+                if (string.Equals(identifier, named, StringComparison.Ordinal))
                 {
-                    if (string.Equals(identifier, field.Path, StringComparison.Ordinal))
-                    {
-                        return conjunct;
-                    }
+                    return conjunct;
                 }
             }
         }
