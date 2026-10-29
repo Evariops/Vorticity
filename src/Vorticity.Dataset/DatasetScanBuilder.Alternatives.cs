@@ -643,6 +643,7 @@ internal sealed partial class DatasetScanBuilder
 
         // The objects the walk keeps, less those whose keys the filter refutes, as a read of rows passes them over.
         KeyPruning? keys = _summaries && _indexes && _take is null ? KeyPruning.Of(_version.Schema, _filter) : null;
+        Queue<(Planned Unit, Task<(List<(int First, int End)> Ranges, Indexes.GranuleKeys Keys)?> Reading)>? reading = null;
         await foreach (PositionedObject held in _version.WalkAsync(
             Pruner(), _from, _to, read && _considers ? _metrics : null, cancellationToken, rollups is null ? null : rollups.Covers).ConfigureAwait(false))
         {
@@ -677,27 +678,64 @@ internal sealed partial class DatasetScanBuilder
 
                 Planned unit = new Planned(held, answer is null ? null : AnsweredBy(answer, held));
                 Choose(unit, explain);
+                units.Add(unit);
 
                 // The share of its rows its key's sparse index keeps, which a read of them takes alone: found when so narrow
-                // a read could beat the choice, through the open an analysis makes anyway, or as the handle holds it.
-                if (keys is not null && unit.Weight > _version.Costs.Weight(RowsCost(held, double.Epsilon))
-                    && await KeptGranulesAsync(held, keys, first, read, cancellationToken).ConfigureAwait(false) is ({ } ranges, { } kept))
+                // a read could beat the choice, through the open an analysis makes anyway, or as the handle holds it. The
+                // indexes of the next objects are asked while the walk goes on, as the rows' walk asks them (KeysAhead), the
+                // oldest awaited when as many wait: each awaited in turn cost QP-1 a round trip an object on one lane.
+                if (keys is not null && unit.Weight > _version.Costs.Weight(RowsCost(held, double.Epsilon)))
                 {
-                    long rows = 0;
-                    foreach ((int from, int end) in ranges)
+                    ValueTask<(List<(int First, int End)> Ranges, Indexes.GranuleKeys Keys)?> asked = KeptGranulesAsync(held, keys, first, read, cancellationToken);
+                    if (asked.IsCompletedSuccessfully)
                     {
-                        rows += Math.Min((long)end * kept.GranuleRows, kept.Rows) - ((long)from * kept.GranuleRows);
+                        Refine(unit, await asked.ConfigureAwait(false), explain);
+                        continue;
                     }
 
-                    unit.Kept = (double)rows / Math.Max(kept.Rows, 1);
-                    Choose(unit, explain);
-                }
+                    (reading ??= new Queue<(Planned, Task<(List<(int First, int End)> Ranges, Indexes.GranuleKeys Keys)?>)>(KeysAhead)).Enqueue((unit, asked.AsTask()));
+                    if (reading.Count >= KeysAhead)
+                    {
+                        (Planned waited, Task<(List<(int First, int End)> Ranges, Indexes.GranuleKeys Keys)?> its) = reading.Dequeue();
 
-                units.Add(unit);
+                        // Each read was asked by this walk, a few objects before.
+#pragma warning disable VSTHRD003
+                        Refine(waited, await its.ConfigureAwait(false), explain);
+#pragma warning restore VSTHRD003
+                    }
+                }
             }
         }
 
+        while (reading is not null && reading.TryDequeue(out (Planned Unit, Task<(List<(int First, int End)> Ranges, Indexes.GranuleKeys Keys)?> Reading) last))
+        {
+#pragma warning disable VSTHRD003
+            Refine(last.Unit, await last.Reading.ConfigureAwait(false), explain);
+#pragma warning restore VSTHRD003
+        }
+
         return (rollups, read ? await SheetsKeptAsync(units, cancellationToken).ConfigureAwait(false) : units);
+    }
+
+    /// <summary>
+    /// Chooses <paramref name="unit"/> again with the share of its rows its key's sparse index keeps, as <paramref name="kept"/>
+    /// says, when it said one.
+    /// </summary>
+    private void Refine(Planned unit, (List<(int First, int End)> Ranges, Indexes.GranuleKeys Keys)? kept, bool explain)
+    {
+        if (kept is not ({ } ranges, { } keys))
+        {
+            return;
+        }
+
+        long rows = 0;
+        foreach ((int from, int end) in ranges)
+        {
+            rows += Math.Min((long)end * keys.GranuleRows, keys.Rows) - ((long)from * keys.GranuleRows);
+        }
+
+        unit.Kept = (double)rows / Math.Max(keys.Rows, 1);
+        Choose(unit, explain);
     }
 
     /// <summary>
