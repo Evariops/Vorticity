@@ -142,7 +142,7 @@ internal sealed class CountsAnswer
         int? column = null;
         List<byte[]>? values = null;
         List<VortexExpr> rest = [];
-        (int Field, string Path, VortexExpr Found)? exclusion = null;
+        ExcludedValue? exclusion = null;
         if (filter is not null)
         {
             int? leading = version.Schema.KeyColumns is [{ } first, ..] ? Top(Expr.Field(first), schema) : null;
@@ -171,7 +171,7 @@ internal sealed class CountsAnswer
                     && other.Value.Kind != FilterLiteralKind.Null && Top(excluded, schema) is int identifier
                     && Identifies(version.Schema, identifier))
                 {
-                    exclusion = (identifier, excluded.Path, new ComparisonExpr(excluded, ComparisonOp.Equal, other.Value));
+                    exclusion = new ExcludedValue(identifier, excluded.Path, new ComparisonExpr(excluded, ComparisonOp.Equal, other.Value));
                     continue;
                 }
 
@@ -256,7 +256,7 @@ internal sealed class CountsAnswer
     }
 
     /// <summary>Whether a column of <paramref name="dtype"/> named <paramref name="path"/> holds no null: its type says so, or the summaries.</summary>
-    private static bool NoNull(ObjectSummaries summaries, string path, DType dtype) =>
+    internal static bool NoNull(ObjectSummaries summaries, string path, DType dtype) =>
         !dtype.IsNullable || (summaries.TryGet(path, out ColumnSummary column) && column.HasNullCount && column.NullCount == 0);
 
     /// <summary>Whether column <paramref name="field"/> of <paramref name="version"/> is a declared identifier, which every job indexes.</summary>
@@ -282,7 +282,7 @@ internal sealed class CountsAnswer
     /// object whose summaries do not prove the column holds none is read as rows. Null for none; a second is a conjunct
     /// like any, which summaries prove or not.
     /// </summary>
-    internal (int Field, string Path, VortexExpr Found)? Exclusion { get; private init; }
+    internal ExcludedValue? Exclusion { get; private init; }
 
     /// <summary>
     /// The summaries an object <paramref name="held"/> is judged by: its entry's, the key's first column bounded by its keys
@@ -861,4 +861,59 @@ internal sealed class StateRows : StateTable
 
         return groups[low].Value;
     }
+}
+
+/// <summary>
+/// One value of a declared identifier a filter leaves out (<see cref="CountsAnswer.Exclusion"/>): the identifier's column,
+/// its name, and the equality its postings place the rows of. The question that asks it places the value through it, its
+/// lookup over the partitions' indexes made once, the objects it may be placed in noted as the plan finds them, and its
+/// places in the objects answered through their granules as their reads find them; made apart, it costs nothing to the
+/// questions that leave no value out.
+/// </summary>
+internal sealed class ExcludedValue(int field, string path, VortexExpr found)
+{
+    private PartitionLookup? _lookup;
+    private bool _looked;
+    private HashSet<UInt128>? _placed;
+    private System.Collections.Concurrent.ConcurrentDictionary<UInt128, List<RowRange>?>? _places;
+
+    /// <summary>The identifier's column.</summary>
+    internal int Field { get; } = field;
+
+    /// <summary>Its name, as the filter names it.</summary>
+    internal string Path { get; } = path;
+
+    /// <summary><c>id == v</c>, which the identifier's postings place the rows of.</summary>
+    internal VortexExpr Found { get; } = found;
+
+    /// <summary>The lookup of the value over the partitions' indexes of <paramref name="version"/>, made once; null where they hold none.</summary>
+    internal PartitionLookup? Lookup(VortexDataset dataset, DatasetSnapshot version)
+    {
+        if (!_looked)
+        {
+            _lookup = PartitionLookup.Of(dataset, version, Found);
+            _looked = true;
+        }
+
+        return _lookup;
+    }
+
+    /// <summary>
+    /// Notes <paramref name="places"/>, the runs of the rows of the object <paramref name="uid"/> that may hold the value, as
+    /// its read found them, beside its statistics; null where its postings did not say. Read side by side, objects note theirs
+    /// at once.
+    /// </summary>
+    internal void Hold(UInt128 uid, List<RowRange>? places) =>
+        System.Threading.LazyInitializer.EnsureInitialized(ref _places, static () => new System.Collections.Concurrent.ConcurrentDictionary<UInt128, List<RowRange>?>())[uid] = places;
+
+    /// <summary>The places of the value in the object <paramref name="uid"/> its read noted, taken; null for none.</summary>
+    internal List<RowRange>? PlacesOf(UInt128 uid) => _places is { } held && held.TryRemove(uid, out List<RowRange>? places) ? places : null;
+
+    /// <summary>Notes that the postings of an identifier may place the value in the object <paramref name="uid"/>.</summary>
+    internal void Place(UInt128 uid) => (_placed ??= []).Add(uid);
+
+    /// <summary>Whether the postings of an identifier may place the value in the object <paramref name="uid"/>, as noted.</summary>
+    internal bool Placed(UInt128 uid) => _placed?.Contains(uid) == true;
+
+    internal void Deconstruct(out int field, out string path, out VortexExpr found) => (field, path, found) = (Field, Path, Found);
 }

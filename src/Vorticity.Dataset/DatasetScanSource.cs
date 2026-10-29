@@ -435,6 +435,7 @@ internal sealed partial class DatasetScanSource
             bool deciding = false;
             if (whole && (spec.Answering?.Family is not null || answer is not null))
             {
+                await planner.PlacedAsync(held, cancellationToken).ConfigureAwait(false);
                 (AnswerPath path, deciding) = planner.ChosenOnOneLane(held, kept: 1);
                 if (!deciding && path is AnswerPath.Learn or AnswerPath.Granules)
                 {

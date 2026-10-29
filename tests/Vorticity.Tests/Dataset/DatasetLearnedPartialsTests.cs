@@ -418,6 +418,30 @@ public sealed partial class DatasetLearnedPartialsTests
     }
 
     /// <summary>
+    /// The same object, its sizes declared an identifier, under a filter that leaves out the size of a hit of the service whose
+    /// granules their statistics answer: the granules the size's postings do not place it in are answered under the rest of
+    /// the filter, and the object answers through them at its first asking, as the rows do, where every granule was its rows
+    /// and the object learned.
+    /// </summary>
+    [Fact]
+    public async Task AnIdentifierLeftOutIsPlacedByItsPostingsAndTheOtherGranulesAnswer()
+    {
+        await using MemoryObjectStore memory = new MemoryObjectStore();
+        Hit[] hits = await GranulesObjectAsync(memory, identifiers: [nameof(Hit.Size)]);
+        long needle = hits.First(static h => h.Service == "svc-000").Size;
+        await using VortexDataset asked = await VortexDataset.OpenAsync(memory, cancellationToken: Ct);
+        List<string> rows = await LinesAsync(Question(asked, synopses: false));
+        ScanPlan plan = await Question(asked, synopses: true).ExplainAsync(analyze: true, Ct);
+        string chosen = string.Join(", ", plan.Units.Select(static unit => $"{unit.Alternative}: {unit.Detail}"));
+        Console.WriteLine($"AN IDENTIFIER LEFT OUT: {chosen}");
+        Assert.Equal(rows, await LinesAsync(Question(asked, synopses: true)));
+        Assert.StartsWith("granules:", chosen, StringComparison.Ordinal);
+
+        Vorticity.Aggregation Question(VortexDataset handle, bool synopses) => handle.Scan<Hit>().With(new ScanOptions { UseSynopses = synopses, DegreeOfParallelism = 1 })
+            .Where(h => h.Size != needle).GroupBy(h => (h.Service, h.At.Truncate(CalendarUnit.Hour))).Select(g => (g.Key.Service, g.Key.Item2, g.Count()));
+    }
+
+    /// <summary>
     /// The granules an object's statistics leave in runs apart, those where a service or an hour ends, are read alone, the
     /// runs between them answered, as the rows answer: read in one part by a mask of them, a run between two costs no part
     /// more. Bridged as if it did, two hours of four services by service and hour read 2.37 MB, where the granules left and
@@ -452,11 +476,65 @@ public sealed partial class DatasetLearnedPartialsTests
     }
 
     /// <summary>
-    /// One object of a hundred granules of 800 000 hits over two hours, sorted by service then instant: one service holds
-    /// 40 % of them, 300 others the rest, and a size drawn at random each. With <paramref name="chunked"/>, each column's
-    /// chunks of 16 KiB, all ending together at each granule: a granule's rows are read alone, and lanes cut the object there.
+    /// Two hours of hits in a partition of a day, consolidated with the index of its partition, the sizes declared an
+    /// identifier; every request but one, by service and day, which the object's counts answer, less the rows of the one size,
+    /// and by service and hour, which its granules' statistics answer, the granules of the one size read as rows: the size
+    /// placed by the partition's index, which holds the object's postings past a consolidation, at one lane and at eight, as
+    /// the rows answer, reading a fraction of what they read. Placed by the object's own postings, which a consolidated object
+    /// keeps none of, the counts read its rows after all, and QP-5 of S1, by service and twelve hours over consolidated days,
+    /// read every request id the first time: 8.7 s at 32 lanes. Cut into pieces of two granules, which each read the object's
+    /// structures again, the object is answered as the rows answer.
     /// </summary>
-    private static async Task GranulesObjectAsync(MemoryObjectStore memory, bool chunked = false)
+    [Theory]
+    [InlineData(1, 50_000)]
+    [InlineData(8, 50_000)]
+    [InlineData(8, 1_000)]
+    public async Task AnIdentifierLeftOutIsPlacedByThePartitionsIndexes(int lanes, long leastPieceRows)
+    {
+        await using MemoryObjectStore memory = new MemoryObjectStore();
+        Hit[] hits = await PartitionedHitsAsync(memory);
+        long needle = hits[hits.Length / 3].Size;
+        foreach ((string by, string path, Func<Scan<Hit>, Vorticity.Aggregation> grouped) in ((string, string, Func<Scan<Hit>, Vorticity.Aggregation>)[])[
+            ("day", "counts:", scan => scan.GroupBy(h => (h.Service, h.At.Truncate(CalendarUnit.Day))).Select(g => (g.Key.Service, g.Key.Item2, g.Count()))),
+            ("hour", "granules:", scan => scan.GroupBy(h => (h.Service, h.At.Truncate(CalendarUnit.Hour))).Select(g => (g.Key.Service, g.Key.Item2, g.Count()))),
+        ])
+        {
+            (List<string> Answer, long Bytes, string Plan) rows = await AskAfreshAsync(grouped, synopses: false);
+            (List<string> Answer, long Bytes, string Plan) placed = await AskAfreshAsync(grouped, synopses: true);
+            Console.WriteLine($"PLACED BY THE PARTITIONS by service and {by} at {lanes} lanes, pieces of {leastPieceRows} rows or more: {placed.Bytes:N0} bytes, {rows.Bytes:N0} through the rows; {placed.Plan}");
+            Assert.NotEmpty(rows.Answer);
+            Assert.Equal(rows.Answer, placed.Answer);
+            Assert.All(placed.Plan.Split(" | "), unit => Assert.StartsWith(path, unit, StringComparison.Ordinal));
+
+            // Pieces of two granules each read the object's marks and statistics' lookups again: their bytes are Q2b's.
+            if (leastPieceRows >= 50_000)
+            {
+                Assert.True(placed.Bytes * 3 < rows.Bytes, $"by service and {by}: {placed.Bytes} bytes placed by the partitions, {rows.Bytes} through the rows");
+            }
+        }
+
+        async Task<(List<string>, long, string)> AskAfreshAsync(Func<Scan<Hit>, Vorticity.Aggregation> grouped, bool synopses)
+        {
+            await using CountingObjectStore store = new CountingObjectStore(memory);
+            await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = lanes);
+            await using VortexDataset dataset = await VortexDataset.OpenAsync(store, new DatasetOptions { Session = session, LeastPieceRows = leastPieceRows }, Ct);
+            string plan = string.Join(" | ", (await Question(dataset, grouped, synopses, 1).ExplainAsync(analyze: false, Ct)).Units.Select(static unit => $"{unit.Alternative}: {unit.Detail}"));
+            store.Reset();
+            List<string> answer = await LinesAsync(Question(dataset, grouped, synopses, lanes));
+            return (answer, store.BytesRead, plan);
+        }
+
+        Vorticity.Aggregation Question(VortexDataset handle, Func<Scan<Hit>, Vorticity.Aggregation> grouped, bool synopses, int degree) =>
+            grouped(handle.Scan<Hit>().With(new ScanOptions { UseSynopses = synopses, DegreeOfParallelism = degree }).Where(h => h.Size != needle));
+    }
+
+    /// <summary>
+    /// One object of a hundred granules of 800 000 hits over two hours, sorted by service then instant: one service holds
+    /// 40 % of them, 300 others the rest, and a size drawn at random each; the hits, in the order they were drawn. With
+    /// <paramref name="chunked"/>, each column's chunks of 16 KiB, all ending together at each granule: a granule's rows are
+    /// read alone, and lanes cut the object there. The columns <paramref name="identifiers"/> names declared identifiers.
+    /// </summary>
+    private static async Task<Hit[]> GranulesObjectAsync(MemoryObjectStore memory, bool chunked = false, string[]? identifiers = null)
     {
         Random random = new Random(0xF3);
         Hit[] hits = [.. Enumerable.Range(0, 800_000).Select(_ => new Hit(
@@ -468,6 +546,7 @@ public sealed partial class DatasetLearnedPartialsTests
             Layout = new DatasetLayout { SortKey = [LayoutValue.Column(nameof(Hit.Service)), LayoutValue.Column(nameof(Hit.At))], IndexedPrefix = 1, ObjectBytes = 64 << 20 },
             ContentsObjectBytes = 1,
             SheetObjectBytes = 0,
+            Identifiers = identifiers ?? [],
             Write = chunked ? new VortexWriteOptions { ChunkTargetBytes = 16 << 10 } : new VortexWriteOptions(),
             ChunkBytes = chunked ? 16 << 10 : 1 << 20,
             GroupRows = chunked ? 8_192 : 1L << 22,
@@ -483,6 +562,8 @@ public sealed partial class DatasetLearnedPartialsTests
         while (await created.CompactAsync(new CompactionOptions { LevelZeroCeiling = 1, TargetBytesAtLevelOne = 1L << 30 }, Ct) is not null)
         {
         }
+
+        return hits;
     }
 
     /// <summary>

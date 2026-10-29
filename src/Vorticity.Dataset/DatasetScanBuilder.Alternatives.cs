@@ -360,20 +360,25 @@ internal sealed partial class DatasetScanBuilder
 
     /// <summary>
     /// The statistics of an object's columns over its granules, the granules they do not answer read as rows
-    /// (<see cref="GranuleAnswer"/>); of a lane's piece of it, the granules the piece holds, unless the piece learns.
+    /// (<see cref="GranuleAnswer"/>); of a lane's piece of it, the granules the piece holds, unless the piece learns. Under a
+    /// value of an identifier left out, an object its postings may place the value in (<see cref="PlacedAsync"/>).
     /// </summary>
     private sealed class GranulesAlternative(DatasetScanBuilder scan) : Alternative(scan, AnswerPath.Granules, UnitLevel.Object)
     {
         internal override Coverage Covers(Planned unit) =>
             Scan.Answer() is not null && unit.Held.Entry.Contents is { GranuleStats.Count: > 0 } && Scan.Covered(unit.Held) > 0 && Scan.Piece(unit.Held) is null
-            && Scan.GranuleAnswer() is { } granules && granules.Covers(unit.Held)
+            && Scan.GranuleAnswer() is { } granules && (granules.Exclusion is not { } excluded || excluded.Placed(unit.Held.Entry.Uid))
+            && granules.Covers(unit.Held)
                 ? Coverage.Part
                 : Coverage.None;
 
         internal override PathCosts.Cost Cost(Planned unit)
         {
+            // Under a value of an identifier left out, the places its postings give it, in two round trips cold: the index's
+            // directory or entries, then its page or runs.
             (PathCosts.Cost statistics, PathCosts.Cost unanswered, _) = Scan.GranuleAnswer()!.Costs(unit.Held);
-            return statistics + unanswered + Scan.SheetsCost(unit.Held);
+            PathCosts.Cost placing = Scan.GranuleAnswer()!.Exclusion is null ? default : new PathCosts.Cost(2, 0);
+            return statistics + unanswered + placing + Scan.SheetsCost(unit.Held);
         }
 
         /// <summary>The rows of the granules the statistics do not answer: the statistics, a synopsis, a later asking finds read.</summary>
@@ -383,7 +388,8 @@ internal sealed partial class DatasetScanBuilder
         {
             (PathCosts.Cost statistics, PathCosts.Cost unanswered, _) = Scan.GranuleAnswer()!.Costs(unit.Held);
             return $"the statistics over the granules of {Scan.GranuleAnswer()!.Fields.Length} columns, {statistics.Bytes} bytes in {statistics.Requests} requests, "
-                + $"and the rows of the granules they do not answer, about {unanswered.Bytes} bytes in {unanswered.Requests}";
+                + $"and the rows of the granules they do not answer, about {unanswered.Bytes} bytes in {unanswered.Requests}"
+                + (Scan.GranuleAnswer()!.Exclusion is { } exclusion ? $", those its postings place a value of {exclusion.Path} in among them" : string.Empty);
         }
     }
 
@@ -692,6 +698,11 @@ internal sealed partial class DatasetScanBuilder
                     {
                         await _dataset.Partials.CoveringAsync(store, own.Family, own.Key, cancellationToken).ConfigureAwait(false);
                     }
+                }
+
+                if (answer?.Exclusion is not null)
+                {
+                    await PlacedAsync(held, cancellationToken).ConfigureAwait(false);
                 }
 
                 Planned unit = new Planned(held, answer is null ? null : AnsweredBy(answer, held));

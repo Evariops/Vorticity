@@ -49,10 +49,15 @@ internal sealed class GranuleAnswer
 
     // The filter, judged by summaries, and the columns it reads, top-level ones by their place; the columns whose statistics
     // a granule is judged by. Worked out at the first object whose keys may hold one group in a granule, which most questions
-    // the counts answer never meet.
+    // the counts answer never meet. Under a value of an identifier left out, the filter less that conjunct.
     private SummaryPruner? _filter;
     private int[] _filtered = [];
     private int[]? _fields;
+
+    // A value of a declared identifier the filter leaves out (CountsAnswer.Exclusion): a granule the identifier's postings
+    // place no row of the value in is answered under the rest of the filter, the others read as rows. Null for none, which
+    // most questions are: made apart, it costs them nothing.
+    private readonly Excluding? _excluding;
 
     // The columns of the sort key the filter only compares to a bound, a window: a granule holds their values in order, or
     // within one value of the columns before, so its extremes decide those whole, mostly, and they never make a granule vary
@@ -69,6 +74,7 @@ internal sealed class GranuleAnswer
         _schema = version;
         _costs = costs;
         _asked = filter;
+        _excluding = counts.Exclusion is { } excluded ? new Excluding(excluded, Less(filter!, excluded.Path)) : null;
         _keys = keys;
         _measured = measured;
         _leading = leading;
@@ -96,6 +102,44 @@ internal sealed class GranuleAnswer
     /// <summary>The columns of the measures whose histograms a quantile or a distribution asks, each once.</summary>
     internal int[] Histogrammed { get; }
 
+    /// <summary>
+    /// The value of a declared identifier the filter leaves out (<see cref="CountsAnswer.Exclusion"/>): its column, its path,
+    /// and the equality its postings place the rows of; null for none. The granules are judged under the rest of the filter
+    /// where the value is placed (<see cref="Settle"/>), and an object where it may not be is answered by none of them.
+    /// </summary>
+    internal ExcludedValue? Exclusion => _excluding?.Value;
+
+    /// <summary>
+    /// A value of a declared identifier the filter leaves out and the filter less its conjunct; and the whole filter as
+    /// summaries judge it, which a granule is judged by where the value is not placed, worked out with the rest's.
+    /// </summary>
+    private sealed class Excluding(ExcludedValue value, VortexExpr? rest)
+    {
+        internal ExcludedValue Value { get; } = value;
+
+        internal VortexExpr? Rest { get; } = rest;
+
+        internal SummaryPruner? Whole { get; set; }
+    }
+
+    /// <summary>
+    /// <paramref name="filter"/> less its first conjunct that leaves a value of <paramref name="path"/> out, as
+    /// <see cref="CountsAnswer.Exclusion"/> takes it; null when nothing else is left.
+    /// </summary>
+    private static VortexExpr? Less(VortexExpr filter, string path)
+    {
+        List<VortexExpr> conjuncts = [];
+        GroupPredicates.Conjuncts(filter, conjuncts);
+        int excluded = conjuncts.FindIndex(conjunct => conjunct is ComparisonExpr { Op: ComparisonOp.NotEqual, Field: ColumnFieldExpr column }
+            && string.Equals(column.Path, path, StringComparison.Ordinal));
+        if (excluded >= 0)
+        {
+            conjuncts.RemoveAt(excluded);
+        }
+
+        return GroupPredicates.And(null, conjuncts);
+    }
+
     /// <summary>The columns whose statistics a granule is judged by: those of the keys, the filter and the measures, each once.</summary>
     internal int[] Fields => _fields ??= Judged();
 
@@ -110,7 +154,12 @@ internal sealed class GranuleAnswer
 
         List<int> filtered = [];
         List<int> ranged = [];
-        if (_asked is { } filter)
+        if (_excluding is { } excluding && _asked is { } whole)
+        {
+            excluding.Whole = new SummaryPruner(whole);
+        }
+
+        if ((_excluding is { } less ? less.Rest : _asked) is { } filter)
         {
             _filter = new SummaryPruner(filter);
             HashSet<string> bounded = new HashSet<string>(StringComparer.Ordinal);
@@ -452,6 +501,12 @@ internal sealed class GranuleAnswer
             share += field == _leading ? Math.Min(1, 2.0 * _granuleRows / entry.PhysicalRows) : 1;
         }
 
+        // The value of an identifier left out lies in a granule or so of an object, which its postings place: read as rows.
+        if (edges && _excluding is not null)
+        {
+            share += Math.Min(1, (double)_granuleRows / entry.PhysicalRows);
+        }
+
         return Math.Min(1, share);
     }
 
@@ -546,12 +601,18 @@ internal sealed class GranuleAnswer
     /// that holds a row of <paramref name="deletions"/> is not answered: its statistics count that row. A quantile takes the
     /// histograms of <paramref name="histograms"/>, by the same places. Of the granules within <paramref name="part"/> alone,
     /// the object's own positions a lane's piece of it covers, deleted rows included: the rows it holds of a granule it cuts
-    /// are read as rows.
+    /// are read as rows. Under a value of an identifier left out (<see cref="Exclusion"/>), the granules are judged under the
+    /// rest of the filter, and those that <paramref name="holding"/>, the runs of the object's rows its postings place the
+    /// value in, touches are read as rows; with none known, every granule is judged under the whole filter.
     /// </summary>
     internal (GranuleStateRows? States, List<RowRange> Unsettled, int Settled) Settle(
-        in PositionedObject held, GranuleStats?[] columns, GranuleHistograms?[] histograms, DeletionVector deletions, RowRange part)
+        in PositionedObject held, GranuleStats?[] columns, GranuleHistograms?[] histograms, DeletionVector deletions, RowRange part,
+        List<RowRange>? holding = null)
     {
-        (GranuleStateRows? states, List<RowRange> unsettled, int settled) = SettlePhysical(held, columns, histograms, deletions, part);
+        _ = Fields;
+        bool placed = _excluding is null || holding is not null;
+        (GranuleStateRows? states, List<RowRange> unsettled, int settled) =
+            SettlePhysical(held, columns, histograms, deletions, part, placed ? _filter : _excluding!.Whole, _excluding is null ? null : holding);
         if (deletions.IsEmpty)
         {
             return (states, unsettled, settled);
@@ -566,9 +627,13 @@ internal sealed class GranuleAnswer
         return (states, unsettled, settled);
     }
 
-    /// <summary><see cref="Settle"/>, its ranges the object's own row positions, deleted rows included.</summary>
+    /// <summary>
+    /// <see cref="Settle"/>, its ranges the object's own row positions, deleted rows included: each granule judged by
+    /// <paramref name="judge"/>, and one that <paramref name="holding"/> touches read as rows.
+    /// </summary>
     private (GranuleStateRows? States, List<RowRange> Unsettled, int Settled) SettlePhysical(
-        in PositionedObject held, GranuleStats?[] columns, GranuleHistograms?[] histograms, DeletionVector deletions, RowRange part)
+        in PositionedObject held, GranuleStats?[] columns, GranuleHistograms?[] histograms, DeletionVector deletions, RowRange part,
+        SummaryPruner? judge, List<RowRange>? holding)
     {
         long objectRows = held.Entry.PhysicalRows;
         GranuleStats? any = null;
@@ -620,11 +685,12 @@ internal sealed class GranuleAnswer
         GranuleStateRows states = new GranuleStateRows(this);
         List<ColumnSummary> judged = new List<ColumnSummary>(Fields.Length + summaries.Columns.Count);
         bool[] answers = new bool[any.Count];
+        int touched = 0;
         for (int b = lo; b < hi; b++)
         {
             long first = any.FirstRow(b);
             answers[b] = first >= part.Start && first + any.Rows[b] <= part.End && deletions.DeletedIn(first, first + any.Rows[b]) == 0
-                && SettleGranule(b, any.Rows[b], described, summaries, judged, states);
+                && !Touches(holding, ref touched, first, first + any.Rows[b]) && SettleGranule(b, any.Rows[b], described, summaries, judged, states, judge);
             states.Truncate(0);
         }
 
@@ -641,7 +707,7 @@ internal sealed class GranuleAnswer
             long rows = any.Rows[b];
             if (answers[b])
             {
-                SettleGranule(b, rows, described, summaries, judged, states);
+                SettleGranule(b, rows, described, summaries, judged, states, judge);
                 settled++;
                 continue;
             }
@@ -666,6 +732,25 @@ internal sealed class GranuleAnswer
         }
 
         return (states, unsettled, settled);
+    }
+
+    /// <summary>
+    /// Whether <paramref name="holding"/>, ascending runs of rows, touches rows <c>[first, end)</c>, asked of granules in their
+    /// order: <paramref name="at"/> the first run that may, moved on as they pass.
+    /// </summary>
+    private static bool Touches(List<RowRange>? holding, ref int at, long first, long end)
+    {
+        if (holding is null)
+        {
+            return false;
+        }
+
+        while (at < holding.Count && holding[at].End <= first)
+        {
+            at++;
+        }
+
+        return at < holding.Count && holding[at].Start < end;
     }
 
     /// <summary>Whether each of <paramref name="histograms"/> describes <paramref name="granules"/> granules, as the statistics do.</summary>
@@ -720,9 +805,11 @@ internal sealed class GranuleAnswer
 
     /// <summary>
     /// Settles granule <paramref name="granule"/> of <paramref name="rows"/> rows into <paramref name="states"/>: true when its
-    /// statistics answer it, its rows of states added, none when they prove the filter selects no row of it.
+    /// statistics answer it under <paramref name="judge"/>, its rows of states added, none when they prove the filter selects
+    /// no row of it.
     /// </summary>
-    private bool SettleGranule(int granule, long rows, GranuleColumn[] columns, ObjectSummaries summaries, List<ColumnSummary> judged, GranuleStateRows states)
+    private bool SettleGranule(
+        int granule, long rows, GranuleColumn[] columns, ObjectSummaries summaries, List<ColumnSummary> judged, GranuleStateRows states, SummaryPruner? judge)
     {
         // The granule's summaries: each column's own, the object's for the columns the granule keeps none of.
         judged.Clear();
@@ -745,12 +832,12 @@ internal sealed class GranuleAnswer
             }
         }
 
-        if (_filter is { } filter && !filter.MayMatch(judged, rows))
+        if (judge is { } filter && !filter.MayMatch(judged, rows))
         {
             return true;
         }
 
-        bool whole = _filter is not { } proving || proving.MustMatch(judged, rows);
+        bool whole = judge is not { } proving || proving.MustMatch(judged, rows);
 
         // The column that varies: a key's column that holds more than one group, or, under a filter the granule's summaries
         // do not prove, a column it reads that holds more than one value; at most one, which lists its values.
@@ -796,12 +883,12 @@ internal sealed class GranuleAnswer
             }
 
             judged[at] = x.SummaryOfValue(v < ids.Length ? x.LiteralOf(ids.Span[v]) : null, taken);
-            if (_filter is { } each && !each.MayMatch(judged, taken))
+            if (judge is { } each && !each.MayMatch(judged, taken))
             {
                 continue;
             }
 
-            if (_filter is { } proven && !proven.MustMatch(judged, taken))
+            if (judge is { } proven && !proven.MustMatch(judged, taken))
             {
                 return false;
             }

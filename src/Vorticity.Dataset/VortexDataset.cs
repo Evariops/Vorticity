@@ -2761,6 +2761,18 @@ public sealed class VortexDataset : IAsyncDisposable
             return null;
         }
 
+        // The directory's entries on the columns the filter reads alone: its runs' segments were a list each, every index of
+        // the object parsed at every lookup, three fifths of what a question that leaves an identifier out allocated. Read
+        // alone, those of the locating indexes, when the contents name them apart: the whole directory of a day's object, when
+        // it named every chunk of the synopsis tables of the time, was 11.5 MB a lookup read for a few runs.
+        DType schema = contents.SchemaType;
+        Func<uint, bool>? indexed = ColumnsOf(filter, schema);
+        List<Indexes.IndexSegment>? named = Named(contents, indexed);
+        if (named is { Count: 0 })
+        {
+            return null;
+        }
+
         ISegmentReader source = await OpenFooterlessAsync(entry, contents, cancellationToken).ConfigureAwait(false);
         await using (source.ConfigureAwait(false))
         {
@@ -2772,21 +2784,8 @@ public sealed class VortexDataset : IAsyncDisposable
 
             using Indexes.SpanReader rowsOf = opened;
 
-            // The directory's entries on the columns the filter reads alone: its runs' segments were a list each, every
-            // index of the object parsed at every lookup, three fifths of what a question that leaves an identifier out
-            // allocated. Read alone, those of the locating indexes, when the contents name them apart: the whole directory
-            // of a day's object, when it named every chunk of the synopsis tables of the time, was 11.5 MB a lookup read for a
-            // few runs.
-            DType schema = contents.SchemaType;
-            Func<uint, bool>? indexed = ColumnsOf(filter, schema);
-            List<Indexes.IndexSegment>? named = Named(contents, indexed);
-            if (named is { Count: 0 })
-            {
-                return null;
-            }
-
             // The first round trip: those entries, or the directory, beside every column's chunk directory.
-            Task<Indexes.IndexDirectory?> read = named is null ? WholeAsync() : EntriesAsync(named);
+            Task<Indexes.IndexDirectory?> read = LocatingAsync(entry, region, reader, indexed, named, cancellationToken);
 
             // The chunk directories of the columns the rows are read for: each read and parsed for every column, at every
             // lookup, was a fifth of what a question that leaves an identifier out allocated.
@@ -2814,89 +2813,149 @@ public sealed class VortexDataset : IAsyncDisposable
                 return null;
             }
 
-            // The second: the runs' segments that may hold a value the filter asks, over the blocks of the finest of the
-            // locating entries, a place of hashed postings spanning a unit of them.
-            long blockRows = 0;
-            foreach (Indexes.IndexEntry index in directory!.Entries)
+            // The second: the runs' segments that may hold a value the filter asks (LiveRangesAsync); the third, every run of
+            // blocks left, their granules together, a granule two runs share read once; the fourth, when a unit of hashed
+            // postings left them, the columns at the rows the filter keeps there.
+            List<RowRange>? ranges = await LiveRangesAsync(entry, reader, directory, filter, cancellationToken).ConfigureAwait(false);
+            return ranges is null ? null : await FoundRowsAsync(entry, rowsOf, ranges, filter, schema, columns, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// The rows of the object <paramref name="entry"/> names that its locating indexes, its identifiers' runs among them, may
+    /// hold for <paramref name="filter"/>, as runs of their blocks, with no open of the object and no row read: its index
+    /// directory's entries on the filter's columns, then the runs' segments that may hold the values, two round trips cold.
+    /// Null when the entry carries no table of contents this library reads, or the object no locating index the filter asks.
+    /// </summary>
+    /// <param name="entry">The object.</param>
+    /// <param name="filter">What the rows are placed for.</param>
+    /// <param name="cancellationToken">Cancels the reads.</param>
+    internal async ValueTask<List<RowRange>?> PlacesAsync(ObjectEntry entry, VortexExpr filter, CancellationToken cancellationToken)
+    {
+        if (entry.Contents is not { DirectoryRegion: { } region } contents)
+        {
+            return null;
+        }
+
+        Func<uint, bool>? indexed = ColumnsOf(filter, contents.SchemaType);
+        List<Indexes.IndexSegment>? named = Named(contents, indexed);
+        if (named is { Count: 0 })
+        {
+            return null;
+        }
+
+        ISegmentReader source = await OpenFooterlessAsync(entry, contents, cancellationToken).ConfigureAwait(false);
+        await using (source.ConfigureAwait(false))
+        {
+            ISegmentReader reader = Footerless(source, entry, contents);
+            return await LocatingAsync(entry, region, reader, indexed, named, cancellationToken).ConfigureAwait(false) is { } directory
+                ? await LiveRangesAsync(entry, reader, directory, filter, cancellationToken).ConfigureAwait(false)
+                : null;
+        }
+    }
+
+    /// <summary>
+    /// The runs of blocks of the object <paramref name="entry"/> names that its locating indexes, the entries of
+    /// <paramref name="directory"/>, leave for <paramref name="filter"/>, read through <paramref name="reader"/>: the runs'
+    /// segments that may hold the values. Null when the object keeps no locating index the filter asks.
+    /// </summary>
+    private static async Task<List<RowRange>?> LiveRangesAsync(
+        ObjectEntry entry, ISegmentReader reader, Indexes.IndexDirectory directory, VortexExpr filter, CancellationToken cancellationToken)
+    {
+        Indexes.ObjectContents contents = entry.Contents!;
+
+        // The runs' segments that may hold a value the filter asks, over the blocks of the finest of the locating entries, a
+        // place of hashed postings spanning a unit of them.
+        long blockRows = 0;
+        foreach (Indexes.IndexEntry index in directory.Entries)
+        {
+            if (index.Kind is Indexes.IndexKinds.SortedRuns or Indexes.IndexKinds.PostingsBlocks or Indexes.IndexKinds.PostingsHashed
+                && index.BlockLength > 0 && (blockRows == 0 || (long)index.BlockLength < blockRows))
             {
-                if (index.Kind is Indexes.IndexKinds.SortedRuns or Indexes.IndexKinds.PostingsBlocks or Indexes.IndexKinds.PostingsHashed
-                    && index.BlockLength > 0 && (blockRows == 0 || (long)index.BlockLength < blockRows))
+                blockRows = (long)index.BlockLength;
+            }
+        }
+
+        Indexes.FooterlessIndexes host = new Indexes.FooterlessIndexes(reader, contents.SchemaType, directory, [.. contents.Encodings]);
+        if (blockRows <= 0
+            || await Indexes.KeyIndexPruner.BuildAsync(host, filter, blockRows, cancellationToken).ConfigureAwait(false) is not { } pruner)
+        {
+            return null;
+        }
+
+        Compute.BlockMask live = new Compute.BlockMask(host.RowCount, blockRows);
+        await pruner.RefineAsync(host, live, cancellationToken).ConfigureAwait(false);
+
+        List<RowRange> ranges = [];
+        ReadOnlySpan<ulong> words = live.Words;
+        int block = 0;
+        while (block < live.BlockCount)
+        {
+            if (((words[block >> 6] >> (block & 63)) & 1) == 0)
+            {
+                block++;
+                continue;
+            }
+
+            int first = block;
+            while (block < live.BlockCount && ((words[block >> 6] >> (block & 63)) & 1) != 0)
+            {
+                block++;
+            }
+
+            long start = first * blockRows;
+            long end = Math.Min(block * blockRows, host.RowCount);
+            ranges.Add(new RowRange(start, end));
+        }
+
+        return ranges;
+    }
+
+    /// <summary>
+    /// The index directory of the object <paramref name="entry"/> names, read through <paramref name="reader"/>: the entries
+    /// <paramref name="named"/> of its locating indexes alone, or, when null, the directory whole, its entries on the columns
+    /// <paramref name="indexed"/> keeps; null when it does not parse.
+    /// </summary>
+    private static Task<Indexes.IndexDirectory?> LocatingAsync(
+        ObjectEntry entry, Indexes.IndexSegment region, ISegmentReader reader, Func<uint, bool>? indexed, List<Indexes.IndexSegment>? named,
+        CancellationToken cancellationToken)
+    {
+        return named is null ? WholeAsync() : EntriesAsync(named);
+
+        // The whole directory, its entries on the filter's columns kept.
+        async Task<Indexes.IndexDirectory?> WholeAsync()
+        {
+            using Buffers.SegmentOwner bytes = await reader.ReadAsync(
+                new Serialization.Schemas.SegmentSpec(region.Offset, region.Length, region.AlignmentExponent, 0, 0), cancellationToken).ConfigureAwait(false);
+            return region.Holds(bytes.Buffer.Span)
+                && Indexes.IndexDirectory.TryParse(bytes.Buffer.Span, Indexes.IndexDirectory.UnknownRows, region.Offset, indexed, out Indexes.IndexDirectory? whole, out _)
+                ? whole
+                : null;
+        }
+
+        // The entries alone, a directory of them over the object's rows: each checked against its own checksum, one that fails
+        // costing itself, as in a directory read whole.
+        async Task<Indexes.IndexDirectory?> EntriesAsync(List<Indexes.IndexSegment> regions)
+        {
+            using SegmentRequestSet requests = new SegmentRequestSet(regions.Count);
+            int[] slots = new int[regions.Count];
+            for (int i = 0; i < regions.Count; i++)
+            {
+                slots[i] = requests.Add(new Serialization.Schemas.SegmentSpec(regions[i].Offset, regions[i].Length, regions[i].AlignmentExponent, 0, 0));
+            }
+
+            await reader.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
+            List<Indexes.IndexEntry> kept = new List<Indexes.IndexEntry>(regions.Count);
+            for (int i = 0; i < regions.Count; i++)
+            {
+                ReadOnlySpan<byte> bytes = requests.GetBuffer(slots[i]).Span;
+                if (regions[i].Holds(bytes) && Indexes.IndexDirectory.TryParseEntry(bytes, region.Offset, out Indexes.IndexEntry? index))
                 {
-                    blockRows = (long)index.BlockLength;
+                    kept.Add(index);
                 }
             }
 
-            Indexes.FooterlessIndexes host = new Indexes.FooterlessIndexes(reader, schema, directory, [.. contents.Encodings]);
-            if (blockRows <= 0
-                || await Indexes.KeyIndexPruner.BuildAsync(host, filter, blockRows, cancellationToken).ConfigureAwait(false) is not { } pruner)
-            {
-                return null;
-            }
-
-            Compute.BlockMask live = new Compute.BlockMask(host.RowCount, blockRows);
-            await pruner.RefineAsync(host, live, cancellationToken).ConfigureAwait(false);
-
-            // The third: every run of blocks left, their granules together, a granule two runs share read once; the
-            // fourth, when a unit of hashed postings left them, the columns at the rows the filter keeps there.
-            List<RowRange> ranges = [];
-            ReadOnlySpan<ulong> words = live.Words;
-            int block = 0;
-            while (block < live.BlockCount)
-            {
-                if (((words[block >> 6] >> (block & 63)) & 1) == 0)
-                {
-                    block++;
-                    continue;
-                }
-
-                int first = block;
-                while (block < live.BlockCount && ((words[block >> 6] >> (block & 63)) & 1) != 0)
-                {
-                    block++;
-                }
-
-                long start = first * blockRows;
-                long end = Math.Min(block * blockRows, host.RowCount);
-                ranges.Add(new RowRange(start, end));
-            }
-
-            return await FoundRowsAsync(entry, rowsOf, ranges, filter, schema, columns, cancellationToken).ConfigureAwait(false);
-
-            // The whole directory, its entries on the filter's columns kept.
-            async Task<Indexes.IndexDirectory?> WholeAsync()
-            {
-                using Buffers.SegmentOwner bytes = await reader.ReadAsync(
-                    new Serialization.Schemas.SegmentSpec(region.Offset, region.Length, region.AlignmentExponent, 0, 0), cancellationToken).ConfigureAwait(false);
-                return region.Holds(bytes.Buffer.Span)
-                    && Indexes.IndexDirectory.TryParse(bytes.Buffer.Span, Indexes.IndexDirectory.UnknownRows, region.Offset, indexed, out Indexes.IndexDirectory? whole, out _)
-                    ? whole
-                    : null;
-            }
-
-            // The entries alone, a directory of them over the object's rows: each checked against its own checksum, one that
-            // fails costing itself, as in a directory read whole.
-            async Task<Indexes.IndexDirectory?> EntriesAsync(List<Indexes.IndexSegment> regions)
-            {
-                using SegmentRequestSet requests = new SegmentRequestSet(regions.Count);
-                int[] slots = new int[regions.Count];
-                for (int i = 0; i < regions.Count; i++)
-                {
-                    slots[i] = requests.Add(new Serialization.Schemas.SegmentSpec(regions[i].Offset, regions[i].Length, regions[i].AlignmentExponent, 0, 0));
-                }
-
-                await reader.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
-                List<Indexes.IndexEntry> kept = new List<Indexes.IndexEntry>(regions.Count);
-                for (int i = 0; i < regions.Count; i++)
-                {
-                    ReadOnlySpan<byte> bytes = requests.GetBuffer(slots[i]).Span;
-                    if (regions[i].Holds(bytes) && Indexes.IndexDirectory.TryParseEntry(bytes, region.Offset, out Indexes.IndexEntry? index))
-                    {
-                        kept.Add(index);
-                    }
-                }
-
-                return new Indexes.IndexDirectory((ulong)entry.PhysicalRows, 0, Indexes.WritePolicy.None, kept);
-            }
+            return new Indexes.IndexDirectory((ulong)entry.PhysicalRows, 0, Indexes.WritePolicy.None, kept);
         }
     }
 

@@ -48,15 +48,106 @@ internal sealed partial class DatasetScanBuilder
 
     /// <summary>
     /// How one lane's plan answers the object <paramref name="held"/>, which the scan covers whole (<see cref="Choose"/>), the
-    /// <paramref name="kept"/> share of its rows its key's sparse index keeps known, or 1; and, that share unknown, whether
-    /// it could change the choice, which then reads the index first, as <see cref="UnitsAsync"/> does. The lanes that cut an
-    /// object learn what one lane learns, and answer through its granules one that one lane answers so.
+    /// <paramref name="kept"/> share of its rows its key's sparse index keeps known, or 1, the value the filter leaves out
+    /// placed in it or not as <see cref="PlacedAsync"/> noted; and, that share unknown, whether it could change the choice,
+    /// which then reads the index first, as <see cref="UnitsAsync"/> does. The lanes that cut an object learn what one lane
+    /// learns, and answer through its granules one that one lane answers so.
     /// </summary>
     internal (AnswerPath Path, bool AsksKept) ChosenOnOneLane(in PositionedObject held, double kept)
     {
         Planned unit = new Planned(held, Answer() is { } answer ? AnsweredBy(answer, held) : null) { Kept = kept };
         Choose(unit, explain: false);
         return (unit.Chosen.Path, kept >= 1 && unit.Weight > _version.Costs.Weight(RowsCost(held, double.Epsilon)));
+    }
+
+    /// <summary>
+    /// Whether the postings of an identifier may place in the object <paramref name="held"/> the value the filter leaves out
+    /// (<see cref="CountsAnswer.Exclusion"/>), as <see cref="PlacesOfAsync"/> will look, noted where they may
+    /// (<see cref="ExcludedValue.Place"/>), which its granules then answer alone: the identifier holds no null in it, which
+    /// the filter leaves out as well, and the index of its partition covers it, or its own directory, which a declared
+    /// identifier's postings are in until a consolidation moves them to the partition's. False under none.
+    /// </summary>
+    internal async ValueTask<bool> PlacedAsync(PositionedObject held, CancellationToken cancellationToken)
+    {
+        if (Answer()?.Exclusion is not { } excluded || GranuleAnswer() is null
+            || !CountsAnswer.NoNull(held.Summaries(_version.Schema), excluded.Path, _version.Schema.DType.GetField(excluded.Field)))
+        {
+            return false;
+        }
+
+        bool placed = (ExclusionLookup() is not null && !held.Entry.HasDeletions
+            && await _version.PartitionIndexAsync(PartitionLookup.PartitionOf(_version, held), cancellationToken).ConfigureAwait(false) is { } index
+            && index.Covers(held.Entry.Uid))
+            || held.Entry.Contents is { DirectoryRegion: not null };
+        if (placed)
+        {
+            excluded.Place(held.Entry.Uid);
+        }
+
+        return placed;
+    }
+
+    /// <summary>
+    /// The runs of the rows of the object <paramref name="held"/>, at its own positions, that may hold the value the filter
+    /// leaves out (<see cref="Dataset.GranuleAnswer.Exclusion"/>), with no row read: the places the index of its partition
+    /// gives it, else those its own postings give, two round trips cold; null when neither says.
+    /// </summary>
+    private async Task<List<RowRange>?> PlacesOfAsync(PositionedObject held, VortexExpr found, CancellationToken cancellationToken)
+    {
+        if (ExclusionLookup() is { } partitions && !held.Entry.HasDeletions
+            && await partitions.BlocksAsync(held, cancellationToken).ConfigureAwait(false) is ({ } places, int placeRows))
+        {
+            List<RowRange> runs = new List<RowRange>(places.Length);
+            foreach (uint place in places)
+            {
+                long start = (long)place * placeRows;
+                long end = Math.Min(start + placeRows, held.Entry.PhysicalRows);
+                if (runs.Count > 0 && runs[^1].End == start)
+                {
+                    runs[^1] = new RowRange(runs[^1].Start, end);
+                }
+                else if (end > start)
+                {
+                    runs.Add(new RowRange(start, end));
+                }
+            }
+
+            return runs;
+        }
+
+        return await _dataset.PlacesAsync(held.Entry, found, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// The lookup of the value the filter leaves out (<see cref="CountsAnswer.Exclusion"/>) over the partitions' indexes, made
+    /// once; null for none, or a version that keeps none.
+    /// </summary>
+    private PartitionLookup? ExclusionLookup() => Answer()?.Exclusion?.Lookup(_dataset, _version);
+
+    /// <summary>
+    /// The statistics of the granules of the object <paramref name="held"/> an answer through them reads, and beside them the
+    /// places of the value <paramref name="excluded"/> the filter leaves out, noted where the settling of its granules takes
+    /// them (<see cref="ExcludedValue.PlacesOf"/>).
+    /// </summary>
+    private async Task<(Indexes.GranuleStats?[] Stats, Indexes.GranuleHistograms?[] Histograms)> StatisticsPlacedAsync(
+        PositionedObject held, ExcludedValue excluded, CancellationToken cancellationToken)
+    {
+        Task<List<RowRange>?> placing = PlacesOfAsync(held, excluded.Found, cancellationToken);
+        (Indexes.GranuleStats?[] Stats, Indexes.GranuleHistograms?[] Histograms) statistics;
+        try
+        {
+            statistics = await _dataset.ReadGranuleStatsAsync(held.Entry, GranuleAnswer()!.Fields, GranuleAnswer()!.Histogrammed, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch
+        {
+            // The places are read beside: they end first.
+            await ((Task)placing).ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
+            throw;
+        }
+
+        excluded.Hold(held.Entry.Uid, await placing.ConfigureAwait(false));
+        return statistics;
     }
 
     /// <summary>The rows of the object <paramref name="held"/> its granules' statistics are expected to leave, read as rows (<see cref="Dataset.GranuleAnswer.Unanswered"/>).</summary>
@@ -325,6 +416,11 @@ internal sealed partial class DatasetScanBuilder
 
         await foreach (PositionedObject held in _version.WalkAsync(Pruner(), _from, _to, null, cancellationToken).ConfigureAwait(false))
         {
+            if (answer.Exclusion is not null)
+            {
+                await PlacedAsync(held, cancellationToken).ConfigureAwait(false);
+            }
+
             Planned unit = new Planned(held, AnsweredBy(answer, held));
             Choose(unit, explain: false);
             if (unit.Chosen.Path is not (AnswerPath.Rows or AnswerPath.Zones or AnswerPath.Learn))
@@ -465,7 +561,7 @@ internal sealed partial class DatasetScanBuilder
                     await held.Entry.ResolveAsync(_version.Pages, cancellationToken).ConfigureAwait(false);
                     (long lower, long upper) = Whole(held) ? (0, held.Entry.PhysicalRows) : PhysicalRange(held);
                     (GranuleStateRows? settled, List<RowRange> unsettled, int answered) = GranuleAnswer()!.Settle(
-                        held, stats, histograms, held.Entry.Deletions, new RowRange(lower, upper));
+                        held, stats, histograms, held.Entry.Deletions, new RowRange(lower, upper), answer.Exclusion?.PlacesOf(held.Entry.Uid));
                     if (_metrics is { } counted)
                     {
                         counted.GranulesAnswered += answered;
@@ -617,11 +713,13 @@ internal sealed partial class DatasetScanBuilder
                 ObjectEntry entry = unit.Held.Entry;
                 int field = unit.Field!.Value;
                 unit.Counts = entry.HasDeletions ? LiveCountsAsync(entry, field, cancellationToken)
-                    : answer.Exclusion is { } exclusion ? KeptCountsAsync(answer, entry, field, exclusion.Field, exclusion.Found, cancellationToken)
+                    : answer.Exclusion is { } exclusion ? KeptCountsAsync(answer, unit.Held, field, exclusion.Field, exclusion.Found, cancellationToken)
                     : _dataset.ReadCountsAsync(entry, field, answer.AsksSketches, cancellationToken).AsTask();
                 break;
             case AnswerPath.Granules:
-                unit.Statistics = _dataset.ReadGranuleStatsAsync(unit.Held.Entry, GranuleAnswer()!.Fields, GranuleAnswer()!.Histogrammed, cancellationToken).AsTask();
+                unit.Statistics = GranuleAnswer()!.Exclusion is { } excluded
+                    ? StatisticsPlacedAsync(unit.Held, excluded, cancellationToken)
+                    : _dataset.ReadGranuleStatsAsync(unit.Held.Entry, GranuleAnswer()!.Fields, GranuleAnswer()!.Histogrammed, cancellationToken).AsTask();
                 break;
             case AnswerPath.Partial:
                 unit.Partial = PartialAsync(unit.Held, cancellationToken);
@@ -779,14 +877,17 @@ internal sealed partial class DatasetScanBuilder
     }
 
     /// <summary>
-    /// The counts of column <paramref name="field"/> of an object under a value of identifier <paramref name="identifier"/>
-    /// left out, less those of the rows that hold it (<see cref="CountsAnswer.Exclusion"/>): the rows its postings find for
-    /// <paramref name="found"/>, read beside the counts, counted and taken out (<see cref="DeletedCounts.Less"/>); none, and the
-    /// object read as rows, when the postings cannot say or the counts do not give the rows kept exactly.
+    /// The counts of column <paramref name="field"/> of the object <paramref name="held"/> under a value of identifier
+    /// <paramref name="identifier"/> left out, less those of the rows that hold it (<see cref="CountsAnswer.Exclusion"/>): the
+    /// rows its postings find for <paramref name="found"/>, those of the index of its partition first, its own otherwise, read
+    /// beside the counts, counted and taken out (<see cref="DeletedCounts.Less"/>); none, and the object read as rows, when the
+    /// postings cannot say or the counts do not give the rows kept exactly. A consolidated object keeps no postings of its own:
+    /// its counts never answered.
     /// </summary>
     private async Task<(Indexes.ColumnCounts?, Indexes.ColumnSketches?)> KeptCountsAsync(
-        CountsAnswer answer, ObjectEntry entry, int field, int identifier, VortexExpr found, CancellationToken cancellationToken)
+        CountsAnswer answer, PositionedObject held, int field, int identifier, VortexExpr found, CancellationToken cancellationToken)
     {
+        ObjectEntry entry = held.Entry;
         (Indexes.ColumnCounts? counts, _) = await _dataset.ReadCountsAsync(entry, field, sketches: false, cancellationToken).ConfigureAwait(false);
         if (counts is null)
         {
@@ -810,7 +911,10 @@ internal sealed partial class DatasetScanBuilder
         Indexes.ColumnCounts shape = new Indexes.ColumnCounts([.. measures], [.. kinds], [], []);
         SortedSet<int> columns = [field, identifier, .. measures];
         int[] read = [.. columns];
-        List<RecordBatch>? rows = await _dataset.LookupAsync(entry, found, read, cancellationToken).ConfigureAwait(false);
+        List<RecordBatch>? rows = ExclusionLookup() is { } partitions && !entry.HasDeletions
+            && await partitions.BlocksAsync(held, cancellationToken).ConfigureAwait(false) is ({ } places, int placeRows)
+                ? await _dataset.ReadBlocksAsync(entry, places, placeRows, found, read, cancellationToken).ConfigureAwait(false)
+                : await _dataset.LookupAsync(entry, found, read, cancellationToken).ConfigureAwait(false);
         if (rows is null)
         {
             return (null, null);
@@ -819,18 +923,18 @@ internal sealed partial class DatasetScanBuilder
         try
         {
             DeletedCounts.Builder taken = new DeletedCounts.Builder(_version.Schema.DType, [(field, shape)], read);
-            long held = 0;
+            long holding = 0;
             foreach (RecordBatch batch in rows)
             {
                 SelectBy(batch, found);
                 if (batch.SelectedRows > 0)
                 {
                     taken.Add(batch);
-                    held += batch.SelectedRows;
+                    holding += batch.SelectedRows;
                 }
             }
 
-            return held == 0 ? (counts, null) : (DeletedCounts.Less(counts, taken.Finish().CountsOf(field)!), null);
+            return holding == 0 ? (counts, null) : (DeletedCounts.Less(counts, taken.Finish().CountsOf(field)!), null);
         }
         finally
         {
