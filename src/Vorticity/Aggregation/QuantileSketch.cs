@@ -346,20 +346,21 @@ internal sealed class QuantileSketch : IGroupSketch<QuantileSketch>
                 throw new VortexFormatException($"A sketch's store says {entries} buckets in {bytes.Length} bytes.");
             }
 
+            // A store that holds nothing yet, a group's first, takes the buckets as they come, sorted.
+            ref Store store = ref side == 0 ? ref _negative : ref _positive;
+            if (store.IsEmpty)
+            {
+                count = checked(count + store.Load(bytes, ref at, (int)entries, shift, _shelf));
+                continue;
+            }
+
             long index = 0;
             for (ulong e = 0; e < entries; e++)
             {
                 index = checked(index + (long)ReadVarint(bytes, ref at));
                 long held = checked((long)ReadVarint(bytes, ref at));
                 count = checked(count + held);
-                if (side == 0)
-                {
-                    _negative.Add(checked((int)(index >> shift)), held, _shelf);
-                }
-                else
-                {
-                    _positive.Add(checked((int)(index >> shift)), held, _shelf);
-                }
+                store.Add(checked((int)(index >> shift)), held, _shelf);
             }
         }
 
@@ -488,6 +489,9 @@ internal sealed class QuantileSketch : IGroupSketch<QuantileSketch>
             : _window is { } window ? (long)window.Length * sizeof(long)
             : ((long)(_keys?.Length ?? 0) * sizeof(int)) + ((long)(_counts?.Length ?? 0) * sizeof(long));
 
+        /// <summary>Whether the store holds no bucket and no window or map: a sparse one, empty, perhaps with its arrays.</summary>
+        internal readonly bool IsEmpty => _sparse == 0 && _window is null && _wide is null;
+
         /// <summary>Whether the store is a dense window, and its counts and the index of its first, which a run of adds reads in place.</summary>
         internal readonly bool Dense(out long[] window, out int low)
         {
@@ -529,7 +533,7 @@ internal sealed class QuantileSketch : IGroupSketch<QuantileSketch>
                 grown = Bytes;
             }
 
-            int found = Array.BinarySearch(_keys, 0, _sparse, index);
+            int found = _keys.AsSpan(0, _sparse).BinarySearch(index);
             if (found >= 0)
             {
                 _counts[found] += count;
@@ -589,9 +593,102 @@ internal sealed class QuantileSketch : IGroupSketch<QuantileSketch>
             _sparse = 0;
         }
 
+        /// <summary>
+        /// Fills the store, which holds no bucket (<see cref="IsEmpty"/>), with the <paramref name="entries"/> buckets of an
+        /// encoded store that <paramref name="bytes"/> holds from <paramref name="at"/> on, ascending, each index brought
+        /// <paramref name="shift"/> bits coarser, and returns their counts: its arrays taken once, at the length and in the
+        /// form the buckets need, sparse, a window or a map, as adding them one by one would leave them, which grew the arrays
+        /// four times from the shelf, gave each back, and searched the indices for each bucket.
+        /// </summary>
+        internal long Load(ReadOnlySpan<byte> bytes, ref int at, int entries, int shift, ArrayShelf? shelf)
+        {
+            // A first pass for the buckets the indices fall in, once coarser, and the first and the last of them.
+            int from = at;
+            long index = 0;
+            long first = -1;
+            long last = -1;
+            int buckets = 0;
+            for (int e = 0; e < entries; e++)
+            {
+                index = checked(index + (long)ReadVarint(bytes, ref at));
+                _ = ReadVarint(bytes, ref at);
+                long bucket = index >> shift;
+                if (bucket != last)
+                {
+                    first = buckets++ == 0 ? bucket : first;
+                    last = bucket;
+                }
+            }
+
+            at = from;
+            long span = last - first + 1;
+            if (buckets > SparseLimit)
+            {
+                // A window over the buckets, or a map of them past MaxWindow, as Densify leaves the sorted indices.
+                Give(shelf, _keys);
+                Give(shelf, _counts);
+                _keys = null!;
+                _counts = null!;
+                if (span > MaxWindow)
+                {
+                    _wide = new Dictionary<int, long>(2 * buckets);
+                }
+                else
+                {
+                    _window = Take<long>(shelf, (int)BitOperations.RoundUpToPowerOf2((uint)Math.Max((int)span, SparseLimit * 2)));
+                    _low = checked((int)first);
+                }
+            }
+            else if (buckets > 0 && (_keys is null || _keys.Length < buckets))
+            {
+                Give(shelf, _keys);
+                Give(shelf, _counts);
+                int length = (int)BitOperations.RoundUpToPowerOf2((uint)Math.Max(buckets, 4));
+                _keys = Take<int>(shelf, length);
+                _counts = Take<long>(shelf, length);
+            }
+
+            long count = 0;
+            index = 0;
+            for (int e = 0; e < entries; e++)
+            {
+                index = checked(index + (long)ReadVarint(bytes, ref at));
+                long held = checked((long)ReadVarint(bytes, ref at));
+                count = checked(count + held);
+                int bucket = checked((int)(index >> shift));
+                if (_wide is { } wide)
+                {
+                    System.Runtime.InteropServices.CollectionsMarshal.GetValueRefOrAddDefault(wide, bucket, out _) += held;
+                }
+                else if (_window is { } window)
+                {
+                    window[bucket - _low] += held;
+                }
+                else if (_sparse > 0 && _keys[_sparse - 1] == bucket)
+                {
+                    _counts[_sparse - 1] += held;
+                }
+                else
+                {
+                    _keys[_sparse] = bucket;
+                    _counts[_sparse] = held;
+                    _sparse++;
+                }
+            }
+
+            return count;
+        }
+
         /// <summary>Adds this store's counts into <paramref name="into"/>, whose arrays come from <paramref name="shelf"/> when one is given.</summary>
         internal readonly void AddTo(ref Store into, ArrayShelf? shelf)
         {
+            // A store that holds nothing yet, a group's first, takes this one's form and counts at once.
+            if (into.IsEmpty)
+            {
+                into.CopyFrom(in this, shelf);
+                return;
+            }
+
             if (_wide is { } wide)
             {
                 foreach ((int index, long count) in wide)
@@ -619,6 +716,46 @@ internal sealed class QuantileSketch : IGroupSketch<QuantileSketch>
             {
                 into.Add(_keys[i], _counts[i], shelf);
             }
+        }
+
+        /// <summary>
+        /// Takes the form and the counts of <paramref name="source"/> into the store, which holds no bucket
+        /// (<see cref="IsEmpty"/>): a sparse store's sorted indices, a window or a map, its arrays from
+        /// <paramref name="shelf"/> when one is given.
+        /// </summary>
+        private void CopyFrom(in Store source, ArrayShelf? shelf)
+        {
+            if (source._wide is null && source._window is null)
+            {
+                int buckets = source._sparse;
+                if (buckets > 0 && (_keys is null || _keys.Length < buckets))
+                {
+                    Give(shelf, _keys);
+                    Give(shelf, _counts);
+                    _keys = Take<int>(shelf, source._keys.Length);
+                    _counts = Take<long>(shelf, source._keys.Length);
+                }
+
+                source._keys.AsSpan(0, buckets).CopyTo(_keys);
+                source._counts.AsSpan(0, buckets).CopyTo(_counts);
+                _sparse = buckets;
+                return;
+            }
+
+            Give(shelf, _keys);
+            Give(shelf, _counts);
+            _keys = null!;
+            _counts = null!;
+            if (source._wide is { } wide)
+            {
+                _wide = new Dictionary<int, long>(wide);
+                return;
+            }
+
+            long[] window = Take<long>(shelf, source._window!.Length);
+            source._window.CopyTo(window, 0);
+            _window = window;
+            _low = source._low;
         }
 
         /// <summary>The buckets that hold values, as <see cref="QuantileSketch.Encode"/> writes them: their count, then each one's gap and count.</summary>
