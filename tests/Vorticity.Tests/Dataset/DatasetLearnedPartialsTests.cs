@@ -529,6 +529,35 @@ public sealed partial class DatasetLearnedPartialsTests
     }
 
     /// <summary>
+    /// Under a value of an identifier left out, the rows of the granules the statistics leave are read under the whole filter,
+    /// the identifier's column with the others', and priced so: by service and hour, the granules weigh more than with no
+    /// filter by that column's bytes. Priced without it, objects of S1 whose granules each mix the hosts and hours of a service
+    /// answered QP-5 through them, every row read at each asking where their rows would have learned at the first: 2.6 s and
+    /// 3.2 GB an asking at 32 lanes, warm.
+    /// </summary>
+    [Fact]
+    public async Task TheGranulesLeftUnderAValueLeftOutArePricedWithItsColumn()
+    {
+        await using MemoryObjectStore memory = new MemoryObjectStore();
+        Hit[] hits = await PartitionedHitsAsync(memory);
+        long needle = hits[hits.Length / 3].Size;
+        await using VortexDataset asked = await VortexDataset.OpenAsync(memory, cancellationToken: Ct);
+        UnitStep left = await GranulesAsync(scan => scan.Where(h => h.Size != needle));
+        UnitStep all = await GranulesAsync(static scan => scan);
+        Console.WriteLine($"PRICED WITH ITS COLUMN: {left.Bytes:N0} bytes leaving one size out, {all.Bytes:N0} with no filter");
+        Assert.True(left.Bytes * 2 > all.Bytes * 3, $"{left.Bytes} bytes priced leaving one size out, {all.Bytes} with no filter");
+
+        async Task<UnitStep> GranulesAsync(Func<Scan<Hit>, Scan<Hit>> filtered)
+        {
+            ScanPlan plan = await filtered(asked.Scan<Hit>().With(new ScanOptions { UseSynopses = true, DegreeOfParallelism = 1 }))
+                .GroupBy(h => (h.Service, h.At.Truncate(CalendarUnit.Hour))).Select(g => (g.Key.Service, g.Key.Item2, g.Count())).ExplainAsync(analyze: false, Ct);
+            UnitStep unit = Assert.Single(plan.Units);
+            Assert.Equal("granules", unit.Alternative);
+            return unit;
+        }
+    }
+
+    /// <summary>
     /// One object of a hundred granules of 800 000 hits over two hours, sorted by service then instant: one service holds
     /// 40 % of them, 300 others the rest, and a size drawn at random each; the hits, in the order they were drawn. With
     /// <paramref name="chunked"/>, each column's chunks of 16 KiB, all ending together at each granule: a granule's rows are

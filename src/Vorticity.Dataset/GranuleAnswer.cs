@@ -115,11 +115,16 @@ internal sealed class GranuleAnswer
     /// </summary>
     private sealed class Excluding(ExcludedValue value, VortexExpr? rest)
     {
+        private int[]? _read;
+
         internal ExcludedValue Value { get; } = value;
 
         internal VortexExpr? Rest { get; } = rest;
 
         internal SummaryPruner? Whole { get; set; }
+
+        /// <summary><paramref name="fields"/>, the columns a granule is judged by, and the identifier's, which a granule left is read for too; made once.</summary>
+        internal int[] ReadOf(int[] fields) => _read ??= Array.IndexOf(fields, Value.Field) >= 0 ? fields : [.. fields, Value.Field];
     }
 
     /// <summary>
@@ -398,7 +403,10 @@ internal sealed class GranuleAnswer
     /// <summary>
     /// What the object <paramref name="held"/> costs through its granules' statistics and their indexes, then through the rows of
     /// the granules they would not answer, as their share of the object's rows estimates them (<see cref="Unanswered"/>), and
-    /// through the rows of the question's columns alone (<see cref="PathCosts"/>).
+    /// through the rows of the question's columns alone (<see cref="PathCosts"/>). Under a value of an identifier left out, the
+    /// rows of a granule left are read under the whole filter, the identifier's column with the others: priced without it, an
+    /// object of S1 whose granules all mix several hours of a service answered QP-5 through them, every row read at each
+    /// asking, where its rows would have learned.
     /// </summary>
     internal (PathCosts.Cost Statistics, PathCosts.Cost Unanswered, PathCosts.Cost Rows) Costs(in PositionedObject held)
     {
@@ -416,7 +424,8 @@ internal sealed class GranuleAnswer
             regions[fields.Length + i] = contents.GranuleHistogramsOf(Histogrammed[i]);
         }
 
-        return (_costs.Regions(held.Entry.Uid, regions), _costs.Share(held.Entry, fields, Unanswered(held, edges: true)), _costs.Rows(held.Entry, fields));
+        int[] read = _excluding is { } excluding ? excluding.ReadOf(fields) : fields;
+        return (_costs.Regions(held.Entry.Uid, regions), _costs.Share(held.Entry, read, Unanswered(held, edges: true)), _costs.Rows(held.Entry, read));
     }
 
     /// <summary>
