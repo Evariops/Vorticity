@@ -106,6 +106,74 @@ public sealed partial class DatasetKeyPruningTests
     }
 
     /// <summary>
+    /// An object's sparse index keeps each granule's key to the indexed prefix, here the service alone: a window on the hour,
+    /// the component after it, varies within a granule, its zone maps judge it, and its pruning bounds no component the index
+    /// keeps, so no object's index is read for it; a service does, except in an object that holds that service's rows alone,
+    /// whose granules it refutes none of. Both return the rows LINQ keeps.
+    /// </summary>
+    [Fact]
+    public async Task AFilterPastTheIndexedPrefixBoundsNoComponentTheIndexKeeps()
+    {
+        Random random = new Random(62);
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Row.Schema, new DatasetOptions
+        {
+            Layout = new DatasetLayout
+            {
+                SortKey = [LayoutValue.Column(nameof(Row.Service)), LayoutValue.Column(nameof(Row.At)).Truncate(CalendarUnit.Hour)],
+                IndexedPrefix = 1,
+                ObjectBytes = 256 << 10,
+            },
+            ContentsObjectBytes = 0,
+            ChunkBytes = 64 << 10,
+            Write = new VortexWriteOptions { BlockRows = 1_024 },
+        }, Ct);
+        Row[] all = [.. Enumerable.Range(0, 120_000).Select(i =>
+            new Row(0, $"svc-{random.Next(0, 3):D2}", Start.AddTicks((long)(random.NextDouble() * TimeSpan.TicksPerDay) / 10 * 10), i, random.NextDouble()))];
+        for (int from = 0; from < all.Length; from += 20_000)
+        {
+            await using ObjectDraft draft = dataset.StartObject();
+            await draft.Writer.WriteAsync<Row>(all[from..(from + 20_000)], Ct);
+            await dataset.AppendAsync(draft, Ct);
+        }
+
+        while (await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 1 }, Ct) is not null)
+        {
+        }
+
+        DateTime ten = Start.AddHours(10);
+        DateTime eleven = Start.AddHours(11);
+        VortexExpr window = Expr.And(Ge(nameof(Row.At), Micros(ten)), Lt(nameof(Row.At), Micros(eleven)));
+        VortexExpr service = Eq(nameof(Row.Service), FilterLiteral.From("svc-01"));
+        DatasetSchema schema = dataset.Snapshot.Schema;
+        KeyPruning byService = KeyPruning.Of(schema, service)!;
+        Assert.False(KeyPruning.Of(schema, window)!.BoundsIndexed);
+        Assert.True(byService.BoundsIndexed);
+        Assert.True(KeyPruning.Of(schema, Expr.And(service, window))!.BoundsIndexed);
+        Assert.Equal(all.Count(row => row.At >= ten && row.At < eleven), await dataset.ScanBuilder().Where(window).CountAsync(Ct));
+        Assert.Equal(all.Count(static row => row.Service == "svc-01"), await dataset.ScanBuilder().Where(service).CountAsync(Ct));
+
+        // Object by object, the index may refute a granule of the service's but where every row is that service's.
+        int alone = 0;
+        int objects = 0;
+        await foreach (PositionedObject held in dataset.ScanBuilder().ObjectsAsync(Ct))
+        {
+            List<Row> rows;
+            await using (ObjectLease lease = await dataset.RentAsync(held.Entry, Ct))
+            {
+                rows = await lease.File.Scan<Row>().ToRecordsAsync(Ct).ToListAsync(Ct);
+            }
+
+            bool whole = rows.TrueForAll(static row => row.Service == "svc-01");
+            alone += whole ? 1 : 0;
+            objects++;
+            Assert.Equal(!whole, byService.IndexMayRefute(held.Summaries(schema), held.Entry.PhysicalRows));
+        }
+
+        Assert.True(alone > 0 && alone < objects, $"{alone} of {objects} objects hold the service's rows alone");
+    }
+
+    /// <summary>
     /// In each object, the granules the key's pruning keeps of <paramref name="filter"/> against those its kept rows lie in:
     /// every one of those, and at most one more at each end of each range kept.
     /// </summary>

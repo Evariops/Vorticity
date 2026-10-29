@@ -970,15 +970,17 @@ internal sealed partial class DatasetScanBuilder
     /// <summary>
     /// The ranges of the granules of the object <paramref name="held"/>, <paramref name="first"/> its first key, that its key's
     /// sparse index keeps under <paramref name="pruning"/>, with that index; null when the object has rows marked, keeps no
-    /// index, its key range keeps every granule (<see cref="KeyPruning.HoldsWhole"/>), or reading the index weighs more than
-    /// it may spare (<see cref="ReadsKeyIndex"/>), and, unless <paramref name="read"/>, when the handle does not hold it.
+    /// index, the index can refute none of its granules (<see cref="KeyPruning.IndexMayRefute"/>), its key range keeps
+    /// every granule (<see cref="KeyPruning.HoldsWhole"/>), or reading the index weighs more than it may spare
+    /// (<see cref="ReadsKeyIndex"/>), and, unless <paramref name="read"/>, when the handle does not hold it.
     /// </summary>
     internal async ValueTask<(List<(int First, int End)> Ranges, Indexes.GranuleKeys Keys)?> KeptGranulesAsync(
         PositionedObject held, KeyPruning pruning, ReadOnlyMemory<byte> first, bool read, CancellationToken cancellationToken)
     {
         if (!held.Entry.Deletions.IsEmpty || held.Entry.Contents is not { KeyIndex: { } index } contents
             || (!read && contents.Keys is not { HoldsEvery: true }) || !ReadsKeyIndex(held)
-            || (contents.Keys is not { HoldsEvery: true } && pruning.HoldsWhole(first.Span, held.Entry.LastKey.Span))
+            || (contents.Keys is not { HoldsEvery: true }
+                && (!pruning.IndexMayRefute(held.Summaries(_version.Schema), held.Entry.PhysicalRows) || pruning.HoldsWhole(first.Span, held.Entry.LastKey.Span)))
             || await KeysAsync(held, contents, index, cancellationToken).ConfigureAwait(false) is not { } keys
             || keys.Rows != held.Entry.PhysicalRows)
         {

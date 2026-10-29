@@ -228,7 +228,11 @@ granules (`vorticity.key.index.v1`). A reader finds it through the object's entr
 its pages in one request. A binary search finds the granules of a prefix. A filter on a
 component that is not leading is judged on ranges of granules: when the bounds of a range share their first `j`
 components, the component after them is bounded by theirs, and the filter is judged on that box; ranges the box refutes
-are skipped, the others split and judged again.
+are skipped, the others split and judged again. An object's index is read only where it may refute a granule: the filter
+bounds a component of the prefix, and the object's summaries do not prove that bound over every row of it. A bound on a
+component past the prefix varies within a granule, and the zone maps judge it: QP-2's pods of a route, fifth under a
+prefix of two, read every object's index for no granule refuted, 0.9 s of processor and 334 MB allocated a question at
+32 lanes where the rows take 0.4 s and 110 MB without them *(measured)*.
 
 It costs at most ~16 bytes a granule: ~52 KB for an object of 1 GiB, ~8 MB a day and ~3.3 GB over 13 months of the
 reference table *(computed)*.

@@ -43,13 +43,39 @@ internal sealed class KeyPruning
     /// <summary>What <see cref="_keyed"/> holds for a filter none of whose conjuncts reads the key's columns alone.</summary>
     private static readonly SummaryPruner Unkeyed = new SummaryPruner(Expr.Literal(FilterLiteral.From(true)));
 
-    private KeyPruning(SortKey tree, LayoutColumn?[] sources, int skip, SummaryPruner pruner, VortexExpr judged)
+    // The conjuncts of the filter that read the components an object's sparse index keeps of each granule's key alone, the
+    // first LayoutPlan.Prefix: what the index may refute a granule by, made at the first object whose index it would read.
+    private readonly LayoutColumn?[] _indexedSources;
+    private SummaryPruner? _indexed;
+
+    private KeyPruning(SortKey tree, LayoutColumn?[] sources, int skip, SummaryPruner pruner, VortexExpr judged, LayoutColumn?[] indexedSources)
     {
         _tree = tree;
         _sources = sources;
         _skip = skip;
         _pruner = pruner;
         _judged = judged;
+        _indexedSources = indexedSources;
+    }
+
+    /// <summary>
+    /// Whether the filter bounds a component an object's sparse index keeps of each granule's key, the first
+    /// <see cref="LayoutPlan.Prefix"/>: else every granule's box holds every value the filter reads, and the index refutes
+    /// none. The components past the prefix vary within a granule, which its zone maps judge: the pods of a route, fifth
+    /// under a prefix of two, read every object's index for no granule refuted.
+    /// </summary>
+    internal bool BoundsIndexed => !ReferenceEquals(_indexed ??= Keyed(_judged, _indexedSources), Unkeyed);
+
+    /// <summary>
+    /// Whether the sparse index of an object whose summaries are <paramref name="summaries"/>, over <paramref name="rows"/>
+    /// rows, may refute a granule: the filter bounds a component the index keeps (<see cref="BoundsIndexed"/>), and the
+    /// object's summaries do not prove those bounds over every row of it. A window that holds an object's rows whole, the
+    /// newest day of a window that ends where its data does, refutes none of its granules.
+    /// </summary>
+    internal bool IndexMayRefute(ObjectSummaries summaries, long rows)
+    {
+        SummaryPruner indexed = _indexed ??= Keyed(_judged, _indexedSources);
+        return !ReferenceEquals(indexed, Unkeyed) && !indexed.MustMatch(summaries.Columns, rows);
     }
 
     /// <summary>
@@ -83,7 +109,13 @@ internal sealed class KeyPruning
         {
             if (source is not null && Reads(pruner, NameOf(source)))
             {
-                return new KeyPruning(tree, sources, skip, pruner, judged);
+                LayoutColumn?[] indexed = new LayoutColumn?[Math.Min(plan.Prefix, plan.Components.Count)];
+                for (int i = 0; i < indexed.Length; i++)
+                {
+                    indexed[i] = plan.Components[i];
+                }
+
+                return new KeyPruning(tree, sources, skip, pruner, judged, indexed);
             }
         }
 
