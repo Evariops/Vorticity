@@ -47,22 +47,27 @@ internal sealed partial class DatasetScanBuilder
     internal bool Learns(in PositionedObject held) => Covered(held) == held.Entry.Rows && MayLearn(held);
 
     /// <summary>
-    /// Whether the object <paramref name="held"/>, which the scan covers whole, learns its partial as one lane's plan answers
-    /// it (<see cref="LearnAlternative"/>), the <paramref name="kept"/> share of its rows its key's sparse index keeps known,
-    /// or 1; and, that share unknown, whether it could change the choice, which then reads the index first, as
-    /// <see cref="UnitsAsync"/> does. The lanes that cut an object learn what one lane learns.
+    /// How one lane's plan answers the object <paramref name="held"/>, which the scan covers whole (<see cref="Choose"/>), the
+    /// <paramref name="kept"/> share of its rows its key's sparse index keeps known, or 1; and, that share unknown, whether
+    /// it could change the choice, which then reads the index first, as <see cref="UnitsAsync"/> does. The lanes that cut an
+    /// object learn what one lane learns, and answer through its granules one that one lane answers so.
     /// </summary>
-    internal (bool Learns, bool AsksKept) LearnsAsChosen(in PositionedObject held, double kept)
+    internal (AnswerPath Path, bool AsksKept) ChosenOnOneLane(in PositionedObject held, double kept)
     {
-        if (!Learns(held))
-        {
-            return (false, false);
-        }
-
         Planned unit = new Planned(held, Answer() is { } answer ? AnsweredBy(answer, held) : null) { Kept = kept };
         Choose(unit, explain: false);
-        return (unit.Chosen.Path == AnswerPath.Learn, kept >= 1 && unit.Weight > _version.Costs.Weight(RowsCost(held, double.Epsilon)));
+        return (unit.Chosen.Path, kept >= 1 && unit.Weight > _version.Costs.Weight(RowsCost(held, double.Epsilon)));
     }
+
+    /// <summary>The rows of the object <paramref name="held"/> its granules' statistics are expected to leave, read as rows (<see cref="Dataset.GranuleAnswer.Unanswered"/>).</summary>
+    internal long GranulesLeave(in PositionedObject held) => (long)Math.Ceiling(GranuleAnswer()!.Unanswered(held, edges: true) * held.Entry.Rows);
+
+    /// <summary>
+    /// Reads the statistics of the granules of the object <paramref name="held"/> an answer through them reads into the
+    /// handle's memo, where each lane's piece of the object finds them: begun as its pieces, each read them.
+    /// </summary>
+    internal Task GranuleStatsAheadAsync(in PositionedObject held, CancellationToken cancellationToken) =>
+        _dataset.ReadGranuleStatsAsync(held.Entry, GranuleAnswer()!.Fields, GranuleAnswer()!.Histogrammed, cancellationToken).AsTask();
 
     /// <summary>
     /// How many questions before this one the handle saw ask the scan's family, in a row no hour apart, its own not counted
@@ -452,12 +457,15 @@ internal sealed partial class DatasetScanBuilder
                 {
                     // An object whose granules answer: the states of the granules its statistics answer, then the rows of the
                     // others, each run of them a part of the scan. The granules that hold a row a delete marked are read as
-                    // rows too.
+                    // rows too. A lane's piece of the object settles the granules it holds, and reads the rows it holds of
+                    // those it cuts.
                     Task<(Indexes.GranuleStats?[] Stats, Indexes.GranuleHistograms?[] Histograms)> statistics = unit.Statistics!;
                     unit.Statistics = null;
                     (Indexes.GranuleStats?[] stats, Indexes.GranuleHistograms?[] histograms) = await statistics.ConfigureAwait(false);
                     await held.Entry.ResolveAsync(_version.Pages, cancellationToken).ConfigureAwait(false);
-                    (GranuleStateRows? settled, List<RowRange> unsettled, int answered) = GranuleAnswer()!.Settle(held, stats, histograms, held.Entry.Deletions);
+                    (long lower, long upper) = Whole(held) ? (0, held.Entry.PhysicalRows) : PhysicalRange(held);
+                    (GranuleStateRows? settled, List<RowRange> unsettled, int answered) = GranuleAnswer()!.Settle(
+                        held, stats, histograms, held.Entry.Deletions, new RowRange(lower, upper));
                     if (_metrics is { } counted)
                     {
                         counted.GranulesAnswered += answered;
@@ -470,7 +478,7 @@ internal sealed partial class DatasetScanBuilder
                         for (int at = 0; settled is not null && at < settled.Count; at += StateTable.BatchRows)
                         {
                             arena.Reset();
-                            yield return settled.Batch(arena, at, Math.Min(StateTable.BatchRows, settled.Count - at), held.FirstRow);
+                            yield return settled.Batch(arena, at, Math.Min(StateTable.BatchRows, settled.Count - at), Math.Max(_from, held.FirstRow));
                         }
                     }
                     finally
@@ -625,7 +633,8 @@ internal sealed partial class DatasetScanBuilder
     /// The rows of the granules of <paramref name="held"/> its statistics leave, <paramref name="unsettled"/>, as one part of
     /// the scan that reads them alone (<see cref="_unsettled"/>), its own settling of blocks left aside; null when there are
     /// none, the object has rows marked, its granules are not of <paramref name="granuleRows"/> rows each but the last, or a
-    /// range is not whole granules, which a part a range reads.
+    /// range is not whole granules, which a part a range reads. The first range may start inside a granule and the last end
+    /// inside one, where a lane's piece of the object cuts it: the part's rows leave out the rest.
     /// </summary>
     private DatasetScanBuilder? UnsettledPart(in PositionedObject held, List<RowRange> unsettled, long granuleRows)
     {
@@ -636,9 +645,10 @@ internal sealed partial class DatasetScanBuilder
         }
 
         ulong[] granules = new ulong[(int)((((rows + granuleRows - 1) / granuleRows) + 63) / 64)];
-        foreach (RowRange range in unsettled)
+        for (int r = 0; r < unsettled.Count; r++)
         {
-            if (range.Start % granuleRows != 0 || (range.End % granuleRows != 0 && range.End != rows))
+            RowRange range = unsettled[r];
+            if ((r > 0 && range.Start % granuleRows != 0) || (r < unsettled.Count - 1 && range.End % granuleRows != 0 && range.End != rows))
             {
                 return null;
             }

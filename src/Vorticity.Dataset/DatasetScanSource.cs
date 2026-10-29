@@ -396,9 +396,11 @@ internal sealed partial class DatasetScanSource
             return null;
         }
 
-        // The objects answered whole, those cut to learn, and those whose learning waits on their index, made as each is met.
+        // The objects answered whole, those cut to learn, those their granules answer with the rows they leave, and those whose
+        // choice waits on their index, made as each is met.
         HashSet<long>? answered = null;
         HashSet<long>? learning = null;
+        Dictionary<long, long>? granular = null;
         HashSet<long>? undecided = null;
         List<(PositionedObject Held, RowRange Rows, List<RowRange>? Kept, Task<List<RowRange>?>? Reading)> walked = [];
         await foreach (PositionedObject held in _version.WalkAsync(pruner, from, to, null, cancellationToken).ConfigureAwait(false))
@@ -428,14 +430,16 @@ internal sealed partial class DatasetScanSource
             // cover a part of it, and nothing would be learned at several lanes. It learns where one lane's plan would, its
             // key's index read first where the share it keeps could weigh less than learning: cut to learn whatever that
             // share, the routes of a service under 5xx read 343 MB at 32 lanes the first time, where the kept granules hold 47.
+            // An object one lane's plan answers through its granules' statistics is answered so too, the rows they leave
+            // weighed for its pieces (Granular): cut as rows, each piece read all of its own.
             bool deciding = false;
-            if (whole && spec.Answering?.Family is not null)
+            if (whole && (spec.Answering?.Family is not null || answer is not null))
             {
-                (bool learns, deciding) = planner.LearnsAsChosen(held, kept: 1);
-                if (learns && !deciding)
+                (AnswerPath path, deciding) = planner.ChosenOnOneLane(held, kept: 1);
+                if (!deciding && path is AnswerPath.Learn or AnswerPath.Granules)
                 {
                     walked.Add((held, new RowRange(start, end), null, null));
-                    (learning ??= []).Add(held.FirstRow);
+                    Mark(held, path, planner, ref learning, ref granular);
                     continue;
                 }
             }
@@ -459,9 +463,10 @@ internal sealed partial class DatasetScanSource
         {
             if (done is null && reading is null)
             {
-                // An object answered whole reads no rows; one that learns reads them all, which the lanes share.
+                // An object answered whole reads no rows; one that learns reads them all, which the lanes share; one its
+                // granules answer, the rows they leave.
                 objects.Add((held, rows));
-                total += learning?.Contains(held.FirstRow) == true ? rows.Length : 0;
+                total += Weight(held, rows);
                 continue;
             }
 
@@ -471,13 +476,16 @@ internal sealed partial class DatasetScanSource
 #pragma warning restore VSTHRD003
             bool whole = ReferenceEquals(read, AllKept);
 
-            // An object that may learn, judged once its index said the share of its rows the question would read otherwise.
-            if (undecided?.Contains(held.FirstRow) == true
-                && planner.LearnsAsChosen(held, whole ? (double)rows.Length / System.Math.Max(held.Entry.Rows, 1) : Share(held, read)).Learns)
+            // An object that may learn, or that its granules may answer, judged once its index said the share of its rows the
+            // question would read otherwise.
+            AnswerPath chosen = undecided?.Contains(held.FirstRow) == true
+                ? planner.ChosenOnOneLane(held, whole ? (double)rows.Length / System.Math.Max(held.Entry.Rows, 1) : Share(held, read)).Path
+                : AnswerPath.Rows;
+            if (chosen is AnswerPath.Learn or AnswerPath.Granules)
             {
                 objects.Add((held, rows));
-                (learning ??= []).Add(held.FirstRow);
-                total += rows.Length;
+                Mark(held, chosen, planner, ref learning, ref granular);
+                total += Weight(held, rows);
                 continue;
             }
 
@@ -511,9 +519,9 @@ internal sealed partial class DatasetScanSource
                 HashSet<long> starts = [.. kept.ConvertAll(static o => o.FirstRow)];
                 objects.RemoveAll(o => !starts.Contains(o.Held.FirstRow));
                 total = 0;
-                foreach ((PositionedObject _, RowRange rows) in objects)
+                foreach ((PositionedObject each, RowRange rows) in objects)
                 {
-                    total += rows.Length;
+                    total += Weight(each, rows);
                 }
             }
         }
@@ -521,18 +529,27 @@ internal sealed partial class DatasetScanSource
         // The objects to cut are opened side by side to read where their chunks end; the scan finds
         // them open after. Each cut gives its object back, whatever another one's open did. A lookup of an identifier
         // cuts none: it reads an object's rows by the identifier's index with no open of it, where a cut opens it, and
-        // each piece would look the whole object up again.
+        // each piece would look the whole object up again. An object its granules answer is cut where the rows they leave
+        // weigh two shares or more, into pieces of about a share of those rows, each of which settles the granules it holds,
+        // their statistics read ahead once for all of them; kept whole otherwise, on one lane, which reads its statistics and
+        // the rows they leave, where cut as rows its pieces read all of its rows.
         long share = System.Math.Max(_dataset.Options.LeastPieceRows, total / (degree * 4L));
         bool lookingUp = spec.Options.UseIndexes && DatasetScanBuilder.LookupOf(spec.Filter, _version.Header.Identifiers) is not null;
         Task<RowRange[]>?[] cuts = new Task<RowRange[]>?[objects.Count];
         List<Task> cutting = [];
         for (int o = 0; o < objects.Count; o++)
         {
-            if (objects[o].Rows.Length >= 2 * share && answered?.Contains(objects[o].Held.FirstRow) != true
-                && !(lookingUp && planner.LooksUp(objects[o].Held)))
+            (PositionedObject held, RowRange rows) = objects[o];
+            long weight = Weight(held, rows);
+            if (weight >= 2 * share && answered?.Contains(held.FirstRow) != true && !(lookingUp && planner.LooksUp(held)))
             {
-                cuts[o] = CutAsync(objects[o].Held, objects[o].Rows, share, spec.Projection, cancellationToken);
+                bool settles = granular?.ContainsKey(held.FirstRow) == true;
+                cuts[o] = CutAsync(held, rows, settles ? (long)((double)share * rows.Length / weight) : share, spec.Projection, cancellationToken);
                 cutting.Add(cuts[o]!);
+                if (settles)
+                {
+                    cutting.Add(planner.GranuleStatsAheadAsync(held, cancellationToken));
+                }
             }
         }
 
@@ -559,6 +576,29 @@ internal sealed partial class DatasetScanSource
         }
 
         return pieces.Count > 1 ? [.. pieces] : null;
+
+        // What a range of an object reads: none of one answered whole, the rows its granules leave of one they answer, its
+        // rows otherwise, every one of one that learns.
+        long Weight(PositionedObject held, RowRange rows) =>
+            answered?.Contains(held.FirstRow) == true ? 0
+            : granular is not null && granular.TryGetValue(held.FirstRow, out long leave) ? leave
+            : rows.Length;
+    }
+
+    /// <summary>
+    /// Marks the object <paramref name="held"/>, as one lane's plan answers it by <paramref name="path"/>: one that learns, or
+    /// one its granules answer, with the rows they leave.
+    /// </summary>
+    private static void Mark(
+        in PositionedObject held, AnswerPath path, DatasetScanBuilder planner, ref HashSet<long>? learning, ref Dictionary<long, long>? granular)
+    {
+        if (path == AnswerPath.Learn)
+        {
+            (learning ??= []).Add(held.FirstRow);
+            return;
+        }
+
+        (granular ??= [])[held.FirstRow] = planner.GranulesLeave(held);
     }
 
     public async ValueTask<(long Requests, long Bytes)?> CostAsync(ScanSpec spec, CancellationToken cancellationToken)

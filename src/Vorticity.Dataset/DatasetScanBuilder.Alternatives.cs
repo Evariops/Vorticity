@@ -358,11 +358,14 @@ internal sealed partial class DatasetScanBuilder
             $"its rows, {cost.Bytes} bytes in {cost.Requests} requests, the partial of the question's family learned from them";
     }
 
-    /// <summary>The statistics of an object's columns over its granules, the granules they do not answer read as rows (<see cref="GranuleAnswer"/>).</summary>
+    /// <summary>
+    /// The statistics of an object's columns over its granules, the granules they do not answer read as rows
+    /// (<see cref="GranuleAnswer"/>); of a lane's piece of it, the granules the piece holds, unless the piece learns.
+    /// </summary>
     private sealed class GranulesAlternative(DatasetScanBuilder scan) : Alternative(scan, AnswerPath.Granules, UnitLevel.Object)
     {
         internal override Coverage Covers(Planned unit) =>
-            Scan.Answer() is not null && unit.Held.Entry.Contents is { GranuleStats.Count: > 0 } && Scan.Covered(unit.Held) == unit.Held.Entry.Rows
+            Scan.Answer() is not null && unit.Held.Entry.Contents is { GranuleStats.Count: > 0 } && Scan.Covered(unit.Held) > 0 && Scan.Piece(unit.Held) is null
             && Scan.GranuleAnswer() is { } granules && granules.Covers(unit.Held)
                 ? Coverage.Part
                 : Coverage.None;

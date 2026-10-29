@@ -544,12 +544,14 @@ internal sealed class GranuleAnswer
     /// <see cref="Fields"/>, by their places in it, and the ranges of its live rows, from its first, that its granules do not
     /// answer, which are read as rows; every row when the statistics do not describe the object's granules alike. A granule
     /// that holds a row of <paramref name="deletions"/> is not answered: its statistics count that row. A quantile takes the
-    /// histograms of <paramref name="histograms"/>, by the same places.
+    /// histograms of <paramref name="histograms"/>, by the same places. Of the granules within <paramref name="part"/> alone,
+    /// the object's own positions a lane's piece of it covers, deleted rows included: the rows it holds of a granule it cuts
+    /// are read as rows.
     /// </summary>
     internal (GranuleStateRows? States, List<RowRange> Unsettled, int Settled) Settle(
-        in PositionedObject held, GranuleStats?[] columns, GranuleHistograms?[] histograms, DeletionVector deletions)
+        in PositionedObject held, GranuleStats?[] columns, GranuleHistograms?[] histograms, DeletionVector deletions, RowRange part)
     {
-        (GranuleStateRows? states, List<RowRange> unsettled, int settled) = SettlePhysical(held, columns, histograms, deletions);
+        (GranuleStateRows? states, List<RowRange> unsettled, int settled) = SettlePhysical(held, columns, histograms, deletions, part);
         if (deletions.IsEmpty)
         {
             return (states, unsettled, settled);
@@ -566,7 +568,7 @@ internal sealed class GranuleAnswer
 
     /// <summary><see cref="Settle"/>, its ranges the object's own row positions, deleted rows included.</summary>
     private (GranuleStateRows? States, List<RowRange> Unsettled, int Settled) SettlePhysical(
-        in PositionedObject held, GranuleStats?[] columns, GranuleHistograms?[] histograms, DeletionVector deletions)
+        in PositionedObject held, GranuleStats?[] columns, GranuleHistograms?[] histograms, DeletionVector deletions, RowRange part)
     {
         long objectRows = held.Entry.PhysicalRows;
         GranuleStats? any = null;
@@ -579,7 +581,7 @@ internal sealed class GranuleAnswer
 
             if ((any is not null && (stats.Count != any.Count || !stats.Rows.AsSpan().SequenceEqual(any.Rows))) || stats.TotalRows != objectRows)
             {
-                return (null, [new RowRange(0, objectRows)], 0);
+                return (null, [part], 0);
             }
 
             any = stats;
@@ -587,7 +589,7 @@ internal sealed class GranuleAnswer
 
         if (any is null || !Alike(histograms, any.Count))
         {
-            return (null, [new RowRange(0, objectRows)], 0);
+            return (null, [part], 0);
         }
 
         ObjectSummaries summaries = held.Summaries(_schema);
@@ -597,22 +599,36 @@ internal sealed class GranuleAnswer
             described[i] = new GranuleColumn(_schema.Columns[Fields[i]].Name, _schema.DType.GetField(Fields[i]), columns[i], histograms[i]);
         }
 
+        // The granules the part holds a row of, from lo to hi; those it holds whole alone may be answered.
+        int lo = 0;
+        while (lo < any.Count && any.FirstRow(lo) + any.Rows[lo] <= part.Start)
+        {
+            lo++;
+        }
+
+        int hi = lo;
+        while (hi < any.Count && any.FirstRow(hi) < part.End)
+        {
+            hi++;
+        }
+
         // Which granules their statistics answer, then those answered between two read as rows that cost less read as rows
         // too than a part of the scan more, which would read again the chunks the two parts share.
         GranuleStateRows states = new GranuleStateRows(this);
         List<ColumnSummary> judged = new List<ColumnSummary>(Fields.Length + summaries.Columns.Count);
         bool[] answers = new bool[any.Count];
-        for (int b = 0; b < any.Count; b++)
+        for (int b = lo; b < hi; b++)
         {
             long first = any.FirstRow(b);
-            answers[b] = deletions.DeletedIn(first, first + any.Rows[b]) == 0 && SettleGranule(b, any.Rows[b], described, summaries, judged, states);
+            answers[b] = first >= part.Start && first + any.Rows[b] <= part.End && deletions.DeletedIn(first, first + any.Rows[b]) == 0
+                && SettleGranule(b, any.Rows[b], described, summaries, judged, states);
             states.Truncate(0);
         }
 
-        Bridge(held.Entry, any, answers);
+        Bridge(held.Entry, any, answers, lo, hi);
         List<RowRange> unsettled = [];
         int settled = 0;
-        for (int b = 0; b < any.Count; b++)
+        for (int b = lo; b < hi; b++)
         {
             long first = any.FirstRow(b);
             long rows = any.Rows[b];
@@ -623,13 +639,16 @@ internal sealed class GranuleAnswer
                 continue;
             }
 
-            if (unsettled.Count > 0 && unsettled[^1].End == first)
+            // The rows the part holds of it.
+            long start = Math.Max(first, part.Start);
+            long end = Math.Min(first + rows, part.End);
+            if (unsettled.Count > 0 && unsettled[^1].End == start)
             {
-                unsettled[^1] = new RowRange(unsettled[^1].Start, first + rows);
+                unsettled[^1] = new RowRange(unsettled[^1].Start, end);
             }
             else
             {
-                unsettled.Add(new RowRange(first, first + rows));
+                unsettled.Add(new RowRange(start, end));
             }
         }
 
@@ -657,34 +676,35 @@ internal sealed class GranuleAnswer
     }
 
     /// <summary>
-    /// Reads as rows each run of granules <paramref name="answers"/> answers between two it does not, when reading its rows of
-    /// the question's columns costs less than a part of the scan more (<see cref="PathCosts.Bridges"/>).
+    /// Reads as rows each run of granules <paramref name="answers"/> answers between two it does not, of those from
+    /// <paramref name="lo"/> to <paramref name="hi"/>, when reading its rows of the question's columns costs less than a part
+    /// of the scan more (<see cref="PathCosts.Bridges"/>).
     /// </summary>
-    private void Bridge(ObjectEntry entry, GranuleStats stats, bool[] answers)
+    private void Bridge(ObjectEntry entry, GranuleStats stats, bool[] answers, int lo, int hi)
     {
-        int b = 0;
-        while (b < answers.Length && answers[b])
+        int b = lo;
+        while (b < hi && answers[b])
         {
             b++;
         }
 
-        while (b < answers.Length)
+        while (b < hi)
         {
             // From an unanswered granule, the run of answered ones after it, and whether an unanswered one ends it.
-            while (b < answers.Length && !answers[b])
+            while (b < hi && !answers[b])
             {
                 b++;
             }
 
             int start = b;
             long rows = 0;
-            while (b < answers.Length && answers[b])
+            while (b < hi && answers[b])
             {
                 rows += stats.Rows[b];
                 b++;
             }
 
-            if (b < answers.Length && _costs.Bridges(entry, Fields, rows))
+            if (b < hi && _costs.Bridges(entry, Fields, rows))
             {
                 Array.Fill(answers, false, start, b - start);
             }

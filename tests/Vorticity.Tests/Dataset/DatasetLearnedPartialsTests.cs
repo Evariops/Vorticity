@@ -379,6 +379,45 @@ public sealed partial class DatasetLearnedPartialsTests
     }
 
     /// <summary>
+    /// At several lanes, an object one lane answers through its granules' statistics is answered so too: its lanes' pieces
+    /// each settle the granules they hold and read the rows they hold of the others, the statistics read once. Cut as rows,
+    /// each piece read all of its rows: the object read its whole columns at 8 lanes, where one lane reads three fifths of
+    /// them. At 32 lanes, QP-5 of S1 read again so 1.3 GB at each asking that its objects' granules answered.
+    /// </summary>
+    [Fact]
+    public async Task AtSeveralLanesAnObjectItsGranulesAnswerSettlesThemByPieces()
+    {
+        await using MemoryObjectStore memory = new MemoryObjectStore();
+        await GranulesObjectAsync(memory, chunked: true);
+        (List<string> Answer, long Bytes, string Plan) one = await AskAfreshAsync(synopses: true, lanes: 1);
+        (List<string> Answer, long Bytes, string Plan) many = await AskAfreshAsync(synopses: true, lanes: 8);
+        (List<string> Answer, long Bytes, string Plan) rows = await AskAfreshAsync(synopses: false, lanes: 8);
+        Console.WriteLine($"GRANULES BY PIECES one lane {one.Bytes:N0} bytes, 8 lanes {many.Bytes:N0}, the rows at 8 lanes {rows.Bytes:N0}; {one.Plan}");
+        Assert.NotEmpty(rows.Answer);
+        Assert.Equal(rows.Answer, one.Answer);
+        Assert.Equal(rows.Answer, many.Answer);
+        Assert.StartsWith("granules:", one.Plan, StringComparison.Ordinal);
+        Assert.True(many.Bytes * 10 < rows.Bytes * 8, $"{many.Bytes} bytes at 8 lanes, {one.Bytes} at one, {rows.Bytes} through the rows");
+        // Neighbouring pieces read some segments both, side by side: a few percent past one lane's, which varies.
+        Assert.True(many.Bytes * 4 < one.Bytes * 5, $"{many.Bytes} bytes at 8 lanes, {one.Bytes} at one");
+
+        async Task<(List<string>, long, string)> AskAfreshAsync(bool synopses, int lanes)
+        {
+            await using CountingObjectStore store = new CountingObjectStore(memory);
+            await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = lanes);
+            await using VortexDataset dataset = await VortexDataset.OpenAsync(store, new DatasetOptions { Session = session, LeastPieceRows = 1_000 }, Ct);
+            string plan = string.Join(", ", (await Question(dataset, synopses, 1).ExplainAsync(analyze: false, Ct)).Units.Select(static unit => $"{unit.Alternative}: {unit.Detail}"));
+            store.Reset();
+            List<string> answer = await LinesAsync(Question(dataset, synopses, lanes));
+            return (answer, store.BytesRead, plan);
+        }
+
+        static Vorticity.Aggregation Question(VortexDataset handle, bool synopses, int lanes) =>
+            handle.Scan<Hit>().With(new ScanOptions { UseSynopses = synopses, DegreeOfParallelism = lanes })
+                .GroupBy(h => (h.Service, h.At.Truncate(CalendarUnit.Hour))).Select(g => (g.Key.Service, g.Key.Item2, g.Count(), g.Sum(h => h.Size)));
+    }
+
+    /// <summary>
     /// One object of a hundred granules of 800 000 hits over two hours, sorted by service then instant: one service holds
     /// 40 % of them, 300 others the rest, and a size drawn at random each. With <paramref name="chunked"/>, each column's
     /// chunks of 16 KiB, all ending together at each granule: a granule's rows are read alone, and lanes cut the object there.
