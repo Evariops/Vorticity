@@ -359,10 +359,31 @@ public sealed partial class DatasetLearnedPartialsTests
     }
 
     /// <summary>
-    /// One object of a hundred granules of 800 000 hits over two hours, sorted by service then instant: one service holds
-    /// 40 % of them, 300 others the rest, and a size drawn at random each.
+    /// The granules an object's statistics leave in runs apart, read as one part of the scan, are read alone, a block at a
+    /// time: those between the runs, which the statistics answered, are not read again. With no filter, that part read every
+    /// row from its first run to its last, and counted twice the hits of the one service's second hour, 155 648 of them.
     /// </summary>
-    private static async Task GranulesObjectAsync(MemoryObjectStore memory)
+    [Fact]
+    public async Task TheGranulesAnObjectsStatisticsLeaveApartAreReadAlone()
+    {
+        await using MemoryObjectStore memory = new MemoryObjectStore();
+        await GranulesObjectAsync(memory, chunked: true);
+        await using VortexDataset asked = await VortexDataset.OpenAsync(memory, cancellationToken: Ct);
+        ScanPlan plan = await Question(asked, synopses: true).ExplainAsync(analyze: false, Ct);
+        Assert.Equal("granules", Assert.Single(plan.Units).Alternative);
+        Assert.Equal(await LinesAsync(Question(asked, synopses: false)), await LinesAsync(Question(asked, synopses: true)));
+
+        static Vorticity.Aggregation Question(VortexDataset handle, bool synopses) =>
+            handle.Scan<Hit>().With(new ScanOptions { UseSynopses = synopses, DegreeOfParallelism = 1 })
+                .GroupBy(h => (h.Service, h.At.Truncate(CalendarUnit.Hour))).Select(g => (g.Key.Service, g.Key.Item2, g.Count(), g.Sum(h => h.Size)));
+    }
+
+    /// <summary>
+    /// One object of a hundred granules of 800 000 hits over two hours, sorted by service then instant: one service holds
+    /// 40 % of them, 300 others the rest, and a size drawn at random each. With <paramref name="chunked"/>, each column's
+    /// chunks of 16 KiB, all ending together at each granule: a granule's rows are read alone, and lanes cut the object there.
+    /// </summary>
+    private static async Task GranulesObjectAsync(MemoryObjectStore memory, bool chunked = false)
     {
         Random random = new Random(0xF3);
         Hit[] hits = [.. Enumerable.Range(0, 800_000).Select(_ => new Hit(
@@ -374,6 +395,9 @@ public sealed partial class DatasetLearnedPartialsTests
             Layout = new DatasetLayout { SortKey = [LayoutValue.Column(nameof(Hit.Service)), LayoutValue.Column(nameof(Hit.At))], IndexedPrefix = 1, ObjectBytes = 64 << 20 },
             ContentsObjectBytes = 1,
             SheetObjectBytes = 0,
+            Write = chunked ? new VortexWriteOptions { ChunkTargetBytes = 16 << 10 } : new VortexWriteOptions(),
+            ChunkBytes = chunked ? 16 << 10 : 1 << 20,
+            GroupRows = chunked ? 8_192 : 1L << 22,
         }, Ct);
         for (int from = 0; from < hits.Length; from += 200_000)
         {

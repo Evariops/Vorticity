@@ -480,7 +480,7 @@ internal sealed partial class DatasetScanBuilder
 
                     // The granules the statistics leave, read as the rows path reads an object: in one pass over them, where a
                     // part a run of them waited a round trip each, 155 for the routes of a service under 5xx sorted by it.
-                    if (UnsettledPart(held, unsettled) is { } rest)
+                    if (UnsettledPart(held, unsettled, GranuleRows(stats)) is { } rest)
                     {
                         await foreach (RecordBatch batch in rest.ExecuteAsync(cancellationToken).ConfigureAwait(false))
                         {
@@ -624,11 +624,11 @@ internal sealed partial class DatasetScanBuilder
     /// <summary>
     /// The rows of the granules of <paramref name="held"/> its statistics leave, <paramref name="unsettled"/>, as one part of
     /// the scan that reads them alone (<see cref="_unsettled"/>), its own settling of blocks left aside; null when there are
-    /// none, the object has rows marked, or a range is not whole granules, which a part a range reads.
+    /// none, the object has rows marked, its granules are not of <paramref name="granuleRows"/> rows each but the last, or a
+    /// range is not whole granules, which a part a range reads.
     /// </summary>
-    private DatasetScanBuilder? UnsettledPart(in PositionedObject held, List<RowRange> unsettled)
+    private DatasetScanBuilder? UnsettledPart(in PositionedObject held, List<RowRange> unsettled, long granuleRows)
     {
-        long granuleRows = _dataset.Options.Write.BlockRows;
         long rows = held.Entry.PhysicalRows;
         if (unsettled.Count == 0 || held.Entry.HasDeletions || granuleRows <= 0)
         {
@@ -653,6 +653,34 @@ internal sealed partial class DatasetScanBuilder
         part._settles = null;
         part._unsettled = (held.Entry.Uid, granules);
         return part;
+    }
+
+    /// <summary>
+    /// The rows of each granule <paramref name="stats"/> describe, the object's blocks, but the last, which holds as many or
+    /// fewer; 0 when they describe none, or granules of other sizes. A handle's own block rows need not be its objects'.
+    /// </summary>
+    private static long GranuleRows(Indexes.GranuleStats?[] stats)
+    {
+        foreach (Indexes.GranuleStats? column in stats)
+        {
+            if (column is not { Count: > 0 } described)
+            {
+                continue;
+            }
+
+            long rows = described.Rows[0];
+            for (int b = 1; b < described.Count; b++)
+            {
+                if (described.Rows[b] > rows || (described.Rows[b] < rows && b < described.Count - 1))
+                {
+                    return 0;
+                }
+            }
+
+            return rows;
+        }
+
+        return 0;
     }
 
     /// <summary>

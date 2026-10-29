@@ -705,11 +705,32 @@ internal sealed class ScanBuilder
         if (_filter is null && _take is null)
         {
             // A mask with no filter is an aggregation's: the blocks its zone maps answered, which
-            // no split reads.
-            return _pruned && _live is not null ? new LiveBatches(batches, _live) : batches;
+            // no split reads; or the blocks a caller's structures leave, which alone are read, a
+            // split a block (Frame), so that none reads a row of a block they leave out. Read whole,
+            // the rest of a dataset object's granules its statistics answered was counted twice.
+            BlockMask? live = _pruned ? _live : null;
+            if (_granted is { } granted)
+            {
+                live = live is null ? granted : Both(live, granted);
+            }
+
+            return live is not null ? new LiveBatches(batches, live) : batches;
         }
 
         return new FilteredBatches(batches, _filter, _prune, _indexes, rows) { Refined = _pruned, Live = _live, Granted = _granted };
+    }
+
+    /// <summary>The blocks both <paramref name="first"/> and <paramref name="second"/> keep, a mask of its own.</summary>
+    private static BlockMask Both(BlockMask first, BlockMask second)
+    {
+        BlockMask both = new BlockMask(first.RowCount, first.BlockRows);
+        both.Keep(first.Words);
+        if (second.BlockRows == first.BlockRows && second.BlockCount == first.BlockCount)
+        {
+            both.Keep(second.Words);
+        }
+
+        return both;
     }
 
     /// <summary>The batches of an unfiltered scan that reads only the splits a mask keeps.</summary>
@@ -1253,7 +1274,8 @@ internal sealed class ScanBuilder
             natural = int.MaxValue;
         }
 
-        long batch = _filter is null && _take is null && _orderPath is null ? WindowBatch(natural) : natural;
+        // A caller's mask of blocks with no filter is read a block a split: wider, a split would run into a block it leaves out.
+        long batch = _filter is null && _take is null && _orderPath is null && _granted is null ? WindowBatch(natural) : natural;
 
         return (rows, natural, Capped(batch));
     }
