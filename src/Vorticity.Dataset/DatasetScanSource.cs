@@ -746,8 +746,10 @@ internal sealed partial class DatasetScanSource
     /// with its projection's: a chunk of a column the filter alone reads, cut, was read by both pieces, 16.0 MB twice of
     /// the 183.2 the pods of one route read at 32 lanes over S1's spans (QP-2), its routes' chunks of a million rows cut
     /// where its pods' start. An object's columns' chunks end together at its slices and its groups of rows; where those
-    /// leave no cut, the chunks of the projection (<paramref name="projection"/>) alone place them, rather than the object
-    /// read on one lane.
+    /// leave fewer than three quarters of the pieces the chunks of the projection (<paramref name="projection"/>) alone
+    /// place, those place them: a filter's chunks of few values hold millions of rows in few bytes, and their starts left
+    /// the 19.2 M rows of an object of the routes under 5xx of a day of S2's logs (T11) six pieces where its projection
+    /// cuts sixteen, twice as long at the S3 profile, to spare 1 MB of a route's pods (QP-2) read twice.
     /// </remarks>
     private async Task<RowRange[]> CutAsync(PositionedObject held, RowRange rows, long share, FieldMask read, FieldMask? projection, CancellationToken cancellationToken)
     {
@@ -763,9 +765,13 @@ internal sealed partial class DatasetScanSource
             RowRange physical = deletions.IsEmpty ? new RowRange(lower, upper) : new RowRange(deletions.Physical(lower), deletions.Physical(upper - 1) + 1);
             FieldMask mask = own ? read : FieldMask.All;
             List<RowRange> pieces = Cut(SplitPlan.CommonStarts(lease.File.LayoutTree, physical, in mask));
-            if (pieces.Count == 1 && own && projection is { } named)
+            if (own && projection is { } named)
             {
-                pieces = Cut(SplitPlan.CommonStarts(lease.File.LayoutTree, physical, in named));
+                List<RowRange> projected = Cut(SplitPlan.CommonStarts(lease.File.LayoutTree, physical, in named));
+                if (pieces.Count * 4 < projected.Count * 3)
+                {
+                    pieces = projected;
+                }
             }
 
             return [.. pieces];

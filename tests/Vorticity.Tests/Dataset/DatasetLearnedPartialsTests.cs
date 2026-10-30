@@ -421,30 +421,37 @@ public sealed partial class DatasetLearnedPartialsTests
     /// <summary>
     /// At eight lanes, one object cut into pieces under a filter on a column the question does not otherwise read, its
     /// columns' chunks of 16 KiB ending together every 200 000 rows alone: the services, sorted, take 16 384 rows a chunk,
-    /// and the first 204 800 in one, where the sizes the question sums, drawn at random, take a block of 8 192. The pieces
-    /// are cut where the services' chunks start as well, and no range of the object is read twice, where cut where the
-    /// sizes' alone start, a chunk of services across an edge was read by every piece it reaches, the first by six.
+    /// and the first 204 800 in one, where the sizes the question sums, drawn at random, take a block of 8 192. Cut where
+    /// the services' chunks start as well, the object made 18 pieces; cut where the sizes' start, 25, a share of its rows
+    /// each, and the services' chunks across an edge, read by each piece they reach, are a sliver of the bytes read. Cut by
+    /// the filter's chunks of few values, the 19.2 M rows of an object of S2's logs made six pieces where their projection
+    /// cuts sixteen, the routes under 5xx of a day (T11) twice as long at the S3 profile.
     /// </summary>
     [Fact]
-    public async Task AnObjectIsCutWhereTheChunksOfItsFiltersColumnsStartToo()
+    public async Task AnObjectIsCutForItsLanesWhereItsFiltersChunksWouldLeaveThemFewPieces()
     {
         await using MemoryObjectStore memory = new MemoryObjectStore();
         await GranulesObjectAsync(memory, chunked: true, groupRows: 200_000);
         await using RangeReads store = new RangeReads(memory);
         await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = 8);
         await using VortexDataset dataset = await VortexDataset.OpenAsync(store, new DatasetOptions { Session = session, LeastPieceRows = 1_000 }, Ct);
-        List<string> answer = await AskAsync(dataset, 8);
+        var question = Question(dataset, 8);
+        List<string> answer = await LinesAsync(question);
         await using (VortexDataset alone = await VortexDataset.OpenAsync(memory, cancellationToken: Ct))
         {
-            Assert.Equal(await AskAsync(alone, 1), answer);
+            Assert.Equal(await LinesAsync(Question(alone, 1)), answer);
         }
 
-        List<string> again = [.. store.Ranges.Where(static range => range.Value > 1).Select(static range => $"{range.Key} read {range.Value} times")];
-        Assert.True(store.Ranges.Count > 8, $"{store.Ranges.Count} ranges read");
-        Assert.True(again.Count == 0, string.Join("; ", again));
+        int pieces = question.Plan.LastRun!.Lanes.Sum(static lane => lane.Ranges);
+        long all = store.Ranges.Sum(static range => (long)range.Value * range.Key.Length);
+        long again = store.Ranges.Where(static range => range.Value > 1).Sum(static range => (long)(range.Value - 1) * range.Key.Length);
+        Console.WriteLine($"CUT FOR THE LANES: {pieces} pieces, {again} of {all} bytes read again");
+        Assert.True(pieces >= 24, $"{pieces} pieces for eight lanes");
+        Assert.True(again * 100 < all, $"{again} of {all} bytes read again");
 
-        static Task<List<string>> AskAsync(VortexDataset handle, int lanes) =>
-            DatasetPlannerTests.AskAsync(handle, [], ["count()", "sum(Size)"], "Service != 'svc-000'", synopses: false, lanes: lanes);
+        static Vorticity.Aggregation Question(VortexDataset handle, int lanes) =>
+            handle.Scan<Hit>().With(new ScanOptions { UseSynopses = false, DegreeOfParallelism = lanes })
+                .Where(h => h.Service != "svc-000").GroupBy(h => h.At.Truncate(CalendarUnit.Hour)).Select(g => (g.Key, g.Count(), g.Sum(h => h.Size)));
     }
 
     /// <summary>
