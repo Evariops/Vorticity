@@ -43,8 +43,7 @@ public sealed partial class ClusterExecutorTests
             .Add("by-service", (d, rows, args) => ByService(d.Scan<Row>().Rows(rows), BitConverter.ToDouble(args.Span)))
             .Add<long>("per-day", (d, rows, args) => d.Scan<Row>().Rows(rows).GroupBy(r => r.Day).Select(g => g.Count()));
         byte[] floor = BitConverter.GetBytes(250.0);
-        string[] nodes = ["a", "b", "c"];
-        ClusterWorker[] workers = [.. nodes.Select(node => new ClusterWorker(node, questions))];
+        ClusterWorker[] workers = [];
         try
         {
             await using VortexDataset dataset = await VortexDataset.CreateAsync(root, Row.Schema, options, Ct);
@@ -52,6 +51,11 @@ public sealed partial class ClusterExecutorTests
             {
                 await AppendAsync(dataset);
             }
+
+            // Three nodes that each own an object: an object's owner hangs on its identity, which is random, and one of
+            // three nodes owns none of eight objects about one time in nine.
+            string[] nodes = await OwningNodesAsync(dataset);
+            workers = [.. nodes.Select(node => new ClusterWorker(node, questions))];
 
             // Three nodes, every part on its owner: the bits of one node.
             Counting transport = new Counting(new LocalClusterTransport(workers));
@@ -68,7 +72,7 @@ public sealed partial class ClusterExecutorTests
             // A node the transport does not reach: its parts run on their next owners, the same bits.
             Counting partial = new Counting(new LocalClusterTransport(workers.Take(2)));
             Assert.Equal(alone, await AnswersAsync(await new ClusterExecutor(nodes, partial, questions).RunAsync(dataset, "by-service", floor, cancellationToken: Ct)));
-            Assert.True(partial.Failures.GetValueOrDefault("c") > 0 && !partial.Runs.ContainsKey("c"), $"{partial.Failures.GetValueOrDefault("c")} parts failed on c");
+            Assert.True(partial.Failures.GetValueOrDefault(nodes[2]) > 0 && !partial.Runs.ContainsKey(nodes[2]), $"{partial.Failures.GetValueOrDefault(nodes[2])} parts failed on {nodes[2]}");
 
             // No retry: the merge throws the transport's error.
             ClusterExecutor strict = new ClusterExecutor(nodes, new LocalClusterTransport(workers.Take(2)), questions, new ClusterOptions { Retries = 0 });
@@ -114,6 +118,25 @@ public sealed partial class ClusterExecutorTests
 
     private static async Task<List<long>> CountsAsync(Aggregation<long> question) =>
         [.. (await question.ToListAsync(Ct)).Order()];
+
+    /// <summary>The names of three nodes, a letter and a number each, every one of which owns an object of the dataset's version.</summary>
+    private static async Task<string[]> OwningNodesAsync(VortexDataset dataset)
+    {
+        List<UInt128> uids = [];
+        await foreach (PositionedObject held in dataset.ScanBuilder().ObjectsAsync(Ct))
+        {
+            uids.Add(held.Entry.Uid);
+        }
+
+        for (int n = 0; ; n++)
+        {
+            string[] nodes = [$"a{n}", $"b{n}", $"c{n}"];
+            if (Array.TrueForAll(nodes, node => uids.Exists(uid => Rendezvous.Owner(uid, nodes) == node)))
+            {
+                return nodes;
+            }
+        }
+    }
 
     /// <summary>A transport that counts the parts each node ran, and those that failed on it.</summary>
     private sealed class Counting(IClusterTransport inner) : IClusterTransport
