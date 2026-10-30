@@ -323,6 +323,24 @@ internal sealed class ArrayShelf : ISweptAfterCollections
         }
     }
 
+    /// <summary>The piles of small arrays an eviction walks: those in the order of their use.</summary>
+    internal int OrderedSmallPiles
+    {
+        get
+        {
+            lock (_gate)
+            {
+                int count = 0;
+                for (Pile? pile = _small.Oldest; pile is not null; pile = pile.Newer)
+                {
+                    count++;
+                }
+
+                return count;
+            }
+        }
+    }
+
     /// <summary>The bytes of the arrays a lane's shelf handed out that its tables hold: what its query's memory counts of them.</summary>
     internal long Out => _out;
 
@@ -879,10 +897,15 @@ internal sealed class ArrayShelf : ISweptAfterCollections
                     bytes -= pile.Bytes;
                 }
 
-                if (pile.Arrays.Count == 0 && _piles.Count > MostPiles)
+                // An emptied pile leaves the order, to come back at its next use (Touch): left in it, every walk after passed
+                // over it, thousands of lengths of a quantile's sketches each time a query gave an array back past the budget.
+                if (pile.Arrays.Count == 0)
                 {
                     Unlink(ref order, pile);
-                    _piles.Remove(pile.Key);
+                    if (_piles.Count > MostPiles)
+                    {
+                        _piles.Remove(pile.Key);
+                    }
                 }
             }
 

@@ -163,6 +163,26 @@ public sealed partial class SharedBudgetTests
         Assert.Equal(Budget / 4, shelf.Held);
     }
 
+    /// <summary>
+    /// A shelf kept as the process's, a quarter of a megabyte for small arrays, given a thousand arrays of a thousand lengths:
+    /// past its budget, each one given lets the oldest go, and the piles it empties leave the order an eviction walks, which
+    /// holds those that keep an array alone. Left in it, every eviction walked past the emptied ones: a quantile within 1 %
+    /// per service and hour (T7), asked after another's sketches filled the shelf, took 2.5 s where it takes 0.25.
+    /// </summary>
+    [Fact]
+    public void AnEvictionWalksOnlyThePilesThatHoldAnArray()
+    {
+        ArrayShelf shelf = ArrayShelf.Governed(1L << 20);
+        for (int length = 1_000; length < 2_000; length++)
+        {
+            shelf.Give(new long[length]);
+        }
+
+        long held = shelf.Held;
+        Assert.InRange(held, 1L << 17, 1L << 18);
+        Assert.InRange(shelf.OrderedSmallPiles, 1, (int)(held / (1_000 * sizeof(long))) + 1);
+    }
+
     [Fact]
     public async Task AfterABigQueryTheShelfKeepsItsBudgetAndCollectionsSweepIt()
     {
