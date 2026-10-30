@@ -413,9 +413,9 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
     private int[] _rowEntries = new int[1_024];
     private int[] _rowIndexes = new int[1_024];
 
-    // For each measure the records hold, the quantile sketch of each entry, made at its first value, encoded at the end;
-    // null once they would pass SketchBudget.
-    private QuantileSketch?[][]? _sketches;
+    // For each measure the records hold, the quantile sketches of the entries, each made at its entry's first value, encoded
+    // at the end; null once they would pass SketchBudget.
+    private EntrySketches[]? _sketches;
 
     // Each row's entry by its row in the batch being fed, which the distinct values read once the batch is in; and for each
     // wide column of the plan, the registers of its entries, ColumnSheet.Registers bytes an entry one after another in a
@@ -445,10 +445,10 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
         _words = new long[1_024 * _stride];
         if (_measures.Length > 0)
         {
-            _sketches = new QuantileSketch?[_measures.Length][];
+            _sketches = new EntrySketches[_measures.Length];
             for (int k = 0; k < _measures.Length; k++)
             {
-                _sketches[k] = new QuantileSketch?[1_024];
+                _sketches[k] = new EntrySketches(SketchBits);
             }
         }
 
@@ -490,6 +490,14 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
         if (_sketches is { } sketches)
         {
             int[] from = Array.ConvertAll(live, m => Array.IndexOf(oldMeasures, m));
+            for (int o = 0; o < sketches.Length; o++)
+            {
+                if (Array.IndexOf(from, o) < 0)
+                {
+                    sketches[o].Dispose();
+                }
+            }
+
             _sketches = Array.ConvertAll(from, o => sketches[o]);
         }
 
@@ -593,7 +601,7 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
         {
             if ((long)_sheet.Distinct * _sketches.Length * SketchSize > SketchBudget)
             {
-                _sketches = null;
+                ReleaseSketches();
             }
             else
             {
@@ -716,7 +724,21 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
     public override void Dispose()
     {
         ReleaseRegisters();
+        ReleaseSketches();
         base.Dispose();
+    }
+
+    /// <summary>Gives every measure's sketches back, their arrays to the process's shelf, and keeps none.</summary>
+    private void ReleaseSketches()
+    {
+        if (_sketches is { } sketches)
+        {
+            _sketches = null;
+            foreach (EntrySketches held in sketches)
+            {
+                held.Dispose();
+            }
+        }
     }
 
     /// <summary>Adds the rows' values of each measure to the sketch of their entry, from the batch's row <paramref name="start"/>.</summary>
@@ -726,6 +748,7 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
         for (int k = 0; k < _measures.Length; k++)
         {
             CountedMeasure measure = _plan.Measures[_measures[k]];
+            EntrySketches sketches = _sketches![k];
             ReadOnlySpan<byte> valid = Valid(measure, start, count);
             for (int i = 0; i < count; i++)
             {
@@ -734,46 +757,18 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
                     continue;
                 }
 
-                QuantileSketch sketch = Open(k, indexes[i]);
-                switch (measure.Kind)
+                sketches.Add(indexes[i], measure.Kind switch
                 {
-                    case MeasureKind.Float:
-                        sketch.Add(measure.Floats[start + i]);
-                        break;
-                    case MeasureKind.Signed:
-                        sketch.Add(measure.Integers[start + i]);
-                        break;
-                    default:
-                        sketch.Add((ulong)measure.Integers[start + i]);
-                        break;
-                }
+                    MeasureKind.Float => measure.Floats[start + i],
+                    MeasureKind.Signed => measure.Integers[start + i],
+                    _ => (ulong)measure.Integers[start + i],
+                });
             }
         }
     }
 
-    /// <summary>The sketch of measure <paramref name="k"/> over entry <paramref name="entry"/>, made at its first value.</summary>
-    private QuantileSketch Open(int k, int entry)
-    {
-        QuantileSketch?[] sketches = _sketches![k];
-        if (entry >= sketches.Length)
-        {
-            Array.Resize(ref _sketches[k], Math.Max(entry + 1, sketches.Length * 2));
-            sketches = _sketches[k];
-        }
-
-        return sketches[entry] ??= new QuantileSketch(SketchBits);
-    }
-
-    private static byte[] Encoded(QuantileSketch sketch)
-    {
-        System.Buffers.ArrayBufferWriter<byte> writer = new System.Buffers.ArrayBufferWriter<byte>(256);
-        sketch.Encode(writer);
-        return writer.WrittenSpan.ToArray();
-    }
-
-    /// <summary>The encoded sketch of measure <paramref name="k"/> over entry <paramref name="entry"/>; null for none.</summary>
-    private byte[]? SketchBytes(int k, int entry) =>
-        _sketches is not null && entry < _sketches[k].Length && _sketches[k][entry] is { } sketch ? Encoded(sketch) : null;
+    /// <summary>The encoded sketch of measure <paramref name="k"/> over entry <paramref name="entry"/>, once sealed; null for none.</summary>
+    private byte[]? SketchBytes(int k, int entry) => _sketches?[k].Encoded(entry);
 
     /// <summary>Whether each of the rows <c>[start, start + count)</c> holds a value of <paramref name="measure"/>; empty when every one does.</summary>
     private static ReadOnlySpan<byte> Valid(CountedMeasure measure, int start, int count) =>
@@ -951,6 +946,10 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
 
         // The sketches and the registers, kept where the values hold enough rows each to pay for them.
         byte[]?[]? sketchBytes = _sketches is null || valid < (long)SketchRows * distinct ? null : new byte[]?[_entries * carried.Count];
+        for (int c = 0; sketchBytes is not null && c < carried.Count; c++)
+        {
+            _sketches![carried[c]].Seal(_entries);
+        }
 
         // The wide columns whose distinct values every entry keeps.
         _plan.SettleWide(end: true);
@@ -1237,19 +1236,8 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
         int[] values = _entryValue;
         long[] words = _words;
 
-        // Each entry's sketches, taken before the entries move.
-        QuantileSketch?[][]? sketches = null;
-        if (_sketches is not null)
-        {
-            sketches = new QuantileSketch?[_measures.Length][];
-            for (int k = 0; k < _measures.Length; k++)
-            {
-                sketches[k] = new QuantileSketch?[total];
-                _sketches[k].AsSpan(0, Math.Min(total, _sketches[k].Length)).CopyTo(sketches[k]);
-                _sketches[k] = new QuantileSketch?[Math.Max(1_024, values.Length)];
-            }
-        }
-
+        // The entry each entry moves onto, for its sketches to follow once the entries have moved.
+        int[] to = ArrayShelf.Retained.Take<int>(Math.Max(total, 1), zeroed: false);
         _entryValue = new int[values.Length];
         _words = new long[words.Length];
         _entries = 0;
@@ -1264,55 +1252,36 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
             ReadOnlySpan<long> record = words.AsSpan(e * _stride, _stride);
             if (value >= 0 && !IsLeftOut(value))
             {
-                int entry = NewEntry(value);
+                int entry = to[e] = NewEntry(value);
                 _entryOf[value] = entry;
                 record.CopyTo(_words.AsSpan(entry * _stride, _stride));
-                MoveSketches(sketches, e, entry);
                 continue;
             }
 
             if (value == NullValue)
             {
-                int entry = _nullEntry = NewEntry(NullValue);
+                int entry = to[e] = _nullEntry = NewEntry(NullValue);
                 record.CopyTo(_words.AsSpan(entry * _stride, _stride));
-                MoveSketches(sketches, e, entry);
                 continue;
             }
 
-            int into = _otherEntry >= 0 ? _otherEntry : _otherEntry = NewEntry(OtherValues);
+            int into = to[e] = _otherEntry >= 0 ? _otherEntry : _otherEntry = NewEntry(OtherValues);
             StateWords.Merge(_words.AsSpan(into * _stride, _stride), record, _kinds);
-            for (int k = 0; sketches is not null && k < _measures.Length; k++)
-            {
-                if (sketches[k][e] is { } merged)
-                {
-                    Open(k, into).Merge(merged);
-                }
-            }
         }
-    }
 
-    /// <summary>Puts the sketches entry <paramref name="from"/> held before a merge on entry <paramref name="to"/>.</summary>
-    private void MoveSketches(QuantileSketch?[][]? sketches, int from, int to)
-    {
-        for (int k = 0; sketches is not null && k < _measures.Length; k++)
+        foreach (EntrySketches sketches in _sketches ?? [])
         {
-            if (sketches[k][from] is { } sketch)
-            {
-                if (to >= _sketches![k].Length)
-                {
-                    Array.Resize(ref _sketches[k], Math.Max(to + 1, _sketches[k].Length * 2));
-                }
-
-                _sketches[k][to] = sketch;
-            }
+            sketches.Remap(to.AsSpan(0, total));
         }
+
+        ArrayShelf.Retained.Give(to);
     }
 
     private void Drop()
     {
         _dropped = true;
         ReleaseRegisters();
-        _sketches = null;
+        ReleaseSketches();
         _entries = 0;
         _entryValue = [];
         _words = [];

@@ -64,9 +64,15 @@ internal sealed class QuantileSketch : IGroupSketch<QuantileSketch>
         ArgumentOutOfRangeException.ThrowIfLessThan(bits, 1);
         ArgumentOutOfRangeException.ThrowIfGreaterThan(bits, MaxBits);
         Bits = bits;
-        _shift = 52 - bits;
+        _shift = ShiftOf(bits);
         _shelf = shelf;
     }
+
+    /// <summary>The bits a magnitude's bits are shifted by for its bucket on a grid of <paramref name="bits"/> mantissa bits.</summary>
+    internal static int ShiftOf(int bits) => 52 - bits;
+
+    /// <summary>The bucket of a positive <paramref name="magnitude"/> on the grid of shift <paramref name="shift"/> (<see cref="ShiftOf"/>).</summary>
+    internal static int Index(double magnitude, int shift) => (int)(BitConverter.DoubleToInt64Bits(magnitude) >> shift);
 
     /// <summary>The mantissa bits of the grid.</summary>
     internal int Bits { get; }
@@ -390,9 +396,10 @@ internal sealed class QuantileSketch : IGroupSketch<QuantileSketch>
     }
 
     /// <summary>The most bytes a varint of 64 bits takes.</summary>
-    private const int MaxVarint = 10;
+    internal const int MaxVarint = 10;
 
-    private static int Varint(Span<byte> into, ulong value)
+    /// <summary>Writes <paramref name="value"/> as the varint <see cref="Encode"/> writes, and returns its bytes.</summary>
+    internal static int Varint(Span<byte> into, ulong value)
     {
         int at = 0;
         while (value >= 0x80)
@@ -474,7 +481,7 @@ internal sealed class QuantileSketch : IGroupSketch<QuantileSketch>
         Zeros = zeros;
     }
 
-    private int Index(double magnitude) => (int)(BitConverter.DoubleToInt64Bits(magnitude) >> _shift);
+    private int Index(double magnitude) => Index(magnitude, _shift);
 
     /// <summary>A bucket's bounds; the infinity's bucket is the infinity alone, past which the bits name NaNs.</summary>
     private (double Lower, double Upper) BoundsOf(int index)
