@@ -75,10 +75,11 @@ internal sealed class LatencyObjectStore(IObjectStore inner) : IObjectStore
 
     public async ValueTask<ObjectRead> ReadAsync(string key, long offset, Memory<byte> destination, string? ifToken, CancellationToken cancellationToken)
     {
-        Trace?.WriteLine(string.Create(CultureInfo.InvariantCulture, $"{key}\t{offset}\t{destination.Length}\t{Stopwatch.GetElapsedTime(_traced).TotalMilliseconds:F1}"));
-        if (Trace is not null && Environment.GetEnvironmentVariable("VORTICITY_TRACE_STACKS") == "1")
+        // The read and its caller's stack in one write: written apart, the lines of the reads sent at once came between them.
+        if (Trace is { } trace)
         {
-            Trace.WriteLine(Environment.StackTrace);
+            string line = string.Create(CultureInfo.InvariantCulture, $"{key}\t{offset}\t{destination.Length}\t{Stopwatch.GetElapsedTime(_traced).TotalMilliseconds:F1}");
+            trace.WriteLine(Environment.GetEnvironmentVariable("VORTICITY_TRACE_STACKS") == "1" ? line + Environment.NewLine + Environment.StackTrace : line);
         }
 
         long answered = Answered(key, read: true);
