@@ -283,6 +283,85 @@ internal sealed class GranuleStats
         }
     }
 
+    /// <summary>
+    /// Reads the values each granule lists, their numbers and each one's rows, into lists of their exact lengths: gathered
+    /// first into arrays the process's shelf lends, as long as the bytes they come from at most, a value taking a byte at
+    /// least. Grown a value at a time, then copied, the lists cost three times their length: the statistics of a week of
+    /// S2's requests (T2), read at a question's first asking, came to some 700 MB an ask. False for lists the granules'
+    /// rows do not account for.
+    /// </summary>
+    private static bool Listed(
+        ref ProtoReader reader, long[] rows, long[] nulls, int[] distinct, int[] listStarts, int bytes, out int[] ids, out long[] valueRows)
+    {
+        (ids, valueRows) = ([], []);
+        int granules = rows.Length;
+        int most = (int)Math.Min((long)granules * ListedValues, Math.Max(bytes, 1));
+        int[] listed = ArrayShelf.Rent<int>(most);
+        long[] listedRows = ArrayShelf.Rent<long>(most);
+        try
+        {
+            int count = 0;
+            for (int b = 0; b < granules; b++)
+            {
+                listStarts[b] = count;
+                ulong held = reader.ReadVarint();
+                long valid = rows[b] - nulls[b];
+                if (held > (ulong)valid || (held == 0) != (valid == 0))
+                {
+                    return false;
+                }
+
+                distinct[b] = (int)held;
+                if (held > ListedValues)
+                {
+                    continue;
+                }
+
+                if (count + (int)held > most)
+                {
+                    return false;
+                }
+
+                long id = -1;
+                for (int i = 0; i < (int)held; i++)
+                {
+                    id = checked(id + 1 + (long)reader.ReadVarint());
+                    listed[count + i] = checked((int)id);
+                }
+
+                long sum = 0;
+                for (int i = 0; i < (int)held; i++)
+                {
+                    long taken = held == 1 ? valid : checked((long)reader.ReadVarint());
+                    if (taken <= 0)
+                    {
+                        return false;
+                    }
+
+                    sum += taken;
+                    listedRows[count + i] = taken;
+                }
+
+                if (sum != valid)
+                {
+                    return false;
+                }
+
+                count += (int)held;
+            }
+
+            listStarts[granules] = count;
+            ids = listed.AsSpan(0, count).ToArray();
+            valueRows = listedRows.AsSpan(0, count).ToArray();
+            return true;
+        }
+        finally
+        {
+            ArrayShelf.Return(listed);
+            ArrayShelf.Return(listedRows);
+        }
+    }
+
     /// <summary>The statistics <paramref name="bytes"/> encode, or null when they do not decode as statistics of this version.</summary>
     internal static GranuleStats? From(ReadOnlySpan<byte> bytes)
     {
@@ -323,53 +402,10 @@ internal sealed class GranuleStats
             if ((parts & HoldsValues) != 0)
             {
                 distinct = new int[granules];
-                System.Collections.Generic.List<int> listed = [];
-                System.Collections.Generic.List<long> listedRows = [];
-                for (int b = 0; b < granules; b++)
+                if (!Listed(ref reader, rows, nulls, distinct, listStarts, bytes.Length, out ids, out valueRows))
                 {
-                    listStarts[b] = listed.Count;
-                    ulong held = reader.ReadVarint();
-                    long valid = rows[b] - nulls[b];
-                    if (held > (ulong)valid || (held == 0) != (valid == 0))
-                    {
-                        return null;
-                    }
-
-                    distinct[b] = (int)held;
-                    if (held > ListedValues)
-                    {
-                        continue;
-                    }
-
-                    long id = -1;
-                    for (int i = 0; i < (int)held; i++)
-                    {
-                        id = checked(id + 1 + (long)reader.ReadVarint());
-                        listed.Add(checked((int)id));
-                    }
-
-                    long sum = 0;
-                    for (int i = 0; i < (int)held; i++)
-                    {
-                        long taken = held == 1 ? valid : checked((long)reader.ReadVarint());
-                        if (taken <= 0)
-                        {
-                            return null;
-                        }
-
-                        sum += taken;
-                        listedRows.Add(taken);
-                    }
-
-                    if (sum != valid)
-                    {
-                        return null;
-                    }
+                    return null;
                 }
-
-                listStarts[granules] = listed.Count;
-                ids = [.. listed];
-                valueRows = [.. listedRows];
             }
 
             MeasureKind? measure = (parts & HoldsMeasure) != 0 ? (MeasureKind)kind : null;

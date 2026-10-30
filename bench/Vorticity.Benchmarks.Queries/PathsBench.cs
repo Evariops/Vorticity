@@ -463,7 +463,7 @@ internal static partial class PathsBench
     /// <summary>
     /// <c>--loop-cold</c>: the cold ask again and again for as long, for a profiler, and its mean: each by a session and a
     /// handle opened for it, with an empty synopsis cache, disposed and deleted after it; under <c>--forget-learned</c>, each
-    /// the family's first.
+    /// the family's first. Under <c>--alloc-types</c>, what a cold ask allocates, by type, sampled over the loop.
     /// </summary>
     private static async Task LoopColdAsync(Settings settings, CountingObjectStore store, Built built, Question question, ScanOptions options, int degree)
     {
@@ -472,6 +472,7 @@ internal static partial class PathsBench
             return;
         }
 
+        using AllocationSampler? sampler = settings.AllocTypes ? new AllocationSampler() : null;
         long until = Stopwatch.GetTimestamp() + (long)(settings.LoopColdSeconds * Stopwatch.Frequency);
         int asks = 0;
         double milliseconds = 0;
@@ -511,6 +512,10 @@ internal static partial class PathsBench
         Console.WriteLine(string.Create(
             CultureInfo.InvariantCulture,
             $"    cold loop: {asks} asks, {milliseconds / asks:F3} ms, {cpu / asks:F1} ms of processor and {allocated / (double)asks / 1e3:F1} KB allocated each"));
+        foreach (string line in sampler?.Lines(asks, 25) ?? [])
+        {
+            Console.WriteLine(line);
+        }
     }
 
     /// <summary>
