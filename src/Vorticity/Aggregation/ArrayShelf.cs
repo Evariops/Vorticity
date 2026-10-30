@@ -426,6 +426,14 @@ internal sealed class ArrayShelf : ISweptAfterCollections
     internal bool Exact { get; set; }
 
     /// <summary>
+    /// The length an array of <paramref name="held"/> elements grows to for <paramref name="needed"/>: twice it at least,
+    /// <paramref name="least"/> at the fewest, and a power of two, a length the shelf holds again for the next array that
+    /// grows as far, where a length of its own would find none.
+    /// </summary>
+    internal static int Grown(int needed, int held, int least = 1_024) =>
+        (int)BitOperations.RoundUpToPowerOf2((uint)Math.Max(needed, Math.Max(least, 2 * held)));
+
+    /// <summary>
     /// <paramref name="array"/> grown to <paramref name="length"/>, its elements copied and the new
     /// ones zeroed, as <see cref="Array.Resize{T}"/> does: its new array from <paramref name="shelf"/>
     /// and its old one given back to it, when there is one.

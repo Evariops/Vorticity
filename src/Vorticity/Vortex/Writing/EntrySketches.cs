@@ -44,7 +44,7 @@ internal sealed class EntrySketches(int bits) : IDisposable
     {
         if (entry >= _zeros.Length)
         {
-            Grow(ref _zeros, Room(entry + 1, _zeros.Length), _zeros.Length, zeroed: true);
+            Grow(ref _zeros, ArrayShelf.Grown(entry + 1, _zeros.Length), _zeros.Length, zeroed: true);
         }
 
         ref long zeros = ref _zeros[entry];
@@ -118,7 +118,7 @@ internal sealed class EntrySketches(int bits) : IDisposable
 
         _keys.AsSpan(0, held).Sort(_counts.AsSpan(0, held));
         Give(_starts);
-        _starts = ArrayShelf.Retained.Take<int>(Room(entries + 1, 0), zeroed: false);
+        _starts = ArrayShelf.Retained.Take<int>(ArrayShelf.Grown(entries + 1, 0), zeroed: false);
         for (int entry = 0, at = 0; entry <= entries; entry++)
         {
             while (at < held && (int)(_keys[at] >> 32) < entry)
@@ -152,7 +152,7 @@ internal sealed class EntrySketches(int bits) : IDisposable
         if (_encoded.Length < most)
         {
             Give(_encoded);
-            _encoded = ArrayShelf.Retained.Take<byte>(Room(most, _encoded.Length), zeroed: false);
+            _encoded = ArrayShelf.Retained.Take<byte>(ArrayShelf.Grown(most, _encoded.Length), zeroed: false);
         }
 
         Span<byte> into = _encoded;
@@ -247,10 +247,6 @@ internal sealed class EntrySketches(int bits) : IDisposable
         _encoded = [];
         _held = 0;
     }
-
-    /// <summary>The length an array of <paramref name="held"/> elements grows to for <paramref name="needed"/>: a power of two, which the shelf holds again for the next object's counts, twice it at least.</summary>
-    internal static int Room(int needed, int held) =>
-        (int)BitOperations.RoundUpToPowerOf2((uint)Math.Max(needed, Math.Max(FirstSlots, 2 * held)));
 
     private static long[] Take(int slots) => ArrayShelf.Retained.Take<long>(slots, zeroed: false);
 
