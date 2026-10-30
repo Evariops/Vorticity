@@ -305,7 +305,10 @@ internal sealed partial class DatasetScanBuilder
             return Coverage.Whole;
         }
 
-        /// <summary>Nothing for a partial in memory; a read from the cache's disk for one there, or for each of the partials it sums.</summary>
+        /// <summary>
+        /// Nothing for a partial in memory, a read from the cache's disk for one there, and a request to the store of the bytes
+        /// its listing gave for one only the store keeps; so for each of the partials it sums.
+        /// </summary>
         internal override PathCosts.Cost Cost(Planned unit)
         {
             PathCosts costs = Scan._version.Costs;
@@ -315,17 +318,23 @@ internal sealed partial class DatasetScanBuilder
             SynopsisCache? cache = Scan._dataset.Session.Options.SynopsisCache;
             if (partials.Holds(uid, key, cache))
             {
-                return partials.InMemory(uid, key) ? default : costs.At(costs.Profile.DiskCache, PartialBytes);
+                return Read(costs, partials, uid, key, cache);
             }
 
             PathCosts.Cost summed = default;
             foreach (UInt128 input in partials.MergedInto(uid, cache) ?? [])
             {
-                summed += partials.InMemory(input, key) ? default : costs.At(costs.Profile.DiskCache, PartialBytes);
+                summed += Read(costs, partials, input, key, cache);
             }
 
             return summed;
         }
+
+        /// <summary>The read of the partial of family <paramref name="key"/> of the object <paramref name="uid"/>, where it lies.</summary>
+        private static PathCosts.Cost Read(PathCosts costs, LearnedPartials partials, UInt128 uid, UInt128 key, SynopsisCache? cache) =>
+            partials.InMemory(uid, key) ? default
+                : partials.StoreBytes(uid, key, cache) is > 0 and long bytes ? new PathCosts.Cost(1, bytes)
+                : costs.At(costs.Profile.DiskCache, PartialBytes);
 
         internal override string Describe(Planned unit, PathCosts.Cost cost)
         {

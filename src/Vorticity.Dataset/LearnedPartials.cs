@@ -250,8 +250,41 @@ internal sealed class LearnedPartials
     }
 
     /// <summary>Whether the handle, the cache or the store holds the partial of family <paramref name="family"/> itself of the object <paramref name="uid"/>.</summary>
-    internal bool HoldsOwn(UInt128 uid, UInt128 family, SynopsisCache? cache) =>
-        _held.ContainsKey((uid, family)) || (cache is not null && cache.HoldsSealed(NameOf(uid, family, stackalloc char[NameLength]))) || Stored(uid, family);
+    internal bool HoldsOwn(UInt128 uid, UInt128 family, SynopsisCache? cache) => Near(uid, family, cache) || Stored(uid, family);
+
+    /// <summary>
+    /// The bytes a read of the partial of family <paramref name="family"/> of the object <paramref name="uid"/> takes from the
+    /// store, as the family's listing gave them, or of the first family that serves it, as a read looks for them: none when
+    /// the handle or the cache holds the one it takes, or when no family's listing names one.
+    /// </summary>
+    internal long StoreBytes(UInt128 uid, UInt128 family, SynopsisCache? cache)
+    {
+        if (HoldsOwn(uid, family, cache))
+        {
+            return Near(uid, family, cache) ? 0 : ListedBytes(uid, family);
+        }
+
+        if (_covering.TryGetValue(family, out (int Known, Covering[] Families) covering))
+        {
+            foreach (Covering wider in covering.Families)
+            {
+                if (HoldsOwn(uid, wider.Key, cache))
+                {
+                    return Near(uid, wider.Key, cache) ? 0 : ListedBytes(uid, wider.Key);
+                }
+            }
+        }
+
+        return 0;
+    }
+
+    /// <summary>Whether the handle or the cache holds the partial of family <paramref name="family"/> of the object <paramref name="uid"/>, with no read of the store.</summary>
+    private bool Near(UInt128 uid, UInt128 family, SynopsisCache? cache) =>
+        _held.ContainsKey((uid, family)) || (cache is not null && cache.HoldsSealed(NameOf(uid, family, stackalloc char[NameLength])));
+
+    /// <summary>The bytes of the partial of family <paramref name="family"/> of the object <paramref name="uid"/>, as the family's listing gave them; 0 when it names none.</summary>
+    private long ListedBytes(UInt128 uid, UInt128 family) =>
+        _listed.TryGetValue(family, out ConcurrentDictionary<UInt128, long>? held) && held.TryGetValue(uid, out long bytes) ? bytes : 0;
 
     /// <summary>A family that serves another (<see cref="Aggregating.LearnedFamily.Covers"/>): the key of its partials, and the place of each key of the other among its own.</summary>
     internal readonly record struct Covering(UInt128 Key, int[] KeyOf);

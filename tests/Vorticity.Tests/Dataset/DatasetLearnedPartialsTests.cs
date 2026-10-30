@@ -933,6 +933,37 @@ public sealed partial class DatasetLearnedPartialsTests
     }
 
     /// <summary>
+    /// A handle opened later with no cache finds in the store the partials a first one learned: its planner prices each at a
+    /// request and the bytes the store's listing gives, what the answer reads, where it priced them as a read from a disk
+    /// cache and the question at nothing from the store.
+    /// </summary>
+    [Fact]
+    public async Task APartialOnlyTheStoreKeepsIsPricedAtItsRead()
+    {
+        await using MemoryObjectStore memory = new MemoryObjectStore();
+        await (await CreateAsync(memory)).DisposeAsync();
+        await using CountingObjectStore store = new CountingObjectStore(memory);
+        await using (VortexDataset learning = await VortexDataset.OpenAsync(store, new DatasetOptions(), Ct))
+        {
+            await DatasetPlannerTests.AskAsync(learning, ["Route"], ["Route", "count()", "sum(Size)"], "Status = 404", synopses: true);
+        }
+
+        await using VortexSession session = VortexSession.Create(_ => { });
+        await using VortexDataset dataset = await VortexDataset.OpenAsync(store, new DatasetOptions { Session = session }, Ct);
+        Vorticity.Aggregation question = dataset.Scan<Call>().With(new ScanOptions { UseSynopses = true }).Where(c => c.Status == 503)
+            .GroupBy(c => c.Route).Select(g => (g.Key, g.Count(), g.Sum(c => c.Size)));
+        (long Requests, long Bytes)? priced = await Aggregating.EstimateRun.ReadsOfAsync((Aggregating.AggregationQuery)question.Query, Ct);
+        ScanPlan plan = await question.ExplainAsync(analyze: false, Ct);
+        store.Reset();
+        List<string> answer = await DatasetPlannerTests.AskAsync(dataset, ["Route"], ["Route", "count()", "sum(Size)"], "Status = 503", synopses: true);
+        long read = store.BytesRead;
+        Assert.Equal(await DatasetPlannerTests.AskAsync(dataset, ["Route"], ["Route", "count()", "sum(Size)"], "Status = 503", synopses: false), answer);
+        Assert.All(plan.Units, step => Assert.Equal("partial", step.Alternative));
+        Assert.NotNull(priced);
+        Assert.True(read > 0 && read <= priced.Value.Bytes + (priced.Value.Bytes / 20), $"{read} bytes read, priced at {priced}");
+    }
+
+    /// <summary>
     /// Four services, each 20 000 calls over two hours from noon, from three hosts and on six routes of its own, keyed by the
     /// service then the instant, or by <paramref name="sortKey"/>, its first <paramref name="indexedPrefix"/> columns
     /// indexed, appended in parts and compacted.
