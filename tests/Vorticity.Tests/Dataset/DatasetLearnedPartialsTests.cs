@@ -11,6 +11,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Dataset;
+using Vorticity.IO;
 using Vorticity.Scanning;
 using Vorticity.Tests.Writing;
 using Xunit;
@@ -418,6 +419,35 @@ public sealed partial class DatasetLearnedPartialsTests
     }
 
     /// <summary>
+    /// At eight lanes, one object cut into pieces under a filter on a column the question does not otherwise read, its
+    /// columns' chunks of 16 KiB ending together every 200 000 rows alone: the services, sorted, take 16 384 rows a chunk,
+    /// and the first 204 800 in one, where the sizes the question sums, drawn at random, take a block of 8 192. The pieces
+    /// are cut where the services' chunks start as well, and no range of the object is read twice, where cut where the
+    /// sizes' alone start, a chunk of services across an edge was read by every piece it reaches, the first by six.
+    /// </summary>
+    [Fact]
+    public async Task AnObjectIsCutWhereTheChunksOfItsFiltersColumnsStartToo()
+    {
+        await using MemoryObjectStore memory = new MemoryObjectStore();
+        await GranulesObjectAsync(memory, chunked: true, groupRows: 200_000);
+        await using RangeReads store = new RangeReads(memory);
+        await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = 8);
+        await using VortexDataset dataset = await VortexDataset.OpenAsync(store, new DatasetOptions { Session = session, LeastPieceRows = 1_000 }, Ct);
+        List<string> answer = await AskAsync(dataset, 8);
+        await using (VortexDataset alone = await VortexDataset.OpenAsync(memory, cancellationToken: Ct))
+        {
+            Assert.Equal(await AskAsync(alone, 1), answer);
+        }
+
+        List<string> again = [.. store.Ranges.Where(static range => range.Value > 1).Select(static range => $"{range.Key} read {range.Value} times")];
+        Assert.True(store.Ranges.Count > 8, $"{store.Ranges.Count} ranges read");
+        Assert.True(again.Count == 0, string.Join("; ", again));
+
+        static Task<List<string>> AskAsync(VortexDataset handle, int lanes) =>
+            DatasetPlannerTests.AskAsync(handle, [], ["count()", "sum(Size)"], "Service != 'svc-000'", synopses: false, lanes: lanes);
+    }
+
+    /// <summary>
     /// The same object, its sizes declared an identifier, under a filter that leaves out the size of a hit of the service whose
     /// granules their statistics answer: the granules the size's postings do not place it in are answered under the rest of
     /// the filter, and the object answers through them at its first asking, as the rows do, where every granule was its rows
@@ -561,9 +591,10 @@ public sealed partial class DatasetLearnedPartialsTests
     /// One object of a hundred granules of 800 000 hits over two hours, sorted by service then instant: one service holds
     /// 40 % of them, 300 others the rest, and a size drawn at random each; the hits, in the order they were drawn. With
     /// <paramref name="chunked"/>, each column's chunks of 16 KiB, all ending together at each granule: a granule's rows are
-    /// read alone, and lanes cut the object there. The columns <paramref name="identifiers"/> names declared identifiers.
+    /// read alone, and lanes cut the object there; or every <paramref name="groupRows"/> rows when it is given. The columns
+    /// <paramref name="identifiers"/> names declared identifiers.
     /// </summary>
-    private static async Task<Hit[]> GranulesObjectAsync(MemoryObjectStore memory, bool chunked = false, string[]? identifiers = null)
+    private static async Task<Hit[]> GranulesObjectAsync(MemoryObjectStore memory, bool chunked = false, string[]? identifiers = null, long? groupRows = null)
     {
         Random random = new Random(0xF3);
         Hit[] hits = [.. Enumerable.Range(0, 800_000).Select(_ => new Hit(
@@ -578,7 +609,7 @@ public sealed partial class DatasetLearnedPartialsTests
             Identifiers = identifiers ?? [],
             Write = chunked ? new VortexWriteOptions { ChunkTargetBytes = 16 << 10 } : new VortexWriteOptions(),
             ChunkBytes = chunked ? 16 << 10 : 1 << 20,
-            GroupRows = chunked ? 8_192 : 1L << 22,
+            GroupRows = groupRows ?? (chunked ? 8_192 : 1L << 22),
         }, Ct);
         for (int from = 0; from < hits.Length; from += 200_000)
         {
@@ -1022,4 +1053,21 @@ public sealed partial class DatasetLearnedPartialsTests
 
     [VortexRecord]
     public partial record struct Hit(string Service, DateTime At, long Size);
+
+    /// <summary>A store that counts the reads of each range of the data objects.</summary>
+    private sealed class RangeReads(IObjectStore inner) : ForwardingStore(inner)
+    {
+        /// <summary>The reads of each range of a data object, by its key, offset and length.</summary>
+        internal System.Collections.Concurrent.ConcurrentDictionary<(string Key, long Offset, int Length), int> Ranges { get; } = new();
+
+        public override ValueTask<ObjectRead> ReadAsync(string key, long offset, Memory<byte> destination, string? ifToken, CancellationToken cancellationToken)
+        {
+            if (key.StartsWith("data/", StringComparison.Ordinal))
+            {
+                Ranges.AddOrUpdate((key, offset, destination.Length), 1, static (_, reads) => reads + 1);
+            }
+
+            return base.ReadAsync(key, offset, destination, ifToken, cancellationToken);
+        }
+    }
 }

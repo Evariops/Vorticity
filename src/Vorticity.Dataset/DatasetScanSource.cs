@@ -545,7 +545,7 @@ internal sealed partial class DatasetScanSource
             if (weight >= 2 * share && answered?.Contains(held.FirstRow) != true && !(lookingUp && planner.LooksUp(held)))
             {
                 bool settles = granular?.ContainsKey(held.FirstRow) == true;
-                cuts[o] = CutAsync(held, rows, settles ? (long)((double)share * rows.Length / weight) : share, spec.Projection, cancellationToken);
+                cuts[o] = CutAsync(held, rows, settles ? (long)((double)share * rows.Length / weight) : share, planner.ReadMask, spec.Projection, cancellationToken);
                 cutting.Add(cuts[o]!);
                 if (settles)
                 {
@@ -741,25 +741,44 @@ internal sealed partial class DatasetScanSource
     /// ranges of <paramref name="share"/> rows or more: a cut inside a chunk would have both ranges
     /// decode it. A deleted row counts for none, and a chunk of deleted rows alone is in no range.
     /// </summary>
-    private async Task<RowRange[]> CutAsync(PositionedObject held, RowRange rows, long share, FieldMask? projection, CancellationToken cancellationToken)
+    /// <remarks>
+    /// The cuts fall where the chunks of every column the scan reads start together, <paramref name="read"/>, its filter's
+    /// with its projection's: a chunk of a column the filter alone reads, cut, was read by both pieces, 16.0 MB twice of
+    /// the 183.2 the pods of one route read at 32 lanes over S1's spans (QP-2), its routes' chunks of a million rows cut
+    /// where its pods' start. An object's columns' chunks end together at its slices and its groups of rows; where those
+    /// leave no cut, the chunks of the projection (<paramref name="projection"/>) alone place them, rather than the object
+    /// read on one lane.
+    /// </remarks>
+    private async Task<RowRange[]> CutAsync(PositionedObject held, RowRange rows, long share, FieldMask read, FieldMask? projection, CancellationToken cancellationToken)
     {
         ObjectLease lease = await _version.RentAsync(held.Entry, cancellationToken).ConfigureAwait(false);
         await using (lease.ConfigureAwait(false))
         {
-            // The projection names the version's columns, where an object of an earlier schema need
-            // not hold them: its chunks are read whole for every column.
-            FieldMask mask = projection is { } named && _version.Schema.ColumnsOf(lease.File.DType, held.Entry.Key) is null ? named : FieldMask.All;
+            // The masks name the version's columns, where an object of an earlier schema need not hold them: its chunks are
+            // read whole for every column.
+            bool own = _version.Schema.ColumnsOf(lease.File.DType, held.Entry.Key) is null;
             DeletionVector deletions = held.Entry.Deletions;
             long lower = rows.Start - held.FirstRow;
             long upper = rows.End - held.FirstRow;
             RowRange physical = deletions.IsEmpty ? new RowRange(lower, upper) : new RowRange(deletions.Physical(lower), deletions.Physical(upper - 1) + 1);
-            long[] starts = SplitPlan.CommonStarts(lease.File.LayoutTree, physical, in mask);
+            FieldMask mask = own ? read : FieldMask.All;
+            List<RowRange> pieces = Cut(SplitPlan.CommonStarts(lease.File.LayoutTree, physical, in mask));
+            if (pieces.Count == 1 && own && projection is { } named)
+            {
+                pieces = Cut(SplitPlan.CommonStarts(lease.File.LayoutTree, physical, in named));
+            }
+
+            return [.. pieces];
+        }
+
+        List<RowRange> Cut(long[] starts)
+        {
             long parts = rows.Length / share;
             List<RowRange> pieces = [];
             long start = rows.Start;
             for (int b = 0; b < starts.Length && pieces.Count < parts - 1; b++)
             {
-                long at = held.FirstRow + deletions.Logical(starts[b]);
+                long at = held.FirstRow + held.Entry.Deletions.Logical(starts[b]);
                 if (at - start >= share && at < rows.End)
                 {
                     pieces.Add(new RowRange(start, at));
@@ -768,7 +787,7 @@ internal sealed partial class DatasetScanSource
             }
 
             pieces.Add(new RowRange(start, rows.End));
-            return [.. pieces];
+            return pieces;
         }
     }
 

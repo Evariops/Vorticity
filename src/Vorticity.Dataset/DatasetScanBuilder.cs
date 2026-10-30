@@ -442,6 +442,9 @@ internal sealed partial class DatasetScanBuilder
 
     private HashSet<string>? _filterPaths;
 
+    /// <summary>The top-level columns the scan reads, those its mask selects and those its filter reads, as a mask of the version's; every one without a mask.</summary>
+    internal FieldMask ReadMask => _mask is null ? FieldMask.All : FieldMasks.Of(FieldsRead());
+
     /// <summary>The top-level columns the scan reads, by their places: those its mask selects and those its filter reads, or every one; found once.</summary>
     private int[] FieldsRead()
     {
