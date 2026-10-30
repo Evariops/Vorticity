@@ -247,11 +247,21 @@ internal sealed class SpanReader : IDisposable
     internal async ValueTask<RecordBatch[]> ReadSpansAsync(IReadOnlyList<RowRange> spans, int[]? columns, CancellationToken cancellationToken)
     {
         int[] fields = columns ?? AllColumns();
+        if (spans.Count == 0)
+        {
+            return [];
+        }
+
         await LoadAsync(fields, spans, cancellationToken).ConfigureAwait(false);
         using SegmentRequestSet shared = new SegmentRequestSet();
 
         // Each batch owns a context of its own, its chunks views of the shared reads it retains, and the regions of the chunks
-        // it reads the granules of in its arena: planned in it before the reads, filled from them after.
+        // it reads the granules of in its arena: planned in it before the reads, filled from them after. The children of a
+        // chunk every range of it reads whole, a dictionary's values, a run-end's runs, are decoded once for the spans and
+        // lent to each: decoded again for each span, each kept them all, past 16 GB for a user's rows over a week of S2's
+        // logs. The table goes with the last batch.
+        RetainedChunks.Shared? retained = spans.Count > 1 ? new RetainedChunks.Shared(fields.Length, spans.Count) : null;
+        int shares = 0;
         ScanContext[] contexts = new ScanContext[spans.Count];
         ChunkRead[][] reads = new ChunkRead[spans.Count][];
         RecordBatch[] batches = new RecordBatch[spans.Count];
@@ -259,10 +269,16 @@ internal sealed class SpanReader : IDisposable
         try
         {
             GranuleBytes granules = new GranuleBytes();
+            HashSet<ulong>? several = Several(spans, fields);
             for (int s = 0; s < spans.Count; s++)
             {
                 contexts[s] = new ScanContext(_encodings, _options);
-                reads[s] = ChunksOf(shared, contexts[s], spans[s], fields, granules);
+                if (retained is not null)
+                {
+                    contexts[s].HoldShare(retained);
+                    shares++;
+                }
+                reads[s] = ChunksOf(shared, contexts[s], spans[s], fields, granules, several);
             }
 
             await _source.ReadManyAsync(shared, cancellationToken).ConfigureAwait(false);
@@ -271,7 +287,7 @@ internal sealed class SpanReader : IDisposable
                 ScanContext context = contexts[made];
                 Fill(context, shared, reads[made]);
                 context.Segments.Complete();
-                batches[made] = Batch(context, spans[made], fields, columns, reads[made]);
+                batches[made] = Batch(context, spans[made], fields, columns, reads[made], shared: retained is not null);
                 contexts[made] = null!;
             }
 
@@ -287,6 +303,12 @@ internal sealed class SpanReader : IDisposable
             foreach (ScanContext? context in contexts)
             {
                 context?.Dispose();
+            }
+
+            // The shares no context took.
+            for (; retained is not null && shares < spans.Count; shares++)
+            {
+                retained.Dispose();
             }
 
             throw;
@@ -377,7 +399,8 @@ internal sealed class SpanReader : IDisposable
     /// it covers in part, when the column's marks say where its granules lie, as the ranges of its region they hold. A
     /// column written against an object dictionary reads its values' segment first, which every span shares.
     /// </summary>
-    private ChunkRead[] ChunksOf(SegmentRequestSet requests, ScanContext context, RowRange span, int[] fields, GranuleBytes granules)
+    private ChunkRead[] ChunksOf(
+        SegmentRequestSet requests, ScanContext context, RowRange span, int[] fields, GranuleBytes granules, HashSet<ulong>? several = null)
     {
         List<ChunkRead> reads = [];
         foreach (int field in fields)
@@ -393,7 +416,8 @@ internal sealed class SpanReader : IDisposable
             ColumnMarks? marks = System.Threading.Volatile.Read(ref _marks[field]);
             foreach (ChunkSpan chunk in Overlapping(field, span.Start, span.Length))
             {
-                if (marks is not null && Granules(requests, context, chunk, span, marks, width, granules) is { } ranged)
+                if (marks is not null && !(several?.Contains(chunk.Offset) ?? false)
+                    && Granules(requests, context, chunk, span, marks, width, granules) is { } ranged)
                 {
                     reads.Add(ranged);
                     continue;
@@ -408,6 +432,37 @@ internal sealed class SpanReader : IDisposable
 
     /// <summary>The share of a chunk's bytes past which its granules are read with the rest of it, in one request.</summary>
     private const double WholeShare = GranulePlans.WholeShare;
+
+    /// <summary>
+    /// The chunks, by their segments' offsets, that more than one of <paramref name="spans"/> reads of <paramref name="fields"/>:
+    /// read whole, once for them all, rather than each span's granules into a region of the chunk's size of its own, which a
+    /// thousand spans of a variant chunk each allocated; null when no chunk is.
+    /// </summary>
+    private HashSet<ulong>? Several(IReadOnlyList<RowRange> spans, int[] fields)
+    {
+        if (spans.Count < 2)
+        {
+            return null;
+        }
+
+        HashSet<ulong> met = [];
+        HashSet<ulong>? several = null;
+        foreach (int field in fields)
+        {
+            foreach (RowRange span in spans)
+            {
+                foreach (ChunkSpan chunk in Overlapping(field, span.Start, span.Length))
+                {
+                    if (!met.Add(chunk.Offset))
+                    {
+                        (several ??= []).Add(chunk.Offset);
+                    }
+                }
+            }
+        }
+
+        return several;
+    }
 
     /// <summary>
     /// The read of the span's granules of <paramref name="chunk"/>, their ranges registered in <paramref name="requests"/>;
@@ -491,7 +546,7 @@ internal sealed class SpanReader : IDisposable
     }
 
     /// <summary>The span's rows decoded from the chunks <paramref name="context"/> holds, as a batch that adopts it.</summary>
-    private RecordBatch Batch(ScanContext context, RowRange span, int[] fields, int[]? columns, ChunkRead[] reads)
+    private RecordBatch Batch(ScanContext context, RowRange span, int[] fields, int[]? columns, ChunkRead[] reads, bool shared = false)
     {
         int length = checked((int)span.Length);
 
@@ -503,7 +558,8 @@ internal sealed class SpanReader : IDisposable
         for (int i = 0; i < fields.Length; i++)
         {
             decoded[i] = Column(
-                context, schema.GetField(i), DictionaryOf(fields[i]), Overlapping(fields[i], span.Start, span.Length).Length, span, length, reads, ref next);
+                context, schema.GetField(i), DictionaryOf(fields[i]), Overlapping(fields[i], span.Start, span.Length).Length, span, length, reads, ref next,
+                shared ? fields[i] : -1);
         }
 
         int root = context.Canonical.AddStruct(
@@ -880,13 +936,18 @@ internal sealed class SpanReader : IDisposable
         return arena.Struct(names, types, _schema.Nullability);
     }
 
+    /// <summary>The scope a chunk of column <paramref name="field"/> is decoded under, its own among the file's: the column, then the chunk's place in it.</summary>
+    private static uint ScopeOf(int field, ChunkSpan chunk) => ((uint)field << 20) | (uint)(chunk.Ordinal & 0xFFFFF);
+
     /// <summary>
     /// One column's rows of the span: its <paramref name="chunks"/> chunks that overlap it, each decoded whole and cut to the
     /// span, or its granules decoded alone over the region they were read into, joined. A column written against an object
-    /// dictionary reads its values first, its chunks as codes, and gathers the one through the other.
+    /// dictionary reads its values first, its chunks as codes, and gathers the one through the other. Column
+    /// <paramref name="field"/>'s chunks are decoded under scopes of their own.
     /// </summary>
     private static int Column(
-        ScanContext context, DType type, ColumnDictionary? dictionary, int chunks, RowRange span, int length, ChunkRead[] reads, ref int next)
+        ScanContext context, DType type, ColumnDictionary? dictionary, int chunks, RowRange span, int length, ChunkRead[] reads, ref int next,
+        int field)
     {
         int values = -1;
         DType chunkType = type;
@@ -905,25 +966,38 @@ internal sealed class SpanReader : IDisposable
             ChunkSpan chunk = read.Chunk;
             long from = Math.Max(span.Start, chunk.FirstRow);
             long to = Math.Min(span.End, chunk.EndRow);
-            if (read.Ranges.Length == 0)
-            {
-                // A chunk read whole for a few of its rows, as a column of few values holds a million of them in a few
-                // kilobytes, decodes those rows alone where its encoding can: decoded whole, a million strings' views each,
-                // the needle of a trace held 860 MB at once.
-                context.Decode.LoadBlob(context.Segments.GetBuffer(read.Whole));
-                ArrayNode root = context.Nodes.Root;
-                int start = (int)(from - chunk.FirstRow);
-                int count = (int)(to - from);
-                parts[i] = count < chunk.Rows && context.Decode.DecodesRange(in root)
-                    ? context.Decode.DecodeRootRange(in root, chunkType, checked((int)chunk.Rows), start, count, keepEncoding: false)
-                    : CanonicalSlice.Slice(context.Decode, context.Decode.DecodeRoot(in root, chunkType, checked((int)chunk.Rows)), start, count);
-                continue;
-            }
 
-            context.Decode.LoadBlob(read.Tree.Span, read.Region);
-            ArrayNode ranged = context.Nodes.Root;
-            parts[i] = context.Decode.DecodeRootRange(
-                in ranged, chunkType, checked((int)chunk.Rows), (int)(from - chunk.FirstRow), (int)(to - from), keepEncoding: false);
+            // Under a scope of the chunk's own, which the children every range reads whole are retained under for the spans.
+            uint? outer = field >= 0 ? context.Decode.BeginNodeCheckScope(ScopeOf(field, chunk)) : null;
+            try
+            {
+                if (read.Ranges.Length == 0)
+                {
+                    // A chunk read whole for a few of its rows, as a column of few values holds a million of them in a few
+                    // kilobytes, decodes those rows alone where its encoding can: decoded whole, a million strings' views
+                    // each, the needle of a trace held 860 MB at once.
+                    context.Decode.LoadBlob(context.Segments.GetBuffer(read.Whole));
+                    ArrayNode root = context.Nodes.Root;
+                    int start = (int)(from - chunk.FirstRow);
+                    int count = (int)(to - from);
+                    parts[i] = count < chunk.Rows && context.Decode.DecodesRange(in root)
+                        ? context.Decode.DecodeRootRange(in root, chunkType, checked((int)chunk.Rows), start, count, keepEncoding: false)
+                        : CanonicalSlice.Slice(context.Decode, context.Decode.DecodeRoot(in root, chunkType, checked((int)chunk.Rows)), start, count);
+                    continue;
+                }
+
+                context.Decode.LoadBlob(read.Tree.Span, read.Region);
+                ArrayNode ranged = context.Nodes.Root;
+                parts[i] = context.Decode.DecodeRootRange(
+                    in ranged, chunkType, checked((int)chunk.Rows), (int)(from - chunk.FirstRow), (int)(to - from), keepEncoding: false);
+            }
+            finally
+            {
+                if (field >= 0)
+                {
+                    context.Decode.EndNodeCheckScope(outer);
+                }
+            }
         }
 
         int joined = parts.Length == 1 ? parts[0] : CanonicalConcat.Concat(context.Decode, chunkType, length, parts);

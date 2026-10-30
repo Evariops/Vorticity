@@ -929,6 +929,23 @@ internal sealed class ScanContext : IDisposable
     }
 
     /// <summary>
+    /// Makes this context retain into <paramref name="shared"/>, a table it holds a share of, given back as it is disposed:
+    /// the last share disposes the table.
+    /// </summary>
+    /// <param name="shared">The table.</param>
+    internal void HoldShare(RetainedChunks.Shared shared)
+    {
+        ArgumentNullException.ThrowIfNull(shared);
+        if (_retained is not null)
+        {
+            throw new InvalidOperationException("This scan context already retains chunks of its own.");
+        }
+
+        _retained = shared;
+        _ownsRetained = true;
+    }
+
+    /// <summary>
     /// The retention key for a flat layout, which its segment identifies within the file.
     /// </summary>
     /// <param name="segmentId">The segment.</param>
