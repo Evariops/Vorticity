@@ -2605,17 +2605,36 @@ public sealed class VortexDataset : IAsyncDisposable
                 ? Spanned(entry, Others(filtered, columns, schema), rows) > Profile.RequestBytes
                 : await rowsOf.CutsAsync(Others(filtered, columns, schema), ranges, cancellationToken).ConfigureAwait(false)))
         {
-            return [.. await rowsOf.ReadSpansAsync(ranges, columns, cancellationToken).ConfigureAwait(false)];
+            return rows <= SpanRowsAtOnce
+                ? [.. await rowsOf.ReadSpansAsync(ranges, columns, cancellationToken).ConfigureAwait(false)]
+                : await ReadGroupsAsync(rowsOf, ranges, columns, cancellationToken).ConfigureAwait(false);
         }
 
-        // The first step: the filter's columns over the units, and the rows it keeps there; the other columns' directories
-        // beside it, which the second reads in hand.
+        // The first step: the filter's columns over the units, and the rows it keeps there, a group of spans at a time, each
+        // let go once noted; the other columns' directories beside it, which the second reads in hand.
         List<RowRange> kept = [];
         Task others = rowsOf.LoadAsync(Others(filtered, columns, schema), ranges, cancellationToken).AsTask();
-        RecordBatch[] first;
         try
         {
-            first = await rowsOf.ReadSpansAsync(ranges, filtered, cancellationToken).ConfigureAwait(false);
+            foreach (List<RowRange> group in Groups(ranges))
+            {
+                RecordBatch[] first = await rowsOf.ReadSpansAsync(group, filtered, cancellationToken).ConfigureAwait(false);
+                try
+                {
+                    foreach (RecordBatch batch in first)
+                    {
+                        Compute.FilterEvaluator.Select(batch, filter);
+                        Kept(batch, kept);
+                    }
+                }
+                finally
+                {
+                    foreach (RecordBatch batch in first)
+                    {
+                        batch.Dispose();
+                    }
+                }
+            }
         }
         finally
         {
@@ -2623,24 +2642,100 @@ public sealed class VortexDataset : IAsyncDisposable
         }
 
         await others.ConfigureAwait(false);
+
+        // The second: every column at those rows.
+        return kept.Count == 0 ? []
+            : RowsOf(kept) <= SpanRowsAtOnce ? [.. await rowsOf.ReadSpansAsync(kept, columns, cancellationToken).ConfigureAwait(false)]
+            : await ReadGroupsAsync(rowsOf, kept, columns, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// The rows a read of spans decodes at once, at most: an object whose units hold a value sought nearly everywhere leaves
+    /// spans of half its rows, which a read decoded in one batch each, every one at once. A user of a week of S2's logs (T9)
+    /// lies in 600 units of 32 768 rows of each object of 42.8 M: 19.6 M rows an object, its variant decoded whole for the
+    /// filter, past 16 GB.
+    /// </summary>
+    private const long SpanRowsAtOnce = 1 << 20;
+
+    /// <summary>The rows <paramref name="ranges"/> hold together.</summary>
+    private static long RowsOf(List<RowRange> ranges)
+    {
+        long rows = 0;
+        foreach (RowRange range in ranges)
+        {
+            rows += range.Length;
+        }
+
+        return rows;
+    }
+
+    /// <summary>The rows of <paramref name="ranges"/>, a group of spans of <see cref="SpanRowsAtOnce"/> rows at most at a time.</summary>
+    private static async ValueTask<List<RecordBatch>> ReadGroupsAsync(
+        Indexes.SpanReader rowsOf, List<RowRange> ranges, int[]? columns, CancellationToken cancellationToken)
+    {
+        if (RowsOf(ranges) <= SpanRowsAtOnce)
+        {
+            return [.. await rowsOf.ReadSpansAsync(ranges, columns, cancellationToken).ConfigureAwait(false)];
+        }
+
+        List<RecordBatch> batches = [];
         try
         {
-            foreach (RecordBatch batch in first)
+            foreach (List<RowRange> group in Groups(ranges))
             {
-                Compute.FilterEvaluator.Select(batch, filter);
-                Kept(batch, kept);
+                batches.AddRange(await rowsOf.ReadSpansAsync(group, columns, cancellationToken).ConfigureAwait(false));
             }
         }
-        finally
+        catch
         {
-            foreach (RecordBatch batch in first)
+            foreach (RecordBatch batch in batches)
             {
                 batch.Dispose();
             }
+
+            throw;
         }
 
-        // The second: every column at those rows.
-        return kept.Count == 0 ? [] : [.. await rowsOf.ReadSpansAsync(kept, columns, cancellationToken).ConfigureAwait(false)];
+        return batches;
+    }
+
+    /// <summary>
+    /// The spans <paramref name="ranges"/> in groups of <see cref="SpanRowsAtOnce"/> rows at most, a span longer than that cut
+    /// into pieces: a chunk a cut falls in is read by both pieces.
+    /// </summary>
+    private static List<List<RowRange>> Groups(List<RowRange> ranges)
+    {
+        if (RowsOf(ranges) <= SpanRowsAtOnce)
+        {
+            return [ranges];
+        }
+
+        List<List<RowRange>> groups = [];
+        List<RowRange> group = [];
+        long rows = 0;
+        foreach (RowRange range in ranges)
+        {
+            for (long start = range.Start; start < range.End;)
+            {
+                long end = Math.Min(range.End, start + (SpanRowsAtOnce - rows));
+                group.Add(new RowRange(start, end));
+                rows += end - start;
+                start = end;
+                if (rows >= SpanRowsAtOnce)
+                {
+                    groups.Add(group);
+                    group = [];
+                    rows = 0;
+                }
+            }
+        }
+
+        if (group.Count > 0)
+        {
+            groups.Add(group);
+        }
+
+        return groups;
     }
 
     /// <summary>

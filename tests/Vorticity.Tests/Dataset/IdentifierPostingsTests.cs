@@ -416,6 +416,105 @@ public sealed partial class IdentifierPostingsTests
         }
     }
 
+    /// <summary>
+    /// Two hours of 400 000 visits, each hour consolidated with the index of its partition, a user among the attributes
+    /// declared an identifier: a user in one visit of four lies in every unit of each hour's object, which is read as any
+    /// object's rows rather than looked up, its units read as spans of every column one object at a time (a user of a week
+    /// of S2's logs ran past 16 GB so, then took 222 s); a user of three visits is looked up. The rows are the visits'.
+    /// </summary>
+    [Fact]
+    public async Task AUserOfMostUnitsIsReadAsRowsAndARareOneLookedUp()
+    {
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Visit.Schema, new DatasetOptions
+        {
+            Layout = new DatasetLayout
+            {
+                Partition = LayoutValue.Column(nameof(Visit.At)).Truncate(CalendarUnit.Hour),
+                SortKey = [LayoutValue.Column(nameof(Visit.At))],
+                ObjectBytes = 256 << 20,
+                MergeFanout = 4,
+                CalmAfter = null,
+            },
+            Identifiers = ["Attributes['user'].AsString()"],
+            ContentsObjectBytes = 0,
+        }, Ct);
+        Random random = new Random(41);
+        List<string> users = [];
+        for (int part = 0; part < 4; part++)
+        {
+            string[] drawn = [.. Enumerable.Range(part * 200_000, 200_000).Select(i => i % 4 == 0 ? "u-common" : i is 70_001 or 70_002 or 70_003 ? "u-rare" : $"u-{random.Next(50_000)}")];
+            users.AddRange(drawn);
+            Visit[] rows = [.. drawn.Select((user, i) => new Visit(Noon.AddMilliseconds(((part * 200_000) + i) * 9), Variant.Object(("user", Variant.From(user)))))];
+            await using ObjectDraft draft = dataset.StartObject();
+            await draft.Writer.WriteAsync<Visit>(rows, Ct);
+            await dataset.AppendAsync(draft, Ct);
+        }
+
+        await dataset.ConsolidateAsync(Ct);
+        foreach ((string user, bool looked) in new[] { ("u-common", false), ("u-rare", true) })
+        {
+            DatasetScanCounters metrics = new DatasetScanCounters();
+            VortexExpr filter = VortexExpr.Parse($"Attributes['user'].AsString() = '{user}'");
+            long rows = 0;
+            await foreach (RecordBatch batch in dataset.ScanBuilder().Where(filter).WithMetrics(metrics).ExecuteAsync(Ct))
+            {
+                rows += batch.SelectedRows;
+            }
+
+            Assert.Equal(users.Count(u => u == user), rows);
+            Assert.Equal(looked, metrics.ObjectsLookedUp > 0);
+        }
+    }
+
+    /// <summary>
+    /// Forty hours of two appends each, consolidated with the index of their partitions, a user in two visits of each hour:
+    /// the forty objects looked up, thirty-two of them ahead of the one given and the rest as those before are given, every
+    /// visit found in the tree's order.
+    /// </summary>
+    [Fact]
+    public async Task TheObjectsOfALookupPastItsWindowAreFoundInOrder()
+    {
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Visit.Schema, new DatasetOptions
+        {
+            Layout = new DatasetLayout
+            {
+                Partition = LayoutValue.Column(nameof(Visit.At)).Truncate(CalendarUnit.Hour),
+                SortKey = [LayoutValue.Column(nameof(Visit.At))],
+                ObjectBytes = 256 << 20,
+                MergeFanout = 4,
+                CalmAfter = null,
+            },
+            Identifiers = ["Attributes['user'].AsString()"],
+            ContentsObjectBytes = 0,
+        }, Ct);
+        const string User = "u-needle";
+        Random random = new Random(43);
+        List<Visit> sought = [];
+        for (int part = 0; part < 80; part++)
+        {
+            Visit[] rows = [.. Enumerable.Range(part * 500, 500).Select(i => new Visit(
+                Noon.AddSeconds(i * 3.6), Variant.Object(("user", Variant.From(i % 500 == 100 ? User : $"u-{random.Next(5_000)}")))))];
+            sought.Add(rows[100]);
+            await using ObjectDraft draft = dataset.StartObject();
+            await draft.Writer.WriteAsync<Visit>(rows, Ct);
+            await dataset.AppendAsync(draft, Ct);
+        }
+
+        await dataset.ConsolidateAsync(Ct);
+        List<Visit> found = await dataset.Scan<Visit>().Where(r => r.Attributes["user"].AsString() == User).ToRecordsAsync(Ct).ToListAsync(Ct);
+        Assert.Equal(sought, found);
+
+        DatasetScanCounters metrics = new DatasetScanCounters();
+        await foreach (RecordBatch batch in dataset.ScanBuilder().Where(VortexExpr.Parse($"Attributes['user'].AsString() = '{User}'")).WithMetrics(metrics).ExecuteAsync(Ct))
+        {
+            Assert.Equal(2, batch.SelectedRows);
+        }
+
+        Assert.Equal(40, metrics.ObjectsLookedUp);
+    }
+
     [Theory]
     [InlineData("Status")]
     [InlineData("Attributes['user']")]

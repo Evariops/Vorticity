@@ -245,8 +245,9 @@ internal sealed partial class DatasetScanBuilder
     }
 
     /// <summary>
-    /// The scan of a lookup of an identifier: every object the walk keeps that takes the lookup (<see cref="LookupFor"/>)
-    /// looked up at once, as many reads in flight as the session lets be, and the objects' rows given in the tree's order;
+    /// The scan of a lookup of an identifier: the objects the walk keeps that take the lookup (<see cref="LookupFor"/>)
+    /// looked up together, <see cref="LookupsAhead"/> ahead of the one given at most, as many reads in flight as the session
+    /// lets be, and the objects' rows given in the tree's order;
     /// an object that does not take it, a small one whose footer an open reads in a request, read as the scan reads any,
     /// <see cref="LookupReads"/> of them at once, the rows they keep copied. A lookup takes four round trips whatever the
     /// object holds, and an open and a read of a small object two or three: thirty objects one after the other would wait
@@ -258,6 +259,7 @@ internal sealed partial class DatasetScanBuilder
         List<(PositionedObject Held, Task<List<RecordBatch>?>? Found, bool Looked)> objects = [];
         using CancellationTokenSource stopped = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         SemaphoreSlim? reading = null;
+        Read[]? reads = null;
 
         // The objects the index of a consolidated partition covers are found by it, a page a partition; an object whose blocks
         // hold no value sought is passed over unread. The walk asks the index of each partition it meets before any is awaited:
@@ -280,6 +282,10 @@ internal sealed partial class DatasetScanBuilder
             }
 
             int kept = 0;
+            long ahead = 0;
+
+            // How each object kept is read, and the rows it may hold while it waits for its turn; rented, given back at the end.
+            reads = System.Buffers.ArrayPool<Read>.Shared.Rent(Math.Max(objects.Count, 1));
             for (int o = 0; o < objects.Count; o++)
             {
                 PositionedObject held = objects[o].Held;
@@ -296,29 +302,91 @@ internal sealed partial class DatasetScanBuilder
                         continue;
                     }
 
-                    objects[kept++] = (held, _dataset.ReadBlocksAsync(held.Entry, located.Blocks, located.BlockRows, lookup, columns, stopped.Token).AsTask(), true);
-                    continue;
+                    // A value many of the object's units hold: the object read as any, at its turn, on the scan's lanes, its
+                    // filter's key alone in a first pass. Looked up, a user of a week of S2's logs read 19.6 M rows of each object
+                    // of 42.8 M through the units, its variant whole, one object after another: 222 s.
+                    if (located.Blocks.Length >= DenseUnits && (long)located.Blocks.Length * located.BlockRows > held.Entry.Rows / DenseShare)
+                    {
+                        reads[kept] = new Read(ReadKind.AtTurn, null, 0, 0);
+                        objects[kept++] = (held, null, false);
+                        continue;
+                    }
+
+                    reads[kept] = new Read(ReadKind.Blocks, located.Blocks, located.BlockRows, (long)located.Blocks.Length * located.BlockRows);
+                }
+                else
+                {
+                    // A lookup by an object's own postings learns the rows it finds as it reads them: bounded by the count
+                    // alone. An object read as any keeps copies of the rows its filter keeps, its reads few at once.
+                    bool looked = LookupFor(held) is not null;
+                    reads[kept] = new Read(looked ? ReadKind.Lookup : ReadKind.Rows, null, 0, 0);
+                    read += looked ? 0 : 1;
                 }
 
-                bool looked = LookupFor(held) is not null;
-                objects[kept++] = (held, looked ? _dataset.LookupAsync(held.Entry, lookup, columns, stopped.Token).AsTask() : null, looked);
-                read += looked ? 0 : 1;
+                // Looked up as soon as its units are known, while the window from the first object allows: started once
+                // every partition's were, the read of the one object of a request's rows over a week waited on the
+                // slowest page, two round trips more.
+                objects[kept] = (held, null, reads[kept].Kind != ReadKind.Rows);
+                if (reads[kept].Kind != ReadKind.Rows && kept <= LookupsAhead && (kept == 0 || ahead + reads[kept].Rows <= LookupRowsAhead))
+                {
+                    objects[kept] = (held, StartAsync(reads[kept], held, lookup, columns, reading, stopped.Token), true);
+                    ahead += reads[kept].Rows;
+                }
+
+                kept++;
             }
 
             objects.RemoveRange(kept, objects.Count - kept);
 
             // Objects read as rows, two or more, read ahead together; one alone is read when its turn comes, as a scan reads it.
-            for (int i = 0; i < objects.Count && read > 1; i++)
+            if (read > 1)
             {
-                if (!objects[i].Looked)
+                reading = new SemaphoreSlim(LookupReads);
+                for (int i = 0; i < objects.Count; i++)
                 {
-                    reading ??= new SemaphoreSlim(LookupReads);
-                    objects[i] = (objects[i].Held, ReadAheadAsync(objects[i].Held, reading, stopped.Token), false);
+                    if (reads[i].Kind == ReadKind.Rows)
+                    {
+                        reads[i] = reads[i] with { Kind = ReadKind.Ahead };
+                    }
                 }
             }
 
-            foreach ((PositionedObject held, Task<List<RecordBatch>?>? found, bool looked) in objects)
+            int started = 0;
+            for (int o = 0; o < objects.Count; o++)
             {
+                // The one before given, what it found let go: the scan has moved past its batches. Held to the scan's end,
+                // every object's of a user's rows over a week of S2's logs were.
+                if (o > 0 && objects[o - 1].Found is { } given)
+                {
+                    ahead -= reads[o - 1].Rows;
+                    objects[o - 1] = (objects[o - 1].Held, null, objects[o - 1].Looked);
+                    foreach (RecordBatch batch in await given.ConfigureAwait(false) ?? [])
+                    {
+                        batch.Dispose();
+                    }
+                }
+
+                // The objects after this one started while they are within LookupsAhead of it and the rows they may hold,
+                // with those of the ones started before, within LookupRowsAhead; this one whatever it holds. Each holds what
+                // it finds until its turn.
+                for (; started < objects.Count && started <= o + LookupsAhead; started++)
+                {
+                    if (objects[started].Found is not null || reads[started].Kind is ReadKind.Rows or ReadKind.AtTurn)
+                    {
+                        continue;
+                    }
+
+                    if (started > o && ahead + reads[started].Rows > LookupRowsAhead)
+                    {
+                        break;
+                    }
+
+                    PositionedObject next = objects[started].Held;
+                    objects[started] = (next, StartAsync(reads[started], next, lookup, columns, reading, stopped.Token), objects[started].Looked);
+                    ahead += reads[started].Rows;
+                }
+
+                (PositionedObject held, Task<List<RecordBatch>?>? found, bool looked) = objects[o];
                 if (looked)
                 {
                     await foreach (RecordBatch batch in FoundAsync(held, await found!.ConfigureAwait(false), cancellationToken).ConfigureAwait(false))
@@ -375,11 +443,80 @@ internal sealed partial class DatasetScanBuilder
             }
 
             reading?.Dispose();
+            if (reads is not null)
+            {
+                System.Buffers.ArrayPool<Read>.Shared.Return(reads, clearArray: true);
+            }
         }
     }
 
+    /// <summary>
+    /// The read of <paramref name="held"/> a lookup's scan starts ahead of its turn, as <paramref name="read"/> says: by the units
+    /// its partition's index placed, by its own postings, or as any, <paramref name="reading"/> letting few at once.
+    /// </summary>
+    private Task<List<RecordBatch>?> StartAsync(
+        Read read, PositionedObject held, VortexExpr lookup, int[]? columns, SemaphoreSlim? reading, CancellationToken cancellationToken) =>
+        read.Kind switch
+        {
+            ReadKind.Blocks => _dataset.ReadBlocksAsync(held.Entry, read.Blocks!, read.BlockRows, lookup, columns, cancellationToken).AsTask(),
+            ReadKind.Lookup => _dataset.LookupAsync(held.Entry, lookup, columns, cancellationToken).AsTask(),
+            ReadKind.Ahead => ReadAheadAsync(held, reading!, cancellationToken),
+            _ => throw new InvalidOperationException($"An object read {read.Kind} is read at its turn."),
+        };
+
     /// <summary>The objects a lookup's scan reads as rows at once, those that do not take the lookup.</summary>
     private const int LookupReads = 16;
+
+    /// <summary>How a lookup's scan reads an object it keeps.</summary>
+    private enum ReadKind : byte
+    {
+        /// <summary>As a scan reads any, at its turn: the one object a lookup does not take.</summary>
+        Rows,
+
+        /// <summary>As a scan reads any, at its turn, though a lookup takes it: a value its units mostly hold.</summary>
+        AtTurn,
+
+        /// <summary>As any, read ahead with the others the lookup does not take, its rows copied.</summary>
+        Ahead,
+
+        /// <summary>By the units its partition's index places a value sought in.</summary>
+        Blocks,
+
+        /// <summary>By its own postings.</summary>
+        Lookup,
+    }
+
+    /// <summary>How a lookup's scan reads an object it keeps: by what, the units its partition's index placed, and the rows it may hold.</summary>
+    private readonly record struct Read(ReadKind Kind, uint[]? Blocks, int BlockRows, long Rows);
+
+    /// <summary>
+    /// The objects a lookup's scan looks up or reads ahead of the one it gives, at most: each holds what it found until its
+    /// turn, the spans of the granules that hold a value sought, every column decoded. Every object started at once held all
+    /// of them together: a user found in each of the 1 166 objects of a week of S2's logs (T9) ran past 16 GB. Thirty-two
+    /// keep the session's reads in flight busy, four or six reads a lookup.
+    /// </summary>
+    private const int LookupsAhead = 32;
+
+    /// <summary>
+    /// The rows the objects a lookup's scan reads ahead may hold, at most, together: the units their partitions' index placed
+    /// a value in, every column of them decoded at once. A user of S2's logs lies in 19.6 M rows of each
+    /// object of 42.8 M, which go one at a time; a rare value's few granules of many objects together.
+    /// </summary>
+    private const long LookupRowsAhead = 1 << 22;
+
+    /// <summary>
+    /// The share of an object's rows, one in this many, past which the units its partition's index places a value sought in
+    /// make the object read as any rather than looked up: its read runs on the scan's lanes and reads its filter's key alone
+    /// first, where a lookup reads the filter's columns whole over every unit, on one.
+    /// </summary>
+    private const int DenseShare = 16;
+
+    /// <summary>
+    /// The units a value sought lies in, at least, for an object to be read as any rather than looked up: a small object's
+    /// unit or two hold any value sought, which a lookup finds beside the others' in four round trips where its open and
+    /// read take two or three, one object after another.
+    /// </summary>
+    private const int DenseUnits = 8;
 
     /// <summary>The places of a take whose objects are read ahead together, at most: the rows they copy.</summary>
     private const int TakeAheadPlaces = 1 << 16;
