@@ -501,9 +501,13 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         // A scan of one lane that asks for it, an aggregation's lane, whose decode is the caller's,
         // reads ahead over a source whose read is a round trip, as many splits as its admission granted,
         // and as its plan holds. Over a mapping a read is a view, and there is nothing to overlap; the file
-        // the scan reads through may be the one the open read whole, which is asked of its source.
-        _extras = readAhead > 0 && window == 1 && !file.Source.ReadsInPlace
-            ? new AheadReads(Math.Min(readAhead, Math.Max(1, plan.BoundaryCount - 1)))
+        // the scan reads through may be the one the open read whole, which is asked of its source. Past its own, the
+        // splits the pass's lanes that finished gave up, up to ReadAheadPool.Most: the pool the count carries.
+        int splits = Math.Max(1, plan.BoundaryCount - 1);
+        int own = ReadAheadPool.SplitsOf(readAhead);
+        ReadAheadPool? pool = ReadAheadPool.Of(readAhead);
+        _extras = own > 0 && window == 1 && !file.Source.ReadsInPlace
+            ? new AheadReads(Math.Min(own, splits), pool is null ? 0 : Math.Max(0, Math.Min(ReadAheadPool.Most, splits) - own), pool)
             : window > 1 ? NewWindow(file, schema, plan, window) : null;
         _segments = new ScanSegments(Ahead is { } ahead ? ahead.Lanes.Length : degree);
 
@@ -532,7 +536,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         }
         else if (Ahead is { } reads)
         {
-            reads.Lanes[0] = _lanes[0];
+            reads.Keep(_lanes[0]!);
         }
     }
 
@@ -787,8 +791,9 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
             return false;
         }
 
-        (Lane lane, ValueTask read) = ahead.TakeOldest(_started);
+        (Lane lane, ValueTask read) = ahead.TakeOldest();
         await read.ConfigureAwait(false);
+        ahead.Settle();
 
         _currentLane = lane;
         ScanCounters.Served(_metrics, lane.Context.Segments);
@@ -805,27 +810,29 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     /// <summary>Starts reads until <paramref name="ahead"/> has as many in flight as it reads ahead, or no split is left.</summary>
     private void FillAhead(AheadReads ahead)
     {
-        // Every lane the reads take, made at the first, so that no split read ahead makes one: a lane is made
-        // as the first's, its variant keys among what it copies, set by then.
+        // The lanes its own reads take, made at the first, so that no split read ahead makes one: a lane is made
+        // as the first's, its variant keys among what it copies, set by then. A read taken from the pool makes one
+        // when none is free.
         if (!ahead.Made)
         {
             ahead.Made = true;
-            for (int slot = 0; slot < ahead.Lanes.Length; slot++)
+            while (ahead.MadeCount < ahead.Base + 1)
             {
-                ahead.Lanes[slot] ??= NextLane();
+                ahead.Keep(NextLane());
             }
         }
 
-        while (ahead.Count < ahead.Reads.Length && !_drained)
+        while (!_drained && ahead.MayStart())
         {
             if (!TryNextSplit(out RowRange split))
             {
                 _drained = true;
+                ahead.Settle();
                 return;
             }
 
             long sequence = _started++;
-            Lane lane = ahead.Lanes[(int)(sequence % ahead.Lanes.Length)] ??= NextLane();
+            Lane lane = ahead.TakeFree() ?? ahead.Track(NextLane());
             lane.Rows = split;
             lane.Sequence = sequence;
             PlanAlong(lane);
@@ -849,7 +856,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
                 throw;
             }
 
-            ahead.Add(ReadAheadAsync(lane));
+            ahead.Add(lane, ReadAheadAsync(lane));
         }
     }
 
@@ -903,7 +910,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         ReleaseCurrent();
         while (ahead.Count > 0)
         {
-            (Lane lane, ValueTask read) = ahead.TakeOldest(_started);
+            (Lane lane, ValueTask read) = ahead.TakeOldest();
             try
             {
                 await read.ConfigureAwait(false);
@@ -1068,41 +1075,120 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
 
     /// <summary>
     /// The reads a scan of one lane has in flight ahead of the split it decodes: each on a lane of
-    /// its own, the split numbered s on lane s modulo their count, one more than the reads, for the
-    /// split being decoded; the reads in the order of their splits, oldest first.
+    /// its own, taken from those holding no split, the reads in the order of their splits, oldest
+    /// first. Its own <see cref="Base"/> of them, and past it as many as it takes from the
+    /// <see cref="Pool"/> its pass's lanes that finished gave up, each given back once its read lands.
+    /// A lane is made for a read that finds none free: as many as the reads in flight and the split
+    /// being decoded need, where lanes taken in turn made one for each place the reads could reach.
     /// </summary>
     private sealed class AheadReads : LaneExtras
     {
+        private readonly Lane?[] _inFlight;
+        private readonly Lane?[] _idle;
+        private int _idleCount;
         private int _first;
 
-        internal AheadReads(int depth)
+        internal AheadReads(int depth, int borrowable, ReadAheadPool? pool)
         {
-            Lanes = new Lane?[depth + 1];
-            Reads = new ValueTask[depth];
+            Base = depth;
+            Pool = borrowable > 0 ? pool : null;
+            int most = depth + (Pool is null ? 0 : borrowable);
+            Lanes = new Lane?[most + 1];
+            Reads = new ValueTask[most];
+            _inFlight = new Lane?[most];
+            _idle = new Lane?[most + 1];
         }
 
+        /// <summary>Every lane made, the scan's first lane first.</summary>
         internal Lane?[] Lanes { get; }
+
+        /// <summary>How many lanes were made.</summary>
+        internal int MadeCount { get; private set; }
 
         internal ValueTask[] Reads { get; }
 
-        /// <summary>Whether every lane was made.</summary>
+        /// <summary>The reads the scan has in flight of its own.</summary>
+        internal int Base { get; }
+
+        /// <summary>The splits the pass's lanes that finished gave up; null for none.</summary>
+        internal ReadAheadPool? Pool { get; }
+
+        /// <summary>The splits taken from the pool and not given back.</summary>
+        internal int Borrowed { get; private set; }
+
+        /// <summary>Whether the first lanes were made.</summary>
         internal bool Made { get; set; }
 
         /// <summary>The reads in flight.</summary>
         internal int Count { get; private set; }
 
-        internal void Add(ValueTask read)
+        /// <summary>Notes <paramref name="lane"/>, made, as one of the scan's, holding no split.</summary>
+        internal void Keep(Lane lane) => Free(Track(lane));
+
+        /// <summary>Notes <paramref name="lane"/>, made, as one of the scan's, which its disposal returns.</summary>
+        internal Lane Track(Lane lane)
         {
-            Reads[(_first + Count) % Reads.Length] = read;
+            Lanes[MadeCount++] = lane;
+            return lane;
+        }
+
+        /// <summary>A lane holding no split; null when none is.</summary>
+        internal Lane? TakeFree()
+        {
+            if (_idleCount == 0)
+            {
+                return null;
+            }
+
+            Lane lane = _idle[--_idleCount]!;
+            _idle[_idleCount] = null;
+            return lane;
+        }
+
+        /// <summary>Takes <paramref name="lane"/> back, holding no split.</summary>
+        internal void Free(Lane lane) => _idle[_idleCount++] = lane;
+
+        /// <summary>Whether another read may start: one of its own, or one taken from the pool.</summary>
+        internal bool MayStart()
+        {
+            if (Count < Base)
+            {
+                return true;
+            }
+
+            if (Count < Reads.Length && Pool is { } pool && pool.TryTake())
+            {
+                Borrowed++;
+                return true;
+            }
+
+            return false;
+        }
+
+        /// <summary>Gives the pool back the splits taken past the reads in flight beyond its own.</summary>
+        internal void Settle()
+        {
+            for (; Borrowed > Math.Max(0, Count - Base); Borrowed--)
+            {
+                Pool!.Give(1);
+            }
+        }
+
+        internal void Add(Lane lane, ValueTask read)
+        {
+            int at = (_first + Count) % Reads.Length;
+            Reads[at] = read;
+            _inFlight[at] = lane;
             Count++;
         }
 
-        /// <summary>The oldest read in flight and its lane, given the number of the next split to start.</summary>
-        internal (Lane Lane, ValueTask Read) TakeOldest(long started)
+        /// <summary>The oldest read in flight and its lane; what it took of the pool goes back once it lands (<see cref="Settle"/>).</summary>
+        internal (Lane Lane, ValueTask Read) TakeOldest()
         {
-            Lane lane = Lanes[(int)((started - Count) % Lanes.Length)]!;
+            Lane lane = _inFlight[_first]!;
             ValueTask read = Reads[_first];
             Reads[_first] = default;
+            _inFlight[_first] = null;
             _first = (_first + 1) % Reads.Length;
             Count--;
             return (lane, read);
@@ -2695,6 +2781,10 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         {
             lanes.Return(lane);
         }
+        else if (Ahead is { } ahead)
+        {
+            ahead.Free(lane);
+        }
     }
 
     /// <summary>How many lanes the scan has made: on the lanes, as many as its splits in flight needed; else its one lane.</summary>
@@ -2714,9 +2804,10 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
             }
         }
 
-        // The lanes of the reads ahead past the first, which is the scan's first lane.
+        // The lanes of the reads ahead past the first, which is the scan's first lane; what they took of the pool, back.
         if (Ahead is { } ahead)
         {
+            ahead.Settle();
             for (int i = 1; i < ahead.Lanes.Length; i++)
             {
                 if (ahead.Lanes[i] is { } lane)

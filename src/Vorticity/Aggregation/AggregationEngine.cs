@@ -5177,9 +5177,12 @@ internal static class AggregationEngine
         // The splits the lanes were granted together go to those that read rows: lanes that answer a dataset's objects
         // from their synopses read none, and two lanes left reading rows among sixteen waited on each of their reads.
         // As many in flight as the lanes were granted, ReadAheadTotal a lane at most.
+        // A lane whose ranges are all read gives its share to those still reading: the last long range of a pass read two
+        // splits at a time while the others' lay idle.
         int readers = Math.Clamp(ranges.Length, 1, partitions.Length);
         int shared = ahead > 0 ? Math.Max(ahead, Math.Min(ReadAheadTotal, ahead * partitions.Length / readers)) : ahead;
-        ScanSpec lane = spec with { Options = spec.Options with { DegreeOfParallelism = 1, Prefetch = 0 }, ReadAhead = shared };
+        using ReadAheadPool? pool = shared > 0 && partitions.Length > 1 ? ReadAheadPool.Lend(partitions.Length) : null;
+        ScanSpec lane = spec with { Options = spec.Options with { DegreeOfParallelism = 1, Prefetch = 0 }, ReadAhead = ReadAheadPool.Carry(shared, pool) };
         int[] next = [-1];
 
         // The ranges the fan's first ranges took, each its lane's before any lane starts, which the queue
@@ -5223,6 +5226,7 @@ internal static class AggregationEngine
                             await RunPartitionAsync(source, lane with { Rows = ranges[at] }, metrics, partition, token).ConfigureAwait(false);
                         }
 
+                        pool?.Finished(shared);
                         partition.DropUnmet();
                         if (partition.Retiring)
                         {
