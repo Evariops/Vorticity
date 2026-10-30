@@ -268,7 +268,7 @@ internal sealed class SpanReader : IDisposable
         int made = 0;
         try
         {
-            GranuleBytes granules = new GranuleBytes();
+            GranuleBytes granules = new GranuleBytes { Variants = true };
             HashSet<ulong>? several = Several(spans, fields);
             for (int s = 0; s < spans.Count; s++)
             {
@@ -354,7 +354,7 @@ internal sealed class SpanReader : IDisposable
         ScanContext context = new ScanContext(_encodings, _options);
         try
         {
-            ChunkRead[] reads = ChunksOf(context.Segments, context, span, fields, new GranuleBytes());
+            ChunkRead[] reads = ChunksOf(context.Segments, context, span, fields, new GranuleBytes { Variants = true });
             await _source.ReadManyAsync(context.Segments, cancellationToken).ConfigureAwait(false);
             Fill(context, context.Segments, reads);
             return Batch(context, span, fields, columns, reads);

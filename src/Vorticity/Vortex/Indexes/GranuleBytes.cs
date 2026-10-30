@@ -17,7 +17,9 @@ namespace Vorticity.Indexes;
 /// decimal's or a timestamp's parts, the left and right parts of ALP-RD hold their rows in their children; a dictionary's
 /// codes hold the rows, and its values are read whole, as every row may name any of them; FSST's compressed bytes lie
 /// between the starts its marks give, and its lengths and offsets are columns of integers of their own. Patches,
-/// validities, symbol tables, a constant's value are small and read whole.
+/// validities, symbol tables, a constant's value are small and read whole. A variant's parts, its metadata and values and
+/// its shredded keys, and a struct's fields hold its rows each, every one walked over them where the read asks for it
+/// (<see cref="Variants"/>); a run-end encoding's runs, few where it is chosen, are read whole, which its decode searches.
 /// </para>
 /// <para>
 /// An encoding whose geometry is not known here makes the chunk be read whole: the plan is a hint for the reads, and a
@@ -37,6 +39,14 @@ internal sealed class GranuleBytes
 
     /// <summary>The bytes the last plan reads.</summary>
     internal long Bytes { get; private set; }
+
+    /// <summary>
+    /// Whether a variant's parts and a struct's fields are walked, for a read that decodes one range of the chunk: each range
+    /// decodes its run-end children whole again, where a chunk read whole decodes them once for every batch of a scan. A
+    /// week of a user's rows over S2's logs (T9) took 45 % more processor time when its second pass planned them, its bytes
+    /// the same.
+    /// </summary>
+    internal bool Variants { get; init; }
 
     /// <summary>
     /// Plans the read of rows <c>[start, start + count)</c> of a chunk of <paramref name="rows"/> rows whose tree
@@ -179,9 +189,41 @@ internal sealed class GranuleBytes
                 if (node.BufferCount >= 1 && width > 0)
                 {
                     Buffer(in node, 0, (long)start * width, ((long)start + count) * width);
+                    WholeChildren(in node, 0);
+                }
+                else
+                {
+                    // Values of a width the walk does not know, a part of a variant's: read whole.
+                    Whole(in node);
                 }
 
-                WholeChildren(in node, 0);
+                return true;
+
+            case ArrayEncodingId.Variant:
+            case ArrayEncodingId.ParquetVariant:
+            case ArrayEncodingId.Struct:
+            {
+                if (!Variants)
+                {
+                    return false;
+                }
+
+                // Each child holds the node's rows, a part of a variant or a field, at a width the walk does not know.
+                WholeBuffers(in node);
+                for (int c = 0; c < node.ChildCount; c++)
+                {
+                    ArrayNode part = node.GetChild(c);
+                    if (!Walk(in part, 0, length, start, count))
+                    {
+                        return false;
+                    }
+                }
+
+                return true;
+            }
+
+            case ArrayEncodingId.RunEnd:
+                Whole(in node);
                 return true;
 
             case ArrayEncodingId.Dict:
