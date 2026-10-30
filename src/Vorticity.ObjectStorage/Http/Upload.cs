@@ -361,7 +361,7 @@ internal static class Upload
         UploadState upload;
         try
         {
-            upload = await service.StartAsync(key, NewPutId(), cancellationToken).ConfigureAwait(false);
+            upload = await StartAsync(service, transport, key, cancellationToken).ConfigureAwait(false);
         }
         catch
         {
@@ -415,6 +415,58 @@ internal static class Upload
         }
 
         return outcome;
+    }
+
+    /// <summary>
+    /// Starts an upload that a put given up while the start's answer is on its way does not leave open: the service may
+    /// have made the upload, which that answer alone names. The start goes on past the put's token, under the abort's
+    /// deadline from when the put gives up, and the upload it names is aborted once it lands, the put not waiting for it.
+    /// </summary>
+    private static async ValueTask<UploadState> StartAsync(IUploadService service, HttpTransport transport, string key, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        CancellationTokenSource outliving = transport.Outliving();
+        Task<UploadState> starting = service.StartAsync(key, NewPutId(), outliving.Token).AsTask();
+        UploadState upload;
+        try
+        {
+            upload = await starting.WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            transport.Outlive(outliving);
+            _ = AbortOnceStartedAsync(service, starting, outliving);
+            throw;
+        }
+        catch
+        {
+            outliving.Dispose();
+            throw;
+        }
+
+        outliving.Dispose();
+        return upload;
+    }
+
+    /// <summary>Aborts the upload <paramref name="starting"/> names once its answer lands; nothing when the start fails or runs out of time.</summary>
+    private static async Task AbortOnceStartedAsync(IUploadService service, Task<UploadState> starting, CancellationTokenSource outliving)
+    {
+        try
+        {
+            // The start the put left behind, which this outlives it for.
+#pragma warning disable VSTHRD003
+            UploadState upload = await starting.ConfigureAwait(false);
+#pragma warning restore VSTHRD003
+            await service.AbortAsync(upload).ConfigureAwait(false);
+        }
+        catch (Exception lost) when (lost is ObjectStoreException or StoreAnswerLostException or OperationCanceledException)
+        {
+            // No upload made, or one left to the bucket's lifecycle rule.
+        }
+        finally
+        {
+            outliving.Dispose();
+        }
     }
 
     /// <summary>
