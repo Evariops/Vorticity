@@ -67,6 +67,13 @@ internal sealed class ArrayShelf : ISweptAfterCollections
     private readonly long _cap;
     private long _expected;
     private long _short;
+
+    // Of small arrays, which the process's budget does not count: past their budget, what the queries running lately
+    // gave back and found no room for, up to the large arrays' budget, back to theirs once idle. A quarter of a gigabyte
+    // kept a quarter for them: a quantile per service and hour over a week (T6) at 32 lanes, its lanes' sketches and its
+    // parts' at once, let go 34 MB of them an ask and made them again, 97 ms where one lane took 42.
+    private long _expectedSmall;
+    private long _shortSmall;
     private bool _active;
     private int _idle;
     private Timer? _timer;
@@ -132,7 +139,8 @@ internal sealed class ArrayShelf : ISweptAfterCollections
     /// large arrays, up to a quarter of a gigabyte or a sixteenth of the memory the process may use,
     /// whichever is less, and while queries run, up to the most one of them held lately
     /// (<see cref="Expect"/>); of small ones, a quarter of the first again, apart, so that a query whose
-    /// large arrays its budget does not hold still finds its small ones. Its large arrays count in the
+    /// large arrays its budget does not hold still finds its small ones, and while queries run, what they
+    /// gave back lately past it, up to the first. Its large arrays count in the
     /// process's budget as the queries' tables do, and go when a query needs their room
     /// (<see cref="Relieve"/>). Back to its budget after two seconds with no query, and swept after
     /// collections: emptied when no query took from it since the last, or when the machine's memory load
@@ -148,11 +156,13 @@ internal sealed class ArrayShelf : ISweptAfterCollections
 
     private static ArrayShelf NewRetained()
     {
-        long budget = Math.Min(256L << 20, GC.GetGCMemoryInfo().TotalAvailableMemoryBytes / 16);
-        ArrayShelf shelf = new ArrayShelf(parent: null, budget, budget / 4, governed: true);
+        ArrayShelf shelf = Governed(Math.Min(256L << 20, GC.GetGCMemoryInfo().TotalAvailableMemoryBytes / 16));
         CollectionSweeper<ArrayShelf>.Register(shelf);
         return shelf;
     }
+
+    /// <summary>A shelf kept as the process's is, of <paramref name="budget"/> bytes and a quarter of it for small arrays: the process's, or a test's.</summary>
+    internal static ArrayShelf Governed(long budget) => new ArrayShelf(parent: null, budget, budget / 4, governed: true);
 
     /// <summary>How often the process's shelf, past its budget, looks whether queries still come.</summary>
     private static readonly TimeSpan IdleTick = TimeSpan.FromSeconds(1);
@@ -175,26 +185,38 @@ internal sealed class ArrayShelf : ISweptAfterCollections
             return;
         }
 
+        // Of small arrays, what they lacked room for, up to the large arrays' budget.
+        long shortSmall = Interlocked.Exchange(ref _shortSmall, 0);
+        bool raised = shortSmall > 0 && Raise(ref _expectedSmall, Math.Min(_budget, SmallBudget + shortSmall), _smallBudget);
         long shortBy = Interlocked.Exchange(ref _short, 0);
         long want = Math.Min(_cap, Math.Max(peak, shortBy > 0 ? LargeBudget + shortBy : 0));
-        if (want <= _budget)
+        if (Raise(ref _expected, want, _budget) || raised)
         {
-            return;
+            Watch();
+        }
+    }
+
+    /// <summary>Raises <paramref name="expected"/> to <paramref name="want"/> when that is past <paramref name="budget"/> and above it: whether it is past the budget.</summary>
+    private static bool Raise(ref long expected, long want, long budget)
+    {
+        if (want <= budget)
+        {
+            return false;
         }
 
-        long expected = Volatile.Read(ref _expected);
-        while (want > expected)
+        long seen = Volatile.Read(ref expected);
+        while (want > seen)
         {
-            long seen = Interlocked.CompareExchange(ref _expected, want, expected);
-            if (seen == expected)
+            long was = Interlocked.CompareExchange(ref expected, want, seen);
+            if (was == seen)
             {
                 break;
             }
 
-            expected = seen;
+            seen = was;
         }
 
-        Watch();
+        return true;
     }
 
     /// <summary>
@@ -234,7 +256,7 @@ internal sealed class ArrayShelf : ISweptAfterCollections
     /// asks to run when that is much. A query between two uses of the shelf is not idle: under a
     /// debugger, q10's scan went seconds without one, and its shelf, let go mid-query, made 850 MB again.
     /// </summary>
-    private void Tick()
+    internal void Tick()
     {
         long trimmed = 0;
         lock (_gate)
@@ -253,13 +275,19 @@ internal sealed class ArrayShelf : ISweptAfterCollections
 
             _idle = 0;
             Volatile.Write(ref _expected, 0);
-            long over = _held - _heldSmall - _budget;
-            if (over > 0)
+            Volatile.Write(ref _expectedSmall, 0);
+            long before = _held;
+            if (_held - _heldSmall - _budget is long over and > 0)
             {
-                long before = _held;
                 Evict(over, ref _large, kept: null, before: long.MaxValue);
-                trimmed = before - _held;
             }
+
+            if (_heldSmall - _smallBudget is long overSmall and > 0)
+            {
+                Evict(overSmall, ref _small, kept: null, before: long.MaxValue);
+            }
+
+            trimmed = before - _held;
 
             _timer?.Dispose();
             _timer = null;
@@ -311,10 +339,13 @@ internal sealed class ArrayShelf : ISweptAfterCollections
     internal long CopiedBytes { get; private set; }
 
     /// <summary>The most bytes the shelf keeps on its piles, its large arrays' and its small ones'; past it, what it is given goes.</summary>
-    internal long Budget => LargeBudget > long.MaxValue - _smallBudget ? long.MaxValue : LargeBudget + _smallBudget;
+    internal long Budget => LargeBudget > long.MaxValue - SmallBudget ? long.MaxValue : LargeBudget + SmallBudget;
 
     /// <summary>The most bytes of large arrays the shelf keeps: its budget, or for the process's, what a query held lately past it.</summary>
     private long LargeBudget => _governed ? Math.Max(_budget, Volatile.Read(ref _expected)) : _budget;
+
+    /// <summary>The most bytes of small arrays the shelf keeps: its budget for them, or for the process's, what queries gave back lately past it.</summary>
+    private long SmallBudget => _governed ? Math.Max(_smallBudget, Volatile.Read(ref _expectedSmall)) : _smallBudget;
 
     /// <summary>
     /// Whether a lane's shelf takes an array its budget refuses all the same, counted past the ceiling:
@@ -767,16 +798,16 @@ internal sealed class ArrayShelf : ISweptAfterCollections
 
             Touch(pile);
             _active = true;
-            long budget = pile.Small ? _smallBudget : LargeBudget;
+            long budget = pile.Small ? SmallBudget : LargeBudget;
             long held = pile.Small ? _heldSmall : _held - _heldSmall;
             if (held + pile.Bytes > budget)
             {
                 // Short of room: what goes for it, or it, the next query of its kind makes again.
                 long heldBefore = _held;
                 bool room = pile.Bytes <= budget && Evict(held + pile.Bytes - budget, ref OrderOf(pile), pile, before);
-                if (_governed && !pile.Small)
+                if (_governed)
                 {
-                    Interlocked.Add(ref _short, heldBefore - _held + (room ? 0 : pile.Bytes));
+                    Interlocked.Add(ref pile.Small ? ref _shortSmall : ref _short, heldBefore - _held + (room ? 0 : pile.Bytes));
                 }
 
                 if (!room)
