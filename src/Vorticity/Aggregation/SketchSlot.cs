@@ -65,10 +65,10 @@ internal abstract class SketchSlot<TSketch, TResult> : AggregateSlot<TResult>
     }
 
     /// <summary>A group's sketch, made at its first value.</summary>
-    private protected TSketch Sketch(int group) => _sketches[group] ??= New();
+    internal TSketch Sketch(int group) => _sketches[group] ??= New();
 
     /// <summary>A group's sketch; null before its first value.</summary>
-    private protected TSketch? Held(int group) => group < _groups ? _sketches[group] : null;
+    internal TSketch? Held(int group) => group < _groups ? _sketches[group] : null;
 
     /// <summary>Counts <paramref name="bytes"/> more that the sketches hold.</summary>
     private protected void Grew(long bytes) => _bytes += bytes;
@@ -154,6 +154,43 @@ internal abstract class SketchSlot<TSketch, TResult> : AggregateSlot<TResult>
             }
         }
     }
+
+    /// <summary>
+    /// A group new to this table takes the other's sketch as it is, where the slot can hold it (<see cref="Adopts"/>), and
+    /// the other forgets it; the others merge. A part of a merge at 32 lanes made each group's sketch anew and merged the
+    /// lane's into it: a quantile per service and hour over a week (T6) made 100 800 sketches and their arrays an ask
+    /// beside the lanes' own.
+    /// </summary>
+    internal override void MoveFrom(AggregateSlot other, ReadOnlySpan<int> from, ReadOnlySpan<int> into)
+    {
+        TSketch?[] theirs = ((SketchSlot<TSketch, TResult>)other)._sketches;
+        for (int i = 0; i < from.Length; i++)
+        {
+            if (theirs[from[i]] is not { } sketch)
+            {
+                continue;
+            }
+
+            if (_sketches[into[i]] is null && Adopts(sketch))
+            {
+                _sketches[into[i]] = sketch;
+                theirs[from[i]] = null;
+                _bytes += sketch.Bytes;
+                continue;
+            }
+
+            TSketch mine = Sketch(into[i]);
+            long before = mine.Bytes;
+            mine.Merge(sketch);
+            _bytes += mine.Bytes - before;
+        }
+    }
+
+    /// <summary>
+    /// Whether the slot takes <paramref name="sketch"/>, another table's, as its own: its arrays given back where its own
+    /// sketches give theirs. None by default.
+    /// </summary>
+    private protected virtual bool Adopts(TSketch sketch) => false;
 
     internal override void Keep(ReadOnlySpan<int> groups)
     {

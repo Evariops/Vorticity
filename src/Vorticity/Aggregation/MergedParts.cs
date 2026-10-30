@@ -234,7 +234,7 @@ internal sealed class PartMerge : PartSource
                     slots[s].EnsureGroups(keys.Count);
                     if (_inputs[s] != AggregationPartition.Settled)
                     {
-                        slots[s].MergeFrom(_partitions[p].Slots[s], groups, into);
+                        slots[s].MoveFrom(_partitions[p].Slots[s], groups, into);
                     }
                 }
 

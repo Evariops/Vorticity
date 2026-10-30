@@ -47,6 +47,12 @@ internal sealed class DistributionSlot<TValue, TResult> : SketchSlot<QuantileSke
 
     private protected override QuantileSketch Read(ref SpillReader reader) => QuantileSketch.Read(_bits, ref reader, _shelved ? Shelf : null);
 
+    /// <summary>
+    /// Another table's sketch taken as it is: one whose arrays no query's memory counts, small ones, given back to this
+    /// slot's shelf from now on; or any, where the answers hold the sketches and nothing is given back.
+    /// </summary>
+    private protected override bool Adopts(QuantileSketch sketch) => !_shelved || sketch.TryRehome(Shelf);
+
     private protected override void Released(QuantileSketch sketch)
     {
         if (_shelved)

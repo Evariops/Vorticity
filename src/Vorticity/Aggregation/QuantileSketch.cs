@@ -51,7 +51,7 @@ internal sealed class QuantileSketch : IGroupSketch<QuantileSketch>
     private const int WideEntryBytes = 32;
 
     private readonly int _shift;
-    private readonly ArrayShelf? _shelf;
+    private ArrayShelf? _shelf;
     private Store _positive;
     private Store _negative;
 
@@ -187,6 +187,22 @@ internal sealed class QuantileSketch : IGroupSketch<QuantileSketch>
         Zeros = 0;
         _positive.Release(_shelf);
         _negative.Release(_shelf);
+    }
+
+    /// <summary>
+    /// Makes the sketch take and give back its arrays at <paramref name="shelf"/> from now on, when none of them is one a
+    /// query's memory counts (<see cref="ArrayShelf.LeastCounted"/>): a lane's shelf takes such arrays from the process's
+    /// and gives them back there, so they move with no count to settle; whether it did.
+    /// </summary>
+    internal bool TryRehome(ArrayShelf? shelf)
+    {
+        if (!_positive.Uncounted || !_negative.Uncounted)
+        {
+            return false;
+        }
+
+        _shelf = shelf;
+        return true;
     }
 
     /// <summary>Forgets every value, its arrays kept for the next ones: a sketch that counts an hour after another.</summary>
@@ -488,6 +504,12 @@ internal sealed class QuantileSketch : IGroupSketch<QuantileSketch>
             _wide is { } wide ? (long)wide.Count * WideEntryBytes
             : _window is { } window ? (long)window.Length * sizeof(long)
             : ((long)(_keys?.Length ?? 0) * sizeof(int)) + ((long)(_counts?.Length ?? 0) * sizeof(long));
+
+        /// <summary>Whether no array of the store is one a query's memory counts (<see cref="ArrayShelf.LeastCounted"/>).</summary>
+        internal readonly bool Uncounted =>
+            (long)(_keys?.Length ?? 0) * sizeof(int) < ArrayShelf.LeastCounted
+            && (long)(_counts?.Length ?? 0) * sizeof(long) < ArrayShelf.LeastCounted
+            && (long)(_window?.Length ?? 0) * sizeof(long) < ArrayShelf.LeastCounted;
 
         /// <summary>Whether the store holds no bucket and no window or map: a sparse one, empty, perhaps with its arrays.</summary>
         internal readonly bool IsEmpty => _sparse == 0 && _window is null && _wide is null;

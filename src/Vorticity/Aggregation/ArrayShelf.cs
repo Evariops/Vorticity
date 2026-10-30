@@ -30,7 +30,7 @@ internal sealed class ArrayShelf : ISweptAfterCollections
     /// every table makes outside a shelf and gives to it when it grows, are smaller, and go uncounted
     /// both ways.
     /// </summary>
-    private const long LeastCounted = 4096;
+    internal const long LeastCounted = 4096;
 
     /// <summary>
     /// What a lane's shelf reserves ahead of its tables: a quarter of a megabyte, sixteen pages of a key
