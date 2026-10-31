@@ -127,10 +127,13 @@ internal sealed partial class DatasetScanBuilder
     private SummaryPruner? _whole;
     private bool _wholeKnown;
 
-    // How the objects' counts answer _states, worked out the first time a read asks (Answer); null when they answer none.
+    // How the objects' counts answer _states, worked out the first time a read asks (Answer); null when they answer none,
+    // why then, for an explanation; and so for their granules' statistics.
     private CountsAnswer? _answer;
+    private string? _answerDeclined;
     private bool _answerKnown;
     private GranuleAnswer? _granuleAnswer;
+    private string? _granuleDeclined;
     private bool _granuleAnswerKnown;
 
     // The granules of each object a selected row may lie in, a bit a granule, by where its columns' values lie, for the

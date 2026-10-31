@@ -219,11 +219,19 @@ internal sealed class GranuleAnswer
     /// when they answer no granule of any: a quantile or a distribution finer than the granules' histograms, a distinct count
     /// kept as a sketch, or a key or a measure on a path.
     /// </summary>
-    internal static GranuleAnswer? Of(StateRequest request, VortexExpr? filter, DatasetSnapshot version, CountsAnswer counts, int granuleRows)
+    internal static GranuleAnswer? Of(StateRequest request, VortexExpr? filter, DatasetSnapshot version, CountsAnswer counts, int granuleRows) =>
+        Of(request, filter, version, counts, granuleRows, out _);
+
+    /// <summary>
+    /// <see cref="Of(StateRequest, VortexExpr?, DatasetSnapshot, CountsAnswer, int)"/>, and why it declines, for an
+    /// explanation; null when it does not.
+    /// </summary>
+    internal static GranuleAnswer? Of(StateRequest request, VortexExpr? filter, DatasetSnapshot version, CountsAnswer counts, int granuleRows, out string? declined)
     {
         DType schema = version.Schema.DType;
         if (schema.IsDefault || schema.Kind != DTypeKind.Struct)
         {
+            declined = "the version's columns are no struct";
             return null;
         }
 
@@ -231,6 +239,7 @@ internal sealed class GranuleAnswer
         {
             if (kind is AggregateKind.Distribution or AggregateKind.Quantile && request.SketchBits is <= 0 or > GranuleHistograms.WrittenBits)
             {
+                declined = "a quantile or a distribution asks a finer grid than the granules' histograms";
                 return null;
             }
         }
@@ -239,8 +248,15 @@ internal sealed class GranuleAnswer
         for (int k = 0; k < keys.Length; k++)
         {
             FieldExpr key = request.Keys[k];
-            if (request.DistinctColumn(k) is not null || Top(CountsAnswer.Inner(key), schema) is not int field)
+            if (request.DistinctColumn(k) is not null)
             {
+                declined = "a distinct count is kept as a sketch";
+                return null;
+            }
+
+            if (Top(CountsAnswer.Inner(key), schema) is not int field)
+            {
+                declined = "a key reads a path or no top-level column";
                 return null;
             }
 
@@ -254,6 +270,7 @@ internal sealed class GranuleAnswer
             {
                 if (Top(input, schema) is not int field)
                 {
+                    declined = "a measure reads a path or no top-level column";
                     return null;
                 }
 
@@ -276,6 +293,7 @@ internal sealed class GranuleAnswer
             }
         }
 
+        declined = null;
         return new GranuleAnswer(counts, version.Schema, version.Costs, filter, keys, [.. measured], leading, [.. prefixed], granuleRows, request.SketchBits);
     }
 
@@ -339,12 +357,15 @@ internal sealed class GranuleAnswer
     /// for nothing. A function of a column, a truncation, holds one group over a granule whose extremes it sends to one. What
     /// they cost against the rows, the scan's choice weighs (<see cref="Costs"/>).
     /// </summary>
-    internal bool Covers(in PositionedObject held)
+    internal bool Covers(in PositionedObject held) => Declines(held) is null;
+
+    /// <summary>Why the granules of the object <paramref name="held"/> may not answer (<see cref="Covers"/>); null when they may.</summary>
+    internal string? Declines(in PositionedObject held)
     {
         ObjectEntry entry = held.Entry;
         if (entry.Contents is not { GranuleStats.Count: > 0 } contents || !_schema.Holds(entry))
         {
-            return false;
+            return entry.Contents is { GranuleStats.Count: > 0 } ? "its columns are an earlier schema's" : "it keeps no statistics over its granules";
         }
 
         // The keys first, which decide most questions with no look at the filter.
@@ -361,7 +382,7 @@ internal sealed class GranuleAnswer
         int allowed = CountsOnly ? 1 : 0;
         if (free > allowed)
         {
-            return false;
+            return CountsOnly ? "two of its keys' columns may vary in a granule" : "a key's column may vary in a granule under a measure";
         }
 
         int[] fields = Fields;
@@ -375,7 +396,7 @@ internal sealed class GranuleAnswer
 
         if (free > allowed)
         {
-            return false;
+            return "the filter's columns and its keys' may vary in a granule, more than one";
         }
 
         // A column the filter alone reads may keep none: the object's summaries judge it.
@@ -383,7 +404,7 @@ internal sealed class GranuleAnswer
         {
             if (contents.GranuleStatsOf(field) is null && (Keyed(field) || Measured(field)))
             {
-                return false;
+                return "a key's or a measure's column keeps no statistics over its granules";
             }
         }
 
@@ -391,13 +412,13 @@ internal sealed class GranuleAnswer
         {
             if (contents.GranuleHistogramsOf(field) is null)
             {
-                return false;
+                return "a quantile's column keeps no histograms over its granules";
             }
         }
 
         // An object whose every granule holds several values that the question needs one of reads its rows, the statistics a
         // request for nothing.
-        return Unanswered(held) < 1;
+        return Unanswered(held) < 1 ? null : "every granule holds several values that the question needs one of";
     }
 
     /// <summary>

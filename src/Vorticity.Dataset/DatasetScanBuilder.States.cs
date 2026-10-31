@@ -382,7 +382,9 @@ internal sealed partial class DatasetScanBuilder
     {
         if (!_answerKnown)
         {
-            _answer = _states is { } request ? CountsAnswer.Of(request, _filter, _version) : null;
+            string? declined = "the question asks no states";
+            _answer = _states is { } request ? CountsAnswer.Of(request, _filter, _version, out declined) : null;
+            _answerDeclined = declined;
             _answerKnown = true;
         }
 
@@ -394,7 +396,11 @@ internal sealed partial class DatasetScanBuilder
     {
         if (!_granuleAnswerKnown)
         {
-            _granuleAnswer = _states is { } request && Answer() is { } counts ? Dataset.GranuleAnswer.Of(request, _filter, _version, counts, _dataset.Options.Write.BlockRows) : null;
+            string? declined = _answerDeclined ?? "the question asks no states";
+            _granuleAnswer = _states is { } request && Answer() is { } counts
+                ? Dataset.GranuleAnswer.Of(request, _filter, _version, counts, _dataset.Options.Write.BlockRows, out declined)
+                : null;
+            _granuleDeclined = declined;
             _granuleAnswerKnown = true;
         }
 

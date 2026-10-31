@@ -164,6 +164,9 @@ internal sealed partial class DatasetScanBuilder
         /// <summary>How much of <paramref name="unit"/> it answers, from the entries alone.</summary>
         internal abstract Coverage Covers(Planned unit);
 
+        /// <summary>Why it covers none of <paramref name="unit"/>, for an explanation.</summary>
+        internal virtual string Uncovered(Planned unit) => "does not cover it";
+
         /// <summary>What answering <paramref name="unit"/> through it costs.</summary>
         internal abstract PathCosts.Cost Cost(Planned unit);
 
@@ -185,6 +188,16 @@ internal sealed partial class DatasetScanBuilder
     private sealed class EntryAlternative(DatasetScanBuilder scan) : Alternative(scan, AnswerPath.Entry, UnitLevel.Object)
     {
         internal override Coverage Covers(Planned unit) => Scan.EntryAnswers(unit.Held) ? Coverage.Whole : Coverage.None;
+
+        internal override string Uncovered(Planned unit) => Scan._shape switch
+        {
+            ExtremeShape when !Scan._summaries => "summaries are off",
+            ExtremeShape when Scan._filter is not null => "an extreme under a filter",
+            ExtremeShape when !Scan.Whole(unit.Held) => "the scan covers part of it",
+            ExtremeShape extreme => $"its summaries hold no exact extreme of {extreme.Path}",
+            { ReadsColumns: false } and not AggregateShape and not KeysShape => "its summaries do not prove the filter keeps all its rows",
+            _ => "the question asks more than a count of its rows or an extreme",
+        };
 
         internal override PathCosts.Cost Cost(Planned unit) => default;
 
@@ -240,6 +253,12 @@ internal sealed partial class DatasetScanBuilder
     private sealed class CountsAlternative(DatasetScanBuilder scan) : Alternative(scan, AnswerPath.Counts, UnitLevel.Object)
     {
         internal override Coverage Covers(Planned unit) => unit.Field is null ? Coverage.None : Coverage.Whole;
+
+        internal override string Uncovered(Planned unit) =>
+            Scan.Answer() is not { } answer ? Scan._answerDeclined ?? "does not cover it"
+            : Scan.Covered(unit.Held) != unit.Held.Entry.Rows ? "the scan covers part of it"
+            : answer.FieldOf(unit.Held, out string? declined) is null ? declined ?? "does not cover it"
+            : "does not cover it";
 
         internal override PathCosts.Cost Cost(Planned unit)
         {
@@ -381,6 +400,15 @@ internal sealed partial class DatasetScanBuilder
                 ? Coverage.Part
                 : Coverage.None;
 
+        internal override string Uncovered(Planned unit) =>
+            Scan.Answer() is null ? Scan._answerDeclined ?? "does not cover it"
+            : unit.Held.Entry.Contents is not { GranuleStats.Count: > 0 } ? "it keeps no statistics over its granules"
+            : Scan.Covered(unit.Held) <= 0 ? "the scan covers none of its rows"
+            : Scan.Piece(unit.Held) is not null ? "a lane's piece of it learns"
+            : Scan.GranuleAnswer() is not { } granules ? Scan._granuleDeclined ?? "does not cover it"
+            : granules.Exclusion is { } excluded && !excluded.Placed(unit.Held.Entry.Uid) ? $"the value of {excluded.Path} left out is not placed in it"
+            : granules.Declines(unit.Held) ?? "does not cover it";
+
         internal override PathCosts.Cost Cost(Planned unit)
         {
             // Under a value of an identifier left out, the places its postings give it, in two round trips cold: the index's
@@ -413,6 +441,12 @@ internal sealed partial class DatasetScanBuilder
             Scan._settles is not null && Scan._take is null && Scan._version.Schema.Holds(unit.Held.Entry) && Scan.MaySettle(unit.Held)
                 ? Coverage.Part
                 : Coverage.None;
+
+        internal override string Uncovered(Planned unit) =>
+            Scan._settles is null ? "the question asks no aggregation its zone maps settle"
+            : Scan._take is not null ? "the scan takes rows by index"
+            : !Scan._version.Schema.Holds(unit.Held.Entry) ? "its columns are an earlier schema's"
+            : "its summaries do not prove the filter true over its rows, or the filter reads another column than the key's first";
 
         internal override PathCosts.Cost Cost(Planned unit) => Scan.RowsCost(unit.Held, unit.Kept);
 
@@ -472,7 +506,7 @@ internal sealed partial class DatasetScanBuilder
 
             if (alternative.Covers(unit) == Coverage.None)
             {
-                rejected?.Add($"{alternative.Name}: does not cover it");
+                rejected?.Add($"{alternative.Name}: {alternative.Uncovered(unit)}");
                 continue;
             }
 

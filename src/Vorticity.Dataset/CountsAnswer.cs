@@ -127,11 +127,15 @@ internal sealed class CountsAnswer
     /// <paramref name="version"/>; null when they answer no object of it: a key of two columns that are no function of
     /// each other, a key, a value or a measure on a path, or a measure no column is. Every object is then read as rows.
     /// </summary>
-    internal static CountsAnswer? Of(StateRequest request, VortexExpr? filter, DatasetSnapshot version)
+    internal static CountsAnswer? Of(StateRequest request, VortexExpr? filter, DatasetSnapshot version) => Of(request, filter, version, out _);
+
+    /// <summary><see cref="Of(StateRequest, VortexExpr?, DatasetSnapshot)"/>, and why it declines, for an explanation; null when it does not.</summary>
+    internal static CountsAnswer? Of(StateRequest request, VortexExpr? filter, DatasetSnapshot version, out string? declined)
     {
         DType schema = version.Schema.DType;
         if (schema.IsDefault)
         {
+            declined = "the version has no columns";
             return null;
         }
 
@@ -187,6 +191,7 @@ internal sealed class CountsAnswer
             // A path's values are no column's: no object's counts hold them.
             if (key is VariantFieldExpr)
             {
+                declined = "a key reads a path, whose values no object's counts hold";
                 return null;
             }
 
@@ -197,6 +202,7 @@ internal sealed class CountsAnswer
 
             if (Top(key, schema) is not int field)
             {
+                declined = "a key reads no top-level column";
                 return null;
             }
 
@@ -224,6 +230,7 @@ internal sealed class CountsAnswer
 
             if (Top(inner, schema) is not int field)
             {
+                declined = "a key is a function of no top-level column";
                 return null;
             }
 
@@ -238,6 +245,7 @@ internal sealed class CountsAnswer
         {
             if (input is not null && Top(input, schema) is null)
             {
+                declined = "a measure reads no top-level column";
                 return null;
             }
         }
@@ -248,6 +256,7 @@ internal sealed class CountsAnswer
             keyed |= Top(Inner(key), schema) is int field && field == column;
         }
 
+        declined = null;
         return new CountsAnswer(
             request, version.Schema, column, keyed, values?.ToArray(), GroupPredicates.And(null, rest), [.. constants])
         {
@@ -297,17 +306,28 @@ internal sealed class CountsAnswer
     /// not prove true over every row or constant; no counts of the column that answer (<see cref="Carries"/>); or columns of
     /// an earlier schema, which its counts name by their places.
     /// </summary>
-    internal int? FieldOf(in PositionedObject held)
+    internal int? FieldOf(in PositionedObject held) => FieldOf(held, out _);
+
+    /// <summary><see cref="FieldOf(in PositionedObject)"/>, and why no column answers, for an explanation; null when one does.</summary>
+    internal int? FieldOf(in PositionedObject held, out string? declined)
     {
         ObjectEntry entry = held.Entry;
-        if ((entry.HasDeletions && !(entry.HasNegatives && Subtracts)) || entry.Contents is not { Counts.Count: > 0 } contents || !_schema.Holds(entry))
+        if (entry.HasDeletions && !(entry.HasNegatives && Subtracts))
         {
+            declined = "a delete marked rows its counts still hold";
+            return null;
+        }
+
+        if (entry.Contents is not { Counts.Count: > 0 } contents || !_schema.Holds(entry))
+        {
+            declined = entry.Contents is { Counts.Count: > 0 } ? "its columns are an earlier schema's" : "it keeps no counts";
             return null;
         }
 
         ObjectSummaries summaries = SummariesOf(held);
         if (_rest is { } rest && !rest.MustMatch(summaries.Columns, entry.PhysicalRows))
         {
+            declined = "its summaries do not prove the filter's conjuncts on other columns true over its rows";
             return null;
         }
 
@@ -316,6 +336,7 @@ internal sealed class CountsAnswer
         if (Exclusion is (int excluded, string excludedPath, _)
             && (!Subtracts || entry.HasDeletions || contents.DirectoryRegion is null || !NoNull(summaries, excludedPath, _schema.DType.GetField(excluded))))
         {
+            declined = !Subtracts ? "a value is left out of a question its counts cannot subtract from" : "a value is left out where its postings or its column's nulls are unknown";
             return null;
         }
 
@@ -323,13 +344,16 @@ internal sealed class CountsAnswer
         {
             if (ConstantOf(summaries, path, key) is null)
             {
+                declined = "a key's column is not constant in it, nor the counted one";
                 return null;
             }
         }
 
-        return Column is { } asked
+        int? answered = Column is { } asked
             ? contents.CountsOf(asked) is not null && Carries(contents, asked) ? asked : null
             : Least(contents);
+        declined = answered is null ? "its counts of the column do not carry what the question reads" : null;
+        return answered;
     }
 
     /// <summary>
