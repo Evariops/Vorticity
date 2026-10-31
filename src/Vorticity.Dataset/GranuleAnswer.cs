@@ -44,6 +44,12 @@ internal sealed class GranuleAnswer
     // The rows of a granule, which a window on the key's first column cuts at most two of.
     private readonly int _granuleRows;
 
+    // Each key that is a function of a column of which a component of the sort key's indexed prefix is a function too, whose
+    // values the object keeps by granule (GranuleKeyRuns): the key's place among the keys, the component's place in the
+    // key, and the component's function. A granule takes the key's groups from those values where the component's class of
+    // each falls in one group of the key's: a bucket of hours over hours.
+    private readonly (int Key, int Component, ValueFunction Of)[] _runKeys;
+
     // The mantissa bits of the grid of the sketches a quantile of the request asks; 0 for none.
     private readonly int _sketchBits;
 
@@ -66,9 +72,11 @@ internal sealed class GranuleAnswer
 
     private GranuleAnswer(
         CountsAnswer counts, DatasetSchema version, PathCosts costs, VortexExpr? filter, (int Field, FieldExpr Key)[] keys, int[] measured, int leading,
-        int[] prefixed, int granuleRows, int sketchBits)
+        int[] prefixed, int granuleRows, int sketchBits, (int Key, int Component, ValueFunction Of)[] runKeys)
     {
         _prefixed = prefixed;
+        _runKeys = runKeys;
+        Components = Array.ConvertAll(runKeys, static run => run.Component);
         _sketchBits = sketchBits;
         _granuleRows = Math.Max(granuleRows, 1);
         _schema = version;
@@ -101,6 +109,9 @@ internal sealed class GranuleAnswer
 
     /// <summary>The columns of the measures whose histograms a quantile or a distribution asks, each once.</summary>
     internal int[] Histogrammed { get; }
+
+    /// <summary>The components of the sort key whose values by granule the keys take their groups from, by their place in the key.</summary>
+    internal int[] Components { get; }
 
     /// <summary>
     /// The value of a declared identifier the filter leaves out (<see cref="CountsAnswer.Exclusion"/>): its column, its path,
@@ -287,8 +298,22 @@ internal sealed class GranuleAnswer
             }
         }
 
+        // The keys that are functions of a column a component of the indexed prefix is a function of too.
+        List<(int Key, int Component, ValueFunction Of)> runKeys = [];
+        for (int k = 0; k < keys.Length && version.Schema.Layout is { } prefix; k++)
+        {
+            for (int c = 0; keys[k].Key is FunctionFieldExpr && c < prefix.Components.Count && c < prefix.Prefix; c++)
+            {
+                if (prefix.Components[c] is { Function: { } function, Read: null } component && component.Field == keys[k].Field)
+                {
+                    runKeys.Add((k, c, function));
+                    break;
+                }
+            }
+        }
+
         declined = null;
-        return new GranuleAnswer(counts, version.Schema, version.Costs, filter, keys, [.. measured], leading, [.. prefixed], granuleRows, request.SketchBits);
+        return new GranuleAnswer(counts, version.Schema, version.Costs, filter, keys, [.. measured], leading, [.. prefixed], granuleRows, request.SketchBits, [.. runKeys]);
     }
 
     /// <summary>Whether column <paramref name="field"/> is one of the sort key's, read as it is: one whose values a granule holds in order.</summary>
@@ -432,7 +457,7 @@ internal sealed class GranuleAnswer
     {
         ObjectContents contents = held.Entry.Contents!;
         int[] fields = Fields;
-        int count = fields.Length + Histogrammed.Length;
+        int count = fields.Length + Histogrammed.Length + Components.Length;
         Span<IndexSegment?> regions = count <= 16 ? stackalloc IndexSegment?[count] : new IndexSegment?[count];
         for (int i = 0; i < fields.Length; i++)
         {
@@ -442,6 +467,11 @@ internal sealed class GranuleAnswer
         for (int i = 0; i < Histogrammed.Length; i++)
         {
             regions[fields.Length + i] = contents.GranuleHistogramsOf(Histogrammed[i]);
+        }
+
+        for (int i = 0; i < Components.Length; i++)
+        {
+            regions[fields.Length + Histogrammed.Length + i] = contents.KeyRunsOf(Components[i])?.Region;
         }
 
         int[] read = _excluding is { } excluding ? excluding.ReadOf(fields) : fields;
@@ -561,8 +591,9 @@ internal sealed class GranuleAnswer
         double rows = held.Entry.PhysicalRows;
         double total = 0;
         double listed = 0;
-        foreach ((int field, FieldExpr key) in _keys)
+        for (int k = 0; k < _keys.Length; k++)
         {
+            (int field, FieldExpr key) = _keys[k];
             if (CountsAnswer.ConstantOf(summaries, _schema.Columns[field].Name, key) is not null)
             {
                 continue;
@@ -571,6 +602,16 @@ internal sealed class GranuleAnswer
             double varies = 1 - Math.Clamp(contents.SingleRowsOf(field) / rows, 0, 1);
             if (key is FunctionFieldExpr function)
             {
+                // A key that takes its groups from a component's values by granule varies where the component does, and may
+                // vary alone as a listed column does.
+                if (RunsOf(k, contents) is { } runs)
+                {
+                    double component = 1 - Math.Clamp(runs.SingleRows / rows, 0, 1);
+                    total += component;
+                    listed = Math.Max(listed, component);
+                    continue;
+                }
+
                 total += Math.Min(varies, FunctionVaries(summaries, field, function, contents, rows));
                 continue;
             }
@@ -590,6 +631,20 @@ internal sealed class GranuleAnswer
         }
 
         return Math.Clamp(total - (CountsOnly ? listed : 0), 0, 1);
+    }
+
+    /// <summary>The values by granule of the component key <paramref name="key"/> takes its groups from, as the object <paramref name="contents"/> describe it keeps them; null for none.</summary>
+    private (IndexSegment Region, long SingleRows)? RunsOf(int key, ObjectContents contents)
+    {
+        foreach ((int held, int component, _) in _runKeys)
+        {
+            if (held == key)
+            {
+                return contents.KeyRunsOf(component);
+            }
+        }
+
+        return null;
     }
 
     /// <summary>
@@ -713,16 +768,17 @@ internal sealed class GranuleAnswer
     /// the object's own positions a lane's piece of it covers, deleted rows included: the rows it holds of a granule it cuts
     /// are read as rows. Under a value of an identifier left out (<see cref="Exclusion"/>), the granules are judged under the
     /// rest of the filter, and those that <paramref name="holding"/>, the runs of the object's rows its postings place the
-    /// value in, touches are read as rows; with none known, every granule is judged under the whole filter.
+    /// value in, touches are read as rows; with none known, every granule is judged under the whole filter. A key whose
+    /// groups a component of the sort key gives takes them from <paramref name="runs"/>, by <see cref="Components"/>' places.
     /// </summary>
     internal (GranuleStateRows? States, List<RowRange> Unsettled, int Settled) Settle(
-        in PositionedObject held, GranuleStats?[] columns, GranuleHistograms?[] histograms, DeletionVector deletions, RowRange part,
+        in PositionedObject held, GranuleStats?[] columns, GranuleHistograms?[] histograms, GranuleKeyRuns?[] runs, DeletionVector deletions, RowRange part,
         List<RowRange>? holding = null)
     {
         _ = Fields;
         bool placed = _excluding is null || holding is not null;
         (GranuleStateRows? states, List<RowRange> unsettled, int settled) =
-            SettlePhysical(held, columns, histograms, deletions, part, placed ? _filter : _excluding!.Whole, _excluding is null ? null : holding);
+            SettlePhysical(held, columns, histograms, runs, deletions, part, placed ? _filter : _excluding!.Whole, _excluding is null ? null : holding);
         if (deletions.IsEmpty)
         {
             return (states, unsettled, settled);
@@ -742,7 +798,7 @@ internal sealed class GranuleAnswer
     /// <paramref name="judge"/>, and one that <paramref name="holding"/> touches read as rows.
     /// </summary>
     private (GranuleStateRows? States, List<RowRange> Unsettled, int Settled) SettlePhysical(
-        in PositionedObject held, GranuleStats?[] columns, GranuleHistograms?[] histograms, DeletionVector deletions, RowRange part,
+        in PositionedObject held, GranuleStats?[] columns, GranuleHistograms?[] histograms, GranuleKeyRuns?[] runs, DeletionVector deletions, RowRange part,
         SummaryPruner? judge, List<RowRange>? holding)
     {
         long objectRows = held.Entry.PhysicalRows;
@@ -765,6 +821,17 @@ internal sealed class GranuleAnswer
         if (any is null || !Alike(histograms, any.Count))
         {
             return (null, [part], 0);
+        }
+
+        // The values of a component that do not describe the same granules are not taken.
+        GranuleKeyRuns?[] alike = runs;
+        for (int r = 0; r < runs.Length; r++)
+        {
+            if (runs[r] is { } values && values.Count != any.Count)
+            {
+                alike = alike == runs ? (GranuleKeyRuns?[])runs.Clone() : alike;
+                alike[r] = null;
+            }
         }
 
         ObjectSummaries summaries = held.Summaries(_schema);
@@ -800,7 +867,7 @@ internal sealed class GranuleAnswer
         {
             long first = any.FirstRow(b);
             answers[b] = first >= part.Start && first + any.Rows[b] <= part.End && deletions.DeletedIn(first, first + any.Rows[b]) == 0
-                && !Touches(holding, ref touched, first, first + any.Rows[b]) && SettleGranule(b, any.Rows[b], described, summaries, judged, states, judge);
+                && !Touches(holding, ref touched, first, first + any.Rows[b]) && SettleGranule(b, any.Rows[b], described, alike, summaries, judged, states, judge);
             states.Truncate(0);
         }
 
@@ -817,7 +884,7 @@ internal sealed class GranuleAnswer
             long rows = any.Rows[b];
             if (answers[b])
             {
-                SettleGranule(b, rows, described, summaries, judged, states, judge);
+                SettleGranule(b, rows, described, alike, summaries, judged, states, judge);
                 settled++;
                 continue;
             }
@@ -919,7 +986,8 @@ internal sealed class GranuleAnswer
     /// no row of it.
     /// </summary>
     private bool SettleGranule(
-        int granule, long rows, GranuleColumn[] columns, ObjectSummaries summaries, List<ColumnSummary> judged, GranuleStateRows states, SummaryPruner? judge)
+        int granule, long rows, GranuleColumn[] columns, GranuleKeyRuns?[] runs, ObjectSummaries summaries, List<ColumnSummary> judged, GranuleStateRows states,
+        SummaryPruner? judge)
     {
         // The granule's summaries: each column's own, the object's for the columns the granule keeps none of.
         judged.Clear();
@@ -950,8 +1018,10 @@ internal sealed class GranuleAnswer
         bool whole = judge is not { } proving || proving.MustMatch(judged, rows);
 
         // The column that varies: a key's column that holds more than one group, or, under a filter the granule's summaries
-        // do not prove, a column it reads that holds more than one value; at most one, which lists its values.
+        // do not prove, a column it reads that holds more than one value; at most one, which lists its values, or whose key
+        // takes its groups from a component's values over the granule, under a filter proven.
         int varying = -1;
+        int byRuns = -1;
         for (int i = 0; i < Fields.Length; i++)
         {
             bool varies = !KeysHoldOneGroup(i, columns[i], granule, rows)
@@ -961,17 +1031,24 @@ internal sealed class GranuleAnswer
                 continue;
             }
 
-            if (varying >= 0 || !CountsOnly || !columns[i].Lists(granule))
+            int run = whole && !columns[i].Lists(granule) ? RunOf(Fields[i], runs) : -1;
+            if (varying >= 0 || !CountsOnly || !(columns[i].Lists(granule) || run >= 0))
             {
                 return false;
             }
 
             varying = i;
+            byRuns = run;
         }
 
         if (varying < 0)
         {
             return whole && AddWhole(granule, rows, columns, states);
+        }
+
+        if (byRuns >= 0)
+        {
+            return AddRuns(granule, rows, varying, columns, runs[byRuns]!, _runKeys[byRuns], states);
         }
 
         // Each of its values, and its nulls, judged apart: the column's summary replaced by the value's.
@@ -1008,6 +1085,71 @@ internal sealed class GranuleAnswer
             {
                 int place = Array.IndexOf(Fields, KeyFields[k]);
                 states.SetKey(row, k, place == varying ? value : columns[place].ConstantOf(granule, rows));
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>The place among <see cref="Components"/> of the values a key of column <paramref name="field"/> takes its groups from; -1 for none, or none read.</summary>
+    private int RunOf(int field, GranuleKeyRuns?[] runs)
+    {
+        for (int r = 0; r < _runKeys.Length && r < runs.Length; r++)
+        {
+            if (_keys[_runKeys[r].Key].Field == field && runs[r] is not null)
+            {
+                return r;
+            }
+        }
+
+        return -1;
+    }
+
+    /// <summary>
+    /// The rows of states of granule <paramref name="granule"/> of <paramref name="rows"/> rows, whose column at
+    /// <paramref name="varying"/> holds several groups of a key that <paramref name="run"/> gives, from the values of its
+    /// component over the granule <paramref name="runs"/> holds: each value's class, from the least value of the column
+    /// whose image is it to the least whose image is past it, falls in one group of the key, its rows that group's, the
+    /// group stood for by the class's least value as the column stores it; the other keys' columns hold one value each.
+    /// False when a class straddles two groups, or the values do not count the granule's rows.
+    /// </summary>
+    private bool AddRuns(int granule, long rows, int varying, GranuleColumn[] columns, GranuleKeyRuns runs, (int Key, int Component, ValueFunction Of) run, GranuleStateRows states)
+    {
+        FieldExpr key = _keys[run.Key].Key;
+        if (key is not FunctionFieldExpr function)
+        {
+            return false;
+        }
+
+        (ReadOnlyMemory<long> values, ReadOnlyMemory<long> counted) = runs.Of(granule);
+        long total = 0;
+        foreach (long count in counted.Span)
+        {
+            total += count;
+        }
+
+        if (total != rows)
+        {
+            return false;
+        }
+
+        int first = states.Count;
+        for (int v = 0; v < values.Length; v++)
+        {
+            if (!run.Of.TryLeast(values.Span[v], out Int128 least) || !run.Of.TryLeast((Int128)values.Span[v] + 1, out Int128 next) || next <= least
+                || CountsAnswer.Image(key, function.Function.Literal(least)) is not { } low
+                || CountsAnswer.Image(key, function.Function.Literal(next - 1)) is not { } high || KeyCursor.Compare(low, high) != 0
+                || columns[varying].KeyOf(function.Function.Literal(least)) is not { } stands)
+            {
+                states.Truncate(first);
+                return false;
+            }
+
+            int row = states.Add(counted.Span[v]);
+            for (int k = 0; k < KeyFields.Length; k++)
+            {
+                int place = Array.IndexOf(Fields, KeyFields[k]);
+                states.SetKey(row, k, place == varying ? stands : columns[place].ConstantOf(granule, rows));
             }
         }
 
@@ -1192,6 +1334,14 @@ internal sealed class GranuleColumn(string path, DType dtype, GranuleStats? stat
 
         return key is FunctionFieldExpr && Stats is { } stats && stats.Nulls[granule] == 0 && Bounds(granule) is ({ } least, { } greatest)
             && CountsAnswer.Image(key, least) is { } low && CountsAnswer.Image(key, greatest) is { } high && KeyCursor.Compare(low, high) == 0;
+    }
+
+    /// <summary>The bytes the column stores <paramref name="value"/> as, a key's; null for a column no key holds, or a value it does not.</summary>
+    internal byte[]? KeyOf(FilterLiteral value)
+    {
+        Span<byte> scratch = stackalloc byte[sizeof(ulong)];
+        Span<byte> zero = stackalloc byte[sizeof(ulong)];
+        return _keyed && _layout.TryEncode(value, scratch, out ReadOnlySpan<byte> key, zero, out _) ? key.ToArray() : null;
     }
 
     /// <summary>

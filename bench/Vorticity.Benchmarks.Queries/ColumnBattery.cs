@@ -230,7 +230,7 @@ internal static class ColumnBattery
 
             // Every column's statistics describe the object's granules alike: their count is any one's.
             int objectGranules = 0;
-            (Vorticity.Indexes.GranuleStats?[] stats, _) = await dataset.ReadGranuleStatsAsync(held.Entry, all, [], default);
+            (Vorticity.Indexes.GranuleStats?[] stats, _, _) = await dataset.ReadGranuleStatsAsync(held.Entry, all, [], [], default);
             foreach (Vorticity.Indexes.GranuleStats? column in stats)
             {
                 objectGranules = Math.Max(objectGranules, column?.Count ?? 0);

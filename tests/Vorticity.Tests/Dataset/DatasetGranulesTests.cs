@@ -83,7 +83,7 @@ public sealed partial class DatasetGranulesTests
 
             objects++;
             store.Reset();
-            (GranuleStats?[] stats, _) = await dataset.ReadGranuleStatsAsync(held.Entry, [0], [], Ct);
+            (GranuleStats?[] stats, _, _) = await dataset.ReadGranuleStatsAsync(held.Entry, [0], [], [], Ct);
             Assert.Equal(1, store.Requests);
             GranuleStats cut = Assert.IsType<GranuleStats>(stats[0]);
             string[] sources = await SourcesAsync(dataset, held.Entry);

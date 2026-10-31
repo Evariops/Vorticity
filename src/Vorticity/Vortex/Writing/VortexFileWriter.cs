@@ -226,7 +226,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         IndexSegment? keyIndex, IndexSegment? keyPages, SliceChunks chunks, IndexSegment[] directories, List<(int Field, IndexSegment Region)> pathDirectories, ChunkPaging? paging,
         List<(int Field, IndexSegment Region)> sheets, List<(int Field, IndexSegment Region)> counts, List<(int Field, int[] Measures, bool LeavesOut)> carried,
         List<(int Field, IndexSegment Region)> sketches,
-        List<(int Field, IndexSegment Region)> granuleStats, long[] listed, long[] single, List<(int Field, IndexSegment Region)> granuleHistograms, List<(int Field, IndexSegment Region)> locates,
+        List<(int Field, IndexSegment Region)> granuleStats, long[] listed, long[] single, List<(int Component, IndexSegment Region, long SingleRows)> keyRuns,
+        List<(int Field, IndexSegment Region)> granuleHistograms, List<(int Field, IndexSegment Region)> locates,
         List<(int Field, string Key, Types.Variants.PathClass Class, IndexSegment Region)> pathLocates,
         long[] columnBytes, long[] columnChunks, IndexSegment[] marks, ColumnDictionary?[] dictionaries) =>
         new ObjectContents(Types.Serialization.DTypeFlatBuffers.Serialize(_schema), chunks.Encodings, _rowCount, directories, pathDirectories)
@@ -248,6 +249,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             PureGranuleRows = granuleStats.Count > 0 ? PureGranuleRows() : -1,
             ListedRows = listed,
             SingleRows = single,
+            KeyRuns = keyRuns,
             Marks = marks,
             Dictionaries = dictionaries,
         };
@@ -502,6 +504,27 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     // The sparse index of the file's key the caller declared, the key of each granule's first row and the last row's, built
     // and written at completion; null for none.
     private (int Components, IReadOnlyList<byte[]> Keys, byte[] LastKey, long PureRows)? _keyIndex;
+
+    // The values each component of the key that is a function of a column takes in each granule, which the caller declared,
+    // each its place in the key, its region's bytes and the rows of its granules of one value; written at completion.
+    private IReadOnlyList<(int Component, byte[] Region, long SingleRows)>? _keyRuns;
+
+    /// <summary>
+    /// Declares the values each component of the file's key that is a function of a column takes in each granule
+    /// (<see cref="GranuleKeyRuns"/>), which completion writes and names in the table of contents beside the key's sparse
+    /// index: the caller, which writes its rows in the key's order, counts them as they come.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">The writer carries no table of contents, or cuts no granules.</exception>
+    internal void DeclareKeyRuns(IReadOnlyList<(int Component, byte[] Region, long SingleRows)> runs)
+    {
+        ArgumentNullException.ThrowIfNull(runs);
+        if (!_carriesContents || _indexes is null || _blockRows <= 0)
+        {
+            throw new InvalidOperationException("A key's values by granule ride in the file's table of contents, over granules, which this writer does not write.");
+        }
+
+        _keyRuns = runs;
+    }
 
     /// <summary>
     /// The rows of the file's granules that hold one value of its key's indexed prefix (<see cref="ObjectContents.PureGranuleRows"/>),
@@ -2674,6 +2697,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             ChunkPaging? paging = null;
             IndexSegment? keyIndex = null;
             IndexSegment? keyPages = null;
+            List<(int Component, IndexSegment Region, long SingleRows)> keyRuns = [];
             if (_carriesContents)
             {
                 // The key's sparse index over the file's granules: its pages, when they do not ride in its table, then the
@@ -2691,6 +2715,13 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                     keyIndex = IndexSegment.Of(_sink.Position, table, 0);
                     await _sink.WriteAsync(table, cancellationToken).ConfigureAwait(false);
                     closed.AddKeyIndex(table, keyPages, _rowCount, _blockRows);
+                }
+
+                // Beside it, the values of its components that are functions of a column, granule by granule.
+                foreach ((int component, byte[] region, long ones) in _rowCount > 0 ? _keyRuns ?? [] : [])
+                {
+                    keyRuns.Add((component, IndexSegment.Of(_sink.Position, region, 0), ones));
+                    await _sink.WriteAsync(region, cancellationToken).ConfigureAwait(false);
                 }
 
                 // The columns of more than a page of chunks, which start at the same rows, lay their directories in pages,
@@ -2749,7 +2780,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             if (_carriesContents)
             {
                 _contents = Contents(
-                    keyIndex, keyPages, chunks!, chunkDirectories, pathDirectories, paging, sheets, counts, carried, sketches, stated, listed, single, histogrammed, locates, pathLocates, closed.ColumnBytes(_isTabular ? _fieldCount : 0), ColumnChunks(), marks, dictionaries);
+                    keyIndex, keyPages, chunks!, chunkDirectories, pathDirectories, paging, sheets, counts, carried, sketches, stated, listed, single, keyRuns, histogrammed, locates, pathLocates, closed.ColumnBytes(_isTabular ? _fieldCount : 0), ColumnChunks(), marks, dictionaries);
             }
 
             // The block statistics of the shredded keys, where they can prune, within what the budget leaves.

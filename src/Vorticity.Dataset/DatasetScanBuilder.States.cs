@@ -100,14 +100,14 @@ internal sealed partial class DatasetScanBuilder
     /// places of the value <paramref name="excluded"/> the filter leaves out, noted where the settling of its granules takes
     /// them (<see cref="ExcludedValue.PlacesOf"/>).
     /// </summary>
-    private async Task<(Indexes.GranuleStats?[] Stats, Indexes.GranuleHistograms?[] Histograms)> StatisticsPlacedAsync(
+    private async Task<(Indexes.GranuleStats?[] Stats, Indexes.GranuleHistograms?[] Histograms, Indexes.GranuleKeyRuns?[] Runs)> StatisticsPlacedAsync(
         PositionedObject held, ExcludedValue excluded, CancellationToken cancellationToken)
     {
         Task<List<RowRange>?> placing = PlacesOfAsync(held, excluded.Found, cancellationToken);
-        (Indexes.GranuleStats?[] Stats, Indexes.GranuleHistograms?[] Histograms) statistics;
+        (Indexes.GranuleStats?[] Stats, Indexes.GranuleHistograms?[] Histograms, Indexes.GranuleKeyRuns?[] Runs) statistics;
         try
         {
-            statistics = await _dataset.ReadGranuleStatsAsync(held.Entry, GranuleAnswer()!.Fields, GranuleAnswer()!.Histogrammed, cancellationToken)
+            statistics = await _dataset.ReadGranuleStatsAsync(held.Entry, GranuleAnswer()!.Fields, GranuleAnswer()!.Histogrammed, GranuleAnswer()!.Components, cancellationToken)
                 .ConfigureAwait(false);
         }
         catch
@@ -129,7 +129,7 @@ internal sealed partial class DatasetScanBuilder
     /// handle's memo, where each lane's piece of the object finds them: begun as its pieces, each read them.
     /// </summary>
     internal Task GranuleStatsAheadAsync(in PositionedObject held, CancellationToken cancellationToken) =>
-        _dataset.ReadGranuleStatsAsync(held.Entry, GranuleAnswer()!.Fields, GranuleAnswer()!.Histogrammed, cancellationToken).AsTask();
+        _dataset.ReadGranuleStatsAsync(held.Entry, GranuleAnswer()!.Fields, GranuleAnswer()!.Histogrammed, GranuleAnswer()!.Components, cancellationToken).AsTask();
 
     /// <summary>How the objects' counts answer the states the scan asks, worked out once; null when they answer none of them.</summary>
     private CountsAnswer? Answer()
@@ -305,13 +305,13 @@ internal sealed partial class DatasetScanBuilder
                     // others, each run of them a part of the scan. The granules that hold a row a delete marked are read as
                     // rows too. A lane's piece of the object settles the granules it holds, and reads the rows it holds of
                     // those it cuts.
-                    Task<(Indexes.GranuleStats?[] Stats, Indexes.GranuleHistograms?[] Histograms)> statistics = unit.Statistics!;
+                    Task<(Indexes.GranuleStats?[] Stats, Indexes.GranuleHistograms?[] Histograms, Indexes.GranuleKeyRuns?[] Runs)> statistics = unit.Statistics!;
                     unit.Statistics = null;
-                    (Indexes.GranuleStats?[] stats, Indexes.GranuleHistograms?[] histograms) = await statistics.ConfigureAwait(false);
+                    (Indexes.GranuleStats?[] stats, Indexes.GranuleHistograms?[] histograms, Indexes.GranuleKeyRuns?[] runs) = await statistics.ConfigureAwait(false);
                     await held.Entry.ResolveAsync(_version.Pages, cancellationToken).ConfigureAwait(false);
                     (long lower, long upper) = Whole(held) ? (0, held.Entry.PhysicalRows) : PhysicalRange(held);
                     (GranuleStateRows? settled, List<RowRange> unsettled, int answered) = GranuleAnswer()!.Settle(
-                        held, stats, histograms, held.Entry.Deletions, new RowRange(lower, upper), answer.Exclusion?.PlacesOf(held.Entry.Uid));
+                        held, stats, histograms, runs, held.Entry.Deletions, new RowRange(lower, upper), answer.Exclusion?.PlacesOf(held.Entry.Uid));
                     if (_metrics is { } counted)
                     {
                         counted.GranulesAnswered += answered;
@@ -434,7 +434,7 @@ internal sealed partial class DatasetScanBuilder
             case AnswerPath.Granules:
                 unit.Statistics = GranuleAnswer()!.Exclusion is { } excluded
                     ? StatisticsPlacedAsync(unit.Held, excluded, cancellationToken)
-                    : _dataset.ReadGranuleStatsAsync(unit.Held.Entry, GranuleAnswer()!.Fields, GranuleAnswer()!.Histogrammed, cancellationToken).AsTask();
+                    : _dataset.ReadGranuleStatsAsync(unit.Held.Entry, GranuleAnswer()!.Fields, GranuleAnswer()!.Histogrammed, GranuleAnswer()!.Components, cancellationToken).AsTask();
                 break;
         }
     }

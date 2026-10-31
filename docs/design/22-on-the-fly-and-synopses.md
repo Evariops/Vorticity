@@ -307,16 +307,27 @@ the filter true over its rows and whose keys each hold one group gives its rows 
 states; a granule where one column of the question varies, under a question of counts alone, gives the
 rows of each of its values, the filter judged value by value on the summary each value makes; any other
 granule is read as rows, each run of them a part of the scan. A key that is a function of a column, a
-truncation, holds one group over a granule whose extremes it sends to one. Before it reads an object's
-statistics, the dataset counts the columns of the question that may vary in its granules, those of the
-keys and of a filter the object's summaries do not prove, other than the key's first component and
-than a key's column the summaries prove constant: past one under a question of counts, or past none
-under one of measures, every granule would be read as rows after its statistics, and the object is read
-as rows at once. Under a key led by the service, errors by service read 247 KB through the granules
+truncation, holds one group over a granule whose extremes it sends to one. A distinct count is a question
+of counts: its column is a key of the states, a granule giving each group the values it lists. Before it
+reads an object's statistics, the dataset weighs the share of its rows in granules where more of the
+question's columns vary than this answers, from the rows of the granules where each column holds one
+value, which the object's table of contents says column by column; an object that does not say is judged
+by its summaries, the columns of the keys and of a filter they do not prove taken to vary everywhere. Under a key led by the service, errors by service read 247 KB through the granules
 where the rows take 898 KB, errors by service and hour 1.9 MB where they take 3.6 MB, and measures by
 service and hour, the hour in the key after the service, 2.4 MB where they take 6.2 MB *(measured,
 `DatasetBlockAnswerTests`)*. The exact bounds of two varying columns are not given yet; they belong
 with the estimates the planner chooses (section 8).
+
+The sort key's components that are functions of a column, the hour of an instant, are no column of the
+object: the writer, which takes its rows in the key's order, counts the values each takes in each granule
+and their rows, a run of the prefix up to the component lying together, found by a gallop over the keys,
+with no cost a row (`vorticity.key.runs`, a region the table of contents names, three to ten bytes a
+granule; `GranuleKeyRuns`). A key that is a coarser function of the same column, a bucket of twelve hours
+or a day, takes a granule's groups from those values wherever each value's class falls in one of its
+groups, which the functions' least images prove with nothing known of time: a granule that straddles two
+buckets answers without its instants. Every request but one, by service and twelve hours, reads 1.39 MB
+through the granules where the rows read 4.35 MB, the four granules the request may lie in read as rows
+*(measured, `DatasetKeyRunsTests`)*.
 
 A granule no delete touches settles as a file's does; a granule a delete touches is read as rows
 (section 6). The statistics take 1 307.7 bytes a granule on the design's requests, sorted by emitter,

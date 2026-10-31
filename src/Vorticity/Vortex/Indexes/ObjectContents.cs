@@ -249,6 +249,27 @@ internal sealed class ObjectContents(
     internal long SingleRowsOf(int field) => (uint)field < (uint)SingleRows.Count ? SingleRows[field] : 0;
 
     /// <summary>
+    /// The values each component of the sort key that is a function of a column takes in each granule, with their rows
+    /// (<see cref="GranuleKeyRuns"/>), by the component's place in the key, and the rows of the granules where it holds one
+    /// value. Empty when the object keeps none.
+    /// </summary>
+    internal IReadOnlyList<(int Component, IndexSegment Region, long SingleRows)> KeyRuns { get; init; } = [];
+
+    /// <summary>The region of the values of the key's component <paramref name="component"/> in each granule, and the rows of its granules of one value; null for none.</summary>
+    internal (IndexSegment Region, long SingleRows)? KeyRunsOf(int component)
+    {
+        foreach ((int held, IndexSegment region, long single) in KeyRuns)
+        {
+            if (held == component)
+            {
+                return (region, single);
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
     /// What each column's counts carry (<see cref="Counts"/>), by its field: the fields of the measures their records hold,
     /// and whether a budget left values out, counted as one group of the others. Empty when the object does not say.
     /// </summary>
@@ -325,6 +346,7 @@ internal sealed class ObjectContents(
             PureGranuleRows = PureGranuleRows,
             ListedRows = ListedRows,
             SingleRows = SingleRows,
+            KeyRuns = KeyRuns,
             Carried = Carried,
             Marks = Marks,
             Dictionaries = Dictionaries,
@@ -439,6 +461,11 @@ internal sealed class ObjectContents(
     // The rows of the granules where each top-level column holds one value, packed, by the column's place.
     private const int TagSingleRows = 34;
 
+    // The values a component of the key that is a function of a column takes in each granule: its place, as a directory's
+    // field, its region, and the rows of its granules of one value.
+    private const int TagKeyRuns = 35;
+    private const int TagKeyRunsSingle = 3;
+
     // What a column's counts carry: its field, the fields of their measures, packed, and whether they leave values out.
     private const int TagCarried = 33;
     private const int TagCarriedMeasures = 2;
@@ -535,6 +562,11 @@ internal sealed class ObjectContents(
         }
 
         foreach ((int _, IndexSegment region) in GranuleHistograms)
+        {
+            Declare(region);
+        }
+
+        foreach ((int _, IndexSegment region, long _) in KeyRuns)
         {
             Declare(region);
         }
@@ -668,6 +700,14 @@ internal sealed class ObjectContents(
                 using ProtoWriter.MessageScope message = writer.BeginMessage(TagGranuleHistograms);
                 writer.WriteUInt32Always(TagDirectoryField, (uint)field);
                 IndexDirectory.WriteSegment(ref writer, TagDirectoryRegion, region);
+            }
+
+            foreach ((int component, IndexSegment region, long single) in KeyRuns)
+            {
+                using ProtoWriter.MessageScope message = writer.BeginMessage(TagKeyRuns);
+                writer.WriteUInt32Always(TagDirectoryField, (uint)component);
+                IndexDirectory.WriteSegment(ref writer, TagDirectoryRegion, region);
+                writer.WriteUInt64Always(TagKeyRunsSingle, (ulong)single);
             }
 
             foreach ((int field, IndexSegment region) in Locates)
@@ -814,6 +854,7 @@ internal sealed class ObjectContents(
             long pureGranuleRows = -1;
             List<long> listedRows = [];
             List<long> singleRows = [];
+            List<(int, IndexSegment, long)> keyRuns = [];
             List<(int, int[], bool)> carried = [];
             List<IndexSegment> marks = [];
             List<(int Field, ColumnDictionary Dictionary)> dictionaries = [];
@@ -964,6 +1005,14 @@ internal sealed class ObjectContents(
                         }
 
                         break;
+                    case (TagKeyRuns, ProtoWireType.LengthDelimited):
+                        if (KeyRunsEntry(reader.ReadMessage()) is not { } runs)
+                        {
+                            return null;
+                        }
+
+                        keyRuns.Add(runs);
+                        break;
                     case (TagLocate, ProtoWireType.LengthDelimited):
                         if (Directory(reader.ReadMessage()) is not { } lying)
                         {
@@ -1030,6 +1079,7 @@ internal sealed class ObjectContents(
                     PureGranuleRows = pureGranuleRows,
                     ListedRows = listedRows,
                     SingleRows = singleRows,
+                    KeyRuns = keyRuns,
                     Carried = carried,
                     Marks = marks.Count == directories.Count ? marks : [],
                     Dictionaries = Placed(dictionaries, directories.Count),
@@ -1124,6 +1174,34 @@ internal sealed class ObjectContents(
         return field is { } at && region is { } segment && key is not null && @class is { } held && held <= (uint)PathClass.Other
             ? (at, key, (PathClass)held, segment)
             : null;
+    }
+
+    /// <summary>A component's values over the granules: its place, its region and the rows of its granules of one value; null when they do not read.</summary>
+    private static (int, IndexSegment, long)? KeyRunsEntry(ProtoReader reader)
+    {
+        int component = -1;
+        IndexSegment? region = null;
+        long single = 0;
+        while (reader.TryReadTag(out int tag, out ProtoWireType wire))
+        {
+            switch (tag, wire)
+            {
+                case (TagDirectoryField, ProtoWireType.Varint):
+                    component = checked((int)reader.ReadVarint32());
+                    break;
+                case (TagDirectoryRegion, ProtoWireType.LengthDelimited):
+                    region = IndexDirectory.ReadSegment(reader.ReadMessage());
+                    break;
+                case (TagKeyRunsSingle, ProtoWireType.Varint):
+                    single = checked((long)reader.ReadVarint());
+                    break;
+                default:
+                    reader.SkipField(wire);
+                    break;
+            }
+        }
+
+        return component >= 0 && region is { } held ? (component, held, single) : null;
     }
 
     private static (int, IndexSegment)? Directory(ProtoReader reader)

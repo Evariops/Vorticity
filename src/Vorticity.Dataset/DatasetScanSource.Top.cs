@@ -281,7 +281,7 @@ internal sealed partial class DatasetScanSource
     /// </summary>
     private async ValueTask<Granules?> GranulesAsync(PositionedObject held, int field, bool descending, CancellationToken cancellationToken)
     {
-        (Indexes.GranuleStats?[] stats, _) = await _dataset.ReadGranuleStatsAsync(held.Entry, [field], [], cancellationToken).ConfigureAwait(false);
+        (Indexes.GranuleStats?[] stats, _, _) = await _dataset.ReadGranuleStatsAsync(held.Entry, [field], [], [], cancellationToken).ConfigureAwait(false);
         if (stats[0] is not { Measure: { } kind } granules || granules.TotalRows != held.Entry.Rows)
         {
             return null;

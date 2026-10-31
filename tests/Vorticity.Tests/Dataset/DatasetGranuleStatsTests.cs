@@ -89,7 +89,7 @@ public sealed partial class DatasetGranuleStatsTests
             objects++;
             store.Reset();
             int[] fields = [.. Enumerable.Range(0, 7)];
-            (GranuleStats?[] stats, _) = await dataset.ReadGranuleStatsAsync(held.Entry, fields, [], Ct);
+            (GranuleStats?[] stats, _, _) = await dataset.ReadGranuleStatsAsync(held.Entry, fields, [], [], Ct);
             ColumnLocate?[] locates = await dataset.ReadLocatesAsync(held.Entry, fields, Ct);
             GranuleStats cut = stats[0]!;
             Console.WriteLine($"OBJECT: {held.Entry.Rows} rows, {cut.Count} granules, {store.Requests} requests for every column's statistics and locates");

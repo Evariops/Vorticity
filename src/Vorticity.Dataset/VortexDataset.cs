@@ -3395,36 +3395,51 @@ public sealed class VortexDataset : IAsyncDisposable
     /// (<see cref="Indexes.GranuleStats"/>), and the histograms of those of them <paramref name="histogrammed"/> names
     /// (<see cref="Indexes.GranuleHistograms"/>), by their position in <paramref name="fields"/>, read with no open of the
     /// object: the regions its entry's table of contents names, side by side in one round trip, none once this handle read
-    /// them. A column the object keeps none of has none.
+    /// them. A column the object keeps none of has none. With them, the values the key's components
+    /// <paramref name="components"/> take in each granule (<see cref="Indexes.GranuleKeyRuns"/>), by their position there.
     /// </summary>
-    internal async ValueTask<(Indexes.GranuleStats?[] Stats, Indexes.GranuleHistograms?[] Histograms)> ReadGranuleStatsAsync(
-        ObjectEntry entry, IReadOnlyList<int> fields, IReadOnlyList<int> histogrammed, CancellationToken cancellationToken)
+    internal async ValueTask<(Indexes.GranuleStats?[] Stats, Indexes.GranuleHistograms?[] Histograms, Indexes.GranuleKeyRuns?[] Runs)> ReadGranuleStatsAsync(
+        ObjectEntry entry, IReadOnlyList<int> fields, IReadOnlyList<int> histogrammed, IReadOnlyList<int> components, CancellationToken cancellationToken)
     {
         Indexes.GranuleStats?[] columns = new Indexes.GranuleStats?[fields.Count];
         Indexes.GranuleHistograms?[] histograms = new Indexes.GranuleHistograms?[fields.Count];
+        Indexes.GranuleKeyRuns?[] runs = components.Count == 0 ? [] : new Indexes.GranuleKeyRuns?[components.Count];
         if (entry.Contents is not { GranuleStats.Count: > 0 } contents)
         {
-            return (columns, histograms);
+            return (columns, histograms, runs);
         }
 
-        // A column's statistics at an even position, its histograms at the odd one after.
-        object?[] read = new object?[2 * fields.Count];
+        // A column's statistics at a position a multiple of three, its histograms at the one after, a component's values at
+        // the one after that.
+        int slots = Math.Max(fields.Count, components.Count);
+        object?[] read = new object?[3 * slots];
         Indexes.IndexSegment?[] regions = new Indexes.IndexSegment?[read.Length];
         for (int i = 0; i < fields.Count; i++)
         {
-            regions[2 * i] = contents.GranuleStatsOf(fields[i]);
-            regions[(2 * i) + 1] = Contains(histogrammed, fields[i]) ? contents.GranuleHistogramsOf(fields[i]) : null;
+            regions[3 * i] = contents.GranuleStatsOf(fields[i]);
+            regions[(3 * i) + 1] = Contains(histogrammed, fields[i]) ? contents.GranuleHistogramsOf(fields[i]) : null;
         }
 
-        await ReadSynopsesAsync(entry, contents, regions, read, static (position, bytes) => (position & 1) == 0 ? Granules(bytes) : Histograms(bytes), cancellationToken)
+        for (int i = 0; i < components.Count; i++)
+        {
+            regions[(3 * i) + 2] = contents.KeyRunsOf(components[i])?.Region;
+        }
+
+        await ReadSynopsesAsync(
+            entry, contents, regions, read, static (position, bytes) => (position % 3) switch { 0 => Granules(bytes), 1 => Histograms(bytes), _ => Runs(bytes) }, cancellationToken)
             .ConfigureAwait(false);
         for (int i = 0; i < fields.Count; i++)
         {
-            columns[i] = read[2 * i] as Indexes.GranuleStats;
-            histograms[i] = read[(2 * i) + 1] as Indexes.GranuleHistograms;
+            columns[i] = read[3 * i] as Indexes.GranuleStats;
+            histograms[i] = read[(3 * i) + 1] as Indexes.GranuleHistograms;
         }
 
-        return (columns, histograms);
+        for (int i = 0; i < components.Count; i++)
+        {
+            runs[i] = read[(3 * i) + 2] as Indexes.GranuleKeyRuns;
+        }
+
+        return (columns, histograms, runs);
 
         static (object Synopsis, long Bytes) Granules(ReadOnlySpan<byte> bytes)
         {
@@ -3438,6 +3453,13 @@ public sealed class VortexDataset : IAsyncDisposable
             Indexes.GranuleHistograms histograms = Indexes.GranuleHistograms.From(bytes)
                 ?? throw new VortexFormatException("A measure's histograms over an object's granules do not decode as histograms.");
             return (histograms, histograms.Bytes);
+        }
+
+        static (object Synopsis, long Bytes) Runs(ReadOnlySpan<byte> bytes)
+        {
+            Indexes.GranuleKeyRuns runs = Indexes.GranuleKeyRuns.From(bytes)
+                ?? throw new VortexFormatException("A key's values over an object's granules do not decode as values.");
+            return (runs, runs.Bytes);
         }
 
         static bool Contains(IReadOnlyList<int> fields, int field)
