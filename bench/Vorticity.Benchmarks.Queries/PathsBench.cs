@@ -247,7 +247,7 @@ internal static partial class PathsBench
         {
             foreach (Built? built in new[] { requests, logs, spans, logs2 })
             {
-                if (built is not null)
+                if (built is not null && built.Directory.Length > 0)
                 {
                     Console.WriteLine($"  {built.Directory}");
                     await EntriesAsync(built.Directory);
@@ -405,6 +405,26 @@ internal static partial class PathsBench
                 $"contents {entry.TableOfContents.Length / 1e6:F2} MB: {contents.Rows:N0} rows, {contents.GranuleStats.Count} columns of granule statistics, " +
                 $"schema {contents.Schema.Length} B");
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"    {entry.Key}: {entry.Rows:N0} rows, entry {bytes / 1e6:F2} MB, {parts}"));
+            if (entry.Contents is { } held2)
+            {
+                // Each column's synopses by their bytes: its counts, its statistics over the granules, where its values lie;
+                // the rows of the granules that list its values, and those of the granules of one run of the key's prefix.
+                Vorticity.Types.DType schema = dataset.Snapshot.Schema.DType;
+                for (int field = 0; field < schema.FieldCount; field++)
+                {
+                    long counts = held2.CountsOf(field)?.Length ?? 0;
+                    long stats = held2.GranuleStatsOf(field)?.Length ?? 0;
+                    long locate = held2.LocateOf(field)?.Length ?? 0;
+                    if (counts + stats + locate > 0)
+                    {
+                        Console.WriteLine(string.Create(
+                            CultureInfo.InvariantCulture,
+                            $"      {schema.GetFieldName(field),-12} counts {counts,11:N0} B, granule statistics {stats,11:N0} B, locate {locate,11:N0} B, listed rows {held2.ListedRowsOf(field) / (double)entry.Rows:P0}"));
+                    }
+                }
+
+                Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"      rows of granules of one run of the key's prefix {held2.PureGranuleRows / (double)entry.Rows:P1}"));
+            }
         }
 
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"    {total / 1e6:F2} MB of entries"));
