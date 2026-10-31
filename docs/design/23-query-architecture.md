@@ -330,6 +330,14 @@ core *(computed)*. This is the design's largest saving of processor time, and it
 the order of the rows meeting execution on encoded data. Each phase keeps it: a partial read of a run-end column yields
 runs, and a filter hands ranges of rows, not one verdict a row, to what follows it.
 
+A column that a question reads only through functions of it, the hour of an instant that keys a group, is not read at
+all where its zones settle it: a zone whose exact bounds every such function sends to one value gives that value to each
+of its rows, and a split whose zones all do takes a constant, or a run a zone, in place of the column. The functions are
+floors, non-decreasing, so one image at both bounds is the image of every value between them. A file's chunk is read
+whole, so there a zone gives its value only when every zone of its chunk does; a dataset's object, read by its granules,
+takes them zone by zone. Under the idiom, at about 8,800 rows an emitter-hour against zones of 8,192, some 45 % of the
+rows lie in a zone of one hour *(computed)*.
+
 ### 6.2 Predicates evaluated in the encoded domain
 
 A comparison with a constant, a range, or a set is answered by the encoding itself where it can be:
@@ -340,8 +348,8 @@ A comparison with a constant, a range, or a set is answered by the encoding itse
 | frame of reference | subtracts the reference from the constant, then as bit-packing; a constant outside the chunk's range settles every row | ~0.82 | ~0.15 |
 | ALP | encodes the constant with the chunk's exponents, compares the integers, handles exceptions apart | ~0.8 to 1.2 | ~0.2 |
 | sequence | intersects the progression with the range: two bounds a chunk | ~0.45 | constant |
-| sparse | judges the fill once and the present values only | 0.15 + 3.2 per present value | 0.28 + ~7 per present value *(measured)* |
-| run-end, dictionary, constant | once per run, per value, per chunk | — | already so |
+| sparse | judges the fill once and the present values only | 0.15 + 3.2 per present value | ~10 per present value *(measured)* |
+| run-end, dictionary, constant | once per run, per value, per chunk, the verdicts spread over the rows by ranges | — | already so |
 | FSST | equality and prefixes on the compressed codes; containment by an automaton over the symbols | 14.7 to 17.6 for a containment | 10.4 to 11.5 when few rows hold the pattern *(measured)* |
 
 The decode costs are measured on one core ([benchmarks-x64.md](../guide/benchmarks-x64.md), decoding per encoding:
@@ -352,6 +360,12 @@ the corpus of its encoding. The measured figures are the best of short runs on o
 kernel at 5 and 45 bits, a sparse column of two million integers at 0.1 % to 50 % present
 (`vortex-queries --micro sparsejudge`), and a containment on a million URLs of 51 bytes, which costs about what
 decompressing and searching does when a tenth of the rows hold the pattern or more.
+
+A count under a filter offers it to the encoding the same way and counts the answer's bits a word at a time, decoding no
+value: over 32.7 M requests, a count of one region takes 1.65 ms where decoding and counting took 8.4, one method 3.1
+where it took 23 *(measured)*. A filter on a key of a variant column read as a string or an integer is offered to the
+key's typed column, in the chunks that shred it as that column alone: its encoding answers over the chunk, a row
+without the key unknown, and a count of 42.9 M log records by one key takes 11 to 28 ms where it took 17 to 58.
 
 ### 6.3 Two passes, and late materialization
 
@@ -567,15 +581,14 @@ Where the code stops short of this design, measured or known:
 - **Bytes of a filtered read.** The planner prices the rows of a filter that the sparse key index does not narrow from
   their columns' whole bytes, and a second pass reads whole a chunk worth less than a request, as the profile prices it,
   where the model counts its granules: a row found by an identifier takes 0.3 to 0.75 MB where the model says 0.3 to 0.4.
-- **Exact sets.** The granules a filter keeps whole come from the zone maps' proofs and the granule statistics alone; the
-  locating indexes and the postings give the granules a row may lie in.
-- **A filtered count** decodes its columns and counts, where a scan pushes its predicates to the encodings.
-- **Sparse columns** cost about 7 ns a present value, against 3.2 in the model.
+- **Sparse columns** cost about 10 ns a present value, against 3.2 in the model: half of it decodes the positions and
+  the values, which judging the values in their own encoding would spare.
 - **Object dictionaries** are one per object, never one per run of chunks, and leave floats to ALP.
 - **Exchanges** gather partials on the coordinator; shuffles by hash buckets and broadcasts are specified, not built, and
   an idle node takes no part from another.
-- **Top lists** under an order correlated with the key decode 8 blocks of about 30 for the top ten, against about 3 in
-  the model.
+- **Top lists** read late: a top ten under a key that spreads the best over nine granules of 74 decodes those nine and
+  one more to find them, then the nine again to take the rows; a projection of the order's column alone could take them
+  from the first pass.
 - **Views** that an application chooses, a joint precomputation of several columns, a degraded history and derived
   datasets, are specified and built when an application asks for them.
 - **The memory of jobs** is reserved from an estimate, its inputs' rows and open chunks and its writer's targets, not
