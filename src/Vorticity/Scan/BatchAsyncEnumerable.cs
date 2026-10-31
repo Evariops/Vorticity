@@ -1947,7 +1947,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     private PushPlan? _pushPlan;
 
     /// <summary>A filter no encoding answers.</summary>
-    private static readonly PushPlan NoPush = new PushPlan(null!, null!);
+    internal static readonly PushPlan NoPush = new PushPlan(null!, null!);
 
     /// <summary>The most members of an <c>IN</c> offered to an encoding: past them, a hash of the decoded rows.</summary>
     private const int MostPushedMembers = 4_096;
@@ -1981,7 +1981,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     }
 
     /// <summary>The predicate <paramref name="filter"/> offers an encoding, or <see cref="NoPush"/>.</summary>
-    private static PushPlan PlanPush(VortexExpr? filter)
+    internal static PushPlan PlanPush(VortexExpr? filter)
     {
         switch (filter)
         {
@@ -2047,7 +2047,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     }
 
     /// <summary>A predicate an encoding may answer, on a top-level field.</summary>
-    private sealed class PushPlan(FieldExpr field, Compute.EncodedPredicate predicate)
+    internal sealed class PushPlan(FieldExpr field, Compute.EncodedPredicate predicate)
     {
         /// <summary>The field.</summary>
         internal FieldExpr Field { get; } = field;
@@ -2129,7 +2129,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     /// A row is selected by its own bit, true and valid; the bits are read a word at a time, see
     /// <see cref="RowIndices.FromBits"/>.
     /// </remarks>
-    private static int Selected(ScanContext context, int answer, Span<int> into)
+    internal static int Selected(ScanContext context, int answer, Span<int> into)
     {
         CanonicalArena arena = context.Canonical;
         CanonicalNode node = arena.GetNode(answer);

@@ -298,13 +298,21 @@ internal sealed class TerminalScan
         return verdict.IsNoneTrue;
     }
 
-    /// <summary>The third tier: one decode, one evaluation, one count, no copy.</summary>
+    /// <summary>
+    /// The third tier: the filter offered to its column's encoding, which answers with the rows it keeps, as a scan offers it;
+    /// else one decode, one evaluation, one count, no copy.
+    /// </summary>
     private async ValueTask<long> DecodeAndCountAsync(
         ScanContext context, Decodes decodes, RowRange split, byte[] states, CancellationToken cancellationToken)
     {
+        if (Pushable() is { } pushable && await PushedCountAsync(context, decodes, split, pushable, cancellationToken).ConfigureAwait(false) is long pushed)
+        {
+            return pushed;
+        }
+
         try
         {
-            int root = await ReadAndExecuteAsync(context, decodes, split, cancellationToken).ConfigureAwait(false);
+            int root = await ReadAndExecuteAsync(context, decodes, split, _mask, cancellationToken).ConfigureAwait(false);
             return CountTrue(context, root, states, split.Start);
         }
         finally
@@ -315,15 +323,109 @@ internal sealed class TerminalScan
     }
 
     /// <summary>
+    /// The predicate the count offers its column's encoding, as a scan's batches do (<see cref="BatchAsyncEnumerator.PlanPush"/>):
+    /// none under a take, whose own selection owns the row space, nor with rows left out, nor once an encoding declined.
+    /// </summary>
+    private BatchAsyncEnumerator.PushPlan? Pushable()
+    {
+        if ((_tiers & TerminalTiers.Encoded) == 0 || _take is not null || _excluded is not null || _pushDeclined)
+        {
+            return null;
+        }
+
+        BatchAsyncEnumerator.PushPlan plan = _pushPlan ??= BatchAsyncEnumerator.PlanPush(_evaluator?.Filter);
+        return ReferenceEquals(plan, BatchAsyncEnumerator.NoPush) ? null : plan;
+    }
+
+    // The predicate offered to an encoding, worked out at the first split; whether an encoding declined it, after which no
+    // split offers it again, the one column it decoded for nothing read once.
+    private BatchAsyncEnumerator.PushPlan? _pushPlan;
+    private bool _pushDeclined;
+
+    /// <summary>
+    /// The rows of <paramref name="split"/> the filter keeps, as its column's encoding answers them over its own values, the
+    /// column read alone and not decoded: a filtered count decoded its columns, then evaluated the filter over them. Null
+    /// when the encoding declined, which no split asks again.
+    /// </summary>
+    private async ValueTask<long?> PushedCountAsync(
+        ScanContext context, Decodes decodes, RowRange split, BatchAsyncEnumerator.PushPlan pushable, CancellationToken cancellationToken)
+    {
+        byte[] name = pushable.Field.SegmentsUtf8[0];
+        DType root = _tree.Root.DType;
+        int field = root.Kind == DTypeKind.Struct ? root.IndexOfField(name) : -1;
+        if (field < 0 || !_mask.Includes(field))
+        {
+            _pushDeclined = true;
+            return null;
+        }
+
+        FieldMask only = FieldMask.Single(field);
+        (byte[]? Field, EncodedPredicate? Predicate) saved = context.ExchangePushedPredicate(name, pushable.Predicate);
+        try
+        {
+            int answer = await ReadAndExecuteAsync(context, decodes, split, only, cancellationToken, answered: true).ConfigureAwait(false);
+            if (!context.PredicateAnswered)
+            {
+                _pushDeclined = true;
+                return null;
+            }
+
+            context.PredicateAnswered = false;
+            return Kept(context, answer);
+        }
+        finally
+        {
+            context.ExchangePushedPredicate(saved.Field, saved.Predicate);
+            context.ResetBatch();
+        }
+    }
+
+    /// <summary>
+    /// How many rows an encoding's answer keeps: its true bits, counted a word at a time when every row is known; the rows
+    /// selected by their own bit, true and valid, otherwise.
+    /// </summary>
+    private static long Kept(ScanContext context, int answer)
+    {
+        CanonicalArena arena = context.Canonical;
+        CanonicalNode node = arena.GetNode(answer);
+        if (node.Kind == CanonicalKind.Struct)
+        {
+            node = arena.GetNode(node.GetFieldIndex(0));
+        }
+
+        Arrays.Decoders.Canonical.ValidityMask valid = Arrays.Decoders.Canonical.ValidityMask.From(arena, node.Validity);
+        if (valid.AllInvalid)
+        {
+            return 0;
+        }
+
+        if (valid.AllValid)
+        {
+            return Arrays.Decoders.Canonical.BitmapKernels.CountSet(node.Bits.Span, node.BitOffset, node.Length);
+        }
+
+        int[] kept = ArrayPool<int>.Shared.Rent(Math.Max(node.Length, 1));
+        try
+        {
+            return BatchAsyncEnumerator.Selected(context, answer, kept);
+        }
+        finally
+        {
+            ArrayPool<int>.Shared.Return(kept);
+        }
+    }
+
+    /// <summary>
     /// Reads a split, the segments an earlier split read already served from what the terminal
-    /// holds, and executes it; its blocks count as decoded when a column of it is in canonical form.
+    /// holds, and executes it over the columns of <paramref name="mask"/>; its blocks count as decoded when a column of it is
+    /// in canonical form, unless its column's encoding <paramref name="answered"/> a predicate offered it.
     /// </summary>
     private async ValueTask<int> ReadAndExecuteAsync(
-        ScanContext context, Decodes decodes, RowRange split, CancellationToken cancellationToken)
+        ScanContext context, Decodes decodes, RowRange split, FieldMask mask, CancellationToken cancellationToken, bool answered = false)
     {
         long batch = decodes.Next++;
         SplitExecution.Window(context, decodes.Plan, split);
-        SplitExecution.Register(context, _tree, in _mask, split, _take);
+        SplitExecution.Register(context, _tree, in mask, split, _take);
         VortexFile.FillFromTail(_file.Segments, context.Segments);
         decodes.Held.Claim(context.Segments, batch, waiter: null);
         try
@@ -346,8 +448,8 @@ internal sealed class TerminalScan
         decodes.Held.Publish(context.Segments, batch);
         decodes.Held.Release(batch);
         ScanCounters.Served(_metrics, context.Segments);
-        int root = SplitExecution.Execute(context, _tree, in _mask, split, _take);
-        if (_metrics is not null && ScanCounters.Decoded(context.Canonical, root))
+        int root = SplitExecution.Execute(context, _tree, in mask, split, _take);
+        if (_metrics is not null && !(answered && context.PredicateAnswered) && ScanCounters.Decoded(context.Canonical, root))
         {
             _metrics.AddBlocksDecoded(decodes.Decoded.Add(split, _take, decodes.Live));
         }
@@ -731,7 +833,7 @@ internal sealed class TerminalScan
     {
         try
         {
-            int root = await ReadAndExecuteAsync(context, decodes, split, cancellationToken).ConfigureAwait(false);
+            int root = await ReadAndExecuteAsync(context, decodes, split, _mask, cancellationToken).ConfigureAwait(false);
             return Extreme(context, root, field, wantMin, states, indices);
         }
         finally

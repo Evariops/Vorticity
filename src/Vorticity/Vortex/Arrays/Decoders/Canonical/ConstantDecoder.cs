@@ -47,16 +47,41 @@ internal sealed class ConstantDecoder : ArrayDecoder
     /// <inheritdoc/>
     public override bool EvaluatesWithoutFullDecode => true;
 
-    /// <summary>A predicate on a constant of integers, the question it asks of the one value; anything else declines.</summary>
+    /// <summary>
+    /// A predicate on a constant of integers, the question it asks of the one value; on any other, the value judged once as
+    /// a column of one row (<see cref="Compute.ValueVerdicts"/>), a match of bytes on no text declining.
+    /// </summary>
     /// <inheritdoc/>
     public override bool TryEvaluate(
         ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, Compute.EncodedPredicate predicate,
         ref Compute.PredicateBits bits)
     {
         ArgumentNullException.ThrowIfNull(context);
-        return dtype.Kind == DTypeKind.Primitive && dtype.PType.IsInteger()
-            && Compute.IntegerQuestion.TryOf(predicate, dtype.PType, out Compute.IntegerQuestion question)
-            && TryEvaluateIntegers(context, in node, dtype, length, in question, ref bits);
+        if (dtype.Kind == DTypeKind.Primitive && dtype.PType.IsInteger()
+            && Compute.IntegerQuestion.TryOf(predicate, dtype.PType, out Compute.IntegerQuestion question))
+        {
+            return TryEvaluateIntegers(context, in node, dtype, length, in question, ref bits);
+        }
+
+        ArrayDecodeContext.RequireBufferCount(node.BufferCount, 1, Id);
+        TypedScalar scalar = TypedScalarReader.Read(node.GetBuffer(0).Span, dtype, context.Scalars, context.Types);
+        int value = ConstantCanonicalizer.Build(context, dtype, 1, in scalar);
+        Span<byte> verdict = stackalloc byte[2];
+        if (!Compute.ValueVerdicts.TryJudge(context.Canonical, value, predicate, verdict[..1], verdict[1..]))
+        {
+            return false;
+        }
+
+        if (verdict[0] == Compute.Trilean.Unknown)
+        {
+            bits.FillUnknown();
+        }
+        else
+        {
+            bits.Fill(verdict[0] == Compute.Trilean.True);
+        }
+
+        return true;
     }
 
     /// <summary>The one value judged once, its verdict every row's; a null one leaves every row unknown.</summary>

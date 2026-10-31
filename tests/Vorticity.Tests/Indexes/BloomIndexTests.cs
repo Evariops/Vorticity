@@ -445,8 +445,10 @@ public sealed class BloomIndexTests
             await written.File.ScanBuilder().Where(Parse($"key = {present}")).WithMetrics(on).CountAsync(ct),
             await written.File.ScanBuilder().Where(Parse($"key = {present}")).WithMetrics(off).WithIndexes(false).CountAsync(ct));
 
-        // With the filters, a handful of filter segments against a full decode of every block.
-        Assert.True(on.ValuesDecoded < off.ValuesDecoded / 8, $"{on.ValuesDecoded} decoded against {off.ValuesDecoded}");
+        // With the filters, every block but a handful ruled out; without them, none is, every block read and its encoding
+        // answering the comparison.
+        Assert.True(on.BlocksPruned >= Blocks - 2, $"{on.BlocksPruned} blocks of {Blocks} ruled out");
+        Assert.Equal(0, off.BlocksPruned);
     }
 
     // ------------------------------------------------------------------------------ oracle
