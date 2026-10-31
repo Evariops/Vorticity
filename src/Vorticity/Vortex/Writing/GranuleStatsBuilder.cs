@@ -40,13 +40,15 @@ internal sealed class GranuleStatsBuilder : IndexBuilder
     private long[] _ownValues = [];
     private byte[] _ownValid = [];
 
-    // The rows taken; the open granule's first row and nulls; the granules closed, and those that list their values.
+    // The rows taken; the open granule's first row and nulls; the granules closed, those that list their values, and the
+    // rows of those that hold one value, or nulls alone.
     private long _row;
     private long _granuleStart;
     private long _granuleNulls;
     private int _granules;
     private int _listing;
     private long _listedRows;
+    private long _singleRows;
 
     // Whether each part still holds: every row numbered, every batch of the measure read.
     private bool _values = true;
@@ -411,6 +413,11 @@ internal sealed class GranuleStatsBuilder : IndexBuilder
                 _listedRows += rows;
             }
 
+            if (met.Length + (_granuleNulls > 0 ? 1 : 0) <= 1)
+            {
+                _singleRows += rows;
+            }
+
             Span<long> counted = listed <= 64 ? stackalloc long[listed] : new long[listed];
             for (int i = 0; i < met.Length; i++)
             {
@@ -451,12 +458,13 @@ internal sealed class GranuleStatsBuilder : IndexBuilder
     /// <summary>
     /// The statistics, once every one of the file's <paramref name="rows"/> is in, the measure's histograms over the
     /// granules (<see cref="GranuleHistograms"/>) for a measure the plan reads, and the rows of the granules that list their
-    /// values (<see cref="ObjectContents.ListedRows"/>), 0 with no values' part: null for a column that keeps neither part.
+    /// values (<see cref="ObjectContents.ListedRows"/>) and of those that hold one value (<see cref="ObjectContents.SingleRows"/>), 0
+    /// with no values' part: null for a column that keeps neither part.
     /// The values' part needs every value's bytes, which its dictionary keeps, and a granule that lists them: past
     /// <see cref="GranuleStats.ListedValues"/> in every granule, it answers nothing and is not written. The measure's is the
     /// plan's verdict, asked once every column's counts settled it.
     /// </summary>
-    internal (byte[] Statistics, byte[]? Histograms, long ListedRows)? Finish(long rows)
+    internal (byte[] Statistics, byte[]? Histograms, long ListedRows, long SingleRows)? Finish(long rows)
     {
         End();
         _measured = _measured && (_own is not null || _plan.Measures[_measure].Live);
@@ -491,7 +499,7 @@ internal sealed class GranuleStatsBuilder : IndexBuilder
                 GranuleStats.WriteDictionary(ref writer, values);
             }
 
-            return (writer.WrittenSpan.ToArray(), _measured && _histogram is not null ? Histograms() : null, values is null ? 0 : _listedRows);
+            return (writer.WrittenSpan.ToArray(), _measured && _histogram is not null ? Histograms() : null, values is null ? 0 : _listedRows, values is null ? 0 : _singleRows);
         }
         finally
         {

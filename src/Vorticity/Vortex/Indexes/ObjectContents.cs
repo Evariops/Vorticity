@@ -235,6 +235,20 @@ internal sealed class ObjectContents(
     internal long ListedRowsOf(int field) => (uint)field < (uint)ListedRows.Count ? ListedRows[field] : 0;
 
     /// <summary>
+    /// The rows of the object's granules where each top-level column holds one value, or nulls alone, as their statistics list
+    /// them, by the column's place: those where the column does not vary, which a question that crosses it with another
+    /// answers from the other's statistics. Empty when the object does not say; 0 for a column whose statistics list none,
+    /// or that varies in every granule.
+    /// </summary>
+    internal IReadOnlyList<long> SingleRows { get; init; } = [];
+
+    /// <summary>Whether the object says, column by column, the rows of the granules where each holds one value (<see cref="SingleRows"/>).</summary>
+    internal bool CountsSingleRows => SingleRows.Count > 0;
+
+    /// <summary>The rows of the granules where column <paramref name="field"/> holds one value (<see cref="SingleRows"/>).</summary>
+    internal long SingleRowsOf(int field) => (uint)field < (uint)SingleRows.Count ? SingleRows[field] : 0;
+
+    /// <summary>
     /// What each column's counts carry (<see cref="Counts"/>), by its field: the fields of the measures their records hold,
     /// and whether a budget left values out, counted as one group of the others. Empty when the object does not say.
     /// </summary>
@@ -310,6 +324,7 @@ internal sealed class ObjectContents(
             ColumnClasses = ColumnClasses,
             PureGranuleRows = PureGranuleRows,
             ListedRows = ListedRows,
+            SingleRows = SingleRows,
             Carried = Carried,
             Marks = Marks,
             Dictionaries = Dictionaries,
@@ -420,6 +435,9 @@ internal sealed class ObjectContents(
 
     // The rows of the granules whose statistics list each top-level column's values, packed, by the column's place.
     private const int TagListedRows = 32;
+
+    // The rows of the granules where each top-level column holds one value, packed, by the column's place.
+    private const int TagSingleRows = 34;
 
     // What a column's counts carry: its field, the fields of their measures, packed, and whether they leave values out.
     private const int TagCarried = 33;
@@ -709,6 +727,15 @@ internal sealed class ObjectContents(
                 }
             }
 
+            if (SingleRows.Count > 0)
+            {
+                using ProtoWriter.MessageScope message = writer.BeginMessage(TagSingleRows);
+                foreach (long rows in SingleRows)
+                {
+                    writer.WriteVarint((ulong)rows);
+                }
+            }
+
             foreach ((int field, int[] measures, bool leavesOut) in Carried)
             {
                 using ProtoWriter.MessageScope message = writer.BeginMessage(TagCarried);
@@ -786,6 +813,7 @@ internal sealed class ObjectContents(
             List<uint> columnClasses = [];
             long pureGranuleRows = -1;
             List<long> listedRows = [];
+            List<long> singleRows = [];
             List<(int, int[], bool)> carried = [];
             List<IndexSegment> marks = [];
             List<(int Field, ColumnDictionary Dictionary)> dictionaries = [];
@@ -928,6 +956,14 @@ internal sealed class ObjectContents(
                         }
 
                         break;
+                    case (TagSingleRows, ProtoWireType.LengthDelimited):
+                        ProtoReader singles = reader.ReadMessage();
+                        while (!singles.End)
+                        {
+                            singleRows.Add(checked((long)singles.ReadVarint()));
+                        }
+
+                        break;
                     case (TagLocate, ProtoWireType.LengthDelimited):
                         if (Directory(reader.ReadMessage()) is not { } lying)
                         {
@@ -993,6 +1029,7 @@ internal sealed class ObjectContents(
                     ColumnClasses = [.. columnClasses],
                     PureGranuleRows = pureGranuleRows,
                     ListedRows = listedRows,
+                    SingleRows = singleRows,
                     Carried = carried,
                     Marks = marks.Count == directories.Count ? marks : [],
                     Dictionaries = Placed(dictionaries, directories.Count),

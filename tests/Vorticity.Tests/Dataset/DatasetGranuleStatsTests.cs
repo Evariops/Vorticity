@@ -134,7 +134,15 @@ public sealed partial class DatasetGranuleStatsTests
                     ? Enumerable.Range(0, cut.Count).Where(g => column.Distinct![g] <= GranuleStats.ListedValues).Sum(g => cut.Rows[g])
                     : 0;
                 Assert.Equal(listing, contents.ListedRowsOf(field));
+
+                // And those of the granules where it holds one value, or nulls alone.
+                long single = column.HoldsValueLists
+                    ? Enumerable.Range(0, cut.Count).Where(g => column.Distinct![g] + (column.Nulls[g] > 0 ? 1 : 0) <= 1).Sum(g => cut.Rows[g])
+                    : 0;
+                Assert.Equal(single, contents.SingleRowsOf(field));
             }
+
+            Assert.True(contents.CountsSingleRows);
 
             for (int field = 0; field < fields.Length; field++)
             {

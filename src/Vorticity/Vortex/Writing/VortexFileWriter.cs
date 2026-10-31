@@ -226,7 +226,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         IndexSegment? keyIndex, IndexSegment? keyPages, SliceChunks chunks, IndexSegment[] directories, List<(int Field, IndexSegment Region)> pathDirectories, ChunkPaging? paging,
         List<(int Field, IndexSegment Region)> sheets, List<(int Field, IndexSegment Region)> counts, List<(int Field, int[] Measures, bool LeavesOut)> carried,
         List<(int Field, IndexSegment Region)> sketches,
-        List<(int Field, IndexSegment Region)> granuleStats, long[] listed, List<(int Field, IndexSegment Region)> granuleHistograms, List<(int Field, IndexSegment Region)> locates,
+        List<(int Field, IndexSegment Region)> granuleStats, long[] listed, long[] single, List<(int Field, IndexSegment Region)> granuleHistograms, List<(int Field, IndexSegment Region)> locates,
         List<(int Field, string Key, Types.Variants.PathClass Class, IndexSegment Region)> pathLocates,
         long[] columnBytes, long[] columnChunks, IndexSegment[] marks, ColumnDictionary?[] dictionaries) =>
         new ObjectContents(Types.Serialization.DTypeFlatBuffers.Serialize(_schema), chunks.Encodings, _rowCount, directories, pathDirectories)
@@ -247,6 +247,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             ColumnClasses = ColumnClasses(),
             PureGranuleRows = granuleStats.Count > 0 ? PureGranuleRows() : -1,
             ListedRows = listed,
+            SingleRows = single,
             Marks = marks,
             Dictionaries = dictionaries,
         };
@@ -2571,6 +2572,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             List<(int Field, IndexSegment Region)> sketches = [];
             List<(int Field, IndexSegment Region)> stated = [];
             long[] listed = [];
+            long[] single = [];
             List<(int Field, IndexSegment Region)> histogrammed = [];
             List<(int Field, IndexSegment Region)> locates = [];
             List<(int Field, string Key, Types.Variants.PathClass Class, IndexSegment Region)> pathLocates = [];
@@ -2615,6 +2617,12 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                         {
                             Array.Resize(ref listed, _fieldCount);
                             listed[field] = finished.ListedRows;
+                        }
+
+                        if (finished.SingleRows > 0)
+                        {
+                            Array.Resize(ref single, _fieldCount);
+                            single[field] = finished.SingleRows;
                         }
 
                         stated.Add((field, await closed.AddColumnRegionAsync(
@@ -2741,7 +2749,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             if (_carriesContents)
             {
                 _contents = Contents(
-                    keyIndex, keyPages, chunks!, chunkDirectories, pathDirectories, paging, sheets, counts, carried, sketches, stated, listed, histogrammed, locates, pathLocates, closed.ColumnBytes(_isTabular ? _fieldCount : 0), ColumnChunks(), marks, dictionaries);
+                    keyIndex, keyPages, chunks!, chunkDirectories, pathDirectories, paging, sheets, counts, carried, sketches, stated, listed, single, histogrammed, locates, pathLocates, closed.ColumnBytes(_isTabular ? _fieldCount : 0), ColumnChunks(), marks, dictionaries);
             }
 
             // The block statistics of the shredded keys, where they can prune, within what the budget leaves.

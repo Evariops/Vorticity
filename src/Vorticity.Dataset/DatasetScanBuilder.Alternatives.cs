@@ -291,14 +291,14 @@ internal sealed partial class DatasetScanBuilder
         {
             // Under a value of an identifier left out, the places its postings give it, in two round trips cold: the index's
             // directory or entries, then its page or runs.
-            (PathCosts.Cost statistics, PathCosts.Cost unanswered, _) = Scan.GranuleAnswer()!.Costs(unit.Held);
+            (PathCosts.Cost statistics, PathCosts.Cost unanswered, _) = Scan.GranuleAnswer()!.Costs(unit.Held, unit.Kept);
             PathCosts.Cost placing = Scan.GranuleAnswer()!.Exclusion is null ? default : new PathCosts.Cost(2, 0);
             return statistics + unanswered + placing + Scan.SheetsCost(unit.Held);
         }
 
         internal override string Describe(Planned unit, PathCosts.Cost cost)
         {
-            (PathCosts.Cost statistics, PathCosts.Cost unanswered, _) = Scan.GranuleAnswer()!.Costs(unit.Held);
+            (PathCosts.Cost statistics, PathCosts.Cost unanswered, _) = Scan.GranuleAnswer()!.Costs(unit.Held, unit.Kept);
             return $"the statistics over the granules of {Scan.GranuleAnswer()!.Fields.Length} columns, {statistics.Bytes} bytes in {statistics.Requests} requests, "
                 + $"and the rows of the granules they do not answer, about {unanswered.Bytes} bytes in {unanswered.Requests}"
                 + (Scan.GranuleAnswer()!.Exclusion is { } exclusion ? $", those its postings place a value of {exclusion.Path} in among them" : string.Empty);

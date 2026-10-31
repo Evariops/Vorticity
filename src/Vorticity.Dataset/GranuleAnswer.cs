@@ -349,13 +349,14 @@ internal sealed class GranuleAnswer
     /// <summary>
     /// Whether the granules of the object <paramref name="held"/> may answer: the version's columns in their places, and
     /// statistics of every column a key or a measure reads; a granule that holds a row a delete marked, which its statistics
-    /// still count, is read as rows (<see cref="Settle"/>). And
-    /// whether a granule of it may hold one group, as the granules follow the key's first column: of the columns of the keys,
-    /// themselves and not a function of them, and of a filter the object's summaries do not prove true, those other than
-    /// the first, and than a key's column they prove constant, may vary in a granule: at most one under a question of
-    /// counts, none under one of measures. Past that, every granule would be read as rows after its statistics, a request
-    /// for nothing. A function of a column, a truncation, holds one group over a granule whose extremes it sends to one. What
-    /// they cost against the rows, the scan's choice weighs (<see cref="Costs"/>).
+    /// still count, is read as rows (<see cref="Settle"/>). And whether some granule of it may hold one group, at most one
+    /// of the question's columns varying there under a question of counts, none under one of measures: judged granule by
+    /// granule from what the object says each column holds (<see cref="ObjectContents.SingleRows"/>), or, for an object
+    /// that does not say, from its summaries, the columns of the keys, themselves and not a function of them, and of a filter
+    /// they do not prove true, other than the key's first and than those they prove constant, taken to vary in every
+    /// granule. Past that, every granule would be read as rows after its statistics, a request for nothing. A function of a
+    /// column, a truncation, holds one group over a granule whose extremes it sends to one. What they cost against the rows,
+    /// the scan's choice weighs (<see cref="Costs"/>).
     /// </summary>
     internal bool Covers(in PositionedObject held) => Declines(held) is null;
 
@@ -368,10 +369,12 @@ internal sealed class GranuleAnswer
             return entry.Contents is { GranuleStats.Count: > 0 } ? "its columns are an earlier schema's" : "it keeps no statistics over its granules";
         }
 
-        // The keys first, which decide most questions with no look at the filter.
+        // An object that does not say what each column holds granule by granule is judged by its summaries: the keys first,
+        // which decide most questions with no look at the filter.
         ObjectSummaries summaries = held.Summaries(_schema);
+        bool judged = contents.CountsSingleRows;
         int free = 0;
-        foreach ((int field, FieldExpr key) in _keys)
+        foreach ((int field, FieldExpr key) in judged ? [] : _keys)
         {
             if (Array.IndexOf(_prefixed, field) < 0 && key is ColumnFieldExpr && CountsAnswer.ConstantOf(summaries, _schema.Columns[field].Name, key) is null)
             {
@@ -386,7 +389,7 @@ internal sealed class GranuleAnswer
         }
 
         int[] fields = Fields;
-        if (_filter is { } filter && !filter.MustMatch(summaries.Columns, entry.PhysicalRows))
+        if (!judged && _filter is { } filter && !filter.MustMatch(summaries.Columns, entry.PhysicalRows))
         {
             foreach (int field in _filtered)
             {
@@ -425,9 +428,13 @@ internal sealed class GranuleAnswer
     /// What the object <paramref name="held"/> costs through its granules' statistics and their indexes, then through the rows of
     /// the granules they would not answer, as their share of the object's rows estimates them (<see cref="Unanswered"/>), and
     /// through the rows of the question's columns alone (<see cref="PathCosts"/>). Under a value of an identifier left out, the
-    /// rows of a granule left are read under the whole filter, the identifier's column with the others.
+    /// rows of a granule left are read under the whole filter, the identifier's column with the others. Of the
+    /// <paramref name="kept"/> share of its rows the key's sparse index keeps, when it is known: the granules it refutes, their
+    /// statistics refute too, and those it keeps leave as many unanswered as the object's do. A route's pods, under a key of
+    /// the service and the route, were priced at the eighth of the object whose routes vary in a granule, where the five
+    /// granules of the route leave two.
     /// </summary>
-    internal (PathCosts.Cost Statistics, PathCosts.Cost Unanswered, PathCosts.Cost Rows) Costs(in PositionedObject held)
+    internal (PathCosts.Cost Statistics, PathCosts.Cost Unanswered, PathCosts.Cost Rows) Costs(in PositionedObject held, double kept = 1)
     {
         ObjectContents contents = held.Entry.Contents!;
         int[] fields = Fields;
@@ -444,11 +451,14 @@ internal sealed class GranuleAnswer
         }
 
         int[] read = _excluding is { } excluding ? excluding.ReadOf(fields) : fields;
-        return (_costs.Regions(held.Entry.Uid, regions), _costs.Share(held.Entry, read, Unanswered(held, edges: true)), _costs.Rows(held.Entry, read));
+        double unanswered = Unanswered(held, edges: true) * Math.Clamp(kept, 0, 1);
+        return (_costs.Regions(held.Entry.Uid, regions), _costs.Share(held.Entry, read, unanswered), _costs.Rows(held.Entry, read));
     }
 
     /// <summary>
     /// The share of the rows of the object <paramref name="held"/> whose granules its statistics are not expected to answer:
+    /// those where more of the question's columns vary than a granule's statistics answer, from what the object says each
+    /// column holds granule by granule (<see cref="Varying"/>); for an object that does not say,
     /// those of the granules that hold several values of the key's first column or of the granule value
     /// (<see cref="ObjectContents.PureGranuleRows"/>), short runs gathered, unless the question would answer such a granule too,
     /// every column it keys or filters but one, under counts alone, constant over the object, and then those of the granules
@@ -471,7 +481,11 @@ internal sealed class GranuleAnswer
         _ = Fields;
         bool proven = _filter is not { } filter || filter.MustMatch(summaries.Columns, entry.PhysicalRows);
         double share = 0;
-        if (entry.Contents is { PureGranuleRows: >= 0 } contents)
+        if (entry.Contents is { CountsSingleRows: true } columns)
+        {
+            share = Varying(held, summaries, columns, proven);
+        }
+        else if (entry.Contents is { PureGranuleRows: >= 0 } contents)
         {
             // In a granule of several runs, the first column varies, and so does every key and filtered column the object's
             // summaries do not hold constant. One column that varies, under counts alone, answers where its values are
@@ -536,6 +550,80 @@ internal sealed class GranuleAnswer
         }
 
         return Math.Min(1, share);
+    }
+
+    /// <summary>
+    /// The share of the rows of the object <paramref name="held"/> in the granules where more of the question's columns vary
+    /// than their statistics answer, from the rows of the granules where each column holds one value
+    /// (<see cref="ObjectContents.SingleRows"/>): a column of a key, or of a filter its summaries do not prove true, varies in
+    /// the others, unless the summaries hold it constant over the object; a function of a column, a truncation, varies where
+    /// the column does and its groups change (<see cref="FunctionVaries"/>). Under counts alone, one column may vary in a
+    /// granule that lists its values, its rows counted value by value: the largest share a listed column varies in is taken
+    /// off. The columns are taken to vary in granules apart, their shares added: a bound, which a sort key that holds them
+    /// together makes loose, never short.
+    /// </summary>
+    private double Varying(in PositionedObject held, ObjectSummaries summaries, ObjectContents contents, bool proven)
+    {
+        double rows = held.Entry.PhysicalRows;
+        double total = 0;
+        double listed = 0;
+        foreach ((int field, FieldExpr key) in _keys)
+        {
+            if (CountsAnswer.ConstantOf(summaries, _schema.Columns[field].Name, key) is not null)
+            {
+                continue;
+            }
+
+            double varies = 1 - Math.Clamp(contents.SingleRowsOf(field) / rows, 0, 1);
+            if (key is FunctionFieldExpr function)
+            {
+                total += Math.Min(varies, FunctionVaries(summaries, field, function, contents, rows));
+                continue;
+            }
+
+            total += varies;
+            listed = Math.Max(listed, Math.Min(varies, Math.Clamp(contents.ListedRowsOf(field) / rows, 0, 1)));
+        }
+
+        foreach (int field in proven ? [] : _filtered)
+        {
+            if (!Keyed(field) && Array.IndexOf(_ranged, field) < 0)
+            {
+                double varies = 1 - Math.Clamp(contents.SingleRowsOf(field) / rows, 0, 1);
+                total += varies;
+                listed = Math.Max(listed, Math.Min(varies, Math.Clamp(contents.ListedRowsOf(field) / rows, 0, 1)));
+            }
+        }
+
+        return Math.Clamp(total - (CountsOnly ? listed : 0), 0, 1);
+    }
+
+    /// <summary>
+    /// The share of the rows of an object of <paramref name="rows"/> rows in the granules where the groups of
+    /// <paramref name="key"/>, a function of column <paramref name="field"/>, change: counted between the column's extremes
+    /// for a column the object holds in order (<see cref="Changing"/>); under a key whose indexed prefix holds a function of
+    /// the column, those outside the granules of one run of the prefix (<see cref="ObjectContents.PureGranuleRows"/>), whose
+    /// values of the column lie within one group of that function; every granule otherwise.
+    /// </summary>
+    private double FunctionVaries(ObjectSummaries summaries, int field, FunctionFieldExpr key, ObjectContents contents, double rows)
+    {
+        if (InOrder(summaries, field))
+        {
+            return Changing(summaries, field, key, (long)rows);
+        }
+
+        if (contents.PureGranuleRows >= 0 && _schema.Layout is { } layout)
+        {
+            for (int c = 0; c < layout.Components.Count && c < layout.Prefix; c++)
+            {
+                if (layout.Components[c] is { Function: not null, Read: null } component && component.Field == field)
+                {
+                    return 1 - Math.Clamp(contents.PureGranuleRows / rows, 0, 1);
+                }
+            }
+        }
+
+        return 1;
     }
 
     /// <summary>

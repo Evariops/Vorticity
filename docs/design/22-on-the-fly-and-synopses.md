@@ -487,9 +487,11 @@ The price a question announces before a read (`CostAsync`, and the threshold of 
   granule that holds one value of each key and filtered column may answer; one that gathers short runs
   varies in the key's first component, and answers only a question of counts where one column varies.
   Each object says in its table of contents how many of its rows lie in granules that list a column's
-  values, which its writer counts as it writes them; the rest is read as rows. A window on a column of the
-  key, unproven by the object's summaries, cuts the granules at its bounds, which the price takes whole.
-  An object none of whose granules would answer is read as rows, without its statistics.
+  values, and in granules where it holds one value, which its writer counts as it writes them: the price
+  adds the share of rows where each of the question's columns varies, a listed one taken off under counts,
+  a bound, over the share the key's sparse index keeps; the rest is read as rows. A window on a column of
+  the key, unproven by the object's summaries, cuts the granules at its bounds, which the price takes
+  whole. An object none of whose granules would answer is read as rows, without its statistics.
 - **the sort key's index**: the share of the object's rows its sparse index keeps under the filter,
   priced as granules of each column read, when the index is held, or read through the open an analysis
   makes anyway.
