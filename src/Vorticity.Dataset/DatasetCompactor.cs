@@ -949,14 +949,21 @@ internal static partial class DatasetCompactor
     /// <remarks>
     /// What a value's rows hold is the same whatever order they come in, so each input is counted apart, side by side on the
     /// session's lanes, and the counts of a value are its inputs' added up (<see cref="PathCensus.Merge"/>): a merge of the
-    /// inputs counted every row on one thread, and took a fifth of a tier merge of log records.
+    /// inputs counted every row on one thread, and took a fifth of a tier merge of log records. An input's counts are added
+    /// to its values' once it and the inputs before it are counted, in the inputs' order whatever the lanes' pace, and its
+    /// censuses go back to <see cref="Censuses"/> for the next input to count in: what the job holds is its values' keys,
+    /// where every input's census, kept to the end, made the job's keys as many times over as it has inputs.
     /// </remarks>
     private static async ValueTask<IReadOnlyList<ValueShredding>> PlanValuesAsync(
         VortexDataset dataset, DatasetSchema schema, CompactionJob job, CancellationToken cancellationToken)
     {
         int[] variants = VariantColumns(schema.DType);
         ValueCut? values = schema.Cut;
-        List<ValueCount>[] counts = new List<ValueCount>[job.Inputs.Count];
+        int textBound = dataset.Options.Write.StringBoundBytes;
+        List<ValueCount>?[] counts = new List<ValueCount>?[job.Inputs.Count];
+        List<(byte[] First, PathCensus[] Paths)> added = [];
+        int next = 0;
+        Lock gate = new Lock();
 
         // Each lane reserves what it holds as it counts an input, the first whether the budget grants it or not: a window of
         // the input's rows decoded, and a slice of a wide shredding.
@@ -977,27 +984,24 @@ internal static partial class DatasetCompactor
             CancellationToken = cancellationToken,
         };
         await Parallel.ForAsync(0, job.Inputs.Count, lanes, async (input, token) =>
-            counts[input] = await CountAsync(dataset, schema, job, input, variants, token).ConfigureAwait(false)).ConfigureAwait(false);
-
-        // The values in the key's order, the partition leading it; each the counts of the inputs that hold it, added up.
-        List<ValueCount> all = [.. counts.SelectMany(static held => held)];
-        all.Sort(static (left, right) => left.First.AsSpan().SequenceCompareTo(right.First) is var order and not 0 ? order : left.Input.CompareTo(right.Input));
-        List<PathCensus[]> censuses = [];
-        byte[]? first = null;
-        foreach (ValueCount count in all)
         {
-            if (censuses.Count == 0 || (values is not null && !values.Same(first, count.First)))
+            List<ValueCount> counted = await CountAsync(dataset, schema, job, input, variants, token).ConfigureAwait(false);
+            lock (gate)
             {
-                censuses.Add(count.Paths);
-                first = count.First;
-                continue;
+                counts[input] = counted;
+                for (; next < counts.Length && counts[next] is { } ready; counts[next++] = null)
+                {
+                    foreach (ValueCount count in ready)
+                    {
+                        Add(count);
+                    }
+                }
             }
+        }).ConfigureAwait(false);
 
-            for (int v = 0; v < variants.Length; v++)
-            {
-                censuses[^1][v].Merge(count.Paths[v]);
-            }
-        }
+        // The values in the key's order, the partition leading it: each a range of keys, which any of its first keys places.
+        added.Sort(static (left, right) => left.First.AsSpan().SequenceCompareTo(right.First));
+        List<PathCensus[]> censuses = [.. added.Select(static value => value.Paths)];
 
         List<ValueShredding> shreddings = new List<ValueShredding>(censuses.Count);
         foreach (PathCensus[] paths in censuses)
@@ -1018,6 +1022,84 @@ internal static partial class DatasetCompactor
         }
 
         return shreddings;
+
+        // An input's counts of a value added to its value's, censuses of their own, and given back for the next input.
+        void Add(ValueCount count)
+        {
+            int at = added.Count - 1;
+            while (at >= 0 && values is not null && !values.Same(added[at].First, count.First))
+            {
+                at--;
+            }
+
+            if (at < 0)
+            {
+                added.Add((count.First, [.. variants.Select(_ => new PathCensus(textBound))]));
+                at = added.Count - 1;
+            }
+
+            for (int v = 0; v < variants.Length; v++)
+            {
+                added[at].Paths[v].Merge(count.Paths[v]);
+            }
+
+            Censuses.Return(count.Paths);
+        }
+    }
+
+    /// <summary>
+    /// The censuses a job's first pass counts its inputs in (<see cref="PlanValuesAsync"/>), kept from one input to the next
+    /// and from one job to the next with their trees of paths: a census an input, its tree as large as the input's keys, was
+    /// made new for every input and kept to the job's end, 1.4 bytes a row of a consolidation of S1's logs. At most
+    /// <see cref="Most"/> are kept, each of at most twice <see cref="PathCensus.MaxKeys"/> keys.
+    /// </summary>
+    private static class Censuses
+    {
+        private const int Most = 32;
+        private static readonly Lock Gate = new Lock();
+        private static readonly Stack<PathCensus> Kept = new Stack<PathCensus>();
+
+        /// <summary>A census of each of <paramref name="columns"/> variant columns, text bounds cut to <paramref name="textBound"/> bytes, counting nothing.</summary>
+        internal static PathCensus[] Rent(int columns, int textBound)
+        {
+            PathCensus[] censuses = new PathCensus[columns];
+            for (int c = 0; c < columns; c++)
+            {
+                PathCensus? kept = null;
+                lock (Gate)
+                {
+                    if (Kept.Count > 0 && Kept.Peek().StringBoundBytes == textBound)
+                    {
+                        kept = Kept.Pop();
+                    }
+                }
+
+                censuses[c] = kept ?? new PathCensus(textBound);
+            }
+
+            return censuses;
+        }
+
+        /// <summary>Takes <paramref name="censuses"/> back, cleared, those the pool has room for.</summary>
+        internal static void Return(PathCensus[] censuses)
+        {
+            foreach (PathCensus census in censuses)
+            {
+                if (census.HeldKeys > 2 * PathCensus.MaxKeys)
+                {
+                    continue;
+                }
+
+                census.Clear();
+                lock (Gate)
+                {
+                    if (Kept.Count < Most)
+                    {
+                        Kept.Push(census);
+                    }
+                }
+            }
+        }
     }
 
     /// <summary>
@@ -1034,7 +1116,7 @@ internal static partial class DatasetCompactor
         List<ValueCount> counts = [];
         if (values is null || values.HoldsOne(held))
         {
-            PathCensus[] paths = [.. variants.Select(_ => new PathCensus(textBound))];
+            PathCensus[] paths = Censuses.Rent(variants.Length, textBound);
             ObjectLease lease = await dataset.RentAsync(held.Entry, cancellationToken).ConfigureAwait(false);
             await using (lease.ConfigureAwait(false))
             {
@@ -1051,6 +1133,10 @@ internal static partial class DatasetCompactor
             if (paths[0].Rows > 0)
             {
                 counts.Add(new ValueCount(held.Key.Span[..^VortexDataset.UidBytes].ToArray(), input, paths));
+            }
+            else
+            {
+                Censuses.Return(paths);
             }
 
             return counts;
@@ -1070,7 +1156,7 @@ internal static partial class DatasetCompactor
                     // A value starts the input's rows, or follows the last counted where the key's value changes.
                     if (counts.Count == 0 || !values.Same(last, merge.KeyAt(at)))
                     {
-                        counts.Add(new ValueCount(merge.KeyAt(at).ToArray(), input, [.. variants.Select(_ => new PathCensus(textBound))]));
+                        counts.Add(new ValueCount(merge.KeyAt(at).ToArray(), input, Censuses.Rent(variants.Length, textBound)));
                     }
 
                     end = values.EndOfValue(merge, at, run.RowCount);

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using System.Text;
 
 namespace Vorticity.Types.Variants;
@@ -52,8 +53,10 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
     /// </summary>
     internal const int MaxKeys = 16_384;
 
-    // The keys counted so far, every depth together.
+    // The keys counted so far, every depth together; and the counts the tree holds, those of rows counted before a Clear
+    // included.
     private int _keyCount;
+    private int _held;
 
     /// <summary>The bytes a text bound keeps; 0 for none.</summary>
     internal int StringBoundBytes { get; } = stringBoundBytes;
@@ -73,8 +76,28 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
     /// <summary>The bytes of the rows' values, as the residual would hold them unshredded.</summary>
     internal long ValueBytes { get; private set; }
 
+    /// <summary>The counts of keys the census's tree holds, those of the rows counted before a <see cref="Clear"/> included.</summary>
+    internal int HeldKeys => _held;
+
     /// <summary>Counts a null row.</summary>
     internal void AddNull() => Rows++;
+
+    /// <summary>
+    /// Forgets every row counted and keeps its tree of paths for the next rows: a key met again counts from nothing, as
+    /// one met for the first time does, its name and its keys' kept; one not met again counts nothing, which
+    /// <see cref="Merge"/> passes over. A job's first pass counts its inputs one after the other in the census of a lane,
+    /// whose tree, made new for every input, was a few hundred bytes a key.
+    /// </summary>
+    internal void Clear()
+    {
+        Rows = 0;
+        ValueBytes = 0;
+        Partial = false;
+        _keyCount = 0;
+        _metadataLength = -1;
+        _epoch++;
+        Root.Clear();
+    }
 
     /// <summary>
     /// Counts every row of the variant column <paramref name="field"/> of <paramref name="batch"/>'s root
@@ -295,6 +318,37 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
         /// <summary>Whether a text that cut to <see cref="MaxText"/> was longer, in which case it bounds nothing from above.</summary>
         internal bool MaxTextCut => _maxTextCut;
 
+        /// <summary>These counts and those of every key below, back to none, the keys and the buffers kept (<see cref="PathCensus.Clear"/>).</summary>
+        internal void Clear()
+        {
+            Values = 0;
+            OtherKeys = 0;
+            Array.Clear(_classes);
+            Array.Clear(_read);
+            _minInteger = long.MaxValue;
+            _maxInteger = long.MinValue;
+            _minDouble = double.PositiveInfinity;
+            _maxDouble = double.NegativeInfinity;
+            _nans = false;
+            _minTime = long.MaxValue;
+            _maxTime = long.MinValue;
+            _false = false;
+            _true = false;
+            _spanCount = 0;
+            _minTextLength = -1;
+            _maxTextLength = -1;
+            _maxTextCut = false;
+            _keptIds = 0;
+            _byIdEpoch = -1;
+            if (_keys is { } keys)
+            {
+                foreach (PathCount key in keys.Values)
+                {
+                    key.Clear();
+                }
+            }
+        }
+
         internal void Add(PathCensus census, in VariantDictionary dictionary, ReadOnlySpan<byte> value, int depth)
         {
             Values++;
@@ -346,6 +400,20 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
                                 else
                                 {
                                     _keys[new string(name)] = key = new PathCount();
+                                    census._keyCount++;
+                                    census._held++;
+                                }
+                            }
+                            else if (key.Values == 0)
+                            {
+                                // A key the tree kept from rows counted before a Clear: new to these rows, met for the
+                                // first time.
+                                if (census._keyCount >= MaxKeys)
+                                {
+                                    key = Uncounted;
+                                }
+                                else
+                                {
                                     census._keyCount++;
                                 }
                             }
@@ -443,7 +511,14 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
             _keys ??= new Dictionary<string, PathCount>(StringComparer.Ordinal);
             foreach ((string name, PathCount count) in keys)
             {
-                if (!_keys.TryGetValue(name, out PathCount? mine))
+                // A key the other's tree kept from rows it counted before a Clear, which its rows did not meet.
+                if (count.Values == 0)
+                {
+                    continue;
+                }
+
+                bool found = _keys.TryGetValue(name, out PathCount? mine);
+                if (!found || mine!.Values == 0)
                 {
                     // A key past the census's: its values go to its objects' other keys, as a count in order puts them.
                     if (census._keyCount >= MaxKeys)
@@ -453,11 +528,16 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
                         continue;
                     }
 
-                    _keys[name] = mine = new PathCount();
+                    if (!found)
+                    {
+                        _keys[name] = mine = new PathCount();
+                        census._held++;
+                    }
+
                     census._keyCount++;
                 }
 
-                mine.Merge(census, count);
+                mine!.Merge(census, count);
             }
         }
 
@@ -466,8 +546,7 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
         {
             if (!HasTextBounds)
             {
-                _minText = new byte[bound];
-                _maxText = new byte[bound];
+                Bounds(bound);
                 other.MinText.CopyTo(_minText);
                 other.MaxText.CopyTo(_maxText);
                 _minTextLength = other._minTextLength;
@@ -557,6 +636,17 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
             }
         }
 
+        /// <summary>The buffers of the text bounds, of <paramref name="bound"/> bytes: those a cleared count kept, or new.</summary>
+        [MemberNotNull(nameof(_minText), nameof(_maxText))]
+        private void Bounds(int bound)
+        {
+            if (_minText?.Length != bound || _maxText?.Length != bound)
+            {
+                _minText = new byte[bound];
+                _maxText = new byte[bound];
+            }
+        }
+
         /// <summary>Widens the text bounds by <paramref name="text"/>, cut to <paramref name="bound"/> bytes.</summary>
         private void Text(ReadOnlySpan<byte> text, int bound)
         {
@@ -564,8 +654,7 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
             bool longer = text.Length > bound;
             if (_minTextLength < 0)
             {
-                _minText = new byte[bound];
-                _maxText = new byte[bound];
+                Bounds(bound);
                 cut.CopyTo(_minText);
                 cut.CopyTo(_maxText);
                 _minTextLength = _maxTextLength = cut.Length;
