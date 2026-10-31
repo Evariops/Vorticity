@@ -1,6 +1,7 @@
 using System;
 using System.Buffers;
 using System.Collections.Generic;
+using Vorticity.Aggregating;
 
 namespace Vorticity.RowEncoding;
 
@@ -12,8 +13,8 @@ namespace Vorticity.RowEncoding;
 /// <remarks>
 /// Not a durable format: the byte layout may change between Vortex releases, so these bytes are
 /// comparable only among keys produced by one version and never in a persisted index. The three
-/// buffers come from <see cref="ArrayPool{T}"/>, and <see cref="Dispose"/> returns them and
-/// invalidates every span handed out.
+/// buffers are rented, from the shared array pool or past a mebibyte from the process's shelf, and
+/// <see cref="Dispose"/> returns them and invalidates every span handed out.
 /// </remarks>
 public sealed class RowKeys : IEncodedKeys
 {
@@ -96,18 +97,18 @@ public sealed class RowKeys : IEncodedKeys
             return;
         }
 
-        ulong[] prefixes = ArrayPool<ulong>.Shared.Rent(indices.Length);
-        ulong[] spare = ArrayPool<ulong>.Shared.Rent(indices.Length);
-        int[] places = ArrayPool<int>.Shared.Rent(indices.Length);
+        ulong[] prefixes = WorkArrays.Rent<ulong>(indices.Length);
+        ulong[] spare = WorkArrays.Rent<ulong>(indices.Length);
+        int[] places = WorkArrays.Rent<int>(indices.Length);
         try
         {
             Radix(indices, prefixes.AsSpan(0, indices.Length), spare.AsSpan(0, indices.Length), places.AsSpan(0, indices.Length), elements, 0);
         }
         finally
         {
-            ArrayPool<ulong>.Shared.Return(prefixes);
-            ArrayPool<ulong>.Shared.Return(spare);
-            ArrayPool<int>.Shared.Return(places);
+            WorkArrays.Return(prefixes);
+            WorkArrays.Return(spare);
+            WorkArrays.Return(places);
         }
     }
 
@@ -318,17 +319,17 @@ public sealed class RowKeys : IEncodedKeys
 
         if (elements is not null)
         {
-            ArrayPool<byte>.Shared.Return(elements);
+            WorkArrays.Return(elements);
         }
 
         if (offsets is not null)
         {
-            ArrayPool<int>.Shared.Return(offsets);
+            WorkArrays.Return(offsets);
         }
 
         if (sizes is not null)
         {
-            ArrayPool<int>.Shared.Return(sizes);
+            WorkArrays.Return(sizes);
         }
     }
 

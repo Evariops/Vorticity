@@ -532,7 +532,7 @@ public sealed class DatasetWriter
     /// <summary>The rows of a batch of several partitions, each partition's gathered in their order and copied to its store.</summary>
     private void Split(CanonicalArena arena, int root, int rows, RowKeys partitions)
     {
-        int[] order = ArrayPool<int>.Shared.Rent(rows);
+        int[] order = WorkArrays.Rent<int>(rows);
         try
         {
             for (int i = 0; i < rows; i++)
@@ -556,7 +556,7 @@ public sealed class DatasetWriter
         }
         finally
         {
-            ArrayPool<int>.Shared.Return(order);
+            WorkArrays.Return(order);
         }
     }
 
@@ -669,7 +669,7 @@ public sealed class DatasetWriter
                     all.Dispose();
                 }
 
-                order = ArrayPool<int>.Shared.Rent(rows);
+                order = WorkArrays.Rent<int>(rows);
                 for (int i = 0; i < rows; i++)
                 {
                     order[i] = i;
@@ -739,7 +739,7 @@ public sealed class DatasetWriter
             keys?.Dispose();
             if (order is not null)
             {
-                ArrayPool<int>.Shared.Return(order);
+                WorkArrays.Return(order);
             }
 
             arena.ResetKeepingBlocks();

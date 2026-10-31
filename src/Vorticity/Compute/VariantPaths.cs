@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
+using Vorticity.Aggregating;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Buffers;
@@ -392,8 +393,8 @@ internal sealed class VariantFieldExpr : FieldExpr
 
         int[] head = reads.Heads;
         head.AsSpan().Fill(-1);
-        Note[] notes = System.Buffers.ArrayPool<Note>.Shared.Rent(Math.Max(rows, 16));
-        int[] keyOfId = System.Buffers.ArrayPool<int>.Shared.Rent(64);
+        Note[] notes = WorkArrays.Rent<Note>(Math.Max(rows, 16));
+        int[] keyOfId = WorkArrays.Rent<int>(64);
         int noted = 0;
         try
         {
@@ -414,8 +415,8 @@ internal sealed class VariantFieldExpr : FieldExpr
                     ids = dictionary.Count;
                     if (ids > keyOfId.Length)
                     {
-                        System.Buffers.ArrayPool<int>.Shared.Return(keyOfId);
-                        keyOfId = System.Buffers.ArrayPool<int>.Shared.Rent(ids);
+                        WorkArrays.Return(keyOfId);
+                        keyOfId = WorkArrays.Rent<int>(ids);
                     }
 
                     for (int id = 0; id < ids; id++)
@@ -450,9 +451,9 @@ internal sealed class VariantFieldExpr : FieldExpr
 
                     if (noted == notes.Length)
                     {
-                        Note[] grown = System.Buffers.ArrayPool<Note>.Shared.Rent(notes.Length * 2);
+                        Note[] grown = WorkArrays.Rent<Note>(notes.Length * 2);
                         notes.AsSpan(0, noted).CopyTo(grown);
-                        System.Buffers.ArrayPool<Note>.Shared.Return(notes);
+                        WorkArrays.Return(notes);
                         notes = grown;
                     }
 
@@ -477,8 +478,8 @@ internal sealed class VariantFieldExpr : FieldExpr
         }
         finally
         {
-            System.Buffers.ArrayPool<Note>.Shared.Return(notes);
-            System.Buffers.ArrayPool<int>.Shared.Return(keyOfId);
+            WorkArrays.Return(notes);
+            WorkArrays.Return(keyOfId);
         }
     }
 

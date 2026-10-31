@@ -6,6 +6,7 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
 
+using Vorticity.Aggregating;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Buffers;
@@ -169,7 +170,7 @@ internal sealed class ShreddedVariant
         _top = 0;
         if (_scratch.Length == 0)
         {
-            _scratch = System.Buffers.ArrayPool<byte>.Shared.Rent(256);
+            _scratch = WorkArrays.Rent<byte>(256);
         }
     }
 
@@ -226,7 +227,7 @@ internal sealed class ShreddedVariant
     {
         if (_scratch.Length != 0)
         {
-            System.Buffers.ArrayPool<byte>.Shared.Return(_scratch);
+            WorkArrays.Return(_scratch);
         }
 
         _scratch = [];
@@ -894,11 +895,11 @@ internal sealed class ShreddedVariant
         int needed = checked(_used + bytes);
         if (needed > _scratch.Length)
         {
-            byte[] larger = System.Buffers.ArrayPool<byte>.Shared.Rent(Math.Max(needed, 2 * _scratch.Length));
+            byte[] larger = WorkArrays.Rent<byte>(Math.Max(needed, 2 * _scratch.Length));
             _scratch.AsSpan(0, _used).CopyTo(larger);
             if (_scratch.Length > 0)
             {
-                System.Buffers.ArrayPool<byte>.Shared.Return(_scratch);
+                WorkArrays.Return(_scratch);
             }
 
             _scratch = larger;

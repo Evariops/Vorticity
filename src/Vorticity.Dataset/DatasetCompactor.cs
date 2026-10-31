@@ -216,6 +216,11 @@ internal static partial class DatasetCompactor
         long reserved = 0;
         int atOnce = 1;
         long writer = WriterBytes(dataset, schema, shreddings);
+
+        // The writer's working arrays, its sheets, its counts, its compressors' trials, go back to the process's shelf between
+        // its chunks and its objects: the shelf keeps as many as the writer holds at once while the job runs, where its own
+        // budget let them go and the next chunk made them again (M7e).
+        ArrayShelf.Retained.Expect(writer);
         Provenance? provenance = null;
         Activity? writing = DatasetTelemetry.StartCompactionPass("write");
         try

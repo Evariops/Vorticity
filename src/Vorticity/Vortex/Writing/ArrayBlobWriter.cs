@@ -8,6 +8,7 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
 using ManagedCompressions.Zstd;
+using Vorticity.Aggregating;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Arrays.Decoders.Compressed;
@@ -128,7 +129,7 @@ internal static class ArrayBlobWriter
         // mean many small writes to a FileStream and a native view that is only memory through a
         // manager.
         int exact = checked((int)total);
-        byte[] bytes = ArrayPool<byte>.Shared.Rent(exact);
+        byte[] bytes = WorkArrays.Rent<byte>(exact);
         long cursor = 0;
         for (int i = 0; i < buffers.Count; i++)
         {
@@ -471,13 +472,13 @@ internal static class ArrayBlobWriter
         // written so that the blob's `finally` hands them back whatever happens next. The patches
         // are rented at the count the chooser priced and handed back once their buffers hold them.
         int packedBytes = PackedBytes(length, plan.BitWidth);
-        byte[] packed = ArrayPool<byte>.Shared.Rent(packedBytes);
+        byte[] packed = WorkArrays.Rent<byte>(packedBytes);
         Span<ushort> packedBuffer = stackalloc ushort[1];
         packedBuffer[0] = (ushort)Add(blob, new PendingBuffer(packed, packedBytes, Exponent(width), rented: true));
 
         int exceptions = checked((int)plan.Exceptions);
-        int[] patchIndices = exceptions == 0 ? [] : ArrayPool<int>.Shared.Rent(exceptions);
-        ulong[] patchValues = exceptions == 0 ? [] : ArrayPool<ulong>.Shared.Rent(exceptions);
+        int[] patchIndices = exceptions == 0 ? [] : WorkArrays.Rent<int>(exceptions);
+        ulong[] patchValues = exceptions == 0 ? [] : WorkArrays.Rent<ulong>(exceptions);
         Span<int> children = stackalloc int[3];
         int childCount = 0;
         PatchesMetadata patches = default;
@@ -501,8 +502,8 @@ internal static class ArrayBlobWriter
         {
             if (patched)
             {
-                ArrayPool<int>.Shared.Return(patchIndices);
-                ArrayPool<ulong>.Shared.Return(patchValues);
+                WorkArrays.Return(patchIndices);
+                WorkArrays.Return(patchValues);
             }
         }
 
@@ -521,7 +522,7 @@ internal static class ArrayBlobWriter
     private static PendingBuffer LittleEndian(ReadOnlySpan<ulong> values, int width)
     {
         int length = values.Length * width;
-        byte[] bytes = ArrayPool<byte>.Shared.Rent(length);
+        byte[] bytes = WorkArrays.Rent<byte>(length);
         for (int i = 0; i < values.Length; i++)
         {
             Span<byte> destination = bytes.AsSpan(i * width, width);
@@ -565,14 +566,14 @@ internal static class ArrayBlobWriter
         int[] indices = new int[exceptions];
         ulong[] values = new ulong[exceptions];
         int bytes = PackedBytes(node.Length, plan.BitWidth);
-        byte[] packed = ArrayPool<byte>.Shared.Rent(bytes);
+        byte[] packed = WorkArrays.Rent<byte>(bytes);
         try
         {
             Pack(arena, node, plan, node.PType, node.Length, packed.AsSpan(0, bytes), indices, values);
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(packed);
+            WorkArrays.Return(packed);
         }
 
         return (indices, values);
@@ -682,7 +683,7 @@ internal static class ArrayBlobWriter
         T largest = patching ? T.CreateTruncating((1UL << bitWidth) - 1) : T.AllBitsSet;
 
         // One block of the element's own type, rented once for the column.
-        T[] rented = ArrayPool<T>.Shared.Rent(FastLanes.BlockSize);
+        T[] rented = WorkArrays.Rent<T>(FastLanes.BlockSize);
         int found = 0;
         try
         {
@@ -726,7 +727,7 @@ internal static class ArrayBlobWriter
         }
         finally
         {
-            ArrayPool<T>.Shared.Return(rented);
+            WorkArrays.Return(rented);
         }
 
         return found;
@@ -969,9 +970,9 @@ internal static class ArrayBlobWriter
         CanonicalNode node = arena.GetNode(nodeIndex);
         FsstSymbols table = plan.Table;
         int symbolBytes = table.Count * 8;
-        byte[] symbols = ArrayPool<byte>.Shared.Rent(symbolBytes);
+        byte[] symbols = WorkArrays.Rent<byte>(symbolBytes);
         int symbolBuffer = Add(blob, new PendingBuffer(symbols, symbolBytes, Exponent(8), rented: true));
-        byte[] symbolLengths = ArrayPool<byte>.Shared.Rent(table.Count);
+        byte[] symbolLengths = WorkArrays.Rent<byte>(table.Count);
         int lengthBuffer = Add(blob, new PendingBuffer(symbolLengths, table.Count, 0, rented: true));
         for (int i = 0; i < table.Count; i++)
         {
@@ -1387,7 +1388,7 @@ internal static class ArrayBlobWriter
 
         if (buffers == 0)
         {
-            ArrayPool<byte>.Shared.Return(data);
+            WorkArrays.Return(data);
         }
 
         Span<int> children = stackalloc int[1];
@@ -1442,7 +1443,7 @@ internal static class ArrayBlobWriter
         VortexBuffer lengths;
         try
         {
-            byte[] dictionary = ArrayPool<byte>.Shared.Rent(plan.DictionaryBytes);
+            byte[] dictionary = WorkArrays.Rent<byte>(plan.DictionaryBytes);
             plan.Dictionary.CopyTo(dictionary);
             dictionaryBuffer = Add(blob, new PendingBuffer(dictionary, plan.DictionaryBytes, Exponent(8), rented: true));
             dictionaryOffsetsPType = FsstPlan.IndexPType(plan.DictionaryOffsets[tokens]);
@@ -1505,7 +1506,7 @@ internal static class ArrayBlobWriter
         PType indicesPType = FsstPlan.IndexPType(rows - 1);
         int width = indicesPType.ByteWidth();
         VortexBuffer indices = arena.AllocateUninitialized(valid * width, width, out Span<byte> into);
-        int[] positions = ArrayPool<int>.Shared.Rent(Math.Max(valid, 1));
+        int[] positions = WorkArrays.Rent<int>(Math.Max(valid, 1));
         int values;
         try
         {
@@ -1548,7 +1549,7 @@ internal static class ArrayBlobWriter
         }
         finally
         {
-            ArrayPool<int>.Shared.Return(positions);
+            WorkArrays.Return(positions);
         }
 
         Span<int> children = stackalloc int[2];
@@ -1576,7 +1577,7 @@ internal static class ArrayBlobWriter
         ref ProtoWriter writer = ref blob.Metadata();
         ScalarProtobuf.WriteValue(ref writer, value);
         ReadOnlySpan<byte> scalar = writer.WrittenSpan;
-        byte[] bytes = ArrayPool<byte>.Shared.Rent(scalar.Length);
+        byte[] bytes = WorkArrays.Rent<byte>(scalar.Length);
         scalar.CopyTo(bytes);
         return Add(blob, new PendingBuffer(bytes, scalar.Length, alignmentExponent: 0, rented: true));
     }
@@ -1750,7 +1751,7 @@ internal static class ArrayBlobWriter
         // chooser handed over goes back to the pool rather than becoming a row vector of garbage.
         if (plan.CodesRented)
         {
-            ArrayPool<int>.Shared.Return(plan.Codes);
+            WorkArrays.Return(plan.Codes);
         }
         int valuesNode = WriteCompressed(blob, arena, values, encodings, cascade: Cascade.ValuesChild(owner));
 
@@ -1900,7 +1901,7 @@ internal static class ArrayBlobWriter
     {
         int width = ptype.ByteWidth();
         int length = values.Length * width;
-        byte[] bytes = ArrayPool<byte>.Shared.Rent(length);
+        byte[] bytes = WorkArrays.Rent<byte>(length);
         Span<ushort> indices = stackalloc ushort[1];
         indices[0] = (ushort)Add(blob, new PendingBuffer(bytes, length, Exponent(width), rented: true));
 
@@ -2014,7 +2015,7 @@ internal static class ArrayBlobWriter
         Span<byte> flat = bytes.Slice(bytes.Length - sizeof(uint) - flatLength, flatLength);
         int budget = VortexLimits.MaxFlatBufferTables;
         FlatBufferTable array = FlatBufferTable.Root(flat, ref budget);
-        int[] seen = ArrayPool<int>.Shared.Rent(64);
+        int[] seen = WorkArrays.Rent<int>(64);
         try
         {
             int count = 0;
@@ -2022,7 +2023,7 @@ internal static class ArrayBlobWriter
         }
         finally
         {
-            ArrayPool<int>.Shared.Return(seen);
+            WorkArrays.Return(seen);
         }
     }
 
@@ -2038,9 +2039,9 @@ internal static class ArrayBlobWriter
 
         if (count == seen.Length)
         {
-            int[] grown = ArrayPool<int>.Shared.Rent(count * 2);
+            int[] grown = WorkArrays.Rent<int>(count * 2);
             seen.AsSpan(0, count).CopyTo(grown);
-            ArrayPool<int>.Shared.Return(seen);
+            WorkArrays.Return(seen);
             seen = grown;
         }
 
@@ -2226,7 +2227,7 @@ internal static class ArrayBlobWriter
         // offsets stay monotone and the reader never looks at the bytes, because validity already
         // told it not to. The values are then gathered by `ViewHeap`, each view's start in the
         // heap being the row's offset.
-        int[] lengths = ArrayPool<int>.Shared.Rent(Math.Max(rows, 1));
+        int[] lengths = WorkArrays.Rent<int>(Math.Max(rows, 1));
         int[]? offsets = null;
         VortexBuffer offsetBuffer;
         PType offsetsPType;
@@ -2252,21 +2253,21 @@ internal static class ArrayBlobWriter
             // rental queued before the gather so that the blob's `finally` hands it back. The
             // offsets are copied into the arena at their own width and go back at once.
             int heapLength = (int)heapBytes;
-            byte[] heap = ArrayPool<byte>.Shared.Rent(heapLength + ViewHeap.Slack);
+            byte[] heap = WorkArrays.Rent<byte>(heapLength + ViewHeap.Slack);
             heapBuffer = Add(blob, new PendingBuffer(heap, heapLength, 0, rented: true));
             int width = offsetsPType.ByteWidth();
             offsetBuffer = arena.AllocateUninitialized((rows + 1) * width, width, out Span<byte> offsetBytes);
-            offsets = ArrayPool<int>.Shared.Rent(rows + 1);
+            offsets = WorkArrays.Rent<int>(rows + 1);
             ViewHeap.Gather(node, lengths.AsSpan(0, rows), heap, offsets.AsSpan(0, rows));
             offsets[rows] = heapLength;
             WriteIndices(offsets.AsSpan(0, rows + 1), width, offsetBytes);
         }
         finally
         {
-            ArrayPool<int>.Shared.Return(lengths);
+            WorkArrays.Return(lengths);
             if (offsets is not null)
             {
-                ArrayPool<int>.Shared.Return(offsets);
+                WorkArrays.Return(offsets);
             }
         }
 
@@ -2988,7 +2989,7 @@ internal static class ArrayBlobWriter
         {
             if (_bytes is not null)
             {
-                ArrayPool<byte>.Shared.Return(_bytes);
+                WorkArrays.Return(_bytes);
             }
         }
     }
@@ -3301,7 +3302,7 @@ internal static class ArrayBlobWriter
                 PendingBuffer pending = _buffers[i];
                 if (pending.IsView && pending.Length > 0)
                 {
-                    byte[] bytes = ArrayPool<byte>.Shared.Rent(pending.Length);
+                    byte[] bytes = WorkArrays.Rent<byte>(pending.Length);
                     pending.CopyTo(bytes.AsSpan(0, pending.Length));
                     _buffers[i] = new PendingBuffer(bytes, pending.Length, pending.AlignmentExponent, rented: true);
                 }
@@ -3315,7 +3316,7 @@ internal static class ArrayBlobWriter
             {
                 if (pending.Rented && pending.Bytes is byte[] rented)
                 {
-                    ArrayPool<byte>.Shared.Return(rented);
+                    WorkArrays.Return(rented);
                 }
             }
 

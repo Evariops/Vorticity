@@ -8,6 +8,7 @@ using System.Runtime.Intrinsics;
 using System.Runtime.Intrinsics.X86;
 
 using ManagedCompressions.Zstd;
+using Vorticity.Aggregating;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Arrays.Decoders.Compressed;
@@ -73,12 +74,12 @@ internal readonly struct ZstdPlan
     /// <summary>Hands <see cref="Data"/> and the frame table back to the pool, for a plan nobody wrote.</summary>
     internal void Release()
     {
-        ArrayPool<byte>.Shared.Return(Data);
+        WorkArrays.Return(Data);
         ReleaseFrames();
     }
 
     /// <summary>Hands the frame table back to the pool, once the frames are laid out and described.</summary>
-    internal void ReleaseFrames() => ArrayPool<int>.Shared.Return(_frames);
+    internal void ReleaseFrames() => WorkArrays.Return(_frames);
 
     /// <summary>
     /// Compresses a <c>VarBinView</c> or <c>Primitive</c> node's valid values, returning
@@ -131,8 +132,8 @@ internal readonly struct ZstdPlan
         // candidate that may lose. A block's frame ends where its values end, so the stream is cut
         // as it is laid out: its end and its values, per block, go into the frame table.
         int blocks = Blocks(rows, frameRows);
-        byte[] stream = ArrayPool<byte>.Shared.Rent((int)streamBytes + StreamSlack);
-        int[] frames = ArrayPool<int>.Shared.Rent(blocks * FrameFields);
+        byte[] stream = WorkArrays.Rent<byte>((int)streamBytes + StreamSlack);
+        int[] frames = WorkArrays.Rent<int>(blocks * FrameFields);
         try
         {
             LayViews(arena, node, stream, frames, blocks, frameRows);
@@ -142,7 +143,7 @@ internal readonly struct ZstdPlan
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(stream);
+            WorkArrays.Return(stream);
         }
     }
 
@@ -580,8 +581,8 @@ internal readonly struct ZstdPlan
         // longer than the rows this node owns, and a longer input is a different frame.
         bool allValid = node.Validity.IsAllValid;
         int blocks = Blocks(rows, frameRows);
-        byte[]? stream = allValid ? null : ArrayPool<byte>.Shared.Rent((rows * width) + CompactSlack);
-        int[] frames = ArrayPool<int>.Shared.Rent(Math.Max(blocks, 1) * FrameFields);
+        byte[]? stream = allValid ? null : WorkArrays.Rent<byte>((rows * width) + CompactSlack);
+        int[] frames = WorkArrays.Rent<int>(Math.Max(blocks, 1) * FrameFields);
         try
         {
             int valueCount = 0;
@@ -612,7 +613,7 @@ internal readonly struct ZstdPlan
 
             if (valueCount == 0)
             {
-                ArrayPool<int>.Shared.Return(frames);
+                WorkArrays.Return(frames);
                 return null;
             }
 
@@ -632,7 +633,7 @@ internal readonly struct ZstdPlan
         {
             if (stream is not null)
             {
-                ArrayPool<byte>.Shared.Return(stream);
+                WorkArrays.Return(stream);
             }
         }
     }
@@ -675,7 +676,7 @@ internal readonly struct ZstdPlan
             return CompressAcross(workspace, stream, frames, blocks, bound, canonicalSize, numerator, denominator);
         }
 
-        byte[] destination = ArrayPool<byte>.Shared.Rent(checked((int)bound));
+        byte[] destination = WorkArrays.Rent<byte>(checked((int)bound));
         bool kept = false;
         try
         {
@@ -720,8 +721,8 @@ internal readonly struct ZstdPlan
         {
             if (!kept)
             {
-                ArrayPool<byte>.Shared.Return(destination);
-                ArrayPool<int>.Shared.Return(frames);
+                WorkArrays.Return(destination);
+                WorkArrays.Return(frames);
             }
         }
     }
@@ -763,7 +764,7 @@ internal readonly struct ZstdPlan
             before = through;
         }
 
-        byte[] destination = ArrayPool<byte>.Shared.Rent(checked((int)bound));
+        byte[] destination = WorkArrays.Rent<byte>(checked((int)bound));
         bool kept = false;
         try
         {
@@ -805,8 +806,8 @@ internal readonly struct ZstdPlan
         {
             if (!kept)
             {
-                ArrayPool<byte>.Shared.Return(destination);
-                ArrayPool<int>.Shared.Return(frames);
+                WorkArrays.Return(destination);
+                WorkArrays.Return(frames);
             }
         }
     }

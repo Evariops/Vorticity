@@ -1,5 +1,6 @@
 using System;
 using System.Buffers;
+using Vorticity.Aggregating;
 using Vorticity.Arrays;
 
 namespace Vorticity.RowEncoding;
@@ -127,14 +128,14 @@ public static partial class RowEncoder
     {
         int rowCount = Validate(arena, columns, fields);
 
-        int[]? sizes = ArrayPool<int>.Shared.Rent(Math.Max(rowCount, 1));
-        int[]? offsets = ArrayPool<int>.Shared.Rent(Math.Max(rowCount, 1));
+        int[]? sizes = WorkArrays.Rent<int>(Math.Max(rowCount, 1));
+        int[]? offsets = WorkArrays.Rent<int>(Math.Max(rowCount, 1));
         byte[]? elements = null;
         try
         {
             int total = ComputeSizes(arena, columns, fields, sizes.AsSpan(0, rowCount));
             _ = ComputeOffsets(sizes.AsSpan(0, rowCount), offsets.AsSpan(0, rowCount));
-            elements = ArrayPool<byte>.Shared.Rent(Math.Max(total, 1));
+            elements = WorkArrays.Rent<byte>(Math.Max(total, 1));
 
             // Cursors start at zero and end as the per-row sizes, so one buffer serves as both the
             // output of pass 1 and the write cursor of pass 2.
@@ -152,17 +153,17 @@ public static partial class RowEncoder
         {
             if (elements is not null)
             {
-                ArrayPool<byte>.Shared.Return(elements);
+                WorkArrays.Return(elements);
             }
 
             if (offsets is not null)
             {
-                ArrayPool<int>.Shared.Return(offsets);
+                WorkArrays.Return(offsets);
             }
 
             if (sizes is not null)
             {
-                ArrayPool<int>.Shared.Return(sizes);
+                WorkArrays.Return(sizes);
             }
         }
     }

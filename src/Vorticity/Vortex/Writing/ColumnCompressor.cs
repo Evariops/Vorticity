@@ -4,6 +4,7 @@ using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Runtime.InteropServices;
+using Vorticity.Aggregating;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Editions;
@@ -282,13 +283,13 @@ internal readonly struct ColumnPlan
     {
         if (CodesRented)
         {
-            ArrayPool<int>.Shared.Return(Codes);
+            WorkArrays.Return(Codes);
         }
 
         if (RunsRented)
         {
-            ArrayPool<int>.Shared.Return(Gather);
-            ArrayPool<int>.Shared.Return(Codes);
+            WorkArrays.Return(Gather);
+            WorkArrays.Return(Codes);
         }
     }
 
@@ -416,8 +417,8 @@ internal static class ColumnCompressor
 
         // Each count stops before it writes a run past the ceiling, so the runs are rented to it, and given to the plan
         // that wins: a column of a million rows took two arrays of its rows to count, and two more of its runs to keep.
-        int[] runStarts = ArrayPool<int>.Shared.Rent(ceiling + 1);
-        int[] runEnds = ArrayPool<int>.Shared.Rent(ceiling + 1);
+        int[] runStarts = WorkArrays.Rent<int>(ceiling + 1);
+        int[] runEnds = WorkArrays.Rent<int>(ceiling + 1);
         int runCount = node.Kind == CanonicalKind.Bool && node.Validity.IsAllValid
             ? BitmapRuns(node.Bits.Span, node.BitOffset, length, ceiling, runStarts, runEnds)
             : FixedRuns(in node, length, ceiling, runStarts, runEnds, out int fixedRuns)
@@ -428,8 +429,8 @@ internal static class ColumnCompressor
 
         if (runCount > ceiling)
         {
-            ArrayPool<int>.Shared.Return(runStarts);
-            ArrayPool<int>.Shared.Return(runEnds);
+            WorkArrays.Return(runStarts);
+            WorkArrays.Return(runEnds);
             return ColumnPlan.Canonical;
         }
 
@@ -1416,10 +1417,10 @@ internal static class ColumnCompressor
         // fire, so allocating it would hand every column that considers a dictionary and refuses
         // one a full row vector to throw away.
         int capacity = BucketCount(length);
-        int[] buckets = ArrayPool<int>.Shared.Rent(capacity);
-        int[] chain = ArrayPool<int>.Shared.Rent(Math.Max(length, 1));
-        int[] firstRows = ArrayPool<int>.Shared.Rent(Math.Max(length, 1));
-        int[] codes = ArrayPool<int>.Shared.Rent(Math.Max(length, 1));
+        int[] buckets = WorkArrays.Rent<int>(capacity);
+        int[] chain = WorkArrays.Rent<int>(Math.Max(length, 1));
+        int[] firstRows = WorkArrays.Rent<int>(Math.Max(length, 1));
+        int[] codes = WorkArrays.Rent<int>(Math.Max(length, 1));
         bool kept = false;
         try
         {
@@ -1493,12 +1494,12 @@ internal static class ColumnCompressor
         {
             if (!kept)
             {
-                ArrayPool<int>.Shared.Return(codes);
+                WorkArrays.Return(codes);
             }
 
-            ArrayPool<int>.Shared.Return(firstRows);
-            ArrayPool<int>.Shared.Return(chain);
-            ArrayPool<int>.Shared.Return(buckets);
+            WorkArrays.Return(firstRows);
+            WorkArrays.Return(chain);
+            WorkArrays.Return(buckets);
         }
     }
 

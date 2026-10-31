@@ -2,6 +2,7 @@ using System;
 using System.Buffers;
 using System.Runtime.InteropServices;
 
+using Vorticity.Aggregating;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Arrays.Decoders.Compressed.Pco;
@@ -112,25 +113,25 @@ internal sealed class PcoPlan
         if (_data is { } data)
         {
             _data = null;
-            ArrayPool<byte>.Shared.Return(data);
+            WorkArrays.Return(data);
         }
 
         if (_buffers is { } buffers)
         {
             _buffers = null;
-            ArrayPool<int>.Shared.Return(buffers);
+            WorkArrays.Return(buffers);
         }
 
         if (_pageValues is { } pages)
         {
             _pageValues = null;
-            ArrayPool<int>.Shared.Return(pages);
+            WorkArrays.Return(pages);
         }
 
         if (_chunkPages is { } chunks)
         {
             _chunkPages = null;
-            ArrayPool<int>.Shared.Return(chunks);
+            WorkArrays.Return(chunks);
         }
     }
 
@@ -198,9 +199,9 @@ internal sealed class PcoPlan
             _bits = number.LatentBits;
             _mask = number.Mask;
             _mid = number.Mid;
-            _latents = ArrayPool<ulong>.Shared.Rent(Math.Max(count, 1));
-            _secondary = ArrayPool<ulong>.Shared.Rent(Math.Max(Math.Min(count, ValuesPerChunk), 1));
-            _sorted = ArrayPool<ulong>.Shared.Rent(Math.Max(Math.Min(count, ValuesPerChunk), 1));
+            _latents = WorkArrays.Rent<ulong>(Math.Max(count, 1));
+            _secondary = WorkArrays.Rent<ulong>(Math.Max(Math.Min(count, ValuesPerChunk), 1));
+            _sorted = WorkArrays.Rent<ulong>(Math.Max(Math.Min(count, ValuesPerChunk), 1));
 
             // The bytes pco must come in under, when there is a ceiling, and never more than the
             // values themselves: the buffer grows past that only for a pin on values pco inflates.
@@ -280,10 +281,10 @@ internal sealed class PcoPlan
                 pages += (Math.Min(ValuesPerChunk, _count - start) + ValuesPerPage - 1) / ValuesPerPage;
             }
 
-            _buffers = ArrayPool<int>.Shared.Rent(Math.Max(2 * (chunks + pages), 1));
-            _pageValues = ArrayPool<int>.Shared.Rent(Math.Max(pages, 1));
-            _chunkPages = ArrayPool<int>.Shared.Rent(Math.Max(chunks, 1));
-            _moments = ArrayPool<ulong>.Shared.Rent(MaxDeltaOrder * Math.Max(pages, 1));
+            _buffers = WorkArrays.Rent<int>(Math.Max(2 * (chunks + pages), 1));
+            _pageValues = WorkArrays.Rent<int>(Math.Max(pages, 1));
+            _chunkPages = WorkArrays.Rent<int>(Math.Max(chunks, 1));
+            _moments = WorkArrays.Rent<ulong>(MaxDeltaOrder * Math.Max(pages, 1));
 
             int page = 0;
             int chunk = 0;
@@ -440,8 +441,8 @@ internal sealed class PcoPlan
             int padding = Math.Max(0, n - nominal) / extraGroups;
 
             // The sample and the copy each candidate delta-encodes, rented for the choice alone.
-            ulong[] sampleArray = ArrayPool<ulong>.Shared.Rent(Math.Min(nominal, n) + 1);
-            ulong[] work = ArrayPool<ulong>.Shared.Rent(Math.Min(nominal, n) + 1);
+            ulong[] sampleArray = WorkArrays.Rent<ulong>(Math.Min(nominal, n) + 1);
+            ulong[] work = WorkArrays.Rent<ulong>(Math.Min(nominal, n) + 1);
             try
             {
                 int sampled = 0;
@@ -483,8 +484,8 @@ internal sealed class PcoPlan
             }
             finally
             {
-                ArrayPool<ulong>.Shared.Return(work);
-                ArrayPool<ulong>.Shared.Return(sampleArray);
+                WorkArrays.Return(work);
+                WorkArrays.Return(sampleArray);
             }
         }
 
@@ -523,8 +524,8 @@ internal sealed class PcoPlan
             }
 
             int target = PcoIntMult.MinSample + ((n - PcoIntMult.MinSample) / PcoIntMult.SampleRatio);
-            ulong[] sample = ArrayPool<ulong>.Shared.Rent(target);
-            byte[] visited = ArrayPool<byte>.Shared.Rent((n + 7) / 8);
+            ulong[] sample = WorkArrays.Rent<ulong>(target);
+            byte[] visited = WorkArrays.Rent<byte>((n + 7) / 8);
             try
             {
                 int sampled = PcoIntMult.Sample(latents, sample.AsSpan(0, target), visited.AsSpan(0, (n + 7) / 8));
@@ -532,8 +533,8 @@ internal sealed class PcoPlan
             }
             finally
             {
-                ArrayPool<byte>.Shared.Return(visited);
-                ArrayPool<ulong>.Shared.Return(sample);
+                WorkArrays.Return(visited);
+                WorkArrays.Return(sample);
             }
         }
 
@@ -630,9 +631,9 @@ internal sealed class PcoPlan
         /// <inheritdoc/>
         public void Dispose()
         {
-            ArrayPool<ulong>.Shared.Return(_latents);
-            ArrayPool<ulong>.Shared.Return(_secondary);
-            ArrayPool<ulong>.Shared.Return(_sorted);
+            WorkArrays.Return(_latents);
+            WorkArrays.Return(_secondary);
+            WorkArrays.Return(_sorted);
             _primaryBins.Dispose();
             _secondaryBins.Dispose();
             _primaryPage.Dispose();
@@ -640,22 +641,22 @@ internal sealed class PcoPlan
             _writer.Dispose();
             if (_buffers is { } buffers)
             {
-                ArrayPool<int>.Shared.Return(buffers);
+                WorkArrays.Return(buffers);
             }
 
             if (_pageValues is { } pages)
             {
-                ArrayPool<int>.Shared.Return(pages);
+                WorkArrays.Return(pages);
             }
 
             if (_chunkPages is { } chunks)
             {
-                ArrayPool<int>.Shared.Return(chunks);
+                WorkArrays.Return(chunks);
             }
 
             if (_moments is { } moments)
             {
-                ArrayPool<ulong>.Shared.Return(moments);
+                WorkArrays.Return(moments);
             }
         }
     }
@@ -667,10 +668,10 @@ internal sealed class PcoPlan
     private sealed class PageScratch : IDisposable
     {
         private readonly uint[] _states = new uint[4];
-        private uint[] _ansValues = ArrayPool<uint>.Shared.Rent(ValuesPerPage);
-        private byte[] _ansBits = ArrayPool<byte>.Shared.Rent(ValuesPerPage);
-        private ulong[] _offsets = ArrayPool<ulong>.Shared.Rent(ValuesPerPage);
-        private byte[] _offsetBits = ArrayPool<byte>.Shared.Rent(ValuesPerPage);
+        private uint[] _ansValues = WorkArrays.Rent<uint>(ValuesPerPage);
+        private byte[] _ansBits = WorkArrays.Rent<byte>(ValuesPerPage);
+        private ulong[] _offsets = WorkArrays.Rent<ulong>(ValuesPerPage);
+        private byte[] _offsetBits = WorkArrays.Rent<byte>(ValuesPerPage);
         private int _count;
 
         internal void Dissect(ReadOnlySpan<ulong> latents, PcoBinTrainer bins, PcoAnsEncoder encoder)
@@ -737,10 +738,10 @@ internal sealed class PcoPlan
 
         public void Dispose()
         {
-            ArrayPool<uint>.Shared.Return(_ansValues);
-            ArrayPool<byte>.Shared.Return(_ansBits);
-            ArrayPool<ulong>.Shared.Return(_offsets);
-            ArrayPool<byte>.Shared.Return(_offsetBits);
+            WorkArrays.Return(_ansValues);
+            WorkArrays.Return(_ansBits);
+            WorkArrays.Return(_offsets);
+            WorkArrays.Return(_offsetBits);
             _ansValues = [];
             _ansBits = [];
             _offsets = [];
