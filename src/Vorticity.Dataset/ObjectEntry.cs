@@ -126,6 +126,17 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
     public ObjectSummaries Summaries { get; }
 
     /// <summary>
+    /// Its summaries with what its keys prove, as the last schema and the last key that asked bound them under its tree key
+    /// (<see cref="PositionedObject.Summaries(DatasetSchema)"/>): a question asks them of each object a dozen times as it
+    /// plans, and each was a sorted copy, two fifths of what a warm question of S1 answered from the synopses allocated.
+    /// Not a part of the entry: its equality leaves them out.
+    /// </summary>
+    internal KeyBounded? BySchema { get; set; }
+
+    /// <inheritdoc cref="BySchema"/>
+    internal KeyBounded? ByKey { get; set; }
+
+    /// <summary>
     /// The bytes an open of the object reads from its end, its statistics, index directory and footer,
     /// when they pass what an open reads first: an open that asks for that many reads them in one
     /// request instead of two. 0 when the entry does not say, as for an object whose footer the first

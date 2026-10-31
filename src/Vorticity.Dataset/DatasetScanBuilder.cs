@@ -1149,20 +1149,54 @@ internal readonly record struct PositionedObject(ObjectEntry Entry, long FirstRo
     /// text's (<see cref="DatasetKey.Bounded"/>): its smallest key, which its tree key leads with, and its largest, which
     /// its entry states. The entry's own when the dataset has no key, or the object states no largest.
     /// </summary>
-    internal ObjectSummaries Summaries(DatasetKey? key) =>
-        key is null || Entry.LastKey.IsEmpty || TreeKey.Length <= VortexDataset.UidBytes
-            ? Entry.Summaries
-            : key.Bounded(Entry.Summaries, VortexDataset.OrderOf(TreeKey).Span, Entry.LastKey.Span, exact: !Entry.HasDeletions);
+    internal ObjectSummaries Summaries(DatasetKey? key)
+    {
+        if (key is null || Entry.LastKey.IsEmpty || TreeKey.Length <= VortexDataset.UidBytes)
+        {
+            return Entry.Summaries;
+        }
+
+        if (Entry.ByKey is { } known && known.Holds(key, TreeKey))
+        {
+            return known.Summaries;
+        }
+
+        ObjectSummaries bounded = key.Bounded(Entry.Summaries, VortexDataset.OrderOf(TreeKey).Span, Entry.LastKey.Span, exact: !Entry.HasDeletions);
+        Entry.ByKey = new KeyBounded(key, TreeKey, bounded);
+        return bounded;
+    }
 
     /// <summary>
     /// Its entry's summaries with what its keys prove under <paramref name="schema"/>'s layout, a partition leading them or
     /// not (<see cref="DatasetSchema.Bounded"/>): the partition's column, and the key's first column between its smallest key,
     /// which its tree key leads with, and its largest, which its entry states.
     /// </summary>
-    internal ObjectSummaries Summaries(DatasetSchema schema) =>
-        TreeKey.Length <= VortexDataset.UidBytes
-            ? Entry.Summaries
-            : schema.Bounded(Entry.Summaries, VortexDataset.OrderOf(TreeKey).Span, Entry.LastKey.Span, exact: !Entry.HasDeletions);
+    internal ObjectSummaries Summaries(DatasetSchema schema)
+    {
+        if (TreeKey.Length <= VortexDataset.UidBytes)
+        {
+            return Entry.Summaries;
+        }
+
+        if (Entry.BySchema is { } known && known.Holds(schema, TreeKey))
+        {
+            return known.Summaries;
+        }
+
+        ObjectSummaries bounded = schema.Bounded(Entry.Summaries, VortexDataset.OrderOf(TreeKey).Span, Entry.LastKey.Span, exact: !Entry.HasDeletions);
+        Entry.BySchema = new KeyBounded(schema, TreeKey, bounded);
+        return bounded;
+    }
+}
+
+/// <summary>An entry's summaries bounded by what its keys prove (<see cref="ObjectEntry.BySchema"/>): by what, under which tree key.</summary>
+/// <param name="By">The schema or the key that bound them.</param>
+/// <param name="TreeKey">The entry's key in the tree they were bound under.</param>
+/// <param name="Summaries">The summaries bounded.</param>
+internal sealed record KeyBounded(object By, ReadOnlyMemory<byte> TreeKey, ObjectSummaries Summaries)
+{
+    /// <summary>Whether they are what <paramref name="by"/> bounds under <paramref name="treeKey"/>.</summary>
+    internal bool Holds(object by, ReadOnlyMemory<byte> treeKey) => ReferenceEquals(By, by) && TreeKey.Span.SequenceEqual(treeKey.Span);
 }
 
 /// <summary>What a dataset scan would read, and what it costs.</summary>
