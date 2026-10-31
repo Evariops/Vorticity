@@ -1409,16 +1409,49 @@ internal static partial class DatasetCompactor
 
             // The blocks the rows before these and these themselves closed, declared before their rows are written.
             _rows += batch.RowCount;
-            if (_census is { } census)
+            if (_census is not { } census)
             {
-                // Each row counted after the object's rows before it, at its place, which the groups of its rows tell apart.
-                for (int v = 0; v < census.Length; v++)
-                {
-                    census[v].Add(batch, _variants![v]);
-                }
+                await output.Writer.WriteBatchAsync(batch, cancellationToken).ConfigureAwait(false);
+                return;
             }
 
-            await output.Writer.WriteBatchAsync(batch, cancellationToken).ConfigureAwait(false);
+            // Each row counted after the object's rows before it, at its place, which the groups of its rows tell apart: with
+            // lanes to spare, on another while the writer takes the same rows, the census reading them alone once their
+            // nodes are canonical; the census and its spans as counted in turn. Counted first, it held a merge of log
+            // records a fifth of its time.
+            PathCensus.Counting[] ready = new PathCensus.Counting[census.Length];
+            for (int v = 0; v < census.Length; v++)
+            {
+                ready[v] = PathCensus.Prepare(batch, _variants![v]);
+            }
+
+            if (_dataset.Session.Options.MaxDegreeOfParallelism <= 1)
+            {
+                Count(census, ready);
+                await output.Writer.WriteBatchAsync(batch, cancellationToken).ConfigureAwait(false);
+                return;
+            }
+
+            Task counting = Task.Run(() => Count(census, ready), cancellationToken);
+            try
+            {
+                await output.Writer.WriteBatchAsync(batch, cancellationToken).ConfigureAwait(false);
+            }
+            catch
+            {
+                await counting.ContinueWith(static _ => { }, TaskScheduler.Default).ConfigureAwait(false);
+                throw;
+            }
+
+            await counting.ConfigureAwait(false);
+
+            static void Count(PathCensus[] census, PathCensus.Counting[] ready)
+            {
+                for (int v = 0; v < census.Length; v++)
+                {
+                    census[v].Add(in ready[v]);
+                }
+            }
         }
 
         /// <summary>

@@ -108,18 +108,32 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
     /// struct, after the rows counted before.
     /// </summary>
     /// <exception cref="VortexFormatException">A row's value or metadata does not decode.</exception>
-    internal void Add(RecordBatch batch, int field)
+    internal void Add(RecordBatch batch, int field) => Add(Prepare(batch, field));
+
+    /// <summary>
+    /// The variant column <paramref name="field"/> of <paramref name="batch"/>'s root struct made ready to count: its metadata
+    /// and its values in canonical form, which may add nodes to the batch's arena; counting them after only reads it, and may
+    /// run on another thread while the batch is written.
+    /// </summary>
+    internal static Counting Prepare(RecordBatch batch, int field)
     {
         Arrays.CanonicalArena arena = batch.Arena;
         int column = arena.GetNode(batch.RootIndex).GetFieldIndex(field);
         Arrays.CanonicalNode variant = arena.GetNode(column);
-        int metadata = EncodedForms.Canonical(arena, variant.GetFieldIndex(0));
-        int value = EncodedForms.Canonical(arena, variant.GetFieldIndex(1));
-        Arrays.CanonicalNode metadataNode = arena.GetNode(metadata);
-        Arrays.CanonicalNode valueNode = arena.GetNode(value);
-        for (int row = 0; row < batch.RowCount; row++)
+        return new Counting(
+            arena, column, EncodedForms.Canonical(arena, variant.GetFieldIndex(0)), EncodedForms.Canonical(arena, variant.GetFieldIndex(1)), batch.RowCount);
+    }
+
+    /// <summary>Counts every row of a variant column made ready (<see cref="Prepare"/>), after the rows counted before.</summary>
+    /// <exception cref="VortexFormatException">A row's value or metadata does not decode.</exception>
+    internal void Add(in Counting counting)
+    {
+        Arrays.CanonicalArena arena = counting.Arena;
+        Arrays.CanonicalNode metadataNode = arena.GetNode(counting.Metadata);
+        Arrays.CanonicalNode valueNode = arena.GetNode(counting.Value);
+        for (int row = 0; row < counting.Rows; row++)
         {
-            if (!Arrays.ArenaWords.IsValid(arena, column, row))
+            if (!Arrays.ArenaWords.IsValid(arena, counting.Column, row))
             {
                 AddNull();
                 continue;
@@ -127,9 +141,12 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
 
             Add(
                 Compute.LiteralReader.ViewAt(metadataNode, row),
-                Arrays.ArenaWords.IsValid(arena, value, row) ? Compute.LiteralReader.ViewAt(valueNode, row) : VariantEncoding.NullValue);
+                Arrays.ArenaWords.IsValid(arena, counting.Value, row) ? Compute.LiteralReader.ViewAt(valueNode, row) : VariantEncoding.NullValue);
         }
     }
+
+    /// <summary>A batch's variant column made ready to count (<see cref="Prepare"/>): the arena, the column, its metadata and its values in canonical form, its rows.</summary>
+    internal readonly record struct Counting(Arrays.CanonicalArena Arena, int Column, int Metadata, int Value, int Rows);
 
     /// <summary>
     /// Counts a row of <paramref name="value"/>, its keys named by <paramref name="metadata"/>, after the rows counted

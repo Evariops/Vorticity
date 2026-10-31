@@ -187,6 +187,62 @@ public sealed partial class DatasetVariantStreamsTests
     }
 
     /// <summary>
+    /// The same 120 000 rows appended in halves and consolidated by a session of one lane, which counts an object's paths
+    /// before it writes each batch, and by one of eight, which counts them on another lane while the writer takes the batch:
+    /// the object's path directory is the same, byte for byte, its paths' counts and the granules they lie in alike.
+    /// </summary>
+    [Fact]
+    public async Task AnObjectsPathsCountedBesideItsWriteAreThoseCountedInTurn()
+    {
+        Random random = new Random(23);
+        Row[] rows = [.. Enumerable.Range(0, 120_000).Select(i =>
+        {
+            List<(string, Variant)> attributes = [("route", Variant.From($"/r/{random.Next(20)}")), ("status", Variant.From(200 + random.Next(4)))];
+            if (i % 7 == 0)
+            {
+                attributes.Add(("retry", Variant.From(random.Next(1, 5))));
+            }
+
+            if (i % 50 == 3)
+            {
+                attributes.Add(($"user.{random.Next(5_000)}.score", Variant.From(random.Next(100))));
+            }
+
+            return new Row(Start.AddMilliseconds(i * 37L), $"svc-{random.Next(12):D2}", i, Variant.Object([.. attributes]));
+        })];
+
+        byte[][] directories = new byte[2][];
+        foreach ((int lanes, int at) in ((int, int)[])[(1, 0), (8, 1)])
+        {
+            await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = lanes);
+            await using MemoryObjectStore store = new MemoryObjectStore();
+            await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Row.Schema, new DatasetOptions
+            {
+                Session = session,
+                Layout = new DatasetLayout
+                {
+                    Partition = LayoutValue.Column(nameof(Row.At)).Truncate(CalendarUnit.Day),
+                    SortKey = [LayoutValue.Column(nameof(Row.Service)), LayoutValue.Column(nameof(Row.At))],
+                    IndexedPrefix = 1,
+                    ObjectBytes = 256 << 20,
+                    MergeFanout = 4,
+                    CalmAfter = null,
+                },
+                ContentsObjectBytes = 0,
+                SheetObjectBytes = 0,
+                Write = new VortexWriteOptions { BlockRows = 1_024 },
+            }, Ct);
+            await AppendAsync(dataset, rows[..60_000]);
+            await AppendAsync(dataset, rows[60_000..]);
+            await dataset.ConsolidateAsync(Ct);
+            PositionedObject held = await dataset.ScanBuilder().ObjectsAsync(Ct).SingleAsync(Ct);
+            directories[at] = (await dataset.ReadPathDirectoryAsync(held.Entry, 3, Ct))!.ToBytes();
+        }
+
+        Assert.Equal(directories[0], directories[1]);
+    }
+
+    /// <summary>
     /// 200 000 rows sorted by their attributes' tenant, then the instant, consolidated in objects of 1 MiB (E4): an equality
     /// on the tenant reads LINQ's rows, and the objects its key's range refutes are passed over by the key.
     /// </summary>
