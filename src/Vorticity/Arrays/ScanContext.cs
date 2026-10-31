@@ -699,6 +699,7 @@ internal sealed class ScanContext : IDisposable
     {
         internal byte[]? Field;
         internal Compute.EncodedPredicate? Predicate;
+        internal Compute.PushedVariantKey? Key;
         internal Layouts.FieldMask Fields;
         internal bool FieldsHonoured;
         internal ulong EncodedFields;
@@ -720,6 +721,26 @@ internal sealed class ScanContext : IDisposable
 
     /// <summary>The predicate on <see cref="PushedField"/>: a comparison, a range, a set or a prefix.</summary>
     internal Compute.EncodedPredicate? PushedPredicate => _pushed?.Predicate;
+
+    /// <summary>
+    /// The key of the variant column <see cref="PushedField"/> names whose typed column the predicate reads, and the class it
+    /// reads it as; null for a predicate on the column itself.
+    /// </summary>
+    internal Compute.PushedVariantKey? PushedKey => _pushed?.Key;
+
+    /// <summary>Replaces the pushed predicate's variant key and returns what was there, for the driver to restore.</summary>
+    internal Compute.PushedVariantKey? ExchangePushedKey(Compute.PushedVariantKey? key)
+    {
+        if (_pushed is null && key is null)
+        {
+            return null;
+        }
+
+        Pushed held = _pushed ??= new Pushed();
+        Compute.PushedVariantKey? previous = held.Key;
+        held.Key = key;
+        return previous;
+    }
 
     /// <summary>
     /// Whether the reader running right now is inside the column <see cref="PushedField"/> names.

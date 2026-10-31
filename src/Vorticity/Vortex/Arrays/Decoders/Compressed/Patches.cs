@@ -165,6 +165,95 @@ internal readonly ref struct Patches
         }
     }
 
+    /// <summary>
+    /// Sets each patch's verdict (<see cref="Compute.Trilean"/>, one a patch in <paramref name="states"/>) at its row in
+    /// <paramref name="bits"/>, which already holds <paramref name="fill"/>'s, the fill's: the index type resolved once.
+    /// </summary>
+    /// <remarks>
+    /// Under a fill that selects no row and patches that are all known, the common case of a sparse column whose fill is
+    /// null, a patch only sets its truth, and its known bit under a null fill: a word or two a patch with no branch. Any
+    /// other mix sets each state as a row's.
+    /// </remarks>
+    public readonly void Judge(ReadOnlySpan<byte> states, byte fill, ref Compute.PredicateBits bits)
+    {
+        states = states[.._count];
+        if (fill != Compute.Trilean.True && !states.Contains(Compute.Trilean.Unknown))
+        {
+            bool known = fill == Compute.Trilean.Unknown;
+            switch (_indicesPType)
+            {
+                case PType.U8:
+                    Mark<byte>(states, known, bits.Truth, bits.Known);
+                    break;
+                case PType.U16:
+                    Mark<ushort>(states, known, bits.Truth, bits.Known);
+                    break;
+                case PType.U32:
+                    Mark<uint>(states, known, bits.Truth, bits.Known);
+                    break;
+                default:
+                    Mark<ulong>(states, known, bits.Truth, bits.Known);
+                    break;
+            }
+
+            return;
+        }
+
+        switch (_indicesPType)
+        {
+            case PType.U8:
+                Set<byte>(states, ref bits);
+                break;
+            case PType.U16:
+                Set<ushort>(states, ref bits);
+                break;
+            case PType.U32:
+                Set<uint>(states, ref bits);
+                break;
+            default:
+                Set<ulong>(states, ref bits);
+                break;
+        }
+    }
+
+    /// <summary>The patches' truths, and their known bits where <paramref name="known"/>, over a fill that selects none.</summary>
+    private readonly void Mark<TIndex>(ReadOnlySpan<byte> states, bool known, Span<ulong> truth, Span<ulong> knownBits)
+        where TIndex : unmanaged
+    {
+        ReadOnlySpan<TIndex> indices = MemoryMarshal.Cast<byte, TIndex>(_indices)[..states.Length];
+        ulong offset = (ulong)_offset;
+        if (known)
+        {
+            for (int i = 0; i < indices.Length; i++)
+            {
+                int position = (int)(Widen(indices[i]) - offset);
+                ulong bit = 1UL << (position & 63);
+                truth[position >> 6] |= states[i] == Compute.Trilean.True ? bit : 0;
+                knownBits[position >> 6] |= bit;
+            }
+
+            return;
+        }
+
+        for (int i = 0; i < indices.Length; i++)
+        {
+            int position = (int)(Widen(indices[i]) - offset);
+            truth[position >> 6] |= states[i] == Compute.Trilean.True ? 1UL << (position & 63) : 0;
+        }
+    }
+
+    /// <summary>Each patch's state as its row's, any fill and any state.</summary>
+    private readonly void Set<TIndex>(ReadOnlySpan<byte> states, ref Compute.PredicateBits bits)
+        where TIndex : unmanaged
+    {
+        ReadOnlySpan<TIndex> indices = MemoryMarshal.Cast<byte, TIndex>(_indices)[..states.Length];
+        ulong offset = (ulong)_offset;
+        for (int i = 0; i < indices.Length; i++)
+        {
+            bits.SetState((int)(Widen(indices[i]) - offset), states[i]);
+        }
+    }
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static ulong Widen<TIndex>(TIndex index)
         where TIndex : unmanaged

@@ -116,12 +116,10 @@ internal sealed class SparseDecoder : ArrayDecoder
 
             if (patchCount > 0)
             {
+                byte fillVerdict = verdict[0];
                 Span<byte> states = rented.AsSpan(0, patchCount);
                 Compute.ValueVerdicts.TryJudge(context.Canonical, valuesIndex, predicate, states, rented.AsSpan(patchCount, patchCount));
-                for (int i = 0; i < patchCount; i++)
-                {
-                    bits.SetState(patches.GetPosition(i), states[i]);
-                }
+                patches.Judge(states, fillVerdict, ref bits);
             }
 
             return true;

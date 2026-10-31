@@ -59,7 +59,7 @@ internal sealed class DictLayoutReader : LayoutReader
         CheckRange(in node, rows);
 
         // The pushed predicate, judged once on the values and asked of the codes.
-        if (context.PredicateAtNode && context.PushedPredicate is { } predicate)
+        if (context.PredicateAtNode && context.PushedKey is null && context.PushedPredicate is { } predicate)
         {
             int answered = TryAnswer(in node, rows, context, predicate);
             if (answered >= 0)

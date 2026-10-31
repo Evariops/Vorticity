@@ -530,6 +530,53 @@ internal sealed class VariantKeyReads
         private bool Typed => Array.TrueForAll(Keys, static key => key.Part is null || key.Shape.Kind != DTypeKind.Variant);
 
         /// <summary>
+        /// The answer of <paramref name="predicate"/> on key <paramref name="name"/> read as <paramref name="read"/>, over the
+        /// chunk's rows, by the encoding of the key's typed column, as a column's encoding answers (spec E, 4.2): a row without
+        /// the key unknown, the key reading null there. False when the chunk keeps values of other classes beside the typed
+        /// column, when the typed column is not of the class read, when the split reads the key by its granules
+        /// (<paramref name="plans"/>, over <paramref name="rows"/>), or when the encoding declines.
+        /// </summary>
+        internal bool TryAnswer(
+            ScanContext context, string name, Compute.VariantRead read, Compute.EncodedPredicate predicate, GranulePlans? plans, RowRange rows,
+            ref Compute.PredicateBits bits)
+        {
+            foreach (Key key in Keys)
+            {
+                if (!string.Equals(key.Name, name, StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                if (key.Part is not { } part)
+                {
+                    bits.FillUnknown();
+                    return true;
+                }
+
+                if (key.Shape.Kind == DTypeKind.Variant || !Reads(read, key.Typed) || (plans is not null && part.Length > 0 && plans.Find(part.Offset, rows) is not null))
+                {
+                    return false;
+                }
+
+                Buffers.VortexBuffer segment = part.Length > 0 ? context.Segments.GetBuffer(context.Segments.Add(Spec(part))) : default;
+                context.Decode.LoadBlob(part.Tree, segment);
+                ArrayNode root = context.Nodes.Root;
+                ArrayDecoder decoder = ArrayDecoderTable.Require(context, root.Encoding, root.EncodingSpecIndex);
+                return decoder.EvaluatesWithoutFullDecode && decoder.TryEvaluate(context.Decode, in root, key.Shape, Rows, predicate, ref bits);
+            }
+
+            return false;
+        }
+
+        /// <summary>Whether a typed column of <paramref name="typed"/> holds the values a read as <paramref name="read"/> takes.</summary>
+        private static bool Reads(Compute.VariantRead read, DType typed) => read switch
+        {
+            Compute.VariantRead.AsString => typed.Kind == DTypeKind.Utf8,
+            Compute.VariantRead.AsInt64 => typed.Kind == DTypeKind.Primitive && typed.PType.IsInteger(),
+            _ => false,
+        };
+
+        /// <summary>
         /// Rows <c>[start, start + count)</c> of the chunk as a variant node of <paramref name="variant"/>'s dtype, each key
         /// decoded from the granules <paramref name="plans"/> read of it for them, or, read whole, from its range; -1 when no
         /// key was read by its granules, the chunk's decode, retained for all its splits, then serving.

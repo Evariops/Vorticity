@@ -180,7 +180,7 @@ internal sealed class FlatLayoutReader : LayoutReader
         if (rows.Start == 0 && length == total)
         {
             ArrayNode wholeRoot = LoadRoot(in node, context);
-            if (context.PredicateAtNode)
+            if (context.PredicateAtNode && context.PushedKey is null)
             {
                 int answered = TryAnswer(in wholeRoot, in node, context, total);
                 if (answered >= 0)
@@ -212,7 +212,7 @@ internal sealed class FlatLayoutReader : LayoutReader
         // answer. It is kept under a key of its own because the same chunk can be wanted both as an
         // answer and as values, and a cache that confused the two would hand a boolean column to a
         // caller that asked for strings.
-        if (context.PredicateAtNode &&
+        if (context.PredicateAtNode && context.PushedKey is null &&
             TryRetainedAnswer(in node, context, key, total, out CanonicalArena states, out int said))
         {
             return CanonicalSlice.SliceAcross(states, context.Canonical, said, (int)rows.Start, length);
@@ -314,6 +314,13 @@ internal sealed class FlatLayoutReader : LayoutReader
     private static int ExecuteKeys(
         in LayoutNode node, RowRange rows, in FieldMask fields, ScanContext context, Indexes.VariantKeyReads.Chunk chunk, int total, int length)
     {
+        // A predicate on one of the chunk's keys, answered by the key's typed column over the chunk's rows and retained for
+        // its batches as a column's answer is (spec E, 4.2); declined, the keys are decoded below and the filter judged on them.
+        if (context.PredicateAtNode && context.PushedKey is { } wanted
+            && KeyAnswer(in node, rows, context, chunk, wanted, total, length) is int answered and >= 0)
+        {
+            return answered;
+        }
         // The keys read by the granules of the split's rows (spec E, 4.1): decoded from them alone, the selection gathered
         // out of them; nothing retained, which would read the rest of the chunk.
         if (context.Granules is { } granules && chunk.DecodeRange(context, node.DType, (int)rows.Start, length, granules) is int ranged and >= 0)
@@ -348,6 +355,55 @@ internal sealed class FlatLayoutReader : LayoutReader
 
         return context.HasSelection
             ? Gather(held, retained, in fields, context, total)
+            : CanonicalSlice.SliceAcross(held, context.Canonical, retained, (int)rows.Start, length);
+    }
+
+    /// <summary>
+    /// Rows <paramref name="rows"/>, or the selection's, of the answer the pushed predicate on key <paramref name="wanted"/> has over the chunk,
+    /// its typed column's encoding asked once for the chunk and the answer retained under a key of its own, as a column's
+    /// answer is (<see cref="TryRetainedAnswer"/>); -1 when the chunk declines.
+    /// </summary>
+    private static int KeyAnswer(
+        in LayoutNode node, RowRange rows, ScanContext context, Indexes.VariantKeyReads.Chunk chunk, Compute.PushedVariantKey wanted,
+        int total, int length)
+    {
+        long answerKey = ~ScanContext.SegmentKey(node.Segments[0]) ^ AnswerKey;
+        if (!context.TryPeekRetained(answerKey, out CanonicalArena held, out int retained))
+        {
+            int words = Compute.PredicateBits.WordsOf(Math.Max(total, 1));
+            ulong[] rented = System.Buffers.ArrayPool<ulong>.Shared.Rent(2 * words);
+            try
+            {
+                Compute.PredicateBits bits = new Compute.PredicateBits(rented.AsSpan(0, words), rented.AsSpan(words, words), total);
+                if (!chunk.TryAnswer(context, wanted.Key, wanted.Read, context.PushedPredicate!, context.Granules, rows, ref bits))
+                {
+                    return -1;
+                }
+
+                if (!context.TryGetRetained(answerKey, out held, out retained))
+                {
+                    held = context.BeginRetainedDecode();
+                    retained = -1;
+                    try
+                    {
+                        retained = Answer(context, ref bits);
+                    }
+                    finally
+                    {
+                        context.EndRetainedDecode(retained);
+                    }
+                }
+            }
+            finally
+            {
+                System.Buffers.ArrayPool<ulong>.Shared.Return(rented);
+            }
+        }
+
+        context.PredicateAnswered = true;
+        FieldMask all = FieldMask.All;
+        return context.HasSelection
+            ? Gather(held, retained, in all, context, total)
             : CanonicalSlice.SliceAcross(held, context.Canonical, retained, (int)rows.Start, length);
     }
 
@@ -813,7 +869,7 @@ internal sealed class FlatLayoutReader : LayoutReader
         // makes. Answering only on the branch above would answer only for the columns whose data
         // defeats pruning. The answer is for the whole node and the selection is gathered out of
         // it, which is what `Gather` does for values and for the same reason.
-        if (context.PredicateAtNode)
+        if (context.PredicateAtNode && context.PushedKey is null)
         {
             long answerKey = ScanContext.SegmentKey(node.Segments[0]);
             if (TryRetainedAnswer(

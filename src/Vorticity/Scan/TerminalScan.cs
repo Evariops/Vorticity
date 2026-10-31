@@ -353,7 +353,7 @@ internal sealed class TerminalScan
         byte[] name = pushable.Field.SegmentsUtf8[0];
         DType root = _tree.Root.DType;
         int field = root.Kind == DTypeKind.Struct ? root.IndexOfField(name) : -1;
-        if (field < 0 || !_mask.Includes(field))
+        if (field < 0 || !_mask.Includes(field) || (pushable.Key is not null && context.VariantKeys is null))
         {
             _pushDeclined = true;
             return null;
@@ -361,6 +361,7 @@ internal sealed class TerminalScan
 
         FieldMask only = FieldMask.Single(field);
         (byte[]? Field, EncodedPredicate? Predicate) saved = context.ExchangePushedPredicate(name, pushable.Predicate);
+        PushedVariantKey? savedKey = context.ExchangePushedKey(pushable.Key);
         try
         {
             int answer = await ReadAndExecuteAsync(context, decodes, split, only, cancellationToken, answered: true).ConfigureAwait(false);
@@ -376,6 +377,7 @@ internal sealed class TerminalScan
         finally
         {
             context.ExchangePushedPredicate(saved.Field, saved.Predicate);
+            context.ExchangePushedKey(savedKey);
             context.ResetBatch();
         }
     }

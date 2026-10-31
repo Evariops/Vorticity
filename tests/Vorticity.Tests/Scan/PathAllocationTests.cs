@@ -369,11 +369,15 @@ public sealed class PathAllocationTests
         //
         // A filter pushed to the encodings plans its predicates once a scan: 480 bytes besides the scan's 40, and 48 more
         // on the pruned filter, not told apart byte by byte (2026-10-27).
-        ("selective filter, pruning on", File, 35_096, PrunedFilter),
+        //
+        // A filter on a key of a variant column is pushed to the key's typed column: the plan of the pushed predicate holds
+        // the key, a reference, 8 bytes on both filtered axes (2026-10-31).
+        ("selective filter, pruning on", File, 35_104, PrunedFilter),
 
         // THE SAME FILTER WITH PRUNING OFF, because it is a different path and not a slower one:
         // pruning on reads the zone map and skips whole splits, pruning off decodes every split and
         // masks. The two allocate differently by construction, so each has its own ceiling.
+        // The pushed predicate's plan holds the key of a variant column it may read, 8 bytes, as above (2026-10-31).
         // The first thing the pair says is not what one would guess: on this file PRUNING ALLOCATES
         // MORE than not pruning while keeping ~100 rows of 65 536.
         //
@@ -383,7 +387,7 @@ public sealed class PathAllocationTests
         // and that context's arenas sized for what they hold rather than for a batch: either one
         // undone costs more than the whole gap that remains. The lane's context holds its zstd
         // decoder's field, 8 bytes, as above.
-        ("selective filter, pruning off", File, 27_016, UnprunedFilter),
+        ("selective filter, pruning off", File, 27_024, UnprunedFilter),
 
         // One scan per late component. They are single-column files of 4 096 rows, so the figure is
         // dominated by the decoder rather than by the open, which is the point of putting them here

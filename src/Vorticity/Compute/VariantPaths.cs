@@ -75,6 +75,9 @@ internal enum VariantRead : byte
     Has,
 }
 
+/// <summary>The key of a variant column whose typed column a pushed predicate reads, and the class it reads it as.</summary>
+internal sealed record PushedVariantKey(string Key, VariantRead Read);
+
 /// <summary>
 /// A path into a variant column read as a typed column: its keys and indices from the column's
 /// value, and the type class it is read as. Its values are null where the path is absent, the

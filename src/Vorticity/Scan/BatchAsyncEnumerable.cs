@@ -2012,49 +2012,50 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     /// <summary>The predicate <paramref name="filter"/> offers an encoding, or <see cref="NoPush"/>.</summary>
     internal static PushPlan PlanPush(VortexExpr? filter)
     {
-        switch (filter)
+        // A filter on a variant's path is fenced off from the pruners (VariantFilterExpr); an encoding's answer is exact, and
+        // looks through the fence as the evaluator does.
+        switch (Unfenced(filter))
         {
-            case ComparisonExpr comparison when comparison.Field is ColumnFieldExpr { SegmentsUtf8.Length: 1 }:
-                return new PushPlan(comparison.Field, Compute.EncodedPredicate.Compare(comparison.Op, comparison.Value));
+            case ComparisonExpr comparison when Target(comparison.Field) is { } target:
+                return new PushPlan(target.Column, Compute.EncodedPredicate.Compare(comparison.Op, comparison.Value), target.Key);
 
-            case LogicalExpr { IsAnd: true, Left: ComparisonExpr left, Right: ComparisonExpr right }
-                when left.Field is ColumnFieldExpr { SegmentsUtf8.Length: 1 }
-                    && right.Field is ColumnFieldExpr { SegmentsUtf8.Length: 1 }
-                    && left.Field.SegmentsUtf8[0].AsSpan().SequenceEqual(right.Field.SegmentsUtf8[0]):
+            case LogicalExpr { IsAnd: true } both
+                when Unfenced(both.Left) is ComparisonExpr left && Unfenced(both.Right) is ComparisonExpr right && Target(left.Field) is { } target && Target(right.Field) is { } other && SameTarget(target, other):
                 // A range: one arm a low bound and the other a high one, in either order.
                 (ComparisonExpr? low, ComparisonExpr? high) = IsLow(left.Op) && IsHigh(right.Op) ? (left, right)
                     : IsLow(right.Op) && IsHigh(left.Op) ? (right, left)
                     : (null, null);
                 return low is null || high is null
                     ? NoPush
-                    : Answerable(left.Field, Compute.EncodedPredicate.Between(
+                    : Answerable(target, Compute.EncodedPredicate.Between(
                         low.Value, low.Op == ComparisonOp.GreaterOrEqual, high.Value, high.Op == ComparisonOp.LessOrEqual));
 
-            case InExpr set when set.Field is ColumnFieldExpr { SegmentsUtf8.Length: 1 } && set.Literals.Length <= MostPushedMembers:
-                return Answerable(set.Field, Compute.EncodedPredicate.In(set.Literals));
+            case InExpr set when Target(set.Field) is { } target && set.Literals.Length <= MostPushedMembers:
+                return Answerable(target, Compute.EncodedPredicate.In(set.Literals));
 
             case StringMatchExpr { Op: StringMatchOp.StartsWith } match
-                when match.Field is ColumnFieldExpr { SegmentsUtf8.Length: 1 } && match.Pattern.Kind == FilterLiteralKind.Bytes:
-                return new PushPlan(match.Field, Compute.EncodedPredicate.Prefix(match.Pattern));
+                when Target(match.Field) is { } target && match.Pattern.Kind == FilterLiteralKind.Bytes:
+                return new PushPlan(target.Column, Compute.EncodedPredicate.Prefix(match.Pattern), target.Key);
 
             case StringMatchExpr { Op: StringMatchOp.Contains } match
-                when match.Field is ColumnFieldExpr { SegmentsUtf8.Length: 1 } && match.Pattern.Kind == FilterLiteralKind.Bytes:
-                return new PushPlan(match.Field, Compute.EncodedPredicate.Contains(match.Pattern));
+                when Target(match.Field) is { } target && match.Pattern.Kind == FilterLiteralKind.Bytes:
+                return new PushPlan(target.Column, Compute.EncodedPredicate.Contains(match.Pattern), target.Key);
 
             default:
                 return NoPush;
         }
 
+        static VortexExpr? Unfenced(VortexExpr? expr) => expr is Compute.VariantFilterExpr fence ? fence.Inner : expr;
         static bool IsLow(ComparisonOp op) => op is ComparisonOp.Greater or ComparisonOp.GreaterOrEqual;
         static bool IsHigh(ComparisonOp op) => op is ComparisonOp.Less or ComparisonOp.LessOrEqual;
 
         // A range or a set of numbers, which the encodings of integers answer, or of bytes, which a dictionary answers on
         // its values: a column of text with none decodes its first split for nothing, once.
-        static PushPlan Answerable(FieldExpr field, Compute.EncodedPredicate predicate) =>
+        static PushPlan Answerable((FieldExpr Column, Compute.PushedVariantKey? Key) target, Compute.EncodedPredicate predicate) =>
             predicate.Integers is null && predicate.Members is null && predicate.Decimals is null && predicate.DecimalMembers is null
                 && !Bytes(predicate)
                 ? NoPush
-                : new PushPlan(field, predicate);
+                : new PushPlan(target.Column, predicate, target.Key);
 
         static bool Bytes(Compute.EncodedPredicate predicate)
         {
@@ -2075,16 +2076,38 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         }
     }
 
-    /// <summary>A predicate an encoding may answer, on a top-level field.</summary>
-    internal sealed class PushPlan(FieldExpr field, Compute.EncodedPredicate predicate)
+    /// <summary>
+    /// The top-level column a predicate's field reads and, for one key of a variant column read as a string or an integer,
+    /// the key and its class, whose typed column an encoding may answer for (spec E, 4.2); null for any other field.
+    /// </summary>
+    private static (FieldExpr Column, Compute.PushedVariantKey? Key)? Target(FieldExpr field) => field switch
+    {
+        ColumnFieldExpr { SegmentsUtf8.Length: 1 } => (field, null),
+        Compute.VariantFieldExpr
+        {
+            Steps: [{ IsKey: true, Key: { } key }], Read: Compute.VariantRead.AsString or Compute.VariantRead.AsInt64,
+            Column: ColumnFieldExpr { SegmentsUtf8.Length: 1 } column,
+        } path => (column, new Compute.PushedVariantKey(key, path.Read)),
+        _ => null,
+    };
+
+    /// <summary>Whether two fields read the same column, or the same key of it in the same class.</summary>
+    private static bool SameTarget(
+        (FieldExpr Column, Compute.PushedVariantKey? Key) left, (FieldExpr Column, Compute.PushedVariantKey? Key) right) =>
+        left.Column.SegmentsUtf8[0].AsSpan().SequenceEqual(right.Column.SegmentsUtf8[0]) && left.Key == right.Key;
+
+    /// <summary>A predicate an encoding may answer, on a top-level field or on the typed column of a key of one.</summary>
+    internal sealed class PushPlan(FieldExpr field, Compute.EncodedPredicate predicate, Compute.PushedVariantKey? key = null)
     {
         /// <summary>The field.</summary>
         internal FieldExpr Field { get; } = field;
 
         /// <summary>The predicate on it.</summary>
         internal Compute.EncodedPredicate Predicate { get; } = predicate;
-    }
 
+        /// <summary>The key of the variant column whose typed column the predicate reads, and its class; null for the column itself.</summary>
+        internal Compute.PushedVariantKey? Key { get; } = key;
+    }
     /// <summary>
     /// Offers the comparison to the predicate's column and, when its encoding answers, reads the
     /// projection over the rows it kept.
@@ -2107,7 +2130,11 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         byte[] name = pushable.Field.SegmentsUtf8[0];
         DType root = _tree.Root.DType;
         int field = root.Kind == DTypeKind.Struct ? root.IndexOfField(name) : -1;
-        if (field < 0 || !_mask.Includes(field))
+        // A key of a variant is answered by its typed column where its chunks are read by their keys: the filter's own reads
+        // when the projection reads the column whole (VariantKeyReads.FilterPass), none on a file that reads no key apart.
+        Indexes.VariantKeyReads? projected = context.VariantKeys;
+        Indexes.VariantKeyReads? keyed = pushable.Key is null ? projected : projected?.FilterPass ?? projected;
+        if (field < 0 || !_mask.Includes(field) || (pushable.Key is not null && keyed is null))
         {
             _push = PushDeclined;
             return -1;
@@ -2116,6 +2143,8 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         FieldMask only = FieldMask.Single(field);
         (byte[]? Field, Compute.EncodedPredicate? Predicate) saved =
             context.ExchangePushedPredicate(name, pushable.Predicate);
+        Compute.PushedVariantKey? savedKey = context.ExchangePushedKey(pushable.Key);
+        context.VariantKeys = keyed;
         int answer;
         FilterWindow(context, split);
         try
@@ -2124,7 +2153,9 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         }
         finally
         {
+            context.VariantKeys = projected;
             context.ExchangePushedPredicate(saved.Field, saved.Predicate);
+            context.ExchangePushedKey(savedKey);
             ProjectionWindow(context, split);
         }
 
