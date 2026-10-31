@@ -179,9 +179,9 @@ public sealed partial class DatasetPlanAlternativesTests
     }
 
     /// <summary>
-    /// Two appends consolidated, keyed by the service: an alternative that covers none of an object says why. A distinct
-    /// count's granules decline it as a sketch, a filter its counts do not answer is unproven by its summaries, and a grouped
-    /// count is more than its entry answers; no alternative of the synopses is left with no reason.
+    /// Two appends consolidated, keyed by the service: an alternative that covers none of an object says why. A quantile at
+    /// 1 % is finer than the granules' histograms, a filter its counts do not answer is unproven by its summaries, and a
+    /// grouped count is more than its entry answers; no alternative of the synopses is left with no reason.
     /// </summary>
     [Fact]
     public async Task AnAlternativeThatCoversNoneSaysWhy()
@@ -212,12 +212,12 @@ public sealed partial class DatasetPlanAlternativesTests
         }
 
         await dataset.ConsolidateAsync(Ct);
-        string[] distinct = [.. (await dataset.Scan<Row>().GroupBy(r => r.Day).Select(g => (g.Key, g.ApproximateCountDistinct(r => r.Service))).ExplainAsync(Ct)).Units.SelectMany(static unit => unit.Rejected)];
-        Assert.Contains("granules: a distinct count is kept as a sketch", distinct);
+        string[] quantile = [.. (await dataset.Scan<Row>().GroupBy(r => r.Day).Select(g => (g.Key, g.Quantile(r => r.Value, 0.9))).ExplainAsync(Ct)).Units.SelectMany(static unit => unit.Rejected)];
+        Assert.Contains("granules: a quantile or a distribution asks a finer grid than the granules' histograms", quantile);
         string[] filtered = [.. (await dataset.Scan<Row>().Where(r => r.Value > 0.5).GroupBy(r => r.Service).Select(g => g.Count()).ExplainAsync(Ct)).Units.SelectMany(static unit => unit.Rejected)];
         Assert.Contains("counts: its summaries do not prove the filter's conjuncts on other columns true over its rows", filtered);
         Assert.Contains("entry: the question asks more than a count of its rows or an extreme", filtered);
-        foreach (string rejected in distinct.Concat(filtered))
+        foreach (string rejected in quantile.Concat(filtered))
         {
             Assert.False(
                 rejected.EndsWith(": does not cover it", StringComparison.Ordinal),

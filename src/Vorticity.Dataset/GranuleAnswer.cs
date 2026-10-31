@@ -248,12 +248,6 @@ internal sealed class GranuleAnswer
         for (int k = 0; k < keys.Length; k++)
         {
             FieldExpr key = request.Keys[k];
-            if (request.DistinctColumn(k) is not null)
-            {
-                declined = "a distinct count is kept as a sketch";
-                return null;
-            }
-
             if (Top(CountsAnswer.Inner(key), schema) is not int field)
             {
                 declined = "a key reads a path or no top-level column";

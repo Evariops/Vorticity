@@ -283,7 +283,9 @@ same way (see [Deleting and updating rows](#deleting-and-updating-rows)).
 object keeps, for each column, its statistics over its granules: each granule's values and their rows,
 and each number's count, sum and extremes. A granule whose columns of the question hold one value each,
 its filter proven over its rows, gives its counts and measures; a granule where one column varies gives
-the count of each of its values, under a question of counts alone. The other granules are read as rows,
+the count of each of its values, under a question of counts alone. A distinct count, exact or
+approximate, is such a question: a granule gives each group it holds the values it lists of the distinct
+column, the same values its rows would give. The other granules are read as rows,
 those a delete marked a row of among them. Under a key that leads with the service, errors by service
 read the statistics of the service and the status, `r.Status >= 500` judged value by value: 247 KB where
 the rows take 898 KB. By the hour as well, a granule answers when its instants fall in one hour, which a
