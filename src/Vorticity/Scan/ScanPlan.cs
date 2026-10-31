@@ -22,9 +22,9 @@ public sealed record PruningStep(string Structure, int BlocksPruned, int Segment
 /// <param name="Unit">The unit, by its key in the dataset: a rollup's, or an object's.</param>
 /// <param name="Level"><c>run</c> for a rollup standing for the objects it covers, <c>object</c> for an object.</param>
 /// <param name="Alternative">
-/// The alternative taken: <c>rollup</c>, <c>counts</c> (the object's counts of a column), <c>partial</c> (the partial of the
-/// question's family it learned), <c>blocks</c> (its columns' statistics over its blocks, the rows of the others read
-/// besides), <c>zones</c> (its rows, the blocks its zone maps settle taken from them) or <c>rows</c>.
+/// The alternative taken: <c>entry</c> (what the object's entry says), <c>rollup</c>, <c>counts</c> (the object's counts of
+/// a column), <c>granules</c> (its columns' statistics over its granules, the rows of the others read besides),
+/// <c>zones</c> (its rows, the blocks its zone maps settle taken from them) or <c>rows</c>.
 /// </param>
 /// <param name="Detail">What it reads.</param>
 /// <param name="Requests">Its requests to the store.</param>

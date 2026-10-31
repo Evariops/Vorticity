@@ -93,47 +93,9 @@ internal static class CommitKey
     /// <summary>The key of a rollup's object, of the form <c>rollups/&lt;uid&gt;.vxr</c>, the uid its 32 hex digits.</summary>
     public static string ForRollup(UInt128 uid) => RollupPrefix + uid.ToString("x32", CultureInfo.InvariantCulture) + RollupSuffix;
 
-    /// <summary>The prefix every learned partial's key starts with (spec H, 3.1).</summary>
-    public const string LearnedPrefix = "learned/";
-
-    /// <summary>The suffix every learned partial's key ends with.</summary>
-    public const string LearnedSuffix = ".vxp";
-
-    /// <summary>The prefix of the families' texts, one a family, which a node lists to find the families of the others.</summary>
-    public const string FamiliesPrefix = LearnedPrefix + "families/";
-
-    /// <summary>The prefix of the partials of <paramref name="family"/>: <c>learned/&lt;family&gt;/</c>.</summary>
-    public static string LearnedOf(UInt128 family) => LearnedPrefix + family.ToString("x32", CultureInfo.InvariantCulture) + "/";
-
-    /// <summary>The key of the partial of <paramref name="family"/> over the object <paramref name="uid"/>: <c>learned/&lt;family&gt;/&lt;uid&gt;.vxp</c>.</summary>
-    public static string ForLearned(UInt128 family, UInt128 uid) => LearnedOf(family) + uid.ToString("x32", CultureInfo.InvariantCulture) + LearnedSuffix;
-
-    /// <summary>The key of the text of <paramref name="family"/>, which says its keys, aggregates and filter: <c>learned/families/&lt;family&gt;</c>.</summary>
-    public static string ForFamily(UInt128 family) => FamiliesPrefix + family.ToString("x32", CultureInfo.InvariantCulture);
-
     /// <summary>
-    /// The family and the object a learned key names, and whether it names one: a partial names both, a family's text its
-    /// family alone.
+    /// The prefix of the partials of question families an earlier version learned and kept, and of their texts, which nothing
+    /// reads now and a vacuum deletes.
     /// </summary>
-    public static bool TryParseLearned(string key, out UInt128 family, out UInt128? uid)
-    {
-        family = default;
-        uid = null;
-        if (key.StartsWith(FamiliesPrefix, StringComparison.Ordinal))
-        {
-            return key.Length == FamiliesPrefix.Length + 32
-                && UInt128.TryParse(key.AsSpan(FamiliesPrefix.Length), NumberStyles.AllowHexSpecifier, CultureInfo.InvariantCulture, out family);
-        }
-
-        if (!key.StartsWith(LearnedPrefix, StringComparison.Ordinal) || key.Length != LearnedPrefix.Length + 33 + 32 + LearnedSuffix.Length
-            || key[LearnedPrefix.Length + 32] != '/' || !key.EndsWith(LearnedSuffix, StringComparison.Ordinal)
-            || !UInt128.TryParse(key.AsSpan(LearnedPrefix.Length, 32), NumberStyles.AllowHexSpecifier, CultureInfo.InvariantCulture, out family)
-            || !UInt128.TryParse(key.AsSpan(LearnedPrefix.Length + 33, 32), NumberStyles.AllowHexSpecifier, CultureInfo.InvariantCulture, out UInt128 parsed))
-        {
-            return false;
-        }
-
-        uid = parsed;
-        return true;
-    }
+    public const string LearnedPrefix = "learned/";
 }

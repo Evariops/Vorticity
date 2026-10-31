@@ -115,11 +115,7 @@ internal sealed record ScanAnalysis(BlockMask? Live);
 /// place of their rows (<see cref="Aggregating.ZoneSettling.PlanObjectAsync"/>): set when the zone maps answer its every
 /// aggregate and key, a source that reads one file being settled by the aggregation itself; null for none.
 /// </param>
-/// <param name="Family">
-/// The family whose partials a source that learns them (<see cref="IStatesCapability.LearnsPartials"/>) keeps of the rows it
-/// reads and answers the family's questions from after (<see cref="Aggregating.LearnedFamily"/>); null for none.
-/// </param>
-internal sealed record StatesAsked(Aggregating.StateRequest? States = null, Aggregating.AggregationPlan? Settles = null, Aggregating.LearnedFamily? Family = null);
+internal sealed record StatesAsked(Aggregating.StateRequest? States = null, Aggregating.AggregationPlan? Settles = null);
 
 /// <summary>
 /// Where a scan's batches and answers come from: a file, a stream, or every object of a dataset's version. The engine sees a

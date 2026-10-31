@@ -28,9 +28,6 @@ internal sealed class LateRows
     /// <summary>The rows of the objects met, over the late rows the exit keeps apart at most.</summary>
     internal const int Share = 8;
 
-    /// <summary>The place the late rows' output takes among a job's outputs, for the inputs that sent rows to it.</summary>
-    internal const int Output = -1;
-
     private readonly byte[] _bound;
     private readonly DType? _leading;
 

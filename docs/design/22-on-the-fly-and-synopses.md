@@ -2,8 +2,8 @@
 
 How a dataset answers any question, over any columns, by computing it from its rows with the group-by
 engine, and the synopses it keeps beside the rows so that the questions the rows cannot answer in time
-are still answered: a fast path of per-column structures only, objects of one partition sorted by the
-key the application declares, and answers learned after a question has asked them. This document replaces the
+are still answered: a fast path of per-column structures only, which the writes leave, and objects of one partition
+sorted by the key the application declares. No answer depends on the questions asked before. This document replaces the
 time-window design that came before it: its composite synopsis tables give way to synopses per column.
 
 Figures marked *computed* come from the cost model of section 2 and the reference table of section
@@ -200,18 +200,13 @@ The engine is fed by the dataset's scan, which holds to seven rules.
    merge folds as a synopsis's ([16-queries.md](16-queries.md#58-parts-of-a-question-merged)).
 7. **Objects opened ahead, even on one lane.** An object read as rows costs an open, a request for its
    end, then its chunks: two round trips after one another. The objects that read their rows next are
-   opened ahead, eight at most, and left open in the handle's cache for the read that comes to them; an
-   object that learns its family's partial learns it while the one before it is served, as a scan
-   decodes its next batch ahead of its consumer (`ScanOptions.Prefetch`). On one lane at the S3 profile,
-   five of the client's questions, which learn from their objects, waited 2 to 14 round trips one after
-   another where they waited 12 to 88, and answered in 0.26 to 2.1 s where they took 0.56 to 4.9 s; on 32 lanes,
-   as before *(measured, `vortex-queries --micro paths --qp`)*.
+   opened ahead, eight at most, and left open in the handle's cache for the read that comes to them.
 
 ## 5. The synopses, all per column
 
 The fast path: structures that answer without reading rows, so that a question over months of a large
-table reads megabytes rather than terabytes. Each describes one column; none crosses two, and a
-crossing a question asks is learned after it (section 5.6). An object keeps its synopses for its whole
+table reads megabytes rather than terabytes. Each describes one column; none crosses two (section 5.6).
+An object keeps its synopses for its whole
 life, at its own grain, the partition it holds; the coarser grains are rollups, which sum runs
 of objects outside them, so that no data object is ever rewritten to change a grain.
 
@@ -353,98 +348,24 @@ Unchanged ([10-indexes.md](10-indexes.md)): for a column whose every value is a 
 value gives the pages holding it. They weigh about 4.2 bytes a row and stay on the store; a lookup
 reads about 64 KB of them per object.
 
-### 5.6 Partials learned after the fact
+### 5.6 Crossings of columns
 
-No crossing of columns exists until a question asks it. When a question reads rows or block
-statistics, it computes at the same time, for each object it reads, the partial result of its family:
-the same columns, with its equality filters on columns of few values in the object turned into groups
-(10⁴ groups at most), so that the partial answers every other value of those filters too
-(`vorticity.partials.v1`).
+No synopsis crosses two columns, and none is made by a question: what answers a question is what the writes left,
+whatever was asked before. A crossing is answered by the granules' statistics where one of its columns varies in a
+granule and the others hold one value there (5.3), and by the rows of the granules the key's index keeps otherwise.
+The sort key makes the first case the common one for the columns it holds together: under a key led by the service, a
+granule holds one service, and a question by service and route reads the routes' statistics.
 
-- A partial is keyed by the object, the version of its deletes and the family. An object never changes,
-  so a partial stays exact as long as the object lives.
-- Objects replaced without removing rows, by a merge, have the sum of their partials:
-  the commit already says which objects an output replaces.
-- While its family is asked, a partial is computed when a new object is written, so that monitors and
-  sliding windows stay exact and cheap. A family not asked for a while stops being kept up.
-- Partials live in the local cache, and may be written beside the rollups on the store, under a
-  budget of 2 GiB per dataset by default; the one that saves the least per byte goes first.
-
-Built so far (`LearnedFamily`, `LearnedPartials`): the core forms the family of a question whose
-aggregates a part's states answer whole, the plan's keys followed by a key for each conjunct that asks a
-top-level column for a value or a few, and names it on the pass that asks states (`ScanSpec.Family`).
-An object with no row marked whose added keys widen no read may learn the family's partial: a value of
-the key's first column that the object holds with others is read as the question reads it, since the
-family would read every value's rows. It runs the family over the object's rows as a part
-(`AggregationPartials.ExportAsync`), with the synopses off, keeps the partial in the handle (64 MiB) and
-the session's synopsis cache, under the object's identity and the family's, its bytes checked by their
-XXH3-128, and serves it as a partial's states, the groups of the values asked selected; a partial past
-1 MiB, some 10⁴ groups, answers its question and is not kept, and the object learns that family no
-more. Learning reads the object's rows of the family's columns, which a question with a scattered
-column's value reads anyway: on four services of 20 000 calls, counts and sums by route under one status
-read 542 KB the first time, as the rows do, and nothing under another status, nor from a handle opened
-later on the same cache *(measured, `DatasetLearnedPartialsTests`)*.
-
-Learning is a placement, an alternative of the plan beside the others (`learn`, then `partial` once
-learned): it reads every row of the object, where the rows' alternatives read the granules its key's
-index keeps of the question's value, and a synopsis reads less. Asked first, an object learns where that
-costs no more than what answers it otherwise; asked again by the handle, within the hour it keeps a
-family up, it learns once the askings before would have read again for as much what answers it
-otherwise: its rows weigh no more than that, plus what each asking reads of it again, times the askings
-of the family so far. A read of rows reads them all again; the granules' statistics are found read, the
-rows of the granules they leave are not. Against a synopsis that answers the object whole, which a later
-asking finds read, it learns only where it costs no more. Three objects of the month of requests answered
-the p99 of a service's durations by hour through their granules at every asking, 258 MB each, and never
-learned, until their granules' rows counted *(measured)*. A family that asks the
-key's second column for a value learns that value's groups and every other's: on three objects keeping
-48, 19 and 28 % of their rows for a host, the first asking reads those granules and learns nothing, the
-second learns the first object, the third the second, the fourth the last, and a handle opened after
-answers each from its partial *(measured, `DatasetLearnedPartialsTests`)*. Learned at any price, the first
-asking of an emitter's errors per hour over a month of requests at a hundredth of the target rate read
-4.7 GB at 32 lanes, where the key kept 75 MB, and took 3.9 s where the rows take 0.19 *(measured)*. Only the objects a job wrote learn, on a version that keeps
-counts: letting appended objects learn too, and versions without counts, raised what a dozen ratchets of
-the rows' path allocate warm two to five times, and made the test of 5.7 million groups learn partials
-past its budget. Through a compaction, a job notes which outputs each input's rows went to, the merge's
-runs each coming from one input; an output whose every input sent it all its rows, none of them marked,
-holds theirs, all and no other, and the handle and the session's cache keep its inputs' identities. A
-question that finds no partial of the output sums its inputs' (`LearnedFamily.MergeAsync`, the
-family's plan over their states, to the bits their rows would give), found so in turn up to eight merges
-deep, and keeps the sum as the output's: an object rewritten into the next level is answered with no row
-read *(measured)*.
-
-At several lanes, a question cuts an object it would read as rows between its lanes, where the chunks of
-the columns it reads end together. Each lane's piece of an object that learns runs the family over its own
-rows, on its lane, and serves that partial; the question's source (`PiecePartials`) keeps the pieces'
-partials until they tile the object, then has the handle merge them in the background, to the bits the
-object's rows would give, and keep the sum as the object's partial, which the handle's disposal waits for.
-An object that learns is cut over all its rows, as one lane reads them all to learn it, not over the
-granules its key's index keeps; a scan whose rows cut an object without the question's lanes, a window's
-edge, learns nothing of it. The lanes learn what one lane learns: the source weighs each object as one
-lane's plan does, its key's index read first, beside the others', where the share it keeps could change
-the choice. Cut to learn whatever one lane would, the first asking of a service's routes under 5xx by hour
-read 343 MB at 32 lanes, where its granules' statistics settle all but 47, and its first answer took
-358 ms where it takes 108 *(measured)*. Objects of blocks of a thousand rows, cut into ten pieces each at
-32 lanes: a family asked there alone is learned, asked again with another value it reads 43 KB where the
-rows read 1.1 MB, and each partial holds the groups and states of the one a lane learns of its object
-whole *(measured, `DatasetLearnedPartialsTests`)*.
-
-Each object makes its own family (`FamilyProof`): the conjuncts its summaries prove true over its every
-row leave it, so that a window that moves keeps the partials of the objects it holds whole; an object a
-conjunct on the key's first column alone neither proves nor refutes, an edge of such a window, is read as
-the question reads it and learns nothing, since it would learn a partial each time the window moves. The
-handle keeps up the families its questions asked in the last hour, sixteen at most: each object it
-appends learns their partials as it is written, read back from where the append left it, so that a
-monitor, the same question after each append, answers every object appended after it first asked from
-its partial (*measured*: the plan says so of each, minute after minute). An appended object, which keeps
-no table of contents, answers from such a partial and learns none from its rows. Keeping a family up
-costs an appended object some 1.5 ms whatever its rows, the family's run and its partial's file: 75 ns
-a row of a minute of 20 000 rows, 912 of one of 2 000, under 30 past some 50 000 *(measured)*. Not built
-yet: the store beside the rollups, the families kept up across processes, which would ask the families
-written down, and a budget by the savings each family makes.
+An earlier design learned crossings after the fact: an object read as rows kept the partial result of the question's
+family, its keys and its equality filters turned into groups, and answered the family from it after. It was withdrawn
+(2026-10-31): a handle amortized it over the askings it counted itself, so a service that opens a handle per request,
+or a process that asks once, never learned; the first asking of a family read every row of its objects; and the
+partials it kept answered nothing a question had not asked. The partials it left in a store, under `learned/`, are
+read by nothing; a vacuum deletes them (`DatasetVacuum`).
 
 ### 5.7 The caches
 
-On the local disk, shared between processes: the data pages; the synopses; the partials; and, for a
+On the local disk, shared between processes: the data pages; the synopses; and, for a
 filter evaluated on rows, the pages that held at least one row it kept (at most 66 KB for a day's
 object), which a later question with the same filter reads alone.
 
@@ -515,12 +436,11 @@ with no read; under `EstimateOptions.ExactUnder`, a second by default, the exact
 1. Time and the column sheets drop objects.
 2. The sort key's sparse index, and where each value lies, narrow the read to the granules of the
    filtered values.
-3. For each object, the cheapest of: a learned partial; its counts, or a rollup's over it, for a question
-   on one column; the granule statistics, for the granules they settle; reading the question's columns on
-   the granules left.
+3. For each object, the cheapest of: its entry; its counts, or a rollup's over it, for a question on one
+   column; the granule statistics, for the granules they settle; reading the question's columns on the
+   granules left.
 4. The cost follows the formula of section 2. Under the threshold the question runs and answers
    exactly; over it, the estimates come first, then the exact answer from the newest data to the oldest.
-5. The reading leaves its partials.
 
 Each object's choice is explained: the path taken, and its requests and bytes computed.
 
@@ -573,8 +493,6 @@ The price a question announces before a read (`CostAsync`, and the threshold of 
 - **the sort key's index**: the share of the object's rows its sparse index keeps under the filter,
   priced as granules of each column read, when the index is held, or read through the open an analysis
   makes anyway.
-- **a learned partial**: nothing; the partials of the objects a compaction merged into it, nothing; else
-  the rows of the family's columns.
 
 A bound on another column than the key's, `Status >= 500`, varies in a granule like any column: its
 extremes there span the statuses. On the battery of section 8.3 the price is a bound where an index of
@@ -614,8 +532,8 @@ At the design rate, S3 profile, cold, one node, on the reference table sorted by
 | the rows of a request | — | 0.1 to 0.2 s, postings | ~5 ms |
 | the 99th percentile per service, last 15 minutes | ~0.2 s | the same | ~10 ms |
 | the 99th percentile per service over 30 days | ~7 min (520 GB) | ~0.1 s, the objects' sketches | ~5 ms |
-| 5xx per endpoint, every service, 30 days | ~2 min (150 GB); estimate at 1 % in ~1.6 s | none | ~50 ms, learned partial |
-| per endpoint where `Weight` > 0.37, 30 days | ~8 min (620 GB); estimate in seconds | none | ~50 ms for the same threshold |
+| 5xx per endpoint, every service, 30 days | ~2 min (150 GB); estimate at 1 % in ~1.6 s | none | ~2 min; ~12 s over ten nodes |
+| per endpoint where `Weight` > 0.37, 30 days | ~8 min (620 GB); estimate in seconds | none | ~8 min |
 
 The coarse paths were computed for monthly files of counts by day and month, which rollups replaced:
 their requests are bounded the same way, a header and the chunks of the values asked for each rollup a
@@ -625,10 +543,10 @@ question takes.
 
 Crossing two columns that vary from row to row, or filtering a raw measure, over days, without
 narrowing to a value of the key's first column: about two to eight minutes for 30 days on one node. No
-per-column synopsis holds such an answer; only the rows or a crossing kept from an earlier question do,
-and ClickHouse reads the same bytes unless a projection was declared. Such a question gets its estimate
-in one to two seconds, its exact answer newest first (the last day in about 4 s), can be spread over
-nodes, ten of which read its 30 days in about 12 s, and is learned for the next time.
+per-column synopsis holds such an answer; only the rows do, and ClickHouse reads the same bytes unless a
+projection was declared. Such a question gets its estimate in one to two seconds, its exact answer
+newest first (the last day in about 4 s), and can be spread over nodes, ten of which read its 30 days in
+about 12 s.
 
 ### 8.3 Any column, in either order
 
@@ -657,9 +575,7 @@ service. Sorted by service, every question but the counts by hour reads less: 56
 service and the columns that depend on it, the version, the host and the endpoint, and 15 to 40 % less
 on the method, the status and the region, which every service holds. The counts by value and hour read
 more: in arrival order the objects' counts answer them, an object an hour, where sorted by service an
-object holds every hour and they read its rows, 3.3 to 4.4 MB each. A first ask learns its family's
-partial, which then answers the rare value's questions after the frequent one's; asked again, any of
-these questions reads nothing.
+object holds every hour and they read its rows, 3.3 to 4.4 MB each.
 
 ## 9. What the store sees
 
@@ -682,7 +598,6 @@ Cold, S3 profile, one node *(computed)*:
 | the rows of a request, 30 days | postings | ~60 | ~2 MB | 0.1 to 0.2 s |
 | 5xx per endpoint, every service, 30 days | rows | ~18 000 ranges of 8 MiB | 150 GB | ~2 min; ~12 s over ten nodes |
 | the same, estimated at 1 % | ranges of at least 1 MiB | ~1 500 | 1.5 GB | ~1.6 s |
-| the same, asked again | learned partials | ~50 | under 50 MB | ~50 ms |
 
 Asked again warm, a question finds its synopses in the local cache and sends the store no request for
 them.
@@ -725,7 +640,7 @@ The composite tables this design replaces wrote 7.7 GB a day, 4.4 % of the data.
 | counts, seven columns | ~56 |
 | quantile and distinct sketches | ~67 |
 | column sheets, seven columns | ~42 |
-| **total** | **~250 to 300**, plus 2 to 3 µs a row for each learned family kept up |
+| **total** | **~250 to 300** |
 
 At the design rate that is 0.013 to 0.015 of a core *(computed)*.
 
@@ -744,7 +659,6 @@ below)*:
 | counts' sketches | ~50 MB | a sketch 0.3 to 0.45 KB at the bench's scale | 0.5 to 2 KB a quantile sketch, 1.5 KB a distinct one |
 | granule statistics | ~690 MB | 1 307.7 bytes a granule, 5.3 × 10⁵ granules a day | 200 bytes |
 | locates | ~300 MB | 570.6 bytes a granule | |
-| learned partials | what is asked | | |
 | **total** | **~1.1 GB, 0.6 % of the data** | | |
 
 The units are those of `vortex-queries --micro columns` and `--micro granules`, the reference requests
@@ -769,7 +683,6 @@ for this table, 4.4 % of the data *(measured)*.
 | `vorticity.granule.stats.v1` | an object's region a column, which its table of contents names | each granule's rows, nulls, values by their numbers and their rows, and a measure's states |
 | `vorticity.granule.histograms.v1` | an object's region a measure, which its table of contents names | each granule's values of the measure in a log-linear sketch |
 | `vorticity.locate.v1` | an object's region a column, which its table of contents names; the partition's index | where each value lies: the values and their granules |
-| `vorticity.partials.v1` | the local cache; beside the rollups | learned partials |
 
 Readers skip a kind they do not know, as they do now. The kinds of the former synopsis tables are no
 longer written nor read. The leaf entry keeps its table of contents, at a second version that holds
@@ -803,7 +716,7 @@ handle counts its own questions, and a variant key's read has no sheet to count 
 | the core | the group-by engine on the rows, every question | precomputed synopses as the main path, which answer only what they were built for |
 | the fast path | synopses, per column only, with absolute budgets | composite synopsis tables under a budget as a share of the data, wrong both ways: 47 to 88 TB per petabyte, and nothing for a small dataset |
 | layout | a partition, a sort key of up to sixteen components and its indexed prefix, which the application declares: columns, struct fields, variant keys or functions of them | one cluster column beside the key, which the first version of this design had; a clustering value of the key's first column with blocks cut on it, the version before this one; a sort key chosen per object, whose cost per question no one can predict |
-| crossings of columns | learned after a question asks them, per object and family | tables of fixed crossings, built before any question, which miss the next crossing asked and grow with every column added |
+| crossings of columns | none kept: the granules' statistics where one column varies, the rows otherwise | tables of fixed crossings, built before any question, which miss the next crossing asked and grow with every column added; partials learned after a question asks them, per object and family, withdrawn on 2026-10-31 (5.6) |
 | coarser grains | rollups beside the levels, which sum runs of objects' counts with no row read | monthly files of days and months, a calendar the library would have had to know; regraining inside the objects, which rewrites a day's 173 GB to merge its 120 MB of synopses |
 | approximate answers | ranges of at least 1 MiB drawn on the fly, stratified by value of the key's first column | a stored sample, 4.4 GB for 13 months of the reference table, only a fixed fraction; blocks drawn one by one, some 10⁵ requests for 1 % of 30 days |
 | requests to the store | one budget per process, shared by its questions and jobs | 128 in flight per question with no ceiling: about 4 000 requests a second from a single question |

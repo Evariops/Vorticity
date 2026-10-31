@@ -425,9 +425,7 @@ internal sealed class GranuleAnswer
     /// What the object <paramref name="held"/> costs through its granules' statistics and their indexes, then through the rows of
     /// the granules they would not answer, as their share of the object's rows estimates them (<see cref="Unanswered"/>), and
     /// through the rows of the question's columns alone (<see cref="PathCosts"/>). Under a value of an identifier left out, the
-    /// rows of a granule left are read under the whole filter, the identifier's column with the others: priced without it, an
-    /// object of S1 whose granules all mix several hours of a service answered QP-5 through them, every row read at each
-    /// asking, where its rows would have learned.
+    /// rows of a granule left are read under the whole filter, the identifier's column with the others.
     /// </summary>
     internal (PathCosts.Cost Statistics, PathCosts.Cost Unanswered, PathCosts.Cost Rows) Costs(in PositionedObject held)
     {
@@ -495,7 +493,7 @@ internal sealed class GranuleAnswer
             // A filtered column outside the sort key lies spread over every granule, however pure its runs of the key's first
             // columns, and a granule's statistics bound it by its extremes alone: a granule answers only where it lists the
             // column's values. A filter leaving one request of S1 out, its ids drawn at random, read an object's rows at every
-            // asking, priced at a sixth of them, and the object never learned.
+            // asking, priced at a sixth of them.
             double spread = 0;
             foreach (int field in proven ? [] : _filtered)
             {

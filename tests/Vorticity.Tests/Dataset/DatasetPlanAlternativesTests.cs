@@ -120,7 +120,7 @@ public sealed partial class DatasetPlanAlternativesTests
     /// <summary>
     /// Six appends over six hours, partitioned by the hour, keyed by the service, consolidated and rolled up: a count by
     /// service is answered by rollups or by each object's counts, its units explained; a count under a filter the counts do
-    /// not answer reads rows and learns its family's partials, which answer it alone the second time; every answer is
+    /// not answer reads rows, the second time as the first, nothing learned; every answer is
     /// LINQ's (B3). Each unit takes the least weight of the alternatives that cover it, a rollup no more than its objects: the
     /// weights adding up, the plan is the least of every assignment of alternatives to its units (spec B, 6.3 and 9).
     /// </summary>
@@ -173,7 +173,7 @@ public sealed partial class DatasetPlanAlternativesTests
         {
             ScanPlan plan = await dataset.Scan<Row>().Where(r => r.Value > 0.5).GroupBy(r => r.Service).Select(g => g.Count()).ExplainAsync(Ct);
             Assert.Equal(hot, (await dataset.Scan<Row>().Where(r => r.Value > 0.5).GroupBy(r => r.Service).Select(g => g.Count()).ToListAsync(Ct)).Order());
-            Assert.True(pass == 0 || plan.Units.All(static unit => unit.Alternative == "partial"), $"pass {pass}: {string.Join(", ", plan.Units.Select(static unit => unit.Alternative))}");
+            Assert.True(plan.Units.All(static unit => unit.Alternative == "rows"), $"pass {pass}: {string.Join(", ", plan.Units.Select(static unit => unit.Alternative))}");
             TakesTheLeast(plan);
         }
     }
@@ -220,7 +220,7 @@ public sealed partial class DatasetPlanAlternativesTests
         foreach (string rejected in distinct.Concat(filtered))
         {
             Assert.False(
-                rejected.EndsWith(": does not cover it", StringComparison.Ordinal) && !rejected.StartsWith("partial:", StringComparison.Ordinal) && !rejected.StartsWith("learn:", StringComparison.Ordinal),
+                rejected.EndsWith(": does not cover it", StringComparison.Ordinal),
                 rejected);
         }
     }
@@ -286,9 +286,8 @@ public sealed partial class DatasetPlanAlternativesTests
     /// <summary>
     /// Six hours partitioned by the hour, keyed by the service, consolidated: each question's plan, worked out by a handle of
     /// its own, predicts what a cold handle asks of the store (spec B, 9): a count by service its granules' statistics answer,
-    /// to the request and the byte; a sum under a filter read as rows, each object learning its family's partial from them,
-    /// which costs no more where the key keeps every row, to the request, its bytes to a thousandth, the padding between
-    /// segments being what the table of contents does not keep.
+    /// to the request and the byte; a sum under a filter read as rows, to the request, its bytes to a thousandth, the padding
+    /// between segments being what the table of contents does not keep.
     /// </summary>
     [Fact]
     public async Task ThePlanPredictsWhatAColdReadAsksOfTheStore()
@@ -311,7 +310,7 @@ public sealed partial class DatasetPlanAlternativesTests
             async dataset => Assert.Equal(
                 all.Where(static row => row.Value > 0.9).Sum(static row => row.Sequence),
                 (await dataset.Scan<Row>().Where(r => r.Value > 0.9).GroupBy(r => r.Service).Select(g => g.Sum(r => r.Sequence)).ToListAsync(Ct)).Sum()));
-        Assert.All(summed.Units, static unit => Assert.Equal("learn", unit.Alternative));
+        Assert.All(summed.Units, static unit => Assert.Equal("rows", unit.Alternative));
         Assert.Equal(summed.Cost!.Requests, reads);
         Assert.InRange(bytes, summed.Cost.Bytes - (summed.Cost.Bytes / 1000), summed.Cost.Bytes + (summed.Cost.Bytes / 1000));
     }
@@ -332,8 +331,8 @@ public sealed partial class DatasetPlanAlternativesTests
         {
             Layout = new DatasetLayout
             {
-                Partition = LayoutValue.Column(nameof(DatasetLearnedPartialsTests.Call.At)).Truncate(CalendarUnit.Hour),
-                SortKey = [LayoutValue.Column(nameof(DatasetLearnedPartialsTests.Call.Service)), LayoutValue.Column(nameof(DatasetLearnedPartialsTests.Call.At))],
+                Partition = LayoutValue.Column(nameof(Call.At)).Truncate(CalendarUnit.Hour),
+                SortKey = [LayoutValue.Column(nameof(Call.Service)), LayoutValue.Column(nameof(Call.At))],
                 IndexedPrefix = 1,
                 ObjectBytes = 1 << 18,
                 MergeFanout = 4,
@@ -345,19 +344,19 @@ public sealed partial class DatasetPlanAlternativesTests
             ChunkBytes = 16 << 10,
             GroupRows = 1_000,
         };
-        await using (VortexDataset writing = await VortexDataset.CreateAsync(memory, DatasetLearnedPartialsTests.Call.Schema, options, Ct))
+        await using (VortexDataset writing = await VortexDataset.CreateAsync(memory, Call.Schema, options, Ct))
         {
             for (int part = 0; part < 4; part++)
             {
-                DatasetLearnedPartialsTests.Call[] rows = [.. Enumerable.Range(0, 20_000).Select(i =>
+                Call[] rows = [.. Enumerable.Range(0, 20_000).Select(i =>
                 {
                     int service = random.Next(4);
-                    return new DatasetLearnedPartialsTests.Call(
+                    return new Call(
                         $"svc-{service}", Start.AddTicks(random.NextInt64(TimeSpan.FromHours(2).Ticks)), $"h-{service}-{random.Next(3)}",
                         $"/svc{service}/r{random.Next(6)}", (short)200, random.Next(4_000) / 4.0, random.Next(1_000_000));
                 })];
                 await using ObjectDraft draft = writing.StartObject();
-                await draft.Writer.WriteAsync<DatasetLearnedPartialsTests.Call>(rows, Ct);
+                await draft.Writer.WriteAsync<Call>(rows, Ct);
                 await writing.AppendAsync(draft, Ct);
             }
 
@@ -551,4 +550,7 @@ public sealed partial class DatasetPlanAlternativesTests
 
     [VortexRecord]
     public partial record struct HourTotal(DateTime Hour, long Count, long Last);
+
+    [VortexRecord]
+    public partial record struct Call(string Service, DateTimeOffset At, string Host, string Route, short Status, double Latency, long Size);
 }

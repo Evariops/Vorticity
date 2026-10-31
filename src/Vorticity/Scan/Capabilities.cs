@@ -118,12 +118,6 @@ internal interface IKeysCapability
 internal interface IStatesCapability
 {
     /// <summary>
-    /// Whether the source learns the partials of an aggregation's family from the rows it reads, a pass that asks states
-    /// naming the family (<see cref="StatesAsked.Family"/>): a dataset, which knows its objects and keeps their partials.
-    /// </summary>
-    bool LearnsPartials => false;
-
-    /// <summary>
     /// Whether a pass of <paramref name="spec"/> asking <paramref name="states"/> would take states in place of some of its
     /// rows: a dataset one of whose units its synopses answer. Read from what the version's entries hold, before any data.
     /// </summary>

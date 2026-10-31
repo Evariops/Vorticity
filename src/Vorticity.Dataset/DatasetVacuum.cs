@@ -99,32 +99,26 @@ internal static class DatasetVacuum
     public static TimeSpan WindowOf(RetentionSettings retention) =>
         retention.Seconds > 0 ? TimeSpan.FromSeconds(retention.Seconds) : DefaultWindow;
 
-    /// <summary>The bytes of learned partials a vacuum leaves when no budget is given (<see cref="DatasetOptions.LearnedBudget"/>).</summary>
-    public const long DefaultLearnedBudget = 2L << 30;
-
-    /// <summary>The keys a vacuum deletes in one request at most while it sweeps the learned partials, which may be many.</summary>
+    /// <summary>The keys a vacuum deletes in one request at most while it sweeps what an earlier version left, which may be many.</summary>
     private const int DeleteBatch = 1_000;
 
     /// <summary>Marks from every version inside the window, then sweeps what is unmarked and old.</summary>
     /// <param name="store">The dataset's store.</param>
     /// <param name="options">The clock and whether to delete; null for the defaults.</param>
     /// <param name="location">Where the dataset lives, as its handle was told, which tags the vacuum's activity; null when unknown.</param>
-    /// <param name="learnedBudget">The bytes of learned partials left past the sweep (<see cref="DatasetOptions.LearnedBudget"/>).</param>
     /// <param name="cancellationToken">Cancels the marking and the deletes.</param>
     /// <exception cref="CommitFormatException">A page it must mark from is not what its reference says.</exception>
     /// <exception cref="ObjectNotFoundException">A page it must mark from is missing; nothing was deleted.</exception>
     public static async ValueTask<VacuumResult> RunAsync(
-        IObjectStore store, VacuumOptions? options = null, string? location = null, long learnedBudget = DefaultLearnedBudget,
-        CancellationToken cancellationToken = default)
+        IObjectStore store, VacuumOptions? options = null, string? location = null, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(store);
-        ArgumentOutOfRangeException.ThrowIfNegative(learnedBudget);
         options ??= new VacuumOptions();
         Activity? activity = DatasetTelemetry.StartVacuum(location, options.DryRun);
         VacuumResult result;
         try
         {
-            result = await SweepAsync(store, options, learnedBudget, cancellationToken).ConfigureAwait(false);
+            result = await SweepAsync(store, options, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception failure)
         {
@@ -136,7 +130,7 @@ internal static class DatasetVacuum
         return result;
     }
 
-    private static async ValueTask<VacuumResult> SweepAsync(IObjectStore store, VacuumOptions options, long learnedBudget, CancellationToken cancellationToken)
+    private static async ValueTask<VacuumResult> SweepAsync(IObjectStore store, VacuumOptions options, CancellationToken cancellationToken)
     {
         DateTimeOffset now = options.TimeProvider.GetUtcNow();
 
@@ -235,81 +229,14 @@ internal static class DatasetVacuum
 
         await DeleteAsync().ConfigureAwait(false);
 
-        // The learned partials (spec H, 3.4), streamed, for there may be one an object and a family: those of the objects no
-        // retained version holds go as a data object would; then, past the budget, the families whose latest partial is the
-        // oldest, each whole, its text with it, whatever their age; a family's text with no partial left goes past the window.
-        Dictionary<UInt128, (long Bytes, DateTimeOffset Latest)> families = [];
-        List<ObjectListing> texts = [];
+        // The partials of question families an earlier version learned and kept under learned/, which nothing reads now,
+        // streamed, for there may be one an object and a family: each deleted whatever its age, unless under the store's lock.
         await foreach (ObjectListing listed in store.ListAsync(CommitKey.LearnedPrefix, null, cancellationToken).ConfigureAwait(false))
         {
-            if (!CommitKey.TryParseLearned(listed.Key, out UInt128 family, out UInt128? uid))
+            if (await HeadToSweepAsync(listed, evicting: true).ConfigureAwait(false) is { } found)
             {
-                continue;
-            }
-
-            if (uid is null)
-            {
-                texts.Add(listed);
-            }
-            else if (!markedUids.Contains(uid.Value))
-            {
-                if (await HeadToSweepAsync(listed).ConfigureAwait(false) is { } found)
-                {
-                    Sweep(listed.Key, found);
-                    await DeleteFullAsync().ConfigureAwait(false);
-                }
-            }
-            else
-            {
-                (long bytes, DateTimeOffset newest) = families.GetValueOrDefault(family);
-                families[family] = (bytes + listed.Head.Length, listed.Head.LastModified > newest ? listed.Head.LastModified : newest);
-            }
-        }
-
-        long learned = 0;
-        foreach ((long bytes, DateTimeOffset _) in families.Values)
-        {
-            learned += bytes;
-        }
-
-        HashSet<UInt128> evicted = [];
-        if (learned > learnedBudget)
-        {
-            List<(UInt128 Family, long Bytes, DateTimeOffset Latest)> oldest = [];
-            foreach ((UInt128 family, (long bytes, DateTimeOffset newest)) in families)
-            {
-                oldest.Add((family, bytes, newest));
-            }
-
-            // A family's partials listed again, those of objects no version holds swept already.
-            await DeleteAsync().ConfigureAwait(false);
-            oldest.Sort(static (a, b) => a.Latest.CompareTo(b.Latest));
-            for (int i = 0; i < oldest.Count && learned > learnedBudget; i++)
-            {
-                evicted.Add(oldest[i].Family);
-                learned -= oldest[i].Bytes;
-                await foreach (ObjectListing listed in store.ListAsync(CommitKey.LearnedOf(oldest[i].Family), null, cancellationToken).ConfigureAwait(false))
-                {
-                    if (CommitKey.TryParseLearned(listed.Key, out _, out UInt128? uid) && uid is { } held && markedUids.Contains(held)
-                        && await HeadToSweepAsync(listed, evicting: true).ConfigureAwait(false) is { } found)
-                    {
-                        Evict(listed.Key, found);
-                        await DeleteFullAsync().ConfigureAwait(false);
-                    }
-                }
-            }
-        }
-
-        foreach (ObjectListing listed in texts)
-        {
-            if (CommitKey.TryParseLearned(listed.Key, out UInt128 family, out _) && !families.ContainsKey(family)
-                && await HeadToSweepAsync(listed).ConfigureAwait(false) is { } found)
-            {
-                Sweep(listed.Key, found);
-            }
-            else if (evicted.Contains(family) && await HeadToSweepAsync(listed, evicting: true).ConfigureAwait(false) is { } kept)
-            {
-                Evict(listed.Key, kept);
+                Evict(listed.Key, found);
+                await DeleteFullAsync().ConfigureAwait(false);
             }
         }
 
@@ -477,7 +404,7 @@ internal static class DatasetVacuum
             batch = [];
         }
 
-        // The batch deleted once it holds a request's worth, while the learned partials are swept.
+        // The batch deleted once it holds a request's worth, while the partials an earlier version learned are swept.
         async ValueTask DeleteFullAsync()
         {
             if (batch.Count >= DeleteBatch)

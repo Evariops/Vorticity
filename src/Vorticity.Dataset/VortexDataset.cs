@@ -1007,56 +1007,7 @@ public sealed class VortexDataset : IAsyncDisposable
             return Version;
         }
 
-        ulong version = await ApplyAsync(Added(written), CommitKind.Append, cancellationToken).ConfigureAwait(false);
-        await KeptUpAsync(written, cancellationToken).ConfigureAwait(false);
-        return version;
-    }
-
-    /// <summary>How long a family this handle's questions asked is kept up: the objects it appends learn its partials as they are written.</summary>
-    internal static readonly TimeSpan KeptUpFor = TimeSpan.FromHours(1);
-
-    /// <summary>
-    /// Learns, of each object an append wrote, the partial of each family this handle's questions asked in the last
-    /// <see cref="KeptUpFor"/> (<see cref="LearnedPartials.Asked"/>), as the object makes it (<see cref="FamilyProof"/>): the
-    /// family run over the object's rows as the append left them, so that a question of it answers the object with no read.
-    /// </summary>
-    private async ValueTask KeptUpAsync(List<WrittenObject> written, CancellationToken cancellationToken)
-    {
-        List<Aggregating.LearnedFamily> live = Partials.Live(_options.TimeProvider.GetUtcNow().UtcTicks - KeptUpFor.Ticks);
-        if (live.Count == 0)
-        {
-            return;
-        }
-
-        DatasetSchema schema = Snapshot.Schema;
-        SynopsisCache? cache = Session.Options.SynopsisCache;
-        foreach (WrittenObject made in written)
-        {
-            ObjectEntry entry = made.Entry;
-            ObjectLease? lease = null;
-            try
-            {
-                foreach (Aggregating.LearnedFamily family in live)
-                {
-                    if (new FamilyProof(family, schema).Of(entry.Summaries, entry.PhysicalRows) is not { } own || Partials.Holds(entry.Uid, own.Key, cache))
-                    {
-                        continue;
-                    }
-
-                    lease ??= await RentAsync(entry, cancellationToken).ConfigureAwait(false);
-                    AggregationPartial partial = await own.Family.LearnAsync(
-                        new FileScanSource(lease.File), new RowRange(0, lease.File.RowCount), ScanOptions.Default, cancellationToken).ConfigureAwait(false);
-                    Partials.Keep(entry.Uid, own.Key, partial, cache, entry.Bytes, LearnedStore, own.Family.Text);
-                }
-            }
-            finally
-            {
-                if (lease is not null)
-                {
-                    await lease.DisposeAsync().ConfigureAwait(false);
-                }
-            }
-        }
+        return await ApplyAsync(Added(written), CommitKind.Append, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>The objects an append of <paramref name="draft"/> adds: the draft's own, written and put.</summary>
@@ -1129,9 +1080,7 @@ public sealed class VortexDataset : IAsyncDisposable
             return Version;
         }
 
-        ulong version = await ApplyAsync(Added(written), CommitKind.Append, cancellationToken).ConfigureAwait(false);
-        await KeptUpAsync(written, cancellationToken).ConfigureAwait(false);
-        return version;
+        return await ApplyAsync(Added(written), CommitKind.Append, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -2037,8 +1986,8 @@ public sealed class VortexDataset : IAsyncDisposable
         CompactionLoop.RunAsync(this, schedule ?? new CompactionSchedule(), cancellationToken);
 
     /// <summary>
-    /// Deletes what no version inside the retention window references, and the learned partials past
-    /// <see cref="DatasetOptions.LearnedBudget"/>. It marks from the store's latest version, not from
+    /// Deletes what no version inside the retention window references, and the partials an earlier version learned
+    /// under <c>learned/</c>. It marks from the store's latest version, not from
     /// this handle's: a handle on an older version outlives the window at its own risk, and is told so
     /// by the object it can no longer read.
     /// </summary>
@@ -2046,7 +1995,7 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <param name="cancellationToken">Cancels the marking and the deletes.</param>
     /// <returns>What vacuum kept and deleted.</returns>
     public ValueTask<VacuumResult> VacuumAsync(VacuumOptions? options = null, CancellationToken cancellationToken = default) =>
-        DatasetVacuum.RunAsync(_store, options, _location, _options.LearnedBudget, cancellationToken);
+        DatasetVacuum.RunAsync(_store, options, _location, cancellationToken);
 
     /// <summary>
     /// Gives the dataset indexes: every writer of it builds them from then on, compactions included,
@@ -2112,10 +2061,6 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <returns>A task that completes when every object is closed.</returns>
     public async ValueTask DisposeAsync()
     {
-        // The partials learned and on their way to the store, which outlive the handle there; the files of those held, which
-        // do not.
-        await Partials.FlushAsync().ConfigureAwait(false);
-        await Partials.CloseAsync().ConfigureAwait(false);
         await LevelZero.DisposeAsync().ConfigureAwait(false);
         await _objects.DisposeAsync().ConfigureAwait(false);
         if (_store is SealedObjectStore sealedStore)
@@ -3083,20 +3028,11 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <summary>The synopses this handle read, its objects' column sheets, counts and sketches, by object and region (<see cref="ReadSynopsesAsync"/>).</summary>
     private readonly SynopsisMemo _synopses = new SynopsisMemo();
 
-    /// <summary>The partials this handle learned of its objects' families, kept in memory, in the session's cache and in the store (<see cref="LearnedPartials"/>).</summary>
-    internal LearnedPartials Partials { get; } = new LearnedPartials();
-
     /// <summary>The bytes the indexes of the partitions this handle read may hold, their directories, last bytes and pages (<see cref="PartitionIndexes"/>).</summary>
     internal const long PartitionIndexBytes = 64L << 20;
 
     /// <summary>The indexes of the partitions this handle read, kept for the questions after (<see cref="PartitionIndexCache"/>).</summary>
     internal PartitionIndexCache PartitionIndexes { get; } = new PartitionIndexCache(PartitionIndexBytes);
-
-    /// <summary>
-    /// The store the learned partials are kept in for every node (spec H, 3.1): the dataset's own, none for a store that
-    /// seals what it writes, as a rollup is not written there either.
-    /// </summary>
-    internal IObjectStore? LearnedStore => _store is SealedObjectStore { Seals: true } ? null : _store;
 
     /// <summary>The granules where the filters this handle evaluated on its objects' rows kept a row (<see cref="PredicatePages"/>).</summary>
     internal PredicatePages Predicates { get; } = new PredicatePages();

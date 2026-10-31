@@ -252,7 +252,6 @@ and `ScanOptions.UseSynopses = false` reads every object's rows.
 | the counts less one value | a filter that leaves one value of a declared identifier out, `r.RequestId != id` | no object holding it: 127 KB where the rows take 791 KB |
 | the counts less the deleted rows | an object a delete marked, under counts, sums, means or distinct values | 332 bytes where the rows take 540 KB |
 | the granules' statistics | a question the counts do not answer, granule by granule, the granules that hold one group | errors by service: 247 KB where the rows take 898 KB |
-| a learned partial | the question, or its family, asked before over the object | nothing read |
 | a rollup's totals | every object under a rollup, over a long range | a count by service: 17 requests where the objects' counts take 26 |
 | the filter's pages | a filter evaluated on rows, asked before | 3.4 MB where the first ask read 23.2 MB |
 | the rows | any other object | |
@@ -293,22 +292,6 @@ hour read 2.4 MB where the rows take 6.2 MB. A window whose edges cut granules r
 rows, and never more than the rows take. `ScanOptions.AlignWindow` widens the window to the bounds of the
 objects its ends fall in, so that they are answered from their counts too: the answer is then the exact
 answer of the window applied, which `ScanMetrics.Window` gives.
-
-**Learned partials.** An object read as rows leaves what it gave the question, so that the question
-asked again reads nothing of it. What it keeps is the question's family: the same keys and aggregates,
-each filter that asks a column for a value or a few made a key of its own. Counts by route where
-`r.Status == 404` learn the counts by route and status, and the same question under `r.Status == 500`
-answers from them. The handle keeps these partials, and so does the session's `SynopsisCache` when it
-has one, for the handles and processes after; an object a compaction rewrites without removing rows
-sums the partials of the objects it replaces. A question whose aggregates a state answers whole learns
-them: counts, sums, means, extremes, quantiles and approximate distinct counts. A value of the key's
-first column is not made a key where an object holds it with others, since learning would read every
-value's rows. A window on the key's first column that moves, `r.At >= now - 15 minutes`, keeps the
-partials of the objects it holds whole, and reads the one its edge cuts: 125 KB the first time, 45 KB
-once it moved. The handle keeps up the families its questions asked in the last hour: each object it
-appends learns their partials as it is written, which costs the append some 2 to 3 µs a row and family,
-so that a monitor asking the same question after each append reads none of the objects appended since
-it first asked.
 
 **Rollups.** Over a long range, an object's counts still cost a request an object. `RollUpAsync` sums
 the counts of runs of about `DatasetOptions.RollupFanout` consecutive objects (64 by default) into
@@ -399,7 +382,7 @@ long warmed = await dataset.WarmAsync<Request>(r => r.At >= DateTimeOffset.UtcNo
 
 By default only what an object's table of contents declares enters the cache: the directories that
 find its rows, of its chunks, its pages, its indexes and its variants' paths, never its data, along with
-the partials and the filters' pages questions learned. A read with no open of an object, such as a
+the filters' pages questions evaluated. A read with no open of an object, such as a
 lookup of an identifier in a large one, needs nothing else before its data; a read that opens the
 object reads its last 64 KiB from the store first. An object never changes, so an entry never goes
 stale.

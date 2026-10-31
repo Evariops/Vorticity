@@ -20,7 +20,7 @@ internal sealed partial class DatasetScanBuilder
     /// <summary>
     /// What the scan would cost, at the dataset's profile, before reading anything: each unit through the alternative its
     /// weight chooses (<see cref="UnitsAsync"/>), as its explanation says, a rollup's totals, an object's counts, its blocks'
-    /// statistics and the rows of the blocks they are not expected to answer, the partial its family learned, or its rows,
+    /// statistics and the rows of the blocks they are not expected to answer, or its rows,
     /// with its sheets when the filter asks values of a column. An object a sheet or an index would pass over counts whole:
     /// the cost is a bound.
     /// </summary>
@@ -127,10 +127,10 @@ internal sealed partial class DatasetScanBuilder
             explained.Add(new UnitStep(
                 unit.Name, unit.Level == UnitLevel.Run ? "run" : "object", unit.Chosen.Name, unit.Chosen.Describe(unit, unit.Cost),
                 unit.Cost.Requests, unit.Cost.Bytes, unit.Weight, [.. unit.Rejected ?? []]));
-            if (unit.Chosen.Path is not (AnswerPath.Rows or AnswerPath.Zones or AnswerPath.Learn))
+            if (unit.Chosen.Path is not (AnswerPath.Rows or AnswerPath.Zones))
             {
                 // A unit its synopses answer reads what its alternative says: a rollup the rows of the buckets the filter
-                // keeps, an object the rows the scan covers. One that learns is planned as its rows.
+                // keeps, an object the rows the scan covers.
                 long answered = unit.Run is { } rollup ? RowsOf(rollup, unit.Buckets) : Covered(unit.Held);
                 keptRows += answered;
                 segments += unit.Cost.Requests;

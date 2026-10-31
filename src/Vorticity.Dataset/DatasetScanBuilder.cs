@@ -338,33 +338,6 @@ internal sealed partial class DatasetScanBuilder
     }
 
     /// <summary>
-    /// Learns, for <paramref name="family"/>, the partial of each object it would read as rows that may learn one, run over
-    /// <paramref name="source"/>, or answers the object from the one it learned (<see cref="LearnedPartials"/>).
-    /// </summary>
-    internal DatasetScanBuilder WithFamily(LearnedFamily family, ScanSource source)
-    {
-        _family = family;
-        _familySource = source;
-        return this;
-    }
-
-    /// <summary>
-    /// Makes the scan a lane's piece of an object its question cut between its lanes, which learns the partial of the
-    /// family over its rows where it would read them (<see cref="PiecePartials"/>).
-    /// </summary>
-    internal DatasetScanBuilder AsPiece()
-    {
-        _piece = true;
-        return this;
-    }
-
-    // The family of the aggregation the scan asks states for, whose partials it learns, and the source its runs read;
-    // whether the scan is a lane's piece of an object, which learns the partial of its rows.
-    private LearnedFamily? _family;
-    private ScanSource? _familySource;
-    private bool _piece;
-
-    /// <summary>
     /// Makes the scan one of the question <paramref name="source"/> asks, whose lanes share what the question reads once:
     /// the lookup of its partitions' indexes (<see cref="DatasetScanSource.LocatesOf"/>).
     /// </summary>

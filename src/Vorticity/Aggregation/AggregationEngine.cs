@@ -3518,9 +3518,9 @@ internal abstract class AggregationHost
         // The states the pass would ask for, and the blocks a dataset would settle, as the run asks them, so that a source that
         // keeps them says per object what it reads.
         AggregationPlan? settles = Source.Rows.SettlesBlocks && ZoneSettling.Applies(pass, plan) ? plan : null;
-        if (pass.Options.UseSynopses && Source.States is { } kept && StateRequest.Of(plan, settled, top: null) is { } states)
+        if (pass.Options.UseSynopses && Source.States is not null && StateRequest.Of(plan, settled, top: null) is { } states)
         {
-            pass = pass with { Answering = new StatesAsked(states, Settles: settles, Family: kept.LearnsPartials ? LearnedFamily.Of(plan, pass.Filter, Source) : null) };
+            pass = pass with { Answering = new StatesAsked(states, Settles: settles) };
         }
         else if (settles is not null)
         {
@@ -3652,13 +3652,9 @@ internal static class AggregationEngine
         // for a pass whose every aggregate and key a state answers whole: asked before the rows are cut, so
         // that the cut leaves whole what states answer. The blocks a dataset settles stay asked beside them,
         // for the objects it reads as rows.
-        else if (pass.Options.UseSynopses && source.States is { } answering && StateRequest.Of(plan, settled, top) is { } states)
+        else if (pass.Options.UseSynopses && source.States is not null && StateRequest.Of(plan, settled, top) is { } states)
         {
-            pass = pass with
-            {
-                Answering = new StatesAsked(
-                    states, Settles: pass.Answering?.Settles, Family: answering.LearnsPartials && top is null ? LearnedFamily.Of(plan, pass.Filter, source) : null),
-            };
+            pass = pass with { Answering = new StatesAsked(states, Settles: pass.Answering?.Settles) };
         }
 
         // On several lanes the structures are read once, before the rows are cut, so that the cut

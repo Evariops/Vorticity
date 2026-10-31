@@ -397,7 +397,7 @@ internal static partial class DatasetCompactor
                 ObjectStream outputs = outputsOf(doublings);
                 try
                 {
-                    long merged = await MergeAsync(dataset, schema, job, outputs, null, null, null, token, ranges, range).ConfigureAwait(false);
+                    long merged = await MergeAsync(dataset, schema, job, outputs, null, null, token, ranges, range).ConfigureAwait(false);
                     await outputs.FinishAsync(token).ConfigureAwait(false);
                     return (outputs, merged);
                 }

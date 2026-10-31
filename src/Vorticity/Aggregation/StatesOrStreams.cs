@@ -20,10 +20,8 @@ internal sealed class StatesOrStreams(AggregationQuery query, StateRequest state
     {
         if (_groups is null)
         {
-            // A source that learns the partials of a question's family takes its states to learn them, or to answer from them.
             ScanSpec spec = await query.Host.AlignedSpecAsync(query.Plan, query.RowFilter, cancellationToken, query.Operators).ConfigureAwait(false);
             ScanSource source = query.Host.Source;
-            spec = spec with { Answering = new StatesAsked(Family: source.States?.LearnsPartials == true && spec.Options.UseSynopses ? LearnedFamily.Of(query.Plan, spec.Filter, source) : null) };
             bool taken = source.States is { } kept && await kept.TakesStatesAsync(spec, states, cancellationToken).ConfigureAwait(false);
             _groups = taken ? new GroupBatches(query, cancellationToken) : query.Streamed(cancellationToken);
         }

@@ -437,8 +437,6 @@ store's profile, and what it **returns**: granules, states or rows.
 | entry | version, object | a count or an extreme the tree's summaries answer |
 | rollup | run of objects | its totals answer the question for the whole run |
 | counts | object | the object's counts per value answer the aggregation |
-| learned partial | object | a partial of the question's family is held |
-| learn | object | the object may learn the family's partial: every row of the family's columns |
 | granule statistics | object | the statistics of its columns over its granules answer some granules; the rest are rows |
 | zones | object | the zone maps settle some granules; the rest are rows |
 | rows | granule ranges | always |
@@ -447,11 +445,9 @@ The choice is the exact optimum over the tree of units, since costs are additive
 alternatives that cover it whole, of those that cover part of it plus the best of the rest, and of the sum of its
 children. Every alternative is exact and sums are reproducible, so the choice changes the cost of an answer and never a
 bit of it. Choosing costs about 3 ms for 30 days of the reference table and about 45 ms for 13 months, before any data is
-read *(computed)*. Learning is weighed last, as a placement: against the alternative chosen, it is taken where it costs no
-more, or, against what each later asking of the family reads again of it, all its rows or the rows of the granules their
-statistics leave, once the askings before would have paid for it
-([22, 5.6](22-on-the-fly-and-synopses.md#56-partials-learned-after-the-fact)). The lanes that cut an object learn what
-one lane learns.
+read *(computed)*. No alternative depends on the questions asked before: each reads what the writes left
+([22, 5.6](22-on-the-fly-and-synopses.md#56-crossings-of-columns)). An explanation says, for each alternative that covers
+none of a unit, why.
 
 ### 8.4 The cost profile
 
@@ -507,9 +503,7 @@ own, exact under deletes, with no declaration:
 
 - **counts** per column and per object, with the states of measures and sketches per value;
 - **rollups** per partition and per runs of partitions, for top lists and series over months;
-- **histograms** of measures per granule (section 5.5);
-- **learned partials**: the partial of a question's family, learned the first time it is asked, kept on the store, shared
-  between nodes, and served to the questions it subsumes.
+- **histograms** of measures per granule (section 5.5).
 
 A joint precomputation of several columns, a degraded history and derived datasets remain options for an application to
 choose.

@@ -27,16 +27,6 @@ internal sealed partial class DatasetScanSource
         _version = version;
     }
 
-    /// <summary>The partials the question's lanes learn of the pieces of the objects cut between them, until each object's tile it.</summary>
-    internal PiecePartials Pieces => LazyInitializer.EnsureInitialized(ref _pieces);
-
-    private PiecePartials? _pieces;
-
-    /// <summary>The question's number in the process, which counts it once among the askings of its family, whatever its lanes.</summary>
-    internal long Asking { get; } = Interlocked.Increment(ref s_askings);
-
-    private static long s_askings;
-
     // The lookup of the partitions' indexes for the filter the question's lanes ask it with, made by the first that asks.
     private Locates? _locates;
 
@@ -91,14 +81,10 @@ internal sealed partial class DatasetScanSource
     /// <summary>It settles each object's blocks as it reads it, those no delete marked a row of (<see cref="StatesAsked.Settles"/>).</summary>
     public bool SettlesBlocks => true;
 
-    /// <summary>It learns the partials of an aggregation's family from the objects it reads as rows (<see cref="StatesAsked.Family"/>).</summary>
-    public bool LearnsPartials => true;
-
     public async ValueTask<bool> TakesStatesAsync(ScanSpec spec, Aggregating.StateRequest states, CancellationToken cancellationToken) =>
         _version.MayKeepCounts && spec.Options.UseSynopses && !spec.MatchesNothing
         && await _version.KeepsCountsAsync(cancellationToken).ConfigureAwait(false)
-        && (spec.Answering?.Family is not null
-            || await Builder(spec with { Answering = (spec.Answering ?? new StatesAsked()) with { States = states } }, null).AnswersAnyAsync(cancellationToken).ConfigureAwait(false));
+        && await Builder(spec with { Answering = (spec.Answering ?? new StatesAsked()) with { States = states } }, null).AnswersAnyAsync(cancellationToken).ConfigureAwait(false);
 
     /// <summary>
     /// The filter grown so that its range on the key's first column covers whole the objects it cuts whose counts would
@@ -396,10 +382,9 @@ internal sealed partial class DatasetScanSource
             return null;
         }
 
-        // The objects answered whole, those cut to learn, those their granules answer with the rows they leave, and those whose
-        // choice waits on their index, made as each is met.
+        // The objects answered whole, those their granules answer with the rows they leave, and those whose choice waits on
+        // their index, made as each is met.
         HashSet<long>? answered = null;
-        HashSet<long>? learning = null;
         Dictionary<long, long>? granular = null;
         HashSet<long>? undecided = null;
         List<(PositionedObject Held, RowRange Rows, List<RowRange>? Kept, Task<List<RowRange>?>? Reading)> walked = [];
@@ -412,35 +397,27 @@ internal sealed partial class DatasetScanSource
                 continue;
             }
 
-            // An object its counts or a partial of the question's family answer is read whole, as states: a piece of its own,
-            // never cut. Cut over its rows, each piece of an object a partial answered read them: the exception groups of a
-            // pod's errors at 32 lanes read 121 MB in 473 requests where one lane read 1.1 MB in 4.
+            // An object its counts answer is read whole, as states: a piece of its own, never cut.
             bool whole = start == held.FirstRow && end == held.FirstRow + held.Entry.Rows;
-            if (whole && ((answer is not null && answer.FieldOf(held) is not null)
-                || (spec.Answering?.Family is not null && await planner.PartialAnswersAsync(held, cancellationToken).ConfigureAwait(false))))
+            if (whole && answer is not null && answer.FieldOf(held) is not null)
             {
                 walked.Add((held, new RowRange(start, end), null, null));
                 (answered ??= []).Add(held.FirstRow);
                 continue;
             }
 
-            // An object that learns the partial of the question's family is cut over all its rows, whatever the key's pruning
-            // keeps: each piece learns the partial of its rows, and once they tile the object they merge into its partial
-            // (PiecePartials), which the next question finds whole. Cut over the granules its index keeps, the pieces would
-            // cover a part of it, and nothing would be learned at several lanes. It learns where one lane's plan would, its
-            // key's index read first where the share it keeps could weigh less than learning: cut to learn whatever that
-            // share, the routes of a service under 5xx read 343 MB at 32 lanes the first time, where the kept granules hold 47.
             // An object one lane's plan answers through its granules' statistics is answered so too, the rows they leave
-            // weighed for its pieces (Granular): cut as rows, each piece read all of its own.
+            // weighed for its pieces: cut as rows, each piece read all of its own. Its key's index is read first where the
+            // share it keeps could weigh less than its granules.
             bool deciding = false;
-            if (whole && (spec.Answering?.Family is not null || answer is not null))
+            if (whole && answer is not null)
             {
                 await planner.PlacedAsync(held, cancellationToken).ConfigureAwait(false);
                 (AnswerPath path, deciding) = planner.ChosenOnOneLane(held, kept: 1);
-                if (!deciding && path is AnswerPath.Learn or AnswerPath.Granules)
+                if (!deciding && path == AnswerPath.Granules)
                 {
                     walked.Add((held, new RowRange(start, end), null, null));
-                    Mark(held, path, planner, ref learning, ref granular);
+                    (granular ??= [])[held.FirstRow] = planner.GranulesLeave(held);
                     continue;
                 }
             }
@@ -464,8 +441,7 @@ internal sealed partial class DatasetScanSource
         {
             if (done is null && reading is null)
             {
-                // An object answered whole reads no rows; one that learns reads them all, which the lanes share; one its
-                // granules answer, the rows they leave.
+                // An object answered whole reads no rows; one its granules answer, the rows they leave.
                 objects.Add((held, rows));
                 total += Weight(held, rows);
                 continue;
@@ -477,15 +453,15 @@ internal sealed partial class DatasetScanSource
 #pragma warning restore VSTHRD003
             bool whole = ReferenceEquals(read, AllKept);
 
-            // An object that may learn, or that its granules may answer, judged once its index said the share of its rows the
-            // question would read otherwise.
+            // An object its granules may answer, judged once its index said the share of its rows the question would read
+            // otherwise.
             AnswerPath chosen = undecided?.Contains(held.FirstRow) == true
                 ? planner.ChosenOnOneLane(held, whole ? (double)rows.Length / System.Math.Max(held.Entry.Rows, 1) : Share(held, read)).Path
                 : AnswerPath.Rows;
-            if (chosen is AnswerPath.Learn or AnswerPath.Granules)
+            if (chosen == AnswerPath.Granules)
             {
                 objects.Add((held, rows));
-                Mark(held, chosen, planner, ref learning, ref granular);
+                (granular ??= [])[held.FirstRow] = planner.GranulesLeave(held);
                 total += Weight(held, rows);
                 continue;
             }
@@ -560,15 +536,7 @@ internal sealed partial class DatasetScanSource
         {
             if (cuts[o] is { } cut)
             {
-                RowRange[] its = await cut.ConfigureAwait(false);
-                pieces.AddRange(its);
-                if (learning?.Contains(objects[o].Held.FirstRow) == true)
-                {
-                    foreach (RowRange piece in its)
-                    {
-                        Pieces.Expect(piece);
-                    }
-                }
+                pieces.AddRange(await cut.ConfigureAwait(false));
             }
             else
             {
@@ -579,27 +547,11 @@ internal sealed partial class DatasetScanSource
         return pieces.Count > 1 ? [.. pieces] : null;
 
         // What a range of an object reads: none of one answered whole, the rows its granules leave of one they answer, its
-        // rows otherwise, every one of one that learns.
+        // rows otherwise.
         long Weight(PositionedObject held, RowRange rows) =>
             answered?.Contains(held.FirstRow) == true ? 0
             : granular is not null && granular.TryGetValue(held.FirstRow, out long leave) ? leave
             : rows.Length;
-    }
-
-    /// <summary>
-    /// Marks the object <paramref name="held"/>, as one lane's plan answers it by <paramref name="path"/>: one that learns, or
-    /// one its granules answer, with the rows they leave.
-    /// </summary>
-    private static void Mark(
-        in PositionedObject held, AnswerPath path, DatasetScanBuilder planner, ref HashSet<long>? learning, ref Dictionary<long, long>? granular)
-    {
-        if (path == AnswerPath.Learn)
-        {
-            (learning ??= []).Add(held.FirstRow);
-            return;
-        }
-
-        (granular ??= [])[held.FirstRow] = planner.GranulesLeave(held);
     }
 
     public async ValueTask<(long Requests, long Bytes)?> CostAsync(ScanSpec spec, CancellationToken cancellationToken)
@@ -838,15 +790,6 @@ internal sealed partial class DatasetScanSource
         if (spec.Answering?.Settles is { } plan)
         {
             builder.WithSettles(plan);
-        }
-
-        if (spec.Answering is { Family: { } family, States: not null } && options.UseSynopses)
-        {
-            builder.WithFamily(family, this);
-            if (spec.Rows is { } piece && _pieces is { } cut && cut.Expects(piece))
-            {
-                builder.AsPiece();
-            }
         }
 
         return counters is null ? builder : builder.WithCounters(counters);

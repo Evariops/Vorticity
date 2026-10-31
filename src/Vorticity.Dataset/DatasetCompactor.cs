@@ -221,7 +221,6 @@ internal static partial class DatasetCompactor
         // its chunks and its objects: the shelf keeps as many as the writer holds at once while the job runs, where its own
         // budget let them go and the next chunk made them again (M7e).
         ArrayShelf.Retained.Expect(writer);
-        Provenance? provenance = null;
         Activity? writing = DatasetTelemetry.StartCompactionPass("write");
         try
         {
@@ -246,10 +245,9 @@ internal static partial class DatasetCompactor
                     ObjectStream outputs = OutputsOf(ran, doublings);
                     try
                     {
-                        provenance = new Provenance();
                         rows = merge
-                            ? await MergeAsync(dataset, schema, ran, outputs, provenance, late, lateOutputs, cancellationToken).ConfigureAwait(false)
-                            : await ConcatenateAsync(dataset, schema, ran, outputs, provenance, cancellationToken).ConfigureAwait(false);
+                            ? await MergeAsync(dataset, schema, ran, outputs, late, lateOutputs, cancellationToken).ConfigureAwait(false)
+                            : await ConcatenateAsync(dataset, schema, ran, outputs, cancellationToken).ConfigureAwait(false);
                         await outputs.FinishAsync(cancellationToken).ConfigureAwait(false);
                         if (lateOutputs is not null)
                         {
@@ -345,22 +343,6 @@ internal static partial class DatasetCompactor
 
         CommitResult commit = await dataset
             .CommitAsync([replacement], CommitKind.Compaction, cancellationToken).ConfigureAwait(false);
-
-        // An object written from inputs none of which a delete marked, each of which sent it every row, holds their rows,
-        // all and no other: the partials the questions learned of them, summed, are its own (LearnedPartials). The
-        // objects of ranges inherit none, an input sending rows to each range its keys meet.
-        OperationOutcome outcome = commit.Outcomes.Count > 0 ? commit.Outcomes[0] : OperationOutcome.Applied;
-        if (outcome == OperationOutcome.Applied && provenance is not null && !ran.Inputs.Any(static input => input.Entry.HasDeletions))
-        {
-            ObjectStream outputs = streams[0];
-            for (int o = 0; o < outputs.Written.Count; o++)
-            {
-                if (provenance.SoleInputsOf(o, ran.Inputs) is { Length: > 0 and <= LearnedPartials.MaxInputs } inputs)
-                {
-                    dataset.Partials.Inherit(outputs.Written[o].Entry.Uid, inputs, dataset.Session.Options.SynopsisCache);
-                }
-            }
-        }
 
         int objectsOut = lateOutputs?.Written.Count ?? 0;
         long bytesOut = lateOutputs?.Bytes ?? 0;
@@ -711,49 +693,9 @@ internal static partial class DatasetCompactor
             ? LiveRows.WithoutDeletedAsync(scan.WithCompaction(false).WithEncodings(false, false).ExecuteAsync(), entry.Deletions, compact: true, 0, cancellationToken)
             : scan.ExecuteAsync();
 
-    /// <summary>
-    /// Which outputs each input's rows went to, as a job writes them, an input by its key: an output whose every input sent it
-    /// all its rows holds theirs, all and no other, and inherits the partials learned of them.
-    /// </summary>
-    private sealed class Provenance
-    {
-        private readonly Dictionary<string, HashSet<int>> _outputs = new Dictionary<string, HashSet<int>>(StringComparer.Ordinal);
-
-        /// <summary>Notes that rows of input <paramref name="input"/> go to output <paramref name="output"/>, by its place among the outputs.</summary>
-        internal void Wrote(string input, int output)
-        {
-            if (!_outputs.TryGetValue(input, out HashSet<int>? outputs))
-            {
-                _outputs[input] = outputs = [];
-            }
-
-            outputs.Add(output);
-        }
-
-        /// <summary>The identities of the inputs whose rows output <paramref name="output"/> holds, when each sent it every row; null when one sent rows elsewhere too.</summary>
-        internal UInt128[]? SoleInputsOf(int output, IReadOnlyList<CompactionInput> inputs)
-        {
-            List<UInt128> sole = [];
-            foreach (CompactionInput input in inputs)
-            {
-                if (_outputs.TryGetValue(input.Entry.Key, out HashSet<int>? outputs) && outputs.Contains(output))
-                {
-                    if (outputs.Count > 1)
-                    {
-                        return null;
-                    }
-
-                    sole.Add(input.Entry.Uid);
-                }
-            }
-
-            return [.. sole];
-        }
-    }
-
     /// <summary>Each input's rows, in its own order, one after another.</summary>
     private static async ValueTask<long> ConcatenateAsync(
-        VortexDataset dataset, DatasetSchema schema, CompactionJob job, ObjectStream outputs, Provenance provenance, CancellationToken cancellationToken)
+        VortexDataset dataset, DatasetSchema schema, CompactionJob job, ObjectStream outputs, CancellationToken cancellationToken)
     {
         long rows = 0;
         foreach (CompactionInput input in job.Inputs)
@@ -778,7 +720,6 @@ internal static partial class DatasetCompactor
                     .WithCancellation(cancellationToken).ConfigureAwait(false))
                 {
                     await outputs.RollIfFullAsync(cancellationToken).ConfigureAwait(false);
-                    provenance.Wrote(input.Entry.Key, outputs.Written.Count);
                     await outputs.WriteAsync(batch, cancellationToken).ConfigureAwait(false);
                     rows += batch.RowCount;
                 }
@@ -790,14 +731,13 @@ internal static partial class DatasetCompactor
 
     /// <summary>
     /// The k-way merge, one run of rows at a time; with <paramref name="ranges"/>, of the rows of range
-    /// <paramref name="range"/> alone. The outputs each run goes to are noted in <paramref name="provenance"/>, when given.
+    /// <paramref name="range"/> alone.
     /// </summary>
     private static async ValueTask<long> MergeAsync(
         VortexDataset dataset,
         DatasetSchema schema,
         CompactionJob job,
         ObjectStream outputs,
-        Provenance? provenance,
         LateRows? late,
         ObjectStream? lateOutputs,
         CancellationToken cancellationToken,
@@ -820,7 +760,6 @@ internal static partial class DatasetCompactor
                 if (start > 0)
                 {
                     late!.Add(start);
-                    provenance?.Wrote(merge.CurrentObject, LateRows.Output);
                     for (int at = 0, end; at < start; at = end)
                     {
                         end = values is null ? start : values.EndOfValue(merge, at, start);
@@ -857,7 +796,6 @@ internal static partial class DatasetCompactor
                         await outputs.RollAsync(cancellationToken).ConfigureAwait(false);
                     }
 
-                    provenance?.Wrote(merge.CurrentObject, outputs.Written.Count);
                     await outputs.WriteAsync(merge, at, end, cancellationToken).ConfigureAwait(false);
                 }
 

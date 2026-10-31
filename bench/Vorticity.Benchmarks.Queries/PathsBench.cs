@@ -32,9 +32,7 @@ namespace Vorticity.Benchmarks.Queries;
 /// its time and processor time, the bytes the process allocated, every thread counted, and the most private bytes and
 /// working set it held above what it held as the ask began (<see cref="MemoryPeaks"/>). Cold is a session and a
 /// handle opened for the question with an empty cache, its open not counted; warm is the median of <c>--rounds</c>
-/// asks by the same handle (<c>--rows-rounds</c> for the rows). The partials a question's family learned stay in the store,
-/// for the next questions and runs: <c>--forget-learned</c> removes them before each cold, first and bounded asking, which
-/// then times the family's first. With <c>--verify</c> each question's answer from
+/// asks by the same handle (<c>--rows-rounds</c> for the rows). With <c>--verify</c> each question's answer from
 /// the synopses is held to the one from its rows, digest against digest. <c>--tsv</c> appends every line to a
 /// file that <c>--compare</c> reads back.
 /// </para>
@@ -98,12 +96,6 @@ internal static partial class PathsBench
 
         /// <summary>Whether each windowed question is also asked cold over its whole window at once, with a part's bounds (<c>--bounded</c>).</summary>
         internal bool Bounded { get; init; }
-
-        /// <summary>
-        /// Whether the partials the store learned are forgotten before each cold, first and bounded asking (<c>--forget-learned</c>):
-        /// those then time a question's family asked for the first time, where they otherwise time it as the asks before learned it.
-        /// </summary>
-        internal bool ForgetLearned { get; init; }
 
         /// <summary>Whether a build prints each compaction job as it ends (<c>--print-jobs</c>).</summary>
         internal bool PrintJobs { get; init; }
@@ -482,10 +474,9 @@ internal static partial class PathsBench
 
     /// <summary>
     /// <c>--loop-cold</c>: the cold ask again and again for as long, for a profiler, and its mean: each by a session and a
-    /// handle opened for it, with an empty synopsis cache, disposed and deleted after it; under <c>--forget-learned</c>, each
-    /// the family's first. Under <c>--alloc-types</c>, what a cold ask allocates, by type, sampled over the loop.
+    /// handle opened for it, with an empty synopsis cache, disposed and deleted after it. Under <c>--alloc-types</c>, what a cold ask allocates, by type, sampled over the loop.
     /// </summary>
-    private static async Task LoopColdAsync(Settings settings, CountingObjectStore store, Built built, Question question, ScanOptions options, int degree)
+    private static async Task LoopColdAsync(Settings settings, CountingObjectStore store, Question question, ScanOptions options, int degree)
     {
         if (settings.LoopColdSeconds <= 0)
         {
@@ -509,7 +500,6 @@ internal static partial class PathsBench
                     o.MaxConcurrentReads = settings.MaxReads > 0 ? settings.MaxReads : o.MaxConcurrentReads;
                     o.SynopsisCache = new SynopsisCache(cache, 8L << 30);
                 });
-                ForgetLearned(settings, built);
                 await using VortexDataset dataset = await VortexDataset.OpenAsync(store, new DatasetOptions { Session = session });
                 Measured again = await MeasureAsync(store, dataset, question, options, !settings.NoDigest);
                 asks++;
@@ -535,29 +525,6 @@ internal static partial class PathsBench
         foreach (string line in sampler?.Lines(asks, 25) ?? [])
         {
             Console.WriteLine(line);
-        }
-    }
-
-    /// <summary>
-    /// Under <c>--forget-learned</c>, removes the partials the store <paramref name="built"/> learned, every family's: the
-    /// asking that follows meets its family for the first time. They persist in the store from one question to the next and
-    /// from one run to the next, as a client's do: a question's first asking learned them, every later one found them.
-    /// </summary>
-    private static void ForgetLearned(Settings settings, Built built)
-    {
-        string learned = Path.Combine(built.Directory, "learned");
-        for (int attempt = 0; settings.ForgetLearned && Directory.Exists(learned); attempt++)
-        {
-            // A partial written a moment before may still be held open, by the scanner of a machine that opens each new
-            // file: under --loop-cold, which forgets dozens of times a minute, a deletion failed so one run in three.
-            try
-            {
-                Directory.Delete(learned, recursive: true);
-            }
-            catch (IOException) when (attempt < 50)
-            {
-                System.Threading.Thread.Sleep(100);
-            }
         }
     }
 
@@ -612,14 +579,13 @@ internal static partial class PathsBench
                 o.SynopsisCache = new SynopsisCache(cache, 8L << 30);
                 o.SegmentCache = settings.SegmentCacheBytes > 0 ? new SegmentCache(settings.SegmentCacheBytes) : null;
             });
-            ForgetLearned(settings, built);
             await using VortexDataset dataset = await VortexDataset.OpenAsync(store, new DatasetOptions { Session = session });
             using TextWriter? trace = settings.TraceReads is { } traced ? TextWriter.Synchronized(new StreamWriter(traced, append: true)) : null;
             trace?.WriteLine($"# {question.Name} {(synopses ? "synopses" : "rows")} cold, degree {degree}");
             remote.Trace = trace;
             Measured cold = settings.Temperatures is "all" or "cold" ? await MeasureAsync(store, dataset, question, options, !settings.NoDigest) : default;
             remote.Trace = null;
-            await LoopColdAsync(settings, store, built, question, options, degree);
+            await LoopColdAsync(settings, store, question, options, degree);
             if (settings.Temperatures is "cold")
             {
                 return (cold, default);
@@ -761,7 +727,6 @@ internal static partial class PathsBench
         Settings settings, Built built, (DateTimeOffset From, DateTimeOffset To, Func<VortexDataset, ScanOptions, DateTimeOffset, DateTimeOffset, Asking> Ask) window,
         int degree, bool bounded)
     {
-        ForgetLearned(settings, built);
         ScanOptions options = new ScanOptions { UseSynopses = true, DegreeOfParallelism = degree };
         await using FileObjectStore files = new FileObjectStore(built.Directory);
         LatencyObjectStore remote = new LatencyObjectStore(settings.KeepHandles ? new HeldFileObjectStore(files) : files)

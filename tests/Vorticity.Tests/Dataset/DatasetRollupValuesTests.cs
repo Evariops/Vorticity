@@ -5,7 +5,7 @@
 // then the chunks that hold the routes asked, two requests a rollup; its answer is the rows'. A count of one route reads
 // less than half the bytes of the rollups' regions whole, and a second ask of the handle reads nothing. A question of every
 // route reads the totals whole. A median by a route, whose values hold 24 to 72 rows each, finds no sketches, which a
-// column keeps where its values hold 256 rows each, and reads rows.
+// column keeps where its values hold 256 rows each, and reads rows, at every ask: nothing it reads answers the next.
 //
 // WHY THE MEMORY PROFILE: totals of tens of kilobytes, priced by their bytes alone. At a remote request's price, an
 // hour's counts read whole in one request weigh less than a rollup's header and chunks in two: the part read pays for
@@ -74,12 +74,14 @@ public sealed partial class DatasetRollupValuesTests : IClassFixture<DatasetRoll
             $"{requests} requests, {bytes} bytes against {whole} for the rollups' regions whole; {again} requests again");
         Assert.NotEmpty(rows);
         Assert.Equal(rows, states);
-        Assert.Equal(0, again);
         if (question.StartsWith("median", StringComparison.Ordinal))
         {
             Assert.Empty(rolled);
+            Assert.Equal(requests, again);
             return;
         }
+
+        Assert.Equal(0, again);
 
         Assert.NotEmpty(rolled);
         if (question == "count by route")

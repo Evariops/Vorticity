@@ -180,7 +180,7 @@ written before anything was built.
 | a count per `Attributes["http.route"]` and per day, 30 days, the path shredded | its typed column, as for a declared column; once the synopses come, the counts of its objects of a day |
 | `ServiceName` under `Attributes["http.response.status_code"] >= 500`, per minute, the last hour | the two columns over the last hour, the path's typed one and the declared one |
 | the rows holding `Attributes["feature.flag.new-cart"]`, per minute, the last day | the path's typed column, or the residual of the chunks that hold the key |
-| `Attributes["feature.flag.new-cart"] == "on"`, per service and per day, 30 days, the key left in the residual of most objects | the residual of the chunks that hold it, and the partial learned for the next time |
+| `Attributes["feature.flag.new-cart"] == "on"`, per service and per day, 30 days, the key left in the residual of most objects | the residual of the chunks that hold it |
 | the average of `Attributes["http.server.request.duration"]` per route and per day | the typed columns of the two paths |
 | the keys that are data most often held, such as `Attributes["user.4711.score"]` and its siblings, 30 days | the path directories' counts per object |
 | the count per `Attributes["http.route"]` of the first row, cold | two round trips per object, in parallel: the path directory, then the typed column's chunks |

@@ -3195,7 +3195,6 @@ Vorticity.Dataset:     property int RollupFanout { get; init; }
 Vorticity.Dataset:     property int SummaryColumnLimit { get; init; }
 Vorticity.Dataset:     property long AppendBufferBytes { get; init; }
 Vorticity.Dataset:     property long InlineCompactionBytes { get; init; }
-Vorticity.Dataset:     property long LearnedBudget { get; init; }
 Vorticity.Dataset:     property long MaxObjectBytes { get; init; }
 Vorticity.Dataset:     property long PageCacheBytes { get; init; }
 Vorticity.Dataset: sealed class Vorticity.Dataset.DatasetVerification : IEquatable<DatasetVerification>

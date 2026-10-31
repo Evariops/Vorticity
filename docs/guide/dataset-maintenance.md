@@ -109,12 +109,9 @@ limits and before the fragments, the most marked object first.
 An object a job writes, of a mebibyte or more, also keeps what aggregations answer from without its
 rows: the counts of each column whose values repeat and the statistics of its blocks, computed as the
 rows go out, with no pass of its own (see
-[How an aggregation is answered](datasets.md#how-an-aggregation-is-answered)). An output that holds
-all the rows of each of its inputs and nothing else, none of them marked, inherits the partials the
-questions learned of them, in the handle that compacts and in the session's `SynopsisCache`, so a
-question asked before the compaction reads nothing of it after. A moved object keeps its partials
-with its entry, and an output that holds part of an input, or rows of a marked one, learns again the
-first time a question reads its rows.
+[How an aggregation is answered](datasets.md#how-an-aggregation-is-answered)). Nothing a question
+reads is kept for the next: what answers a question is what the writes left. A vacuum deletes the
+partials an earlier version learned of questions and kept under `learned/`, which nothing reads now.
 
 When the application owes the erasure of deleted rows within a delay, it declares the delay when it
 creates the dataset:

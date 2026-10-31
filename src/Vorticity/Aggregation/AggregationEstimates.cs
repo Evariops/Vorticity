@@ -120,8 +120,7 @@ internal sealed class EstimateRun
         (ColumnShape[] columns, _) = AggregationEngine.Columns(plan, settled);
         ScanSpec pass = AggregationEngine.PassSpec(host.Spec(question.RowFilter), columns, plan, host.Source.Schema);
         StateRequest? states = host.Source.States is not null && pass.Options.UseSynopses ? StateRequest.Of(plan, settled, null) : null;
-        LearnedFamily? family = states is not null && host.Source.States!.LearnsPartials ? LearnedFamily.Of(plan, pass.Filter, host.Source) : null;
-        return host.Source.Cost is { } cost ? cost.CostAsync(pass with { Answering = new StatesAsked(states, Family: family) }, cancellationToken) : default;
+        return host.Source.Cost is { } cost ? cost.CostAsync(pass with { Answering = new StatesAsked(states) }, cancellationToken) : default;
     }
 
     /// <summary>The tiers: one a share of the ranges, each reading those the share adds, then the exact answer.</summary>
