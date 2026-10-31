@@ -3084,6 +3084,12 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <summary>The partials this handle learned of its objects' families, kept in memory, in the session's cache and in the store (<see cref="LearnedPartials"/>).</summary>
     internal LearnedPartials Partials { get; } = new LearnedPartials();
 
+    /// <summary>The bytes the indexes of the partitions this handle read may hold, their directories, last bytes and pages (<see cref="PartitionIndexes"/>).</summary>
+    internal const long PartitionIndexBytes = 64L << 20;
+
+    /// <summary>The indexes of the partitions this handle read, kept for the questions after (<see cref="PartitionIndexCache"/>).</summary>
+    internal PartitionIndexCache PartitionIndexes { get; } = new PartitionIndexCache(PartitionIndexBytes);
+
     /// <summary>
     /// The store the learned partials are kept in for every node (spec H, 3.1): the dataset's own, none for a store that
     /// seals what it writes, as a rollup is not written there either.

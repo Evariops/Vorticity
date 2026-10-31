@@ -120,6 +120,54 @@ public sealed partial class DatasetGranuleReadsTests
     }
 
     /// <summary>
+    /// A needle asked again on the same handle reads nothing of its partition's index: the handle keeps the index's
+    /// directory, its last bytes and the page the first asking loaded, where every asking read them again and parsed the
+    /// directory anew. The same row is found each time.
+    /// </summary>
+    [Fact]
+    public async Task ANeedleAskedAgainReadsNothingOfItsPartitionsIndex()
+    {
+        await using MemoryObjectStore memory = new MemoryObjectStore();
+        KeyReads store = new KeyReads(memory);
+        (VortexDataset dataset, Row[] rows) = await DayAsync(store, identifiers: [nameof(Row.Sequence)], IdentifierLocation.Chunk);
+        await using (dataset)
+        {
+            PositionedObject held = await dataset.ScanBuilder().ObjectsAsync(Ct).SingleAsync(Ct);
+            PartitionIndexEntry index = (await dataset.Snapshot.PartitionIndexAsync(PartitionLookup.PartitionOf(dataset.Snapshot, held), Ct))!;
+            store.Key = index.ObjectKey;
+            for (int asking = 0; asking < 3; asking++)
+            {
+                store.Reads = 0;
+                List<Row> found = await dataset.Scan<Row>().Where(r => r.Sequence == 299_999).ToRecordsAsync(Ct).ToListAsync(Ct);
+                Assert.Equal([rows[299_999]], found);
+                Assert.True(asking == 0 ? store.Reads > 0 : store.Reads == 0, $"asking {asking}: {store.Reads} reads of the index");
+            }
+
+            Assert.True(dataset.PartitionIndexes.Bytes > 0);
+        }
+    }
+
+    /// <summary>A store that counts the reads of one key.</summary>
+    private sealed class KeyReads(IObjectStore inner) : ForwardingStore(inner)
+    {
+        internal string? Key { get; set; }
+
+        internal int Reads { get; set; }
+
+        public override ValueTask<ObjectRead> ReadAsync(string key, long offset, Memory<byte> destination, string? ifToken, CancellationToken cancellationToken)
+        {
+            Reads += key == Key ? 1 : 0;
+            return base.ReadAsync(key, offset, destination, ifToken, cancellationToken);
+        }
+
+        public override ValueTask<ObjectRead> ReadTailAsync(string key, Memory<byte> destination, CancellationToken cancellationToken)
+        {
+            Reads += key == Key ? 1 : 0;
+            return base.ReadTailAsync(key, destination, cancellationToken);
+        }
+    }
+
+    /// <summary>
     /// The same rows partitioned by the hour, seven partitions each consolidated with its index, the sequences drawn at random
     /// as a request's ids are, so that no object's bounds pass over a needle: on one lane, it asks the index of every
     /// partition before it awaits any, and waits on six round trips at most, as over one, where each partition's index read

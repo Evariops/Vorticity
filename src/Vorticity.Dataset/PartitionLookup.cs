@@ -186,7 +186,8 @@ internal sealed class PartitionLookup
         ISegmentReader reader = await SealedObjectStore.OpenDataAsync(_dataset.Store, entry.ObjectKey, entry.Uid, entry.Bytes, cancellationToken).ConfigureAwait(false);
         await using (reader.ConfigureAwait(false))
         {
-            using PartitionPostings.OpenedIndex opened = await PartitionPostings.OpenAsync(reader, entry.Bytes, cancellationToken).ConfigureAwait(false);
+            using PartitionPostings.OpenedIndex opened = await PartitionPostings.OpenCachedAsync(
+                reader, entry.ObjectKey, entry.Uid, entry.Bytes, _dataset.PartitionIndexes, cancellationToken).ConfigureAwait(false);
             PartitionIndex index = opened.Index;
             if (index.Of(_identifier, PartitionIndex.EntryKind.Postings) is not { } postings)
             {
