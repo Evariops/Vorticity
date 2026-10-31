@@ -46,6 +46,14 @@ internal sealed class LearnedPartials
     private readonly ConcurrentDictionary<(UInt128 Object, UInt128 Family), AggregationPartial> _held = new();
     private long _bytes;
 
+    // The files of the partials held, opened once for the handle's questions and closed with it: a partial served was opened
+    // at every asking, its dtype, its layout's tree and a scan made again, the most a warm question answered from the
+    // synopses allocated.
+    private readonly ConcurrentDictionary<(UInt128 Object, UInt128 Family), Task<VortexFile>> _opened = new();
+
+    /// <summary>The files of the partials held that the handle keeps open (<see cref="OpenedAsync"/>).</summary>
+    internal int OpenedFiles => _opened.Count;
+
     // Per family, the objects whose partial the store keeps and the bytes of each, from the one listing this handle made;
     // and the listings on their way, shared by the questions that ask at once.
     private readonly ConcurrentDictionary<UInt128, ConcurrentDictionary<UInt128, long>> _listed = new();
@@ -554,6 +562,58 @@ internal sealed class LearnedPartials
         catch (Exception failure) when (failure is VortexException or InvalidDataException)
         {
             // A merge past the memory the session gives it, or of partials whose columns the family's text did not say.
+        }
+    }
+
+    /// <summary>
+    /// The file of <paramref name="partial"/>, the partial of family <paramref name="family"/> of the object
+    /// <paramref name="uid"/>, opened once in <paramref name="session"/> and kept open for the handle when the handle holds
+    /// that partial in memory; null for a partial it does not hold, which a question opens for itself.
+    /// </summary>
+    internal async ValueTask<VortexFile?> OpenedAsync(
+        UInt128 uid, UInt128 family, AggregationPartial partial, VortexSession session, CancellationToken cancellationToken)
+    {
+        if (!_held.TryGetValue((uid, family), out AggregationPartial? held) || !ReferenceEquals(held, partial))
+        {
+            return null;
+        }
+
+        if (!_opened.TryGetValue((uid, family), out Task<VortexFile>? opening))
+        {
+            opening = _opened.GetOrAdd((uid, family), static (_, open) => open.Partial.OpenAsync(open.Session, CancellationToken.None).AsTask(), (Partial: partial, Session: session));
+        }
+
+        try
+        {
+            return await opening.WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception) when (opening.IsFaulted)
+        {
+            // An open that failed is asked again by the next question; this one opens the partial for itself.
+            _opened.TryRemove(new KeyValuePair<(UInt128, UInt128), Task<VortexFile>>((uid, family), opening));
+            return null;
+        }
+    }
+
+    /// <summary>Closes the files of the partials held (<see cref="OpenedAsync"/>): what a handle's disposal does, once its questions are done.</summary>
+    internal async ValueTask CloseAsync()
+    {
+        // The handle's questions are done: none opens a file after.
+        foreach ((UInt128, UInt128) key in _opened.Keys)
+        {
+            if (!_opened.TryRemove(key, out Task<VortexFile>? opening))
+            {
+                continue;
+            }
+
+            try
+            {
+                await (await opening.ConfigureAwait(false)).DisposeAsync().ConfigureAwait(false);
+            }
+            catch (Exception) when (opening.IsFaulted)
+            {
+                // An open that failed left nothing to close.
+            }
         }
     }
 

@@ -2112,8 +2112,10 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <returns>A task that completes when every object is closed.</returns>
     public async ValueTask DisposeAsync()
     {
-        // The partials learned and on their way to the store, which outlive the handle there.
+        // The partials learned and on their way to the store, which outlive the handle there; the files of those held, which
+        // do not.
         await Partials.FlushAsync().ConfigureAwait(false);
+        await Partials.CloseAsync().ConfigureAwait(false);
         await LevelZero.DisposeAsync().ConfigureAwait(false);
         await _objects.DisposeAsync().ConfigureAwait(false);
         if (_store is SealedObjectStore sealedStore)

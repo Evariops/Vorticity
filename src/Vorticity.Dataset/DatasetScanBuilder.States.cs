@@ -268,7 +268,9 @@ internal sealed partial class DatasetScanBuilder
         PositionedObject held, Task<AggregationPartial>? learning, long firstRow, [EnumeratorCancellation] CancellationToken cancellationToken)
     {
         AggregationPartial partial = await (learning ?? PartialAsync(held, cancellationToken)).ConfigureAwait(false);
-        await foreach (RecordBatch batch in FamilyOf(held)!.Value.Family.ServeAsync(partial, _dataset.Session, firstRow, cancellationToken).ConfigureAwait(false))
+        (LearnedFamily family, UInt128 key) = FamilyOf(held)!.Value;
+        VortexFile? opened = await _dataset.Partials.OpenedAsync(held.Entry.Uid, key, partial, _dataset.Session, cancellationToken).ConfigureAwait(false);
+        await foreach (RecordBatch batch in family.ServeAsync(partial, opened, _dataset.Session, firstRow, cancellationToken).ConfigureAwait(false))
         {
             yield return batch;
         }

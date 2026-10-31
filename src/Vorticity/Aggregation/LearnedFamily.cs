@@ -333,13 +333,14 @@ internal sealed class LearnedFamily
     /// <summary>
     /// The states of <paramref name="partial"/>, a partial of this family, as a question of it reads them: each batch of its
     /// file a batch of a partial's states (<see cref="RecordBatch.OfPartial"/>), its rows numbered from
-    /// <paramref name="firstRow"/>, the groups of the values the question asks selected.
+    /// <paramref name="firstRow"/>, the groups of the values the question asks selected. Its file <paramref name="opened"/>
+    /// when the handle keeps it open, left open; otherwise opened for the question and closed after.
     /// </summary>
     internal async IAsyncEnumerable<RecordBatch> ServeAsync(
-        AggregationPartial partial, VortexSession session, long firstRow, [EnumeratorCancellation] CancellationToken cancellationToken)
+        AggregationPartial partial, VortexFile? opened, VortexSession session, long firstRow, [EnumeratorCancellation] CancellationToken cancellationToken)
     {
-        VortexFile file = await partial.OpenAsync(session, cancellationToken).ConfigureAwait(false);
-        await using (file.ConfigureAwait(false))
+        VortexFile file = opened ?? await partial.OpenAsync(session, cancellationToken).ConfigureAwait(false);
+        try
         {
             long row = firstRow;
             await foreach (RecordBatch batch in new FileScanSource(file).Rows.BatchesAsync(new ScanSpec(), new ScanCounters()).WithCancellation(cancellationToken).ConfigureAwait(false))
@@ -352,6 +353,13 @@ internal sealed class LearnedFamily
                 }
 
                 yield return states;
+            }
+        }
+        finally
+        {
+            if (opened is null)
+            {
+                await file.DisposeAsync().ConfigureAwait(false);
             }
         }
     }

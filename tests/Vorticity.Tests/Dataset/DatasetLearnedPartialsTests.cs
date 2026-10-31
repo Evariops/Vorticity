@@ -67,6 +67,35 @@ public sealed partial class DatasetLearnedPartialsTests
     }
 
     /// <summary>
+    /// A partial the handle holds is served from its file, opened once for the handle: asked again and again, the family's
+    /// questions open no partial anew and answer as the rows do, where each opened its partials again, their dtypes, their
+    /// layouts' trees, the most a warm question answered from the synopses allocated. The files close with the handle.
+    /// </summary>
+    [Fact]
+    public async Task APartialHeldIsServedFromItsFileOpenedOnce()
+    {
+        await using MemoryObjectStore memory = new MemoryObjectStore();
+        await (await CreateAsync(memory)).DisposeAsync();
+        VortexDataset dataset = await VortexDataset.OpenAsync(memory, new DatasetOptions(), Ct);
+        (string[] keys, string[] results, string[] filters) = Families[0];
+        _ = await DatasetPlannerTests.AskAsync(dataset, keys, results, filters[0], synopses: true);
+        int opened = dataset.Partials.OpenedFiles;
+        Assert.True(opened > 0, "no partial served from a file the handle keeps");
+        for (int asking = 0; asking < 3; asking++)
+        {
+            foreach (string filter in filters)
+            {
+                List<string> rows = await DatasetPlannerTests.AskAsync(dataset, keys, results, filter, synopses: false);
+                Assert.Equal(rows, await DatasetPlannerTests.AskAsync(dataset, keys, results, filter, synopses: true));
+            }
+        }
+
+        Assert.Equal(opened, dataset.Partials.OpenedFiles);
+        await dataset.DisposeAsync();
+        Assert.Equal(0, dataset.Partials.OpenedFiles);
+    }
+
+    /// <summary>
     /// At several lanes, an object a partial of the question's family answers is a piece of its own, never cut over its rows:
     /// cut, each piece read its rows where the partial answered the object at no read. The exception groups of a pod's errors
     /// over S1's spans at 32 lanes read 121 MB in 473 requests where one lane read 1.1 MB in 4.
