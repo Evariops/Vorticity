@@ -427,7 +427,8 @@ public sealed partial class DatasetLearnedPartialsTests
         Assert.Equal(rows.Answer, one.Answer);
         Assert.Equal(rows.Answer, many.Answer);
         Assert.StartsWith("granules:", one.Plan, StringComparison.Ordinal);
-        Assert.True(many.Bytes * 10 < rows.Bytes * 8, $"{many.Bytes} bytes at 8 lanes, {one.Bytes} at one, {rows.Bytes} through the rows");
+        // The rows take the hour of a granule within an hour from its zones, the instants unread.
+        Assert.True(many.Bytes * 10 < rows.Bytes * 9, $"{many.Bytes} bytes at 8 lanes, {one.Bytes} at one, {rows.Bytes} through the rows");
         // Neighbouring pieces read some segments both, side by side: a few percent past one lane's, which varies.
         Assert.True(many.Bytes * 4 < one.Bytes * 5, $"{many.Bytes} bytes at 8 lanes, {one.Bytes} at one");
 
@@ -572,10 +573,11 @@ public sealed partial class DatasetLearnedPartialsTests
             Assert.Equal(rows.Answer, placed.Answer);
             Assert.All(placed.Plan.Split(" | "), unit => Assert.StartsWith(path, unit, StringComparison.Ordinal));
 
-            // Pieces of two granules each read the object's marks and statistics' lookups again: their bytes are Q2b's.
+            // Pieces of two granules each read the object's marks and statistics' lookups again: their bytes are Q2b's. The
+            // rows take the hour of a granule within an hour from its zones, the instants unread.
             if (leastPieceRows >= 50_000)
             {
-                Assert.True(placed.Bytes * 3 < rows.Bytes, $"by service and {by}: {placed.Bytes} bytes placed by the partitions, {rows.Bytes} through the rows");
+                Assert.True(placed.Bytes * 2 < rows.Bytes, $"by service and {by}: {placed.Bytes} bytes placed by the partitions, {rows.Bytes} through the rows");
             }
         }
 

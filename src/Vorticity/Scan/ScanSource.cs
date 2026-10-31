@@ -55,6 +55,13 @@ internal sealed record ScanSpec
     internal IReadOnlyDictionary<string, string[]>? VariantKeys { get; init; }
 
     /// <summary>
+    /// The top-level columns, by name, the consumer reads only through these functions of them, a key's truncation say:
+    /// a split whose zones send each function to one value takes the zones' values in place of the column
+    /// (<see cref="ZoneKeyReads"/>); null for none.
+    /// </summary>
+    internal ZoneKeyReads.Request? ZoneKeys { get; init; }
+
+    /// <summary>
     /// The spec of a terminal that delivers no column but <paramref name="uses"/>: a variant column those and the filter
     /// read through top-level keys is read by those keys alone (<see cref="VariantKeys"/>), where a count over a filter on
     /// one key parsed every row's variant.
@@ -355,7 +362,7 @@ internal sealed class FileScanSource : ScanSource, IRowsCapability, IStatisticsC
     /// <summary>The engine's builder for <paramref name="spec"/>.</summary>
     internal ScanBuilder Builder(ScanSpec spec, ScanCounters metrics)
     {
-        ScanBuilder builder = _file.ScanBuilder().WithMetrics(metrics).WithVariantKeys(spec.VariantKeys);
+        ScanBuilder builder = _file.ScanBuilder().WithMetrics(metrics).WithVariantKeys(spec.VariantKeys).WithZoneKeys(spec.ZoneKeys);
         if (spec.Projection is { } mask)
         {
             builder.ProjectMask(in mask);

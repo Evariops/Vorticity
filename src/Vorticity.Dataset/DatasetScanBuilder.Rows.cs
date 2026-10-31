@@ -1546,7 +1546,7 @@ internal sealed partial class DatasetScanBuilder
         // allows; one reshaped from an earlier schema reads them whole.
         if (!canonical)
         {
-            scan.WithVariantKeys(_variantKeys);
+            scan.WithVariantKeys(_variantKeys).WithZoneKeys(_zoneKeys);
         }
 
         if (projection is { } mask)

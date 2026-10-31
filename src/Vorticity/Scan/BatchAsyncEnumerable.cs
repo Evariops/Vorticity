@@ -139,6 +139,12 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
     internal Indexes.VariantKeyReads? VariantKeys { get; set; }
 
     /// <summary>
+    /// The columns the scan's consumer reads through functions alone whose zones give a split their values, the columns then
+    /// not read; null for none. Set before the scan starts.
+    /// </summary>
+    internal ZoneKeyReads? ZoneKeys { get; set; }
+
+    /// <summary>
     /// The geometry of the chunks the scan may read a part of by their granules, which each lane plans its reads by; null
     /// when it reads every chunk whole. Set before the scan starts.
     /// </summary>
@@ -150,6 +156,11 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
         if (VariantKeys is { } keys)
         {
             enumerator.VariantKeys = keys;
+        }
+
+        if (ZoneKeys is { } zoned)
+        {
+            enumerator.ZoneKeys = zoned;
         }
 
         if (Granules is { } geometry)
@@ -573,6 +584,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         ScanContext first = _lanes[0]!.Context;
         Lane lane = NewLane(first.File, first.LiveBlocks, first.Metrics, first.KeepEncodings);
         lane.Context.VariantKeys = first.VariantKeys;
+        lane.Context.ZoneKeys = first.ZoneKeys;
         lane.Context.Granules = _granules is { } geometry ? new Indexes.GranulePlans(geometry, first.File, _take, _live, Scanned) : null;
         return lane;
     }
@@ -616,6 +628,21 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
                 if (lane is not null)
                 {
                     lane.Context.VariantKeys = value;
+                }
+            }
+        }
+    }
+
+    /// <summary>Tells the lanes which columns their splits take from the zones (<see cref="Scanning.ZoneKeyReads"/>).</summary>
+    internal ZoneKeyReads? ZoneKeys
+    {
+        set
+        {
+            foreach (Lane? lane in _lanes)
+            {
+                if (lane is not null)
+                {
+                    lane.Context.ZoneKeys = value;
                 }
             }
         }
@@ -1336,6 +1363,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         {
             ahead.Release();
             ahead.VariantKeys = null;
+            ahead.ZoneKeys = null;
             ahead.Granules = null;
         }
 
@@ -1392,6 +1420,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     {
         ahead.Release();
         ahead.VariantKeys = lane.Context.VariantKeys;
+        ahead.ZoneKeys = lane.Context.ZoneKeys;
         ahead.Granules = lane.Context.Granules;
         LayoutReaderTable.Require(in root).RegisterSegments(in root, rows, in _mask, ahead);
         VortexFile.FillFromTail(_source, ahead);

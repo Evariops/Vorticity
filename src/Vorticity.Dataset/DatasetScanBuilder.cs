@@ -515,6 +515,18 @@ internal sealed partial class DatasetScanBuilder
     private IReadOnlyDictionary<string, string[]>? _variantKeys;
 
     /// <summary>
+    /// Says that the top-level columns of <paramref name="keys"/>, by name, are read only through those functions of them,
+    /// which the scan of each object read in the dataset's columns takes from its zones where they give a split's values.
+    /// </summary>
+    internal DatasetScanBuilder WithZoneKeys(Scanning.ZoneKeyReads.Request? keys)
+    {
+        _zoneKeys = keys;
+        return this;
+    }
+
+    private Scanning.ZoneKeyReads.Request? _zoneKeys;
+
+    /// <summary>
     /// The splits each object's scan of one lane reads ahead of the one it decodes, over a store whose read is a round
     /// trip (<see cref="ScanSpec.ReadAhead"/>): what an aggregation's lane is granted, which an object's scan reads as a
     /// file's would.
@@ -728,6 +740,7 @@ internal sealed partial class DatasetScanBuilder
             _sinkDecodes = _sinkDecodes,
             _positionsUnread = _positionsUnread,
             _variantKeys = _variantKeys,
+            _zoneKeys = _zoneKeys,
             _readAhead = _readAhead,
             _readAheadGranted = _readAheadGranted,
             _settles = _settles,

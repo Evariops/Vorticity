@@ -520,6 +520,12 @@ internal sealed class ScanContext : IDisposable
     internal Indexes.VariantKeyReads? VariantKeys { get; set; }
 
     /// <summary>
+    /// The columns the scan's consumer reads through functions alone, which a split whose zones give their values takes
+    /// from them, per scan like <see cref="Metrics"/>; null for none (<see cref="Scanning.ZoneKeyReads"/>).
+    /// </summary>
+    internal Scanning.ZoneKeyReads? ZoneKeys { get; set; }
+
+    /// <summary>
     /// What the lane plans of the chunks it reads a part of by their granules (spec C, 2), per lane; null when it reads every
     /// chunk whole.
     /// </summary>
@@ -1723,6 +1729,7 @@ internal sealed class ScanContext : IDisposable
         _building = null;
         _child = null;
         VariantKeys = null;
+        ZoneKeys = null;
         Granules = null;
         Along?.Clear();
         if (_memory is { } memory)

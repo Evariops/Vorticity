@@ -125,6 +125,19 @@ internal sealed class ScanBuilder
     private IReadOnlyDictionary<string, string[]>? _variantKeys;
 
     /// <summary>
+    /// Says that the top-level columns of <paramref name="keys"/>, by name, are read only through those functions of them:
+    /// a split whose zones send each function to one value takes the zones' values in place of the column, which it then
+    /// does not read (<see cref="ZoneKeyReads"/>), for a consumer that keeps the encodings and a scan in the file's order.
+    /// </summary>
+    internal ScanBuilder WithZoneKeys(ZoneKeyReads.Request? keys)
+    {
+        _zoneKeys = keys;
+        return this;
+    }
+
+    private ZoneKeyReads.Request? _zoneKeys;
+
+    /// <summary>
     /// Reads a part of a chunk by its granules alone (spec C, 2), where <paramref name="geometry"/> knows the chunk's tree
     /// and marks: what a dataset's object, whose table of contents names them, gives a read of a few of its granules. Null
     /// reads every chunk whole.
@@ -592,7 +605,17 @@ internal sealed class ScanBuilder
         IAsyncEnumerable<RecordBatch> scan = WholeAsync(excluded, out BatchAsyncEnumerable batches);
         batches.Granules = _granules;
         IReadOnlyDictionary<string, string[]>? filtered = FilterOnlyKeys();
-        return _variantKeys is not null || filtered is not null ? new KeyedBatches(scan, batches, _file, _variantKeys, filtered) : scan;
+        // The zones of the columns read through functions, which the file keeps from the first scan that loaded them.
+        ZoneKeyReads.Request? zoned = _keepEncodings && _orderPath is null ? _zoneKeys : null;
+        if (zoned is not null && ZoneKeyReads.TryHeld(_file, zoned, _filter, _granules is not null, out ZoneKeyReads? held))
+        {
+            batches.ZoneKeys = held;
+            zoned = null;
+        }
+
+        return _variantKeys is not null || filtered is not null || zoned is not null
+            ? new KeyedBatches(scan, batches, _file, _variantKeys, filtered, zoned, _granules is not null, _filter, _metrics)
+            : scan;
     }
 
     /// <summary>
@@ -643,17 +666,29 @@ internal sealed class ScanBuilder
     }
 
     /// <summary>
-    /// A scan whose variant columns are read through some shredded keys alone, by the scan or by its filter's own pass: the
-    /// file's path maps are read once, before its first batch, and the lanes told which chunks they read by keys.
+    /// A scan whose variant columns are read through some shredded keys alone, by the scan or by its filter's own pass, or
+    /// whose columns read through functions alone are taken from their zones where they give a split's values: the file's
+    /// path maps and those zones are read once, before its first batch, and the lanes told which chunks they read by keys
+    /// and which columns their splits take from the zones.
     /// </summary>
     private sealed class KeyedBatches(
         IAsyncEnumerable<RecordBatch> scan, BatchAsyncEnumerable batches, VortexFile file,
-        IReadOnlyDictionary<string, string[]>? keys, IReadOnlyDictionary<string, string[]>? filtered)
+        IReadOnlyDictionary<string, string[]>? keys, IReadOnlyDictionary<string, string[]>? filtered,
+        ZoneKeyReads.Request? zoned, bool byGranules, VortexExpr? filter, ScanCounters? metrics)
         : IAsyncEnumerable<RecordBatch>
     {
         public async IAsyncEnumerator<RecordBatch> GetAsyncEnumerator(CancellationToken cancellationToken = default)
         {
-            batches.VariantKeys ??= await Indexes.VariantKeyReads.LoadAsync(file, keys, filtered, cancellationToken).ConfigureAwait(false);
+            if (keys is not null || filtered is not null)
+            {
+                batches.VariantKeys ??= await Indexes.VariantKeyReads.LoadAsync(file, keys, filtered, cancellationToken).ConfigureAwait(false);
+            }
+
+            if (zoned is not null)
+            {
+                batches.ZoneKeys ??= await ZoneKeyReads.LoadAsync(file, zoned, filter, byGranules, metrics, cancellationToken).ConfigureAwait(false);
+            }
+
             await foreach (RecordBatch batch in scan.WithCancellation(cancellationToken).ConfigureAwait(false))
             {
                 yield return batch;
@@ -876,12 +911,23 @@ internal sealed class ScanBuilder
             }
         }
 
+        // The columns the scan takes from their zones where they give a split's values, whose zones it reads first and whose
+        // segments those splits do not register, as the scan does.
+        ScanCounters? zoneCost = null;
+        ZoneKeyReads? zoneKeys = null;
+        if (analyze && _keepEncodings && _orderPath is null && _zoneKeys is { } keyed)
+        {
+            zoneCost = new ScanCounters();
+            zoneKeys = await ZoneKeyReads.LoadAsync(_file, keyed, _filter, _granules is not null, zoneCost, cancellationToken).ConfigureAwait(false);
+        }
+
         int splits = 0;
         int zoneLiveSplits = 0;
         int liveSplits = 0;
         IO.SegmentRequestSet segments = new IO.SegmentRequestSet();
         try
         {
+            segments.ZoneKeys = zoneKeys;
             LayoutNode root = tree.Root;
             LayoutReader reader = LayoutReaderTable.Require(in root);
             FieldMask mask = walk;
@@ -940,6 +986,12 @@ internal sealed class ScanBuilder
             {
                 toRead += checked((int)orderCost.SegmentRequests);
                 bytes += orderCost.BytesRequested;
+            }
+
+            if (zoneCost is not null)
+            {
+                toRead += checked((int)zoneCost.SegmentRequests);
+                bytes += zoneCost.BytesRequested;
             }
 
             // The whole file-level answer: the statistics, then the file filters when indexes are on.

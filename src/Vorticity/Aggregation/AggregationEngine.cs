@@ -4795,6 +4795,10 @@ internal static class AggregationEngine
         return spec with
         {
             VariantKeys = Indexes.VariantKeyReads.Of(uses, spec.Filter),
+
+            // A column the keys read through functions alone, which a split whose zones give each function one value
+            // takes from them; none for a chosen row, which reads its columns whole.
+            ZoneKeys = plan.Chosen.Length == 0 ? Scanning.ZoneKeyReads.Of(uses, spec.Filter) : null,
             Projection = mask.Build(),
             KeepEncodings = true,
             SinkDecodes = true,

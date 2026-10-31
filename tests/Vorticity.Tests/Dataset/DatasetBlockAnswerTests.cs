@@ -29,7 +29,7 @@ public sealed partial class DatasetBlockAnswerTests : IClassFixture<DatasetBlock
     [
         "5xx by service", "5xx by service and hour", "count by service and status", "measures by service",
         "count by route, one service", "measures by service and hour", "count by host", "measures by service under 5xx",
-        "count by status, a latency window", "count by service, two statuses",
+        "count by status, a latency window", "count by service, two statuses", "5xx by route and hour",
     ];
 
     public static TheoryData<string> Questions() => [.. Named];
@@ -223,6 +223,10 @@ public sealed partial class DatasetBlockAnswerTests : IClassFixture<DatasetBlock
             "measures by service under 5xx" => scan.Where(c => c.Status >= 500).GroupBy(c => c.Service).Select(g => (g.Key, g.Count(), g.Average(c => c.Latency))),
             "count by status, a latency window" => scan.Where(c => c.Latency >= 100 && c.Latency < 200).GroupBy(c => c.Status).Select(g => (g.Key, g.Count())),
             "count by service, two statuses" => scan.Where(c => c.Status.In(500, 503)).GroupBy(c => c.Service).Select(g => (g.Key, g.Count())),
+            "5xx by route and hour" => scan.Where(c => c.Status >= 500).GroupBy(c => (c.Route, c.At.Truncate(CalendarUnit.Hour)))
+                .Select(g => (g.Key.Route, g.Key.Item2, g.Count())),
+            "5xx by route and hour, the last instant" => scan.Where(c => c.Status >= 500).GroupBy(c => (c.Route, c.At.Truncate(CalendarUnit.Hour)))
+                .Select(g => (g.Key.Route, g.Key.Item2, g.Count(), g.Max(c => c.At))),
             _ => throw new ArgumentException($"No question named '{question}'.", nameof(question)),
         };
     }

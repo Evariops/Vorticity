@@ -64,17 +64,22 @@ public sealed partial class QueryPathBudgetTests : IClassFixture<QueryPathBudget
     /// and 79,624 to 81,568 beside the other classes of `tests/runs-alone.sh`, seven runs on 2026-10-27, two of them past
     /// the 2 % the others keep.
     /// </para>
+    /// <para>
+    /// The two by the hour raised by 256 bytes on 2026-10-31: a pass keying a column through a function names it to its
+    /// scans, which take its zones' values where they give one (ZoneKeyReads), some 200 bytes an ask; the zones are kept by
+    /// the file, and a warm ask loads none.
+    /// </para>
     /// </summary>
     private static readonly Dictionary<string, Budget> Ceilings = new(StringComparer.Ordinal)
     {
         ["count by service"] = new(4, 174800, 0, 0, 38516),
         ["count by service, at eight lanes"] = new(4, 174800, 0, 0, 60099),
-        ["count by service and hour"] = new(4, 174800, 0, 0, 44024),
+        ["count by service and hour"] = new(4, 174800, 0, 0, 44280),
         ["by minute, the last hour, under a predicate"] = new(1, 43476, 0, 0, 43893),
         ["an unaligned window"] = new(3, 131324, 0, 0, 52461),
         ["an unaligned window, at eight lanes"] = new(3, 131324, 0, 0, 80613),
         ["every row but one id"] = new(4, 174800, 0, 0, 52176),
-        ["measures by region and hour"] = new(4, 174800, 0, 0, 51694),
+        ["measures by region and hour"] = new(4, 174800, 0, 0, 51950),
         ["count by route, a shredded path"] = new(4, 174800, 0, 0, 55888),
         ["the rows of one id"] = new(4, 174800, 0, 0, 82125),
     };

@@ -367,7 +367,7 @@ internal sealed class ZoneSettling
     }
 
     /// <summary>A value of a column through the functions <paramref name="field"/> applies to it, the innermost first.</summary>
-    private static bool TryMap(FieldExpr field, FilterLiteral value, out FilterLiteral mapped)
+    internal static bool TryMap(FieldExpr field, FilterLiteral value, out FilterLiteral mapped)
     {
         if (field is FunctionFieldExpr function)
         {
@@ -380,7 +380,7 @@ internal sealed class ZoneSettling
     }
 
     /// <summary>Whether two bounds are one value, bit for bit: two zeros of two signs are two keys.</summary>
-    private static bool Same(FilterLiteral left, FilterLiteral right) =>
+    internal static bool Same(FilterLiteral left, FilterLiteral right) =>
         left.Kind == right.Kind && left.Kind switch
         {
             FilterLiteralKind.Signed => left.SignedValue == right.SignedValue,
