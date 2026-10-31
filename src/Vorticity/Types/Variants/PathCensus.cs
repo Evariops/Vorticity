@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.Text;
+using Vorticity.Aggregating;
 
 namespace Vorticity.Types.Variants;
 
@@ -81,6 +82,9 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
 
     /// <summary>Counts a null row.</summary>
     internal void AddNull() => Rows++;
+
+    /// <summary>The spans the paths keep given back to the process's shelf, once nothing reads them: the census's spans are none after.</summary>
+    internal void Release() => Root.Release();
 
     /// <summary>
     /// Forgets every row counted and keeps its tree of paths for the next rows: a key met again counts from nothing, as
@@ -286,7 +290,13 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
 
             if (_spans is null || last + 2 >= _spans.Length)
             {
-                Array.Resize(ref _spans, Math.Max(4, 2 * (_spans?.Length ?? 0)));
+                // From the process's shelf, given back when the census is (Release): an object's census keeps spans for
+                // each of its paths, 3 bytes a row of a build of the client's log records made new.
+                long[] held = _spans ?? [];
+                long[] grown = ArrayShelf.Retained.Take<long>(ArrayShelf.Grown(last + 3, held.Length, least: 4), zeroed: false);
+                held.AsSpan(0, 2 * _spanCount).CopyTo(grown);
+                ArrayShelf.Retained.Give(held);
+                _spans = grown;
             }
 
             _spans[last + 1] = row;
@@ -317,6 +327,25 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
 
         /// <summary>Whether a text that cut to <see cref="MaxText"/> was longer, in which case it bounds nothing from above.</summary>
         internal bool MaxTextCut => _maxTextCut;
+
+        /// <summary>The spans of this path and of every key below given back to the process's shelf, and kept no more.</summary>
+        internal void Release()
+        {
+            if (_spans is { } spans)
+            {
+                ArrayShelf.Retained.Give(spans);
+                _spans = null;
+                _spanCount = 0;
+            }
+
+            if (_keys is { } keys)
+            {
+                foreach (PathCount key in keys.Values)
+                {
+                    key.Release();
+                }
+            }
+        }
 
         /// <summary>These counts and those of every key below, back to none, the keys and the buffers kept (<see cref="PathCensus.Clear"/>).</summary>
         internal void Clear()

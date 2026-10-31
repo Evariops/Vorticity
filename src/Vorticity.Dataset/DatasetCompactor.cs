@@ -1519,6 +1519,10 @@ internal static partial class DatasetCompactor
                     {
                         _census = null;
                         DeclareDirectories(output.Writer, census, Shreddings![Math.Clamp(_value, 0, Shreddings.Count - 1)].Shredded);
+                        foreach (PathCensus counted in census)
+                        {
+                            counted.Release();
+                        }
                     }
 
                     await output.Writer.CompleteAsync(cancellationToken).ConfigureAwait(false);

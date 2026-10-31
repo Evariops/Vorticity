@@ -5,6 +5,7 @@ using System.Collections.Generic;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using Vorticity.Aggregating;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Buffers;
@@ -123,7 +124,7 @@ internal sealed class ObjectDictionary
             return null;
         }
 
-        Collector collector = new Collector(arena.GetNode(node).DType);
+        using Collector collector = new Collector(arena.GetNode(node).DType);
         return collector.Add(arena, node) ? collector.Finish(allReferenced: true) : null;
     }
 
@@ -141,7 +142,7 @@ internal sealed class ObjectDictionary
             return null;
         }
 
-        Collector collector = new Collector(inputs[0].Arena.GetNode(inputs[0].Node).DType);
+        using Collector collector = new Collector(inputs[0].Arena.GetNode(inputs[0].Node).DType);
         foreach ((CanonicalArena arena, int node) in inputs)
         {
             if (!collector.Add(arena, node))
@@ -474,16 +475,20 @@ internal sealed class ObjectDictionary
     /// The distinct values of one or more columns, as rows come: text into a heap of its own, numbers as their bits, each
     /// found again through a table that grows. Then sorted, and laid out as a dictionary.
     /// </summary>
-    private sealed class Collector
+    /// <remarks>
+    /// Its working arrays come from the process's shelf and go back when it is disposed: a collector a column and a part
+    /// written, they were made new as they grew, 4 bytes a row of a build of the client's log records.
+    /// </remarks>
+    private sealed class Collector : IDisposable
     {
         private readonly DTypeKind _kind;
         private readonly PType _ptype;
         private readonly int _width;
-        private byte[] _heap = new byte[1024];
+        private byte[] _heap = ArrayShelf.Retained.Take<byte>(1024, zeroed: false);
         private int _heapUsed;
-        private int[] _offsets = new int[65];
-        private ulong[] _keys = new ulong[64];
-        private int[] _slots = new int[128];
+        private int[] _offsets = ArrayShelf.Retained.Take<int>(65, zeroed: true);
+        private ulong[] _keys = ArrayShelf.Retained.Take<ulong>(64, zeroed: false);
+        private int[] _slots = ArrayShelf.Retained.Take<int>(128, zeroed: true);
         private int _mask = 127;
         private int _count;
 
@@ -563,7 +568,7 @@ internal sealed class ObjectDictionary
 
             if (_heapUsed + value.Length > _heap.Length)
             {
-                Array.Resize(ref _heap, Math.Max(_heap.Length * 2, _heapUsed + value.Length));
+                ArrayShelf.Resize(ArrayShelf.Retained, ref _heap, ArrayShelf.Grown(_heapUsed + value.Length, _heap.Length));
             }
 
             value.CopyTo(_heap.AsSpan(_heapUsed));
@@ -601,15 +606,17 @@ internal sealed class ObjectDictionary
             // A key a code, and an offset a code and one past the last.
             if (_count == _keys.Length)
             {
-                Array.Resize(ref _keys, _keys.Length * 2);
-                Array.Resize(ref _offsets, _keys.Length + 1);
+                ArrayShelf.Resize(ArrayShelf.Retained, ref _keys, _keys.Length * 2);
+                ArrayShelf.Resize(ArrayShelf.Retained, ref _offsets, _keys.Length + 1);
             }
 
             _keys[_count] = key;
             _slots[slot] = ++_count;
             if (_count * 2 > _mask)
             {
-                _slots = new int[_slots.Length * 2];
+                int slots = _slots.Length * 2;
+                ArrayShelf.Retained.Give(_slots);
+                _slots = ArrayShelf.Retained.Take<int>(slots, zeroed: true);
                 _mask = _slots.Length - 1;
                 for (int code = 0; code < _count; code++)
                 {
@@ -627,16 +634,17 @@ internal sealed class ObjectDictionary
         /// <summary>The values sorted in their type's order, as a dictionary.</summary>
         internal ObjectDictionary Finish(bool allReferenced)
         {
-            int[] order = new int[_count];
-            for (int i = 0; i < order.Length; i++)
-            {
-                order[i] = i;
-            }
-
             if (_width == 0)
             {
                 // Text and binary order by their bytes, unsigned, the shorter first on a tie.
-                order.AsSpan().Sort(new ByteOrder(_heap, _offsets));
+                int[] held = ArrayShelf.Retained.Take<int>(ArrayShelf.Grown(_count, 0, least: 64), zeroed: false);
+                Span<int> order = held.AsSpan(0, _count);
+                for (int i = 0; i < order.Length; i++)
+                {
+                    order[i] = i;
+                }
+
+                order.Sort(new ByteOrder(_heap, _offsets));
                 byte[] bytes = GC.AllocateUninitializedArray<byte>(Math.Max(_heapUsed, 1), pinned: true);
                 int[] offsets = new int[_count + 1];
                 ulong[] hashes = new ulong[_count];
@@ -653,6 +661,7 @@ internal sealed class ObjectDictionary
                 }
 
                 offsets[_count] = used;
+                ArrayShelf.Retained.Give(held);
                 return new ObjectDictionary(_kind, default, bytes, offsets, hashes, _count, allReferenced);
             }
 
@@ -682,6 +691,19 @@ internal sealed class ObjectDictionary
             }
 
             return new ObjectDictionary(_kind, _ptype, values, [], keys, _count, allReferenced);
+        }
+
+        /// <summary>Its working arrays back to the process's shelf, once: what it finished holds arrays of its own.</summary>
+        public void Dispose()
+        {
+            ArrayShelf.Retained.Give(_heap);
+            ArrayShelf.Retained.Give(_offsets);
+            ArrayShelf.Retained.Give(_keys);
+            ArrayShelf.Retained.Give(_slots);
+            _heap = [];
+            _offsets = [];
+            _keys = [];
+            _slots = [];
         }
 
         /// <summary>The order of two collected values' bytes; a value starts at its offset and ends at the next.</summary>
