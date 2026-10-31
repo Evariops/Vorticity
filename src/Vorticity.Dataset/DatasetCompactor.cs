@@ -161,9 +161,12 @@ internal static partial class DatasetCompactor
 
         // A merge writes each column every input writes against an object dictionary against their union, sorted, when the
         // writer prices it below a dictionary a chunk: the dictionaries go on through the merges.
-        IReadOnlyList<(int Field, ObjectDictionary Dictionary, long RowBytes)> unions = merge
-            ? await UnionsAsync(dataset, schema, job, cancellationToken).ConfigureAwait(false)
-            : [];
+        IReadOnlyList<(int Field, ObjectDictionary Dictionary, long RowBytes)> unions = [];
+        if (merge)
+        {
+            using Activity? uniting = DatasetTelemetry.StartCompactionPass("unions");
+            unions = await UnionsAsync(dataset, schema, job, cancellationToken).ConfigureAwait(false);
+        }
 
         // A leveled exit of level 0 keeps the rows that came late apart, in an object of level 0, while they weigh little
         // against the objects of its destination they fall among (LateRows): it reads its sources alone, and those
@@ -199,9 +202,12 @@ internal static partial class DatasetCompactor
         // A consolidation of several objects' worth runs in ranges of the key side by side, on the session's lanes, each
         // reading of its inputs the granules of its range alone (KeyRanges); one of a value, since each object of a
         // range shreds the paths of the first.
-        KeyRanges? ranges = late is null && merge && job.Trigger == CompactionTrigger.Consolidation && shreddings is not { Count: > 1 }
-            ? await KeyRangesAsync(dataset, schema, job, cancellationToken).ConfigureAwait(false)
-            : null;
+        KeyRanges? ranges = null;
+        if (late is null && merge && job.Trigger == CompactionTrigger.Consolidation && shreddings is not { Count: > 1 })
+        {
+            using Activity? cutting = DatasetTelemetry.StartCompactionPass("ranges");
+            ranges = await KeyRangesAsync(dataset, schema, job, cancellationToken).ConfigureAwait(false);
+        }
 
         // The destination's objects, in the key's order: those of one stream, or of one a range.
         ObjectStream[] streams;
@@ -315,6 +321,13 @@ internal static partial class DatasetCompactor
             read.Add(input.Entry);
         }
 
+        DatasetOperation.PartitionIndexChange? partitionIndex = null;
+        if (postings is not null)
+        {
+            using Activity? indexing = DatasetTelemetry.StartCompactionPass("index");
+            partitionIndex = await PartitionIndexAsync(dataset, schema, ran, streams, postings, cancellationToken).ConfigureAwait(false);
+        }
+
         DatasetOperation.ReplaceObjects replacement = new DatasetOperation.ReplaceObjects(consumed, produced)
         {
             Expected = read,
@@ -322,7 +335,7 @@ internal static partial class DatasetCompactor
 
             // Apart, the outputs take over the part of the destination they fill alone, which no object it holds may meet.
             Range = late is null ? job.Range : filled.Count == 0 ? null : LevelRange.Of(job.ToLevel, filled, key),
-            PartitionIndex = postings is null ? null : await PartitionIndexAsync(dataset, schema, ran, streams, postings, cancellationToken).ConfigureAwait(false),
+            PartitionIndex = partitionIndex,
         };
 
         CommitResult commit = await dataset

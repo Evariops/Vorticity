@@ -63,11 +63,16 @@ public sealed class DatasetTelemetryTests
                 ((string)ran.GetTagItem("vortex.trigger")!, (int)ran.GetTagItem("vortex.level.from")!, (int)ran.GetTagItem("vortex.level.to")!,
                     (long)ran.GetTagItem("vortex.bytes_in")!, (long)ran.GetTagItem("vortex.bytes_out")!, (string)ran.GetTagItem("vortex.location")!));
 
-            // Each compaction's commit is a child of its activity.
+            // Each compaction's commit is a child of its activity, and so is each of its passes, its rows written among them.
             foreach (Activity job in compactions)
             {
                 Assert.Single(recorder.Stopped("vortex.dataset.commit"), activity => ReferenceEquals(activity.Parent, job));
+                Assert.Single(recorder.Stopped("vortex.dataset.compaction.write"), activity => ReferenceEquals(activity.Parent, job));
             }
+
+            Assert.All(
+                recorder.Stopped(static name => name.StartsWith("vortex.dataset.compaction.", StringComparison.Ordinal)),
+                pass => Assert.Contains(pass.Parent, compactions));
 
             Assert.Equal(1, recorder.Sum("vortex.dataset.compactions", ("vortex.trigger", "level_zero_ceiling"), ("vortex.outcome", "applied")));
             Assert.Equal(1, recorder.Sum("vortex.dataset.compactions", ("vortex.trigger", "level_zero_ceiling"), ("vortex.outcome", "abandoned")));
@@ -213,6 +218,8 @@ public sealed class DatasetTelemetryTests
         }
 
         internal IEnumerable<Activity> Stopped(string name) => _stopped.Where(activity => activity.OperationName == name);
+
+        internal IEnumerable<Activity> Stopped(Func<string, bool> named) => _stopped.Where(activity => named(activity.OperationName));
 
         internal long Sum(string instrument, params (string Key, string Value)[] tags) =>
             _measured

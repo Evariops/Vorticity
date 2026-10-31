@@ -198,8 +198,9 @@ internal static class DatasetTelemetry
     /// <summary>
     /// Starts the activity of one pass of a compaction job, a child of the job's, or returns null when nothing
     /// listens: <c>plan</c>, the first pass of a job that writes indexed objects over a variant column, which counts the paths
-    /// of each partition value's rows,
-    /// or <c>write</c>, the pass that reads the rows again and writes the outputs.
+    /// of each partition value's rows; <c>unions</c>, a merge's object dictionaries, the union of its inputs'; <c>ranges</c>,
+    /// a consolidation's ranges of the key; <c>write</c>, the pass that reads the rows again and writes the outputs;
+    /// and <c>index</c>, a consolidation's index of its partition. The commit has an activity of its own.
     /// </summary>
     internal static Activity? StartCompactionPass(string pass) =>
         VortexTelemetry.Source.StartActivity($"vortex.dataset.compaction.{pass}", ActivityKind.Internal);
