@@ -425,7 +425,9 @@ internal static class ColumnCompressor
                 ? fixedRuns
                 : ViewRuns(in node, length, ceiling, runStarts, runEnds, out int viewRuns)
                     ? viewRuns
-                    : ComparedRuns(in comparer, length, ceiling, runStarts, runEnds);
+                    : comparer.Mask.Bits is { IsEmpty: false } bits
+                        ? NullableRuns(in comparer, bits, comparer.Mask.BitOffset, length, ceiling, runStarts, runEnds)
+                        : ComparedRuns(in comparer, length, ceiling, runStarts, runEnds);
 
         if (runCount > ceiling)
         {
@@ -436,6 +438,86 @@ internal static class ColumnCompressor
 
         runEnds[runCount - 1] = length;
         return ColumnPlan.RentedRuns(runStarts, runEnds, runCount);
+    }
+
+    /// <summary>
+    /// <see cref="ComparedRuns"/> over a column whose validity is a bitmap, sixty-four rows at a time: a row starts a run
+    /// where its validity differs from the row before's, as <see cref="BitmapRuns"/> finds it, or where it and the row before
+    /// both hold values and the values differ; a word of nulls after a null holds no boundary and is passed over whole. The
+    /// same runs, in the same order, the same count past the ceiling.
+    /// </summary>
+    /// <remarks>
+    /// A variant's shredded columns are mostly nulls: walked a row at a time through <see cref="RowComparer.Equal"/>, two
+    /// validity reads a row, their search took a fifth of the managed time of a build of the client's log records.
+    /// </remarks>
+    private static int NullableRuns(
+        in RowComparer comparer, ReadOnlySpan<byte> bits, int bitOffset, int length, int ceiling, Span<int> starts, Span<int> ends)
+    {
+        int runCount = 1;
+        starts[0] = 0;
+        int shift = bitOffset & 7;
+        int firstByte = bitOffset >> 3;
+        ulong previous = 0;
+        for (int row = 0; row < length; row += 64)
+        {
+            int take = Math.Min(64, length - row);
+            ulong mask = BitWords.Mask(take);
+            ulong word = BitWords.Load(bits, firstByte + (row >> 3), shift) & mask;
+
+            // Row 0, which has no predecessor, takes its own bit, so that it starts no run of its own.
+            if (row == 0)
+            {
+                previous = word & 1;
+            }
+
+            ulong before = (word << 1) | previous;
+            ulong diff = (word ^ before) & mask;
+
+            // The rows that hold a value after a row that holds one: a boundary where the values differ.
+            ulong pairs = word & before & mask & (row == 0 ? ~1UL : ulong.MaxValue);
+            while (pairs != 0)
+            {
+                int at = System.Numerics.BitOperations.TrailingZeroCount(pairs);
+                if (!comparer.EqualValues(row + at - 1, row + at))
+                {
+                    diff |= 1UL << at;
+                }
+
+                pairs &= pairs - 1;
+            }
+
+            previous = (word >> (take - 1)) & 1;
+            while (diff != 0)
+            {
+                if (runCount > ceiling)
+                {
+                    return runCount;
+                }
+
+                int at = row + System.Numerics.BitOperations.TrailingZeroCount(diff);
+                ends[runCount - 1] = at;
+                starts[runCount] = at;
+                runCount++;
+                diff &= diff - 1;
+            }
+        }
+
+        return runCount;
+    }
+
+    /// <summary>
+    /// The runs of column <paramref name="nodeIndex"/>, its validity a bitmap, as <see cref="NullableRuns"/> finds them, or
+    /// as <see cref="ComparedRuns"/> does when <paramref name="compared"/>, up to <paramref name="starts"/>' length less one:
+    /// for the tests, which hold the two to the same runs.
+    /// </summary>
+    internal static int RunsOf(CanonicalArena arena, int nodeIndex, bool compared, Span<int> starts, Span<int> ends)
+    {
+        RowComparer comparer = new RowComparer(arena, nodeIndex);
+        int length = arena.GetNode(nodeIndex).Length;
+        ValidityMask mask = comparer.Mask;
+        return compared || mask.Bits.IsEmpty
+            ? ComparedRuns(in comparer, length, starts.Length - 1, starts, ends)
+            : NullableRuns(in comparer, mask.Bits, mask.BitOffset, length, starts.Length - 1, starts, ends);
     }
 
     /// <summary>Runs by comparing adjacent rows, abandoning once run-end has already lost.</summary>
@@ -2546,11 +2628,15 @@ internal static class ColumnCompressor
                 return false;
             }
 
-            if (!validA)
-            {
-                return true;
-            }
+            return !validA || EqualValues(a, b);
+        }
 
+        /// <summary>The validity of the column's rows.</summary>
+        internal ValidityMask Mask => _mask;
+
+        /// <summary>Whether rows <paramref name="a"/> and <paramref name="b"/>, both valid, hold the same value.</summary>
+        internal bool EqualValues(int a, int b)
+        {
             if (_width == 0)
             {
                 return _node.Kind == CanonicalKind.Bool

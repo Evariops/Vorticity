@@ -131,7 +131,8 @@ Dictionary<string, (string Help, Func<Task<int>> Run)> micros = new Dictionary<s
         Option(args, "--rate", 5_000),
         Option(args, "--part-minutes", 10),
         Option(args, "--write-degree", Math.Max(1, Environment.ProcessorCount / 2)),
-        Option(args, "--budget", 100))),
+        Option(args, "--budget", 100),
+        args.Contains("--print-jobs"))),
     ["layout"] = ("the bytes a row of each column takes, the reference requests in arrival order and sorted by emitter (LayoutMicro.cs)", () =>
         LayoutMicro.Run(Text(args, "--store") ?? BenchStores.Of("layout"), Option(args, "--minutes", 20), Option(args, "--rate", 5_000))),
     ["columns"] = ("the battery \"any column\": each column counted by hour, then filtered on a frequent and a rare value and grouped by each other, in arrival order and sorted by service, priced, read and held to the rows; and the frontier on the fly (ColumnBattery.cs)", () =>
