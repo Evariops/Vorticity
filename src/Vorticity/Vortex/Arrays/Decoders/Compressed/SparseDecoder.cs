@@ -85,7 +85,14 @@ internal sealed class SparseDecoder : ArrayDecoder
         int patchCount = ArrayDecodeContext.CheckedLength(patchesMetadata.Length, $"{Id} patch count");
         DType indicesType = context.Types.Primitive(patchesMetadata.IndicesPType, Nullability.NonNullable);
         int indicesIndex = context.DecodeChild(in node, 0, indicesType, patchCount);
-        int valuesIndex = context.DecodeChild(in node, 1, dtype, patchCount);
+
+        // The patch values judged in their encoding where it answers, a packing, a frame or a dictionary, which decodes none
+        // of them; else decoded and judged one by one.
+        int words = Compute.PredicateBits.WordsOf(Math.Max(patchCount, 1));
+        ulong[] answers = ArrayPool<ulong>.Shared.Rent(2 * words);
+        Compute.PredicateBits judged = new Compute.PredicateBits(answers.AsSpan(0, words), answers.AsSpan(words, words), patchCount);
+        bool inEncoding = patchCount > 0 && context.TryEvaluateChild(in node, 1, dtype, patchCount, predicate, ref judged);
+        int valuesIndex = inEncoding ? -1 : context.DecodeChild(in node, 1, dtype, patchCount);
         bool walked = context.IsNodeChecked(in node);
         Patches patches = Patches.Create(context, in patchesMetadata, length, indicesIndex, valuesIndex, Id, walked);
         if (!walked)
@@ -118,7 +125,21 @@ internal sealed class SparseDecoder : ArrayDecoder
             {
                 byte fillVerdict = verdict[0];
                 Span<byte> states = rented.AsSpan(0, patchCount);
-                Compute.ValueVerdicts.TryJudge(context.Canonical, valuesIndex, predicate, states, rented.AsSpan(patchCount, patchCount));
+                if (inEncoding)
+                {
+                    for (int patch = 0; patch < patchCount; patch++)
+                    {
+                        ulong bit = 1UL << (patch & 63);
+                        states[patch] = (judged.Truth[patch >> 6] & bit) != 0 ? Compute.Trilean.True
+                            : judged.Unknown && (judged.Known[patch >> 6] & bit) == 0 ? Compute.Trilean.Unknown
+                            : Compute.Trilean.False;
+                    }
+                }
+                else
+                {
+                    Compute.ValueVerdicts.TryJudge(context.Canonical, valuesIndex, predicate, states, rented.AsSpan(patchCount, patchCount));
+                }
+
                 patches.Judge(states, fillVerdict, ref bits);
             }
 
@@ -127,6 +148,7 @@ internal sealed class SparseDecoder : ArrayDecoder
         finally
         {
             ArrayPool<byte>.Shared.Return(rented);
+            ArrayPool<ulong>.Shared.Return(answers);
         }
     }
 

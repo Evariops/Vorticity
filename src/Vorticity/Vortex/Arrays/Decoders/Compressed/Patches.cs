@@ -506,7 +506,10 @@ internal readonly ref struct Patches
     /// <param name="metadata">The descriptor read out of the encoding's own metadata.</param>
     /// <param name="arrayLength">The parent array's row count.</param>
     /// <param name="indicesNodeIndex">The decoded <c>patch_indices</c> child.</param>
-    /// <param name="valuesNodeIndex">The decoded <c>patch_values</c> child.</param>
+    /// <param name="valuesNodeIndex">
+    /// The decoded <c>patch_values</c> child; -1 for values judged in their encoding, which only <see cref="Judge"/> may then
+    /// be asked of.
+    /// </param>
     /// <param name="encodingId">The encoding asking, for the error messages.</param>
     /// <param name="indicesAlreadyChecked">
     /// <see langword="true"/> when this scan has already walked these indices and found them
@@ -560,10 +563,11 @@ internal readonly ref struct Patches
         ReadOnlySpan<byte> indices = CompressedValues.RequireIndexChild(
             ctx, indicesNodeIndex, indicesPType, count, encodingId, "patch_indices");
 
-        CanonicalNode values = ctx.Canonical.GetNode(valuesNodeIndex);
-        if (values.Length != count)
+        // Values judged in their encoding rather than decoded (-1) leave the patches their indices alone: the encoding that
+        // answered was asked of as many rows.
+        if (valuesNodeIndex >= 0 && ctx.Canonical.GetNode(valuesNodeIndex).Length is int values && values != count)
         {
-            CompressedThrow.ChildLength(encodingId, "patch_values", values.Length, count);
+            CompressedThrow.ChildLength(encodingId, "patch_values", values, count);
         }
 
         // Sorted first, then the two ends. Once the sequence is known to ascend, the endpoints
