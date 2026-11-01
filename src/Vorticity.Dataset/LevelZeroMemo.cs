@@ -15,21 +15,22 @@ namespace Vorticity.Dataset;
 /// The objects of level 0 a query node read through keys of their variant columns, shredded in memory once.
 /// An object of level 0 is stored as it was appended, shredded only in the declared paths when its handle
 /// shredded on append, so each question on another key of it would parse every row. The first question
-/// reads the object whole and writes it again in memory, the keys asked shredded at the class most of their
-/// values hold, with their path maps; every later question on those keys reads that copy through them
-/// alone, as it reads an object a job shredded. An object whose append shredded every key asked is read as
-/// it lies, by those keys, with no copy.
+/// parses the object as it lies, its keys read in place, while the object is read whole beside it and written
+/// again in memory, the keys asked shredded at the class most of their values hold, with their path maps;
+/// every later question on those keys, once the copy is made, reads it through them alone, as it reads an
+/// object a job shredded. An object whose append shredded every key asked is read as it lies, by those keys,
+/// with no copy.
 /// </summary>
 /// <remarks>
 /// <para>
 /// The copy holds the object's rows in their order, those deleted included, so the entry's deletion vector
 /// applies to it as to the object. Its memory, as large as the object, is reserved from the session's query
-/// memory budget before it is made; when the budget refuses it, the question parses the object as it lies and
-/// no copy is made. A copy is dropped once its object has left level 0, which the next read of the memo finds.
+/// memory budget before it is made; when the budget refuses it, no copy is made, and the questions parse the
+/// object as it lies. A copy is dropped once its object has left level 0, which the next read of the memo finds.
 /// </para>
 /// <para>
-/// A question waits only on one that shreds the same object: each object has a gate of its own, held while
-/// its copy is made, and a question a copy held serves waits on none.
+/// No question waits on a copy: one copy of an object is made at a time, beside the questions, which parse the
+/// object until it is done; one a copy held serves reads it.
 /// </para>
 /// <para>
 /// A question on keys a copy lacks shreds the object again with the keys of both, so a key is parsed once
@@ -38,9 +39,10 @@ namespace Vorticity.Dataset;
 /// </remarks>
 internal sealed class LevelZeroMemo : IAsyncDisposable
 {
-    // The gates of the objects questions shred, each held while its object's copy is made and kept while a
-    // question waits on it; whether a question forgets the objects gone from level 0, which the others leave it to.
-    private readonly Dictionary<UInt128, Gate> _gates = [];
+    // The copies being made, by object, one at a time each, and what stops them when the memo is let go; whether a question
+    // forgets the objects gone from level 0, which the others leave it to.
+    private readonly Dictionary<UInt128, Task> _making = [];
+    private readonly CancellationTokenSource _stopping = new CancellationTokenSource();
     private int _forgetting;
     private readonly Dictionary<UInt128, Copy> _copies = [];
     private long _shredded;
@@ -156,96 +158,150 @@ internal sealed class LevelZeroMemo : IAsyncDisposable
             }
         }
 
-        // A question waits only on one that shreds the same object, and finds its copy once that one is done.
-        Gate gate = Enter(entry.Uid);
+        // Not copied yet, or not with these keys: the copy is made beside the question, which reads the object as it lies,
+        // its keys parsed in place, and a later question finds it once it is done. Made on the first question's path, a
+        // copy kept it four to six times longer, for later questions faster by a quarter at one lane and alike at 32: the
+        // services under a status of 500 or more over the logs of the short S1, 1 045 ms at first at 32 lanes, 221 parsed.
+        StartCopy(dataset, version, entry, keys);
+        return await version.RentAsync(entry, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Starts the copy of the object <paramref name="entry"/> names with the keys <paramref name="keys"/> beside the question
+    /// that asks them (<see cref="CopyBesideAsync"/>), unless one of it is being made already.
+    /// </summary>
+    private void StartCopy(VortexDataset dataset, DatasetSnapshot version, ObjectEntry entry, IReadOnlyDictionary<string, string[]> keys)
+    {
+        lock (_copies)
+        {
+            if (_disposed || _making.ContainsKey(entry.Uid))
+            {
+                return;
+            }
+
+            _making[entry.Uid] = Task.Run(() => CopyBesideAsync(dataset, version, entry, keys));
+        }
+    }
+
+    /// <summary>
+    /// The copy of the object <paramref name="entry"/> names, its keys <paramref name="keys"/> and those of the copy held
+    /// shredded, made beside the questions and kept for those after: its memory, as large as the object, reserved before it
+    /// is made, and refused, nothing made only to be let go. A copy that fails leaves the questions to parse the object as
+    /// it lies.
+    /// </summary>
+    private async Task CopyBesideAsync(VortexDataset dataset, DatasetSnapshot version, ObjectEntry entry, IReadOnlyDictionary<string, string[]> keys)
+    {
+        CancellationToken stopping = _stopping.Token;
         try
         {
-            await gate.Lock.WaitAsync(cancellationToken).ConfigureAwait(false);
+            Dictionary<string, HashSet<string>> wanted = Wanted(keys, null);
+            Copy? held;
+            lock (_copies)
+            {
+                _copies.TryGetValue(entry.Uid, out held);
+            }
+
+            if (held is not null)
+            {
+                if (held.Covers(wanted))
+                {
+                    return;
+                }
+
+                wanted = Wanted(keys, held.Keys);
+            }
+
+            QueryMemoryBudget budget = dataset.Session.Options.MemoryBudget ?? QueryMemoryBudget.Process;
+            long reserved = Math.Max(entry.Bytes, 1);
+            if (!budget.TryReserve(reserved))
+            {
+                Interlocked.Increment(ref _refused);
+                return;
+            }
+
+            Copy? made;
             try
             {
-                if (Volatile.Read(ref _disposed))
-                {
-                    return await version.RentAsync(entry, cancellationToken).ConfigureAwait(false);
-                }
-
-                if (Leased(entry.Uid, wanted, out Copy? held) is { } shreddedMeanwhile)
-                {
-                    return shreddedMeanwhile;
-                }
-
-                if (held is not null)
-                {
-                    wanted = Wanted(keys, held.Keys);
-                }
-
-                // The copy's memory, as large as the object, reserved before it is made: refused, the question parses
-                // the object as it lies, and nothing is made only to be let go.
-                QueryMemoryBudget budget = dataset.Session.Options.MemoryBudget ?? QueryMemoryBudget.Process;
-                long reserved = Math.Max(entry.Bytes, 1);
-                if (!budget.TryReserve(reserved))
-                {
-                    Interlocked.Increment(ref _refused);
-                    return await version.RentAsync(entry, cancellationToken).ConfigureAwait(false);
-                }
-
-                Copy? made;
-                try
-                {
-                    made = await CopyAsync(dataset, version, entry, wanted, budget, reserved, cancellationToken).ConfigureAwait(false);
-                }
-                catch
-                {
-                    budget.Release(reserved);
-                    throw;
-                }
-
-                if (made is null)
-                {
-                    budget.Release(reserved);
-                    return await version.RentAsync(entry, cancellationToken).ConfigureAwait(false);
-                }
-
-                // The reservation brought to the copy's bytes: past it, and refused the rest, the copy serves this
-                // question alone and goes with its lease.
-                Interlocked.Increment(ref _shredded);
-                if (made.Bytes > reserved && !budget.TryReserve(made.Bytes - reserved))
-                {
-                    budget.Release(reserved);
-                    Interlocked.Increment(ref _refused);
-                    return made.Lease(dropWithLastLease: true);
-                }
-
-                if (made.Bytes < reserved)
-                {
-                    budget.Release(reserved - made.Bytes);
-                }
-
-                made.Release = () => budget.Release(made.Bytes);
-                if (held is not null)
-                {
-                    await DropAsync(entry.Uid, held).ConfigureAwait(false);
-                }
-
-                lock (_copies)
-                {
-                    if (!_disposed)
-                    {
-                        _copies[entry.Uid] = made;
-                        return made.Lease();
-                    }
-                }
-
-                // Let go meanwhile: the copy serves this question alone.
-                return made.Lease(dropWithLastLease: true);
+                made = await CopyAsync(dataset, version, entry, wanted, budget, reserved, stopping).ConfigureAwait(false);
             }
-            finally
+            catch
             {
-                gate.Lock.Release();
+                budget.Release(reserved);
+                throw;
             }
+
+            if (made is null)
+            {
+                budget.Release(reserved);
+                return;
+            }
+
+            // The reservation brought to the copy's bytes: past it, and refused the rest, the copy is let go.
+            Interlocked.Increment(ref _shredded);
+            if (made.Bytes > reserved && !budget.TryReserve(made.Bytes - reserved))
+            {
+                budget.Release(reserved);
+                Interlocked.Increment(ref _refused);
+                await made.DropAsync().ConfigureAwait(false);
+                return;
+            }
+
+            if (made.Bytes < reserved)
+            {
+                budget.Release(reserved - made.Bytes);
+            }
+
+            made.Release = () => budget.Release(made.Bytes);
+            if (held is not null)
+            {
+                await DropAsync(entry.Uid, held).ConfigureAwait(false);
+            }
+
+            bool kept;
+            lock (_copies)
+            {
+                kept = !_disposed;
+                if (kept)
+                {
+                    _copies[entry.Uid] = made;
+                }
+            }
+
+            if (!kept)
+            {
+                await made.DropAsync().ConfigureAwait(false);
+            }
+        }
+        catch (Exception)
+        {
+            // A copy that fails, or that the memo's close stops, leaves the questions to parse the object as it lies.
         }
         finally
         {
-            Leave(entry.Uid, gate);
+            lock (_copies)
+            {
+                _making.Remove(entry.Uid);
+            }
+        }
+    }
+
+    /// <summary>Waits for the copies being made: what a question finds after is what they made.</summary>
+    internal async Task WhenMadeAsync()
+    {
+        while (true)
+        {
+            Task[] making;
+            lock (_copies)
+            {
+                making = [.. _making.Values];
+            }
+
+            if (making.Length == 0)
+            {
+                return;
+            }
+
+            await Task.WhenAll(making).ConfigureAwait(false);
         }
     }
 
@@ -266,45 +322,6 @@ internal sealed class LevelZeroMemo : IAsyncDisposable
             Interlocked.Increment(ref _served);
             return held.Lease();
         }
-    }
-
-    /// <summary>The gate of the object <paramref name="uid"/> names, one more question waiting on it.</summary>
-    private Gate Enter(UInt128 uid)
-    {
-        lock (_gates)
-        {
-            if (!_gates.TryGetValue(uid, out Gate? gate))
-            {
-                _gates[uid] = gate = new Gate();
-            }
-
-            gate.Users++;
-            return gate;
-        }
-    }
-
-    /// <summary>One question fewer on <paramref name="gate"/>; the last one lets the gate go.</summary>
-    private void Leave(UInt128 uid, Gate gate)
-    {
-        lock (_gates)
-        {
-            if (--gate.Users > 0)
-            {
-                return;
-            }
-
-            _gates.Remove(uid);
-        }
-
-        gate.Lock.Dispose();
-    }
-
-    /// <summary>The gate of one object, and the questions that hold or wait on it.</summary>
-    private sealed class Gate
-    {
-        internal SemaphoreSlim Lock { get; } = new SemaphoreSlim(1, 1);
-
-        internal int Users { get; set; }
     }
 
     /// <summary>
@@ -576,6 +593,14 @@ internal sealed class LevelZeroMemo : IAsyncDisposable
 
             Volatile.Write(ref _disposed, true);
             _lying.Clear();
+        }
+
+        // The copies being made stopped and awaited first: each lets its copy go, the memo being let go.
+        await _stopping.CancelAsync().ConfigureAwait(false);
+        await WhenMadeAsync().ConfigureAwait(false);
+        _stopping.Dispose();
+        lock (_copies)
+        {
             all = [.. System.Linq.Enumerable.Select(_copies, c => (c.Key, c.Value))];
         }
 
