@@ -63,12 +63,40 @@ internal sealed partial class DatasetScanBuilder
             await _dataset.LevelZero.ForgetMovedAsync(_version, cancellationToken).ConfigureAwait(false);
         }
 
-        return held.Level == 0 && _variantKeys is { Count: > 0 } keys
+        ObjectLease lease = held.Level == 0 && _variantKeys is { Count: > 0 } keys
             ? await _dataset.LevelZero.RentAsync(_dataset, _version, held.Entry, keys, cancellationToken).ConfigureAwait(false)
             : await _version.RentAsync(held.Entry, cancellationToken).ConfigureAwait(false);
+        if (lease.IsCopy)
+        {
+            HashSet<UInt128> copies = LazyInitializer.EnsureInitialized(ref _copies);
+            lock (copies)
+            {
+                copies.Add(held.Entry.Uid);
+            }
+        }
+
+        return lease;
     }
 
     private bool _memoChecked;
+
+    // The objects a rent of this scan gave as a copy written again in memory (ObjectLease.IsCopy), whose entries' regions,
+    // marks and sparse index, lie in the object and not in the copy: read whole, by no granule. Null for none, as most scans.
+    private HashSet<UInt128>? _copies;
+
+    /// <summary>Whether a rent of this scan gave the object <paramref name="uid"/> names as a copy (<see cref="ObjectLease.IsCopy"/>).</summary>
+    private bool Copied(UInt128 uid)
+    {
+        if (_copies is not { } copies)
+        {
+            return false;
+        }
+
+        lock (copies)
+        {
+            return copies.Contains(uid);
+        }
+    }
 
     /// <summary>
     /// The conjunct of <paramref name="filter"/> that looks one value of a declared identifier up, or a few,
@@ -676,7 +704,8 @@ internal sealed partial class DatasetScanBuilder
     private async ValueTask GeometryAsync(
         VortexFile file, PositionedObject held, Task<Indexes.ColumnMarks?[]>? marks, CancellationToken cancellationToken, bool judged = false)
     {
-        if (!WantsGeometry(held))
+        // A copy written again in memory has chunks of its own, which the object's marks do not describe.
+        if (!WantsGeometry(held) || Copied(held.Entry.Uid))
         {
             return;
         }

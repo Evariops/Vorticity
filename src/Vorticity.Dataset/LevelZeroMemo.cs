@@ -578,7 +578,7 @@ internal sealed class LevelZeroMemo : IAsyncDisposable
                 _dropped |= dropWithLastLease;
             }
 
-            return new ObjectLease(file, cached: true, ReturnAsync);
+            return new ObjectLease(file, cached: true, ReturnAsync) { IsCopy = true };
         }
 
         internal ValueTask DropAsync()

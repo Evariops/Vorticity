@@ -1031,10 +1031,11 @@ internal sealed partial class DatasetScanBuilder
             return await _dataset.KeyIndexAsync(held.Entry, contents, cancellationToken).ConfigureAwait(false);
         }
 
+        // Through the object's open, whose tail holds the index; a copy written again in memory holds none of the object's regions.
         ObjectLease lease = await RentAsync(held, cancellationToken).ConfigureAwait(false);
         await using (lease.ConfigureAwait(false))
         {
-            return await _dataset.KeyIndexAsync(held.Entry, contents, cancellationToken, lease.File).ConfigureAwait(false);
+            return await _dataset.KeyIndexAsync(held.Entry, contents, cancellationToken, lease.IsCopy ? null : lease.File).ConfigureAwait(false);
         }
     }
 

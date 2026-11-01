@@ -7,6 +7,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Dataset;
+using Vorticity.IO;
 using Xunit;
 
 namespace Vorticity.Tests.Dataset;
@@ -109,6 +110,50 @@ public sealed partial class LevelZeroMemoTests
         Assert.Equal(Routes([.. rows.Where(r => r.Id < 2_000)]), await first);
         Assert.Equal(2, dataset.LevelZero.Shredded);
     }
+
+    /// <summary>
+    /// An object of level 0 large enough that its granules are read by their marks, a service's call by row and attributes of
+    /// a status and a text: a question on the status, shredded in a copy written again in memory, reads that copy whole. The
+    /// object's marks and sparse index lie in the object, not in the copy, whose chunks are its own; read through it, they
+    /// named bytes past its end, or others than theirs. The answer is LINQ's.
+    /// </summary>
+    [Fact]
+    public async Task ACopyIsReadWithNoneOfTheObjectsRegions()
+    {
+        Random random = new Random(11);
+        Call[] calls = [.. Enumerable.Range(0, 200_000).Select(i => new Call(
+            $"svc-{i * 16 / 200_000:D2}", i, Variant.Object(
+                ("status", Variant.From(random.Next(20) == 0 ? 500 + random.Next(4) : 200 + random.Next(4))),
+                ("text", Variant.From($"call {random.Next(1 << 30)} of a route {random.Next(40)}")))))];
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Call.Schema, new DatasetOptions
+        {
+            Layout = new DatasetLayout { SortKey = [LayoutValue.Column(nameof(Call.Service)), LayoutValue.Column(nameof(Call.Id))], IndexedPrefix = 1 },
+            CostProfile = CostProfile.Memory,
+        }, Ct);
+        await using (ObjectDraft draft = dataset.StartObject())
+        {
+            await draft.Writer.WriteAsync<Call>(calls, Ct);
+            await dataset.AppendAsync(draft, Ct);
+        }
+
+        string[] expected = [.. calls.Where(static c => c.Attributes["status"]?.AsInt64() >= 500).GroupBy(static c => c.Service)
+            .Select(static g => $"{g.Key}:{g.Count()}").Order(StringComparer.Ordinal)];
+        for (int asked = 0; asked < 2; asked++)
+        {
+            List<ServiceCount> answers = await dataset.Scan<Call>().Where(c => c.Attributes["status"].AsInt64() >= 500)
+                .GroupBy(c => c.Service).Select(g => (g.Key, g.Count())).As<ServiceCount>().ToRecordsAsync(Ct).ToListAsync(Ct);
+            Assert.Equal(expected, answers.Select(static a => $"{a.Service}:{a.Count}").Order(StringComparer.Ordinal));
+        }
+
+        Assert.Equal(1, dataset.LevelZero.Shredded);
+    }
+
+    [VortexRecord]
+    public partial record struct Call(string Service, long Id, Variant Attributes);
+
+    [VortexRecord]
+    public partial record struct ServiceCount(string? Service, long Count);
 
     private static async Task<List<Doc>> AppendAsync(VortexDataset dataset)
     {

@@ -403,6 +403,13 @@ internal sealed class ObjectLease : IAsyncDisposable
     internal bool WasCached { get; }
 
     /// <summary>
+    /// Whether <see cref="File"/> is a copy of the object written again, the rows in their order but its chunks its own
+    /// (<see cref="LevelZeroMemo"/>), rather than the object as it lies: the regions its entry's table of contents names, its
+    /// marks and its sparse index, lie in the object, not in the copy, which is read whole.
+    /// </summary>
+    internal bool IsCopy { get; init; }
+
+    /// <summary>
     /// The fragments left out because their bytes are not what their references say; the file's own
     /// <see cref="VortexFile.IndexFragmentRefusals"/> covers the fragments it was given.
     /// </summary>
