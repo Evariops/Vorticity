@@ -173,7 +173,7 @@ internal sealed class ZonePruner : IBlockPruner
             {
                 ComparisonExpr comparison = (ComparisonExpr)expr;
                 ComparisonOp op = negated ? Negate(comparison.Op) : comparison.Op;
-                bool nanMatches = negated && IsOrdering(comparison.Op);
+                bool nanMatches = (negated && IsOrdering(comparison.Op)) || op == ComparisonOp.NotEqual;
                 if (comparison.Value.Kind != FilterLiteralKind.Null &&
                     Find(comparison.Field) is { HasStatistics: true } column &&
                     column.ZoneLength == live.BlockRows && column.RowCount == live.RowCount &&
@@ -251,10 +251,10 @@ internal sealed class ZonePruner : IBlockPruner
                 ComparisonOp op = negated ? Negate(comparison.Op) : comparison.Op;
 
                 // NOT (x < v) is true on a NaN row, where the pushed-down x >= v is false: under
-                // a negation an ordering predicate matches wherever a NaN may be. Equality is not
-                // concerned -- NOT (x = v) becomes x != v, which never prunes, and NOT (x != v)
-                // is false on NaN exactly as x = v is.
-                bool nanMatches = negated && IsOrdering(comparison.Op);
+                // a negation an ordering predicate matches wherever a NaN may be; and so does
+                // x != v, NOT (x = v) included, which rules out a zone of v alone. NOT (x != v) is
+                // false on NaN exactly as x = v is.
+                bool nanMatches = (negated && IsOrdering(comparison.Op)) || op == ComparisonOp.NotEqual;
                 return MayMatchComparison(comparison.Field, op, comparison.Value, rows, nanMatches);
             }
 
@@ -1076,10 +1076,15 @@ internal sealed class ZonePruner : IBlockPruner
                 return true;
 
             default:
-                // NotEqual: a zone can only be ruled out when every value equals k, which needs
-                // min == max AND both exact. Rare enough that the check earns nothing; kept as
-                // "may match".
-                return true;
+                // NotEqual: a zone is ruled out when every value it holds equals k: exact bounds both k,
+                // and no NaN, which != holds for (a float's count of them says; another kind holds
+                // none). A granule's statistics judge each value they list so, one value at a time:
+                // every row but a status's, of a granule that lists it, is answered only once its own
+                // rows are ruled out.
+                return !(bounds.IsExact && bounds.HasMin && bounds.HasMax
+                    && TryOrder(column, bounds.Min, value, out int least) && least == 0
+                    && TryOrder(column, bounds.Max, value, out int greatest) && greatest == 0
+                    && NaNs(bounds, column.RowsInZone(zone)) == 0);
         }
     }
 

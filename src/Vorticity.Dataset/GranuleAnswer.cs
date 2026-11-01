@@ -55,9 +55,12 @@ internal sealed class GranuleAnswer
 
     // The filter, judged by summaries, and the columns it reads, top-level ones by their place; the columns whose statistics
     // a granule is judged by. Worked out at the first object whose keys may hold one group in a granule, which most questions
-    // the counts answer never meet. Under a value of an identifier left out, the filter less that conjunct.
+    // the counts answer never meet. Under a value left out, the filter less that conjunct; and the columns the whole filter
+    // reads, the column of a value left out of one that is no identifier among them, which judge an object no index of it
+    // places the value in.
     private SummaryPruner? _filter;
     private int[] _filtered = [];
+    private int[] _filteredWhole = [];
     private int[]? _fields;
 
     // The shredded keys the filter reads, each a column of its own for the granules, past the version's columns: the variant
@@ -67,9 +70,10 @@ internal sealed class GranuleAnswer
     private List<(int Variant, string Key, Types.Variants.PathClass Class, string Name, DType Type)>? _pathColumns;
     private DTypeArena? _pathTypes;
 
-    // A value of a declared identifier the filter leaves out (CountsAnswer.Exclusion): a granule the identifier's postings
-    // place no row of the value in is answered under the rest of the filter, the others read as rows. Null for none, which
-    // most questions are: made apart, it costs them nothing.
+    // A value of a declared identifier the filter leaves out (CountsAnswer.Exclusion), or of another column, whose locate,
+    // Bloom filters or postings in an object may place it: a granule they place no row of the value in is answered under
+    // the rest of the filter, the others under the whole filter, or read as rows. Null for none, which most questions are:
+    // made apart, it costs them nothing.
     private readonly Excluding? _excluding;
 
     // The columns of the sort key the filter only compares to a bound, a window: a granule holds their values in order, or
@@ -79,7 +83,7 @@ internal sealed class GranuleAnswer
 
     private GranuleAnswer(
         CountsAnswer counts, DatasetSchema version, PathCosts costs, VortexExpr? filter, (int Field, FieldExpr Key)[] keys, int[] measured, int leading,
-        int[] prefixed, int granuleRows, int sketchBits, (int Key, int Component, ValueFunction Of)[] runKeys)
+        int[] prefixed, int granuleRows, int sketchBits, (int Key, int Component, ValueFunction Of)[] runKeys, ExcludedValue? excluded)
     {
         _prefixed = prefixed;
         _runKeys = runKeys;
@@ -89,7 +93,7 @@ internal sealed class GranuleAnswer
         _schema = version;
         _costs = costs;
         _asked = filter;
-        _excluding = counts.Exclusion is { } excluded ? new Excluding(excluded, Less(filter!, excluded.Path)) : null;
+        _excluding = (counts.Exclusion ?? excluded) is { } value ? new Excluding(value, Less(filter!, value.Path)) : null;
         _keys = keys;
         _measured = measured;
         _leading = leading;
@@ -216,6 +220,16 @@ internal sealed class GranuleAnswer
         }
 
         _filtered = [.. filtered];
+
+        // The column of a value left out of one that is no identifier: its statistics judge, under the whole filter, the objects
+        // no index of it places the value in, and the granules one places it in.
+        if (_excluding is { Value: { Identifier: false } own })
+        {
+            Add(fields, own.Field);
+            Add(filtered, own.Field);
+        }
+
+        _filteredWhole = [.. filtered];
         return [.. fields];
     }
 
@@ -448,8 +462,29 @@ internal sealed class GranuleAnswer
         }
 
         declined = null;
-        return new GranuleAnswer(counts, version.Schema, version.Costs, filter, keys, [.. measured], leading, [.. prefixed], granuleRows, request.SketchBits, [.. runKeys]);
+        return new GranuleAnswer(
+            counts, version.Schema, version.Costs, filter, keys, [.. measured], leading, [.. prefixed], granuleRows, request.SketchBits, [.. runKeys],
+            counts.Exclusion is null && filter is not null ? Excluded(filter, schema) : null);
     }
+
+    /// <summary>
+    /// The first value <paramref name="filter"/> leaves out of a top-level column of <paramref name="schema"/> by a conjunct,
+    /// <c>x != v</c> of a value that is no null, which an object's indexes of the column may place (spec D, 4); null for none.
+    /// </summary>
+    private static ExcludedValue? Excluded(VortexExpr filter, DType schema) => filter switch
+    {
+        LogicalExpr { IsAnd: true } and => Excluded(and.Left, schema) ?? Excluded(and.Right, schema),
+        ComparisonExpr { Op: ComparisonOp.NotEqual, Field: ColumnFieldExpr column } other when other.Value.Kind != FilterLiteralKind.Null && Top(column, schema) is int field =>
+            new ExcludedValue(field, column.Path, new ComparisonExpr(column, ComparisonOp.Equal, other.Value), identifier: false),
+        _ => null,
+    };
+
+    /// <summary>
+    /// The filter the granules of the object <paramref name="held"/> are judged by and the columns it reads: under a value left
+    /// out of a column that is no identifier, which no index of the object places, the whole filter; the rest otherwise.
+    /// </summary>
+    private (SummaryPruner? Judge, int[] Filtered) JudgeOf(in PositionedObject held) =>
+        _excluding is { Value: { Identifier: false } value } excluding && !value.Placed(held.Entry.Uid) ? (excluding.Whole, _filteredWhole) : (_filter, _filtered);
 
     /// <summary>Whether column <paramref name="field"/> is one of the sort key's, read as it is: one whose values a granule holds in order.</summary>
     private static bool Sorted(DatasetSchema schema, int field)
@@ -543,9 +578,10 @@ internal sealed class GranuleAnswer
         }
 
         int[] fields = Fields;
-        if (!judged && _filter is { } filter && !filter.MustMatch(summaries.Columns, entry.PhysicalRows))
+        (SummaryPruner? judge, int[] filtered) = JudgeOf(held);
+        if (!judged && judge is { } filter && !filter.MustMatch(summaries.Columns, entry.PhysicalRows))
         {
-            foreach (int field in _filtered)
+            foreach (int field in filtered)
             {
                 free += Array.IndexOf(_prefixed, field) < 0 && !Keyed(field) && Array.IndexOf(_ranged, field) < 0 ? 1 : 0;
             }
@@ -594,9 +630,10 @@ internal sealed class GranuleAnswer
         int[] fields = Fields;
         int count = fields.Length + Histogrammed.Length + Components.Length;
         Span<IndexSegment?> regions = count <= 16 ? stackalloc IndexSegment?[count] : new IndexSegment?[count];
+        int unread = Unread(held);
         for (int i = 0; i < fields.Length; i++)
         {
-            regions[i] = StatisticsOf(contents, fields[i]);
+            regions[i] = fields[i] == unread ? null : StatisticsOf(contents, fields[i]);
         }
 
         for (int i = 0; i < Histogrammed.Length; i++)
@@ -613,6 +650,40 @@ internal sealed class GranuleAnswer
         double unanswered = Unanswered(held, edges: true) * Math.Clamp(kept, 0, 1);
         return (_costs.Regions(held.Entry.Uid, regions), _costs.Share(held.Entry, read, unanswered), _costs.Rows(held.Entry, read));
     }
+
+    /// <summary>
+    /// The column of the value the filter leaves out whose statistics a read of the object <paramref name="held"/> leaves
+    /// aside, -1 for none: one that is no identifier, whose indexes place the value in the object, and whose statistics weigh
+    /// more than the rows of a granule the question reads, which the granules the value is placed in, about one, are read
+    /// as when its statistics judge them not. A session among a thousand by service kept 100 KB of statistics, against 6 KB
+    /// of rows a granule.
+    /// </summary>
+    internal int Unread(in PositionedObject held)
+    {
+        if (_excluding?.Value is not { Identifier: false } value || !value.Placed(held.Entry.Uid) || held.Entry.Contents is not { } contents
+            || contents.GranuleStatsOf(value.Field) is not { } region || held.Entry.PhysicalRows <= 0)
+        {
+            return -1;
+        }
+
+        double rows = 0;
+        foreach (int field in ReadFields)
+        {
+            rows += field < contents.ColumnBytes.Count ? contents.ColumnBytes[field] : 0;
+        }
+
+        return region.Length > rows * Math.Min(1, (double)_granuleRows / held.Entry.PhysicalRows) ? value.Field : -1;
+    }
+
+    /// <summary>
+    /// What placing the value the filter leaves out in the object <paramref name="held"/> costs: its locate's region, read
+    /// beside the statistics, where the column is no identifier and the object keeps one; two round trips cold otherwise, an
+    /// index's directory or entries, then its page, runs or filters; nothing where the value is not placed.
+    /// </summary>
+    internal PathCosts.Cost Placing(in PositionedObject held) =>
+        _excluding?.Value is not { } value || !value.Placed(held.Entry.Uid) ? default
+        : !value.Identifier && held.Entry.Contents?.LocateOf(value.Field) is { } locate ? _costs.Regions(held.Entry.Uid, [locate])
+        : new PathCosts.Cost(2, 0);
 
     /// <summary>
     /// The share of the rows of the object <paramref name="held"/> whose granules its statistics are not expected to answer:
@@ -638,11 +709,12 @@ internal sealed class GranuleAnswer
 
         ObjectSummaries summaries = held.Summaries(_schema);
         _ = Fields;
-        bool proven = _filter is not { } filter || filter.MustMatch(summaries.Columns, entry.PhysicalRows);
+        (SummaryPruner? judge, int[] filtered) = JudgeOf(held);
+        bool proven = judge is not { } filter || filter.MustMatch(summaries.Columns, entry.PhysicalRows);
         double share = 0;
         if (entry.Contents is { CountsSingleRows: true } columns)
         {
-            share = Varying(held, summaries, columns, proven);
+            share = Varying(held, summaries, columns, proven, filtered);
         }
         else if (entry.Contents is { PureGranuleRows: >= 0 } contents)
         {
@@ -668,7 +740,7 @@ internal sealed class GranuleAnswer
             // column's values. A filter leaving one request of S1 out, its ids drawn at random, read an object's rows at every
             // asking, priced at a sixth of them.
             double spread = 0;
-            foreach (int field in proven ? [] : _filtered)
+            foreach (int field in proven ? [] : filtered)
             {
                 if (!Keyed(field) && Array.IndexOf(_ranged, field) < 0)
                 {
@@ -702,7 +774,8 @@ internal sealed class GranuleAnswer
             share += field == _leading ? Math.Min(1, 2.0 * _granuleRows / entry.PhysicalRows) : 1;
         }
 
-        // The value of an identifier left out lies in a granule or so of an object, which its postings place: read as rows.
+        // The value of an identifier left out lies in a granule or so of an object, which its postings place: read as rows; a
+        // value of another column, in the granules its indexes place it in, taken to be as few.
         if (edges && _excluding is not null)
         {
             share += Math.Min(1, (double)_granuleRows / entry.PhysicalRows);
@@ -721,7 +794,7 @@ internal sealed class GranuleAnswer
     /// off. The columns are taken to vary in granules apart, their shares added: a bound, which a sort key that holds them
     /// together makes loose, never short.
     /// </summary>
-    private double Varying(in PositionedObject held, ObjectSummaries summaries, ObjectContents contents, bool proven)
+    private double Varying(in PositionedObject held, ObjectSummaries summaries, ObjectContents contents, bool proven, int[] filtered)
     {
         double rows = held.Entry.PhysicalRows;
         double total = 0;
@@ -755,7 +828,7 @@ internal sealed class GranuleAnswer
             listed = Math.Max(listed, Math.Min(varies, Math.Clamp(contents.ListedRowsOf(field) / rows, 0, 1)));
         }
 
-        foreach (int field in proven ? [] : _filtered)
+        foreach (int field in proven ? [] : filtered)
         {
             if (!Keyed(field) && Array.IndexOf(_ranged, field) < 0)
             {
@@ -998,13 +1071,20 @@ internal sealed class GranuleAnswer
         // services by service and hour read 2.37 MB, where the granules left and the statistics hold 0.51, the rows 3.04.
         GranuleStateRows states = new GranuleStateRows(this);
         List<ColumnSummary> judged = new List<ColumnSummary>(Fields.Length + summaries.Columns.Count);
+        // A granule the places of a value left out touch is judged under the whole filter, where the value's column is no
+        // identifier: its statistics may list the value's rows apart, or refute the rest.
         bool[] answers = new bool[any.Count];
+        bool[]? wholly = holding is null ? null : new bool[any.Count];
+        SummaryPruner? whole = _excluding?.Whole;
         int touched = 0;
         for (int b = lo; b < hi; b++)
         {
             long first = any.FirstRow(b);
+            bool placed = Touches(holding, ref touched, first, first + any.Rows[b]);
+            wholly?[b] = placed;
             answers[b] = first >= part.Start && first + any.Rows[b] <= part.End && deletions.DeletedIn(first, first + any.Rows[b]) == 0
-                && !Touches(holding, ref touched, first, first + any.Rows[b]) && SettleGranule(b, any.Rows[b], described, alike, summaries, judged, states, judge);
+                && (placed ? whole is not null && SettleGranule(b, any.Rows[b], described, alike, summaries, judged, states, whole)
+                    : SettleGranule(b, any.Rows[b], described, alike, summaries, judged, states, judge));
             states.Truncate(0);
         }
 
@@ -1021,7 +1101,7 @@ internal sealed class GranuleAnswer
             long rows = any.Rows[b];
             if (answers[b])
             {
-                SettleGranule(b, rows, described, alike, summaries, judged, states, judge);
+                SettleGranule(b, rows, described, alike, summaries, judged, states, wholly?[b] == true ? whole : judge);
                 settled++;
                 continue;
             }
@@ -1153,6 +1233,7 @@ internal sealed class GranuleAnswer
         }
 
         bool whole = judge is not { } proving || proving.MustMatch(judged, rows);
+        int[] filtered = _excluding is { } excluding && ReferenceEquals(judge, excluding.Whole) ? _filteredWhole : _filtered;
 
         // The column that varies: a key's column that holds more than one group, or, under a filter the granule's summaries
         // do not prove, a column it reads that holds more than one value; at most one, which lists its values, or whose key
@@ -1162,7 +1243,7 @@ internal sealed class GranuleAnswer
         for (int i = 0; i < Fields.Length; i++)
         {
             bool varies = !KeysHoldOneGroup(i, columns[i], granule, rows)
-                || (!whole && Array.IndexOf(_filtered, Fields[i]) >= 0 && !columns[i].HoldsOneValue(granule, rows));
+                || (!whole && Array.IndexOf(filtered, Fields[i]) >= 0 && !columns[i].HoldsOneValue(granule, rows));
             if (!varies)
             {
                 continue;

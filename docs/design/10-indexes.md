@@ -80,10 +80,12 @@ and a zeroed filter is caught by its checksum rather than dropping rows.
 A lookup by a value needs the entries of the indexes that locate it, not the whole directory. The
 table of contents a dataset's entry carries for an object ([what a node
 carries](13-dataset.md#42-what-a-node-carries)) names each entry of a locating kind (sorted runs,
-block postings, hashed postings, trigram postings and the dictionary probe): its column, its kind,
-and where its message lies within the directory, with an XXH3-64 of those bytes. A lookup reads the
-messages of its filter's columns alone and checks each against its checksum, so an entry that fails
-costs only itself. A day's directory held 11.5 MB, of which the identifier's hashed postings, what a
+block postings, hashed postings, trigram postings and the dictionary probe), and each Bloom filter's,
+which refuses the blocks that cannot hold a value: its column, its kind, and where its message lies
+within the directory, with an XXH3-64 of those bytes. A lookup reads the messages of its filter's
+columns alone and checks each against its checksum, so an entry that fails costs only itself; the
+Bloom filters are asked, with no open of the object, where no postings answer, and give the blocks
+that may hold a value left out ([22-on-the-fly-and-synopses.md](22-on-the-fly-and-synopses.md#6-deletes-exclusions-late-rows-window-edges)). A day's directory held 11.5 MB, of which the identifier's hashed postings, what a
 lookup reads, took 558 bytes. An object whose table of contents names none is looked up through its
 whole directory.
 

@@ -888,21 +888,29 @@ internal sealed class StateRows : StateTable
 }
 
 /// <summary>
-/// One value of a declared identifier a filter leaves out (<see cref="CountsAnswer.Exclusion"/>): the identifier's column,
-/// its name, and the equality its postings place the rows of. The question that asks it places the value through it, its
-/// lookup over the partitions' indexes made once, the objects it may be placed in noted as the plan finds them, and its
-/// places in the objects answered through their granules as their reads find them; made apart, it costs nothing to the
-/// questions that leave no value out.
+/// One value of a declared identifier a filter leaves out (<see cref="CountsAnswer.Exclusion"/>), or of another column
+/// (<see cref="GranuleAnswer"/>): the column, its name, and the equality its postings, or another column's locate, Bloom
+/// filters or postings, place the rows of. The question that asks it places the value through it, an identifier's lookup
+/// over the partitions' indexes made once, the objects it may be placed in noted as the plan finds them, and its places in
+/// the objects answered through their granules as their reads find them; made apart, it costs nothing to the questions
+/// that leave no value out.
 /// </summary>
-internal sealed class ExcludedValue(int field, string path, VortexExpr found)
+internal sealed class ExcludedValue(int field, string path, VortexExpr found, bool identifier = true)
 {
     private PartitionLookup? _lookup;
     private bool _looked;
     private HashSet<UInt128>? _placed;
     private System.Collections.Concurrent.ConcurrentDictionary<UInt128, List<RowRange>?>? _places;
 
-    /// <summary>The identifier's column.</summary>
+    /// <summary>The value's column.</summary>
     internal int Field { get; } = field;
+
+    /// <summary>
+    /// Whether the column is a declared identifier, whose postings place the value, an object they do not place it in left to
+    /// its rows; another column's is placed by its object's indexes, an object none of them places it in judged under the
+    /// whole filter.
+    /// </summary>
+    internal bool Identifier { get; } = identifier;
 
     /// <summary>Its name, as the filter names it.</summary>
     internal string Path { get; } = path;

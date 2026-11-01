@@ -40,10 +40,22 @@ internal sealed partial class DatasetScanBuilder
     /// </summary>
     internal async ValueTask<bool> PlacedAsync(PositionedObject held, CancellationToken cancellationToken)
     {
-        if (Answer()?.Exclusion is not { } excluded || GranuleAnswer() is null
+        if (GranuleAnswer()?.Exclusion is not { } excluded
             || !CountsAnswer.NoNull(held.Summaries(_version.Schema), excluded.Path, _version.Schema.DType.GetField(excluded.Field)))
         {
             return false;
+        }
+
+        // Another column's value: where its locate, or the Bloom filters or postings its table of contents names, place it.
+        if (!excluded.Identifier)
+        {
+            bool located = held.Entry.Contents is { } contents && (contents.LocateOf(excluded.Field) is not null || Names(contents, excluded.Field));
+            if (located)
+            {
+                excluded.Place(held.Entry.Uid);
+            }
+
+            return located;
         }
 
         bool placed = (ExclusionLookup() is not null && !held.Entry.HasDeletions
@@ -60,11 +72,19 @@ internal sealed partial class DatasetScanBuilder
 
     /// <summary>
     /// The runs of the rows of the object <paramref name="held"/>, at its own positions, that may hold the value the filter
-    /// leaves out (<see cref="Dataset.GranuleAnswer.Exclusion"/>), with no row read: the places the index of its partition
-    /// gives it, else those its own postings give, two round trips cold; null when neither says.
+    /// leaves out (<see cref="Dataset.GranuleAnswer.Exclusion"/>), with no row read: of an identifier, the places the index
+    /// of its partition gives it, else those its own postings give, two round trips cold; of another column, the granules
+    /// its locate gives it, one round trip, else the blocks its own Bloom filters or postings leave; null when none says.
     /// </summary>
-    private async Task<List<RowRange>?> PlacesOfAsync(PositionedObject held, VortexExpr found, CancellationToken cancellationToken)
+    private async Task<List<RowRange>?> PlacesOfAsync(PositionedObject held, ExcludedValue excluded, CancellationToken cancellationToken)
     {
+        VortexExpr found = excluded.Found;
+        if (!excluded.Identifier)
+        {
+            return await LocatedAsync(held, excluded, cancellationToken).ConfigureAwait(false)
+                ?? await _dataset.PlacesAsync(held.Entry, found, cancellationToken).ConfigureAwait(false);
+        }
+
         if (ExclusionLookup() is { } partitions && !held.Entry.HasDeletions
             && await partitions.BlocksAsync(held, cancellationToken).ConfigureAwait(false) is ({ } places, int placeRows))
         {
@@ -90,6 +110,63 @@ internal sealed partial class DatasetScanBuilder
     }
 
     /// <summary>
+    /// The runs of the rows of the object <paramref name="held"/> whose granules its locate of the column of the value
+    /// <paramref name="excluded"/> places the value in, one round trip cold; null when it keeps none, or one of other granules.
+    /// </summary>
+    private async Task<List<RowRange>?> LocatedAsync(PositionedObject held, ExcludedValue excluded, CancellationToken cancellationToken)
+    {
+        long granuleRows = _dataset.Options.Write.BlockRows;
+        long rows = held.Entry.PhysicalRows;
+        if (held.Entry.Contents?.LocateOf(excluded.Field) is null || granuleRows <= 0
+            || (await _dataset.ReadLocatesAsync(held.Entry, [excluded.Field], cancellationToken).ConfigureAwait(false))[0] is not { } locate
+            || locate.Granules != (rows + granuleRows - 1) / granuleRows
+            || GranuleAlgebra.May(excluded.Found, _version.Schema.DType, field => field == excluded.Field ? locate : null, locate.Granules) is not { } granules)
+        {
+            return null;
+        }
+
+        List<RowRange> runs = [];
+        for (int granule = 0; granule < locate.Granules; granule++)
+        {
+            if (((granules[granule >> 6] >> (granule & 63)) & 1) == 0)
+            {
+                continue;
+            }
+
+            long start = granule * granuleRows;
+            long end = Math.Min(start + granuleRows, rows);
+            if (runs.Count > 0 && runs[^1].End == start)
+            {
+                runs[^1] = new RowRange(runs[^1].Start, end);
+            }
+            else
+            {
+                runs.Add(new RowRange(start, end));
+            }
+        }
+
+        return runs;
+    }
+
+    /// <summary>
+    /// Whether the table of contents <paramref name="contents"/> names an index of column <paramref name="field"/> that places
+    /// a value by its blocks with no open (<see cref="VortexDataset.PlacesAsync"/>): sorted runs, postings, or Bloom filters.
+    /// </summary>
+    private static bool Names(Indexes.ObjectContents contents, int field)
+    {
+        foreach (Indexes.LocatingEntry located in contents.Locating ?? [])
+        {
+            if (located.Column == (uint)field && located.Kind is Indexes.IndexKinds.SortedRuns or Indexes.IndexKinds.PostingsBlocks
+                or Indexes.IndexKinds.PostingsHashed or Indexes.IndexKinds.BloomSbbf)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
     /// The lookup of the value the filter leaves out (<see cref="CountsAnswer.Exclusion"/>) over the partitions' indexes, made
     /// once; null for none, or a version that keeps none.
     /// </summary>
@@ -103,11 +180,12 @@ internal sealed partial class DatasetScanBuilder
     private async Task<(Indexes.GranuleStats?[] Stats, Indexes.GranuleHistograms?[] Histograms, Indexes.GranuleKeyRuns?[] Runs)> StatisticsPlacedAsync(
         PositionedObject held, ExcludedValue excluded, CancellationToken cancellationToken)
     {
-        Task<List<RowRange>?> placing = PlacesOfAsync(held, excluded.Found, cancellationToken);
+        Task<List<RowRange>?> placing = PlacesOfAsync(held, excluded, cancellationToken);
         (Indexes.GranuleStats?[] Stats, Indexes.GranuleHistograms?[] Histograms, Indexes.GranuleKeyRuns?[] Runs) statistics;
         try
         {
-            statistics = await _dataset.ReadGranuleStatsAsync(held.Entry, GranuleAnswer()!.Fields, GranuleAnswer()!.Histogrammed, GranuleAnswer()!.Components, cancellationToken, GranuleAnswer()!.PathsOfFields)
+            statistics = await _dataset.ReadGranuleStatsAsync(
+                held.Entry, GranuleAnswer()!.Fields, GranuleAnswer()!.Histogrammed, GranuleAnswer()!.Components, cancellationToken, GranuleAnswer()!.PathsOfFields, GranuleAnswer()!.Unread(held))
                 .ConfigureAwait(false);
         }
         catch
@@ -129,7 +207,9 @@ internal sealed partial class DatasetScanBuilder
     /// handle's memo, where each lane's piece of the object finds them: begun as its pieces, each read them.
     /// </summary>
     internal Task GranuleStatsAheadAsync(in PositionedObject held, CancellationToken cancellationToken) =>
-        _dataset.ReadGranuleStatsAsync(held.Entry, GranuleAnswer()!.Fields, GranuleAnswer()!.Histogrammed, GranuleAnswer()!.Components, cancellationToken, GranuleAnswer()!.PathsOfFields).AsTask();
+        _dataset.ReadGranuleStatsAsync(
+            held.Entry, GranuleAnswer()!.Fields, GranuleAnswer()!.Histogrammed, GranuleAnswer()!.Components, cancellationToken, GranuleAnswer()!.PathsOfFields, GranuleAnswer()!.Unread(held))
+            .AsTask();
 
     /// <summary>How the objects' counts answer the states the scan asks, worked out once; null when they answer none of them.</summary>
     private CountsAnswer? Answer()
@@ -178,7 +258,7 @@ internal sealed partial class DatasetScanBuilder
 
         await foreach (PositionedObject held in _version.WalkAsync(Pruner(), _from, _to, null, cancellationToken).ConfigureAwait(false))
         {
-            if (answer.Exclusion is not null)
+            if (GranuleAnswer()?.Exclusion is not null)
             {
                 await PlacedAsync(held, cancellationToken).ConfigureAwait(false);
             }
@@ -311,7 +391,7 @@ internal sealed partial class DatasetScanBuilder
                     await held.Entry.ResolveAsync(_version.Pages, cancellationToken).ConfigureAwait(false);
                     (long lower, long upper) = Whole(held) ? (0, held.Entry.PhysicalRows) : PhysicalRange(held);
                     (GranuleStateRows? settled, List<RowRange> unsettled, int answered) = GranuleAnswer()!.Settle(
-                        held, stats, histograms, runs, held.Entry.Deletions, new RowRange(lower, upper), answer.Exclusion?.PlacesOf(held.Entry.Uid));
+                        held, stats, histograms, runs, held.Entry.Deletions, new RowRange(lower, upper), GranuleAnswer()!.Exclusion?.PlacesOf(held.Entry.Uid));
                     if (_metrics is { } counted)
                     {
                         counted.GranulesAnswered += answered;
@@ -432,9 +512,11 @@ internal sealed partial class DatasetScanBuilder
                     : _dataset.ReadCountsAsync(entry, field, answer.AsksSketches, cancellationToken).AsTask();
                 break;
             case AnswerPath.Granules:
-                unit.Statistics = GranuleAnswer()!.Exclusion is { } excluded
+                unit.Statistics = GranuleAnswer()!.Exclusion is { } excluded && excluded.Placed(unit.Held.Entry.Uid)
                     ? StatisticsPlacedAsync(unit.Held, excluded, cancellationToken)
-                    : _dataset.ReadGranuleStatsAsync(unit.Held.Entry, GranuleAnswer()!.Fields, GranuleAnswer()!.Histogrammed, GranuleAnswer()!.Components, cancellationToken, GranuleAnswer()!.PathsOfFields).AsTask();
+                    : _dataset.ReadGranuleStatsAsync(
+                        unit.Held.Entry, GranuleAnswer()!.Fields, GranuleAnswer()!.Histogrammed, GranuleAnswer()!.Components, cancellationToken, GranuleAnswer()!.PathsOfFields,
+                        GranuleAnswer()!.Unread(unit.Held)).AsTask();
                 break;
         }
     }

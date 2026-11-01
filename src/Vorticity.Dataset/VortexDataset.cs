@@ -2899,7 +2899,8 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <summary>
     /// The runs of blocks of the object <paramref name="entry"/> names that its locating indexes, the entries of
     /// <paramref name="directory"/>, leave for <paramref name="filter"/>, read through <paramref name="reader"/>: the runs'
-    /// segments that may hold the values. Null when the object keeps no locating index the filter asks.
+    /// segments that may hold the values, and the blocks whose Bloom filters do not refuse them. Null when the object keeps
+    /// no locating index the filter asks.
     /// </summary>
     private static async Task<List<RowRange>?> LiveRangesAsync(
         ObjectEntry entry, ISegmentReader reader, Indexes.IndexDirectory directory, VortexExpr filter, CancellationToken cancellationToken)
@@ -2911,7 +2912,7 @@ public sealed class VortexDataset : IAsyncDisposable
         long blockRows = 0;
         foreach (Indexes.IndexEntry index in directory.Entries)
         {
-            if (index.Kind is Indexes.IndexKinds.SortedRuns or Indexes.IndexKinds.PostingsBlocks or Indexes.IndexKinds.PostingsHashed
+            if (index.Kind is Indexes.IndexKinds.SortedRuns or Indexes.IndexKinds.PostingsBlocks or Indexes.IndexKinds.PostingsHashed or Indexes.IndexKinds.BloomSbbf
                 && index.BlockLength > 0 && (blockRows == 0 || (long)index.BlockLength < blockRows))
             {
                 blockRows = (long)index.BlockLength;
@@ -2919,14 +2920,25 @@ public sealed class VortexDataset : IAsyncDisposable
         }
 
         Indexes.FooterlessIndexes host = new Indexes.FooterlessIndexes(reader, contents.SchemaType, directory, [.. contents.Encodings]);
-        if (blockRows <= 0
-            || await Indexes.KeyIndexPruner.BuildAsync(host, filter, blockRows, cancellationToken).ConfigureAwait(false) is not { } pruner)
+        // The Bloom filters where no locating index answers: postings place a value's rows, the filters only refuse blocks,
+        // a round trip a level, which a lookup that postings answer would pay for nothing.
+        Indexes.KeyIndexPruner? keys = blockRows <= 0 ? null : await Indexes.KeyIndexPruner.BuildAsync(host, filter, blockRows, cancellationToken).ConfigureAwait(false);
+        Indexes.BloomPruner? blooms = blockRows <= 0 || keys is not null ? null : await Indexes.BloomPruner.BuildAsync(host, filter, blockRows, cancellationToken).ConfigureAwait(false);
+        if (keys is null && blooms is null)
         {
             return null;
         }
 
         Compute.BlockMask live = new Compute.BlockMask(host.RowCount, blockRows);
-        await pruner.RefineAsync(host, live, cancellationToken).ConfigureAwait(false);
+        if (keys is not null)
+        {
+            await keys.RefineAsync(host, live, cancellationToken).ConfigureAwait(false);
+        }
+
+        if (blooms is not null)
+        {
+            await blooms.RefineAsync(host, live, cancellationToken).ConfigureAwait(false);
+        }
 
         List<RowRange> ranges = [];
         ReadOnlySpan<ulong> words = live.Words;
@@ -3397,11 +3409,12 @@ public sealed class VortexDataset : IAsyncDisposable
     /// object: the regions its entry's table of contents names, side by side in one round trip, none once this handle read
     /// them. A column the object keeps none of has none. With them, the values the key's components
     /// <paramref name="components"/> take in each granule (<see cref="Indexes.GranuleKeyRuns"/>), by their position there. A
-    /// column <paramref name="paths"/> names at its position is the shredded key it names, its statistics the key's.
+    /// column <paramref name="paths"/> names at its position is the shredded key it names, its statistics the key's; column
+    /// <paramref name="skip"/> has none read.
     /// </summary>
     internal async ValueTask<(Indexes.GranuleStats?[] Stats, Indexes.GranuleHistograms?[] Histograms, Indexes.GranuleKeyRuns?[] Runs)> ReadGranuleStatsAsync(
         ObjectEntry entry, IReadOnlyList<int> fields, IReadOnlyList<int> histogrammed, IReadOnlyList<int> components, CancellationToken cancellationToken,
-        IReadOnlyList<(int Field, string Key, Types.Variants.PathClass Class)?>? paths = null)
+        IReadOnlyList<(int Field, string Key, Types.Variants.PathClass Class)?>? paths = null, int skip = -1)
     {
         Indexes.GranuleStats?[] columns = new Indexes.GranuleStats?[fields.Count];
         Indexes.GranuleHistograms?[] histograms = new Indexes.GranuleHistograms?[fields.Count];
@@ -3418,7 +3431,9 @@ public sealed class VortexDataset : IAsyncDisposable
         Indexes.IndexSegment?[] regions = new Indexes.IndexSegment?[read.Length];
         for (int i = 0; i < fields.Count; i++)
         {
-            regions[3 * i] = paths?[i] is { } path ? contents.PathGranuleStatsOf(path.Field, path.Key, path.Class)?.Region : contents.GranuleStatsOf(fields[i]);
+            regions[3 * i] = fields[i] == skip ? null
+                : paths?[i] is { } path ? contents.PathGranuleStatsOf(path.Field, path.Key, path.Class)?.Region
+                : contents.GranuleStatsOf(fields[i]);
             regions[(3 * i) + 1] = Contains(histogrammed, fields[i]) ? contents.GranuleHistogramsOf(fields[i]) : null;
         }
 

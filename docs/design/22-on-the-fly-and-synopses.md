@@ -422,6 +422,19 @@ longer lie where they were, notes none.
   one request's read 127 KB when no object holds it, and 611 KB when one does, one chunk a column
   there, where the rows take 791 KB *(measured, `DatasetExclusionTests`)*. A rollup's totals hold the
   value's rows, and are not read under an exclusion.
+- The granules answer a value left out of any column, `x != v` (`GranuleAnswer`): the granules the
+  object's indexes of the column do not place `v` in are judged under the rest of the filter, `x` read
+  in none of them; those they place it in, under the whole filter, `x`'s statistics judging each value
+  they list, else read as rows. A declared identifier is placed by its postings; another column by its
+  locate, read beside the statistics, else by the Bloom filters or postings the table of contents names
+  (section 5.4, [10-indexes.md](10-indexes.md#4-skipping-indexes)); an object no index places the value
+  in is judged under the whole filter. The statistics of `x` are left aside where it is placed and they
+  weigh more than a granule's rows. A granule of one value is ruled out by `x != v` when that value is
+  `v` and no NaN may be there, the zone maps as the granules. On 32 granules, every call but one
+  ticket's, its tickets under a Bloom filter, read 890 KB through the granules where the rows take
+  3.59 MB; the calls and sizes of every host but one, placed by the hosts' locate, 111 KB where they take
+  723 KB; every call but those of a status, which no index places, 1.9 KB where they take 263 KB
+  *(measured, `DatasetAbsenceProofsTests`, under the memory profile, which weighs bytes before requests)*.
 - Late rows add their own entries, which merges add up.
 - A window edge that cuts a granule or a bucket is exact by default: that granule's rows are read, and
   the granules the window holds whole are answered by their statistics. Windows drawn to the second over

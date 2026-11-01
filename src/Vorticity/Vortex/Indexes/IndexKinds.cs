@@ -167,11 +167,13 @@ internal static class IndexKinds
     /// <summary>
     /// Whether the kind locates the blocks that hold a column's values, which a lookup of rows by a value reads with no open
     /// of the file (<c>KeyIndexPruner</c>): sorted runs, postings of blocks, hashed postings, postings of trigrams, and the
-    /// dictionary probe where none of them answers.
+    /// dictionary probe where none of them answers; or the blocks that may hold them, which a Bloom filter's refuse
+    /// (<c>BloomPruner</c>), so that a value left out is placed by either.
     /// </summary>
     /// <param name="kind">The name.</param>
     /// <returns>Whether a lookup reads it.</returns>
-    internal static bool Locates(string kind) => kind is SortedRuns or PostingsBlocks or PostingsHashed or PostingsNgram3 or PostingsTokens or DictProbe;
+    internal static bool Locates(string kind) =>
+        kind is SortedRuns or PostingsBlocks or PostingsHashed or PostingsNgram3 or PostingsTokens or DictProbe or BloomSbbf or BloomNgram3;
 
     /// <summary>The kind a policy of <paramref name="policy"/> builds, or null for a policy that names none.</summary>
     /// <param name="policy">The policy's kind.</param>

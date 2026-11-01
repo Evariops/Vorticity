@@ -274,7 +274,7 @@ internal sealed partial class DatasetScanBuilder
     {
         internal override Coverage Covers(Planned unit) =>
             Scan.Answer() is not null && unit.Held.Entry.Contents is { GranuleStats.Count: > 0 } && Scan.Covered(unit.Held) > 0
-            && Scan.GranuleAnswer() is { } granules && (granules.Exclusion is not { } excluded || excluded.Placed(unit.Held.Entry.Uid))
+            && Scan.GranuleAnswer() is { } granules && (granules.Exclusion is not { } excluded || !excluded.Identifier || excluded.Placed(unit.Held.Entry.Uid))
             && granules.Covers(unit.Held)
                 ? Coverage.Part
                 : Coverage.None;
@@ -284,15 +284,14 @@ internal sealed partial class DatasetScanBuilder
             : unit.Held.Entry.Contents is not { GranuleStats.Count: > 0 } ? "it keeps no statistics over its granules"
             : Scan.Covered(unit.Held) <= 0 ? "the scan covers none of its rows"
             : Scan.GranuleAnswer() is not { } granules ? Scan._granuleDeclined ?? "does not cover it"
-            : granules.Exclusion is { } excluded && !excluded.Placed(unit.Held.Entry.Uid) ? $"the value of {excluded.Path} left out is not placed in it"
+            : granules.Exclusion is { Identifier: true } excluded && !excluded.Placed(unit.Held.Entry.Uid) ? $"the value of {excluded.Path} left out is not placed in it"
             : granules.Declines(unit.Held) ?? "does not cover it";
 
         internal override PathCosts.Cost Cost(Planned unit)
         {
-            // Under a value of an identifier left out, the places its postings give it, in two round trips cold: the index's
-            // directory or entries, then its page or runs.
+            // Under a value left out, the places its indexes give it (GranuleAnswer.Placing).
             (PathCosts.Cost statistics, PathCosts.Cost unanswered, _) = Scan.GranuleAnswer()!.Costs(unit.Held, unit.Kept);
-            PathCosts.Cost placing = Scan.GranuleAnswer()!.Exclusion is null ? default : new PathCosts.Cost(2, 0);
+            PathCosts.Cost placing = Scan.GranuleAnswer()!.Placing(unit.Held);
             return statistics + unanswered + placing + Scan.SheetsCost(unit.Held);
         }
 
@@ -301,7 +300,7 @@ internal sealed partial class DatasetScanBuilder
             (PathCosts.Cost statistics, PathCosts.Cost unanswered, _) = Scan.GranuleAnswer()!.Costs(unit.Held, unit.Kept);
             return $"the statistics over the granules of {Scan.GranuleAnswer()!.Fields.Length} columns, {statistics.Bytes} bytes in {statistics.Requests} requests, "
                 + $"and the rows of the granules they do not answer, about {unanswered.Bytes} bytes in {unanswered.Requests}"
-                + (Scan.GranuleAnswer()!.Exclusion is { } exclusion ? $", those its postings place a value of {exclusion.Path} in among them" : string.Empty);
+                + (Scan.GranuleAnswer()!.Exclusion is { } exclusion && exclusion.Placed(unit.Held.Entry.Uid) ? $", those its indexes place a value of {exclusion.Path} in among them" : string.Empty);
         }
     }
 
@@ -557,7 +556,7 @@ internal sealed partial class DatasetScanBuilder
 
             if (Covered(held) > 0 && rollups?.CoverOf(held) is not >= 0)
             {
-                if (answer?.Exclusion is not null)
+                if (answer is not null && GranuleAnswer()?.Exclusion is not null)
                 {
                     await PlacedAsync(held, cancellationToken).ConfigureAwait(false);
                 }
