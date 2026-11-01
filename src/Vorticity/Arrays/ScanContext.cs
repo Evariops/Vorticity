@@ -531,6 +531,11 @@ internal sealed class ScanContext : IDisposable
     /// </summary>
     internal Indexes.GranulePlans? Granules { get; set; }
 
+    /// <summary>What the lane's granule plans work in, kept with the context from one scan to the next.</summary>
+    internal Indexes.GranuleScratch GranuleScratch => _granuleScratch ??= new Indexes.GranuleScratch();
+
+    private Indexes.GranuleScratch? _granuleScratch;
+
     /// <summary>
     /// The small segments of the splits ahead the batch reads along with its own, which a scan over a source whose read is
     /// a round trip gives the batch; made at the first, and held with the context across the scans it serves.

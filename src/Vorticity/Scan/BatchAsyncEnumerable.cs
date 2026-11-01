@@ -585,7 +585,9 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         Lane lane = NewLane(first.File, first.LiveBlocks, first.Metrics, first.KeepEncodings);
         lane.Context.VariantKeys = first.VariantKeys;
         lane.Context.ZoneKeys = first.ZoneKeys;
-        lane.Context.Granules = _granules is { } geometry ? new Indexes.GranulePlans(geometry, first.File, _take, _live, Scanned) : null;
+        lane.Context.Granules = _granules is { } geometry
+            ? new Indexes.GranulePlans(geometry, first.File, _take, _live, Scanned, lane.Context.GranuleScratch)
+            : null;
         return lane;
     }
 
@@ -612,7 +614,9 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
             {
                 if (lane is not null)
                 {
-                    lane.Context.Granules = value is null ? null : new Indexes.GranulePlans(value, lane.Context.File, _take, _live, Scanned);
+                    lane.Context.Granules = value is null
+                        ? null
+                        : new Indexes.GranulePlans(value, lane.Context.File, _take, _live, Scanned, lane.Context.GranuleScratch);
                 }
             }
         }

@@ -375,7 +375,10 @@ public sealed class PathAllocationTests
         //
         // The zone maps hold the blocks an index proves a value the filter leaves out absent from (ZonePruner.NoteAbsent), a
         // reference, empty for most filters: 8 bytes on the pruned filter (2026-11-01).
-        ("selective filter, pruning on", File, 35_112, PrunedFilter),
+        //
+        // A context keeps its lane's granule planning from one scan to the next (ScanContext.GranuleScratch), a reference:
+        // 8 bytes for the context the pruning reads the zone map through (2026-11-02).
+        ("selective filter, pruning on", File, 35_120, PrunedFilter),
 
         // THE SAME FILTER WITH PRUNING OFF, because it is a different path and not a slower one:
         // pruning on reads the zone map and skips whole splits, pruning off decodes every split and

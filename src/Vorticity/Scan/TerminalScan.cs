@@ -139,7 +139,7 @@ internal sealed class TerminalScan
         context.LiveBlocks = live;
         context.Metrics = _metrics;
         // The count reads a chunk by its granules as the batches would: those of the rows it counts that hold a live block.
-        context.Granules = _granules is { } geometry ? new Indexes.GranulePlans(geometry, _file, _take, live, _rows) : null;
+        context.Granules = _granules is { } geometry ? new Indexes.GranulePlans(geometry, _file, _take, live, _rows, context.GranuleScratch) : null;
 
         // The filter's variant columns read as a scan reads them: through their shredded keys, or their residuals.
         if (_variantKeys is not null)

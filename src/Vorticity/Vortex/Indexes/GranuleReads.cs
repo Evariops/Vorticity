@@ -133,7 +133,8 @@ internal sealed class GranuleGeometry
 /// hold most of its bytes is read whole, as before, and once.
 /// </summary>
 internal sealed class GranulePlans(
-    GranuleGeometry geometry, VortexFile file, Scanning.RowSelection? take = null, Compute.BlockMask? live = null, RowRange? scanned = null)
+    GranuleGeometry geometry, VortexFile file, Scanning.RowSelection? take = null, Compute.BlockMask? live = null, RowRange? scanned = null,
+    GranuleScratch? scratch = null)
 {
     /// <summary>The share of a chunk's bytes past which its granules are read with the rest of it, in one request (N9).</summary>
     internal const double WholeShare = 0.75;
@@ -141,12 +142,12 @@ internal sealed class GranulePlans(
     /// <summary>The plans a chunk keeps at most, those of the splits registered last: the ones the lane reads next.</summary>
     private const int PlansPerChunk = 4;
 
-    private readonly ArrayNodeArena _nodes = new ArrayNodeArena();
-    private readonly GranuleBytes _planner = new GranuleBytes();
-    private readonly Dictionary<ulong, List<Plan>> _plans = [];
+    private readonly ArrayNodeArena _nodes = scratch?.Nodes ?? new ArrayNodeArena();
+    private readonly GranuleBytes _planner = scratch?.Planner ?? new GranuleBytes();
+    private readonly Dictionary<ulong, List<Plan>> _plans = scratch?.Plans() ?? [];
 
     // Whether each chunk the scan reads every row of is read by its live granules, by its segment's offset.
-    private readonly Dictionary<ulong, bool> _sparse = [];
+    private readonly Dictionary<ulong, bool> _sparse = scratch?.Sparse() ?? [];
 
     /// <summary>
     /// A part of a chunk read by its granules: its rows, the chunk's tree, the ranges of the chunk's region of buffers read,
@@ -424,4 +425,36 @@ internal sealed class GranulePlans(
         DTypeKind.Extension => WidthOf(type.StorageType),
         _ => 0,
     };
+}
+
+/// <summary>
+/// What a lane's granule plans work in (<see cref="GranulePlans"/>), kept by its scan context from one scan to the next: the
+/// arena a chunk's tree is loaded into, the planner of its ranges, the plans by chunk. A lane's plans were made again for
+/// each scan of each object, an arena of nodes each, a megabyte an ask of a warm question over the logs of a short S1.
+/// One lane's plans use it at a time; each takes the dictionaries emptied.
+/// </summary>
+internal sealed class GranuleScratch
+{
+    private readonly Dictionary<ulong, List<GranulePlans.Plan>> _plans = [];
+    private readonly Dictionary<ulong, bool> _sparse = [];
+
+    /// <summary>The arena a chunk's tree is loaded into.</summary>
+    internal ArrayNodeArena Nodes { get; } = new ArrayNodeArena();
+
+    /// <summary>The planner of a part's ranges.</summary>
+    internal GranuleBytes Planner { get; } = new GranuleBytes();
+
+    /// <summary>The plans by chunk, emptied.</summary>
+    internal Dictionary<ulong, List<GranulePlans.Plan>> Plans()
+    {
+        _plans.Clear();
+        return _plans;
+    }
+
+    /// <summary>Whether each chunk is read by its live granules, emptied.</summary>
+    internal Dictionary<ulong, bool> Sparse()
+    {
+        _sparse.Clear();
+        return _sparse;
+    }
 }
