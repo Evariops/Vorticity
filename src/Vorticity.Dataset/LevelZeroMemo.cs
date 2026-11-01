@@ -191,11 +191,7 @@ internal sealed class LevelZeroMemo : IAsyncDisposable
                 Copy? made;
                 try
                 {
-                    ObjectLease original = await version.RentAsync(entry, cancellationToken).ConfigureAwait(false);
-                    await using (original.ConfigureAwait(false))
-                    {
-                        made = await ShredAsync(original.File, wanted, dataset.Session, reserved, cancellationToken).ConfigureAwait(false);
-                    }
+                    made = await CopyAsync(dataset, version, entry, wanted, budget, reserved, cancellationToken).ConfigureAwait(false);
                 }
                 catch
                 {
@@ -424,6 +420,52 @@ internal sealed class LevelZeroMemo : IAsyncDisposable
         }
 
         return wanted;
+    }
+
+    /// <summary>
+    /// The object <paramref name="entry"/> names written again in memory (<see cref="ShredAsync"/>), its keys counted, then
+    /// its rows written, two passes over its rows: over its bytes read once into memory the budget holds as long as the copy
+    /// is made, as large as the object; through its open, which reads it twice, when the budget refuses them. Three objects
+    /// of level 0 of the logs of S1, of 9 to 12 MB, read 66 MB for a question on one of their keys, twice their bytes.
+    /// </summary>
+    private static async ValueTask<Copy?> CopyAsync(
+        VortexDataset dataset, DatasetSnapshot version, ObjectEntry entry, Dictionary<string, HashSet<string>> wanted, QueryMemoryBudget budget,
+        long reserved, CancellationToken cancellationToken)
+    {
+        if (entry.Bytes <= 0 || entry.Bytes > Array.MaxLength || !budget.TryReserve(entry.Bytes))
+        {
+            ObjectLease original = await version.RentAsync(entry, cancellationToken).ConfigureAwait(false);
+            await using (original.ConfigureAwait(false))
+            {
+                return await ShredAsync(original.File, wanted, dataset.Session, reserved, cancellationToken).ConfigureAwait(false);
+            }
+        }
+
+        try
+        {
+            byte[] bytes = new byte[entry.Bytes];
+            for (int at = 0; at < bytes.Length;)
+            {
+                ObjectRead read = await dataset.Store.ReadAsync(entry.Key, at, bytes.AsMemory(at), null, cancellationToken).ConfigureAwait(false);
+                if (read.BytesRead <= 0)
+                {
+                    throw new VortexFormatException($"The object '{entry.Key}' holds {at} bytes where its entry names {entry.Bytes}.");
+                }
+
+                at += read.BytesRead;
+            }
+
+            VortexFile lying = await VortexFile.OpenAsync(new MemorySegmentSource(bytes), new VortexOpenOptions(), cancellationToken).ConfigureAwait(false);
+            await using (lying.ConfigureAwait(false))
+            {
+                lying.Session = dataset.Session;
+                return await ShredAsync(lying, wanted, dataset.Session, reserved, cancellationToken).ConfigureAwait(false);
+            }
+        }
+        finally
+        {
+            budget.Release(entry.Bytes);
+        }
     }
 
     /// <summary>

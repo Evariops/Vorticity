@@ -149,6 +149,34 @@ public sealed partial class LevelZeroMemoTests
         Assert.Equal(1, dataset.LevelZero.Shredded);
     }
 
+    /// <summary>
+    /// An object of level 0, larger than the tail its open reads, copied for a question on a key of its attributes: its
+    /// keys are counted, then its rows written again, two passes over its rows, over its bytes read once; they read it
+    /// twice through its open before.
+    /// </summary>
+    [Fact]
+    public async Task AnObjectIsReadOnceForItsCopy()
+    {
+        await using MemoryObjectStore memory = new MemoryObjectStore();
+        await using CountingObjectStore store = new CountingObjectStore(memory);
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Doc.Schema, new DatasetOptions { Layout = new DatasetLayout { SortKey = [LayoutValue.Column(nameof(Doc.Id))] } }, Ct);
+        Random random = new Random(13);
+        List<Doc> rows = [.. Enumerable.Range(0, 100_000).Select(i => new Doc(i, Variant.Object(
+            ("route", Variant.From($"/r/{random.Next(7)}/{random.Next(1 << 20)}")), ("status", Variant.From(200 + random.Next(4))))))];
+        await using (ObjectDraft draft = dataset.StartObject())
+        {
+            await draft.Writer.WriteAsync<Doc>([.. rows], Ct);
+            await dataset.AppendAsync(draft, Ct);
+        }
+
+        long bytes = (await dataset.ScanBuilder().ObjectsAsync(Ct).ToListAsync(Ct)).Sum(static held => held.Entry.Bytes);
+        store.Reset();
+        Assert.Equal(Routes(rows), await RoutesAsync(dataset));
+        Assert.Equal(1, dataset.LevelZero.Shredded);
+        Console.WriteLine($"LEVEL ZERO COPY: {store.BytesRead} bytes read to copy an object of {bytes}");
+        Assert.True(store.BytesRead < bytes * 3 / 2, $"{store.BytesRead} bytes read to copy an object of {bytes}");
+    }
+
     [VortexRecord]
     public partial record struct Call(string Service, long Id, Variant Attributes);
 
