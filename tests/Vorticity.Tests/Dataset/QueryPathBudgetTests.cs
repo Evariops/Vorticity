@@ -75,11 +75,16 @@ public sealed partial class QueryPathBudgetTests : IClassFixture<QueryPathBudget
     /// dictionaries of its chunks asked for the value (the dictionary probe of sorted runs); the counts by route answered
     /// by the granules of the shredded key allocate 47 KB where the rows took 55.
     /// </para>
+    /// <para>
+    /// The count by service at eight lanes raised the same day to 2 % above 60,304 bytes: what it measured beside the other
+    /// classes of `tests/runs-alone.sh` once the objects kept their keys' nulls and their variants' marks (59,504 to 59,728
+    /// before), where a process of its own measured the same mean before and after, 59.8 KB an ask over 4,000.
+    /// </para>
     /// </summary>
     private static readonly Dictionary<string, Budget> Ceilings = new(StringComparer.Ordinal)
     {
         ["count by service"] = new(4, 169512, 0, 0, 38516),
-        ["count by service, at eight lanes"] = new(4, 169512, 0, 0, 60099),
+        ["count by service, at eight lanes"] = new(4, 169512, 0, 0, 61510),
         ["count by service and hour"] = new(4, 169512, 0, 0, 44280),
         ["by minute, the last hour, under a predicate"] = new(1, 42106, 0, 0, 48446),
         ["an unaligned window"] = new(3, 127406, 0, 0, 52461),

@@ -41,15 +41,17 @@ internal sealed partial class DatasetScanBuilder
     internal async ValueTask<bool> PlacedAsync(PositionedObject held, CancellationToken cancellationToken)
     {
         if (GranuleAnswer()?.Exclusion is not { } excluded
-            || !CountsAnswer.NoNull(held.Summaries(_version.Schema), excluded.Path, _version.Schema.DType.GetField(excluded.Field)))
+            || (excluded.Key is null && !CountsAnswer.NoNull(held.Summaries(_version.Schema), excluded.Path, _version.Schema.DType.GetField(excluded.Field))))
         {
             return false;
         }
 
-        // Another column's value: where its locate, or the Bloom filters or postings its table of contents names, place it.
+        // Another column's value: where its locate, or the Bloom filters or postings its table of contents names, place it; a
+        // shredded key's, where those of its variant column do, its rows that hold no value of the key judged by the granules.
         if (!excluded.Identifier)
         {
-            bool located = held.Entry.Contents is { } contents && (contents.LocateOf(excluded.Field) is not null || Names(contents, excluded.Field));
+            bool located = held.Entry.Contents is { } contents
+                && ((excluded.Key is null && contents.LocateOf(excluded.Field) is not null) || Names(contents, excluded));
             if (located)
             {
                 excluded.Place(held.Entry.Uid);
@@ -81,7 +83,7 @@ internal sealed partial class DatasetScanBuilder
         VortexExpr found = excluded.Found;
         if (!excluded.Identifier)
         {
-            return await LocatedAsync(held, excluded, cancellationToken).ConfigureAwait(false)
+            return (excluded.Key is null ? await LocatedAsync(held, excluded, cancellationToken).ConfigureAwait(false) : null)
                 ?? await _dataset.PlacesAsync(held.Entry, found, cancellationToken).ConfigureAwait(false);
         }
 
@@ -149,15 +151,15 @@ internal sealed partial class DatasetScanBuilder
     }
 
     /// <summary>
-    /// Whether the table of contents <paramref name="contents"/> names an index of column <paramref name="field"/> that places
-    /// a value by its blocks with no open (<see cref="VortexDataset.PlacesAsync"/>): sorted runs, postings, or Bloom filters.
+    /// Whether the table of contents <paramref name="contents"/> names an index of the column of <paramref name="excluded"/>, or
+    /// of its key, that places a value by its blocks with no open (<see cref="VortexDataset.PlacesAsync"/>): sorted runs,
+    /// postings, or Bloom filters (<see cref="Dataset.GranuleAnswer.Places"/>).
     /// </summary>
-    private static bool Names(Indexes.ObjectContents contents, int field)
+    private static bool Names(Indexes.ObjectContents contents, ExcludedValue excluded)
     {
         foreach (Indexes.LocatingEntry located in contents.Locating ?? [])
         {
-            if (located.Column == (uint)field && located.Kind is Indexes.IndexKinds.SortedRuns or Indexes.IndexKinds.PostingsBlocks
-                or Indexes.IndexKinds.PostingsHashed or Indexes.IndexKinds.BloomSbbf)
+            if (Dataset.GranuleAnswer.Places(located, excluded))
             {
                 return true;
             }
@@ -170,7 +172,7 @@ internal sealed partial class DatasetScanBuilder
     /// The lookup of the value the filter leaves out (<see cref="CountsAnswer.Exclusion"/>) over the partitions' indexes, made
     /// once; null for none, or a version that keeps none.
     /// </summary>
-    private PartitionLookup? ExclusionLookup() => Answer()?.Exclusion?.Lookup(_dataset, _version);
+    private PartitionLookup? ExclusionLookup() => (GranuleAnswer()?.Exclusion ?? Answer()?.Exclusion)?.Lookup(_dataset, _version);
 
     /// <summary>
     /// The statistics of the granules of the object <paramref name="held"/> an answer through them reads, and beside them the

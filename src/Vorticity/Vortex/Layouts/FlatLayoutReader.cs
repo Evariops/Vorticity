@@ -61,14 +61,14 @@ internal sealed class FlatLayoutReader : LayoutReader
             SegmentSpec spec = SpecOf(in node, 0);
             if (reads.Find(spec.Offset, spec.Length) is { Residual: false } chunk)
             {
-                chunk.Register(segments, rows);
+                chunk.Register(segments, rows, spec.Offset);
                 return;
             }
 
             // The keys the filter's own pass reads of a chunk the scan reads whole: their ranges beside the segment.
             if (reads.FilterPass?.Find(spec.Offset, spec.Length) is { Residual: false } keyed)
             {
-                keyed.Register(segments, rows);
+                keyed.Register(segments, rows, spec.Offset);
             }
         }
 

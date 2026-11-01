@@ -300,7 +300,9 @@ internal sealed partial class DatasetScanBuilder
             (PathCosts.Cost statistics, PathCosts.Cost unanswered, _) = Scan.GranuleAnswer()!.Costs(unit.Held, unit.Kept);
             return $"the statistics over the granules of {Scan.GranuleAnswer()!.Fields.Length} columns, {statistics.Bytes} bytes in {statistics.Requests} requests, "
                 + $"and the rows of the granules they do not answer, about {unanswered.Bytes} bytes in {unanswered.Requests}"
-                + (Scan.GranuleAnswer()!.Exclusion is { } exclusion && exclusion.Placed(unit.Held.Entry.Uid) ? $", those its indexes place a value of {exclusion.Path} in among them" : string.Empty);
+                + (Scan.GranuleAnswer()!.Exclusion is { } exclusion && exclusion.Placed(unit.Held.Entry.Uid)
+                    ? $", those {Scan.GranuleAnswer()!.PlacingSource(unit.Held)} place a value of {exclusion.Path} in among them, for {Scan.GranuleAnswer()!.Placing(unit.Held).Bytes} bytes"
+                    : string.Empty);
         }
     }
 

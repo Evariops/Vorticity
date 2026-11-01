@@ -221,7 +221,7 @@ internal sealed class GranulePlans(
     /// a text's compressed bytes, leaves the key's range read whole, as a sparse stream, which holds its values alone,
     /// does; false then.
     /// </summary>
-    internal bool TryRegisterKey(PathChunk part, DType dtype, RowRange rows, SegmentRequestSet segments)
+    internal bool TryRegisterKey(PathChunk part, DType dtype, RowRange rows, SegmentRequestSet segments, ulong chunk)
     {
         int chunkRows = checked((int)part.Rows);
         SegmentSpec spec = new SegmentSpec(part.Offset, part.Length, part.AlignmentExponent, 0, 0);
@@ -241,7 +241,7 @@ internal sealed class GranulePlans(
         ArrayNode root = _nodes.Root;
         int start = checked((int)rows.Start);
         int count = checked((int)Math.Min(rows.Length, chunkRows - rows.Start));
-        if (!_planner.TryPlan(in root, WidthOf(dtype), chunkRows, start, count, layout, new ChunkGeometry(part.Tree, []), checked((int)live.BlockRows))
+        if (!_planner.TryPlan(in root, WidthOf(dtype), chunkRows, start, count, layout, KeyGeometry(part, layout, chunk), checked((int)live.BlockRows))
             || _planner.Bytes > WholeShare * part.Length)
         {
             return false;
@@ -360,6 +360,42 @@ internal sealed class GranulePlans(
         {
             System.Buffers.ArrayPool<int>.Shared.Return(places);
         }
+    }
+
+    /// <summary>
+    /// The geometry of the shredded key <paramref name="part"/>, whose buffers lie at <paramref name="layout"/> from its
+    /// start, in the chunk of segment offset <paramref name="chunk"/>: its tree, and the marks of the chunk's geometry that fall
+    /// on its buffers, each found by where it lies in the file and numbered as the key's tree numbers it. No marks where the
+    /// geometry of the chunk is not known.
+    /// </summary>
+    private ChunkGeometry KeyGeometry(PathChunk part, (long Start, long Length)[] layout, ulong chunk)
+    {
+        if (!geometry.TryGet(chunk, out ChunkGeometry whole, out _, out _) || whole.Marks.Length == 0)
+        {
+            return new ChunkGeometry(part.Tree, []);
+        }
+
+        (long Start, long Length)[] chunkLayout = ArrayBlobReader.BufferLayout(whole.Tree.Span, out _);
+        List<ChunkMark>? marks = null;
+        foreach (ChunkMark mark in whole.Marks)
+        {
+            if ((uint)mark.Buffer >= (uint)chunkLayout.Length)
+            {
+                continue;
+            }
+
+            long at = (long)chunk + chunkLayout[mark.Buffer].Start - (long)part.Offset;
+            for (int buffer = 0; buffer < layout.Length; buffer++)
+            {
+                if (layout[buffer].Start == at)
+                {
+                    (marks ??= []).Add(new ChunkMark(buffer, mark.Starts));
+                    break;
+                }
+            }
+        }
+
+        return new ChunkGeometry(part.Tree, marks is null ? [] : [.. marks]);
     }
 
     /// <summary>The plan of the chunk of segment offset <paramref name="offset"/> that holds rows <paramref name="rows"/>; null when it is read whole.</summary>

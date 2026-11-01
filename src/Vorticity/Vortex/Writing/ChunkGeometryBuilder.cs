@@ -19,7 +19,8 @@ namespace Vorticity.Writing;
 /// A mark is where each granule's first row starts in the bytes FSST compressed or a binary column holds, which only the
 /// offsets the encoder wrote say: the offsets child is decoded from the blob, a cheap pass over integers, and sampled at
 /// each granule's first row. Only the nodes that hold the chunk's rows are marked: the root, through an extension's
-/// storage; a dictionary's values hold other rows, and are read whole.
+/// storage, and a variant's parts and a struct's fields, a shredded key's text among them, which a read of the key by its
+/// granules finds its own in; a dictionary's values hold other rows, and are read whole.
 /// </para>
 /// <para>
 /// One decode context serves every chunk of the writer, made again only when the file names more encodings than it knew.
@@ -61,7 +62,7 @@ internal sealed class ChunkGeometryBuilder : IDisposable
         return new ChunkGeometry(tree, _marks.Count == 0 ? [] : [.. _marks]);
     }
 
-    /// <summary>Marks the node that holds the chunk's rows, through an extension's storage.</summary>
+    /// <summary>Marks the nodes that hold the chunk's rows, through an extension's storage, a variant's parts and a struct's fields.</summary>
     private void Mark(ScanContext context, in ArrayNode node, DType dtype, int rows, int granuleRows)
     {
         switch (node.Encoding)
@@ -69,6 +70,15 @@ internal sealed class ChunkGeometryBuilder : IDisposable
             case ArrayEncodingId.Extension when dtype.Kind == DTypeKind.Extension:
                 ArrayNode storage = node.GetChild(0);
                 Mark(context, in storage, dtype.StorageType, rows, granuleRows);
+                break;
+
+            case ArrayEncodingId.Variant or ArrayEncodingId.ParquetVariant or ArrayEncodingId.Struct:
+                for (int c = 0; c < node.ChildCount; c++)
+                {
+                    ArrayNode part = node.GetChild(c);
+                    Mark(context, in part, default, rows, granuleRows);
+                }
+
                 break;
 
             case ArrayEncodingId.Fsst when node.BufferCount == 3 && node.ChildCount >= 2:

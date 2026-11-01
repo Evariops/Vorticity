@@ -259,7 +259,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
     /// <summary>
     /// The entries of the locating indexes as the table of contents names them: each on the field of the root its path
-    /// starts with, the root's own for none, at its region in the file, the directory written at <paramref name="offset"/>
+    /// starts with, the root's own for none, with the key of a variant column it lies on and the bytes of its segments, at
+    /// its region in the file, the directory written at <paramref name="offset"/>
     /// with the bytes <paramref name="directory"/>, where <paramref name="located"/> says each lies; null for none.
     /// </summary>
     private static LocatingEntry[]? Locating(List<(IndexEntry Entry, int Start, int Length)> located, byte[] directory, long offset)
@@ -273,10 +274,23 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         for (int i = 0; i < entries.Length; i++)
         {
             (IndexEntry entry, int start, int length) = located[i];
+            long bytes = entry.WrittenBytes;
+            foreach (IndexRun run in bytes > 0 ? [] : entry.Runs)
+            {
+                foreach (IndexSegment payload in run.Payload)
+                {
+                    bytes += payload.Length;
+                }
+            }
+
             entries[i] = new LocatingEntry(
                 entry.ColumnPath.Count > 0 ? entry.ColumnPath[0] : IndexDirectory.RootColumn,
                 entry.Kind,
-                IndexSegment.Of(offset + start, directory.AsSpan(start, length), 0));
+                IndexSegment.Of(offset + start, directory.AsSpan(start, length), 0))
+            {
+                Key = entry.VariantPath is [{ } key, ..] ? key : null,
+                Bytes = bytes,
+            };
         }
 
         return entries;

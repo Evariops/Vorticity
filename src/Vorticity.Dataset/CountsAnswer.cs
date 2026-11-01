@@ -955,6 +955,12 @@ internal sealed class ExcludedValue(int field, string path, VortexExpr found, bo
     internal int Field { get; } = field;
 
     /// <summary>
+    /// The shredded key of the variant column <see cref="Field"/> the value is left out of, read in a class its statistics
+    /// over the granules list; null for a column's value. A row that holds no value of the key is left out too.
+    /// </summary>
+    internal VariantFieldExpr? Key { get; init; }
+
+    /// <summary>
     /// Whether the column is a declared identifier, whose postings place the value, an object they do not place it in left to
     /// its rows; another column's is placed by its object's indexes, an object none of them places it in judged under the
     /// whole filter.

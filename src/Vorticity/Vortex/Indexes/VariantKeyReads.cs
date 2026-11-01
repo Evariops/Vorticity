@@ -511,15 +511,16 @@ internal sealed class VariantKeyReads
 
         /// <summary>
         /// Registers each key's range, or, where the split reads the chunk's live granules apart, the granules of its rows
-        /// <paramref name="rows"/> alone (<see cref="GranulePlans.TryRegisterKey"/>, spec E, 4.1); every range whole in a chunk
+        /// <paramref name="rows"/> alone (<see cref="GranulePlans.TryRegisterKey"/>, spec E, 4.1), the chunk of segment offset
+        /// <paramref name="chunk"/> giving the marks of a key's text; every range whole in a chunk
         /// that kept a key's values of other classes beside its typed column, which a split does not decode apart.
         /// </summary>
-        internal void Register(SegmentRequestSet segments, RowRange rows)
+        internal void Register(SegmentRequestSet segments, RowRange rows, ulong chunk)
         {
             bool apart = segments.Granules is not null && Typed;
             foreach (Key key in Keys)
             {
-                if (key.Part is { Length: > 0 } part && (!apart || !segments.Granules!.TryRegisterKey(part, key.Shape, rows, segments)))
+                if (key.Part is { Length: > 0 } part && (!apart || !segments.Granules!.TryRegisterKey(part, key.Shape, rows, segments, chunk)))
                 {
                     segments.Add(Spec(part));
                 }

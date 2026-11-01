@@ -432,8 +432,15 @@ longer lie where they were, notes none.
   filter, `x`'s statistics judging each value they list, else read as rows. A declared identifier is
   placed by its postings; another column by its locate, read beside the statistics, else by the Bloom
   filters or postings the table of contents names (section 5.4,
-  [10-indexes.md](10-indexes.md#4-skipping-indexes)); an object no index places the value in is judged
-  under the whole filter. The statistics of `x` are left aside where it is placed and they weigh more
+  [10-indexes.md](10-indexes.md#4-skipping-indexes)), priced at the bytes it names; an object no index
+  places the value in is judged under the whole filter. A shredded key of a variant,
+  `Attributes["user.id"].AsString() != u`, is left out as a column is: placed by its postings where the
+  dataset declares it an identifier, else by its Bloom filter, its rows that hold no value of it left out
+  too, which its statistics over the granules prove absent (a key keeps its nulls there however many
+  values it holds). On 32 granules, every call but one user's, the users nearly all distinct, read 1.68 MB
+  through the granules under the key's postings, and 2.04 MB under its Bloom filter, where the rows take
+  2.28 MB: a granule read as rows reads the key's dictionary whole *(measured,
+  `DatasetKeyAbsenceProofsTests`)*. The statistics of `x` are left aside where it is placed and they weigh more
   than a granule's rows. A granule of one value is ruled out by `x != v` when that value is `v` and no
   NaN may be there, the zone maps as the granules. On 32 granules, every call but one ticket's, its
   tickets under a Bloom filter, read 890 KB through the granules where the rows take 3.59 MB; the

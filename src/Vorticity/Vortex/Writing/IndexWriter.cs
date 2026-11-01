@@ -1566,7 +1566,7 @@ internal sealed class IndexWriter : IDisposable
             policy.Resolutions >= 3 ? BloomBuilder.FileMaxBlocks : BloomBuilder.MaxBlocksOf(policy));
         IndexRun run = new IndexRun(
             (ulong)tree.FirstBlock, checked((uint)tree.Leaves), [root], [dtype], 0, BloomTreeRun.Options(tree.RootWords));
-        _entries.Add(EntryOf(new IndexEntry(kind, ColumnPath(field), (ulong)Math.Max(blockRows, 1), options.ToBytes(), [run]), field));
+        _entries.Add(EntryOf(new IndexEntry(kind, ColumnPath(field), (ulong)Math.Max(blockRows, 1), options.ToBytes(), [run]) { WrittenBytes = bloom.WrittenBytes }, field));
 
         string? fileNote = policy.Resolutions >= 3 ? bloom.FileAbandoned : null;
         Report(
@@ -1941,7 +1941,7 @@ internal sealed class IndexWriter : IDisposable
     /// Gives every top-level column with a sheet, but a float's, where each of its values lies, granule by granule (spec D,
     /// 3), fed right after its sheet's numbering of its rows' values; and each shredded key read in its class, but a float or
     /// a boolean, a sheet of its own that numbers its values and where each lies (spec E, 3.3), and, in a file that keeps
-    /// counts, its statistics over the granules, its values listed as a column's.
+    /// counts, its statistics over the granules, its values listed as a column's, its nulls kept where none are.
     /// </summary>
     internal void AddLocates(DType schema)
     {
@@ -1954,7 +1954,7 @@ internal sealed class IndexWriter : IDisposable
                 _builders[slot].Add(new LocateBuilder(sheet));
                 if (_counts is { } plan)
                 {
-                    _builders[slot].Add(new GranuleStatsBuilder(sheet, plan, slot, _pathTypes[slot]));
+                    _builders[slot].Add(new GranuleStatsBuilder(sheet, plan, slot, _pathTypes[slot]) { KeepsNulls = true });
                 }
             }
         }

@@ -98,6 +98,14 @@ internal sealed class GranuleStatsBuilder : IndexBuilder
 
     private MeasureKind Kind => _own?.Kind ?? _plan.Measures[_measure].Kind;
 
+    /// <summary>
+    /// Whether the statistics are written for their rows and nulls alone where they keep neither values nor a measure: a
+    /// shredded key's, whose nulls, the rows that hold no value of it, no summary of the object says, and which prove a filter
+    /// that leaves a value of the key out true over a granule the key's index does not place the value in. A user's key among
+    /// 200 000 listed no granule's values and kept nothing before.
+    /// </summary>
+    internal bool KeepsNulls { get; init; }
+
     /// <summary>How an integer under an extension is summed, and its width; null for any other type.</summary>
     private static (MeasureKind Kind, int Width)? OwnOf(DType dtype)
     {
@@ -127,7 +135,7 @@ internal sealed class GranuleStatsBuilder : IndexBuilder
 
     internal override void Accumulate(CanonicalArena arena, int nodeIndex, int start, int count)
     {
-        if (count <= 0 || (!_values && !_measured))
+        if (count <= 0 || (!_values && !_measured && !KeepsNulls))
         {
             _row += count;
             return;
@@ -459,7 +467,7 @@ internal sealed class GranuleStatsBuilder : IndexBuilder
     /// The statistics, once every one of the file's <paramref name="rows"/> is in, the measure's histograms over the
     /// granules (<see cref="GranuleHistograms"/>) for a measure the plan reads, and the rows of the granules that list their
     /// values (<see cref="ObjectContents.ListedRows"/>) and of those that hold one value (<see cref="ObjectContents.SingleRows"/>), 0
-    /// with no values' part: null for a column that keeps neither part.
+    /// with no values' part: null for a column that keeps neither part, unless it keeps its nulls (<see cref="KeepsNulls"/>).
     /// The values' part needs every value's bytes, which its dictionary keeps, and a granule that lists them: past
     /// <see cref="GranuleStats.ListedValues"/> in every granule, it answers nothing and is not written. The measure's is the
     /// plan's verdict, asked once every column's counts settled it.
@@ -474,7 +482,7 @@ internal sealed class GranuleStatsBuilder : IndexBuilder
             values = null;
         }
 
-        if ((values is null && !_measured) || _row != rows || _granules == 0)
+        if ((values is null && !_measured && !KeepsNulls) || _row != rows || _granules == 0)
         {
             return null;
         }

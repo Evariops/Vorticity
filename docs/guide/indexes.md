@@ -221,6 +221,17 @@ written before takes a fragment that holds it. [dataset-maintenance.md](dataset-
 what it costs and what it buys, and the design is in
 [13-dataset.md](../design/13-dataset.md#64-fragments-in-commit-objects-transient).
 
+A key of a variant column takes a Bloom filter or hashed postings the same way, named as a filter reads
+it:
+
+```csharp
+await dataset.IndexAsync(IndexPolicy.None.Bloom("Attributes['user.id'].AsString()"));
+```
+
+Every job that shreds the key builds it from then on; the objects already written take it when
+compaction rewrites them, and no fragment does. A key whose values are nearly all distinct is better
+declared an identifier (below): its filter weighs as much as the key.
+
 `dataset.IndexAsync(IndexPolicy.Auto)` gives every column its automatic indexes instead, the columns
 you add later with `EvolveSchemaAsync` included. Writers apply it from the next object they write,
 within the budget, and the objects already there take it when compaction rewrites them.

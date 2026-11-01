@@ -169,7 +169,7 @@ internal sealed class GranuleAnswer
     /// <summary>
     /// <paramref name="filter"/> less its first conjunct that leaves out the values <paramref name="value"/> places, as
     /// <see cref="CountsAnswer.Exclusion"/> or <see cref="Excluded"/> took it: <c>x != v</c> of that value, or <c>NOT</c> of
-    /// that set; null when nothing else is left.
+    /// that set; of a shredded key, the key's rows that hold a value in its place. Null when nothing else is left.
     /// </summary>
     private static VortexExpr? Less(VortexExpr filter, ExcludedValue value)
     {
@@ -180,11 +180,20 @@ internal sealed class GranuleAnswer
             (ComparisonExpr { Op: ComparisonOp.NotEqual, Field: ColumnFieldExpr column } other, ComparisonExpr found) =>
                 string.Equals(column.Path, value.Path, StringComparison.Ordinal) && other.Value.Equals(found.Value),
             (NotExpr { Operand: InExpr set }, InExpr found) => ReferenceEquals(set, found),
+            (VariantFilterExpr { Inner: ComparisonExpr { Op: ComparisonOp.NotEqual, Field: VariantFieldExpr path } other }, VariantFilterExpr { Inner: ComparisonExpr found }) =>
+                string.Equals(path.Text, value.Path, StringComparison.Ordinal) && other.Value.Equals(found.Value),
+            (NotExpr { Operand: VariantFilterExpr fence }, VariantFilterExpr found) => ReferenceEquals(fence, found),
             _ => false,
         });
         if (excluded >= 0)
         {
             conjuncts.RemoveAt(excluded);
+        }
+
+        // A key's rows that hold no value of it are left out too, as a column's nulls are.
+        if (value.Key is { } key)
+        {
+            conjuncts.Add(VariantFilterExpr.Of(Expr.IsNotNull(key)));
         }
 
         return GroupPredicates.And(null, conjuncts);
@@ -248,13 +257,16 @@ internal sealed class GranuleAnswer
         // no index of it places the value in, and the granules one places it in.
         if (_excluding is { Value: { Identifier: false } own })
         {
-            Add(fields, own.Field);
-            Add(filtered, own.Field);
+            Add(fields, JudgedOf(own));
+            Add(filtered, JudgedOf(own));
         }
 
         _filteredWhole = [.. filtered];
         return [.. fields];
     }
+
+    /// <summary>The column whose statistics judge the value <paramref name="value"/> leaves out: its column's, or its key's.</summary>
+    private int JudgedOf(ExcludedValue value) => value.Key is { } key && PathField(key) is int path ? path : value.Field;
 
     /// <summary>
     /// <paramref name="filter"/> with each comparison on a shredded key read in a class its statistics list, an integer or a
@@ -277,6 +289,8 @@ internal sealed class GranuleAnswer
                 return new ComparisonExpr(column, comparison.Op, comparison.Value);
             case InExpr { Field: VariantFieldExpr path } set when PathColumn(path) is { } column:
                 return new InExpr(column, [.. set.Values]);
+            case NullCheckExpr { Field: VariantFieldExpr path } check when PathColumn(path) is { } column:
+                return new NullCheckExpr(column, check.IsNull);
             default:
                 return filter;
         }
@@ -511,7 +525,7 @@ internal sealed class GranuleAnswer
         declined = null;
         return new GranuleAnswer(
             counts, version.Schema, version.Costs, filter, keys, measured, measuredPaths, leading, [.. prefixed], granuleRows, request.SketchBits, [.. runKeys],
-            counts.Exclusion is null && filter is not null ? Excluded(filter, schema) : null);
+            counts.Exclusion is null && filter is not null ? Excluded(filter, version.Schema) : null);
     }
 
     /// <summary>
@@ -527,19 +541,38 @@ internal sealed class GranuleAnswer
         };
 
     /// <summary>
-    /// The first values <paramref name="filter"/> leaves out of a top-level column of <paramref name="schema"/> by a
+    /// The first values <paramref name="filter"/> leaves out of a top-level column of <paramref name="version"/> by a
     /// conjunct, <c>x != v</c> of a value that is no null or <c>NOT x IN (…)</c> of such values, which an object's indexes
-    /// of the column may place (spec D, 4), their equality or set the found rows; null for none.
+    /// of the column may place (spec D, 4), their equality or set the found rows; of a shredded key, as its postings when the
+    /// dataset declares it an identifier, or its Bloom filter, place them. Null for none.
     /// </summary>
-    private static ExcludedValue? Excluded(VortexExpr filter, DType schema) => filter switch
+    private static ExcludedValue? Excluded(VortexExpr filter, DatasetSchema version) => filter switch
     {
-        LogicalExpr { IsAnd: true } and => Excluded(and.Left, schema) ?? Excluded(and.Right, schema),
-        ComparisonExpr { Op: ComparisonOp.NotEqual, Field: ColumnFieldExpr column } other when other.Value.Kind != FilterLiteralKind.Null && Top(column, schema) is int field =>
+        LogicalExpr { IsAnd: true } and => Excluded(and.Left, version) ?? Excluded(and.Right, version),
+        ComparisonExpr { Op: ComparisonOp.NotEqual, Field: ColumnFieldExpr column } other when other.Value.Kind != FilterLiteralKind.Null && Top(column, version.DType) is int field =>
             new ExcludedValue(field, column.Path, new ComparisonExpr(column, ComparisonOp.Equal, other.Value), identifier: false),
-        NotExpr { Operand: InExpr { Field: ColumnFieldExpr column } set } when Present(set) && Top(column, schema) is int field =>
+        NotExpr { Operand: InExpr { Field: ColumnFieldExpr column } set } when Present(set) && Top(column, version.DType) is int field =>
             new ExcludedValue(field, column.Path, set, identifier: false),
+        VariantFilterExpr { Inner: ComparisonExpr { Op: ComparisonOp.NotEqual, Field: VariantFieldExpr path } other } when other.Value.Kind != FilterLiteralKind.Null && ClassOf(path, version.DType) is not null =>
+            new ExcludedValue(version.DType.IndexOfField(path.Column.Path), path.Text, VariantFilterExpr.Of(new ComparisonExpr(path, ComparisonOp.Equal, other.Value)), Identifies(version, path)) { Key = path },
+        NotExpr { Operand: VariantFilterExpr { Inner: InExpr { Field: VariantFieldExpr path } set } fence } when Present(set) && ClassOf(path, version.DType) is not null =>
+            new ExcludedValue(version.DType.IndexOfField(path.Column.Path), path.Text, fence, Identifies(version, path)) { Key = path },
         _ => null,
     };
+
+    /// <summary>Whether <paramref name="version"/> declares the shredded key <paramref name="path"/> an identifier, whose postings every job writes.</summary>
+    private static bool Identifies(DatasetSchema version, VariantFieldExpr path)
+    {
+        foreach (string identifier in version.Identifiers)
+        {
+            if (VortexDataset.IdentifierPath(identifier, version.DType) is { } key && string.Equals(key.Text, path.Text, StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
 
     /// <summary>Whether <paramref name="set"/> holds values and no null, which <c>NOT IN</c> leaves no row of in its column's nulls.</summary>
     private static bool Present(InExpr set)
@@ -746,7 +779,7 @@ internal sealed class GranuleAnswer
     internal int Unread(in PositionedObject held)
     {
         if (_excluding?.Value is not { Identifier: false } value || !value.Placed(held.Entry.Uid) || held.Entry.Contents is not { } contents
-            || contents.GranuleStatsOf(value.Field) is not { } region || held.Entry.PhysicalRows <= 0)
+            || StatisticsOf(contents, JudgedOf(value)) is not { } region || held.Entry.PhysicalRows <= 0)
         {
             return -1;
         }
@@ -757,18 +790,66 @@ internal sealed class GranuleAnswer
             rows += field < contents.ColumnBytes.Count ? contents.ColumnBytes[field] : 0;
         }
 
-        return region.Length > rows * Math.Min(1, (double)_granuleRows / held.Entry.PhysicalRows) ? value.Field : -1;
+        return region.Length > rows * Math.Min(1, (double)_granuleRows / held.Entry.PhysicalRows) ? JudgedOf(value) : -1;
     }
 
     /// <summary>
-    /// What placing the value the filter leaves out in the object <paramref name="held"/> costs: its locate's region, read
-    /// beside the statistics, where the column is no identifier and the object keeps one; two round trips cold otherwise, an
-    /// index's directory or entries, then its page, runs or filters; nothing where the value is not placed.
+    /// What placing the value the filter leaves out in the object <paramref name="held"/> costs (<see cref="PlacingSource"/>):
+    /// its locate's region, read beside the statistics, where the column is no identifier and the object keeps one; the
+    /// regions of the Bloom filters, runs or postings of its column the table of contents names, every level of them, a bound,
+    /// and a round trip for their directory, for another column or a key that is no identifier; two round trips cold for an
+    /// identifier's postings, its partition's page then its runs; nothing where the value is not placed. A user's key under a
+    /// Bloom filter of 786 KB in an object whose rows weighed 1.1 MB was priced at two round trips.
     /// </summary>
-    internal PathCosts.Cost Placing(in PositionedObject held) =>
-        _excluding?.Value is not { } value || !value.Placed(held.Entry.Uid) ? default
-        : !value.Identifier && held.Entry.Contents?.LocateOf(value.Field) is { } locate ? _costs.Regions(held.Entry.Uid, [locate])
-        : new PathCosts.Cost(2, 0);
+    internal PathCosts.Cost Placing(in PositionedObject held)
+    {
+        if (_excluding?.Value is not { } value || !value.Placed(held.Entry.Uid))
+        {
+            return default;
+        }
+
+        if (value.Identifier || held.Entry.Contents is not { } contents)
+        {
+            return new PathCosts.Cost(2, 0);
+        }
+
+        if (value.Key is null && contents.LocateOf(value.Field) is { } locate)
+        {
+            return _costs.Regions(held.Entry.Uid, [locate]);
+        }
+
+        // The entries named, read in one request, then each index's segments; an object whose table of contents does not say
+        // their bytes is priced at the round trips alone.
+        int count = 0;
+        long bytes = 0;
+        bool known = true;
+        foreach (LocatingEntry entry in contents.Locating ?? [])
+        {
+            if (Places(entry, value))
+            {
+                count++;
+                bytes += entry.Region.Length + entry.Bytes;
+                known &= entry.Bytes > 0;
+            }
+        }
+
+        return count == 0 || !known ? new PathCosts.Cost(2, 0) : new PathCosts.Cost(1 + count, bytes);
+    }
+
+    /// <summary>What places the value the filter leaves out in the object <paramref name="held"/>, for an explanation; null for nothing.</summary>
+    internal string? PlacingSource(in PositionedObject held) =>
+        _excluding?.Value is not { } value || !value.Placed(held.Entry.Uid) ? null
+        : value.Identifier ? "its identifier's postings"
+        : value.Key is null && held.Entry.Contents?.LocateOf(value.Field) is not null ? "its locate"
+        : "the Bloom filters, runs or postings of its column";
+
+    /// <summary>
+    /// Whether <paramref name="entry"/> is an index of the column of <paramref name="value"/>, of its key on a variant's, that
+    /// places a value by its blocks with no open; an entry that does not say its key is taken to be the key's.
+    /// </summary>
+    internal static bool Places(LocatingEntry entry, ExcludedValue value) =>
+        entry.Column == (uint)value.Field && entry.Kind is IndexKinds.SortedRuns or IndexKinds.PostingsBlocks or IndexKinds.PostingsHashed or IndexKinds.BloomSbbf
+        && (value.Key is not { } key || entry.Key is null || string.Equals(entry.Key, key.Steps[0].Key, StringComparison.Ordinal));
 
     /// <summary>
     /// The share of the rows of the object <paramref name="held"/> whose granules its statistics are not expected to answer:

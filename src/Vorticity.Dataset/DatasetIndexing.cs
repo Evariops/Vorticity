@@ -92,8 +92,23 @@ internal static class DatasetIndexing
 
         bool names = false;
         DatasetSchema schema = dataset.Snapshot.Schema;
+        WritePolicy written = WritePolicy.None.WithDefault(wanted.Default);
         foreach ((string path, IndexSpec spec) in wanted.Columns)
         {
+            // A key of a variant column, Attributes['user.id'].AsString(): the jobs that shred it build its index, under the
+            // path as a plan writes it, which a writer looks the key up by.
+            if (VortexDataset.IdentifierPath(path, schema.DType) is { } key)
+            {
+                if (spec.Kind is not (IndexPolicyKind.Bloom or IndexPolicyKind.HashedPostings))
+                {
+                    throw new ArgumentException($"A key of a variant column takes a Bloom filter or hashed postings, and '{path}' asks {spec.Kind}.", nameof(policy));
+                }
+
+                written = written.For(key.Text, spec);
+                names = true;
+                continue;
+            }
+
             // Refused here rather than left out of every object a writer builds from now on.
             DType column = schema.DType;
             foreach (int field in ToolPaths.Resolve(schema.Columns, path))
@@ -107,7 +122,10 @@ internal static class DatasetIndexing
             }
 
             names |= IndexKinds.Of(spec.Kind) is not null;
+            written = written.For(path, spec);
         }
+
+        wanted = written;
 
         // A default that indexes, such as IndexPolicy.Auto, gives every column a writer meets its index, those
         // schema evolution adds later included; the objects already written take it as compaction rewrites them.
@@ -215,6 +233,12 @@ internal static class DatasetIndexing
             WritePolicy missing = WritePolicy.None;
             foreach ((string path, IndexSpec spec) in wanted.Columns)
             {
+                // A key of a variant column takes its index as a job shreds it: no fragment builds one.
+                if (VortexDataset.IdentifierPath(path, dataset.Snapshot.Schema.DType) is not null)
+                {
+                    continue;
+                }
+
                 if ((columns is null ? path : columns.SourcePath(path)) is { } source
                     && IndexKinds.Of(spec.Kind) is { } kind
                     && !Covers(directory, file, source, kind, blockRows))

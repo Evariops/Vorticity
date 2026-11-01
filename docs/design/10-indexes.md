@@ -81,8 +81,11 @@ A lookup by a value needs the entries of the indexes that locate it, not the who
 table of contents a dataset's entry carries for an object ([what a node
 carries](13-dataset.md#42-what-a-node-carries)) names each entry of a locating kind (sorted runs,
 block postings, hashed postings, trigram postings and the dictionary probe), and each Bloom filter's,
-which refuses the blocks that cannot hold a value: its column, its kind, and where its message lies
-within the directory, with an XXH3-64 of those bytes. A lookup reads the messages of its filter's
+which refuses the blocks that cannot hold a value: its column, the key of a variant column it lies on,
+its kind, the bytes of its segments (a Bloom filter's whole tree), and where its message lies within the
+directory, with an XXH3-64 of those bytes. A plan prices placing a value through it by those bytes,
+before reading anything: a Bloom filter of a user's key nearly all of whose values are distinct took
+787 KB of an object whose rows took 1.1 MB. A lookup reads the messages of its filter's
 columns alone and checks each against its checksum, so an entry that fails costs only itself; the
 Bloom filters are asked, with no open of the object, where no postings answer, and give the blocks
 that may hold a value left out ([22-on-the-fly-and-synopses.md](22-on-the-fly-and-synopses.md#6-deletes-exclusions-late-rows-window-edges)). A day's directory held 11.5 MB, of which the identifier's hashed postings, what a
@@ -258,7 +261,9 @@ describes the file as its writer cut it.
 
 Beside it, under the kind `vorticity.marks.v1`, on the root, a file with a table of contents keeps the
 geometry of every top-level column's chunks, a payload region per column: each chunk's encoding tree, and
-where each granule starts in each of its buffers of variable length. A read of a few granules of a chunk
+where each granule starts in each of its buffers of variable length, a variant's parts and a struct's
+fields among them. A read of a shredded key by its granules finds its text's starts there, in the
+buffers of its range of the chunk. A read of a few granules of a chunk
 needs that before it reads their bytes alone: the buffers of fixed width give a granule's range by
 arithmetic, and the others by these starts ([reading a granule, not a
 chunk](23-query-architecture.md#53-reading-a-granule-not-a-chunk)). The table of contents names each
@@ -477,8 +482,10 @@ columns of many values, the endpoints 677 and the hosts 423 *(measured, `--micro
 Each top-level key of a variant that a job shreds, read as an integer or a text, keeps a region of the same
 kind, built from the sheet its locate numbers its values by ([4.13](#413-vorticitylocatev1-where-each-value-lies-granule-by-granule)),
 the rows that hold no value of that class counted as its nulls; the table of contents names it by the
-variant column, the key and the class, beside the rows of its granules of one value. A nested path, a
-double and a boolean keep none.
+variant column, the key and the class, beside the rows of its granules of one value. A key whose granules
+list no values keeps its rows and nulls alone, where a column would keep nothing: no summary of the
+object says which rows hold no value of a key, and a filter that leaves a value of the key out needs
+them. A nested path, a double and a boolean keep none.
 
 ### 4.12 `vorticity.granule.histograms.v1`: a measure's histograms over the granules
 

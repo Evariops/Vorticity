@@ -419,6 +419,8 @@ internal sealed class ObjectContents(
     private const int TagLocatingColumn = 1;
     private const int TagLocatingKind = 2;
     private const int TagLocatingRegion = 3;
+    private const int TagLocatingKey = 4;
+    private const int TagLocatingBytes = 5;
 
     // The paging of the chunk directories: the entries of a page, the chunks of a paged column, the first row of each page,
     // and the paged columns, the last two as deltas, packed.
@@ -861,6 +863,15 @@ internal sealed class ObjectContents(
                 writer.WriteUInt32Always(TagLocatingColumn, located.Column);
                 writer.WriteStringAlways(TagLocatingKind, located.Kind);
                 IndexDirectory.WriteSegment(ref writer, TagLocatingRegion, located.Region);
+                if (located.Key is { } key)
+                {
+                    writer.WriteStringAlways(TagLocatingKey, key);
+                }
+
+                if (located.Bytes > 0)
+                {
+                    writer.WriteUInt64Always(TagLocatingBytes, (ulong)located.Bytes);
+                }
             }
 
             if (Paging is { } paging)
@@ -1308,10 +1319,18 @@ internal sealed class ObjectContents(
         uint? column = null;
         string? kind = null;
         IndexSegment? region = null;
+        string? key = null;
+        long bytes = 0;
         while (reader.TryReadTag(out int tag, out ProtoWireType wire))
         {
             switch (tag, wire)
             {
+                case (TagLocatingKey, ProtoWireType.LengthDelimited):
+                    key = Encoding.UTF8.GetString(reader.ReadLengthDelimited());
+                    break;
+                case (TagLocatingBytes, ProtoWireType.Varint):
+                    bytes = checked((long)reader.ReadVarint());
+                    break;
                 case (TagLocatingColumn, ProtoWireType.Varint):
                     column = reader.ReadVarint32();
                     break;
@@ -1327,7 +1346,7 @@ internal sealed class ObjectContents(
             }
         }
 
-        return column is { } on && kind is not null && region is { Checksum: not null } segment ? new LocatingEntry(on, kind, segment) : null;
+        return column is { } on && kind is not null && region is { Checksum: not null } segment ? new LocatingEntry(on, kind, segment) { Key = key, Bytes = bytes } : null;
     }
 
     /// <summary>
@@ -1459,4 +1478,14 @@ internal sealed record ChunkPaging(int PageEntries, int Count, long[] PageRows, 
 /// <param name="Column">The field of the root the index lies on, the first of its path; <see cref="IndexDirectory.RootColumn"/> for the root.</param>
 /// <param name="Kind">The index's kind.</param>
 /// <param name="Region">Where the entry's message lies in the file, with its checksum.</param>
-internal readonly record struct LocatingEntry(uint Column, string Kind, IndexSegment Region);
+internal readonly record struct LocatingEntry(uint Column, string Kind, IndexSegment Region)
+{
+    /// <summary>The key of the variant column <see cref="Column"/> the index lies on, the first of its path; null for a column, or unknown.</summary>
+    internal string? Key { get; init; }
+
+    /// <summary>
+    /// The bytes of the index's segments, every level of a Bloom filter's tree: what placing a value through it reads at most,
+    /// past its entry; 0 when unknown, an object written before its table of contents said.
+    /// </summary>
+    internal long Bytes { get; init; }
+}
