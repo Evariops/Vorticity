@@ -463,6 +463,43 @@ public sealed class VariantDirectoryTests
     private static PathEntry Entry(VariantDirectory directory, string[] path, PathClass @class) =>
         Assert.Single(directory.Of(path).ToArray(), entry => entry.Class == @class);
 
+    /// <summary>
+    /// A question's filter asks the directory of every object it reads, and a warm question asks again: a predicate on a
+    /// nested path is judged with no allocation, and a directory read for one path of a thousand allocates what one path
+    /// costs, as one of a hundred does. A key looked up as a string made of its keys, and a list of wanted paths walked by
+    /// its boxed enumerator for each entry, made a warm question on a key of the client's logs allocate 16 MB.
+    /// </summary>
+    [Fact]
+    public void AskingADirectoryAllocatesForThePathsItKeepsAlone()
+    {
+        Dictionary<string, VariantDirectory> directories = new() { ["Attributes"] = Directory() };
+        VortexExpr nested = Path(VariantRead.AsInt64, ComparisonOp.Greater, FilterLiteral.From(100L), "user", "id");
+        Assert.False(VariantDirectory.MayMatch(nested, directories));
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        for (int i = 0; i < 100; i++)
+        {
+            Assert.False(VariantDirectory.MayMatch(nested, directories));
+        }
+
+        Assert.Equal(0, GC.GetAllocatedBytesForCurrentThread() - before);
+
+        long[] allocated = new long[2];
+        foreach ((int index, int keys) in (ReadOnlySpan<(int, int)>)[(0, 100), (1, 1_000)])
+        {
+            PathCensus census = new PathCensus();
+            Variant row = Variant.Object([.. Enumerable.Range(0, keys).Select(k => ($"key-{k:D4}", Variant.From((long)k)))]);
+            census.Add(row.Metadata.Span, row.Value.Span);
+            byte[] bytes = VariantDirectory.From(census, null).ToBytes();
+            byte[][][] wanted = [["key-0007"u8.ToArray()]];
+            Assert.Single(VariantDirectory.From(bytes, wanted)!.Entries);
+            before = GC.GetAllocatedBytesForCurrentThread();
+            Assert.Single(VariantDirectory.From(bytes, wanted)!.Entries);
+            allocated[index] = GC.GetAllocatedBytesForCurrentThread() - before;
+        }
+
+        Assert.Equal(allocated[0], allocated[1]);
+    }
+
     private static VortexExpr Has(params string[] keys) => Path(VariantRead.Has, ComparisonOp.Equal, FilterLiteral.From(true), keys);
 
     private static VortexExpr Path(VariantRead read, ComparisonOp op, FilterLiteral value, params string[] keys) =>

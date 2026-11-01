@@ -1241,7 +1241,7 @@ internal sealed partial class DatasetScanBuilder
         long blocks = (rows + TwoPhaseReads.BlockRows - 1) / TwoPhaseReads.BlockRows;
         ulong[] granuleBits = new ulong[(granules + 63) / 64];
         ulong[] blockBits = new ulong[(blocks + 63) / 64];
-        long[] places = new long[(int)Math.Min(blocks, 1_024)];
+        long[] places = [];
         int count = 0;
         bool placed = true;
         long kept = 0;
@@ -1287,7 +1287,8 @@ internal sealed partial class DatasetScanBuilder
                 {
                     if (kept > places.Length)
                     {
-                        Array.Resize(ref places, (int)Math.Min(blocks, Math.Max(places.Length * 2L, kept)));
+                        // Made at the first kept row, for an object that keeps one.
+                        Array.Resize(ref places, (int)Math.Min(blocks, Math.Max(Math.Max(places.Length * 2L, 1_024), kept)));
                     }
 
                     count = Append(words, batch.StartRow, batch.RowCount, places, count);

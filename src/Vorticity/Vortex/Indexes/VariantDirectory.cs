@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -97,7 +98,13 @@ internal sealed class VariantDirectory
         {
             _byPath[group.Key] = [.. group.Value];
         }
+
+        _byJoined = _byPath.GetAlternateLookup<ReadOnlySpan<char>>();
     }
+
+    // The same paths, looked up by their keys joined into a span, which a question's filter asks once an object and a
+    // predicate: no string made for the asking.
+    private readonly Dictionary<string, PathEntry[]>.AlternateLookup<ReadOnlySpan<char>> _byJoined;
 
     /// <summary>The object's rows.</summary>
     internal long Rows { get; }
@@ -382,18 +389,41 @@ internal sealed class VariantDirectory
 
         partial = directory.Partial;
 
-        string[] keys = new string[path.Steps.Length];
-        for (int i = 0; i < keys.Length; i++)
+        // The keys joined as the directory joins them, on the stack while they fit.
+        int length = 0;
+        foreach (VariantStep step in path.Steps)
         {
-            if (!path.Steps[i].IsKey)
+            if (!step.IsKey)
             {
                 return null;
             }
 
-            keys[i] = path.Steps[i].Key!;
+            length += Digits(step.Key!.Length) + 1 + step.Key.Length;
         }
 
-        entries = directory.Of(keys);
+        char[]? rented = length > 256 ? System.Buffers.ArrayPool<char>.Shared.Rent(length) : null;
+        try
+        {
+            Span<char> joined = rented ?? stackalloc char[256];
+            int at = 0;
+            foreach (VariantStep step in path.Steps)
+            {
+                step.Key!.Length.TryFormat(joined[at..], out int written, provider: CultureInfo.InvariantCulture);
+                at += written;
+                joined[at++] = ':';
+                step.Key.CopyTo(joined[at..]);
+                at += step.Key.Length;
+            }
+
+            entries = directory._byJoined.TryGetValue(joined[..at], out PathEntry[]? found) ? found : [];
+        }
+        finally
+        {
+            if (rented is not null)
+            {
+                System.Buffers.ArrayPool<char>.Shared.Return(rented);
+            }
+        }
         if (entries.IsEmpty)
         {
             return directory.Partial ? null : true;
@@ -689,8 +719,11 @@ internal sealed class VariantDirectory
     private static bool Wanted(ReadOnlySpan<byte> bytes, ReadOnlySpan<int> keys, IReadOnlyList<byte[][]> wanted)
     {
         int depth = keys.Length / 2;
-        foreach (byte[][] path in wanted)
+
+        // By index: a foreach over the list boxes its enumerator, once for each entry of the directory.
+        for (int w = 0; w < wanted.Count; w++)
         {
+            byte[][] path = wanted[w];
             if (path.Length != depth)
             {
                 continue;
@@ -750,6 +783,18 @@ internal sealed class VariantDirectory
         }
 
         return (null, 0, 0);
+    }
+
+    /// <summary>The decimal digits of <paramref name="value"/>, not negative.</summary>
+    private static int Digits(int value)
+    {
+        int digits = 1;
+        for (; value >= 10; value /= 10)
+        {
+            digits++;
+        }
+
+        return digits;
     }
 
     private static string Joined(IReadOnlyList<string> keys)

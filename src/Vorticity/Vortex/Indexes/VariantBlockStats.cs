@@ -489,7 +489,7 @@ internal sealed class VariantBlockStats
     /// only; null when the file carries none, or they do not decode.
     /// </summary>
     internal static async ValueTask<(VariantBlockStats? Stats, int Segments, long Bytes)> ReadAsync(
-        VortexFile file, int field, IReadOnlyCollection<(string Key, PathClass Class)> wanted, CancellationToken cancellationToken)
+        VortexFile file, int field, IReadOnlyList<(string Key, PathClass Class)> wanted, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(file);
         IndexDirectory? directory = await file.ReadIndexDirectoryAsync(cancellationToken).ConfigureAwait(false);
@@ -514,10 +514,11 @@ internal sealed class VariantBlockStats
             {
                 blocks[key] = [];
                 IndexSegment region = run.Payload[key];
+                // By index: a foreach over the list boxes its enumerator, once for each key of the object.
                 bool asked = false;
-                foreach ((string Key, PathClass Class) want in wanted)
+                for (int w = 0; w < wanted.Count; w++)
                 {
-                    asked |= want.Class == keys[key].Class && string.Equals(want.Key, keys[key].Key, StringComparison.Ordinal);
+                    asked |= wanted[w].Class == keys[key].Class && string.Equals(wanted[w].Key, keys[key].Key, StringComparison.Ordinal);
                 }
 
                 slots[key] = asked ? requests.Add(new Vorticity.Serialization.Schemas.SegmentSpec(region.Offset, region.Length, region.AlignmentExponent, 0, 0)) : -1;
