@@ -774,6 +774,19 @@ internal static class ColumnCompressor
     /// </summary>
     private const int DictionaryOverhead = 512;
 
+    /// <summary>
+    /// What the codes of <paramref name="rows"/> rows into <paramref name="entries"/> entries cost: bit-packed at the
+    /// narrowest width that indexes the entries where <paramref name="packs"/>, as their own cascade writes them at worst;
+    /// at the narrowest integer otherwise. Priced so, a dictionary competes with a bit-packing at the bytes both write:
+    /// eight status codes, five in a hundred past a bit-packing's width, took 3 bits a row as a dictionary where the
+    /// bit-packing and its patches took 6.7, and the codes priced a byte a row lost to it.
+    /// </summary>
+    private static long CodeBytes(long rows, int entries, bool packs) =>
+        packs
+            ? ((rows + Arrays.Decoders.Compressed.FastLanes.BlockSize - 1) / Arrays.Decoders.Compressed.FastLanes.BlockSize)
+                * Arrays.Decoders.Compressed.FastLanes.BytesPerBlockPerBit * Math.Max(1, 64 - BitOperations.LeadingZeroCount((ulong)Math.Max(entries - 1, 0)))
+            : rows * FsstPlan.IndexPType(entries).ByteWidth();
+
     /// <summary>Below this many rows, a column is a candidate only if it is big in bytes.</summary>
     private const int MinimumRows = 64;
 
@@ -1176,8 +1189,8 @@ internal static class ColumnCompressor
         if (Allows(target, "vortex.dict") && !cascade.DictionaryIsDead)
         {
             dictionary = chunk.TableServes(length)
-                ? TabledDictionary(node, in chunk, length, budget)
-                : Dictionary(arena, node, comparer, length, budget);
+                ? TabledDictionary(node, in chunk, length, budget, Allows(target, "fastlanes.bitpacked"))
+                : Dictionary(arena, node, comparer, length, budget, Allows(target, "fastlanes.bitpacked"));
         }
         if (dictionary.Scheme != ColumnScheme.None)
         {
@@ -1479,7 +1492,7 @@ internal static class ColumnCompressor
     /// than that budget can never win, whatever the rest of the rows hold.
     /// </remarks>
     private static ColumnPlan Dictionary(
-        CanonicalArena arena, CanonicalNode node, in RowComparer comparer, int length, long budget)
+        CanonicalArena arena, CanonicalNode node, in RowComparer comparer, int length, long budget, bool packs)
     {
         int minimumEntry = node.Kind switch
         {
@@ -1535,17 +1548,16 @@ internal static class ColumnCompressor
                     buckets[bucket] = code;
 
                     // Give up as soon as the dictionary provably cannot win, against the price the
-                    // plan will actually be charged rather than a weaker stand-in for it. Assuming
-                    // a one-byte code per row holds only while there are at most 256 distinct
-                    // values; past that the codes are wider, and a bound that ignores it walks
-                    // every row of a column whose verdict was settled at the 257th distinct value.
+                    // plan will actually be charged rather than a weaker stand-in for it. The codes'
+                    // width grows with the distinct values, and a bound that ignores it walks every
+                    // row of a column whose verdict was settled at the 257th distinct value.
                     //
                     // It is still a lower bound, so nothing that would have been kept is refused
                     // here and not a byte moves: `distinct` only grows, so the code width only
                     // grows; and `EntriesSize` is at least `distinct * minimumEntry` for every kind
                     // that reaches this line. The final test below is this same expression with the
                     // entries priced exactly.
-                    long codeBytes = (long)length * FsstPlan.IndexPType(distinct).ByteWidth();
+                    long codeBytes = CodeBytes(length, distinct, packs);
                     if (codeBytes + ((long)distinct * minimumEntry) + DictionaryOverhead >= budget)
                     {
                         return ColumnPlan.Canonical;
@@ -1557,7 +1569,7 @@ internal static class ColumnCompressor
 
             // Priced, not assumed: codes at the narrowest width that indexes the entries, plus the
             // entries themselves in whatever form they will actually be written.
-            long encoded = ((long)length * FsstPlan.IndexPType(distinct).ByteWidth())
+            long encoded = CodeBytes(length, distinct, packs)
                 + EntriesSize(arena, node, firstRows.AsSpan(0, distinct));
             if (encoded + DictionaryOverhead >= budget)
             {
@@ -1946,8 +1958,8 @@ internal static class ColumnCompressor
         if (Allows(target, "vortex.dict") && !cascade.DictionaryIsDead)
         {
             ColumnPlan dictionary = chunk.TableServes(length)
-                ? TabledDictionary(node, in chunk, length, best)
-                : Dictionary(arena, node, comparer, length, best);
+                ? TabledDictionary(node, in chunk, length, best, Allows(target, "fastlanes.bitpacked"))
+                : Dictionary(arena, node, comparer, length, best, Allows(target, "fastlanes.bitpacked"));
             if (dictionary.Scheme != ColumnScheme.None)
             {
                 // The runs walked when run-end competes, which the dictionary beat, go back to the pool.
@@ -2304,14 +2316,14 @@ internal static class ColumnCompressor
 
                 if (chunk.TableServes(length))
                 {
-                    return TabledDictionary(node, in chunk, length, plain);
+                    return TabledDictionary(node, in chunk, length, plain, Allows(target, "fastlanes.bitpacked"));
                 }
 
                 // No table runs on a column two bytes wide or narrower, whose worst case no
                 // dictionary beats, though sixteen values of a short take a byte a row. Memory
                 // exists to skip this walk; a caller's pin pays it.
                 return pinned
-                    ? Dictionary(arena, node, new RowComparer(arena, nodeIndex), length, plain)
+                    ? Dictionary(arena, node, new RowComparer(arena, nodeIndex), length, plain, Allows(target, "fastlanes.bitpacked"))
                     : ColumnPlan.Canonical;
 
             default:
@@ -2416,7 +2428,7 @@ internal static class ColumnCompressor
     /// </summary>
     /// <remarks>
     /// The final test is the same expression, on the same numbers. The walk prices
-    /// <c>rows × codeWidth(entries) + EntriesSize(entries)</c> against the budget once it has seen
+    /// <c>CodeBytes(rows, entries) + EntriesSize(entries)</c> against the budget once it has seen
     /// every row; its early abandonment is a lower bound of that test and never fires on a plan the
     /// test would have kept. So the plan here is the plan there, and what changes is that no row is
     /// read to reach it.
@@ -2431,14 +2443,14 @@ internal static class ColumnCompressor
     /// <param name="chunk">The cursor whose table serves this chunk.</param>
     /// <param name="length">The chunk's row count.</param>
     /// <param name="budget">The cheapest plan so far, in bytes.</param>
+    /// <param name="packs">Whether the edition bit-packs the codes (<see cref="CodeBytes"/>).</param>
     private static ColumnPlan TabledDictionary(
-        CanonicalNode node, in ChunkStats chunk, int length, long budget)
+        CanonicalNode node, in ChunkStats chunk, int length, long budget, bool packs)
     {
         DistinctTable table = chunk.Table!;
         (int entries, long heap) = chunk.TableAtClose;
 
-        long encoded = ((long)length * FsstPlan.IndexPType(entries).ByteWidth())
-            + EntriesSizeOf(node, entries, heap);
+        long encoded = CodeBytes(length, entries, packs) + EntriesSizeOf(node, entries, heap);
         if (encoded + DictionaryOverhead >= budget)
         {
             return ColumnPlan.Canonical;
@@ -2457,8 +2469,8 @@ internal static class ColumnCompressor
     }
 
     /// <summary>
-    /// The bytes the dictionary layer was priced at, over what the encoder built: the codes at the
-    /// narrowest width that indexes <paramref name="values"/>, plus the entries in the form
+    /// The bytes the dictionary layer was priced at, over what the encoder built: the codes as
+    /// <see cref="CodeBytes"/> prices those that index <paramref name="values"/>, plus the entries in the form
     /// <see cref="EntriesSize(CanonicalArena, CanonicalNode, ReadOnlySpan{int})"/> prices them.
     /// </summary>
     /// <remarks>
@@ -2472,10 +2484,11 @@ internal static class ColumnCompressor
     /// <param name="arena">The arena holding the values child.</param>
     /// <param name="values">The values child as the encoder built it, one row per entry.</param>
     /// <param name="rows">The rows of the column the codes index.</param>
-    internal static long DictionaryLayerBytes(CanonicalArena arena, CanonicalNode values, int rows)
+    /// <param name="target">The edition written, which says whether the codes are bit-packed (<see cref="CodeBytes"/>).</param>
+    internal static long DictionaryLayerBytes(CanonicalArena arena, CanonicalNode values, int rows, VortexEdition target)
     {
         int entries = values.Length;
-        return ((long)rows * FsstPlan.IndexPType(entries).ByteWidth()) + EntriesSize(arena, values, entries);
+        return CodeBytes(rows, entries, Allows(target, "fastlanes.bitpacked")) + EntriesSize(arena, values, entries);
     }
 
     /// <summary>

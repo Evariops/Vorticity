@@ -136,8 +136,10 @@ Per column chunk, in order:
    below a quarter as many runs as rows), bit-packing in the raw, zigzag or frame-of-reference domain
    at the cheapest width with its patches, a timestamp's instants split into days, seconds and
    subseconds (`vortex.datetimeparts`), priced by each part's packed width and taken when it comes a
-   tenth under the best so far, and the dictionary, priced by its own layer at the codes' width plus
-   its values child. A 256-row sample bounds the timestamp split from below, so instants at full
+   tenth under the best so far, and the dictionary, priced by its own layer, its codes bit-packed at the
+   width that indexes its values as their own cascade writes them at worst, plus its values child: eight
+   status codes, five in a hundred past the width the others pack at, take 3 bits a row as a dictionary
+   where the bit-packing and its patches take 6.7, a choice its codes priced a byte a row lost. A 256-row sample bounds the timestamp split from below, so instants at full
    resolution are refused without the pass that splits them.
 4. Trials only run when no exact verdict won, and each carries its encoded result so a winner is
    never encoded twice. For floats, ALP is tried, then ALP-RD against a zstd frame. For text, a zstd

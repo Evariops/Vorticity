@@ -410,7 +410,7 @@ internal static class ArrayBlobWriter
         // Computed over the values child as built and the rows the codes index, with the formula
         // the plan was priced by: the number plan memory compares the prediction to.
         dictionaryLayer = ColumnCompressor.DictionaryLayerBytes(
-            arena, arena.GetNode(values), arena.GetNode(nodeIndex).Length);
+            arena, arena.GetNode(values), arena.GetNode(nodeIndex).Length, encodings.Target);
         return WriteDict(blob, arena, nodeIndex, values, plan, encodings, owner);
     }
 
