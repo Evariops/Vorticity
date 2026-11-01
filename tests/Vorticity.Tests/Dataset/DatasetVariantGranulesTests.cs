@@ -113,6 +113,66 @@ public sealed partial class DatasetVariantGranulesTests
         };
     }
 
+    /// <summary>
+    /// The calls of <see cref="AKeysStatisticsAreThoseOfItsValuesAsAColumn"/> grouped by a key of the attributes: a service's
+    /// calls by route, the route varying in every granule; every call by status code; and the calls and the sum of their
+    /// codes by service and tenant, a granule holding one of each, the code summed from the values its statistics list. Each
+    /// is answered by the granules with no block decoded, the key's statistics giving its groups, where the rows' path
+    /// decodes the attributes; the answers are LINQ's.
+    /// </summary>
+    [Fact]
+    public async Task GroupsByAKeyAreAnsweredByItsGranules()
+    {
+        await using MemoryObjectStore memory = new MemoryObjectStore();
+        await using CountingObjectStore store = new CountingObjectStore(memory);
+        Call[] calls = await WrittenAsync(store);
+        string[][] expected =
+        [
+            [.. calls.Where(static c => c.Service == "svc-1").GroupBy(static c => c.Attributes["route"]?.AsString()).Select(static g => $"{g.Key}:{g.Count()}").Order(StringComparer.Ordinal)],
+            [.. calls.GroupBy(static c => c.Code).Select(static g => $"{g.Key}:{g.Count()}").Order(StringComparer.Ordinal)],
+            [.. calls.GroupBy(static c => (c.Service, c.Tenant)).Select(static g => $"{g.Key.Service}/{g.Key.Tenant}:{g.Count()}:{g.Sum(static c => c.Code)}").Order(StringComparer.Ordinal)],
+        ];
+        for (int q = 0; q < expected.Length; q++)
+        {
+            long[] bytes = new long[2];
+            long[] decoded = new long[2];
+            foreach (bool synopses in (bool[])[false, true])
+            {
+                await using VortexDataset fresh = await VortexDataset.OpenAsync(store, new DatasetOptions { ContentsObjectBytes = 0, SheetObjectBytes = 0 }, Ct);
+                store.Reset();
+                Vorticity.Aggregation question = Grouped(fresh.Scan<Call>().With(new ScanOptions { UseSynopses = synopses }), q);
+                string[] answers = await Answered(question, q);
+                bytes[synopses ? 1 : 0] = store.BytesRead;
+                decoded[synopses ? 1 : 0] = question.Metrics.BlocksDecoded;
+                Assert.Equal(expected[q], answers);
+                if (synopses)
+                {
+                    ScanPlan plan = await Grouped(fresh.Scan<Call>(), q).ExplainAsync(Ct);
+                    Assert.All(plan.Units, static unit => Assert.True(unit.Alternative == "granules", $"{unit.Alternative}: {unit.Detail}; {string.Join("; ", unit.Rejected)}"));
+                }
+            }
+
+            Console.WriteLine($"GROUPS: question {q}, {bytes[1]} bytes and {decoded[1]} blocks decoded through the granules, {bytes[0]} and {decoded[0]} through the rows");
+            Assert.Equal(0, decoded[1]);
+            Assert.True(decoded[0] > 0);
+            Assert.True(bytes[1] < bytes[0], $"question {q}: {bytes[1]} bytes through the granules, {bytes[0]} through the rows");
+        }
+
+        static Vorticity.Aggregation Grouped(Scan<Call> scan, int question) => question switch
+        {
+            0 => scan.Where(c => c.Service == "svc-1").GroupBy(c => c.Attributes["route"].AsString()).Select(g => (g.Key, g.Count())),
+            1 => scan.GroupBy(c => c.Attributes["code"].AsInt64()).Select(g => (g.Key, g.Count())),
+            _ => scan.GroupBy(c => (c.Service, c.Attributes["tenant"].AsString())).Select(g => (g.Key.Item1, g.Key.Item2, g.Count(), g.Sum(x => x.Attributes["code"].AsInt64()))),
+        };
+
+        static async Task<string[]> Answered(Vorticity.Aggregation question, int q) => q switch
+        {
+            0 => [.. (await question.As<RouteCount>().ToRecordsAsync(Ct).ToListAsync(Ct)).Select(static a => $"{a.Route}:{a.Count}").Order(StringComparer.Ordinal)],
+            1 => [.. (await question.As<CodeCount>().ToRecordsAsync(Ct).ToListAsync(Ct)).Select(static a => $"{a.Code}:{a.Count}").Order(StringComparer.Ordinal)],
+            _ => [.. (await question.As<TenantSum>().ToRecordsAsync(Ct).ToListAsync(Ct)).Select(static a => $"{a.Service}/{a.Tenant}:{a.Count}:{a.Codes}").Order(StringComparer.Ordinal)],
+        };
+    }
+
     /// <summary>The calls both tests ask, written to <paramref name="store"/> and consolidated into one object of a day.</summary>
     private static async Task<Call[]> WrittenAsync(CountingObjectStore store)
     {
@@ -196,4 +256,13 @@ public sealed partial class DatasetVariantGranulesTests
 
     [VortexRecord]
     public partial record struct ServiceCount(string? Service, long Count);
+
+    [VortexRecord]
+    public partial record struct RouteCount(string? Route, long Count);
+
+    [VortexRecord]
+    public partial record struct CodeCount(long? Code, long Count);
+
+    [VortexRecord]
+    public partial record struct TenantSum(string? Service, string? Tenant, long Count, long Codes);
 }

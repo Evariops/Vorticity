@@ -335,8 +335,12 @@ granules as a column does, the rows that hold no value of its class counted as n
 `Attributes["code"].AsInt64() >= 500`, is judged on them granule by granule as on a column, a granule
 where the key varies answered from its values under a question of counts. The services under a code of
 500 or more, and those of a tenant, read 3.1 KB and 9.6 KB through the granules with no block decoded,
-where the rows read 655 KB and 66 KB *(measured, `DatasetVariantGranulesTests`)*. A key or a measure on a
-path is still read as rows.
+where the rows read 655 KB and 66 KB *(measured, `DatasetVariantGranulesTests`)*. A key on such a path
+takes its groups from them as a column's does, its states carried under the path's text, and a measure on
+one sums the values a granule lists; no object's counts hold a path, so its objects are answered by their
+granules or their rows. A service's calls by route, every call by status code, and the calls and codes by
+service and tenant read 9.7 KB, 1.3 KB and 9.6 KB through the granules, where the rows read 538 KB, 399 KB
+and 627 KB *(measured, `DatasetVariantGranulesTests`)*.
 
 A granule no delete touches settles as a file's does; a granule a delete touches is read as rows
 (section 6). The statistics take 1 307.7 bytes a granule on the design's requests, sorted by emitter,

@@ -51,7 +51,7 @@ internal sealed class CountsAnswer
 
     private CountsAnswer(
         StateRequest request, DatasetSchema version, int? column, bool keyed, byte[][]? values, VortexExpr? rest,
-        (int Field, string Path, FieldExpr Key)[] constants)
+        (int Field, string Path, FieldExpr Key)[] constants, bool readsPaths)
     {
         VortexSchema columns = version.Columns;
         DType schema = version.DType;
@@ -59,6 +59,7 @@ internal sealed class CountsAnswer
         _schema = version;
         Column = column;
         Keyed = keyed;
+        ReadsPaths = readsPaths;
         Values = values;
         _rest = rest is null ? null : new SummaryPruner(rest);
         _constants = constants;
@@ -92,6 +93,12 @@ internal sealed class CountsAnswer
     /// <summary>The column a key or the filter reads, whose counts answer; null for a question of no column, which any column's counts answer.</summary>
     internal int? Column { get; }
 
+    /// <summary>
+    /// Whether a key or a measure reads a path of a variant, whose values no object's counts hold: no object nor rollup is
+    /// answered by them, and the batches' layout serves the statistics of the path's granules alone (<see cref="GranuleAnswer"/>).
+    /// </summary>
+    internal bool ReadsPaths { get; }
+
     /// <summary>Whether a key or a distinct count reads the column's values, which the entries of the values a budget left out do not give.</summary>
     internal bool Keyed { get; }
 
@@ -124,8 +131,9 @@ internal sealed class CountsAnswer
 
     /// <summary>
     /// How the objects' counts answer <paramref name="request"/> under <paramref name="filter"/> over the columns of
-    /// <paramref name="version"/>; null when they answer no object of it: a key of two columns that are no function of
-    /// each other, a key, a value or a measure on a path, or a measure no column is. Every object is then read as rows.
+    /// <paramref name="version"/>; null when they answer no object of it, nor lay out batches for its granules: a key of
+    /// no top-level column, or a measure that is neither such a column nor a path. Every object is then read as rows. A
+    /// key or a measure on a path answers no object either, but lays the batches out (<see cref="ReadsPaths"/>).
     /// </summary>
     internal static CountsAnswer? Of(StateRequest request, VortexExpr? filter, DatasetSnapshot version) => Of(request, filter, version, out _);
 
@@ -186,13 +194,14 @@ internal sealed class CountsAnswer
         // The keys: a column itself is the one counted, the first met when the filter asks none; another column, or a
         // function of one, each object holds constant; a function of the counted column, its counts give.
         List<(int Field, string Path, FieldExpr Key)> constants = [];
+        bool paths = false;
         foreach (FieldExpr key in request.Keys)
         {
-            // A path's values are no column's: no object's counts hold them.
+            // A path's values are no column's: no object's counts hold them, its granules' statistics may.
             if (key is VariantFieldExpr)
             {
-                declined = "a key reads a path, whose values no object's counts hold";
-                return null;
+                paths = true;
+                continue;
             }
 
             if (key is not ColumnFieldExpr)
@@ -240,10 +249,11 @@ internal sealed class CountsAnswer
             }
         }
 
-        // The measures: top-level columns, which the counts carry as numbers.
+        // The measures: top-level columns, which the counts carry as numbers; or paths, which their granules' statistics may.
         foreach (FieldExpr? input in request.InputFields)
         {
-            if (input is not null && Top(input, schema) is null)
+            paths |= input is VariantFieldExpr;
+            if (input is not (null or VariantFieldExpr) && Top(input, schema) is null)
             {
                 declined = "a measure reads no top-level column";
                 return null;
@@ -258,7 +268,7 @@ internal sealed class CountsAnswer
 
         declined = null;
         return new CountsAnswer(
-            request, version.Schema, column, keyed, values?.ToArray(), GroupPredicates.And(null, rest), [.. constants])
+            request, version.Schema, column, keyed, values?.ToArray(), GroupPredicates.And(null, rest), [.. constants], paths)
         {
             Exclusion = exclusion,
         };
@@ -312,6 +322,12 @@ internal sealed class CountsAnswer
     internal int? FieldOf(in PositionedObject held, out string? declined)
     {
         ObjectEntry entry = held.Entry;
+        if (ReadsPaths)
+        {
+            declined = "a key or a measure reads a path, whose values no object's counts hold";
+            return null;
+        }
+
         if (entry.HasDeletions && !(entry.HasNegatives && Subtracts))
         {
             declined = "a delete marked rows its counts still hold";
@@ -392,7 +408,7 @@ internal sealed class CountsAnswer
     /// </summary>
     internal int? FieldOf(RollupEntry rollup)
     {
-        if ((_rest is { } rest && !rest.MustMatch(rollup.Summaries.Columns, rollup.Rows)) || rollup.Columns.Count == 0 || Exclusion is not null)
+        if ((_rest is { } rest && !rest.MustMatch(rollup.Summaries.Columns, rollup.Rows)) || rollup.Columns.Count == 0 || Exclusion is not null || ReadsPaths)
         {
             return null;
         }
@@ -425,7 +441,7 @@ internal sealed class CountsAnswer
     /// </summary>
     internal (int Field, ObjectSummaries?[] Buckets)? BucketsOf(RollupEntry rollup, DatasetKey key, SummaryPruner? pruner)
     {
-        if (rollup.Buckets.Count < 2 || Exclusion is not null)
+        if (rollup.Buckets.Count < 2 || Exclusion is not null || ReadsPaths)
         {
             return null;
         }
@@ -643,15 +659,29 @@ internal sealed class CountsAnswer
     /// <summary>
     /// The batches' columns of <paramref name="request"/> over <paramref name="columns"/>: each key's column once, under the
     /// name a batch of states gives it, the rows, each measure's states, then the sketches a quantile asks, typed in
-    /// <paramref name="types"/>.
+    /// <paramref name="types"/>. A path a key or a measure reads is numbered past the columns, in the order the keys, then
+    /// the measures, first read it; a key's carries its values under its text, of the type its read gives them.
     /// </summary>
     internal static (int[] KeyFields, (string Name, int Field, bool Floats, bool Sketch)[] Measures, DType Type) Layout(
         StateRequest request, VortexSchema columns, DType schema, DTypeArena types)
     {
         List<int> keyFields = [];
         List<VortexField> fields = [];
+        List<string>? paths = null;
         foreach (FieldExpr key in request.Keys)
         {
+            if (key is VariantFieldExpr path)
+            {
+                int numbered = columns.Count + PathNumber(paths ??= [], path.Text);
+                if (!keyFields.Contains(numbered))
+                {
+                    keyFields.Add(numbered);
+                    fields.Add(new VortexField(path.Text, VariantFieldExpr.TypeOf(path.Read)));
+                }
+
+                continue;
+            }
+
             FieldExpr inner = Inner(key);
             int field = columns.IndexOf(inner.Path);
             if (!keyFields.Contains(field))
@@ -675,6 +705,12 @@ internal sealed class CountsAnswer
             if (at >= 0)
             {
                 measures[at] = measures[at] with { Sketch = measures[at].Sketch || sketch };
+                continue;
+            }
+
+            if (request.InputFields[i] is VariantFieldExpr path)
+            {
+                measures.Add((name, columns.Count + PathNumber(paths ??= [], path.Text), path.Read is VariantRead.AsDouble or VariantRead.ToDouble, sketch));
                 continue;
             }
 
@@ -703,6 +739,19 @@ internal sealed class CountsAnswer
         }
 
         return ([.. keyFields], [.. measures], VortexTypes.ToDType(VortexSchema.Create([.. fields]), types));
+    }
+
+    /// <summary>The place of the path <paramref name="text"/> among <paramref name="paths"/>, added at their end the first time.</summary>
+    private static int PathNumber(List<string> paths, string text)
+    {
+        int at = paths.IndexOf(text);
+        if (at < 0)
+        {
+            paths.Add(text);
+            at = paths.Count - 1;
+        }
+
+        return at;
     }
 
     /// <summary>
