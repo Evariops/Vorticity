@@ -128,7 +128,7 @@ select (g.Key, g.Count())
 | the `Variant` type, paths, `As…`, `To…` and `Has` in questions, typed and on the tool path | [07-dotnet-mapping.md](07-dotnet-mapping.md), [14-public-api.md](14-public-api.md), [16-queries.md, variant paths](16-queries.md#36-variant-paths), [08-semantics.md](08-semantics.md) for a path absent or of another type |
 | what an object shreds, the presence rule, shapes, bodies, the validity of shredded fields, level 0's variants | [11-write-strategy.md, shredded variants](11-write-strategy.md#10-shredded-variants), [90-registry.md, the writer's schemes](90-registry.md#5-the-writers-schemes-and-their-ids) |
 | the path map, the path directory, the shredded keys' zone maps, their locates and indexes on paths | [10-indexes.md](10-indexes.md#45-vorticityvariantpathsv1-where-each-shredded-key-of-a-variant-lies), and the three kinds after it |
-| the synopses on paths: where a shredded key's values lie, granule by granule; counts and sheets are top-level columns' alone | [10-indexes.md](10-indexes.md#413-vorticitylocatev1-where-each-value-lies-granule-by-granule), [22-on-the-fly-and-synopses.md](22-on-the-fly-and-synopses.md#5-the-synopses-all-per-column) |
+| the synopses on paths: where a shredded key's values lie, and its statistics, granule by granule; counts and sheets are top-level columns' alone | [10-indexes.md](10-indexes.md#411-vorticitygranulestatsv1-a-column-over-the-granules), [4.13](10-indexes.md#413-vorticitylocatev1-where-each-value-lies-granule-by-granule), [22-on-the-fly-and-synopses.md](22-on-the-fly-and-synopses.md#5-the-synopses-all-per-column) |
 
 The guide shows them from the caller's side ([records.md](../guide/records.md),
 [untyped-files.md](../guide/untyped-files.md), [indexes.md](../guide/indexes.md),

@@ -60,6 +60,13 @@ internal sealed class GranuleAnswer
     private int[] _filtered = [];
     private int[]? _fields;
 
+    // The shredded keys the filter reads, each a column of its own for the granules, past the version's columns: the variant
+    // column, the key and the class its statistics list, the name its comparisons are judged under, and its type. A
+    // comparison on such a key is judged on that column (OverPaths), which the key's statistics over the granules describe.
+    // Null for a filter on none, which allocates nothing.
+    private List<(int Variant, string Key, Types.Variants.PathClass Class, string Name, DType Type)>? _pathColumns;
+    private DTypeArena? _pathTypes;
+
     // A value of a declared identifier the filter leaves out (CountsAnswer.Exclusion): a granule the identifier's postings
     // place no row of the value in is answered under the rest of the filter, the others read as rows. Null for none, which
     // most questions are: made apart, it costs them nothing.
@@ -172,11 +179,12 @@ internal sealed class GranuleAnswer
         List<int> ranged = [];
         if (_excluding is { } excluding && _asked is { } whole)
         {
-            excluding.Whole = new SummaryPruner(whole);
+            excluding.Whole = new SummaryPruner(OverPaths(whole));
         }
 
-        if ((_excluding is { } less ? less.Rest : _asked) is { } filter)
+        if ((_excluding is { } less ? less.Rest : _asked) is { } asked)
         {
+            VortexExpr filter = OverPaths(asked);
             _filter = new SummaryPruner(filter);
             HashSet<string> bounded = new HashSet<string>(StringComparer.Ordinal);
             HashSet<string> other = new HashSet<string>(StringComparer.Ordinal);
@@ -192,6 +200,11 @@ internal sealed class GranuleAnswer
                         Add(ranged, field);
                     }
                 }
+                else if (PathIndex(path) is int at and >= 0)
+                {
+                    Add(filtered, _schema.DType.FieldCount + at);
+                    Add(fields, _schema.DType.FieldCount + at);
+                }
             }
         }
 
@@ -205,6 +218,128 @@ internal sealed class GranuleAnswer
         _filtered = [.. filtered];
         return [.. fields];
     }
+
+    /// <summary>
+    /// <paramref name="filter"/> with each comparison on a shredded key read in a class its statistics list, an integer or a
+    /// text, made one on a column of the key's own (<see cref="_pathColumns"/>), out of its fence; the rest as it is, a
+    /// predicate on any other path in its fence, which no summary of the variant column judges.
+    /// </summary>
+    private VortexExpr OverPaths(VortexExpr filter)
+    {
+        switch (filter)
+        {
+            case VariantFilterExpr fenced:
+                VortexExpr inner = OverPaths(fenced.Inner);
+                return ReferenceEquals(inner, fenced.Inner) ? fenced : inner;
+            case LogicalExpr logical:
+                VortexExpr left = OverPaths(logical.Left);
+                VortexExpr right = OverPaths(logical.Right);
+                return ReferenceEquals(left, logical.Left) && ReferenceEquals(right, logical.Right) ? logical
+                    : logical.IsAnd ? Expr.And(left, right) : Expr.Or(left, right);
+            case ComparisonExpr { Field: VariantFieldExpr path } comparison when PathColumn(path) is { } column:
+                return new ComparisonExpr(column, comparison.Op, comparison.Value);
+            case InExpr { Field: VariantFieldExpr path } set when PathColumn(path) is { } column:
+                return new InExpr(column, [.. set.Values]);
+            default:
+                return filter;
+        }
+    }
+
+    /// <summary>The column of the granules the shredded key <paramref name="path"/> reads, made the first time; null for a path no statistics describe.</summary>
+    private ColumnFieldExpr? PathColumn(VariantFieldExpr path)
+    {
+        Types.Variants.PathClass? @class = path.CountedClass switch
+        {
+            Types.Variants.VariantClass.Integer => Types.Variants.PathClass.Integer,
+            Types.Variants.VariantClass.String => Types.Variants.PathClass.String,
+            _ => null,
+        };
+        if (@class is not { } held || _schema.DType.IndexOfField(path.Column.Path) is not (int variant and >= 0))
+        {
+            return null;
+        }
+
+        int at = PathIndex(path.Text);
+        if (at < 0)
+        {
+            _pathTypes ??= new DTypeArena();
+            (_pathColumns ??= []).Add((variant, path.Steps[0].Key!, held, path.Text, Writing.IndexWriter.ClassType(_pathTypes, held)));
+            at = _pathColumns.Count - 1;
+        }
+
+        return new ColumnFieldExpr([_pathColumns![at].Name]);
+    }
+
+    /// <summary>The place among <see cref="_pathColumns"/> of the shredded key judged under <paramref name="name"/>; -1 for none.</summary>
+    private int PathIndex(string name)
+    {
+        for (int i = 0; _pathColumns is { } columns && i < columns.Count; i++)
+        {
+            if (string.Equals(columns[i].Name, name, StringComparison.Ordinal))
+            {
+                return i;
+            }
+        }
+
+        return -1;
+    }
+
+    /// <summary>The shredded key column <paramref name="field"/> stands for, past the version's columns; null for a column.</summary>
+    private (int Variant, string Key, Types.Variants.PathClass Class, string Name, DType Type)? PathOf(int field) =>
+        _pathColumns is { } columns && field >= _schema.DType.FieldCount && field - _schema.DType.FieldCount < columns.Count ? columns[field - _schema.DType.FieldCount] : null;
+
+    /// <summary>
+    /// The shredded key each of <see cref="Fields"/> stands for, by the same places, its variant column, key and class, which
+    /// a read of the statistics takes the key's of; null for a column, and null whole when the filter reads no key.
+    /// </summary>
+    internal (int Field, string Key, Types.Variants.PathClass Class)?[]? PathsOfFields
+    {
+        get
+        {
+            int[] fields = Fields;
+            return _pathColumns is null ? null
+                : _pathsOfFields ??= Array.ConvertAll(fields, column => PathOf(column) is { } path ? ((int, string, Types.Variants.PathClass)?)(path.Variant, path.Key, path.Class) : null);
+        }
+    }
+
+    private (int Field, string Key, Types.Variants.PathClass Class)?[]? _pathsOfFields;
+
+    /// <summary><see cref="Fields"/> as a scan reads their rows: a shredded key's column the variant column it lies in, each once.</summary>
+    private int[] ReadFields
+    {
+        get
+        {
+            if (_readFields is null)
+            {
+                int[] fields = Fields;
+                List<int>? read = _pathColumns is null ? null : [];
+                foreach (int column in read is null ? [] : fields)
+                {
+                    Add(read!, PathOf(column)?.Variant ?? column);
+                }
+
+                _readFields = read is null ? fields : [.. read];
+            }
+
+            return _readFields;
+        }
+    }
+
+    private int[]? _readFields;
+
+    /// <summary>The name column <paramref name="field"/> is judged under: a column's own, a shredded key's text.</summary>
+    private string NameOf(int field) => PathOf(field)?.Name ?? _schema.Columns[field].Name;
+
+    /// <summary>The type of column <paramref name="field"/>: a column's own, the class a shredded key's statistics list.</summary>
+    private DType TypeOf(int field) => PathOf(field)?.Type ?? _schema.DType.GetField(field);
+
+    /// <summary>The region of the statistics over the granules of column <paramref name="field"/> of an object of <paramref name="contents"/>; null for none.</summary>
+    private IndexSegment? StatisticsOf(ObjectContents contents, int field) =>
+        PathOf(field) is { } path ? contents.PathGranuleStatsOf(path.Variant, path.Key, path.Class)?.Region : contents.GranuleStatsOf(field);
+
+    /// <summary>The rows of the granules where column <paramref name="field"/> of an object of <paramref name="contents"/> holds one value.</summary>
+    private long SingleRowsOf(ObjectContents contents, int field) =>
+        PathOf(field) is { } path ? contents.PathGranuleStatsOf(path.Variant, path.Key, path.Class)?.SingleRows ?? 0 : contents.SingleRowsOf(field);
 
     /// <summary>The top-level column of each key's column of the batches, each once, in their order.</summary>
     internal int[] KeyFields { get; }
@@ -461,7 +596,7 @@ internal sealed class GranuleAnswer
         Span<IndexSegment?> regions = count <= 16 ? stackalloc IndexSegment?[count] : new IndexSegment?[count];
         for (int i = 0; i < fields.Length; i++)
         {
-            regions[i] = contents.GranuleStatsOf(fields[i]);
+            regions[i] = StatisticsOf(contents, fields[i]);
         }
 
         for (int i = 0; i < Histogrammed.Length; i++)
@@ -474,7 +609,7 @@ internal sealed class GranuleAnswer
             regions[fields.Length + Histogrammed.Length + i] = contents.KeyRunsOf(Components[i])?.Region;
         }
 
-        int[] read = _excluding is { } excluding ? excluding.ReadOf(fields) : fields;
+        int[] read = _excluding is { } excluding ? excluding.ReadOf(ReadFields) : ReadFields;
         double unanswered = Unanswered(held, edges: true) * Math.Clamp(kept, 0, 1);
         return (_costs.Regions(held.Entry.Uid, regions), _costs.Share(held.Entry, read, unanswered), _costs.Rows(held.Entry, read));
     }
@@ -624,9 +759,11 @@ internal sealed class GranuleAnswer
         {
             if (!Keyed(field) && Array.IndexOf(_ranged, field) < 0)
             {
-                double varies = 1 - Math.Clamp(contents.SingleRowsOf(field) / rows, 0, 1);
+                // A shredded key's statistics do not say the rows of the granules that list its values: taken to list them.
+                double varies = 1 - Math.Clamp(SingleRowsOf(contents, field) / rows, 0, 1);
+                double listing = PathOf(field) is null ? Math.Clamp(contents.ListedRowsOf(field) / rows, 0, 1) : 1;
                 total += varies;
-                listed = Math.Max(listed, Math.Min(varies, Math.Clamp(contents.ListedRowsOf(field) / rows, 0, 1)));
+                listed = Math.Max(listed, Math.Min(varies, listing));
             }
         }
 
@@ -838,7 +975,7 @@ internal sealed class GranuleAnswer
         GranuleColumn[] described = new GranuleColumn[Fields.Length];
         for (int i = 0; i < Fields.Length; i++)
         {
-            described[i] = new GranuleColumn(_schema.Columns[Fields[i]].Name, _schema.DType.GetField(Fields[i]), columns[i], histograms[i]);
+            described[i] = new GranuleColumn(NameOf(Fields[i]), TypeOf(Fields[i]), columns[i], histograms[i]);
         }
 
         // The granules the part holds a row of, from lo to hi; those it holds whole alone may be answered.
@@ -973,7 +1110,7 @@ internal sealed class GranuleAnswer
                 b++;
             }
 
-            if (b < hi && _costs.Bridges(entry, Fields, rows))
+            if (b < hi && _costs.Bridges(entry, ReadFields, rows))
             {
                 Array.Fill(answers, false, start, b - start);
             }

@@ -147,6 +147,31 @@ internal sealed class ObjectContents(
     /// </summary>
     internal IReadOnlyList<(int Field, string Key, PathClass Class, IndexSegment Region)> PathLocates { get; init; } = [];
 
+    /// <summary>
+    /// The statistics over the granules of each shredded key read in its class (<see cref="GranuleStats"/>), its values listed
+    /// granule by granule as a column's, the rows that hold none of the class counted as nulls: by the variant column's
+    /// place, the key and the class. Empty when the object keeps none.
+    /// </summary>
+    internal IReadOnlyList<(int Field, string Key, PathClass Class, IndexSegment Region)> PathGranuleStats { get; init; } = [];
+
+    /// <summary>The rows of the granules where each of <see cref="PathGranuleStats"/> holds one value, or nulls alone, by the same places.</summary>
+    internal IReadOnlyList<long> PathSingleRows { get; init; } = [];
+
+    /// <summary>The statistics over the granules of key <paramref name="key"/> of the variant column <paramref name="field"/>, read as <paramref name="class"/>, and the rows of its granules of one value; null for none.</summary>
+    internal (IndexSegment Region, long SingleRows)? PathGranuleStatsOf(int field, string key, PathClass @class)
+    {
+        for (int i = 0; i < PathGranuleStats.Count; i++)
+        {
+            (int column, string named, PathClass held, IndexSegment region) = PathGranuleStats[i];
+            if (column == field && held == @class && string.Equals(named, key, StringComparison.Ordinal))
+            {
+                return (region, i < PathSingleRows.Count ? PathSingleRows[i] : 0);
+            }
+        }
+
+        return null;
+    }
+
     /// <summary>The region of where key <paramref name="key"/> of the variant column <paramref name="field"/>, read as <paramref name="class"/>, lies; null for none.</summary>
     internal IndexSegment? PathLocateOf(int field, string key, PathClass @class)
     {
@@ -340,6 +365,8 @@ internal sealed class ObjectContents(
             GranuleHistograms = GranuleHistograms,
             Locates = Locates,
             PathLocates = PathLocates,
+            PathGranuleStats = PathGranuleStats,
+            PathSingleRows = PathSingleRows,
             ColumnBytes = ColumnBytes,
             ColumnChunks = ColumnChunks,
             ColumnClasses = ColumnClasses,
@@ -466,6 +493,11 @@ internal sealed class ObjectContents(
     private const int TagKeyRuns = 35;
     private const int TagKeyRunsSingle = 3;
 
+    // The statistics over the granules of a shredded key read in its class, as a path's locate is named; then the rows of the
+    // granules where each holds one value, packed, in their order.
+    private const int TagPathGranuleStats = 36;
+    private const int TagPathSingleRows = 37;
+
     // What a column's counts carry: its field, the fields of their measures, packed, and whether they leave values out.
     private const int TagCarried = 33;
     private const int TagCarriedMeasures = 2;
@@ -577,6 +609,11 @@ internal sealed class ObjectContents(
         }
 
         foreach ((int _, string _, PathClass _, IndexSegment region) in PathLocates)
+        {
+            Declare(region);
+        }
+
+        foreach ((int _, string _, PathClass _, IndexSegment region) in PathGranuleStats)
         {
             Declare(region);
         }
@@ -726,6 +763,24 @@ internal sealed class ObjectContents(
                 writer.WriteUInt32Always(TagPathLocateClass, (uint)@class);
             }
 
+            foreach ((int field, string key, PathClass @class, IndexSegment region) in PathGranuleStats)
+            {
+                using ProtoWriter.MessageScope message = writer.BeginMessage(TagPathGranuleStats);
+                writer.WriteUInt32Always(TagDirectoryField, (uint)field);
+                IndexDirectory.WriteSegment(ref writer, TagDirectoryRegion, region);
+                writer.WriteString(TagPathLocateKey, key);
+                writer.WriteUInt32Always(TagPathLocateClass, (uint)@class);
+            }
+
+            if (PathSingleRows.Count > 0)
+            {
+                using ProtoWriter.MessageScope message = writer.BeginMessage(TagPathSingleRows);
+                foreach (long rows in PathSingleRows)
+                {
+                    writer.WriteVarint((ulong)rows);
+                }
+            }
+
             if (ColumnBytes.Count > 0)
             {
                 using ProtoWriter.MessageScope message = writer.BeginMessage(TagColumnBytes);
@@ -855,6 +910,8 @@ internal sealed class ObjectContents(
             List<long> listedRows = [];
             List<long> singleRows = [];
             List<(int, IndexSegment, long)> keyRuns = [];
+            List<(int, string, PathClass, IndexSegment)> pathGranuleStats = [];
+            List<long> pathSingleRows = [];
             List<(int, int[], bool)> carried = [];
             List<IndexSegment> marks = [];
             List<(int Field, ColumnDictionary Dictionary)> dictionaries = [];
@@ -1029,6 +1086,22 @@ internal sealed class ObjectContents(
 
                         pathLocates.Add(pathLying);
                         break;
+                    case (TagPathGranuleStats, ProtoWireType.LengthDelimited):
+                        if (PathLocated(reader.ReadMessage()) is not { } pathStated)
+                        {
+                            return null;
+                        }
+
+                        pathGranuleStats.Add(pathStated);
+                        break;
+                    case (TagPathSingleRows, ProtoWireType.LengthDelimited):
+                        ProtoReader pathSingles = reader.ReadMessage();
+                        while (!pathSingles.End)
+                        {
+                            pathSingleRows.Add(checked((long)pathSingles.ReadVarint()));
+                        }
+
+                        break;
                     case (TagLocating, ProtoWireType.LengthDelimited):
                         if (Located(reader.ReadMessage()) is not { } located)
                         {
@@ -1073,6 +1146,8 @@ internal sealed class ObjectContents(
                     GranuleHistograms = granuleHistograms,
                     Locates = locates,
                     PathLocates = pathLocates,
+                    PathGranuleStats = pathGranuleStats,
+                    PathSingleRows = pathSingleRows,
                     ColumnBytes = columnBytes,
                     ColumnChunks = columnChunks,
                     ColumnClasses = [.. columnClasses],

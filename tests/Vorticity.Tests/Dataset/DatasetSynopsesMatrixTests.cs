@@ -5,8 +5,8 @@
 // THE ORACLE IS THE MATRIX OF THE QUERY PATH PLAN (2026-10-31, section 1.3), as the job writes it today: a column keeps its
 // counts and its statistics over the granules where its values allow, where its values lie where they cluster, and the
 // Bloom filter the dataset was given; an identifier hands its postings to its partition's index and keeps none; a key of
-// a variant keeps its typed column, and its zone maps and where its values lie only where they can prune, no statistics
-// over its granules; a nested path keeps its typed column, a rare key its presence. Each lot that gives a path a mean flips
+// a variant keeps its typed column and its statistics over the granules, and its zone maps and where its values lie only
+// where they can prune; a nested path keeps its typed column, a rare key its presence. Each lot that gives a path a mean flips
 // its line.
 using System;
 using System.Collections.Generic;
@@ -116,12 +116,13 @@ public sealed partial class DatasetSynopsesMatrixTests
             Add(means, entry is not null, entry is null ? string.Empty : entry.Place.ToString().ToLowerInvariant());
             Add(means, entry is { Groups: not null }, "presence");
             Add(means, contents.PathLocateOf(attributesField, key, @class) is not null, "locate");
+            Add(means, contents.PathGranuleStatsOf(attributesField, key, @class) is not null, "granule-stats");
             Add(means, blocks is not null && blocks.Keys.Contains((key, @class)), "zones");
             means.AddRange(directory.Entries.Where(index => index.VariantPath is { } path && path.SequenceEqual(steps)).Select(static index => Short(index.Kind)));
             kept[$"{key}:{@class}"] = string.Join(' ', means.Distinct().Order(StringComparer.Ordinal));
         }
 
-        // No statistics over the granules but of top-level columns.
+        // No column statistics over the granules but of top-level columns: a key keeps its own, beside them.
         Add(kept, contents.GranuleStats.Any(region => region.Field >= schema.FieldCount || region.Field == attributesField), "statistics of a slot past the columns");
         SortedDictionary<string, string> expected = new SortedDictionary<string, string>(StringComparer.Ordinal)
         {
@@ -129,11 +130,11 @@ public sealed partial class DatasetSynopsesMatrixTests
             ["Service"] = "column.counts column.sheet counts granule-stats granule.stats locate",
             ["Status"] = "column.counts column.sheet counts granule-stats granule.stats",
             ["Tag"] = "bloom.sbbf column.counts column.sheet counts",
-            ["code:Integer"] = "typed",
+            ["code:Integer"] = "granule-stats granule.stats typed",
             ["debug:String"] = "presence residual",
             ["http.method:String"] = "typed",
-            ["route:String"] = "typed",
-            ["tenant:String"] = "locate typed zones",
+            ["route:String"] = "granule-stats granule.stats typed",
+            ["tenant:String"] = "granule-stats granule.stats locate typed zones",
         };
         Assert.True(
             expected.SequenceEqual(kept),

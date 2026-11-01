@@ -107,7 +107,7 @@ internal sealed partial class DatasetScanBuilder
         (Indexes.GranuleStats?[] Stats, Indexes.GranuleHistograms?[] Histograms, Indexes.GranuleKeyRuns?[] Runs) statistics;
         try
         {
-            statistics = await _dataset.ReadGranuleStatsAsync(held.Entry, GranuleAnswer()!.Fields, GranuleAnswer()!.Histogrammed, GranuleAnswer()!.Components, cancellationToken)
+            statistics = await _dataset.ReadGranuleStatsAsync(held.Entry, GranuleAnswer()!.Fields, GranuleAnswer()!.Histogrammed, GranuleAnswer()!.Components, cancellationToken, GranuleAnswer()!.PathsOfFields)
                 .ConfigureAwait(false);
         }
         catch
@@ -129,7 +129,7 @@ internal sealed partial class DatasetScanBuilder
     /// handle's memo, where each lane's piece of the object finds them: begun as its pieces, each read them.
     /// </summary>
     internal Task GranuleStatsAheadAsync(in PositionedObject held, CancellationToken cancellationToken) =>
-        _dataset.ReadGranuleStatsAsync(held.Entry, GranuleAnswer()!.Fields, GranuleAnswer()!.Histogrammed, GranuleAnswer()!.Components, cancellationToken).AsTask();
+        _dataset.ReadGranuleStatsAsync(held.Entry, GranuleAnswer()!.Fields, GranuleAnswer()!.Histogrammed, GranuleAnswer()!.Components, cancellationToken, GranuleAnswer()!.PathsOfFields).AsTask();
 
     /// <summary>How the objects' counts answer the states the scan asks, worked out once; null when they answer none of them.</summary>
     private CountsAnswer? Answer()
@@ -434,7 +434,7 @@ internal sealed partial class DatasetScanBuilder
             case AnswerPath.Granules:
                 unit.Statistics = GranuleAnswer()!.Exclusion is { } excluded
                     ? StatisticsPlacedAsync(unit.Held, excluded, cancellationToken)
-                    : _dataset.ReadGranuleStatsAsync(unit.Held.Entry, GranuleAnswer()!.Fields, GranuleAnswer()!.Histogrammed, GranuleAnswer()!.Components, cancellationToken).AsTask();
+                    : _dataset.ReadGranuleStatsAsync(unit.Held.Entry, GranuleAnswer()!.Fields, GranuleAnswer()!.Histogrammed, GranuleAnswer()!.Components, cancellationToken, GranuleAnswer()!.PathsOfFields).AsTask();
                 break;
         }
     }

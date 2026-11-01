@@ -31,6 +31,9 @@ internal sealed class IndexWriter : IDisposable
     private readonly bool _isTabular;
     private readonly int _budgetPerMille;
     private readonly string[] _paths;
+
+    // The type each shredded key's slot reads its class as; default for another slot.
+    private readonly DType[] _pathTypes;
     private readonly IndexSpec[] _columns;
     private readonly List<IndexBuilder>[] _builders;
     private readonly string?[] _refusals;
@@ -114,6 +117,7 @@ internal sealed class IndexWriter : IDisposable
         int paths = isTabular ? variantKeys?.Count ?? 0 : 0;
         int total = fieldCount + keys + (nested?.Count ?? 0) + paths;
         _paths = new string[total];
+        _pathTypes = new DType[total];
         _columns = new IndexSpec[total];
         _builders = new List<IndexBuilder>[total];
         _refusals = new string?[total];
@@ -153,6 +157,7 @@ internal sealed class IndexWriter : IDisposable
             IndexSpec column = policy.Columns.TryGetValue(path.Text, out IndexSpec own) ? own : policy.Of(name);
             DType dtype = ClassType(classTypes ??= new DTypeArena(), @class);
             _paths[slot] = path.Text;
+            _pathTypes[slot] = dtype;
             _columns[slot] = column;
             _builders[slot] = [];
             (_variants ??= new (int, Compute.VariantFieldExpr)?[total])[slot] = (field, path);
@@ -1935,7 +1940,8 @@ internal sealed class IndexWriter : IDisposable
     /// <summary>
     /// Gives every top-level column with a sheet, but a float's, where each of its values lies, granule by granule (spec D,
     /// 3), fed right after its sheet's numbering of its rows' values; and each shredded key read in its class, but a float or
-    /// a boolean, a sheet of its own that numbers its values and where each lies (spec E, 3.3).
+    /// a boolean, a sheet of its own that numbers its values and where each lies (spec E, 3.3), and, in a file that keeps
+    /// counts, its statistics over the granules, its values listed as a column's.
     /// </summary>
     internal void AddLocates(DType schema)
     {
@@ -1946,6 +1952,10 @@ internal sealed class IndexWriter : IDisposable
                 ColumnSheetBuilder sheet = new ColumnSheetBuilder();
                 _builders[slot].Add(sheet);
                 _builders[slot].Add(new LocateBuilder(sheet));
+                if (_counts is { } plan)
+                {
+                    _builders[slot].Add(new GranuleStatsBuilder(sheet, plan, slot, _pathTypes[slot]));
+                }
             }
         }
 

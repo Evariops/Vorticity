@@ -3396,10 +3396,12 @@ public sealed class VortexDataset : IAsyncDisposable
     /// (<see cref="Indexes.GranuleHistograms"/>), by their position in <paramref name="fields"/>, read with no open of the
     /// object: the regions its entry's table of contents names, side by side in one round trip, none once this handle read
     /// them. A column the object keeps none of has none. With them, the values the key's components
-    /// <paramref name="components"/> take in each granule (<see cref="Indexes.GranuleKeyRuns"/>), by their position there.
+    /// <paramref name="components"/> take in each granule (<see cref="Indexes.GranuleKeyRuns"/>), by their position there. A
+    /// column <paramref name="paths"/> names at its position is the shredded key it names, its statistics the key's.
     /// </summary>
     internal async ValueTask<(Indexes.GranuleStats?[] Stats, Indexes.GranuleHistograms?[] Histograms, Indexes.GranuleKeyRuns?[] Runs)> ReadGranuleStatsAsync(
-        ObjectEntry entry, IReadOnlyList<int> fields, IReadOnlyList<int> histogrammed, IReadOnlyList<int> components, CancellationToken cancellationToken)
+        ObjectEntry entry, IReadOnlyList<int> fields, IReadOnlyList<int> histogrammed, IReadOnlyList<int> components, CancellationToken cancellationToken,
+        IReadOnlyList<(int Field, string Key, Types.Variants.PathClass Class)?>? paths = null)
     {
         Indexes.GranuleStats?[] columns = new Indexes.GranuleStats?[fields.Count];
         Indexes.GranuleHistograms?[] histograms = new Indexes.GranuleHistograms?[fields.Count];
@@ -3416,7 +3418,7 @@ public sealed class VortexDataset : IAsyncDisposable
         Indexes.IndexSegment?[] regions = new Indexes.IndexSegment?[read.Length];
         for (int i = 0; i < fields.Count; i++)
         {
-            regions[3 * i] = contents.GranuleStatsOf(fields[i]);
+            regions[3 * i] = paths?[i] is { } path ? contents.PathGranuleStatsOf(path.Field, path.Key, path.Class)?.Region : contents.GranuleStatsOf(fields[i]);
             regions[(3 * i) + 1] = Contains(histogrammed, fields[i]) ? contents.GranuleHistogramsOf(fields[i]) : null;
         }
 

@@ -229,6 +229,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         List<(int Field, IndexSegment Region)> granuleStats, long[] listed, long[] single, List<(int Component, IndexSegment Region, long SingleRows)> keyRuns,
         List<(int Field, IndexSegment Region)> granuleHistograms, List<(int Field, IndexSegment Region)> locates,
         List<(int Field, string Key, Types.Variants.PathClass Class, IndexSegment Region)> pathLocates,
+        List<(int Field, string Key, Types.Variants.PathClass Class, IndexSegment Region)> pathStats, List<long> pathSingle,
         long[] columnBytes, long[] columnChunks, IndexSegment[] marks, ColumnDictionary?[] dictionaries) =>
         new ObjectContents(Types.Serialization.DTypeFlatBuffers.Serialize(_schema), chunks.Encodings, _rowCount, directories, pathDirectories)
         {
@@ -243,6 +244,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             GranuleHistograms = granuleHistograms,
             Locates = locates,
             PathLocates = pathLocates,
+            PathGranuleStats = pathStats,
+            PathSingleRows = pathSingle,
             ColumnBytes = columnBytes,
             ColumnChunks = columnChunks,
             ColumnClasses = ColumnClasses(),
@@ -2599,6 +2602,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             List<(int Field, IndexSegment Region)> histogrammed = [];
             List<(int Field, IndexSegment Region)> locates = [];
             List<(int Field, string Key, Types.Variants.PathClass Class, IndexSegment Region)> pathLocates = [];
+            List<(int Field, string Key, Types.Variants.PathClass Class, IndexSegment Region)> pathStats = [];
+            List<long> pathSingle = [];
             bool keepsSheets = _sheetBytes is { } least && _sink.Position >= least;
             for (int field = 0; keepsSheets && field < _fieldCount; field++)
             {
@@ -2678,13 +2683,21 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                     }
                 }
 
-                // Where each value of each shredded key read in its class lies, a slot of the index writer each (spec E, 3.3).
+                // Where each value of each shredded key read in its class lies, a slot of the index writer each (spec E, 3.3),
+                // and its statistics over the granules.
                 for (int slot = _fieldCount; slot < closed.Slots; slot++)
                 {
                     if (closed.VariantOf(slot) is { } path && closed.LocateOf(slot)?.Finish(_rowCount, _blockRows) is { } lying)
                     {
                         pathLocates.Add((path.Field, path.Key, path.Class, await closed.AddColumnRegionAsync(
                             _sink, IndexKinds.ColumnLocate, slot, lying, _rowCount, _blockRows, cancellationToken).ConfigureAwait(false)));
+                    }
+
+                    if (closed.VariantOf(slot) is { } keyed && closed.GranuleStatsOf(slot)?.Finish(_rowCount) is { } finished)
+                    {
+                        pathStats.Add((keyed.Field, keyed.Key, keyed.Class, await closed.AddColumnRegionAsync(
+                            _sink, IndexKinds.GranuleStats, slot, finished.Statistics, _rowCount, _blockRows, cancellationToken).ConfigureAwait(false)));
+                        pathSingle.Add(finished.SingleRows);
                     }
                 }
             }
@@ -2780,7 +2793,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             if (_carriesContents)
             {
                 _contents = Contents(
-                    keyIndex, keyPages, chunks!, chunkDirectories, pathDirectories, paging, sheets, counts, carried, sketches, stated, listed, single, keyRuns, histogrammed, locates, pathLocates, closed.ColumnBytes(_isTabular ? _fieldCount : 0), ColumnChunks(), marks, dictionaries);
+                    keyIndex, keyPages, chunks!, chunkDirectories, pathDirectories, paging, sheets, counts, carried, sketches, stated, listed, single, keyRuns, histogrammed, locates, pathLocates, pathStats, pathSingle, closed.ColumnBytes(_isTabular ? _fieldCount : 0), ColumnChunks(), marks, dictionaries);
             }
 
             // The block statistics of the shredded keys, where they can prune, within what the budget leaves.
