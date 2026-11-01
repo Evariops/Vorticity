@@ -451,6 +451,35 @@ public sealed class BloomIndexTests
         Assert.Equal(0, off.BlocksPruned);
     }
 
+    /// <summary>
+    /// A count that leaves a value out, <c>key != v</c> or <c>NOT key IN (v, w)</c>, takes the rows of every block the
+    /// Bloom filters prove holds none of it from the zone maps (the query path plan, B2): the key holds no null there, so
+    /// every row is counted, and only the block or two the values may lie in is decoded. Without the indexes, every block
+    /// spans the key's range and is decoded.
+    /// </summary>
+    [Fact]
+    public async Task ACountThatLeavesAValueOutCountsTheBlocksTheFiltersProveItAbsentFrom()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Decoders.EnsureRegistered();
+        await using Written written = await Written.CreateAsync(Policy());
+        int present = Key(40_000);
+        int alsoPresent = Key(123);
+        string other = string.Create(CultureInfo.InvariantCulture, $"key != {present}");
+        string set = string.Create(CultureInfo.InvariantCulture, $"key in {present},{alsoPresent}");
+        foreach ((string text, VortexExpr filter, long expected) in ((string, VortexExpr, long)[])[(other, Parse(other), Oracle(other)), ("not " + set, Expr.Not(Parse(set)), Rows - Oracle(set))])
+        {
+            long counted = await written.File.ScanBuilder().Where(filter).CountAsync(ct);
+            Assert.Equal(expected, counted);
+            Assert.Equal(counted, await written.File.ScanBuilder().Where(filter).WithIndexes(false).CountAsync(ct));
+            ScanExplanation proven = await written.File.ScanBuilder().Where(filter).ExplainAsync(analyze: true, ct);
+            ScanExplanation plain = await written.File.ScanBuilder().Where(filter).WithIndexes(false).ExplainAsync(analyze: true, ct);
+            Assert.True(proven.Count!.SplitsProven >= Blocks - 4, $"{text}: {proven.Count.SplitsProven} blocks proven with the filters");
+            Assert.True(proven.Count.SplitsDecoded <= 4, $"{text}: {proven.Count.SplitsDecoded} blocks decoded with the filters");
+            Assert.Equal(0, plain.Count!.SplitsProven);
+        }
+    }
+
     // ------------------------------------------------------------------------------ oracle
 
     private static bool Contains(int key)

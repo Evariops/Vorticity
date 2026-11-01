@@ -80,10 +80,16 @@ internal static class ZonePruningPlan
     /// the whole file: a step counts only the blocks it pruned among them, and the mask leaves the
     /// others dead, which no structure asks about.
     /// </param>
+    /// <param name="proofs">
+    /// Whether the zone maps should prove the filter true where they can, a count or a settling
+    /// asking: the Bloom filters of a value a conjunct leaves out are read for the blocks they prove
+    /// it absent from (<see cref="ZonePruner.NoteAbsent"/>), which a scan of rows would read for
+    /// nothing.
+    /// </param>
     internal static async ValueTask<PruningPlan> PlanAsync(
         VortexFile file, LayoutTree tree, VortexExpr filter, CancellationToken cancellationToken,
         List<PruningStep>? steps = null, Scanning.ScanCounters? metrics = null, bool indexes = true,
-        BlockMask? scope = null)
+        BlockMask? scope = null, bool proofs = false)
     {
         long blockRows = Scanning.SplitPlan.NaturalBatchRows(tree);
 
@@ -99,6 +105,10 @@ internal static class ZonePruningPlan
         // are bytes the scan asked its source for, and they go to the same sink the batches feed,
         // so that the sink and the source agree about what was requested.
         Scanning.ScanCounters.Note(metrics, segments, bytes);
+        if (proofs && indexes && zones is not null && blockRows > 0)
+        {
+            await NoteAbsentAsync(file, tree, filter, zones, blockRows, steps, metrics, cancellationToken).ConfigureAwait(false);
+        }
 
         // The path directories first among the indexes: one small read refutes the whole file, or the
         // groups of its rows that hold no path the filter asks for.
@@ -200,6 +210,66 @@ internal static class ZonePruningPlan
 
         Diagnostics.VortexEventSource.Pruned(live.BlockCount - live.LiveCount, live.BlockCount);
         return new PruningPlan(live, zones, located);
+    }
+
+    /// <summary>
+    /// Notes to <paramref name="zones"/>, for each value a conjunct of <paramref name="filter"/> leaves
+    /// out, <c>x != v</c>, <c>NOT x IN (…)</c> or <c>NOT list_contains(x, v)</c>, the blocks the Bloom
+    /// filters of <c>x</c> prove hold no row of it: the complement of those they keep for the value's
+    /// own predicate.
+    /// </summary>
+    private static async ValueTask NoteAbsentAsync(
+        VortexFile file, LayoutTree tree, VortexExpr filter, ZonePruner zones, long blockRows, List<PruningStep>? steps,
+        Scanning.ScanCounters? metrics, CancellationToken cancellationToken)
+    {
+        List<VortexExpr> conjuncts = [];
+        Conjuncts(filter, conjuncts);
+        foreach (VortexExpr conjunct in conjuncts)
+        {
+            (VortexExpr? excluded, VortexExpr? found, FieldExpr? field) = conjunct switch
+            {
+                ComparisonExpr { Op: ComparisonOp.NotEqual } other when other.Value.Kind != FilterLiteralKind.Null =>
+                    (other, new ComparisonExpr(other.Field, ComparisonOp.Equal, other.Value), other.Field),
+                NotExpr { Operand: InExpr set } => (set, set, set.Field),
+                NotExpr { Operand: ListContainsExpr contains } when contains.Value.Kind != FilterLiteralKind.Null => (contains, contains, contains.Field),
+                _ => ((VortexExpr?)null, (VortexExpr?)null, (FieldExpr?)null),
+            };
+
+            // The filters are read where they weigh less than the column whose blocks they would spare.
+            if (excluded is null || found is null || field is null
+                || await Indexes.BloomPruner.BuildAsync(file, found, blockRows, cancellationToken).ConfigureAwait(false) is not { } blooms
+                || blooms.PayloadBytes >= ColumnBytes(file, tree, field))
+            {
+                continue;
+            }
+
+            BlockMask mayHold = new BlockMask(tree.Root.RowCount, blockRows);
+            await blooms.RefineAsync(file, mayHold, cancellationToken).ConfigureAwait(false);
+            Scanning.ScanCounters.Note(metrics, blooms.Segments, blooms.Bytes);
+            steps?.Add(new PruningStep("bloom filter, a value left out", 0, blooms.Segments, blooms.Bytes));
+            zones.NoteAbsent(excluded, mayHold);
+        }
+
+        // The bytes of the top-level column field reads, all of them, or none known for a file of no struct.
+        static long ColumnBytes(VortexFile file, LayoutTree tree, FieldExpr field)
+        {
+            int dot = field.Path.IndexOf('.', StringComparison.Ordinal);
+            int at = file.DType.Kind == DTypeKind.Struct ? file.DType.IndexOfField(dot < 0 ? field.Path : field.Path[..dot]) : -1;
+            return at >= 0 && at < tree.Root.ChildCount ? LayoutTree.BytesUnder(tree.Root.GetChild(at), file.SegmentSpecs) : 0;
+        }
+
+        static void Conjuncts(VortexExpr expr, List<VortexExpr> into)
+        {
+            if (expr is LogicalExpr { IsAnd: true } and)
+            {
+                Conjuncts(and.Left, into);
+                Conjuncts(and.Right, into);
+            }
+            else
+            {
+                into.Add(expr);
+            }
+        }
     }
 
     /// <summary>

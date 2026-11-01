@@ -458,7 +458,12 @@ longer lie where they were, notes none.
   2.28 MB: a granule read as rows reads the key's dictionary whole *(measured,
   `DatasetKeyAbsenceProofsTests`)*. The statistics of `x` are left aside where it is placed and they weigh more
   than a granule's rows. A granule of one value is ruled out by `x != v` when that value is `v` and no
-  NaN may be there, the zone maps as the granules. On 32 granules, every call but one ticket's, its
+  NaN may be there, the zone maps as the granules. A count, an extreme or a settling of blocks by their
+  zone maps asks the Bloom filters of `x` too, where they weigh less than the column: a block they prove
+  holds no row of `v`, and whose zone map counts no null of `x`, keeps `x != v`, `NOT x IN (…)` or
+  `NOT list_contains(x, v)` true on every row, and is counted with no decoding (`ZonePruner.NoteAbsent`).
+  Over 64 blocks of keys that span the whole range, 60 or more blocks are proven, 4 decoded at most, where
+  without the filters none is proven *(measured, `BloomIndexTests`)*. On 32 granules, every call but one ticket's, its
   tickets under a Bloom filter, read 890 KB through the granules where the rows take 3.59 MB; the
   calls and sizes of every host but one, placed by the hosts' locate, 111 KB where they take 723 KB, and
   of every host but two 152 KB; every call but those of a status, which no index places, 1.9 KB where

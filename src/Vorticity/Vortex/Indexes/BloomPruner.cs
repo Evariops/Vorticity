@@ -77,6 +77,24 @@ internal sealed class BloomPruner
     /// <summary>The bytes of those segments.</summary>
     internal long Bytes { get; private set; }
 
+    /// <summary>The bytes of every tree it may consult, the most a question reads of them.</summary>
+    internal long PayloadBytes
+    {
+        get
+        {
+            long bytes = 0;
+            foreach (Column column in _columns.Values)
+            {
+                foreach (Tree tree in column.Trees)
+                {
+                    bytes += (long)tree.Run.Payload[0].Length;
+                }
+            }
+
+            return bytes;
+        }
+    }
+
     /// <summary>
     /// The pruner for <paramref name="filter"/>, or <see langword="null"/> when no column it tests
     /// for equality carries a usable Bloom entry.

@@ -59,7 +59,7 @@ internal static class EstimateStrata
         LayoutNode root = tree.Root;
         if (root.Encoding != LayoutEncodingId.Struct)
         {
-            return Bytes(root, segments);
+            return LayoutTree.BytesUnder(root, segments);
         }
 
         long least = long.MaxValue;
@@ -69,27 +69,10 @@ internal static class EstimateStrata
             int field = mask.IsAll ? i : mask.GetNamedField(i);
             if (field < root.ChildCount)
             {
-                least = Math.Min(least, Bytes(root.GetChild(field), segments));
+                least = Math.Min(least, LayoutTree.BytesUnder(root.GetChild(field), segments));
             }
         }
 
-        return least == long.MaxValue ? Bytes(root, segments) : least;
-    }
-
-    /// <summary>The bytes of every segment under <paramref name="node"/>.</summary>
-    private static long Bytes(LayoutNode node, ReadOnlySpan<SegmentSpec> segments)
-    {
-        long bytes = 0;
-        foreach (uint segment in node.Segments)
-        {
-            bytes += segments[(int)segment].Length;
-        }
-
-        for (int c = 0; c < node.ChildCount; c++)
-        {
-            bytes += Bytes(node.GetChild(c), segments);
-        }
-
-        return bytes;
+        return least == long.MaxValue ? LayoutTree.BytesUnder(root, segments) : least;
     }
 }

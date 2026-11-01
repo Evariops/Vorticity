@@ -47,10 +47,65 @@ internal sealed class ZonePruner : IBlockPruner
     /// </summary>
     private static readonly ConditionalWeakTable<InExpr, Ordered> Sorted = new ConditionalWeakTable<InExpr, Ordered>();
 
+    /// <summary>
+    /// For each value a conjunct of the filter leaves out, <c>x != v</c>, <c>NOT x IN (…)</c> or
+    /// <c>NOT list_contains(x, v)</c>, the blocks an index of <c>x</c> proves hold no row of it: the
+    /// filter's own comparison, set or containing, and those blocks one bit each. Set before any
+    /// question, by the plan that reads the indexes; empty for none, which most filters are.
+    /// </summary>
+    private (VortexExpr Excluded, ulong[] Absent, long BlockRows)[] _absent = [];
+
     internal ZonePruner(VortexExpr filter, ZoneColumn[] columns)
     {
         _filter = filter;
         _columns = columns;
+    }
+
+    /// <summary>
+    /// Notes the blocks <paramref name="mayHold"/> left dead as those where no row holds the value
+    /// <paramref name="excluded"/> leaves out, a comparison, a set or a containing of the filter:
+    /// what an index of its column proved, which then proves the filter's leaving it out true on
+    /// every row of such a block that holds a value (<see cref="Verdict(VortexExpr, RowRange)"/>).
+    /// </summary>
+    internal void NoteAbsent(VortexExpr excluded, BlockMask mayHold)
+    {
+        ReadOnlySpan<ulong> live = mayHold.Words;
+        ulong[] absent = new ulong[live.Length];
+        for (int i = 0; i < absent.Length; i++)
+        {
+            absent[i] = ~live[i];
+        }
+
+        _absent = [.. _absent, (excluded, absent, mayHold.BlockRows)];
+    }
+
+    /// <summary>
+    /// Whether every block <paramref name="rows"/> reaches holds no row of the value
+    /// <paramref name="excluded"/> leaves out, as an index proved (<see cref="NoteAbsent"/>), and
+    /// <paramref name="field"/> no null there: a null holds no value, of which the filter says
+    /// nothing.
+    /// </summary>
+    private bool Absent(VortexExpr excluded, FieldExpr field, RowRange rows)
+    {
+        foreach ((VortexExpr held, ulong[] absent, long blockRows) in _absent)
+        {
+            if (!ReferenceEquals(held, excluded) || blockRows <= 0 || rows.IsEmpty)
+            {
+                continue;
+            }
+
+            for (long block = rows.Start / blockRows; block <= (rows.End - 1) / blockRows; block++)
+            {
+                if (block >= (long)absent.Length * 64 || ((absent[block >> 6] >> (int)(block & 63)) & 1) == 0)
+                {
+                    return false;
+                }
+            }
+
+            return Decide(field, rows, ZoneQuestion.NullCheck(isNull: false)).IsAllTrue;
+        }
+
+        return false;
     }
 
     /// <summary>Whether any column carries usable statistics; a pruner with none never prunes.</summary>
@@ -568,6 +623,12 @@ internal sealed class ZonePruner : IBlockPruner
                     return RangeVerdict.AllUnknown(length);
                 }
 
+                // A value an index proves absent from blocks that hold no null: x != v holds on every row.
+                if (comparison.Op == ComparisonOp.NotEqual && _absent.Length > 0 && Absent(comparison, comparison.Field, rows))
+                {
+                    return RangeVerdict.AllTrue(length);
+                }
+
                 return Decide(comparison.Field, rows, ZoneQuestion.Compare(comparison.Op, comparison.Value));
             }
 
@@ -583,6 +644,11 @@ internal sealed class ZonePruner : IBlockPruner
             case ExprKind.In:
             {
                 InExpr membership = (InExpr)expr;
+                if (_absent.Length > 0 && Absent(membership, membership.Field, rows))
+                {
+                    return RangeVerdict.AllFalse(length);
+                }
+
                 return Decide(
                     membership.Field, rows, ZoneQuestion.In(membership.Literals, OrderedFor(membership)));
             }
@@ -594,8 +660,8 @@ internal sealed class ZonePruner : IBlockPruner
             {
                 // The nulls are the unknown rows, and nothing a zone holds decides the others.
                 ListContainsExpr contains = (ListContainsExpr)expr;
-                return contains.Value.Kind == FilterLiteralKind.Null
-                    ? RangeVerdict.AllUnknown(length)
+                return contains.Value.Kind == FilterLiteralKind.Null ? RangeVerdict.AllUnknown(length)
+                    : _absent.Length > 0 && Absent(contains, contains.Field, rows) ? RangeVerdict.AllFalse(length)
                     : Decide(contains.Field, rows, ZoneQuestion.Open);
             }
 

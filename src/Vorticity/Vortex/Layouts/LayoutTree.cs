@@ -259,6 +259,23 @@ internal sealed class LayoutTree
         return 0;
     }
 
+    /// <summary>The bytes of every segment under <paramref name="node"/>, as <paramref name="segments"/> lays them out.</summary>
+    internal static long BytesUnder(LayoutNode node, ReadOnlySpan<SegmentSpec> segments)
+    {
+        long bytes = 0;
+        foreach (uint segment in node.Segments)
+        {
+            bytes += segments[(int)segment].Length;
+        }
+
+        for (int c = 0; c < node.ChildCount; c++)
+        {
+            bytes += BytesUnder(node.GetChild(c), segments);
+        }
+
+        return bytes;
+    }
+
     /// <summary>Whether child <paramref name="slot"/> of a struct root was parsed: for the tests of what a walk parses.</summary>
     internal bool ColumnParsed(int slot) => _columns is null || Volatile.Read(ref _columns.Trees[slot]) is not null;
 

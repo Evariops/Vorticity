@@ -158,7 +158,7 @@ internal sealed class ZoneSettling
         ZonePruningPlan.PruningPlan pruning = filter is null
             ? default
             : await ZonePruningPlan
-                .PlanAsync(file, tree, filter, cancellationToken, steps: null, metrics, indexes)
+                .PlanAsync(file, tree, filter, cancellationToken, steps: null, metrics, indexes, proofs: true)
                 .ConfigureAwait(false);
         BlockMask live = pruning.Live ?? new BlockMask(file.RowCount, blockRows);
         if (live.BlockRows != blockRows || (filter is not null && pruning.Zones is null))

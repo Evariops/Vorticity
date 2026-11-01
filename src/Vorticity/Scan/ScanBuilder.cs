@@ -865,7 +865,7 @@ internal sealed class ScanBuilder
         List<PruningStep> steps = [];
         Compute.ZonePruningPlan.PruningPlan pruning = analyze && _filter is not null && _prune
             ? await Compute.ZonePruningPlan
-                .PlanAsync(_file, tree, _filter, cancellationToken, steps, metrics: null, _indexes, Scope(tree, rows, natural))
+                .PlanAsync(_file, tree, _filter, cancellationToken, steps, metrics: null, _indexes, Scope(tree, rows, natural), proofs: true)
                 .ConfigureAwait(false)
             : default;
         Compute.BlockMask? live = pruning.Live;

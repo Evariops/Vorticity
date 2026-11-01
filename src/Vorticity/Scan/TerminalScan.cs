@@ -126,7 +126,7 @@ internal sealed class TerminalScan
         SplitPlan plan = SplitPlan.Compute(_tree, _rows, in _mask, _cap);
         ZonePruningPlan.PruningPlan pruning = _prune
             ? await ZonePruningPlan
-                .PlanAsync(_file, _tree, _filter, cancellationToken, steps: null, _metrics, _indexes)
+                .PlanAsync(_file, _tree, _filter, cancellationToken, steps: null, _metrics, _indexes, proofs: !stopAtFirst)
                 .ConfigureAwait(false)
             : default;
         BlockMask? live = pruning.Live;
@@ -590,7 +590,7 @@ internal sealed class TerminalScan
         SplitPlan plan = SplitPlan.Compute(_tree, _rows, in _mask, _cap);
         ZonePruningPlan.PruningPlan pruning = _prune && _filter is not null
             ? await ZonePruningPlan
-                .PlanAsync(_file, _tree, _filter, cancellationToken, steps: null, _metrics, _indexes)
+                .PlanAsync(_file, _tree, _filter, cancellationToken, steps: null, _metrics, _indexes, proofs: true)
                 .ConfigureAwait(false)
             : default;
         BlockMask? live = pruning.Live;
