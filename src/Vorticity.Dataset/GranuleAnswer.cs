@@ -5,6 +5,7 @@ using Vorticity.Compute;
 using Vorticity.Expressions;
 using Vorticity.Indexes;
 using Vorticity.Keys;
+using Vorticity.RowEncoding;
 using Vorticity.Scanning;
 using Vorticity.Types;
 
@@ -50,6 +51,14 @@ internal sealed class GranuleAnswer
     // each falls in one group of the key's: a bucket of hours over hours.
     private readonly (int Key, int Component, ValueFunction Of)[] _runKeys;
 
+    // For a question of counts two of whose keys the sort key's indexed prefix gives, the component each key reads its
+    // groups from, by the key's place: a column of the prefix as it is, its function null, or the function of a column a key
+    // that is a function of it too takes the groups of each value's class from; -1 for a key the prefix does not give. A
+    // granule where several of them vary takes them run by run from the object's runs of the prefix (GranuleKeyRuns), at
+    // _prefixAt among the components' values read. Null for another question.
+    private readonly (int Component, ValueFunction? Of)[]? _prefixKeys;
+    private readonly int _prefixAt = -1;
+
     // The mantissa bits of the grid of the sketches a quantile of the request asks; 0 for none.
     private readonly int _sketchBits;
 
@@ -84,11 +93,13 @@ internal sealed class GranuleAnswer
     private GranuleAnswer(
         CountsAnswer counts, DatasetSchema version, PathCosts costs, VortexExpr? filter, (int Field, FieldExpr Key)[] keys, List<int> measured,
         List<VariantFieldExpr>? measuredPaths, int leading, int[] prefixed, int granuleRows, int sketchBits, (int Key, int Component, ValueFunction Of)[] runKeys,
-        ExcludedValue? excluded)
+        (int Component, ValueFunction? Of)[]? prefixKeys, ExcludedValue? excluded)
     {
         _prefixed = prefixed;
         _runKeys = runKeys;
-        Components = Array.ConvertAll(runKeys, static run => run.Component);
+        _prefixKeys = prefixKeys;
+        _prefixAt = prefixKeys is null ? -1 : runKeys.Length;
+        Components = [.. Array.ConvertAll(runKeys, static run => run.Component), .. prefixKeys is null ? (int[])[] : [GranuleKeyRuns.WholePrefix]];
         _sketchBits = sketchBits;
         _granuleRows = Math.Max(granuleRows, 1);
         _schema = version;
@@ -525,7 +536,40 @@ internal sealed class GranuleAnswer
         declined = null;
         return new GranuleAnswer(
             counts, version.Schema, version.Costs, filter, keys, measured, measuredPaths, leading, [.. prefixed], granuleRows, request.SketchBits, [.. runKeys],
-            counts.Exclusion is null && filter is not null ? Excluded(filter, version.Schema) : null);
+            counts.Measures.Length == 0 ? PrefixKeys(keys, version.Schema.Layout) : null, counts.Exclusion is null && filter is not null ? Excluded(filter, version.Schema) : null);
+    }
+
+    /// <summary>
+    /// The component of the indexed prefix of <paramref name="layout"/> each of <paramref name="keys"/> takes its groups from,
+    /// by the key's place: a column of the prefix as it is, its function null, or a function of a column a key that is a
+    /// function of it too reads; -1 for a key the prefix does not give. Null when it gives fewer than two, which a granule's
+    /// runs of the prefix would not answer more of than its components' values and listed columns do.
+    /// </summary>
+    private static (int Component, ValueFunction? Of)[]? PrefixKeys((int Field, FieldExpr Key)[] keys, LayoutPlan? layout)
+    {
+        if (layout is not { Prefix: >= 2 } || keys.Length < 2)
+        {
+            return null;
+        }
+
+        (int Component, ValueFunction? Of)[] given = new (int, ValueFunction?)[keys.Length];
+        int count = 0;
+        for (int k = 0; k < keys.Length; k++)
+        {
+            given[k] = (-1, null);
+            for (int c = 0; keys[k].Field >= 0 && c < layout.Components.Count && c < layout.Prefix; c++)
+            {
+                if (layout.Components[c] is { Read: null } component && component.Field == keys[k].Field
+                    && (component.Function is null || keys[k].Key is FunctionFieldExpr))
+                {
+                    given[k] = (c, component.Function);
+                    count++;
+                    break;
+                }
+            }
+        }
+
+        return count >= 2 ? given : null;
     }
 
     /// <summary>
@@ -962,13 +1006,18 @@ internal sealed class GranuleAnswer
     /// the column does and its groups change (<see cref="FunctionVaries"/>). Under counts alone, one column may vary in a
     /// granule that lists its values, its rows counted value by value: the largest share a listed column varies in is taken
     /// off. The columns are taken to vary in granules apart, their shares added: a bound, which a sort key that holds them
-    /// together makes loose, never short.
+    /// together makes loose, never short. Where the object keeps the runs of its prefix and the question's keys are read
+    /// from them (<see cref="AddPrefixRuns"/>), the keys the prefix gives vary in the granules the runs do not describe
+    /// alone, whatever they hold: a bound too, the lesser of the two taken.
     /// </summary>
     private double Varying(in PositionedObject held, ObjectSummaries summaries, ObjectContents contents, bool proven, int[] filtered)
     {
         double rows = held.Entry.PhysicalRows;
         double total = 0;
         double listed = 0;
+
+        // The shares of the keys the prefix does not give, and of the filter's columns.
+        double others = 0;
         for (int k = 0; k < _keys.Length; k++)
         {
             (int field, FieldExpr key) = _keys[k];
@@ -978,24 +1027,26 @@ internal sealed class GranuleAnswer
             }
 
             double varies = 1 - Math.Clamp(SingleRowsOf(contents, field) / rows, 0, 1);
-            if (key is FunctionFieldExpr function)
+            double share;
+            if (key is FunctionFieldExpr function && RunsOf(k, contents) is { } runs)
             {
                 // A key that takes its groups from a component's values by granule varies where the component does, and may
                 // vary alone as a listed column does.
-                if (RunsOf(k, contents) is { } runs)
-                {
-                    double component = 1 - Math.Clamp(runs.SingleRows / rows, 0, 1);
-                    total += component;
-                    listed = Math.Max(listed, component);
-                    continue;
-                }
-
-                total += Math.Min(varies, FunctionVaries(summaries, field, function, contents, rows));
-                continue;
+                share = 1 - Math.Clamp(runs.SingleRows / rows, 0, 1);
+                listed = Math.Max(listed, share);
+            }
+            else if (key is FunctionFieldExpr other)
+            {
+                share = Math.Min(varies, FunctionVaries(summaries, field, other, contents, rows));
+            }
+            else
+            {
+                share = varies;
+                listed = Math.Max(listed, Math.Min(varies, ListedShare(contents, field, rows)));
             }
 
-            total += varies;
-            listed = Math.Max(listed, Math.Min(varies, ListedShare(contents, field, rows)));
+            total += share;
+            others += _prefixKeys is { } given && given[k].Component >= 0 ? 0 : share;
         }
 
         foreach (int field in proven ? [] : filtered)
@@ -1004,11 +1055,15 @@ internal sealed class GranuleAnswer
             {
                 double varies = 1 - Math.Clamp(SingleRowsOf(contents, field) / rows, 0, 1);
                 total += varies;
+                others += varies;
                 listed = Math.Max(listed, Math.Min(varies, ListedShare(contents, field, rows)));
             }
         }
 
-        return Math.Clamp(total - (CountsOnly ? listed : 0), 0, 1);
+        double varying = Math.Clamp(total - (CountsOnly ? listed : 0), 0, 1);
+        return _prefixKeys is not null && contents.KeyRunsOf(GranuleKeyRuns.WholePrefix) is { } prefix
+            ? Math.Min(varying, Math.Clamp(others + 1 - (prefix.SingleRows / rows), 0, 1))
+            : varying;
     }
 
     /// <summary>
@@ -1246,6 +1301,10 @@ internal sealed class GranuleAnswer
         // services by service and hour read 2.37 MB, where the granules left and the statistics hold 0.51, the rows 3.04.
         GranuleStateRows states = new GranuleStateRows(this);
         List<ColumnSummary> judged = new List<ColumnSummary>(Fields.Length + summaries.Columns.Count);
+        PrefixValues? prefixRuns = _prefixAt >= 0 && _prefixAt < alike.Length && alike[_prefixAt] is { IsPrefix: true } prefix && _schema.Tree is { } tree
+            ? new PrefixValues(prefix, tree, _schema.Partitioned ? 1 : 0, KeyFields.Length)
+            : null;
+
         // A granule the places of a value left out touch is judged under the whole filter, where the value's column is no
         // identifier: its statistics may list the value's rows apart, or refute the rest.
         bool[] answers = new bool[any.Count];
@@ -1258,8 +1317,8 @@ internal sealed class GranuleAnswer
             bool placed = Touches(holding, ref touched, first, first + any.Rows[b]);
             wholly?[b] = placed;
             answers[b] = first >= part.Start && first + any.Rows[b] <= part.End && deletions.DeletedIn(first, first + any.Rows[b]) == 0
-                && (placed ? whole is not null && SettleGranule(b, any.Rows[b], described, alike, summaries, judged, states, whole)
-                    : SettleGranule(b, any.Rows[b], described, alike, summaries, judged, states, judge));
+                && (placed ? whole is not null && SettleGranule(b, any.Rows[b], described, alike, summaries, judged, states, whole, prefixRuns)
+                    : SettleGranule(b, any.Rows[b], described, alike, summaries, judged, states, judge, prefixRuns));
             states.Truncate(0);
         }
 
@@ -1276,7 +1335,7 @@ internal sealed class GranuleAnswer
             long rows = any.Rows[b];
             if (answers[b])
             {
-                SettleGranule(b, rows, described, alike, summaries, judged, states, wholly?[b] == true ? whole : judge);
+                SettleGranule(b, rows, described, alike, summaries, judged, states, wholly?[b] == true ? whole : judge, prefixRuns);
                 settled++;
                 continue;
             }
@@ -1375,11 +1434,12 @@ internal sealed class GranuleAnswer
     /// <summary>
     /// Settles granule <paramref name="granule"/> of <paramref name="rows"/> rows into <paramref name="states"/>: true when its
     /// statistics answer it under <paramref name="judge"/>, its rows of states added, none when they prove the filter selects
-    /// no row of it.
+    /// no row of it. Where more of the keys' columns vary than its statistics answer, the runs of the prefix
+    /// <paramref name="values"/> reads may answer it run by run (<see cref="AddPrefixRuns"/>).
     /// </summary>
     private bool SettleGranule(
         int granule, long rows, GranuleColumn[] columns, GranuleKeyRuns?[] runs, ObjectSummaries summaries, List<ColumnSummary> judged, GranuleStateRows states,
-        SummaryPruner? judge)
+        SummaryPruner? judge, PrefixValues? values)
     {
         // The granule's summaries: each column's own, the object's for the columns the granule keeps none of.
         judged.Clear();
@@ -1427,7 +1487,7 @@ internal sealed class GranuleAnswer
             int run = whole && !columns[i].Lists(granule) ? RunOf(Fields[i], runs) : -1;
             if (varying >= 0 || !CountsOnly || !(columns[i].Lists(granule) || run >= 0))
             {
-                return false;
+                return whole && values is not null && AddPrefixRuns(granule, rows, columns, values, states);
             }
 
             varying = i;
@@ -1529,10 +1589,7 @@ internal sealed class GranuleAnswer
         int first = states.Count;
         for (int v = 0; v < values.Length; v++)
         {
-            if (!run.Of.TryLeast(values.Span[v], out Int128 least) || !run.Of.TryLeast((Int128)values.Span[v] + 1, out Int128 next) || next <= least
-                || CountsAnswer.Image(key, function.Function.Literal(least)) is not { } low
-                || CountsAnswer.Image(key, function.Function.Literal(next - 1)) is not { } high || KeyCursor.Compare(low, high) != 0
-                || columns[varying].KeyOf(function.Function.Literal(least)) is not { } stands)
+            if (StandsFor(function, run.Of, values.Span[v], columns[varying]) is not { } stands)
             {
                 states.Truncate(first);
                 return false;
@@ -1547,6 +1604,157 @@ internal sealed class GranuleAnswer
         }
 
         return true;
+    }
+
+    /// <summary>
+    /// The value of <paramref name="column"/> that stands for the group of <paramref name="key"/>, a function of the column,
+    /// holding the class of <paramref name="value"/> under <paramref name="of"/>, a function of the column too: the class,
+    /// from the least value of the column whose image is it to the least whose image is past it, falls in one group of the
+    /// key, stood for by the class's least value as the column stores it. Null when it straddles two.
+    /// </summary>
+    private static byte[]? StandsFor(FunctionFieldExpr key, ValueFunction of, long value, GranuleColumn column) =>
+        of.TryLeast(value, out Int128 least) && of.TryLeast((Int128)value + 1, out Int128 next) && next > least
+            && CountsAnswer.Image(key, key.Function.Literal(least)) is { } low
+            && CountsAnswer.Image(key, key.Function.Literal(next - 1)) is { } high && KeyCursor.Compare(low, high) == 0
+            ? column.KeyOf(key.Function.Literal(least))
+            : null;
+
+    /// <summary>
+    /// The rows of states of granule <paramref name="granule"/> of <paramref name="rows"/> rows, where more of the keys'
+    /// columns vary than its statistics answer, from the runs of the whole indexed prefix <paramref name="values"/> reads:
+    /// each run holds one value of every component, so one group of each key the prefix gives (<see cref="_prefixKeys"/>), a
+    /// column of it as the run holds it, a function of a column a component is a function of by the component's class
+    /// (<see cref="StandsFor"/>); every other key's column holds one group over the granule. Runs of the same groups, one
+    /// after the other, make one row. False for a question of measures, a granule the runs do not describe, a key's column
+    /// the prefix does not give that varies, or a class that straddles two groups.
+    /// </summary>
+    private bool AddPrefixRuns(int granule, long rows, GranuleColumn[] columns, PrefixValues values, GranuleStateRows states)
+    {
+        (int First, int Count) runs = values.Runs.RunsOf(granule);
+        long total = 0;
+        for (int r = runs.First; r < runs.First + runs.Count; r++)
+        {
+            total += values.Runs.RowsOf(r);
+        }
+
+        if (!CountsOnly || _prefixKeys is not { } given || runs.Count == 0 || total != rows)
+        {
+            return false;
+        }
+
+        // The keys the prefix does not give, one group each over the granule.
+        for (int k = 0; k < given.Length; k++)
+        {
+            int place = Array.IndexOf(Fields, KeyFields[k]);
+            if (given[k].Component < 0 && !columns[place].HoldsOneGroup(granule, rows, _keys[k].Key))
+            {
+                return false;
+            }
+
+            values.Current[k] = given[k].Component < 0 ? columns[place].ConstantOf(granule, rows) : null;
+        }
+
+        int first = states.Count;
+        for (int r = runs.First; r < runs.First + runs.Count; r++)
+        {
+            ReadOnlySpan<byte> key = values.Runs.KeyOf(r);
+            bool same = states.Count > first;
+            for (int k = 0; k < given.Length; k++)
+            {
+                if (given[k].Component >= 0)
+                {
+                    if (!values.TryStand(k, key, given[k], _keys[k].Key, columns[Array.IndexOf(Fields, KeyFields[k])]))
+                    {
+                        states.Truncate(first);
+                        return false;
+                    }
+                }
+
+                same &= ReferenceEquals(values.Current[k], values.Previous[k]);
+            }
+
+            if (same)
+            {
+                states.Words(states.Count - 1)[0] += values.Runs.RowsOf(r);
+                continue;
+            }
+
+            int row = states.Add(values.Runs.RowsOf(r));
+            for (int k = 0; k < given.Length; k++)
+            {
+                states.SetKey(row, k, values.Current[k]);
+                values.Previous[k] = values.Current[k];
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// The runs of the prefix an object keeps by granule, as a granule of a question its prefix gives the keys of reads them
+    /// (<see cref="AddPrefixRuns"/>): each key's group in the run read, and in the run before it read; and, by key, the bytes
+    /// of its component in the last run decoded and the value that stood for it, which the runs of one service and other
+    /// hosts take again with no decoding.
+    /// </summary>
+    private sealed class PrefixValues(GranuleKeyRuns runs, SortKey tree, int skip, int keys)
+    {
+        private readonly byte[]?[] _bytes = new byte[]?[keys];
+        private readonly int[] _lengths = new int[keys];
+        private readonly byte[]?[] _stands = new byte[]?[keys];
+
+        /// <summary>The runs.</summary>
+        internal GranuleKeyRuns Runs { get; } = runs;
+
+        /// <summary>Each key's group in the run read, as its column stores the value that stands for it.</summary>
+        internal byte[]?[] Current { get; } = new byte[]?[keys];
+
+        /// <summary>Each key's group in the run before it, of the same granule or the one before.</summary>
+        internal byte[]?[] Previous { get; } = new byte[]?[keys];
+
+        /// <summary>
+        /// Sets <see cref="Current"/>'s <paramref name="k"/>th to the group of <paramref name="key"/> in the run of key
+        /// <paramref name="run"/>, from the component <paramref name="given"/> names: its value as <paramref name="column"/>
+        /// stores it, or the one standing for its class; false when it reads as none, or a class straddles two groups.
+        /// </summary>
+        internal bool TryStand(int k, ReadOnlySpan<byte> run, (int Component, ValueFunction? Of) given, FieldExpr key, GranuleColumn column)
+        {
+            int position = skip + given.Component;
+            int at = tree.PrefixLength(run, position);
+            int end = tree.PrefixLength(run, position + 1);
+            if (at < 0 || end < at)
+            {
+                return false;
+            }
+
+            ReadOnlySpan<byte> bytes = run[at..end];
+            if (_bytes[k] is { } held && bytes.SequenceEqual(held.AsSpan(0, _lengths[k])))
+            {
+                Current[k] = _stands[k];
+                return true;
+            }
+
+            FilterLiteral literal = RowEncoder.ReadFirstValue(run[at..], tree.TypeAt(position));
+            byte[]? stands;
+            if (given.Of is not { } function)
+            {
+                stands = literal.Kind == FilterLiteralKind.Null ? null : column.KeyOf(literal);
+                if (stands is null && literal.Kind != FilterLiteralKind.Null)
+                {
+                    return false;
+                }
+            }
+            else if (key is not FunctionFieldExpr coarser || !ValueFunction.TryInteger(literal, out Int128 value) || value < long.MinValue || value > long.MaxValue
+                || (stands = StandsFor(coarser, function, (long)value, column)) is null)
+            {
+                return false;
+            }
+
+            byte[] kept = _bytes[k] ?? new byte[16];
+            _lengths[k] = SortedRows.Keep(ref kept, bytes);
+            _bytes[k] = kept;
+            Current[k] = _stands[k] = stands;
+            return true;
+        }
     }
 
     /// <summary>The place among the first <paramref name="count"/> summaries of the one of column <paramref name="path"/>, or -1.</summary>

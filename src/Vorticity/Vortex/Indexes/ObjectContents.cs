@@ -276,7 +276,8 @@ internal sealed class ObjectContents(
     /// <summary>
     /// The values each component of the sort key that is a function of a column takes in each granule, with their rows
     /// (<see cref="GranuleKeyRuns"/>), by the component's place in the key, and the rows of the granules where it holds one
-    /// value. Empty when the object keeps none.
+    /// value; and the runs of the whole indexed prefix, at <see cref="GranuleKeyRuns.WholePrefix"/>, with the rows of the
+    /// granules they describe. Empty when the object keeps none.
     /// </summary>
     internal IReadOnlyList<(int Component, IndexSegment Region, long SingleRows)> KeyRuns { get; init; } = [];
 
@@ -494,6 +495,9 @@ internal sealed class ObjectContents(
     // field, its region, and the rows of its granules of one value.
     private const int TagKeyRuns = 35;
     private const int TagKeyRunsSingle = 3;
+
+    // The runs of the key's whole indexed prefix in each granule: their region, and the rows of the granules they describe.
+    private const int TagPrefixRuns = 38;
 
     // The statistics over the granules of a shredded key read in its class, as a path's locate is named; then the rows of the
     // granules where each holds one value, packed, in their order.
@@ -743,8 +747,12 @@ internal sealed class ObjectContents(
 
             foreach ((int component, IndexSegment region, long single) in KeyRuns)
             {
-                using ProtoWriter.MessageScope message = writer.BeginMessage(TagKeyRuns);
-                writer.WriteUInt32Always(TagDirectoryField, (uint)component);
+                using ProtoWriter.MessageScope message = writer.BeginMessage(component == GranuleKeyRuns.WholePrefix ? TagPrefixRuns : TagKeyRuns);
+                if (component != GranuleKeyRuns.WholePrefix)
+                {
+                    writer.WriteUInt32Always(TagDirectoryField, (uint)component);
+                }
+
                 IndexDirectory.WriteSegment(ref writer, TagDirectoryRegion, region);
                 writer.WriteUInt64Always(TagKeyRunsSingle, (ulong)single);
             }
@@ -1073,8 +1081,8 @@ internal sealed class ObjectContents(
                         }
 
                         break;
-                    case (TagKeyRuns, ProtoWireType.LengthDelimited):
-                        if (KeyRunsEntry(reader.ReadMessage()) is not { } runs)
+                    case (TagKeyRuns or TagPrefixRuns, ProtoWireType.LengthDelimited):
+                        if (KeyRunsEntry(reader.ReadMessage(), whole: field == TagPrefixRuns) is not { } runs)
                         {
                             return null;
                         }
@@ -1262,8 +1270,12 @@ internal sealed class ObjectContents(
             : null;
     }
 
-    /// <summary>A component's values over the granules: its place, its region and the rows of its granules of one value; null when they do not read.</summary>
-    private static (int, IndexSegment, long)? KeyRunsEntry(ProtoReader reader)
+    /// <summary>
+    /// A component's values over the granules: its place, its region and the rows of its granules of one value; or, when
+    /// <paramref name="whole"/>, the runs of the whole prefix, at <see cref="GranuleKeyRuns.WholePrefix"/>, with the rows of
+    /// the granules they describe. Null when they do not read.
+    /// </summary>
+    private static (int, IndexSegment, long)? KeyRunsEntry(ProtoReader reader, bool whole)
     {
         int component = -1;
         IndexSegment? region = null;
@@ -1287,7 +1299,8 @@ internal sealed class ObjectContents(
             }
         }
 
-        return component >= 0 && region is { } held ? (component, held, single) : null;
+        return whole && region is { } prefix ? (GranuleKeyRuns.WholePrefix, prefix, single)
+            : component >= 0 && region is { } held ? (component, held, single) : null;
     }
 
     private static (int, IndexSegment)? Directory(ProtoReader reader)

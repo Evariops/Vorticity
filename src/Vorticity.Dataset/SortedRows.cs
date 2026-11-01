@@ -17,10 +17,10 @@ internal interface IOrderedKeys
 /// <summary>
 /// What a sorted object's rows give its writer as they come in the key's order (<see cref="SortKey"/>): the indexed prefix
 /// of the key of each granule's first row, which its sparse index keeps, its last key, and the rows of the granules that
-/// hold one value of the prefix, whose first and last rows hold the same, the keys following one another; and, for each
-/// component of the prefix that is a function of a column, the values it takes in each granule with their rows
-/// (<see cref="GranuleKeyRuns"/>). What a compaction, an append and a rewrite share of every object they write sorted. A
-/// granule is the writer's block.
+/// hold one value of the prefix, whose first and last rows hold the same, the keys following one another; for each
+/// component of the prefix that is a function of a column, the values it takes in each granule with their rows; and, for a
+/// prefix of two components or more, its runs in each granule with their rows (<see cref="GranuleKeyRuns"/>). What a
+/// compaction, an append and a rewrite share of every object they write sorted. A granule is the writer's block.
 /// </summary>
 /// <param name="keys">The key the rows come in the order of.</param>
 /// <param name="prefix">The components of the key the object indexes.</param>
@@ -45,10 +45,21 @@ internal sealed class SortedRows(SortKey keys, int prefix, int skip = 0)
     private int _granuleRows;
 
     // Each component of the prefix that is a function of a column, by its place in the key, its values by granule, and
-    // whether they still hold: a value that reads as no integer gives the component up. The bytes of a run's prefix.
+    // whether they still hold: a value that reads as no integer gives the component up; the bytes of the last value read of
+    // each, and that value. The bytes of a run's prefix.
     private readonly (int Position, GranuleKeyRuns.Builder Runs)[] _runs = FunctionsOf(keys, skip, prefix);
     private readonly bool[] _givenUp = new bool[FunctionCount(keys, skip, prefix)];
+    private readonly byte[]?[] _valueBytes = new byte[]?[FunctionCount(keys, skip, prefix)];
+    private readonly int[] _valueLengths = new int[FunctionCount(keys, skip, prefix)];
+    private readonly long[] _valuesRead = new long[FunctionCount(keys, skip, prefix)];
     private byte[] _runPrefix = new byte[64];
+
+    // The runs of the prefix by granule, for a prefix of two components or more, and whether they still hold. The components
+    // the runs are galloped over: the prefix's, or those before one whose width the encoding does not tell, a struct's or a
+    // list's, which the key's types decide once and which gives the prefix's runs up; -1 before the first key.
+    private readonly GranuleKeyRuns.PrefixBuilder? _prefixRuns = prefix >= 2 ? new GranuleKeyRuns.PrefixBuilder() : null;
+    private bool _prefixGivenUp;
+    private int _runCut = -1;
 
     /// <summary>The keys of the first and the last rows taken, whole; null before one.</summary>
     internal (byte[] First, byte[] Last)? Bounds => _firstKey is null || _lastKeyLength < 0 ? null : (_firstKey, _lastKey[.._lastKeyLength]);
@@ -84,30 +95,46 @@ internal sealed class SortedRows(SortKey keys, int prefix, int skip = 0)
             }
         }
 
-        // The values of each component that is a function of a column, run by run: a run of one value of the prefix up to
-        // it lies together, found by a gallop over the keys, a few looks a run and none a row.
-        for (int c = 0; c < _runs.Length; c++)
+        // The runs of the prefix, each one value of every component, found by a gallop over the keys, a few looks a run and
+        // none a row: each the prefix's runs take whole, and each component that is a function of a column its value, read
+        // where its bytes change.
+        if (_runCut < 0)
         {
-            (int position, GranuleKeyRuns.Builder runs) = _runs[c];
-            for (int row = from; row < to && !_givenUp[c];)
+            ReadOnlySpan<byte> first = source.KeyAt(from);
+            _runCut = _cut;
+            while (_runCut > 0 && keys.PrefixLength(first, _runCut) < 0)
             {
-                int end = RunEnd(source, row, to, position + 1);
-                if (!TryValue(source.KeyAt(row), position, out long value))
-                {
-                    _givenUp[c] = true;
-                    break;
-                }
-
-                for (long at = _rows + (row - from), stop = _rows + (end - from); at < stop;)
-                {
-                    long granule = at / granuleRows;
-                    long until = Math.Min(stop, (granule + 1) * granuleRows);
-                    runs.Add(granule, value, until - at);
-                    at = until;
-                }
-
-                row = end;
+                _runCut--;
             }
+        }
+
+        for (int row = from; row < to && (_prefixRuns is not null || _runs.Length > 0);)
+        {
+            int end = RunEnd(source, row, to, _runCut);
+            ReadOnlySpan<byte> key = source.KeyAt(row);
+            int length = keys.PrefixLength(key, _runCut);
+            _prefixGivenUp |= length < 0 || _runCut < _cut;
+            for (long at = _rows + (row - from), stop = _rows + (end - from); at < stop;)
+            {
+                long granule = at / granuleRows;
+                long until = Math.Min(stop, (granule + 1) * granuleRows);
+                if (!_prefixGivenUp)
+                {
+                    _prefixRuns?.Add(granule, key[..length], until - at);
+                }
+
+                for (int c = 0; c < _runs.Length; c++)
+                {
+                    if (!_givenUp[c] && TryValue(key, c, out long value))
+                    {
+                        _runs[c].Runs.Add(granule, value, until - at);
+                    }
+                }
+
+                at = until;
+            }
+
+            row = end;
         }
 
         _rows += to - from;
@@ -192,23 +219,33 @@ internal sealed class SortedRows(SortKey keys, int prefix, int skip = 0)
         return bound;
     }
 
-    /// <summary>The value of the key's component at <paramref name="position"/> as an integer, the function's image; false when it reads as none.</summary>
-    private bool TryValue(ReadOnlySpan<byte> key, int position, out long value)
+    /// <summary>
+    /// The value of the <paramref name="function"/>th of the components that are functions of a column in the key
+    /// <paramref name="key"/>, as an integer, the function's image: the last one read again where its bytes are the same;
+    /// false, the component given up, when it reads as none.
+    /// </summary>
+    private bool TryValue(ReadOnlySpan<byte> key, int function, out long value)
     {
-        value = 0;
+        int position = _runs[function].Position;
         int at = keys.PrefixLength(key, position);
-        if (at < 0)
+        int end = keys.PrefixLength(key, position + 1);
+        value = _valuesRead[function];
+        if (at >= 0 && end >= at && _valueBytes[function] is { } held && key[at..end].SequenceEqual(held.AsSpan(0, _valueLengths[function])))
         {
+            return true;
+        }
+
+        if (at < 0 || end < at || !ValueFunction.TryInteger(RowEncoder.ReadFirstValue(key[at..], keys.TypeAt(position)), out Int128 integer)
+            || integer < long.MinValue || integer > long.MaxValue)
+        {
+            _givenUp[function] = true;
             return false;
         }
 
-        FilterLiteral literal = RowEncoder.ReadFirstValue(key[at..], keys.TypeAt(position));
-        if (!ValueFunction.TryInteger(literal, out Int128 integer) || integer < long.MinValue || integer > long.MaxValue)
-        {
-            return false;
-        }
-
-        value = (long)integer;
+        byte[] bytes = _valueBytes[function] ?? new byte[16];
+        _valueLengths[function] = Keep(ref bytes, key[at..end]);
+        _valueBytes[function] = bytes;
+        _valuesRead[function] = value = (long)integer;
         return true;
     }
 
@@ -235,6 +272,13 @@ internal sealed class SortedRows(SortKey keys, int prefix, int skip = 0)
                 }
             }
 
+            // The prefix's runs, where a granule they describe holds more than one: the rows of those they describe stand
+            // for the rows of the granules of one value.
+            if (_prefixRuns?.Finish() is ({ } prefixRegion, long described, long ones) && !_prefixGivenUp && described > ones)
+            {
+                declared.Add((GranuleKeyRuns.WholePrefix, prefixRegion, described));
+            }
+
             if (declared.Count > 0)
             {
                 writer.DeclareKeyRuns(declared);
@@ -257,6 +301,9 @@ internal sealed class SortedRows(SortKey keys, int prefix, int skip = 0)
             _runs[c].Runs.Finish();
             _givenUp[c] = false;
         }
+
+        _prefixRuns?.Finish();
+        _prefixGivenUp = false;
     }
 
     /// <summary>

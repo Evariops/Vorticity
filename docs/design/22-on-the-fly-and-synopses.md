@@ -329,6 +329,20 @@ buckets answers without its instants. Every request but one, by service and twel
 through the granules where the rows read 4.35 MB, the four granules the request may lie in read as rows
 *(measured, `DatasetKeyRunsTests`)*.
 
+Where two services meet, a granule holds two services and two buckets: two columns of the question vary,
+which neither the service's listed values nor the hours answer alone. For a prefix of two components or
+more, the same gallop keeps the runs of the whole prefix in each granule, each one value of every
+component, the key's own bytes from its start through the prefix, each run sharing its leading bytes with
+the one before, and its rows (`GranuleKeyRuns` again, a second shape the table of contents names apart;
+a granule of more than 256 runs is not described, as a granule lists 256 values at most). A question of
+counts keyed by two columns the prefix gives, a column of it or a coarser function of a column a component
+is a function of, takes such a granule's groups from them run by run, its other keys holding one group
+over the granule. *Calculated* for the requests of S1, whose key's prefix is the service, the version,
+the host and the hour: about ten runs a granule, five to ten bytes each, some 5 MB a day, read only by
+such a question. Every request but one, by service and twelve hours, over forty services of three hosts
+each, answers every granule where two services meet by its runs, the four the request may lie in read as
+rows: 5 blocks decoded where the rows decode 50 *(measured, `DatasetPrefixRunsTests`)*.
+
 A variant's key that a job shreds, top-level or nested in its objects, read as an integer or a text, keeps
 its statistics over the granules as a column does, the rows that hold no value of its class counted as nulls
 ([10-indexes.md](10-indexes.md#411-vorticitygranulestatsv1-a-column-over-the-granules)). A filter on the key,
