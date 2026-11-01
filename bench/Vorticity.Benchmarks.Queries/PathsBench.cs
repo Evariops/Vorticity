@@ -180,9 +180,6 @@ internal static partial class PathsBench
         /// <summary>The counts of clients <c>--qps</c> asks the questions with at once (<c>--clients</c>).</summary>
         internal int[] Clients { get; init; } = [1, Environment.ProcessorCount];
 
-        /// <summary>Whether <c>--qps</c> also gives each question's asks and latencies (<c>--qps-by-question</c>).</summary>
-        internal bool QpsByQuestion { get; init; }
-
         /// <summary>The objects each handle of <c>--qps</c> keeps open (<c>--open-objects</c>); 0 for the dataset's default.</summary>
         internal int OpenObjects { get; init; }
 
@@ -195,6 +192,19 @@ internal static partial class PathsBench
         /// own made for the run and deleted after it; null for the latter.
         /// </summary>
         internal string? SharedCache { get; init; }
+
+        /// <summary>
+        /// The processes <c>--qps</c> asks the questions in at once over one synopsis cache shared by its root
+        /// (<c>--qps-processes N</c>): past one, a third phase, this process and N − 1 copies of it, each reading what the others
+        /// kept; one, the default, for none.
+        /// </summary>
+        internal int QpsProcesses { get; init; } = 1;
+
+        /// <summary>The one phase of <c>--qps</c> a copy of the bench runs, <c>shared</c> (<c>--qps-phase</c>); null for all of them.</summary>
+        internal string? QpsPhase { get; init; }
+
+        /// <summary>The bench's arguments, as a copy of it in another process is given them.</summary>
+        internal string[] Arguments { get; init; } = [];
 
         /// <summary>
         /// One of the client's stores, <c>spans</c> or <c>logs</c>, built alone in this process and kept, its build's cost
