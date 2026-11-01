@@ -1953,11 +1953,17 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         }
     }
 
+    /// <summary>The rows of the granules a reader reads a part of a chunk by: the block, in a file that carries its table of contents.</summary>
+    private int GranuleReadRows => _carriesContents ? _blockRows : 0;
+
     /// <summary>
     /// The workspace every blob is assembled in, one after the other: a column's chunk, a zone map,
     /// an index payload.
     /// </summary>
-    private ArrayBlobWriter.Workspace Blobs => _blobs ??= new ArrayBlobWriter.Workspace { FrameRows = _rowBlock, Fan = Fan, SizeFirst = _sizeFirst, ZstdLevel = _zstdLevel };
+    private ArrayBlobWriter.Workspace Blobs => _blobs ??= new ArrayBlobWriter.Workspace
+    {
+        FrameRows = _rowBlock, GranuleRows = GranuleReadRows, Fan = Fan, SizeFirst = _sizeFirst, ZstdLevel = _zstdLevel,
+    };
 
     /// <summary>The writer's threads, or null when it has one.</summary>
     private WorkFan? Fan => _lanes > 1 ? _fan ??= WorkFan.Rent(_lanes, _budget) : null;

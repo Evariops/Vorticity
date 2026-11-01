@@ -3204,6 +3204,13 @@ internal static class ArrayBlobWriter
         /// </summary>
         internal bool SizeFirst { get; init; }
 
+        /// <summary>
+        /// The rows of the granules a reader reads a part of a chunk by, the writer's block in a file that carries its
+        /// table of contents; 0 for a file read by its chunks alone. Every array the workspace writes answers to them, a
+        /// variant's shredded keys as well as the columns (<see cref="ColumnCompressor"/>).
+        /// </summary>
+        internal int GranuleRows { get; init; }
+
         private ZstdFrames? _frames;
 
         /// <summary>The frame table of a column compressed on <see cref="Fan"/>, rented by the first column that uses it.</summary>
@@ -3253,7 +3260,10 @@ internal static class ArrayBlobWriter
         internal (Workspace Blob, EncodingDictionary Encodings) Measure(VortexEdition target)
         {
             // Never size first: what it measures is the plan every other profile writes.
-            _measure ??= new Workspace { FrameRows = FrameRows, Fan = Fan, OwnTypes = OwnTypes, ZstdLevel = ZstdLevel };
+            _measure ??= new Workspace
+            {
+                FrameRows = FrameRows, GranuleRows = GranuleRows, Fan = Fan, OwnTypes = OwnTypes, ZstdLevel = ZstdLevel,
+            };
             _measure.ColumnLevel = ColumnLevel;
             if (_measureEncodings is null || _measureEncodings.Target != target)
             {

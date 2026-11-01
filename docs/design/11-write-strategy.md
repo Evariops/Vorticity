@@ -453,6 +453,16 @@ each on average; QP-1 read 33.9 MB in 75 requests in 123 ms, against 177.7 MB in
 column then, about a megabyte, where it took the small chunk of every column in one; it now reads the
 granules that hold its row, through the marks of their chunks.
 
+A read of a few granules slices a dictionary's codes but reads its values whole, as any row may name
+any of them, where FSST's bytes lie between its granules' marks. So an object, which its readers read
+granule by granule, writes a text chunk as FSST rather than a dictionary when the dictionary's values
+weigh more than one granule's share of it, so that a read of one granule reads more than twice its
+share, and FSST writes the chunk in no more than the dictionary does and one granule's share of it,
+an eighth at most. The values are priced as FSST would write them, at its ratio
+to the plain column. A file written alone keeps the dictionary. A trace identifier of 32 hexadecimal
+digits, one span in seven sharing its trace with a span a few rows before, read 2.07 MB of an object of
+3.40 MB for one trace's spans as a dictionary, and 494 KB of 3.63 MB as FSST.
+
 ## 10. Shredded variants
 
 A job of a schema with a variant column reads its rows twice, once to count the paths of each

@@ -1195,7 +1195,7 @@ internal static class ColumnCompressor
         if (dictionary.Scheme != ColumnScheme.None)
         {
             temporal?.Release();
-            return dictionary;
+            return Sliceable(in dictionary, arena, nodeIndex, in node, target, workspace?.GranuleRows ?? 0, plain);
         }
 
         if (temporal is not null)
@@ -1885,7 +1885,9 @@ internal static class ColumnCompressor
                 memory.Scheme, arena, nodeIndex, node, target, in stats, cascade, chunk, plain, workspace);
             if (remembered.Scheme == memory.Scheme)
             {
-                return remembered with { FromMemory = true };
+                // A dictionary remembered still answers to the granules a reader reads a part of a chunk by.
+                remembered = remembered with { FromMemory = true };
+                return Sliceable(in remembered, arena, nodeIndex, in node, target, workspace?.GranuleRows ?? 0, plain);
             }
         }
 
@@ -1972,7 +1974,7 @@ internal static class ColumnCompressor
                     return smaller with { DisplacedExact = true };
                 }
 
-                return dictionary;
+                return Sliceable(in dictionary, arena, nodeIndex, in node, target, workspace?.GranuleRows ?? 0, plain);
             }
         }
 
@@ -2466,6 +2468,70 @@ internal static class ColumnCompressor
             Rows = length,
             PredictedBytes = encoded,
         };
+    }
+
+    /// <summary>
+    /// FSST in place of <paramref name="dictionary"/>, a text column's, in a chunk a reader reads a part of granule by
+    /// granule, <paramref name="granuleRows"/> rows each: when the dictionary's values weigh more than one granule's
+    /// share of it, so that a read of one granule reads more than twice its share, and FSST writes the chunk in no more
+    /// than the dictionary does and one granule's share of it, an eighth at most. The dictionary otherwise, and in a file
+    /// read by its chunks alone.
+    /// </summary>
+    /// <remarks>
+    /// A read of a few granules slices a dictionary's codes but reads its values whole, as every row may name any of them
+    /// (<see cref="Indexes.GranuleBytes"/>), where FSST's bytes lie between its granules' marks. A dictionary of nearly as
+    /// many values as rows saves a chunk read whole a few hundredths, and costs each read of a part its values; a key of
+    /// 150 000 values, its codes 590 KB and its values 517, read 1.52 MB through its granules where its rows read 1.17.
+    /// <para>
+    /// The dictionary's values are priced as FSST writes them, at FSST's ratio to the plain column, ρ = F / P, F its bytes
+    /// and P the plain column's: FSST takes the chunk when F ≤ (C + ρ·V)·(k + 1) / k, C the codes, V the values plain and
+    /// k the chunk's granules, eight at least. Solved for F, F·(k·P − (k + 1)·V) ≤ (k + 1)·C·P is the ceiling its build
+    /// stops at, under its own bar against the plain column; where the left factor is not positive, the values weigh as
+    /// much as the column and any F holds.
+    /// </para>
+    /// </remarks>
+    /// <param name="dictionary">The dictionary chosen, priced.</param>
+    /// <param name="arena">The arena holding the chunk.</param>
+    /// <param name="nodeIndex">The chunk.</param>
+    /// <param name="node">The same chunk, resolved.</param>
+    /// <param name="target">The edition written.</param>
+    /// <param name="granuleRows">The rows of the file's granules; 0 for a file read by its chunks alone.</param>
+    /// <param name="plain">The plain column's bytes.</param>
+    private static ColumnPlan Sliceable(
+        in ColumnPlan dictionary, CanonicalArena arena, int nodeIndex, in CanonicalNode node, VortexEdition target,
+        int granuleRows, long plain)
+    {
+        int length = node.Length;
+        if (dictionary.Scheme != ColumnScheme.Dict || granuleRows <= 0 || length < 2 * granuleRows
+            || node.Kind != CanonicalKind.VarBinView || !Allows(target, "vortex.fsst") || dictionary.PredictedBytes <= 0)
+        {
+            return dictionary;
+        }
+
+        int entries = dictionary.Table is not null ? dictionary.Entries : dictionary.Gather.Length;
+        long codes = CodeBytes(length, entries, Allows(target, "fastlanes.bitpacked"));
+        long values = dictionary.PredictedBytes - codes;
+        long granules = length / granuleRows;
+        if (values * (granules - 1) <= codes)
+        {
+            return dictionary;
+        }
+
+        long k = Math.Max(8, granules);
+        long ceiling = plain * 9 / 10;
+        Int128 factor = (Int128)k * plain - (Int128)(k + 1) * values;
+        if (factor > 0)
+        {
+            ceiling = (long)Int128.Min(ceiling, (Int128)(k + 1) * codes * plain / factor);
+        }
+
+        if (FsstPlan.TryBuild(arena, nodeIndex, ceiling) is not { } fsst)
+        {
+            return dictionary;
+        }
+
+        dictionary.ReleaseCodes();
+        return ColumnPlan.ForFsst(fsst) with { PredictedBytes = fsst.EncodedSize };
     }
 
     /// <summary>

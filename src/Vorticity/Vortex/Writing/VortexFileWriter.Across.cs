@@ -730,14 +730,14 @@ public sealed partial class VortexFileWriter
                 lane._fan = WorkFan.Rent(writer._lanes, writer._budget);
             }
 
-            if (lane._blobs.FrameRows != writer._rowBlock || lane._blobs.SizeFirst != writer._sizeFirst
-                || lane._blobs.ZstdLevel != writer._zstdLevel || lane._blobs.Fan != lane._fan)
+            if (lane._blobs.FrameRows != writer._rowBlock || lane._blobs.GranuleRows != writer.GranuleReadRows
+                || lane._blobs.SizeFirst != writer._sizeFirst || lane._blobs.ZstdLevel != writer._zstdLevel || lane._blobs.Fan != lane._fan)
             {
                 lane._blobs.Dispose();
                 lane._blobs = new ArrayBlobWriter.Workspace
                 {
-                    FrameRows = writer._rowBlock, SizeFirst = writer._sizeFirst, ZstdLevel = writer._zstdLevel,
-                    OwnTypes = true, Fan = lane._fan,
+                    FrameRows = writer._rowBlock, GranuleRows = writer.GranuleReadRows, SizeFirst = writer._sizeFirst,
+                    ZstdLevel = writer._zstdLevel, OwnTypes = true, Fan = lane._fan,
                 };
             }
 
