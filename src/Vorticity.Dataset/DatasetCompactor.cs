@@ -967,7 +967,7 @@ internal static partial class DatasetCompactor
             for (int v = 0; v < variants.Length; v++)
             {
                 string name = schema.DType.GetFieldName(variants[v]);
-                if (ShreddingChoice.Choose(paths[v], required: IdentifierKeys(schema, variants[v]), promoted: dataset.Promotions.Of(name)) is { } chosen)
+                if (ShreddingChoice.Choose(paths[v], required: IdentifierKeys(schema, variants[v])) is { } chosen)
                 {
                     shredded = shredded.SetItem(name, chosen);
                     chunks = chunks.SetItem(name, ShreddingChoice.ChunkTargetBytes(paths[v]));

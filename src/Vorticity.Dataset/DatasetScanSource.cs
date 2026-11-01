@@ -752,7 +752,6 @@ internal sealed partial class DatasetScanSource
     /// <summary>The engine's scan for <paramref name="spec"/>, adding what the objects' scans count to <paramref name="counters"/>.</summary>
     internal DatasetScanBuilder Builder(ScanSpec spec, ScanCounters? counters)
     {
-        _dataset.Promotions.Asked(spec.VariantKeys);
         DatasetScanBuilder builder = new DatasetScanBuilder(_dataset, _version)
             .WithVariantKeys(spec.VariantKeys).WithZoneKeys(spec.ZoneKeys).WithReadAhead(spec.ReadAhead).WithShape(spec.Query?.Shape).OfQuestion(this);
         if (spec.Projection is { } mask)

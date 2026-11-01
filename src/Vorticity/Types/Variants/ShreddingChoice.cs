@@ -60,16 +60,12 @@ internal static class ShreddingChoice
     /// First-level keys shredded in their class wherever a row holds one of that class, however few, and first to keep: a
     /// dataset's identifiers among the attributes, whose index a key in the residual could not have.
     /// </param>
-    /// <param name="promoted">
-    /// First-level keys shredded in their dominant class however few values they hold, next to keep: the keys a dataset's
-    /// questions ask (spec E, 5.1).
-    /// </param>
     internal static VariantShredding? Choose(
-        PathCensus census, int tableBudget = TableBudget, IReadOnlyDictionary<string, VariantClass>? required = null, IReadOnlySet<string>? promoted = null)
+        PathCensus census, int tableBudget = TableBudget, IReadOnlyDictionary<string, VariantClass>? required = null)
     {
         ArgumentNullException.ThrowIfNull(census);
         List<Candidate> candidates = [];
-        Collect(census.Root, [], candidates, required, promoted);
+        Collect(census.Root, [], candidates, required);
         if (candidates.Count == 0)
         {
             return null;
@@ -90,10 +86,10 @@ internal static class ShreddingChoice
 
     /// <summary>
     /// The paths under <paramref name="node"/> that hold <see cref="LeastValues"/> values of their dominant class or more,
-    /// and the first-level keys <paramref name="required"/> or <paramref name="promoted"/> name.
+    /// and the first-level keys <paramref name="required"/> names.
     /// </summary>
     private static void Collect(
-        PathCensus.PathCount node, string[] path, List<Candidate> into, IReadOnlyDictionary<string, VariantClass>? required, IReadOnlySet<string>? promoted)
+        PathCensus.PathCount node, string[] path, List<Candidate> into, IReadOnlyDictionary<string, VariantClass>? required)
     {
         // A required key is shredded in its class wherever a row holds one; a key that holds none of that class is judged
         // as any other.
@@ -108,15 +104,15 @@ internal static class ShreddingChoice
         {
             foreach ((string name, PathCensus.PathCount key) in node.Keys.OrderBy(static key => key.Key, StringComparer.Ordinal))
             {
-                Collect(key, [.. path, name], into, path.Length == 0 ? required : null, path.Length == 0 ? promoted : null);
+                Collect(key, [.. path, name], into, path.Length == 0 ? required : null);
             }
 
             return;
         }
 
-        if (count >= LeastValues || (count > 0 && path.Length == 1 && promoted?.Contains(path[0]) == true))
+        if (count >= LeastValues)
         {
-            into.Add(new Candidate(path, best, count >= LeastValues ? count : long.MaxValue - 1));
+            into.Add(new Candidate(path, best, count));
         }
     }
 

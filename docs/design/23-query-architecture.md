@@ -398,8 +398,8 @@ every path of an object is a stream of its own, of one of four kinds:
 
 There is no budget of columns and no cap on paths; budgets apply to metadata alone. Each path has its presence, zone
 maps and locating index per granule, under the yield rules of [section 5.5](#55-metadata-per-granule-and-locating-indexes).
-Paths that questions filter and group on are promoted to typed streams with their indexes at the next merge, learned
-from the questions asked rather than declared: a path a handle's questions name three times. A declared path may be a
+No question changes what a job writes: a path is typed by how often the object holds it, or because the dataset declares
+it (`ShreddedPaths`), and a rare one is read through its presence, its granules alone. A declared path may be a
 component of the sort key. A filter on a sparse path costs its present values
 ([section 6.2](#62-predicates-evaluated-in-the-encoded-domain)), and a question on a path reads that path's streams and
 nothing else.

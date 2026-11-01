@@ -3069,8 +3069,6 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <summary>What an order of the rows by each value the filters of this handle's questions read would have spared them (<see cref="LayoutAdvisor"/>).</summary>
     internal LayoutAdvisor Advisor { get; } = new LayoutAdvisor();
 
-    /// <summary>The keys of variant columns this handle's questions ask, which its jobs shred once asked enough (<see cref="VariantPromotions"/>).</summary>
-    internal VariantPromotions Promotions { get; } = new VariantPromotions();
 
     /// <summary>The rows of a granule the advice reckons with, a dataset writer's block.</summary>
     private const int AdvisedGranuleRows = 8192;

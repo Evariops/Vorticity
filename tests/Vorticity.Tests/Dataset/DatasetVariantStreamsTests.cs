@@ -27,7 +27,7 @@ public sealed partial class DatasetVariantStreamsTests
     /// a debug text on one service's rows now and then, and a key that is data on one in a hundred, appended in two halves
     /// and consolidated: route, status and retry typed (E1), debug and the keys that are data in the residual; each path's
     /// granules named as its rows lie (E2); questions on each path, and a key read under a filter on another, as LINQ
-    /// answers (E3); the debug text asked three times is typed by the next consolidation (E4).
+    /// answers (E3). The debug text stays in the residual however often it is asked: no question changes what a job writes.
     /// </summary>
     [Fact]
     public async Task EachPathThatComesBackHasItsStream()
@@ -161,29 +161,26 @@ public sealed partial class DatasetVariantStreamsTests
             (await dataset.Scan<Row>().GroupBy(r => (r.Attributes["route"].AsString(), r.At.Truncate(CalendarUnit.Day))).Select(g => (g.Key.Item1, g.Key.Item2, g.Count())).As<RouteDayCount>().ToRecordsAsync(Ct).ToListAsync(Ct))
                 .Select(static c => $"{c.Route}/{c.Day:yyyy-MM-dd}:{c.Count}").Order(StringComparer.Ordinal));
 
-        // Promotion: the debug text asked three times in all is typed by the next job that writes its rows.
-        for (int time = 0; time < 2; time++)
+        // No promotion: the debug text asked three times in all stays in the residual of the next job that writes its rows.
+        for (int time = 0; time < 3; time++)
         {
             await dataset.Scan<Row>().Where(r => r.Attributes["debug"].AsString() == "trace-9").Select(r => r.Sequence).ToListAsync(Ct);
         }
 
         await AppendAsync(dataset, [.. rows[..2_000].Select(static r => r with { Sequence = r.Sequence + 300_000 })]);
         await dataset.ConsolidateAsync(Ct);
-        int typed = 0;
-        await foreach (PositionedObject promoted in dataset.ScanBuilder().ObjectsAsync(Ct))
+        await foreach (PositionedObject rewritten in dataset.ScanBuilder().ObjectsAsync(Ct))
         {
-            if (await dataset.ReadPathDirectoryAsync(promoted.Entry, Attributes, Ct) is not { } paths)
+            if (await dataset.ReadPathDirectoryAsync(rewritten.Entry, Attributes, Ct) is not { } paths)
             {
                 continue;
             }
 
             foreach (PathEntry entry in paths.Of(["debug"]))
             {
-                typed += entry.Class == Vorticity.Types.Variants.PathClass.String && entry.Place == PathPlace.Typed ? 1 : 0;
+                Assert.NotEqual(PathPlace.Typed, entry.Place);
             }
         }
-
-        Assert.True(typed > 0, "the debug text is typed nowhere after three questions and a consolidation");
     }
 
     /// <summary>
