@@ -52,6 +52,8 @@ internal static class DesignBuild
 
         await using (dataset)
         {
+            // The indexes the handle's writes build, declared to the dataset: its jobs build them into what they write too.
+            await dataset.IndexAsync(WriteOptions(budget, scratch).Indexes);
             long perHour = (long)(rate * 3_600);
             Task<List<ObjectDraft>>[] written = new Task<List<ObjectDraft>>[hours];
             int next = 0;

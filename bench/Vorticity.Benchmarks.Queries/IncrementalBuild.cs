@@ -34,6 +34,10 @@ internal static class IncrementalBuild
         where TRecord : IVortexRecord<TRecord>
     {
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, TRecord.Schema, options);
+
+        // The indexes the handle's writes build, declared to the dataset: its jobs build them into what they write too, where
+        // the handle's options reach its own writes alone.
+        await dataset.IndexAsync(options.Write.Indexes);
         Dictionary<string, Pass> passes = new(StringComparer.Ordinal);
         using ActivityListener? listener = PrintJobs ? ListenToPasses(passes) : null;
         Task<List<ObjectDraft>>[] written = new Task<List<ObjectDraft>>[hours];
