@@ -315,7 +315,7 @@ internal sealed class GranuleAnswer
         if (at < 0)
         {
             _pathTypes ??= new DTypeArena();
-            (_pathColumns ??= []).Add((_schema.DType.IndexOfField(path.Column.Path), path.Steps[0].Key!, held, path.Text, Writing.IndexWriter.ClassType(_pathTypes, held)));
+            (_pathColumns ??= []).Add((_schema.DType.IndexOfField(path.Column.Path), path.KeyName!, held, path.Text, Writing.IndexWriter.ClassType(_pathTypes, held)));
             at = _pathColumns.Count - 1;
         }
 
@@ -530,15 +530,19 @@ internal sealed class GranuleAnswer
 
     /// <summary>
     /// The class the statistics of the shredded key <paramref name="path"/> reads list its values in, an integer or a text, for
-    /// a top-level key of a column of <paramref name="schema"/>; null for a path no statistics over the granules describe.
+    /// a key of a top-level column of <paramref name="schema"/>, top-level or nested in its objects; null for a path no
+    /// statistics over the granules describe.
     /// </summary>
     private static Types.Variants.PathClass? ClassOf(VariantFieldExpr path, DType schema) =>
-        schema.IndexOfField(path.Column.Path) is < 0 ? null : path.CountedClass switch
-        {
-            Types.Variants.VariantClass.Integer => Types.Variants.PathClass.Integer,
-            Types.Variants.VariantClass.String => Types.Variants.PathClass.String,
-            _ => null,
-        };
+        path.Column is not ColumnFieldExpr || path.Column.Path.Contains('.', StringComparison.Ordinal) || schema.IndexOfField(path.Column.Path) < 0
+            || path.KeyName is null
+            ? null
+            : path.Read switch
+            {
+                VariantRead.AsInt64 => Types.Variants.PathClass.Integer,
+                VariantRead.AsString => Types.Variants.PathClass.String,
+                _ => null,
+            };
 
     /// <summary>
     /// The first values <paramref name="filter"/> leaves out of a top-level column of <paramref name="version"/> by a
@@ -849,7 +853,7 @@ internal sealed class GranuleAnswer
     /// </summary>
     internal static bool Places(LocatingEntry entry, ExcludedValue value) =>
         entry.Column == (uint)value.Field && entry.Kind is IndexKinds.SortedRuns or IndexKinds.PostingsBlocks or IndexKinds.PostingsHashed or IndexKinds.BloomSbbf
-        && (value.Key is not { } key || entry.Key is null || string.Equals(entry.Key, key.Steps[0].Key, StringComparison.Ordinal));
+        && (value.Key is not { } key || entry.Key is null || string.Equals(entry.Key, key.KeyName, StringComparison.Ordinal));
 
     /// <summary>
     /// The share of the rows of the object <paramref name="held"/> whose granules its statistics are not expected to answer:

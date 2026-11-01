@@ -288,7 +288,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                 entry.Kind,
                 IndexSegment.Of(offset + start, directory.AsSpan(start, length), 0))
             {
-                Key = entry.VariantPath is [{ } key, ..] ? key : null,
+                Key = entry.VariantPath is { Count: > 0 } keys ? string.Join(Compute.VariantFieldExpr.NestedKeys, keys) : null,
                 Bytes = bytes,
             };
         }
@@ -2208,7 +2208,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
     /// <summary>
     /// The shredded keys an index policy may index, each in the class its typed column holds: the
-    /// top-level primitive keys of each variant column <paramref name="shredding"/> names; null for none.
+    /// primitive keys of each variant column <paramref name="shredding"/> names, top-level or nested in its objects, a
+    /// nested one under the name its keys give it (<see cref="Compute.VariantFieldExpr.KeyName"/>); null for none.
     /// </summary>
     private static List<(int Field, string Key, Types.Variants.PathClass Class)>? IndexedKeys(
         DType schema, IReadOnlyDictionary<string, VariantShredding>? shredding)
@@ -2224,20 +2225,39 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
             foreach (ShreddedKey key in column.Value.Keys)
             {
-                if (key.Field.Kind == VariantShreddingKind.Primitive)
-                {
-                    (keys ??= []).Add((field, key.Name, key.Field.Class switch
-                    {
-                        VariantClass.Integer => Types.Variants.PathClass.Integer,
-                        VariantClass.Double => Types.Variants.PathClass.Double,
-                        VariantClass.Boolean => Types.Variants.PathClass.Boolean,
-                        _ => Types.Variants.PathClass.String,
-                    }));
-                }
+                Collect(field, key, [], ref keys);
             }
         }
 
         return keys;
+
+        // A primitive key, or those an object's key holds, under the name the keys it steps through give it.
+        static void Collect(int field, ShreddedKey key, Compute.VariantStep[] above, ref List<(int, string, Types.Variants.PathClass)>? keys)
+        {
+            Compute.VariantStep[] steps = [.. above, Compute.VariantStep.Of(key.Name)];
+            if (Compute.VariantFieldExpr.KeyNameOf(steps) is not { } name)
+            {
+                return;
+            }
+
+            if (key.Field.Kind == VariantShreddingKind.Primitive)
+            {
+                (keys ??= []).Add((field, name, key.Field.Class switch
+                {
+                    VariantClass.Integer => Types.Variants.PathClass.Integer,
+                    VariantClass.Double => Types.Variants.PathClass.Double,
+                    VariantClass.Boolean => Types.Variants.PathClass.Boolean,
+                    _ => Types.Variants.PathClass.String,
+                }));
+            }
+            else if (key.Field.Kind == VariantShreddingKind.Object)
+            {
+                foreach (ShreddedKey nested in key.Field.Keys)
+                {
+                    Collect(field, nested, steps, ref keys);
+                }
+            }
+        }
     }
 
     /// <summary>

@@ -111,12 +111,13 @@ public sealed partial class DatasetSynopsesMatrixTests
         foreach ((string key, PathClass @class) in keys)
         {
             string[] steps = key.Split('.');
+            string named = string.Join('\u001f', steps);
             List<string> means = [];
             PathEntry? entry = paths.Of(steps).ToArray().FirstOrDefault(entry => entry.Class == @class && entry.Values > 0);
             Add(means, entry is not null, entry is null ? string.Empty : entry.Place.ToString().ToLowerInvariant());
             Add(means, entry is { Groups: not null }, "presence");
-            Add(means, contents.PathLocateOf(attributesField, key, @class) is not null, "locate");
-            Add(means, contents.PathGranuleStatsOf(attributesField, key, @class) is not null, "granule-stats");
+            Add(means, contents.PathLocateOf(attributesField, named, @class) is not null, "locate");
+            Add(means, contents.PathGranuleStatsOf(attributesField, named, @class) is not null, "granule-stats");
             Add(means, blocks is not null && blocks.Keys.Contains((key, @class)), "zones");
             means.AddRange(directory.Entries.Where(index => index.VariantPath is { } path && path.SequenceEqual(steps)).Select(static index => Short(index.Kind)));
             kept[$"{key}:{@class}"] = string.Join(' ', means.Distinct().Order(StringComparer.Ordinal));
@@ -132,7 +133,7 @@ public sealed partial class DatasetSynopsesMatrixTests
             ["Tag"] = "bloom.sbbf column.counts column.sheet counts",
             ["code:Integer"] = "granule-stats granule.stats typed",
             ["debug:String"] = "presence residual",
-            ["http.method:String"] = "typed",
+            ["http.method:String"] = "granule-stats granule.stats typed",
             ["route:String"] = "granule-stats granule.stats typed",
             ["tenant:String"] = "granule-stats granule.stats locate typed zones",
         };

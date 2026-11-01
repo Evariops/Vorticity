@@ -329,8 +329,8 @@ buckets answers without its instants. Every request but one, by service and twel
 through the granules where the rows read 4.35 MB, the four granules the request may lie in read as rows
 *(measured, `DatasetKeyRunsTests`)*.
 
-A variant's top-level key that a job shreds, read as an integer or a text, keeps its statistics over the
-granules as a column does, the rows that hold no value of its class counted as nulls
+A variant's key that a job shreds, top-level or nested in its objects, read as an integer or a text, keeps
+its statistics over the granules as a column does, the rows that hold no value of its class counted as nulls
 ([10-indexes.md](10-indexes.md#411-vorticitygranulestatsv1-a-column-over-the-granules)). A filter on the key,
 `Attributes["code"].AsInt64() >= 500`, is judged on them granule by granule as on a column, a granule
 where the key varies answered from its values under a question of counts. The services under a code of
@@ -340,7 +340,9 @@ takes its groups from them as a column's does, its states carried under the path
 one sums the values a granule lists; no object's counts hold a path, so its objects are answered by their
 granules or their rows. A service's calls by route, every call by status code, and the calls and codes by
 service and tenant read 9.7 KB, 1.3 KB and 9.6 KB through the granules, where the rows read 538 KB, 399 KB
-and 627 KB *(measured, `DatasetVariantGranulesTests`)*.
+and 627 KB *(measured, `DatasetVariantGranulesTests`)*. A nested key answers alike: the services under an
+HTTP status of 500 or more, `Attributes["http"]["status"]`, read 2.8 KB, and every call by method 476
+bytes, where the rows read 461 KB and 230 KB *(measured, `DatasetNestedPathGranulesTests`)*.
 
 A granule no delete touches settles as a file's does; a granule a delete touches is read as rows
 (section 6). The statistics take 1 307.7 bytes a granule on the design's requests, sorted by emitter,

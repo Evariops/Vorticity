@@ -479,13 +479,15 @@ design over four hours, 367 granules, the statistics and the locates of every co
 on one thread, and the statistics took 1 307.7 bytes a granule, most of them the values listed by the
 columns of many values, the endpoints 677 and the hosts 423 *(measured, `--micro granules`)*.
 
-Each top-level key of a variant that a job shreds, read as an integer or a text, keeps a region of the same
-kind, built from the sheet its locate numbers its values by ([4.13](#413-vorticitylocatev1-where-each-value-lies-granule-by-granule)),
+Each key of a variant that a job shreds, top-level or nested in its objects (`Attributes['http']['status']`),
+read as an integer or a text, keeps a region of the same kind, built from the sheet its locate numbers its values by ([4.13](#413-vorticitylocatev1-where-each-value-lies-granule-by-granule)),
 the rows that hold no value of that class counted as its nulls; the table of contents names it by the
-variant column, the key and the class, beside the rows of its granules of one value. A key whose granules
+variant column, the key and the class, beside the rows of its granules of one value, a nested key by the
+keys it steps through joined by U+001F, as its locate and its Bloom filter are. A key whose granules
 list no values keeps its rows and nulls alone, where a column would keep nothing: no summary of the
 object says which rows hold no value of a key, and a filter that leaves a value of the key out needs
-them. A nested path, a double and a boolean keep none.
+them. A double and a boolean keep none, nor a path through a list. A nested key keeps no zone map by block
+([4.7](#47-vorticityvariantblocksv1-a-shredded-keys-zone-map)): its statistics over the granules judge it.
 
 ### 4.12 `vorticity.granule.histograms.v1`: a measure's histograms over the granules
 

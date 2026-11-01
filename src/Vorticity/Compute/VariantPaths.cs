@@ -157,6 +157,38 @@ internal sealed class VariantFieldExpr : FieldExpr
 
     internal override string Key => $"{Column.Key}{string.Concat(Steps)}.{Read}()";
 
+    /// <summary>What separates the keys of a nested path in the name its indexes take (<see cref="KeyName"/>).</summary>
+    internal const char NestedKeys = '\u001f';
+
+    /// <summary>
+    /// The name the indexes of the shredded path take in a file: its one key, or the keys it steps through joined by
+    /// <see cref="NestedKeys"/>, as <c>http</c> then <c>method</c>; null for a path that steps through a list or a key that
+    /// holds the separator.
+    /// </summary>
+    internal string? KeyName => KeyNameOf(Steps);
+
+    /// <summary>The name <see cref="KeyName"/> gives the keys <paramref name="steps"/> step through; null for an index step or a key holding the separator.</summary>
+    internal static string? KeyNameOf(ReadOnlySpan<VariantStep> steps)
+    {
+        if (steps.IsEmpty)
+        {
+            return null;
+        }
+
+        foreach (VariantStep step in steps)
+        {
+            if (!step.IsKey || step.Key!.Contains(NestedKeys, StringComparison.Ordinal))
+            {
+                return null;
+            }
+        }
+
+        return steps.Length == 1 ? steps[0].Key : string.Join(NestedKeys, Array.ConvertAll(steps.ToArray(), static step => step.Key!));
+    }
+
+    /// <summary>The steps of the keys a name <see cref="KeyName"/> gave joins.</summary>
+    internal static VariantStep[] StepsOf(string name) => Array.ConvertAll(name.Split(NestedKeys), VariantStep.Of);
+
     /// <summary>The type the values are read as.</summary>
     internal static VortexType TypeOf(VariantRead read) => read switch
     {

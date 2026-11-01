@@ -288,10 +288,10 @@ internal sealed class StateRequest
     /// <summary>Whether an aggregate of <paramref name="kind"/> folds a column of a batch of states, the values it is keyed by, rather than states.</summary>
     internal static bool FoldsValues(AggregateKind kind) => kind is AggregateKind.CountDistinct or AggregateKind.ApproximateCountDistinct;
 
-    /// <summary>A key a batch of states carries: a top-level column, functions of one, or a path a synopsis counts.</summary>
+    /// <summary>A key a batch of states carries: a top-level column, functions of one, a path a synopsis counts, or a nested key's read as an integer or a text, which the granules' statistics may list.</summary>
     private static bool Keyable(FieldExpr field) => field switch
     {
-        VariantFieldExpr path => path.CountedClass is not null,
+        VariantFieldExpr path => path.CountedClass is not null || (path.KeyName is not null && path.Read is VariantRead.AsInt64 or VariantRead.AsString && Column(path.Column)),
         FunctionFieldExpr function => function.Column is not VariantFieldExpr && Keyable(function.Column),
         _ => Column(field),
     };

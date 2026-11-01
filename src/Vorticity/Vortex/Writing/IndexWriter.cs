@@ -153,7 +153,7 @@ internal sealed class IndexWriter : IDisposable
             int slot = fieldCount + keys + (nested?.Count ?? 0) + p;
             (int field, string key, Types.Variants.PathClass @class) = variantKeys![p];
             string name = schema.GetFieldName(field);
-            Compute.VariantFieldExpr path = new Compute.VariantFieldExpr(new ColumnFieldExpr(name), [Compute.VariantStep.Of(key)], ReadOf(@class));
+            Compute.VariantFieldExpr path = new Compute.VariantFieldExpr(new ColumnFieldExpr(name), Compute.VariantFieldExpr.StepsOf(key), ReadOf(@class));
             IndexSpec column = policy.Columns.TryGetValue(path.Text, out IndexSpec own) ? own : policy.Of(name);
             DType dtype = ClassType(classTypes ??= new DTypeArena(), @class);
             _paths[slot] = path.Text;
@@ -1981,7 +1981,7 @@ internal sealed class IndexWriter : IDisposable
 
     /// <summary>The variant column, key and class of slot <paramref name="slot"/>, a shredded key read in its class; null for another slot.</summary>
     internal (int Field, string Key, Types.Variants.PathClass Class)? VariantOf(int slot) =>
-        _variants?[slot] is { } path ? (path.Field, path.Path.Steps[0].Key!, ClassOf(path.Path.Read)) : null;
+        _variants?[slot] is { } path ? (path.Field, path.Path.KeyName!, ClassOf(path.Path.Read)) : null;
 
     /// <summary>The builder of where column <paramref name="field"/>'s values lie, or null when it has none.</summary>
     internal LocateBuilder? LocateOf(int field)
@@ -2181,7 +2181,7 @@ internal sealed class IndexWriter : IDisposable
     /// <summary>An entry on slot <paramref name="field"/>, which names its path and class when the slot is a path's.</summary>
     private IndexEntry EntryOf(IndexEntry entry, int field) =>
         _variants?[field] is { } path
-            ? entry with { VariantPath = [path.Path.Steps[0].Key!], VariantClass = ClassOf(path.Path.Read) }
+            ? entry with { VariantPath = Array.ConvertAll(path.Path.Steps, static step => step.Key!), VariantClass = ClassOf(path.Path.Read) }
             : entry;
 
     /// <summary>Auto's Bloom filter, which gives itself up past its share of the column's bytes; no refusal.</summary>
@@ -2247,8 +2247,8 @@ internal sealed class IndexWriter : IDisposable
     /// <summary>
     /// Hands rows <paramref name="start"/> to <paramref name="start"/> + <paramref name="count"/> of the variant column at
     /// <paramref name="nodeIndex"/> to the builders of the keys <paramref name="feed"/> holds, each read in its slot's class:
-    /// the rows sliced once and every key read in one pass over them (<see cref="Compute.VariantFieldExpr.ApplyKeys"/>),
-    /// where a key at a time read every row's dictionary again.
+    /// the rows sliced once and every top-level key read in one pass over them (<see cref="Compute.VariantFieldExpr.ApplyKeys"/>),
+    /// where a key at a time read every row's dictionary again; a nested path through its own walk.
     /// </summary>
     private void FeedVariant(VariantFeed feed, CanonicalArena arena, int nodeIndex, int start, int count)
     {
@@ -2256,7 +2256,16 @@ internal sealed class IndexWriter : IDisposable
         try
         {
             int variant = CanonicalSlice.SliceAcross(arena, rows, nodeIndex, start, count);
-            Compute.VariantFieldExpr.ApplyKeys(rows, variant, feed.Reads, feed.Nodes);
+            int keyed = feed.Slots.Length - feed.Nested.Length;
+            if (feed.Reads is { } reads)
+            {
+                Compute.VariantFieldExpr.ApplyKeys(rows, variant, reads, feed.Nodes);
+            }
+
+            for (int n = 0; n < feed.Nested.Length; n++)
+            {
+                feed.Nodes[keyed + n] = feed.Nested[n].Apply(rows, variant);
+            }
             for (int k = 0; k < feed.Slots.Length; k++)
             {
                 foreach (IndexBuilder builder in _builders[feed.Slots[k]])
@@ -2289,18 +2298,23 @@ internal sealed class IndexWriter : IDisposable
         for (int field = 0; field < _fieldCount; field++)
         {
             slots.Clear();
-            for (int slot = 0; slot < variants.Length; slot++)
+            foreach (bool nested in (bool[])[false, true])
             {
-                if (variants[slot] is { } path && path.Field == field && _builders[slot].Count > 0)
+                for (int slot = 0; slot < variants.Length; slot++)
                 {
-                    slots.Add(slot);
+                    if (variants[slot] is { } path && path.Field == field && _builders[slot].Count > 0 && (path.Path.Steps.Length > 1) == nested)
+                    {
+                        slots.Add(slot);
+                    }
                 }
             }
 
             if (slots.Count > 0)
             {
                 int[] held = [.. slots];
-                feeds[field] = new VariantFeed(held, new Compute.VariantFieldExpr.KeyReads(Array.ConvertAll(held, slot => variants[slot]!.Value.Path)));
+                int keyed = Array.FindIndex(held, slot => variants[slot]!.Value.Path.Steps.Length > 1) is int first and >= 0 ? first : held.Length;
+                Compute.VariantFieldExpr[] paths = Array.ConvertAll(held, slot => variants[slot]!.Value.Path);
+                feeds[field] = new VariantFeed(held, keyed == 0 ? null : new Compute.VariantFieldExpr.KeyReads(paths[..keyed]), paths[keyed..]);
             }
         }
 
@@ -2312,13 +2326,17 @@ internal sealed class IndexWriter : IDisposable
     /// and the nodes they read into, in an arena of the column's own, so that each variant column feeds its keys on the
     /// thread that ingests it.
     /// </summary>
-    private sealed class VariantFeed(int[] slots, Compute.VariantFieldExpr.KeyReads reads)
+    private sealed class VariantFeed(int[] slots, Compute.VariantFieldExpr.KeyReads? reads, Compute.VariantFieldExpr[] nested)
     {
         private CanonicalArena? _rows;
 
         internal int[] Slots { get; } = slots;
 
-        internal Compute.VariantFieldExpr.KeyReads Reads { get; } = reads;
+        /// <summary>The top-level keys, read together, the first of <see cref="Slots"/>; null for none.</summary>
+        internal Compute.VariantFieldExpr.KeyReads? Reads { get; } = reads;
+
+        /// <summary>The nested paths, each read through its own walk, the last of <see cref="Slots"/>.</summary>
+        internal Compute.VariantFieldExpr[] Nested { get; } = nested;
 
         /// <summary>For each key, the node its values were read into in <see cref="Rows"/>.</summary>
         internal int[] Nodes { get; } = new int[slots.Length];
