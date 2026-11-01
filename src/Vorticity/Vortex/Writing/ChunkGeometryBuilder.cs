@@ -32,6 +32,9 @@ internal sealed class ChunkGeometryBuilder : IDisposable
     private ScanContext? _context;
     private int _encodings = -1;
     private readonly List<ChunkMark> _marks = [];
+    private readonly ArrayNodeArena _nodes = new ArrayNodeArena();
+    private readonly GranuleBytes _planner = new GranuleBytes { Variants = true };
+    private ArrayEncodingId[] _resolved = [];
 
     /// <summary>The geometry of a chunk of <paramref name="rows"/> rows of <paramref name="dtype"/>, its blob <paramref name="blob"/>.</summary>
     internal unsafe ChunkGeometry Of(ReadOnlySpan<byte> blob, IReadOnlyList<string> encodings, DType dtype, int rows, int granuleRows)
@@ -118,6 +121,47 @@ internal sealed class ChunkGeometryBuilder : IDisposable
         }
 
         _marks.Add(new ChunkMark(node.Arena.GlobalBufferIndex(node.Record.FirstBuffer + buffer), starts));
+    }
+
+    /// <summary>
+    /// The bytes of a chunk of <paramref name="rows"/> rows of <paramref name="dtype"/>, whose tree <paramref name="geometry"/>
+    /// holds, that a read of any part of it reads whole, as <see cref="GranuleBytes"/> plans the read of its first granule:
+    /// a dictionary's values, patches, runs, the whole of a chunk a read of a part does not slice. A part of
+    /// <c>g</c> of its <c>k</c> granules then reads about <c>W + g·(R − W)/k</c> of its <c>R</c> bytes, so a first granule
+    /// that reads <c>P</c> of them makes <c>W = (k·P − R) / (k − 1)</c>, between none and all.
+    /// </summary>
+    internal long WholeOf(ChunkGeometry geometry, IReadOnlyList<string> encodings, DType dtype, int rows, int granuleRows)
+    {
+        (long Start, long Length)[] layout = ArrayBlobReader.BufferLayout(geometry.Tree.Span, out long regionLength);
+        int granules = granuleRows <= 0 ? 1 : (rows + granuleRows - 1) / granuleRows;
+        if (granules <= 1 || regionLength <= 0)
+        {
+            return Math.Max(regionLength, 0);
+        }
+
+        ArrayBlobReader.LoadLayout(_nodes, geometry.Tree.Span, Resolved(encodings));
+        ArrayNode root = _nodes.Root;
+        if (!_planner.TryPlan(in root, GranulePlans.WidthOf(dtype), rows, 0, granuleRows, layout, geometry, granuleRows))
+        {
+            return regionLength;
+        }
+
+        return Math.Clamp((granules * _planner.Bytes - regionLength) / (granules - 1), 0, regionLength);
+    }
+
+    /// <summary>The file's encodings resolved, made again when the file names more encodings than it knew.</summary>
+    private ArrayEncodingId[] Resolved(IReadOnlyList<string> encodings)
+    {
+        if (_resolved.Length != encodings.Count)
+        {
+            _resolved = new ArrayEncodingId[encodings.Count];
+            for (int i = 0; i < _resolved.Length; i++)
+            {
+                _resolved[i] = EncodingRegistry.ResolveArray(System.Text.Encoding.UTF8.GetBytes(encodings[i]));
+            }
+        }
+
+        return _resolved;
     }
 
     /// <summary>Whether the file names an encoding whose rows take bytes of their own length.</summary>

@@ -200,7 +200,10 @@ internal sealed class PathCosts(CostProfile profile, long chunkBytes, Func<UInt1
     /// run lies in, as many as the share of its units and one more that it starts inside, all of them at most; nothing for
     /// no share. A column's unit is its granule when the object keeps its marks and is worth more than a request, as a
     /// scan reads a part of a chunk (spec C, 2), the chunk read whole past three quarters of it; its chunk otherwise. A
-    /// column of <paramref name="unsliced"/>, whose chunks no read of granules slices, a list's, is read whole.
+    /// column of <paramref name="unsliced"/>, whose chunks no read of granules slices, a list's, is read whole. What a read
+    /// of granules reads whole of each chunk it touches, as the object says (<see cref="ObjectContents.ColumnWholeBytes"/>),
+    /// is priced by the chunks the run touches: the dictionary values of a key of 150 000 values, 517 KB of its column's
+    /// 1.1 MB, were priced at the run's share of them.
     /// </summary>
     internal Cost Share(ObjectEntry entry, ReadOnlySpan<int> fields, double share, ReadOnlySpan<int> unsliced = default)
     {
@@ -218,6 +221,7 @@ internal sealed class PathCosts(CostProfile profile, long chunkBytes, Func<UInt1
         // Of each column, the share of its units the run lies in, and one it starts inside: the reads past the open, so
         // weighted by the columns' bytes.
         IReadOnlyList<long>? chunks = entry.Contents?.ColumnChunks;
+        IReadOnlyList<long> wholes = entry.Contents?.ColumnWholeBytes ?? [];
         long granules = Granules(entry);
         double total = 0;
         double touched = 0;
@@ -229,8 +233,15 @@ internal sealed class PathCosts(CostProfile profile, long chunkBytes, Func<UInt1
                 read++;
                 double count = granules > 0 ? granules : ChunksOf(columns, chunks, field);
                 double run = Math.Min(1, ((share * count) + 1) / count);
+                double cut = (granules > 0 && run > GranulePlans.WholeShare) || unsliced.Contains(field) ? 1 : run;
+
+                // What each chunk the run touches reads whole whatever its granules, a dictionary's values among them, once a
+                // chunk: as many chunks as the share of them and one more it starts inside.
+                long once = granules > 0 && field < wholes.Count ? Math.Min(wholes[field], columns[field]) : 0;
+                double held = ChunksOf(columns, chunks, field);
+                double spanned = Math.Max(cut, Math.Min(1, ((share * held) + 1) / held));
                 total += columns[field];
-                touched += columns[field] * ((granules > 0 && run > GranulePlans.WholeShare) || unsliced.Contains(field) ? 1 : run);
+                touched += ((columns[field] - once) * cut) + (once * spanned);
             }
         }
 

@@ -78,14 +78,34 @@ public sealed partial class PathCostsTests
         Assert.Equal((2, open + 100_000), Read(costs.Share(unmarked, [0], 0.01)));
     }
 
+    /// <summary>
+    /// What a read of any part of a chunk reads whole, a dictionary's values, is priced once for each chunk a run touches,
+    /// and the rest by its granules: of a column of one chunk whose values weigh 60 000 of its 100 000 bytes, a hundredth of
+    /// the rows reads the values and 1.13 of 13 granules of the rest; of a column of four, the values of the 1.04 chunks the
+    /// run touches. An object that does not say prices the whole column by its granules, as before.
+    /// </summary>
+    [Fact]
+    public void WhatEveryPartOfAChunkReadsIsPricedOnceForEachChunkTouched()
+    {
+        PathCosts costs = new PathCosts(CostProfile.Remote, 1 << 20, granuleRows: 8_192);
+        ObjectEntry valued = Entry([100_000, 400_000, 30_000], [1, 4, 1], [0, 0, 0], marks: true, wholes: [60_000, 240_000, 0]);
+        long open = PathCosts.OpenBytes(valued);
+        Assert.Equal((2, open + 63_476), Read(costs.Share(valued, [0], 0.01)));
+        Assert.Equal((2, open + 76_307), Read(costs.Share(valued, [1], 0.01)));
+
+        ObjectEntry silent = Entry([100_000, 400_000, 30_000], [1, 4, 1], [0, 0, 0], marks: true);
+        Assert.Equal((2, open + 8_692), Read(costs.Share(silent, [0], 0.01)));
+    }
+
     private static (int Requests, long Bytes) Read(PathCosts.Cost cost) => (cost.Requests, cost.Bytes);
 
     /// <summary>
     /// An object of three columns of <paramref name="columns"/> bytes in <paramref name="chunks"/> chunks, each written
     /// against a dictionary of the bytes <paramref name="dictionaries"/> says, none for 0; with <paramref name="marks"/>,
-    /// the marks of its columns kept.
+    /// the marks of its columns kept; <paramref name="wholes"/> the bytes of each column a read of a part of a chunk reads
+    /// whole, said when given.
     /// </summary>
-    private static ObjectEntry Entry(long[] columns, long[] chunks, long[] dictionaries, bool marks = false)
+    private static ObjectEntry Entry(long[] columns, long[] chunks, long[] dictionaries, bool marks = false, long[]? wholes = null)
     {
         ColumnDictionary?[] held = new ColumnDictionary?[dictionaries.Length];
         for (int field = 0; field < held.Length; field++)
@@ -102,6 +122,7 @@ public sealed partial class PathCostsTests
         {
             ColumnBytes = columns,
             ColumnChunks = chunks,
+            ColumnWholeBytes = wholes ?? [],
             Dictionaries = held,
             Marks = marks ? [new IndexSegment(1_000, 100, 0), new IndexSegment(1_100, 100, 0), new IndexSegment(1_200, 100, 0)] : [],
         };

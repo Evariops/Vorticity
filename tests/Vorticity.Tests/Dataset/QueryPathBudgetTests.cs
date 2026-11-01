@@ -80,6 +80,11 @@ public sealed partial class QueryPathBudgetTests : IClassFixture<QueryPathBudget
     /// classes of `tests/runs-alone.sh` once the objects kept their keys' nulls and their variants' marks (59,504 to 59,728
     /// before), where a process of its own measured the same mean before and after, 59.8 KB an ask over 4,000.
     /// </para>
+    /// <para>
+    /// The rows of one id raised on 2026-11-02 to 3 % above 81,328 bytes, what they measured in a process of their own, six
+    /// runs from 80,696 to 81,608, the same before and after the tables of contents said what a part of a chunk reads whole;
+    /// beside the other classes of `tests/runs-alone.sh`, 81,608 to 82,192 over eight runs, three of them past 82,125.
+    /// </para>
     /// </summary>
     private static readonly Dictionary<string, Budget> Ceilings = new(StringComparer.Ordinal)
     {
@@ -92,7 +97,7 @@ public sealed partial class QueryPathBudgetTests : IClassFixture<QueryPathBudget
         ["every row but one id"] = new(4, 169512, 0, 0, 52176),
         ["measures by region and hour"] = new(4, 169512, 0, 0, 51950),
         ["count by route, a shredded path"] = new(4, 169512, 0, 0, 48217),
-        ["the rows of one id"] = new(4, 169512, 0, 0, 82125),
+        ["the rows of one id"] = new(4, 169512, 0, 0, 83768),
     };
 
     private readonly Fixture _fixture;

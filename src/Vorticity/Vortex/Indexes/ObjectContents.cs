@@ -201,6 +201,13 @@ internal sealed class ObjectContents(
     internal IReadOnlyList<long> ColumnChunks { get; init; } = [];
 
     /// <summary>
+    /// The bytes of each top-level column's chunks that a read of a part of one reads whole, by the column's place: a
+    /// dictionary's values, patches, runs, which every row of the chunk may need. What a read of a few granules pays for each
+    /// chunk it touches, past its granules' share. Empty when the object does not say, whose parts are priced by their share.
+    /// </summary>
+    internal IReadOnlyList<long> ColumnWholeBytes { get; init; } = [];
+
+    /// <summary>
     /// What each top-level column's values cost the processor (spec B, 2.1), by the column's place: for each encoding class
     /// its values lie under (<see cref="IO.EncodingClass"/>), the units the class's price counts, values for most, runs for
     /// run-end, present values for sparse, over the object's rows in 256ths, rounded up. Each column's entries follow their
@@ -370,6 +377,7 @@ internal sealed class ObjectContents(
             PathSingleRows = PathSingleRows,
             ColumnBytes = ColumnBytes,
             ColumnChunks = ColumnChunks,
+            ColumnWholeBytes = ColumnWholeBytes,
             ColumnClasses = ColumnClasses,
             PureGranuleRows = PureGranuleRows,
             ListedRows = ListedRows,
@@ -498,6 +506,9 @@ internal sealed class ObjectContents(
 
     // The runs of the key's whole indexed prefix in each granule: their region, and the rows of the granules they describe.
     private const int TagPrefixRuns = 38;
+
+    // The bytes of each top-level column's chunks that a read of a part of one reads whole, packed, by the column's place.
+    private const int TagColumnWholeBytes = 39;
 
     // The statistics over the granules of a shredded key read in its class, as a path's locate is named; then the rows of the
     // granules where each holds one value, packed, in their order.
@@ -809,6 +820,15 @@ internal sealed class ObjectContents(
                 }
             }
 
+            if (ColumnWholeBytes.Count > 0)
+            {
+                using ProtoWriter.MessageScope message = writer.BeginMessage(TagColumnWholeBytes);
+                foreach (long bytes in ColumnWholeBytes)
+                {
+                    writer.WriteVarint((ulong)bytes);
+                }
+            }
+
             if (ColumnClasses.Length > 0)
             {
                 using ProtoWriter.MessageScope message = writer.BeginMessage(TagColumnClasses);
@@ -924,6 +944,7 @@ internal sealed class ObjectContents(
             List<(int, string, PathClass, IndexSegment)> pathLocates = [];
             List<long> columnBytes = [];
             List<long> columnChunks = [];
+            long[] columnWholeBytes = [];
             List<uint> columnClasses = [];
             long pureGranuleRows = -1;
             List<long> listedRows = [];
@@ -1043,6 +1064,23 @@ internal sealed class ObjectContents(
                         while (!chunked.End)
                         {
                             columnChunks.Add(checked((long)chunked.ReadVarint()));
+                        }
+
+                        break;
+                    case (TagColumnWholeBytes, ProtoWireType.LengthDelimited):
+                        // Counted first, then read into an array of its size, no list grown entry by entry.
+                        ProtoReader wholes = reader.ReadMessage();
+                        ProtoReader ahead = wholes;
+                        int entries = 0;
+                        for (; !ahead.End; entries++)
+                        {
+                            ahead.ReadVarint();
+                        }
+
+                        columnWholeBytes = new long[entries];
+                        for (int i = 0; i < entries; i++)
+                        {
+                            columnWholeBytes[i] = checked((long)wholes.ReadVarint());
                         }
 
                         break;
@@ -1169,6 +1207,7 @@ internal sealed class ObjectContents(
                     PathSingleRows = pathSingleRows,
                     ColumnBytes = columnBytes,
                     ColumnChunks = columnChunks,
+                    ColumnWholeBytes = columnWholeBytes,
                     ColumnClasses = [.. columnClasses],
                     PureGranuleRows = pureGranuleRows,
                     ListedRows = listedRows,

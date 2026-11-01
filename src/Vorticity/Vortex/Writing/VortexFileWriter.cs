@@ -249,6 +249,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             ColumnBytes = columnBytes,
             ColumnChunks = columnChunks,
             ColumnClasses = ColumnClasses(),
+            ColumnWholeBytes = _isTabular && _wholeBytes is { } whole ? whole : [],
             PureGranuleRows = granuleStats.Count > 0 ? PureGranuleRows() : -1,
             ListedRows = listed,
             SingleRows = single,
@@ -511,6 +512,10 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     // The units each column's values cost the processor, by class (ChunkClasses), a column's classes after the other's,
     // added as their chunks' blobs are written, for a file that carries a table of contents; null for one that carries none.
     private long[]? _classUnits;
+
+    // The bytes of each column's chunks that a read of a part of one reads whole (ChunkGeometryBuilder.WholeOf), added as their
+    // blobs are written, for a file that carries a table of contents; null for one that carries none.
+    private long[]? _wholeBytes;
 
     // Whether the file carries a table of contents (VortexWriteOptions.CarriesContents).
     private bool _carriesContents;
@@ -922,6 +927,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         {
             writer._carriesContents = true;
             writer._classUnits = new long[writer._fieldCount * ChunkClasses.Count];
+            writer._wholeBytes = new long[writer._fieldCount];
             writer._geometry = new List<ChunkGeometry>[writer._fieldCount];
             for (int field = 0; field < writer._fieldCount; field++)
             {
@@ -2356,8 +2362,12 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             {
                 // The chunk's tree, and where its granules start in its buffers of variable length, while its blob is in hand.
                 long rows = _columns[field].Chunk(firstBlock, blocks).Rows;
-                geometry[field].Add((_geometryBuilder ??= new ChunkGeometryBuilder()).Of(
-                    blob.Memory.Span, _arrayEncodings.Ids, ChunkType(field), checked((int)rows), _blockRows));
+                ChunkGeometryBuilder builder = _geometryBuilder ??= new ChunkGeometryBuilder();
+                ChunkGeometry chunk = builder.Of(blob.Memory.Span, _arrayEncodings.Ids, ChunkType(field), checked((int)rows), _blockRows);
+                geometry[field].Add(chunk);
+
+                // What a read of any part of it reads whole, which a planner prices each chunk a part of the column touches by.
+                _wholeBytes![field] += builder.WholeOf(chunk, _arrayEncodings.Ids, ChunkType(field), checked((int)rows), _blockRows);
 
                 // What its values cost the processor: a code a row gathered through the column's dictionary, or what its tree holds.
                 Span<long> units = _classUnits.AsSpan(field * ChunkClasses.Count, ChunkClasses.Count);

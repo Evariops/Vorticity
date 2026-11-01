@@ -147,6 +147,10 @@ public sealed partial class DatasetKeyAbsenceProofsTests
         await foreach (PositionedObject held in dataset.ScanBuilder().ObjectsAsync(Ct))
         {
             Assert.NotNull(held.Entry.Contents!.PathGranuleStatsOf(attributes, "user.id", PathClass.String));
+
+            // A read of a part of the column reads the user's dictionary values whole, 517 KB of its 1.1 MB, and says so.
+            long columnBytes = held.Entry.Contents.ColumnBytes[attributes];
+            Assert.InRange(held.Entry.Contents.ColumnWholeBytes[attributes], columnBytes * 2 / 5, columnBytes / 2);
             if (!identifier)
             {
                 Assert.Contains(held.Entry.Contents.Locating ?? [], entry => entry.Column == (uint)attributes && entry.Kind == IndexKinds.BloomSbbf && entry.Key == "user.id" && entry.Bytes > 0);

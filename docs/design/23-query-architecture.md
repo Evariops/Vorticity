@@ -260,6 +260,14 @@ offsets that cannot be computed; where each chunk lies is in the paged chunk dir
 the granules it keeps, joins ranges closer than a request is worth (256 KiB on an object store, a few KiB on a local
 disk), reads a chunk whole past three quarters of its bytes, and decodes the ranges in place.
 
+What a read of a part reads once per chunk, a dictionary's values above all, which every row may name, is not a share
+of the chunk. The object's table of contents says, column by column, how many of its bytes each part read of a chunk
+reads whole, from the plan of a read of its first granule (`ObjectContents.ColumnWholeBytes`), and a planner prices a
+part by the chunks it touches for those bytes and by its granules for the rest: the dictionary values of a key of
+150 000 values, 517 KB of its column's 1.1 MB, were priced at the share of the rows a part read. In an object, a text
+whose dictionary values weigh more than one granule's share is written as FSST instead, when FSST writes no more than
+the dictionary and that share ([the write strategy](11-write-strategy.md)).
+
 A granule of a column of width `w` then costs about `w` KiB instead of about 1 MiB; a row found by an identifier costs
 about 0.3 to 0.4 MB for eleven columns *(computed)*, 0.3 to 0.75 MB in four or five dependent steps *(measured,
 `DatasetGranuleReadsTests`)*. On an object store, where requests dominate below about 300 KB, the gain shows in memory
