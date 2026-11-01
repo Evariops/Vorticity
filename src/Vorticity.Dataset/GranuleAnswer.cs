@@ -59,6 +59,10 @@ internal sealed class GranuleAnswer
     private readonly (int Component, ValueFunction? Of)[]? _prefixKeys;
     private readonly int _prefixAt = -1;
 
+    // The columns of the fields a granule left reads whose chunks no read of granules slices, by the fields they were found
+    // among; worked out at the first price.
+    private (int[] Read, int[] Fields)? _unsliced;
+
     // The mantissa bits of the grid of the sketches a quantile of the request asks; 0 for none.
     private readonly int _sketchBits;
 
@@ -179,8 +183,9 @@ internal sealed class GranuleAnswer
 
     /// <summary>
     /// <paramref name="filter"/> less its first conjunct that leaves out the values <paramref name="value"/> places, as
-    /// <see cref="CountsAnswer.Exclusion"/> or <see cref="Excluded"/> took it: <c>x != v</c> of that value, or <c>NOT</c> of
-    /// that set; of a shredded key, the key's rows that hold a value in its place. Null when nothing else is left.
+    /// <see cref="CountsAnswer.Exclusion"/> or <see cref="Excluded"/> took it: <c>x != v</c> of that value, <c>NOT</c> of
+    /// that set, or <c>NOT</c> of that list's containing it; of a shredded key, the key's rows that hold a value in its
+    /// place, and of a list, its rows that hold a list. Null when nothing else is left.
     /// </summary>
     private static VortexExpr? Less(VortexExpr filter, ExcludedValue value)
     {
@@ -191,6 +196,7 @@ internal sealed class GranuleAnswer
             (ComparisonExpr { Op: ComparisonOp.NotEqual, Field: ColumnFieldExpr column } other, ComparisonExpr found) =>
                 string.Equals(column.Path, value.Path, StringComparison.Ordinal) && other.Value.Equals(found.Value),
             (NotExpr { Operand: InExpr set }, InExpr found) => ReferenceEquals(set, found),
+            (NotExpr { Operand: ListContainsExpr contains }, ListContainsExpr found) => ReferenceEquals(contains, found),
             (VariantFilterExpr { Inner: ComparisonExpr { Op: ComparisonOp.NotEqual, Field: VariantFieldExpr path } other }, VariantFilterExpr { Inner: ComparisonExpr found }) =>
                 string.Equals(path.Text, value.Path, StringComparison.Ordinal) && other.Value.Equals(found.Value),
             (NotExpr { Operand: VariantFilterExpr fence }, VariantFilterExpr found) => ReferenceEquals(fence, found),
@@ -201,10 +207,15 @@ internal sealed class GranuleAnswer
             conjuncts.RemoveAt(excluded);
         }
 
-        // A key's rows that hold no value of it are left out too, as a column's nulls are.
+        // A key's rows that hold no value of it are left out too, as a column's nulls are; so are the rows of a null list,
+        // which holds no element and of which a list that holds no such value says nothing.
         if (value.Key is { } key)
         {
             conjuncts.Add(VariantFilterExpr.Of(Expr.IsNotNull(key)));
+        }
+        else if (value.Found is ListContainsExpr { Field: { } list })
+        {
+            conjuncts.Add(Expr.IsNotNull(list));
         }
 
         return GroupPredicates.And(null, conjuncts);
@@ -590,9 +601,10 @@ internal sealed class GranuleAnswer
 
     /// <summary>
     /// The first values <paramref name="filter"/> leaves out of a top-level column of <paramref name="version"/> by a
-    /// conjunct, <c>x != v</c> of a value that is no null or <c>NOT x IN (…)</c> of such values, which an object's indexes
-    /// of the column may place (spec D, 4), their equality or set the found rows; of a shredded key, as its postings when the
-    /// dataset declares it an identifier, or its Bloom filter, place them. Null for none.
+    /// conjunct, <c>x != v</c> of a value that is no null, <c>NOT x IN (…)</c> of such values or <c>NOT list_contains(x, v)</c>,
+    /// which an object's indexes of the column may place (spec D, 4), their equality, set or containing the found rows; of a
+    /// shredded key, as its postings when the dataset declares it an identifier, or its Bloom filter, place them. Null for
+    /// none.
     /// </summary>
     private static ExcludedValue? Excluded(VortexExpr filter, DatasetSchema version) => filter switch
     {
@@ -601,6 +613,8 @@ internal sealed class GranuleAnswer
             new ExcludedValue(field, column.Path, new ComparisonExpr(column, ComparisonOp.Equal, other.Value), identifier: false),
         NotExpr { Operand: InExpr { Field: ColumnFieldExpr column } set } when Present(set) && Top(column, version.DType) is int field =>
             new ExcludedValue(field, column.Path, set, identifier: false),
+        NotExpr { Operand: ListContainsExpr { Field: ColumnFieldExpr column } contains } when contains.Value.Kind != FilterLiteralKind.Null && Top(column, version.DType) is int field =>
+            new ExcludedValue(field, column.Path, contains, identifier: false),
         VariantFilterExpr { Inner: ComparisonExpr { Op: ComparisonOp.NotEqual, Field: VariantFieldExpr path } other } when other.Value.Kind != FilterLiteralKind.Null && ClassOf(path, version.DType) is not null =>
             new ExcludedValue(version.DType.IndexOfField(path.Column.Path), path.Text, VariantFilterExpr.Of(new ComparisonExpr(path, ComparisonOp.Equal, other.Value)), Identifies(version, path)) { Key = path },
         NotExpr { Operand: VariantFilterExpr { Inner: InExpr { Field: VariantFieldExpr path } set } fence } when Present(set) && ClassOf(path, version.DType) is not null =>
@@ -814,7 +828,37 @@ internal sealed class GranuleAnswer
 
         int[] read = _excluding is { } excluding ? excluding.ReadOf(ReadFields) : ReadFields;
         double unanswered = Unanswered(held, edges: true) * Math.Clamp(kept, 0, 1);
-        return (_costs.Regions(held.Entry.Uid, regions), _costs.Share(held.Entry, read, unanswered), _costs.Rows(held.Entry, read));
+        return (_costs.Regions(held.Entry.Uid, regions), _costs.Share(held.Entry, read, unanswered, Unsliced(read)), _costs.Rows(held.Entry, read));
+    }
+
+    /// <summary>
+    /// The columns of <paramref name="read"/> whose chunks a read of granules does not slice, read whole: a list's or a map's,
+    /// whose elements no marks place granule by granule. Empty for most questions, which allocates nothing.
+    /// </summary>
+    private int[] Unsliced(int[] read)
+    {
+        if (_unsliced is { } known && ReferenceEquals(known.Read, read))
+        {
+            return known.Fields;
+        }
+
+        int[] fields = [];
+        foreach (int field in read)
+        {
+            DType type = field < _schema.DType.FieldCount ? _schema.DType.GetField(field) : default;
+            while (!type.IsDefault && type.Kind == DTypeKind.Extension)
+            {
+                type = type.StorageType;
+            }
+
+            if (!type.IsDefault && type.Kind is DTypeKind.List or DTypeKind.FixedSizeList or DTypeKind.Map)
+            {
+                fields = [.. fields, field];
+            }
+        }
+
+        _unsliced = (read, fields);
+        return fields;
     }
 
     /// <summary>

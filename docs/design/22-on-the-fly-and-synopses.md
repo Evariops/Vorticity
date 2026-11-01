@@ -463,7 +463,12 @@ longer lie where they were, notes none.
   calls and sizes of every host but one, placed by the hosts' locate, 111 KB where they take 723 KB, and
   of every host but two 152 KB; every call but those of a status, which no index places, 1.9 KB where
   they take 263 KB *(measured, `DatasetAbsenceProofsTests`, under the memory profile, which weighs bytes
-  before requests)*.
+  before requests)*. A value left out of a list, `NOT list_contains(labels, v)`, is placed as a value
+  of a column is, by the Bloom filters of the list's elements, its rows that hold no list left out
+  too: a null list says nothing of the value, and the filter leaves it out. A list's chunk is read
+  whole for the granules the value lies in, no marks placing its elements granule by granule, and the
+  granules are priced so: every call but those of a rare label read 4.58 MB through the granules,
+  which spare the other columns, where the rows take 5.53 MB.
 - Late rows add their own entries, which merges add up.
 - A window edge that cuts a granule or a bucket is exact by default: that granule's rows are read, and
   the granules the window holds whole are answered by their statistics. Windows drawn to the second over

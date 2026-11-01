@@ -118,8 +118,137 @@ public sealed partial class DatasetAbsenceProofsTests
         };
     }
 
+    /// <summary>
+    /// 262 144 calls of four services, 65 536 each, sorted by the service then the instant, 32 granules of one service each:
+    /// a list of two or three labels on each, drawn among a thousand under a Bloom filter, and on three calls of one service
+    /// a rare one beside them. Every call whose labels do not hold the rare one, by service, is answered by the granules the
+    /// labels' Bloom filters do not place it in, under the rest of the filter and a list on the call, the two or three they
+    /// place it in read as rows, as LINQ counts it.
+    /// </summary>
+    [Fact]
+    public async Task ALabelLeftOutOfAListIsPlacedByItsBloomFilters()
+    {
+        Random random = new Random(73);
+        Labelled[] calls = [.. Enumerable.Range(0, 4 * 65_536).Select(i => new Labelled(
+            Start.AddMilliseconds(i * 29L), $"svc-{i % 4}",
+            [.. Enumerable.Range(0, 2 + random.Next(2)).Select(_ => $"label-{random.Next(1_000):D4}"), .. i is 4_002 or 90_002 or 200_002 ? (string[])["label-rare"] : []]))];
+        await using MemoryObjectStore memory = new MemoryObjectStore();
+        await using CountingObjectStore store = new CountingObjectStore(memory);
+        await using (VortexDataset dataset = await VortexDataset.CreateAsync(store, Labelled.Schema, new DatasetOptions
+        {
+            Layout = new DatasetLayout
+            {
+                Partition = LayoutValue.Column(nameof(Labelled.At)).Truncate(CalendarUnit.Day),
+                SortKey = [LayoutValue.Column(nameof(Labelled.Service)), LayoutValue.Column(nameof(Labelled.At))],
+                IndexedPrefix = 1,
+                ObjectBytes = 256 << 20,
+                MergeFanout = 4,
+                CalmAfter = null,
+            },
+            ContentsObjectBytes = 0,
+            SheetObjectBytes = 0,
+        }, Ct))
+        {
+            await dataset.IndexAsync(IndexPolicy.Auto.Bloom(nameof(Labelled.Labels)), cancellationToken: Ct);
+            foreach (Labelled[] half in (Labelled[][])[calls[..131_072], calls[131_072..]])
+            {
+                await using (ObjectDraft draft = dataset.StartObject())
+                {
+                    await draft.Writer.WriteAsync<Labelled>(half, Ct);
+                    await dataset.AppendAsync(draft, Ct);
+                }
+
+                while (await dataset.CompactAsync(cancellationToken: Ct) is not null)
+                {
+                }
+            }
+
+            await dataset.ConsolidateAsync(Ct);
+        }
+
+        string label = "label-rare";
+        string[] expected = [.. calls.Where(c => c.Labels is { } labels && !labels.Contains(label))
+            .GroupBy(static c => c.Service).Select(static g => $"{g.Key}:{g.Count()}").Order(StringComparer.Ordinal)];
+        long[] bytes = new long[2];
+        foreach (bool synopses in (bool[])[false, true])
+        {
+            await using VortexDataset fresh = await VortexDataset.OpenAsync(store, new DatasetOptions { ContentsObjectBytes = 0, SheetObjectBytes = 0, CostProfile = CostProfile.Memory }, Ct);
+            store.Reset();
+            Vorticity.Aggregation question = fresh.Scan<Labelled>().With(new ScanOptions { UseSynopses = synopses })
+                .Where(c => !c.Labels.Contains(label)).GroupBy(c => c.Service).Select(g => (g.Key, g.Count()));
+            string[] answers = [.. (await question.As<ServiceCount>().ToRecordsAsync(Ct).ToListAsync(Ct)).Select(static a => $"{a.Service}:{a.Count}")];
+            bytes[synopses ? 1 : 0] = store.BytesRead;
+            Assert.Equal(expected, answers.Order(StringComparer.Ordinal));
+            if (synopses)
+            {
+                ScanPlan plan = await fresh.Scan<Labelled>().Where(c => !c.Labels.Contains(label)).GroupBy(c => c.Service).Select(g => (g.Key, g.Count())).ExplainAsync(Ct);
+                Assert.All(plan.Units, static unit => Assert.True(unit.Alternative == "granules", $"{unit.Alternative}: {unit.Detail}; {string.Join("; ", unit.Rejected)}"));
+
+                // The price counts the list's chunk whole, as the read of its granules reads it: it was a tenth of it.
+                long priced = plan.Units.Sum(static unit => unit.Bytes);
+                Assert.True(priced * 2 > bytes[1], $"{priced} bytes priced through the granules, {bytes[1]} read");
+            }
+        }
+
+        // A list's chunk is read whole for the granules the label lies in, no marks placing its elements granule by granule:
+        // the granules spare the service's column alone, as their price says.
+        Console.WriteLine($"ABSENCE: a label left out of a list, {bytes[1]} bytes through the granules, {bytes[0]} through the rows");
+        Assert.True(bytes[1] < bytes[0], $"{bytes[1]} bytes through the granules, {bytes[0]} through the rows");
+    }
+
+    /// <summary>
+    /// 20 000 calls of a list of labels each, null on one in seven and empty on one in five, in two appends compacted and
+    /// consolidated under a sort key: the lists are gathered, in the key's order, as the sort of each object holds its rows,
+    /// and read back as they were written, which the sort refused before.
+    /// </summary>
+    [Fact]
+    public async Task ListsAreGatheredByTheSortOfASortedObject()
+    {
+        Random random = new Random(79);
+        Labelled[] calls = [.. Enumerable.Range(0, 20_000).Select(i => new Labelled(
+            Start.AddMilliseconds(i * 997L % 86_400_000), $"svc-{random.Next(5)}",
+            i % 7 == 0 ? null : i % 5 == 0 ? [] : [.. Enumerable.Range(0, 1 + random.Next(4)).Select(_ => $"label-{random.Next(100):D3}")]))];
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Labelled.Schema, new DatasetOptions
+        {
+            Layout = new DatasetLayout
+            {
+                Partition = LayoutValue.Column(nameof(Labelled.At)).Truncate(CalendarUnit.Day),
+                SortKey = [LayoutValue.Column(nameof(Labelled.Service)), LayoutValue.Column(nameof(Labelled.At))],
+                IndexedPrefix = 1,
+                MergeFanout = 2,
+                CalmAfter = null,
+            },
+        }, Ct);
+        foreach (Labelled[] half in (Labelled[][])[calls[..10_000], calls[10_000..]])
+        {
+            await using (ObjectDraft draft = dataset.StartObject())
+            {
+                await draft.Writer.WriteAsync<Labelled>(half, Ct);
+                await dataset.AppendAsync(draft, Ct);
+            }
+
+            while (await dataset.CompactAsync(cancellationToken: Ct) is not null)
+            {
+            }
+        }
+
+        await dataset.ConsolidateAsync(Ct);
+        List<Labelled> read = await dataset.Scan<Labelled>().ToRecordsAsync(Ct).ToListAsync(Ct);
+        Assert.Equal(
+            calls.Select(Text).Order(StringComparer.Ordinal),
+            read.Select(Text).Order(StringComparer.Ordinal));
+        Assert.Equal(read.Select(static c => (c.Service, c.At)).Order(), read.Select(static c => (c.Service, c.At)));
+
+        static string Text(Labelled call) =>
+            $"{call.At.Ticks}/{call.Service}/{(call.Labels is null ? "null" : string.Join(',', call.Labels))}";
+    }
+
     [VortexRecord]
     public partial record struct Call(DateTime At, string Service, string Ticket, string Host, long Status, long Size);
+
+    [VortexRecord]
+    public partial record struct Labelled(DateTime At, string Service, string[]? Labels);
 
     [VortexRecord]
     public partial record struct ServiceCount(string? Service, long Count);
