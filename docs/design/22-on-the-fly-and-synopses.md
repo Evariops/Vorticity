@@ -287,8 +287,8 @@ For each granule of section 3.3 and each column, a region a column (`vorticity.g
 A column whose values hardly repeat and that is no measure, an identifier, keeps none
 ([10-indexes.md](10-indexes.md#411-vorticitygranulestatsv1-a-column-over-the-granules)). For a measure a
 question's plan reads, each granule also keeps its values in a log-linear sketch, apart, which a
-quantile or a distribution merges over the granules it settles, within 5.9 % of any value
-(`vorticity.granule.histograms.v1`).
+quantile or a distribution merges over the granules it settles, within 0.77 % of any value, the grid a
+quantile asks by default (`vorticity.granule.histograms.v1`).
 
 The engine already settles a granule from its zone maps when its key maps to a single group and every
 aggregate is a count, a least or a greatest ([16-queries.md](16-queries.md#93-statistics-and-zone-maps)),

@@ -20,8 +20,13 @@ internal sealed class GranuleHistograms
     /// <summary>The encoding's version.</summary>
     internal const int Version = 1;
 
-    /// <summary>The mantissa bits of the grid a writer keeps a granule's histogram in: within 5.9 % of any value of a bucket.</summary>
-    internal const int WrittenBits = 3;
+    /// <summary>
+    /// The mantissa bits of the grid a writer keeps a granule's histogram in: within 0.77 % of any value of a bucket, the grid a
+    /// quantile asks by default. A granule of the design's requests keeps 575 bytes of durations, 112 at three bits, 0.35 % of
+    /// the table, where the rows of the durations take 3.3 bytes a row. An object written at three bits keeps answering the
+    /// coarser quantiles.
+    /// </summary>
+    internal const int WrittenBits = 6;
 
     // The granules' sketches, one after another; where each one starts, and where the last one ends.
     private readonly byte[] _sketches;

@@ -293,7 +293,7 @@ the same request; the planner prices a column's reads with them.
 |---|---|---|
 | zone map per column (minimum, maximum, nulls, NaN) | any comparison, any range | ~120 MB, 0.07 % |
 | zone map and presence per variant path | a filter on a path; skipping granules a rare path is absent from | proportional to where the path is present |
-| histogram of a measure per granule, on a log-linear grid (k = 3, ±5.9 %) | thresholds and quantiles per entity and fine grain | ~37 MB a measure |
+| histogram of a measure per granule, on a log-linear grid (k = 6, ±0.77 %, the grid a quantile asks by default) | thresholds and quantiles per entity and fine grain | ~190 MB a measure (~37 MB at k = 3, ±5.9 %) |
 | locating index: each value of a repeating column or path, to its granules | equality, sets, prefixes, ranges, without visiting every granule | ~60 MB, 0.03 % |
 | identifier postings: the hash of each value, to the granules of the identifier's stream that hold it | finding one row among billions | ~3.4 bytes a row of a unique identifier, ~8 % |
 
@@ -523,7 +523,7 @@ objects per consolidated partition. Cold: an object store at 128 requests in fli
 | one route under errors, per host, 7 days | locating index, the run of errors | ~3 MB | ~0.15 s | ~15 ms | ~0.1 s |
 | a rare path per service, 7 days | presence per partition, a sparse stream judged on its present values | ~0.76 GB | ~0.6 s | ~0.25 s | ~0.07 s |
 | the rows of one request, 30 days | identifier postings per partition, then a granule per column | ~3 MB | ~0.15 s | ~ms | ~0.05 s |
-| p99 per service and hour, 7 days, ±5.9 % | histograms per granule | ~0.26 GB | ~0.3 s | ~0.1 s | ~0.05 s |
+| p99 per service and hour, 7 days, ±0.77 % | histograms per granule | ~1.3 GB | ~1.3 s | ~0.4 s | ~0.15 s |
 | top 100 endpoints, 13 months | rollups | ~25 to 100 MB | ~0.1 s | ~10 ms | ~0.1 s |
 | a count by a high-cardinality path, 1 day | the path's stream, a shuffle of partials | ~13 GB | ~10 s | ~4 s | ~1.3 s |
 

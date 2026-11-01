@@ -59,6 +59,11 @@ public sealed class PlannerBudgetTests : IClassFixture<DatasetPlannerTests.Fixtu
     /// 36,149), and warm their rows from the handle's open objects: 2 to 21 % more allocated, a quantile by service 81 %
     /// less, its states no longer served from a partial's file.
     /// </para>
+    /// <para>
+    /// The quantiles by service raised on 2026-11-01 to 2 % above 68,040 bytes: the granules' histograms kept at the grid a
+    /// quantile asks by default, the planner weighs the granules of each object for it too, where it declined them at once;
+    /// the same reads cold.
+    /// </para>
     /// </summary>
     private static readonly Dictionary<string, Budget> Ceilings = new(StringComparer.Ordinal)
     {
@@ -69,7 +74,7 @@ public sealed class PlannerBudgetTests : IClassFixture<DatasetPlannerTests.Fixtu
         ["count by hour, one service"] = new(6, 36149, 0, 0, 79895),
         ["count by service, an aligned window"] = new(2, 401, 0, 0, 46047),
         ["measures by service, an unaligned window"] = new(5, 402466, 2, 270920, 93375),
-        ["quantiles by service"] = new(6, 68839, 0, 0, 68038),
+        ["quantiles by service"] = new(6, 68839, 0, 0, 69401),
         ["distinct services by hour"] = new(6, 35386, 0, 0, 63526),
         ["count by route and day"] = new(6, 48486, 0, 0, 62669),
     };

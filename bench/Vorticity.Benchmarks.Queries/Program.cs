@@ -62,6 +62,8 @@ Dictionary<string, (string Help, Func<Task<int>> Run)> micros = new Dictionary<s
         SheetMicro.RunAsync((int)Option(args, "--rows", 3_000_000), rounds)),
     ["counts"] = ("what each column's counts cost the writer and weigh, a counted column a row, one thread (CountsMicro.cs)", () =>
         CountsMicro.RunAsync((int)Option(args, "--rows", 3_000_000), Option(args, "--hours", 4), rounds)),
+    ["histograms"] = ("a measure's histograms over the granules weighed at three and six bits of mantissa, against the rows (HistogramsMicro.cs)", () =>
+        HistogramsMicro.RunAsync((int)Option(args, "--rows", 3_000_000), Option(args, "--hours", 4))),
     ["granules"] = ("what each column's statistics over the granules and its locate cost the writer and weigh, a row and a granule, one thread (GranulesMicro.cs)", () =>
         GranulesMicro.RunAsync((int)Option(args, "--rows", 3_000_000), Option(args, "--hours", 4), rounds)),
     ["entries"] = ("each object's entry in the tree of the dataset at --store, and what its table of contents holds", async () =>

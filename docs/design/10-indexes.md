@@ -490,9 +490,11 @@ them. A nested path, a double and a boolean keep none.
 ### 4.12 `vorticity.granule.histograms.v1`: a measure's histograms over the granules
 
 For each measure a question's plan reads, the object keeps, apart from its statistics so that a sum never
-reads them, each granule's values in a log-linear sketch of three mantissa bits: within 1/17, about
-5.9 %, of any value of a bucket. A quantile or a distribution over the granules a question answers merges
-their sketches. The region holds a version, the count of granules and the bits of the grid, then each
+reads them, each granule's values in a log-linear sketch of six mantissa bits: within 1/129, about
+0.77 %, of any value of a bucket, the grid a quantile asks by default. A quantile or a distribution over
+the granules a question answers merges their sketches. The durations of the design's requests keep
+575 bytes a granule, 0.35 % of the table, where three bits kept 112 *(calculated, `--micro
+histograms`)*; an object written at three bits answers the coarser quantiles alone. The region holds a version, the count of granules and the bits of the grid, then each
 granule's sketch, its length then its bytes, as the engine's quantile sketch encodes it; a reader takes
 them back into one array, each granule's sketch a slice of it.
 
