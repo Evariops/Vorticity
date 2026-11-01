@@ -93,7 +93,7 @@ internal sealed class GranuleAnswer
         _schema = version;
         _costs = costs;
         _asked = filter;
-        _excluding = (counts.Exclusion ?? excluded) is { } value ? new Excluding(value, Less(filter!, value.Path)) : null;
+        _excluding = (counts.Exclusion ?? excluded) is { } value ? new Excluding(value, Less(filter!, value)) : null;
         _keys = keys;
         _measured = measured;
         _leading = leading;
@@ -150,15 +150,21 @@ internal sealed class GranuleAnswer
     }
 
     /// <summary>
-    /// <paramref name="filter"/> less its first conjunct that leaves a value of <paramref name="path"/> out, as
-    /// <see cref="CountsAnswer.Exclusion"/> takes it; null when nothing else is left.
+    /// <paramref name="filter"/> less its first conjunct that leaves out the values <paramref name="value"/> places, as
+    /// <see cref="CountsAnswer.Exclusion"/> or <see cref="Excluded"/> took it: <c>x != v</c> of that value, or <c>NOT</c> of
+    /// that set; null when nothing else is left.
     /// </summary>
-    private static VortexExpr? Less(VortexExpr filter, string path)
+    private static VortexExpr? Less(VortexExpr filter, ExcludedValue value)
     {
         List<VortexExpr> conjuncts = [];
         GroupPredicates.Conjuncts(filter, conjuncts);
-        int excluded = conjuncts.FindIndex(conjunct => conjunct is ComparisonExpr { Op: ComparisonOp.NotEqual, Field: ColumnFieldExpr column }
-            && string.Equals(column.Path, path, StringComparison.Ordinal));
+        int excluded = conjuncts.FindIndex(conjunct => (conjunct, value.Found) switch
+        {
+            (ComparisonExpr { Op: ComparisonOp.NotEqual, Field: ColumnFieldExpr column } other, ComparisonExpr found) =>
+                string.Equals(column.Path, value.Path, StringComparison.Ordinal) && other.Value.Equals(found.Value),
+            (NotExpr { Operand: InExpr set }, InExpr found) => ReferenceEquals(set, found),
+            _ => false,
+        });
         if (excluded >= 0)
         {
             conjuncts.RemoveAt(excluded);
@@ -468,16 +474,33 @@ internal sealed class GranuleAnswer
     }
 
     /// <summary>
-    /// The first value <paramref name="filter"/> leaves out of a top-level column of <paramref name="schema"/> by a conjunct,
-    /// <c>x != v</c> of a value that is no null, which an object's indexes of the column may place (spec D, 4); null for none.
+    /// The first values <paramref name="filter"/> leaves out of a top-level column of <paramref name="schema"/> by a
+    /// conjunct, <c>x != v</c> of a value that is no null or <c>NOT x IN (…)</c> of such values, which an object's indexes
+    /// of the column may place (spec D, 4), their equality or set the found rows; null for none.
     /// </summary>
     private static ExcludedValue? Excluded(VortexExpr filter, DType schema) => filter switch
     {
         LogicalExpr { IsAnd: true } and => Excluded(and.Left, schema) ?? Excluded(and.Right, schema),
         ComparisonExpr { Op: ComparisonOp.NotEqual, Field: ColumnFieldExpr column } other when other.Value.Kind != FilterLiteralKind.Null && Top(column, schema) is int field =>
             new ExcludedValue(field, column.Path, new ComparisonExpr(column, ComparisonOp.Equal, other.Value), identifier: false),
+        NotExpr { Operand: InExpr { Field: ColumnFieldExpr column } set } when Present(set) && Top(column, schema) is int field =>
+            new ExcludedValue(field, column.Path, set, identifier: false),
         _ => null,
     };
+
+    /// <summary>Whether <paramref name="set"/> holds values and no null, which <c>NOT IN</c> leaves no row of in its column's nulls.</summary>
+    private static bool Present(InExpr set)
+    {
+        foreach (FilterLiteral value in set.Values)
+        {
+            if (value.Kind == FilterLiteralKind.Null)
+            {
+                return false;
+            }
+        }
+
+        return set.Values.Count > 0;
+    }
 
     /// <summary>
     /// The filter the granules of the object <paramref name="held"/> are judged by and the columns it reads: under a value left

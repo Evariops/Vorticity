@@ -28,8 +28,8 @@ public sealed partial class DatasetAbsenceProofsTests
     /// five values a granule lists. Every call but one ticket's by service, and the calls and sizes summed of every host but
     /// one by service, are answered by the granules the ticket's filters or the host's locate do not place the value in,
     /// under the rest of the filter, the one or two they place it in read as rows: the host, which varies in most granules,
-    /// would forbid the sum under the whole filter. Every call but those of a status, which no index places, by the
-    /// statistics of the status, value by value. Asked of a store close by, which weighs bytes before requests: the object,
+    /// would forbid the sum under the whole filter; and so are those of every host but two, NOT IN. Every call but those
+    /// of a status, which no index places, by the statistics of the status, value by value. Asked of a store close by, which weighs bytes before requests: the object,
     /// of 4 MB, reads its rows in three requests, as many as a granule of them, which would tie the paths anywhere else.
     /// </summary>
     [Fact]
@@ -82,24 +82,25 @@ public sealed partial class DatasetAbsenceProofsTests
 
         string ticket = calls[77_777].Ticket;
         string host = calls[12_345].Host;
-        for (int q = 0; q < 3; q++)
+        string other = calls[200_001].Host;
+        for (int q = 0; q < 4; q++)
         {
-            string[] expected = [.. calls.Where(c => q switch { 0 => c.Ticket != ticket, 1 => c.Host != host, _ => c.Status != 500 })
-                .GroupBy(static c => c.Service).Select(g => q == 1 ? $"{g.Key}:{g.Count()}:{g.Sum(static c => c.Size)}" : $"{g.Key}:{g.Count()}").Order(StringComparer.Ordinal)];
+            string[] expected = [.. calls.Where(c => q switch { 0 => c.Ticket != ticket, 1 => c.Host != host, 2 => c.Status != 500, _ => c.Host != host && c.Host != other })
+                .GroupBy(static c => c.Service).Select(g => q is 1 or 3 ? $"{g.Key}:{g.Count()}:{g.Sum(static c => c.Size)}" : $"{g.Key}:{g.Count()}").Order(StringComparer.Ordinal)];
             long[] bytes = new long[2];
             foreach (bool synopses in (bool[])[false, true])
             {
                 await using VortexDataset fresh = await VortexDataset.OpenAsync(store, new DatasetOptions { ContentsObjectBytes = 0, SheetObjectBytes = 0, CostProfile = CostProfile.Memory }, Ct);
                 store.Reset();
-                Vorticity.Aggregation question = Asked(fresh.Scan<Call>().With(new ScanOptions { UseSynopses = synopses }), q, ticket, host);
-                string[] answers = q == 1
+                Vorticity.Aggregation question = Asked(fresh.Scan<Call>().With(new ScanOptions { UseSynopses = synopses }), q, ticket, host, other);
+                string[] answers = q is 1 or 3
                     ? [.. (await question.As<ServiceTotals>().ToRecordsAsync(Ct).ToListAsync(Ct)).Select(static a => $"{a.Service}:{a.Count}:{a.Total}")]
                     : [.. (await question.As<ServiceCount>().ToRecordsAsync(Ct).ToListAsync(Ct)).Select(static a => $"{a.Service}:{a.Count}")];
                 bytes[synopses ? 1 : 0] = store.BytesRead;
                 Assert.Equal(expected, answers.Order(StringComparer.Ordinal));
                 if (synopses)
                 {
-                    ScanPlan plan = await Asked(fresh.Scan<Call>(), q, ticket, host).ExplainAsync(Ct);
+                    ScanPlan plan = await Asked(fresh.Scan<Call>(), q, ticket, host, other).ExplainAsync(Ct);
                     Assert.All(plan.Units, static unit => Assert.True(unit.Alternative == "granules", $"{unit.Alternative}: {unit.Detail}; {string.Join("; ", unit.Rejected)}"));
                 }
             }
@@ -108,11 +109,12 @@ public sealed partial class DatasetAbsenceProofsTests
             Assert.True(bytes[1] * 3 < bytes[0], $"question {q}: {bytes[1]} bytes through the granules, {bytes[0]} through the rows");
         }
 
-        static Vorticity.Aggregation Asked(Scan<Call> scan, int question, string ticket, string host) => question switch
+        static Vorticity.Aggregation Asked(Scan<Call> scan, int question, string ticket, string host, string other) => question switch
         {
             0 => scan.Where(c => c.Ticket != ticket).GroupBy(c => c.Service).Select(g => (g.Key, g.Count())),
             1 => scan.Where(c => c.Host != host).GroupBy(c => c.Service).Select(g => (g.Key, g.Count(), g.Sum(c => c.Size))),
-            _ => scan.Where(c => c.Status != 500).GroupBy(c => c.Service).Select(g => (g.Key, g.Count())),
+            2 => scan.Where(c => c.Status != 500).GroupBy(c => c.Service).Select(g => (g.Key, g.Count())),
+            _ => scan.Where(c => !c.Host.In(host, other)).GroupBy(c => c.Service).Select(g => (g.Key, g.Count(), g.Sum(c => c.Size))),
         };
     }
 
