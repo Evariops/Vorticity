@@ -20,7 +20,8 @@ namespace Vorticity.Indexes;
 /// </para>
 /// <para>
 /// The prefix's region: a version byte, <see cref="PrefixVersion"/>; the granules, a varint; for each granule its runs, a
-/// varint, 0 for a granule of more than <see cref="GranuleStats.ListedValues"/>, which it does not describe; then each run,
+/// varint, 0 for a granule of more than an eighth of its rows' runs (<see cref="PrefixBuilder.MaxRuns"/>), which it does not
+/// describe; then each run,
 /// the bytes its key shares with the run's before, from the region's first on, a varint, the rest of its bytes, their
 /// length then themselves, and its rows, a varint. A run that goes on from the granule before shares its whole key: five
 /// bytes or so; one of another hour of a host, ten.
@@ -160,7 +161,7 @@ internal sealed class GranuleKeyRuns
         {
             starts[g] = rows.WrittenCount;
             ulong count = reader.ReadVarint();
-            if (count > GranuleStats.ListedValues)
+            if (count > (ulong)reader.Remaining)
             {
                 return null;
             }
@@ -299,10 +300,17 @@ internal sealed class GranuleKeyRuns
     /// <summary>
     /// Builds the region of the runs of the whole indexed prefix as a file's rows come in its key's order: the runs of the
     /// granule open, a run cut by the rows' batches joined again, closed into the region as the next granule starts; the
-    /// rows of the granules it describes, of at most <see cref="GranuleStats.ListedValues"/> runs, and of those of one.
+    /// rows of the granules it describes, of at most <see cref="MaxRuns"/> runs, and of those of one.
     /// </summary>
     internal sealed class PrefixBuilder
     {
+        /// <summary>
+        /// The runs a granule it describes holds at most: an eighth of its rows, so that a run a row costs the region a byte or
+        /// so a row at worst, and <see cref="GranuleStats.ListedValues"/> at least. Small services of many hosts hold four
+        /// hundred runs and more in a granule of 8 192 rows, which the runs answer for kilobytes where its rows cost hundreds.
+        /// </summary>
+        internal int MaxRuns { get; set; } = GranuleStats.ListedValues;
+
         private ProtoWriter _granules = new ProtoWriter(256);
         private int _count;
         private long _open = -1;
@@ -336,7 +344,7 @@ internal sealed class GranuleKeyRuns
                 return;
             }
 
-            if (_over || _held == GranuleStats.ListedValues)
+            if (_over || _held >= MaxRuns)
             {
                 _over = true;
                 return;

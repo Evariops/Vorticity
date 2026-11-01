@@ -24,21 +24,24 @@ public sealed partial class DatasetPrefixRunsTests
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
 
     /// <summary>
-    /// 400 000 requests of a day, forty services of three hosts each, sorted by the service, the host, the hour, then the
-    /// instant, the first three indexed, in two appends consolidated: a service's 10 000 requests lie in two granules or so,
-    /// and where two services meet a granule holds the last hours of one and the first of the next, two services and two
-    /// buckets of twelve hours. The object keeps the runs of the prefix each granule holds, those its rows hold; every
-    /// request but one, per service and per twelve hours, is answered by the granules, those where two services meet by
-    /// their runs, the request's own read as rows, its counts LINQ's.
+    /// 400 000 requests of a day, forty services of three hosts each, or of thirty, sorted by the service, the host, the hour,
+    /// then the instant, the first three indexed, in two appends consolidated: a service's 10 000 requests lie in two
+    /// granules or so, and where two services meet a granule holds the last hours of one and the first of the next, two
+    /// services and two buckets of twelve hours. The object keeps the runs of the prefix each granule holds, those its rows
+    /// hold, some 60 a granule, or 590 under thirty hosts, past the 256 values a granule lists; every request but one, per
+    /// service and per twelve hours, is answered by the granules, those where two services meet by their runs, the
+    /// request's own read as rows, its counts LINQ's.
     /// </summary>
-    [Fact]
-    public async Task TwoKeysOfThePrefixAreAnsweredRunByRun()
+    [Theory]
+    [InlineData(3)]
+    [InlineData(30)]
+    public async Task TwoKeysOfThePrefixAreAnsweredRunByRun(int hosts)
     {
         Random random = new Random(89);
         Request[] requests = [.. Enumerable.Range(0, 400_000).Select(i =>
         {
-            int host = random.Next(120);
-            return new Request(Start.AddTicks(random.NextInt64(TimeSpan.TicksPerDay)), $"svc-{host / 3:D2}", $"host-{host:D3}", $"id-{i:D7}");
+            int host = random.Next(40 * hosts);
+            return new Request(Start.AddTicks(random.NextInt64(TimeSpan.TicksPerDay)), $"svc-{host / hosts:D2}", $"host-{host:D4}", $"id-{i:D7}");
         })];
         await using MemoryObjectStore memory = new MemoryObjectStore();
         await using CountingObjectStore store = new CountingObjectStore(memory);
@@ -122,7 +125,7 @@ public sealed partial class DatasetPrefixRunsTests
         // The four granules the request may lie in alone are read as rows, a few blocks: the granules where two services meet
         // are answered by their runs. Without them, every such granule read as rows, the granules weighed 5.55 MB and the
         // rows were chosen.
-        Console.WriteLine($"PREFIX RUNS: every request but one by service and twelve hours, {bytes[1]} bytes and {decoded[1]} blocks decoded through the granules, {bytes[0]} and {decoded[0]} through the rows");
+        Console.WriteLine($"PREFIX RUNS: {hosts} hosts a service, every request but one by service and twelve hours, {bytes[1]} bytes and {decoded[1]} blocks decoded through the granules, {bytes[0]} and {decoded[0]} through the rows");
         Assert.True(decoded[1] * 8 < decoded[0], $"{decoded[1]} blocks decoded through the granules, {decoded[0]} through the rows");
         Assert.True(bytes[1] < bytes[0], $"{bytes[1]} bytes through the granules, {bytes[0]} through the rows");
 

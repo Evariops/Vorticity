@@ -98,6 +98,7 @@ internal sealed class SortedRows(SortKey keys, int prefix, int skip = 0)
         // The runs of the prefix, each one value of every component, found by a gallop over the keys, a few looks a run and
         // none a row: each the prefix's runs take whole, and each component that is a function of a column its value, read
         // where its bytes change.
+        _prefixRuns?.MaxRuns = Math.Max(GranuleStats.ListedValues, granuleRows / 8);
         if (_runCut < 0)
         {
             ReadOnlySpan<byte> first = source.KeyAt(from);

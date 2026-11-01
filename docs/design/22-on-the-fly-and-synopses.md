@@ -334,7 +334,9 @@ which neither the service's listed values nor the hours answer alone. For a pref
 more, the same gallop keeps the runs of the whole prefix in each granule, each one value of every
 component, the key's own bytes from its start through the prefix, each run sharing its leading bytes with
 the one before, and its rows (`GranuleKeyRuns` again, a second shape the table of contents names apart;
-a granule of more than 256 runs is not described, as a granule lists 256 values at most). A question of
+a granule of more runs than an eighth of its rows, 256 at least, is not described, so that a run a row
+costs a byte or so a row at worst: the small services of many hosts hold 400 runs and more in a granule,
+which their runs answer for kilobytes where its rows cost hundreds). A question of
 counts keyed by two columns the prefix gives, a column of it or a coarser function of a column a component
 is a function of, takes such a granule's groups from them run by run, its other keys holding one group
 over the granule. *Calculated* for the requests of S1, whose key's prefix is the service, the version,
