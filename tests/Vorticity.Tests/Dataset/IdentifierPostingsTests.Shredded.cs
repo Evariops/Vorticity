@@ -103,6 +103,9 @@ public sealed partial class IdentifierPostingsTests
                 Assert.Equal(
                     rows.Where(r => r.Attributes["status"]?.AsInt64() >= 400).Select(r => r.Attributes["status"]?.AsInt64()).Order(),
                     (await dataset.Scan<Visit>().Where(r => r.Attributes["status"].AsInt64() >= 400).Select(r => r.Attributes["status"].AsInt64()).ToListAsync(Ct)).Order());
+
+                // The copies of the objects shredded are made beside the first question.
+                await dataset.LevelZero.WhenMadeAsync();
                 Assert.Equal(onAppend ? 3 * asked : 0, dataset.LevelZero.AsAppended);
                 Assert.Equal(onAppend ? 0 : 3, dataset.LevelZero.Shredded);
             }
