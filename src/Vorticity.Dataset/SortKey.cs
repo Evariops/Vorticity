@@ -58,6 +58,9 @@ internal sealed class SortKey
     /// <summary>The type of the value at <paramref name="position"/>, which a seek's literal is encoded at.</summary>
     internal DType TypeAt(int position) => _types[position];
 
+    /// <summary>The encoded width of the value at <paramref name="position"/> (<see cref="RowEncoder.EncodedWidth"/>).</summary>
+    internal int WidthAt(int position) => _widths[position];
+
     /// <summary>Whether the value at <paramref name="position"/> is a function of a column, a truncation, rather than a column as it is or a variant's key.</summary>
     internal bool IsFunctionOfColumn(int position) => _sources[position] is { Function: not null, Read: null };
 

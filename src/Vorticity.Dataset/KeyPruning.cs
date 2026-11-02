@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Threading;
+using Vorticity.Buffers;
 using Vorticity.Compute;
 using Vorticity.Expressions;
 using Vorticity.Indexes;
@@ -282,15 +283,16 @@ internal sealed class KeyPruning
         }
 
         // The pages first: a page runs from its first key to the next page's, the last one to the object's last key. One list
-        // of summaries serves every node of the search.
+        // of summaries serves every node of the search, and each text or binary the keys hold is read once.
         List<ColumnSummary> box = new List<ColumnSummary>(_tree.Count + 1);
+        Dictionary<byte[], FilterLiteral> values = new Dictionary<byte[], FilterLiteral>(ByteKeys.Instance);
         List<(int First, int End)> pages = [];
-        Search(keys, partition, 0, keys.Pages, granules: false, pages, box);
+        Search(keys, partition, 0, keys.Pages, granules: false, pages, box, values);
         foreach ((int firstPage, int endPage) in pages)
         {
             int from = firstPage * keys.PageEntries;
             int to = (int)Math.Min((long)endPage * keys.PageEntries, keys.Granules);
-            Search(keys, partition, from, to, granules: true, kept, box);
+            Search(keys, partition, from, to, granules: true, kept, box, values);
         }
 
         // Neighbouring ranges as one; none when the object's box meets the filter's and no granule's does.
@@ -320,14 +322,16 @@ internal sealed class KeyPruning
     /// The exclusion search over entries <paramref name="from"/> to <paramref name="to"/>, pages or granules: a range the
     /// box of its bounds refutes is dropped, one of a single entry kept, any other cut in <see cref="Fanout"/>.
     /// </summary>
-    private void Search(GranuleKeys keys, ReadOnlySpan<byte> partition, int from, int to, bool granules, List<(int First, int End)> kept, List<ColumnSummary> box)
+    private void Search(
+        GranuleKeys keys, ReadOnlySpan<byte> partition, int from, int to, bool granules, List<(int First, int End)> kept, List<ColumnSummary> box,
+        Dictionary<byte[], FilterLiteral> values)
     {
         if (from >= to)
         {
             return;
         }
 
-        if (!Judge(EntryKey(keys, from, granules), NextKey(keys, to, granules), _skip, partition, box))
+        if (!Judge(EntryKey(keys, from, granules), NextKey(keys, to, granules), _skip, partition, box, values))
         {
             return;
         }
@@ -341,7 +345,7 @@ internal sealed class KeyPruning
         int step = Math.Max(1, (to - from + Fanout - 1) / Fanout);
         for (int at = from; at < to; at += step)
         {
-            Search(keys, partition, at, Math.Min(at + step, to), granules, kept, box);
+            Search(keys, partition, at, Math.Min(at + step, to), granules, kept, box, values);
         }
     }
 
@@ -360,10 +364,12 @@ internal sealed class KeyPruning
     /// <paramref name="from"/> on, both included, may hold a row the filter keeps; <paramref name="partition"/> the value of
     /// the positions before, which every row holds.
     /// </summary>
-    private bool Judge(ReadOnlySpan<byte> low, ReadOnlySpan<byte> high, int from, ReadOnlySpan<byte> partition, List<ColumnSummary> box)
+    private bool Judge(
+        ReadOnlySpan<byte> low, ReadOnlySpan<byte> high, int from, ReadOnlySpan<byte> partition, List<ColumnSummary> box,
+        Dictionary<byte[], FilterLiteral>? values = null)
     {
         box.Clear();
-        Box(low, high, from, partition, nonNull: false, box);
+        Box(low, high, from, partition, nonNull: false, box, values);
         return box.Count == 0 || _pruner.MayMatch(Merged(box), 1);
     }
 
@@ -372,11 +378,13 @@ internal sealed class KeyPruning
     /// <see cref="Judge"/> reads them; with <paramref name="nonNull"/>, a column bounded on both sides by values holds no
     /// null, which the order puts after every value. Into <paramref name="box"/>, which it returns.
     /// </summary>
-    private List<ColumnSummary> Box(ReadOnlySpan<byte> low, ReadOnlySpan<byte> high, int from, ReadOnlySpan<byte> partition, bool nonNull, List<ColumnSummary> box)
+    private List<ColumnSummary> Box(
+        ReadOnlySpan<byte> low, ReadOnlySpan<byte> high, int from, ReadOnlySpan<byte> partition, bool nonNull, List<ColumnSummary> box,
+        Dictionary<byte[], FilterLiteral>? values = null)
     {
         if (from > 0 && !partition.IsEmpty)
         {
-            FilterLiteral value = RowEncoder.ReadFirstValue(partition, _tree.TypeAt(0));
+            FilterLiteral value = Value(partition, 0, values);
             Bound(box, 0, value, value, nonNull);
         }
 
@@ -394,7 +402,7 @@ internal sealed class KeyPruning
 
             ReadOnlySpan<byte> lowValue = low.Slice(lowAt, lowLength);
             ReadOnlySpan<byte> highValue = high.Slice(highAt, highLength);
-            Bound(box, position, RowEncoder.ReadFirstValue(lowValue, type), RowEncoder.ReadFirstValue(highValue, type), nonNull);
+            Bound(box, position, Value(lowValue, position, values), Value(highValue, position, values), nonNull);
 
             // Past the first component the two keys part on, the next ones are free.
             if (!lowValue.SequenceEqual(highValue))
@@ -407,6 +415,29 @@ internal sealed class KeyPruning
         }
 
         return box;
+    }
+
+    /// <summary>
+    /// The value <paramref name="encoded"/> holds, of the component at <paramref name="position"/>: a text's or a binary's read
+    /// once a search, by its bytes, into <paramref name="values"/> when there are some. Each granule's bounds made their
+    /// values' bytes anew: a search of a service's objects read the same few names thousands of times, a tenth of what the
+    /// questions of a node allocated (2026-11-02).
+    /// </summary>
+    private FilterLiteral Value(ReadOnlySpan<byte> encoded, int position, Dictionary<byte[], FilterLiteral>? values)
+    {
+        if (values is null || _tree.WidthAt(position) != RowEncoder.VariableWidth)
+        {
+            return RowEncoder.ReadFirstValue(encoded, _tree.TypeAt(position));
+        }
+
+        Dictionary<byte[], FilterLiteral>.AlternateLookup<ReadOnlySpan<byte>> lookup = values.GetAlternateLookup<ReadOnlySpan<byte>>();
+        if (!lookup.TryGetValue(encoded, out FilterLiteral value))
+        {
+            value = RowEncoder.ReadFirstValue(encoded, _tree.TypeAt(position));
+            lookup[encoded] = value;
+        }
+
+        return value;
     }
 
     /// <summary>
