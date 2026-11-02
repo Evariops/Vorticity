@@ -676,6 +676,9 @@ internal static partial class PathsBench
             // --loop: the warm ask again and again for as long, for a profiler, and its mean.
             if (settings.LoopSeconds > 0)
             {
+                // A profiler that attaches to the process waits for this line, and samples the loop alone.
+                Console.WriteLine($"    loop: begins, process {Environment.ProcessId}");
+                Console.Out.Flush();
                 long until = Stopwatch.GetTimestamp() + (long)(settings.LoopSeconds * Stopwatch.Frequency);
                 int asks = 0;
                 double milliseconds = 0;
