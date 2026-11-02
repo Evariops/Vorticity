@@ -100,6 +100,11 @@ public sealed partial class QueryPathBudgetTests : IClassFixture<QueryPathBudget
     /// The count by service and hour raised the same day to 44,740 bytes, 1 % above the 44,296 it measured alone, by the
     /// plan its scans make of their filter.
     /// </para>
+    /// <para>
+    /// The unaligned window at eight lanes raised the same day to 82,506 bytes, 2 % above the 80,888 the runner measured,
+    /// where this machine measured 80,272 three times out of three: eight lanes on the runner's four cores share their pools
+    /// otherwise than on thirty-two.
+    /// </para>
     /// </summary>
     private static readonly Dictionary<string, Budget> Ceilings = new(StringComparer.Ordinal)
     {
@@ -108,7 +113,7 @@ public sealed partial class QueryPathBudgetTests : IClassFixture<QueryPathBudget
         ["count by service and hour"] = new(4, 169512, 0, 0, 44740),
         ["by minute, the last hour, under a predicate"] = new(1, 42106, 0, 0, 48446),
         ["an unaligned window"] = new(3, 127406, 0, 0, 52461),
-        ["an unaligned window, at eight lanes"] = new(3, 127406, 0, 0, 80613),
+        ["an unaligned window, at eight lanes"] = new(3, 127406, 0, 0, 82506),
         ["every row but one id"] = new(4, 169512, 0, 0, 53220),
         ["measures by region and hour"] = new(4, 169512, 0, 0, 51950),
         ["count by route, a shredded path"] = new(4, 169512, 0, 0, 49028),

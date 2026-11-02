@@ -426,7 +426,9 @@ public sealed class PathAllocationTests
         // lend as it is: the open holds a 48-byte owner of the view where it would copy the tail.
         // The walk of the reads along is behind a reference of the enumerator, 8 bytes, as on every
         // axis that scans.
-        ("scan, vortex.map", "encodings/map", 3_680, FullScan),
+        // The 64 bytes every axis that scans took above, as the runner measured (2026-11-02): this
+        // machine's figure less its allowance, which read 48 bytes under it on this file alone.
+        ("scan, vortex.map", "encodings/map", 3_728, FullScan),
         ("scan, vortex.variant", "encodings/variant", 3_368, FullScan),
     ];
 

@@ -55,12 +55,18 @@ public sealed partial class DatasetRangedConsolidationTests
     /// <summary>
     /// A range reserves what its writer gathers besides its inputs' batches: columns that gather chunks of 64 MiB, sixteen
     /// times that each at most, run the ranges one at a time under a budget of 3 GiB, which the inputs' batches alone, a
-    /// few hundred megabytes a range, would have filled with every range at once; under the process's share, side by side.
+    /// few hundred megabytes a range, would have filled with every range at once; under a budget of 64 GiB, side by side.
     /// </summary>
+    /// <remarks>
+    /// The roomy budget is one of its own, under a parent of a fixed ceiling standing for the process: under the process's
+    /// share, a range reserving some 5.5 GB ran alone on a runner of 16 GB, where it ran beside another on a machine of more
+    /// (2026-11-02).
+    /// </remarks>
     [Fact]
     public async Task ARangeReservesWhatItsWriterGathers()
     {
-        (List<Row> appended, List<Row> roomy, IReadOnlyList<CompactionResult> wide) = await ConsolidateAsync(lanes: 4, chunkBytes: 64 << 20);
+        QueryMemoryBudget roomyBudget = new QueryMemoryBudget(64L << 30, new QueryMemoryBudget(64L << 30, process: null));
+        (List<Row> appended, List<Row> roomy, IReadOnlyList<CompactionResult> wide) = await ConsolidateAsync(lanes: 4, roomyBudget, chunkBytes: 64 << 20);
         (_, List<Row> tight, IReadOnlyList<CompactionResult> narrow) = await ConsolidateAsync(lanes: 4, new QueryMemoryBudget(3L << 30), chunkBytes: 64 << 20);
         List<Row> live = [.. appended.Where(static row => !(row.Day == 0 && row.Status == 7))];
         Assert.Equal(live, roomy.OrderBy(static row => row.Sequence));
