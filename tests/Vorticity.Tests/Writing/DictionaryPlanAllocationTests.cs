@@ -4,11 +4,14 @@
 using System;
 using Vorticity.Arrays;
 using Vorticity.Tests.Columns;
+using Vorticity.Tests.Scan;
 using Vorticity.Writing;
 using Xunit;
 
 namespace Vorticity.Tests.Writing;
 
+[Collection(nameof(AllocationCollection))]
+[Trait("Category", "RunsAlone")]
 public sealed class DictionaryPlanAllocationTests
 {
     [Fact]
