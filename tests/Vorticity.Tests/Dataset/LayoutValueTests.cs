@@ -146,6 +146,34 @@ public sealed partial class LayoutValueTests
         Assert.True(cut.Same(Key(plan, tree, FilterLiteral.From(string.Empty), FilterLiteral.From(1L)), Key(plan, tree, FilterLiteral.From(string.Empty), FilterLiteral.From(2L))));
     }
 
+    /// <summary>
+    /// A key's values found in one walk, as a granule's prefix runs find them a run at a time: each value's end is where
+    /// its prefix ends, and the last the key's own end, for texts of no block, of one, of a block exactly and of several.
+    /// </summary>
+    [Fact]
+    public void TheEndsOfAKeysValuesAreWhereItsPrefixesEnd()
+    {
+        LayoutPlan plan = Plan(Tenanted.Schema, new DatasetLayout
+        {
+            Partition = LayoutValue.Column(nameof(Tenanted.Tenant)),
+            SortKey = [LayoutValue.Column(nameof(Tenanted.Tenant)), LayoutValue.Column(nameof(Tenanted.Id))],
+        });
+        SortKey tree = SortKey.Of(plan, partition: true, plan.Components.Count);
+        Span<int> ends = stackalloc int[tree.Count];
+        foreach (int length in (int[])[0, 1, 31, 32, 33, 64, 70])
+        {
+            byte[] key = Key(plan, tree, FilterLiteral.From(new string('t', length)), FilterLiteral.From(-(long)length));
+            Assert.True(tree.Ends(key, ends));
+            for (int i = 0; i < tree.Count; i++)
+            {
+                Assert.Equal(tree.PrefixLength(key, i + 1), ends[i]);
+            }
+
+            Assert.Equal(key.Length, ends[^1]);
+            Assert.True(ends[0] < ends[1] && ends[1] - ends[0] == ends[0]);
+        }
+    }
+
     [Fact]
     public void ANumberBucketCutsWhereTheScansBucketChanges()
     {

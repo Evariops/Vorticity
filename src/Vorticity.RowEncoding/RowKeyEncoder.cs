@@ -310,26 +310,55 @@ public static partial class RowEncoder
                 return dtype.PType.ByteWidth() + 1;
 
             case DTypeKind.Utf8 or DTypeKind.Binary:
-            {
-                // A null or an empty value is its sentinel alone.
-                if (key[0] != RowSentinels.VarNonEmpty(RowSortField.Ascending))
-                {
-                    return 1;
-                }
-
-                const byte Continuation = 0xFF;
-                int length = 1;
-                while (key[length + RowWidths.VarBlockData] == Continuation)
-                {
-                    length += RowWidths.VarBlockTotal;
-                }
-
-                return length + RowWidths.VarBlockTotal;
-            }
+                return VariableLength(key);
 
             default:
                 throw Unkeyed(dtype);
         }
+    }
+
+    /// <summary>The width <see cref="EncodedWidth"/> gives a text or a binary, whose bytes tell their length.</summary>
+    internal const int VariableWidth = -2;
+
+    /// <summary>
+    /// What <see cref="ValueLength(ReadOnlySpan{byte}, DType)"/> needs of <paramref name="dtype"/>, worked out once for a
+    /// key's component: the width of a fixed one, <see cref="VariableWidth"/> for a text or a binary, -1 for a struct or a
+    /// list whose width depends on its data.
+    /// </summary>
+    internal static int EncodedWidth(DType dtype)
+    {
+        dtype = Storage(dtype);
+        RowWidth width = RowWidths.For(dtype);
+        return width.IsFixed ? width.Width : dtype.Kind is DTypeKind.Utf8 or DTypeKind.Binary ? VariableWidth : -1;
+    }
+
+    /// <summary>
+    /// <see cref="ValueLength(ReadOnlySpan{byte}, DType)"/> from the width <see cref="EncodedWidth"/> gave the value's type:
+    /// a walk of a key's components a run at a time reads no type, whose copy cost more than the walk (2026-11-02, the
+    /// prefix runs of a granule's question).
+    /// </summary>
+    internal static int ValueLength(ReadOnlySpan<byte> key, int width) =>
+        width >= 0 ? width : width == VariableWidth ? VariableLength(key) : -1;
+
+    /// <summary>
+    /// The bytes a text's or a binary's first value takes: its sentinel alone for a null or an empty value, else its
+    /// sentinel and blocks, the last block's marker the first that is no continuation.
+    /// </summary>
+    private static int VariableLength(ReadOnlySpan<byte> key)
+    {
+        if (key[0] != RowSentinels.VarNonEmpty(RowSortField.Ascending))
+        {
+            return 1;
+        }
+
+        const byte Continuation = 0xFF;
+        int length = 1;
+        while (key[length + RowWidths.VarBlockData] == Continuation)
+        {
+            length += RowWidths.VarBlockTotal;
+        }
+
+        return length + RowWidths.VarBlockTotal;
     }
 
     /// <summary>

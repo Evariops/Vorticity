@@ -24,6 +24,9 @@ internal sealed class SortKey
     private readonly RowSortField[] _fields;
     private readonly DType[] _types;
 
+    // Each value's encoded width (RowEncoder.EncodedWidth), which a walk of a key's values reads in place of its type.
+    private readonly int[] _widths;
+
     private SortKey(Source[] sources, bool descending, bool reversed = false)
     {
         _sources = sources;
@@ -40,10 +43,12 @@ internal sealed class SortKey
             }
         }
         _types = new DType[sources.Length];
+        _widths = new int[sources.Length];
         DTypeArena arena = new DTypeArena();
         for (int i = 0; i < sources.Length; i++)
         {
             _types[i] = sources[i].Type(arena);
+            _widths[i] = RowEncoder.EncodedWidth(_types[i]);
         }
     }
 
@@ -157,7 +162,7 @@ internal sealed class SortKey
         int at = 0;
         for (int i = 0; i < components; i++)
         {
-            int length = RowEncoder.ValueLength(key[at..], _types[i]);
+            int length = RowEncoder.ValueLength(key[at..], _widths[i]);
             if (length < 0)
             {
                 return -1;
@@ -167,6 +172,27 @@ internal sealed class SortKey
         }
 
         return at;
+    }
+
+    /// <summary>
+    /// The end of each of the first <paramref name="ends"/>.Length values of the row-encoded key <paramref name="key"/>, in
+    /// one walk; false when one is a struct or a list whose width its bytes do not tell.
+    /// </summary>
+    internal bool Ends(ReadOnlySpan<byte> key, Span<int> ends)
+    {
+        int at = 0;
+        for (int i = 0; i < ends.Length; i++)
+        {
+            int length = RowEncoder.ValueLength(key[at..], _widths[i]);
+            if (length < 0)
+            {
+                return false;
+            }
+
+            ends[i] = at += length;
+        }
+
+        return true;
     }
 
     /// <summary>

@@ -1346,7 +1346,7 @@ internal sealed class GranuleAnswer
         GranuleStateRows states = new GranuleStateRows(this);
         List<ColumnSummary> judged = new List<ColumnSummary>(Fields.Length + summaries.Columns.Count);
         PrefixValues? prefixRuns = _prefixAt >= 0 && _prefixAt < alike.Length && alike[_prefixAt] is { IsPrefix: true } prefix && _schema.Tree is { } tree
-            ? new PrefixValues(prefix, tree, _schema.Partitioned ? 1 : 0, KeyFields.Length)
+            ? new PrefixValues(prefix, tree, _schema.Partitioned ? 1 : 0, KeyFields.Length, _prefixKeys)
             : null;
 
         // A granule the places of a value left out touch is judged under the whole filter, where the value's column is no
@@ -1702,6 +1702,12 @@ internal sealed class GranuleAnswer
         for (int r = runs.First; r < runs.First + runs.Count; r++)
         {
             ReadOnlySpan<byte> key = values.Runs.KeyOf(r);
+            if (!values.Bound(key))
+            {
+                states.Truncate(first);
+                return false;
+            }
+
             bool same = states.Count > first;
             for (int k = 0; k < given.Length; k++)
             {
@@ -1740,11 +1746,27 @@ internal sealed class GranuleAnswer
     /// of its component in the last run decoded and the value that stood for it, which the runs of one service and other
     /// hosts take again with no decoding.
     /// </summary>
-    private sealed class PrefixValues(GranuleKeyRuns runs, SortKey tree, int skip, int keys)
+    private sealed class PrefixValues(GranuleKeyRuns runs, SortKey tree, int skip, int keys, (int Component, ValueFunction? Of)[]? given)
     {
         private readonly byte[]?[] _bytes = new byte[]?[keys];
         private readonly int[] _lengths = new int[keys];
         private readonly byte[]?[] _stands = new byte[]?[keys];
+
+        // The end of each value of the run's key up to the last a key takes, found once a run (Bound): the keys' values
+        // are each found from the key's start, which walked it twice a key a run, 1.35 million values a question of the
+        // distinct hosts by region over 97,000 runs.
+        private readonly int[] _ends = new int[Needed(skip, given)];
+
+        private static int Needed(int skip, (int Component, ValueFunction? Of)[]? given)
+        {
+            int last = -1;
+            foreach ((int component, _) in given ?? [])
+            {
+                last = Math.Max(last, component);
+            }
+
+            return last < 0 ? 0 : skip + last + 1;
+        }
 
         /// <summary>The runs.</summary>
         internal GranuleKeyRuns Runs { get; } = runs;
@@ -1755,22 +1777,20 @@ internal sealed class GranuleAnswer
         /// <summary>Each key's group in the run before it, of the same granule or the one before.</summary>
         internal byte[]?[] Previous { get; } = new byte[]?[keys];
 
+        /// <summary>The ends of the values of the run's key <paramref name="run"/> that the keys take; false when one's width is unknown.</summary>
+        internal bool Bound(ReadOnlySpan<byte> run) => tree.Ends(run, _ends);
+
         /// <summary>
         /// Sets <see cref="Current"/>'s <paramref name="k"/>th to the group of <paramref name="key"/> in the run of key
         /// <paramref name="run"/>, from the component <paramref name="given"/> names: its value as <paramref name="column"/>
-        /// stores it, or the one standing for its class; false when it reads as none, or a class straddles two groups.
+        /// stores it, or the one standing for its class; false when it reads as none, or a class straddles two groups. The
+        /// run's ends are <see cref="Bound"/>'s.
         /// </summary>
         internal bool TryStand(int k, ReadOnlySpan<byte> run, (int Component, ValueFunction? Of) given, FieldExpr key, GranuleColumn column)
         {
             int position = skip + given.Component;
-            int at = tree.PrefixLength(run, position);
-            int end = tree.PrefixLength(run, position + 1);
-            if (at < 0 || end < at)
-            {
-                return false;
-            }
-
-            ReadOnlySpan<byte> bytes = run[at..end];
+            int at = position == 0 ? 0 : _ends[position - 1];
+            ReadOnlySpan<byte> bytes = run[at.._ends[position]];
             if (_bytes[k] is { } held && bytes.SequenceEqual(held.AsSpan(0, _lengths[k])))
             {
                 Current[k] = _stands[k];
