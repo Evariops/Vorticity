@@ -2,6 +2,10 @@ using System;
 using System.Buffers;
 using System.Collections.Generic;
 using System.Numerics;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.X86;
 
 namespace Vorticity.Aggregating;
 
@@ -149,6 +153,11 @@ internal sealed class QuantileSketch : IGroupSketch<QuantileSketch>
     internal long AddAll<TValue>(ReadOnlySpan<TValue> values)
         where TValue : unmanaged, INumberBase<TValue>
     {
+        if (typeof(TValue) == typeof(long))
+        {
+            return AddLongs(MemoryMarshal.Cast<TValue, long>(values));
+        }
+
         long grown = 0;
         int i = 0;
         while (i < values.Length)
@@ -177,6 +186,72 @@ internal sealed class QuantileSketch : IGroupSketch<QuantileSketch>
             }
 
             grown += Add(double.CreateTruncating(values[i]));
+            i++;
+        }
+
+        return grown;
+    }
+
+    /// <summary>
+    /// <see cref="AddAll{TValue}"/> over integers of 64 bits, a loop of its own: the generic one converted each value
+    /// through a call, its result through memory, and its locals spilled where a slot inlined it, 39 % of a percentile's
+    /// fold waiting on one reload (2026-11-02). Past that, eight values a step at 512 bits while all lie in the dense
+    /// window, their buckets found together and counted one by one; the first that does not ends the step's block.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private long AddLongs(ReadOnlySpan<long> values)
+    {
+        long grown = 0;
+        int i = 0;
+        ref long first = ref MemoryMarshal.GetReference(values);
+        Span<long> at = stackalloc long[Vector512<long>.Count];
+        while (i < values.Length)
+        {
+            if (_positive.Dense(out long[] window, out int low))
+            {
+                int start = i;
+                int shift = _shift;
+                if (Vector512.IsHardwareAccelerated && Avx512DQ.IsSupported)
+                {
+                    Vector512<long> origin = Vector512.Create((long)low);
+                    Vector512<ulong> width = Vector512.Create((ulong)window.Length);
+                    for (; i <= values.Length - Vector512<long>.Count; i += Vector512<long>.Count)
+                    {
+                        Vector512<long> value = Vector512.LoadUnsafe(ref first, (nuint)i);
+                        Vector512<long> bucket = Vector512.ShiftRightArithmetic(Avx512DQ.ConvertToVector512Double(value).AsInt64(), shift) - origin;
+                        if (!Vector512.EqualsAll(Vector512.GreaterThan(value, Vector512<long>.Zero) & Vector512.LessThan(bucket.AsUInt64(), width).AsInt64(), Vector512<long>.AllBitsSet))
+                        {
+                            break;
+                        }
+
+                        bucket.CopyTo(at);
+                        for (int lane = 0; lane < at.Length; lane++)
+                        {
+                            window[(int)at[lane]]++;
+                        }
+                    }
+                }
+
+                for (; i < values.Length; i++)
+                {
+                    double value = Unsafe.Add(ref first, i);
+                    int bucket = (int)(BitConverter.DoubleToInt64Bits(value) >> shift) - low;
+                    if (!(value > 0) || (uint)bucket >= (uint)window.Length)
+                    {
+                        break;
+                    }
+
+                    window[bucket]++;
+                }
+
+                Count += i - start;
+                if (i == values.Length)
+                {
+                    break;
+                }
+            }
+
+            grown += Add(Unsafe.Add(ref first, i));
             i++;
         }
 
