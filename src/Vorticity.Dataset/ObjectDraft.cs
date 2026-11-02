@@ -4,50 +4,31 @@ using System.Threading.Tasks;
 namespace Vorticity.Dataset;
 
 /// <summary>
-/// A data object being written for a dataset: a core writer over a fresh key, which the dataset
-/// completes, puts in the store and commits when it is handed to
-/// <see cref="VortexDataset.AppendAsync(ObjectDraft, System.Threading.CancellationToken)"/> or
+/// Rows being written for a dataset, which it sorts by its key into objects, one a partition, and commits when the draft is
+/// handed to <see cref="VortexDataset.AppendAsync(ObjectDraft, System.Threading.CancellationToken)"/> or
 /// <see cref="VortexDataset.ReplaceObjectsAsync(System.Collections.Generic.IReadOnlyList{DataObject}, System.Collections.Generic.IReadOnlyList{ObjectDraft}, System.Threading.CancellationToken)"/>.
 /// </summary>
 /// <remarks>
-/// Write the rows through <see cref="Writer"/> and leave its completion to the dataset. Disposing a
-/// draft that was never committed abandons it: nothing reaches the store.
+/// Write the rows through <see cref="Writer"/> and leave the objects to the dataset. Disposing a draft that was never
+/// committed abandons it: the objects it wrote already are left for vacuum, and nothing else reaches the store.
 /// </remarks>
 public sealed class ObjectDraft : IAsyncDisposable
 {
     private bool _taken;
 
-    internal ObjectDraft(VortexDataset owner, Guid identity, string key, ObjectSegmentSink sink, VortexFileWriter writer)
+    internal ObjectDraft(VortexDataset owner, DatasetWriter writer)
     {
         Owner = owner;
-        Identity = identity;
-        Key = key;
-        Sink = sink;
         Writer = writer;
     }
 
-    /// <summary>The key the object will have in the store.</summary>
-    public string Key { get; }
+    /// <summary>The writer the rows go through, with the dataset's schema: held by partition and written sorted.</summary>
+    public DatasetWriter Writer { get; }
 
-    /// <summary>The writer the rows go through, with the dataset's schema and write options.</summary>
-    public VortexFileWriter Writer { get; }
-
-    /// <summary>The dataset the object is written for.</summary>
+    /// <summary>The dataset the rows are written for.</summary>
     internal VortexDataset Owner { get; }
 
-    /// <summary>The identity minted for the object before a byte of it was written.</summary>
-    internal Guid Identity { get; }
-
-    /// <summary>Where the bytes wait until the object is put.</summary>
-    internal ObjectSegmentSink Sink { get; }
-
-    /// <summary>
-    /// Whether the object is written with no run on the clustering key, its rows coming in key order:
-    /// its seal checks that the statistics say so, since a key cursor then walks the column itself.
-    /// </summary>
-    internal bool BySortedColumn { get; init; }
-
-    /// <summary>Abandons the object unless a commit took it.</summary>
+    /// <summary>Abandons the rows unless a commit took them.</summary>
     /// <returns>A task that completes when the writer's buffers are released.</returns>
     public async ValueTask DisposeAsync()
     {
@@ -57,9 +38,7 @@ public sealed class ObjectDraft : IAsyncDisposable
         }
 
         _taken = true;
-        Writer.Abandon();
-        await Writer.DisposeAsync().ConfigureAwait(false);
-        Sink.Discard();
+        await Writer.AbandonAsync().ConfigureAwait(false);
     }
 
     /// <summary>Marks the draft as taken by a commit, once.</summary>
@@ -68,7 +47,7 @@ public sealed class ObjectDraft : IAsyncDisposable
     {
         if (_taken)
         {
-            throw new InvalidOperationException($"The draft of '{Key}' was already committed or disposed.");
+            throw new InvalidOperationException("The draft was already committed or disposed.");
         }
 
         _taken = true;

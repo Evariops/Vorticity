@@ -1,6 +1,9 @@
 using System;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
+using Vorticity.Expressions;
+using Vorticity.RowEncoding;
+using Vorticity.Scanning;
 using Vorticity.Types;
 using Vorticity.Types.Serialization;
 
@@ -15,7 +18,7 @@ namespace Vorticity.Dataset;
 internal readonly record struct RetiredColumn(string Name, string Current);
 
 /// <summary>
-/// The dataset's columns at one version, the clustering key over them, and the names its columns
+/// The dataset's columns at one version, the layout over them, and the names its columns
 /// had before. An object written under an earlier schema still holds its columns under those
 /// names, with the types they had then, and reads as this schema through <see cref="ColumnsOf"/>.
 /// </summary>
@@ -36,8 +39,8 @@ internal sealed class DatasetSchema
     private readonly ConditionalWeakTable<DTypeArena, Mapped> _mapped = new ConditionalWeakTable<DTypeArena, Mapped>();
 
     private DatasetSchema(
-        ReadOnlyMemory<byte> bytes, IReadOnlyList<RetiredColumn> retired, IReadOnlyList<string> clustering, ReadOnlyMemory<byte> policy,
-        IReadOnlyList<string> identifiers, IReadOnlyList<string> shreddedPaths, ClusteringOptions? declared)
+        ReadOnlyMemory<byte> bytes, IReadOnlyList<RetiredColumn> retired, DatasetLayout? layout, ReadOnlyMemory<byte> policy,
+        IReadOnlyList<string> identifiers, IReadOnlyList<string> shreddedPaths)
     {
         Bytes = bytes;
         Retired = retired;
@@ -48,9 +51,14 @@ internal sealed class DatasetSchema
         IndexedColumns = new HashSet<string>(IndexPolicy.Columns.Keys, StringComparer.Ordinal);
         DType = bytes.IsEmpty ? default : DTypeProtobuf.Read(bytes.Span, new DTypeArena());
         Columns = DType.IsDefault ? VortexSchema.Create([]) : VortexTypes.SchemaOf(DType);
-        Key = DType.IsDefault ? null : ClusteringKey.For(clustering, DType);
-        Cut = ValueCut.Of(declared, Key);
-        BlockCut = ValueCut.OfBlocks(declared, Key);
+        Layout = DType.IsDefault ? null : LayoutPlan.Of(layout, DType);
+        Tree = Layout is { } plan && (plan.Partition is not null || plan.Components.Count > 0)
+            ? SortKey.Of(plan, partition: true, plan.Components.Count)
+            : null;
+        KeyColumns = Layout?.ColumnPaths();
+        Key = Layout is { Partition: null } && KeyColumns is { } paths ? DatasetKey.OfLayout(paths, DType) : null;
+        Cut = ValueCut.Of(Layout, Tree);
+        RollupKey = Key ?? (Cut is { Path: { } partitioned } ? DatasetKey.For([partitioned], DType) : null);
         _hash = DType.IsDefault ? 0 : DType.GetHashCode();
         _renamed = new Dictionary<string, string>(StringComparer.Ordinal);
         _retired = new HashSet<string>(StringComparer.Ordinal);
@@ -73,14 +81,51 @@ internal sealed class DatasetSchema
     /// <summary>The schema as a caller sees it, and binds a record to.</summary>
     internal VortexSchema Columns { get; }
 
-    /// <summary>The clustering key, or null when the dataset is ordered by arrival.</summary>
-    internal ClusteringKey? Key { get; }
+    /// <summary>The dataset's layout resolved against these columns; null when it states neither a partition nor a key.</summary>
+    internal LayoutPlan? Layout { get; }
 
-    /// <summary>The clustering value the dataset's jobs cut their objects by, over <see cref="Key"/>; null when it declares none.</summary>
+    /// <summary>
+    /// The order of the dataset's rows and of its trees, row-encoded: the partition, then the key's components, each
+    /// ascending with nulls last; null when the layout states neither. What a tree key leads with, what an entry's last
+    /// key holds, and what a merge compares.
+    /// </summary>
+    internal SortKey? Tree { get; }
+
+    /// <summary>Whether the layout states a key, whose order every object's rows are in.</summary>
+    internal bool Keyed => Layout is { Components.Count: > 0 };
+
+    /// <summary>Whether the layout states a partition, which leads the tree and holds each object's rows.</summary>
+    internal bool Partitioned => Layout?.Partition is not null;
+
+    /// <summary>
+    /// The top-level column the key's first component reads as it is, whose values an object's rows come in the order of:
+    /// what its dictionary is priced as sorted by; -1 for none.
+    /// </summary>
+    internal int SortedColumn => Layout is { Components: [{ Function: null, Read: null } first, ..] }
+        && !first.Value.SourcePath.Contains('.', StringComparison.Ordinal) ? first.Field : -1;
+
+    /// <summary>
+    /// The key over the columns of the layout's components, when each is a column's own values and no partition leads the
+    /// tree's keys: what the reads seek by until they seek by the sparse index. Null for a layout of no key, of a computed
+    /// component or of a partition, whose reads prune by summaries alone until then.
+    /// </summary>
+    internal DatasetKey? Key { get; }
+
+    /// <summary>
+    /// The column a rollup bounds its buckets by, as a key of it alone: under a partition over a column, that column, a
+    /// rollup of rank 1 holding one partition; otherwise the layout key's, with no buckets. Null when the dataset has
+    /// neither, and so no rollup.
+    /// </summary>
+    internal DatasetKey? RollupKey { get; }
+
+    /// <summary>
+    /// The columns the layout's key components read as they are, in key order, whose order every object's rows lie in
+    /// within its partition, nulls last; null when a component is computed, or the layout has no key.
+    /// </summary>
+    internal IReadOnlyList<string>? KeyColumns { get; }
+
+    /// <summary>The partition the dataset's jobs cut their objects by, over the tree's keys; null when it declares none.</summary>
     internal ValueCut? Cut { get; }
-
-    /// <summary>Where a job also ends a block, by the declared block value of the key's second column; null for none.</summary>
-    internal ValueCut? BlockCut { get; }
 
     /// <summary>Every name a column of the dataset gave up, in the order they were given up.</summary>
     internal IReadOnlyList<RetiredColumn> Retired { get; }
@@ -117,10 +162,9 @@ internal sealed class DatasetSchema
         previous is not null && previous.Bytes.Span.SequenceEqual(header.Schema.Span) && Same(previous.Retired, header.Retired)
             && previous.PolicyBytes.Span.SequenceEqual(header.WritePolicy.Span)
             && Same(previous.Identifiers, header.Identifiers) && Same(previous.ShreddedPaths, header.ShreddedPaths)
+            && Equals(previous.Layout?.Layout, header.Layout)
             ? previous
-            : new DatasetSchema(
-                header.Schema, header.Retired, header.ClusteringKey, header.WritePolicy, header.Identifiers, header.ShreddedPaths,
-                header.Clustering);
+            : new DatasetSchema(header.Schema, header.Retired, header.Layout, header.WritePolicy, header.Identifiers, header.ShreddedPaths);
 
     /// <summary>
     /// How an object of this dtype answers for these columns: null when it holds exactly them, the
@@ -152,6 +196,78 @@ internal sealed class DatasetSchema
     /// </summary>
     internal bool Holds(ObjectEntry entry) => entry.Contents is { } contents && ColumnsOf(contents.SchemaType, entry.Key) is null;
 
+    /// <summary>
+    /// An object's <paramref name="summaries"/> with what its keys prove of its rows, its first key <paramref name="first"/>,
+    /// which its tree key leads with, and its last <paramref name="last"/>, as the tree orders them (<see cref="Tree"/>): the
+    /// partition's column, a column as it is, holding the one value they lead with; the key's first column, a column as it
+    /// is, between their first values past the partition's. A column the summaries bound already keeps its bounds, a
+    /// text's being bound by the keys alone; the bounds are the extremes when <paramref name="exact"/>.
+    /// </summary>
+    internal ObjectSummaries Bounded(ObjectSummaries summaries, ReadOnlySpan<byte> first, ReadOnlySpan<byte> last, bool exact)
+    {
+        if (Tree is not { } tree || Layout is not { } layout || first.IsEmpty)
+        {
+            return summaries;
+        }
+
+        List<ColumnSummary>? bounded = null;
+        int position = 0;
+        if (layout.Partition is { } partition)
+        {
+            int length = tree.PrefixLength(first, 1);
+            int lastLength = last.IsEmpty ? 0 : tree.PrefixLength(last, 1);
+            if (length < 0 || lastLength < 0)
+            {
+                return summaries;
+            }
+
+            if (partition.IsColumn)
+            {
+                FilterLiteral value = RowEncoder.ReadFirstValue(first, tree.TypeAt(0));
+                Bound(ref bounded, summaries, partition.Value.SourcePath, value, value, exact);
+            }
+
+            first = first[length..];
+            last = last.IsEmpty ? last : last[lastLength..];
+            position = 1;
+        }
+
+        if (layout.Components is [{ IsColumn: true } leading, ..] && !last.IsEmpty && position < tree.Count)
+        {
+            FilterLiteral low = RowEncoder.ReadFirstValue(first, tree.TypeAt(position));
+            FilterLiteral high = RowEncoder.ReadFirstValue(last, tree.TypeAt(position));
+            Bound(ref bounded, summaries, leading.Value.SourcePath, low, high, exact);
+        }
+
+        return bounded is null ? summaries : ObjectSummaries.From(bounded);
+
+        static void Bound(ref List<ColumnSummary>? bounded, ObjectSummaries summaries, string path, FilterLiteral low, FilterLiteral high, bool exact)
+        {
+            if (low.Kind == FilterLiteralKind.Null || high.Kind == FilterLiteralKind.Null
+                || (summaries.TryGet(path, out ColumnSummary held) && held.HasMin && held.HasMax))
+            {
+                return;
+            }
+
+            bounded ??= [.. summaries.Columns];
+            ColumnSummary keyed = new ColumnSummary(path, low, true, high, true, exact, 0, true);
+            int at = bounded.Count - 1;
+            while (at >= 0 && !string.Equals(bounded[at].Path, path, StringComparison.Ordinal))
+            {
+                at--;
+            }
+
+            if (at < 0)
+            {
+                bounded.Add(keyed);
+            }
+            else if (!bounded[at].HasMin || !bounded[at].HasMax)
+            {
+                bounded[at] = keyed;
+            }
+        }
+    }
+
     /// <summary>What <see cref="ColumnsOf"/> found for one file's dtype, at its place in its arena.</summary>
     private sealed record Mapped(int Index, int Generation, string Key, ObjectColumns? Columns);
 
@@ -174,7 +290,7 @@ internal sealed class DatasetSchema
     /// A column is kept under its name or a new one, and its type may widen a number within its kind
     /// or become nullable, which every value it holds survives. A new column is nullable, since the
     /// objects written before it hold no value for it, and takes a name no column ever had. A column
-    /// of the clustering key orders every object and keeps its name and its type.
+    /// the layout reads partitions and orders every object, and keeps its name and its type.
     /// </remarks>
     /// <exception cref="ArgumentException">The next schema is not one this one's objects read as, with the reason.</exception>
     internal IReadOnlyList<RetiredColumn> Evolve(DType next, IReadOnlyDictionary<string, string>? renamed)
@@ -252,12 +368,12 @@ internal sealed class DatasetSchema
 
             kept.Add(old);
             DType was = DType.GetField(DType.IndexOfField(old));
-            if (Keyed(old))
+            if (IsKeyed(old))
             {
                 if (!string.Equals(old, name, StringComparison.Ordinal) || was != type)
                 {
                     throw new ArgumentException(
-                        $"'{old}' is a column of the clustering key, which orders every object: it keeps its name and its type.",
+                        $"'{old}' is read by the dataset's layout, which partitions and orders every object: it keeps its name and its type.",
                         nameof(next));
                 }
             }
@@ -279,9 +395,9 @@ internal sealed class DatasetSchema
                 continue;
             }
 
-            if (Keyed(name))
+            if (IsKeyed(name))
             {
-                throw new ArgumentException($"'{name}' is a column of the clustering key, which orders every object: it cannot be dropped.", nameof(next));
+                throw new ArgumentException($"'{name}' is read by the dataset's layout, which partitions and orders every object: it cannot be dropped.", nameof(next));
             }
 
             Retire(retired, name, string.Empty);
@@ -295,27 +411,8 @@ internal sealed class DatasetSchema
         return retired;
     }
 
-    /// <summary>Whether a top-level column carries a column of the clustering key.</summary>
-    internal bool IsKeyed(string column) => Keyed(column);
-
-    private bool Keyed(string column)
-    {
-        if (Key is not { } key)
-        {
-            return false;
-        }
-
-        foreach (string path in key.Paths)
-        {
-            int dot = path.IndexOf('.', StringComparison.Ordinal);
-            if (string.Equals(dot < 0 ? path : path[..dot], column, StringComparison.Ordinal))
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
+    /// <summary>Whether a top-level column is the source of the layout's partition or of a component of its key.</summary>
+    internal bool IsKeyed(string column) => Layout?.Reads(column) == true;
 
     /// <summary>Retires a name, the column's earlier names following it to its new name or out of the schema.</summary>
     private static void Retire(List<RetiredColumn> retired, string name, string current)

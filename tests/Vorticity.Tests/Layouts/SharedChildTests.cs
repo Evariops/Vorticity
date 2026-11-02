@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Immutable;
 using System.IO;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
@@ -69,10 +70,58 @@ public sealed class SharedChildTests
         }
     }
 
+    /// <summary>
+    /// A hundred spans of the chunk read together, each its own batch, as a lookup reads the rows its units hold: the
+    /// dictionary's values decoded once for them all and lent to each, where each span decoded them again and kept them, a
+    /// user's rows over a week of S2's logs past 16 GB.
+    /// </summary>
+    [Fact]
+    public async Task ADictionarysValuesAreDecodedOnceForTheSpansOfARead()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        string path = await WriteAsync(contents: true);
+        try
+        {
+            byte[] bytes = await System.IO.File.ReadAllBytesAsync(path, ct);
+            Vorticity.Types.DType schema;
+            await using (VortexFile file = await VortexFile.OpenAsync(path, ct))
+            {
+                schema = file.DType;
+            }
+
+            global::Vorticity.Indexes.SpanReader reader = (await global::Vorticity.Indexes.SpanReader.OpenAsync(new global::Vorticity.Tests.File.TestSegmentSource(bytes), bytes.Length, schema, null, ct))!;
+            RowRange[] spans = [.. Enumerable.Range(0, 100).Select(static s => RowRange.FromLength(s * 2_999L, 100))];
+            long before = ArrayDecodeContext.SharedChildrenDecoded;
+            RecordBatch[] batches = await reader.ReadSpansAsync(spans, null, ct);
+            try
+            {
+                for (int s = 0; s < spans.Length; s++)
+                {
+                    Tagged[] rows = new Tagged[batches[s].RowCount];
+                    Tagged.ReadRows(batches[s].As<Tagged>(), rows);
+                    Assert.Equal(Enumerable.Range((int)spans[s].Start, 100).Select(Row), rows);
+                }
+            }
+            finally
+            {
+                foreach (RecordBatch batch in batches)
+                {
+                    batch.Dispose();
+                }
+            }
+
+            Assert.Equal(1, ArrayDecodeContext.SharedChildrenDecoded - before);
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
     private static Tagged Row(int row) =>
         new Tagged(row, "tag-" + (row * 7_919 % Tags).ToString(System.Globalization.CultureInfo.InvariantCulture));
 
-    private static async Task<string> WriteAsync()
+    private static async Task<string> WriteAsync(bool contents = false)
     {
         string directory = Path.Combine(AppContext.BaseDirectory, "windows");
         Directory.CreateDirectory(directory);
@@ -82,6 +131,7 @@ public sealed class SharedChildTests
         VortexWriteOptions options = new VortexWriteOptions
         {
             DataBlockTargetBytes = 64 << 20,
+            CarriesContents = contents,
             Hints = ImmutableDictionary<string, EncodingHint>.Empty.Add("Tag", EncodingHint.Dictionary),
         };
         await using VortexFileWriter writer = VortexSession.Default.CreateWriter<Tagged>(path, options);

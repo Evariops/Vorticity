@@ -35,15 +35,18 @@ public sealed partial class RollupBudgetTests : IClassFixture<RollupBudgetTests.
     private const int Routes = 2_000;
 
     /// <summary>
-    /// The ceilings of each question: requests and bytes, measured on 2026-10-25. Every route: the totals of 3 rollups
-    /// whole and the counts of the last day's object, which the open run leaves out. One route by the day: the counts by
-    /// bucket of 3 rollups, each by its header and a chunk, and that object's counts. Over days 3 to 26: 2 rollups so.
+    /// The ceilings of each question: requests and bytes, measured on 2026-10-27, the tree's keys led by the partition, which
+    /// moved the runs' ends. Every route: the totals of 2 rollups whole, of ranks 4 and 3, and the counts of the last 3
+    /// days' objects, which the open run leaves out, besides the two listings a fresh handle makes of the question's learned
+    /// partials and of their families. One route by the day: the counts by bucket of the 2 rollups, each by its header and a
+    /// chunk, those 3 objects' counts and the two listings. Over days 3 to 26: 2 rollups so, and nothing listed, no object
+    /// being weighed.
     /// </summary>
     private static readonly Dictionary<string, (long Requests, long Bytes)> Ceilings = new(StringComparer.Ordinal)
     {
-        ["count by route"] = (4, 261_698),
-        ["count by day, one route"] = (7, 115_755),
-        ["count by day, one route, days 3 to 26"] = (4, 35_025),
+        ["count by route"] = (7, 324_254),
+        ["count by day, one route"] = (9, 228_086),
+        ["count by day, one route, days 3 to 26"] = (4, 35_054),
     };
 
     private readonly Fixture _fixture;
@@ -62,18 +65,18 @@ public sealed partial class RollupBudgetTests : IClassFixture<RollupBudgetTests.
         await using CountingObjectStore store = new CountingObjectStore(_fixture.Store);
         await using VortexDataset dataset = await VortexDataset.OpenAsync(store, Options(), Ct);
         List<string> rows = await AskAsync(dataset, question, synopses: false);
-        ScanPlan plan = await Ask(dataset, question, synopses: true).ExplainAsync(Ct);
+        ScanPlan plan = await Ask(dataset, question, synopses: true).ExplainAsync(analyze: true, Ct);
         await using CountingObjectStore fresh = new CountingObjectStore(_fixture.Store);
         await using VortexDataset asked = await VortexDataset.OpenAsync(fresh, Options(), Ct);
         fresh.Reset();
         List<string> states = await AskAsync(asked, question, synopses: true);
         (long requests, long bytes) = (fresh.Requests, fresh.BytesRead);
 
-        int rollups = plan.States.Count(step => step.Read == "rollup");
-        int byBucket = plan.States.Count(step => step.Read == "rollup" && step.Detail.Contains("by bucket", StringComparison.Ordinal));
-        int inPart = plan.States.Count(step => step.Read == "rollup" && step.Detail.StartsWith("the header", StringComparison.Ordinal));
+        int rollups = plan.Units.Count(step => step.Alternative == "rollup");
+        int byBucket = plan.Units.Count(step => step.Alternative == "rollup" && step.Detail.Contains("by bucket", StringComparison.Ordinal));
+        int inPart = plan.Units.Count(step => step.Alternative == "rollup" && step.Detail.StartsWith("the header", StringComparison.Ordinal));
         Console.WriteLine(
-            $"ROLLUP BUDGET {question}: {rollups} rollups, {byBucket} by bucket, {inPart} in part, {plan.States.Length - rollups} objects' counts; " +
+            $"ROLLUP BUDGET {question}: {rollups} rollups, {byBucket} by bucket, {inPart} in part, {plan.Units.Length - rollups} objects' counts; " +
             $"{requests} requests and {bytes} bytes (ceilings {Shown(requestsCeiling)}, {Shown(bytesCeiling)}), {states.Count} rows answered");
         Assert.NotEmpty(rows);
         Assert.Equal(rows, states);
@@ -134,8 +137,7 @@ public sealed partial class RollupBudgetTests : IClassFixture<RollupBudgetTests.
         {
             await using VortexDataset dataset = await VortexDataset.CreateAsync(Store, Hit.Schema, Options() with
             {
-                ClusteringKey = [nameof(Hit.At)],
-                Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Day) },
+                Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(Hit.At)).Truncate(CalendarUnit.Day), SortKey = [LayoutValue.Column(nameof(Hit.At))], Organization = LayoutOrganization.Leveled },
             });
             Random random = new Random(37);
             int part = RowsPerDay / 2;

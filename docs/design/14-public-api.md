@@ -63,10 +63,11 @@ implement its interface by hand without referencing the generator.
 | owned | why |
 |---|---|
 | the memory pool, 64-byte aligned by default (`AlignedMemoryPool`) | every batch, segment and builder buffer comes from it, and disposing the session returns everything |
-| the segment cache | one budget for every file of the session, for sources that do I/O |
+| the segment cache | one budget for every file of the session, for sources that do I/O; by default the process's, which every session given none shares, but a session that holds keys, whose plaintext stays its own |
 | the bound on reads in flight, `MaxConcurrentReads` | an object store sees at most that many requests from the process |
 | the degree of parallelism, `MaxDegreeOfParallelism`, 1 by default | where every scan and writer of the session starts (see [parallelism](09-contracts.md#2-parallelism)) |
 | the query memory and scratch budgets, `MemoryBudget` and `ScratchBudget` | what the session's group bys may hold in memory and spill to disk, shared with every session given the same budget |
+| the jobs' memory budget, `JobMemoryBudget` | what the session's background work holds, its datasets' merges and consolidations and the stores of their appends, shared with every session given the same budget; half the process's limit by default, the queries having the rest |
 | the index cache, `IndexCacheBytes` | how much of the decoded index runs each open file keeps |
 | the files kept mapped once closed, `MappedFileCacheCount` | opening a file again takes over its mapping and every page already mapped in it |
 | whether a path is mapped at all, `MapFiles`, true by default | a service that reads files others may truncate reads them positionally, so a truncated file fails a read rather than the process |
@@ -412,7 +413,7 @@ wherever it appears. Rule 6 decides the `Async` suffix, and these rules decide t
    The exceptions are the extent of a file or a range (`Length`, `Offset`), a limit the Vortex format
    names (`MaxPostscriptSize`), and a member that comes from the BCL (`MaxBufferSize`).
 6. A switch in an options type is a verb (`UseIndexes`, `UseStatistics`, `WriteStatistics`,
-   `MapFiles`), and a fact is an adjective or starts with `Is` or `Has` (`Durable`, `IsClustered`,
+   `MapFiles`), and a fact is an adjective or starts with `Is` or `Has` (`Durable`, `IsKeyed`,
    `HasRows`).
 7. A unit that counts a quantity is plural, as in `TimeSpan.FromMilliseconds`:
    `TimeUnit.Milliseconds`, `TimeUnit.Days`. A period of the calendar is singular, since
@@ -435,4 +436,6 @@ The members these rules renamed, for a caller moving to the current names:
 | `MaxDecompressedSize`, `MaxBatchDecompressedSize` and `InitialReadSize` on `VortexOpenOptions`, `VortexLimits.DefaultMaxDecompressedSize` | `MaxDecompressedBytes`, `MaxBatchDecompressedBytes`, `InitialReadBytes`, `DefaultMaxDecompressedBytes` |
 | `SegmentCache.Capacity`, `SegmentCache.Size` | `CapacityBytes`, `HeldBytes` |
 | `ScanOptions.Pruning`, `VortexWriteOptions.Statistics` | `UseStatistics`, `WriteStatistics` |
-| `CompactionJob.Objects`, `GroupKeyPlan.Values`, `VortexDataset.ClusteringKeyPaths` | `ObjectKeys`, `ValueRange`, `ClusteringKey` |
+| `CompactionJob.Objects`, `GroupKeyPlan.Values` | `ObjectKeys`, `ValueRange` |
+| `DatasetOptions.ClusteringKey`, `DatasetOptions.Clustering` (`ClusteringOptions`, `ClusteringValue`), `VortexDataset.ClusteringKeyPaths` | `DatasetOptions.Layout` (`DatasetLayout`: `SortKey`, `Partition`, `IndexedPrefix`, `LayoutValue`), `VortexDataset.Layout` |
+| `CompactionPlan.IsClustered` | `CompactionPlan.IsKeyed` |

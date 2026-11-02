@@ -99,6 +99,9 @@ internal static class DatasetVacuum
     public static TimeSpan WindowOf(RetentionSettings retention) =>
         retention.Seconds > 0 ? TimeSpan.FromSeconds(retention.Seconds) : DefaultWindow;
 
+    /// <summary>The keys a vacuum deletes in one request at most while it sweeps what an earlier version left, which may be many.</summary>
+    private const int DeleteBatch = 1_000;
+
     /// <summary>Marks from every version inside the window, then sweeps what is unmarked and old.</summary>
     /// <param name="store">The dataset's store.</param>
     /// <param name="options">The clock and whether to delete; null for the defaults.</param>
@@ -168,6 +171,7 @@ internal static class DatasetVacuum
         // Each distinct page is walked once, however many retained versions share it.
         HashSet<ulong> markedCommits = [.. retained];
         HashSet<string> markedData = new HashSet<string>(StringComparer.Ordinal);
+        HashSet<UInt128> markedUids = [];
         HashSet<PageReference> seen = [];
         HashSet<PageReference> fragmentsSeen = [];
         Dictionary<ulong, long> live = [];
@@ -184,10 +188,15 @@ internal static class DatasetVacuum
                 await MarkAsync(tree.Root, tree.Depth).ConfigureAwait(false);
             }
 
-            // The tree of rollups, whose leaves name the rollups' objects.
+            // The tree of rollups, whose leaves name the rollups' objects; the tree of partition indexes, theirs.
             if (!trees.Rollups.IsEmpty)
             {
-                await MarkAsync(trees.Rollups.Root, trees.Rollups.Depth, rollups: true).ConfigureAwait(false);
+                await MarkAsync(trees.Rollups.Root, trees.Rollups.Depth, Leaves.Rollups).ConfigureAwait(false);
+            }
+
+            if (!trees.PartitionIndexes.IsEmpty)
+            {
+                await MarkAsync(trees.PartitionIndexes.Root, trees.PartitionIndexes.Depth, Leaves.PartitionIndexes).ConfigureAwait(false);
             }
         }
 
@@ -215,6 +224,19 @@ internal static class DatasetVacuum
                 {
                     Sweep(listed.Key, found);
                 }
+            }
+        }
+
+        await DeleteAsync().ConfigureAwait(false);
+
+        // The partials of question families an earlier version learned and kept under learned/, which nothing reads now,
+        // streamed, for there may be one an object and a family: each deleted whatever its age, unless under the store's lock.
+        await foreach (ObjectListing listed in store.ListAsync(CommitKey.LearnedPrefix, null, cancellationToken).ConfigureAwait(false))
+        {
+            if (await HeadToSweepAsync(listed, evicting: true).ConfigureAwait(false) is { } found)
+            {
+                Evict(listed.Key, found);
+                await DeleteFullAsync().ConfigureAwait(false);
             }
         }
 
@@ -252,7 +274,7 @@ internal static class DatasetVacuum
             Sparse = sparse,
         };
 
-        async ValueTask MarkAsync(PageReference reference, int depth, bool rollups = false)
+        async ValueTask MarkAsync(PageReference reference, int depth, Leaves leaves = Leaves.Objects)
         {
             if (!reference.Exists || !seen.Add(reference))
             {
@@ -262,11 +284,21 @@ internal static class DatasetVacuum
             markedCommits.Add(reference.Version);
             live[reference.Version] = live.GetValueOrDefault(reference.Version) + reference.Length;
             ReadOnlyMemory<byte> page = await pages.ReadPageAsync(reference, cancellationToken).ConfigureAwait(false);
-            if (depth == 1 && rollups)
+            if (depth == 1 && leaves == Leaves.Rollups)
             {
                 foreach (TreeEntry leaf in TreePage.ReadLeaf(page))
                 {
                     markedData.Add(RollupEntry.FromBytes(leaf.Key.Span, leaf.Value.Span).Key);
+                }
+
+                return;
+            }
+
+            if (depth == 1 && leaves == Leaves.PartitionIndexes)
+            {
+                foreach (TreeEntry leaf in TreePage.ReadLeaf(page))
+                {
+                    markedData.Add(PartitionIndexEntry.FromBytes(leaf.Key.Span, leaf.Value.Span).ObjectKey);
                 }
 
                 return;
@@ -278,6 +310,7 @@ internal static class DatasetVacuum
                 {
                     ObjectEntry entry = ObjectEntry.FromBytes(leaf.Value);
                     markedData.Add(entry.Key);
+                    markedUids.Add(entry.Uid);
                     foreach (PageReference fragment in entry.Fragments)
                     {
                         markedCommits.Add(fragment.Version);
@@ -313,16 +346,16 @@ internal static class DatasetVacuum
 
             foreach (InternalEntry child in TreePage.ReadInternal(page))
             {
-                await MarkAsync(child.Child, depth - 1, rollups).ConfigureAwait(false);
+                await MarkAsync(child.Child, depth - 1, leaves).ConfigureAwait(false);
             }
         }
 
         // The head an unmarked object is judged by: the listing's, unless the store keeps locks the
-        // listing does not report and the object is old enough to go, when its head says the lock.
-        // Null when the object went meanwhile.
-        async ValueTask<ObjectHead?> HeadToSweepAsync(ObjectListing listed)
+        // listing does not report and the object is old enough to go, or is evicted whatever its age,
+        // when its head says the lock. Null when the object went meanwhile.
+        async ValueTask<ObjectHead?> HeadToSweepAsync(ObjectListing listed, bool evicting = false)
         {
-            if (listed.LockReported || !lockedStore || now - listed.Head.LastModified < window)
+            if (listed.LockReported || !lockedStore || (!evicting && now - listed.Head.LastModified < window))
             {
                 return listed.Head;
             }
@@ -338,7 +371,12 @@ internal static class DatasetVacuum
                 return;
             }
 
-            // Past the window and still under the store's lock: the next vacuum after the date takes it.
+            Evict(key, found);
+        }
+
+        // Deleted whatever its age, unless still under the store's lock: the next vacuum after the date takes it.
+        void Evict(string key, ObjectHead found)
+        {
             if (found.IsLockedAt(now))
             {
                 locked.Add(key);
@@ -365,5 +403,22 @@ internal static class DatasetVacuum
 
             batch = [];
         }
+
+        // The batch deleted once it holds a request's worth, while the partials an earlier version learned are swept.
+        async ValueTask DeleteFullAsync()
+        {
+            if (batch.Count >= DeleteBatch)
+            {
+                await DeleteAsync().ConfigureAwait(false);
+            }
+        }
+    }
+
+    /// <summary>What the leaves of a tree the vacuum marks name: data objects, rollups, or the indexes of partitions.</summary>
+    private enum Leaves
+    {
+        Objects,
+        Rollups,
+        PartitionIndexes,
     }
 }

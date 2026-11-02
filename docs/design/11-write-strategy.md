@@ -136,8 +136,10 @@ Per column chunk, in order:
    below a quarter as many runs as rows), bit-packing in the raw, zigzag or frame-of-reference domain
    at the cheapest width with its patches, a timestamp's instants split into days, seconds and
    subseconds (`vortex.datetimeparts`), priced by each part's packed width and taken when it comes a
-   tenth under the best so far, and the dictionary, priced by its own layer at the codes' width plus
-   its values child. A 256-row sample bounds the timestamp split from below, so instants at full
+   tenth under the best so far, and the dictionary, priced by its own layer, its codes bit-packed at the
+   width that indexes its values as their own cascade writes them at worst, plus its values child: eight
+   status codes, five in a hundred past the width the others pack at, take 3 bits a row as a dictionary
+   where the bit-packing and its patches take 6.7, a choice its codes priced a byte a row lost. A 256-row sample bounds the timestamp split from below, so instants at full
    resolution are refused without the pass that splits them.
 4. Trials only run when no exact verdict won, and each carries its encoded result so a winner is
    never encoded twice. For floats, ALP is tried, then ALP-RD against a zstd frame. For text, a zstd
@@ -380,9 +382,10 @@ file is valid and reads back value for value, but its size changes. Rewriting an
 column at forced batch counts costs 65 980 bytes in 2 chunks, 92 212 in 3, 146 076 in 5 and 169 860
 in 9, about 26 kB per extra chunk, because each chunk builds and writes its own dictionary of the same
 distinct values. The reference shares one values child across a column's chunks through the
-`vortex.dict` layout, which this writer does not emit. `BatchingSizeTests` pins those numbers as a
-ratchet on a cost known to be bad. A caller who wants the smallest file writes the largest batches it
-can, or gives the column chunks of its own.
+`vortex.dict` layout, which this writer emits only for a column a dataset's writer declares an
+[object dictionary](23-query-architecture.md#54-ordered-object-dictionaries) of. `BatchingSizeTests`
+pins those numbers as a ratchet on a cost known to be bad. A caller who wants the smallest file writes
+the largest batches it can, or gives the column chunks of its own.
 
 ## 8. Choosing encodings ahead: the advisor
 
@@ -423,65 +426,84 @@ outside CI against the twenty column shapes of `--tradeoffs`, it names the choic
 measured as best on every one. Taking the advice by default would change what a write produces and
 its determinism, so it is not done.
 
-## 9. Key slices, and shredded variants
+## 9. A dataset's objects
 
-A job hands the writer its rows in key order, and cuts an object that aims at a mebibyte or more into
-slices of the key: past `SliceTargetRows` rows, 3 × 10⁶ by default, a minute of the design's example,
-the next change of key starts a slice, so that a key's rows lie in one slice ([clustering by a
-value](15-compaction.md#clustering-by-a-value-and-a-size)). The slice table records each slice's rows
-and first key, and the last key of the last ([the slice
-table](10-indexes.md#44-vorticityslicesv1-the-slices-of-a-file)). An earlier release's datasets of periods
-cut their objects into time slices instead, a calendar unit chosen from the rows' pace, which a reader
-still walks.
+A dataset's writer hands the file writer its rows in the order of the dataset's sort key: an append
+sorts each partition's rows in memory first, and a job merges its inputs in key order
+([the layout](23-query-architecture.md#44-sorted-objects-from-the-first-write)). The file writer cuts no
+object by its key: its granules are its blocks, 8 192 rows by default, and the sparse index the object
+keeps names the first key of each ([the sparse
+index](10-indexes.md#44-vorticitykeyindexv1-the-first-key-of-each-granule)).
 
 A dataset's object chunks each column on its own. A column gathers its rows across the object's chunks
 until they would encode to about 1 MiB (`DatasetOptions.ChunkBytes`, internal) at the rate its last
 chunk compressed to, the first guessed at a quarter, and holds at most sixteen times that in canonical
 bytes, so that a question reading a few columns fetches segments of about a megabyte rather than every
-column's bytes between them. The chunks of every column end together at each slice's end, the writer
-flushed there, and at least every 2²² rows (`GroupRows`): where a lane's range of the object starts, so
-that no chunk is read by two lanes. A file written alone keeps its columns chunked together, which the
-decision of 2026-10-11 left as the default for a file read locally.
+column's bytes between them, and a question reading a few granules of a column the ranges of those
+granules in its chunks ([reading a granule, not a
+chunk](23-query-architecture.md#53-reading-a-granule-not-a-chunk)). The chunks of every column end
+together at least every 2²² rows (`GroupRows`): where a lane's range of the object starts, so that no
+chunk is read by two lanes. A file written alone keeps its columns chunked together, which the decision
+of 2026-10-11 left as the default for a file read locally.
 
 Measured on the client's spans, two hours at 500 rows a second over a store 5 ms away, at 16 lanes, cold
 (`vortex-queries --micro paths --qp`): an hour's object went from about 2 000 segments to 102, 555 KB
 each on average; QP-1 read 33.9 MB in 75 requests in 123 ms, against 177.7 MB in 232 in 280 ms; QP-5
-504 MB in 545 requests in 470 ms, against 1 061 MB in 2 688 in 1 291 ms. A needle takes a segment a
-column now, about a megabyte, where it took the small chunk of every column in one: QP-4 read 15.5 MB in
-13 requests in 39 ms, against 0.8 MB in 7 in 18 ms. A load of four hourly periods at 50 000 rows a
-second, in the load of periods an earlier release had, took 2.07 s against 1.75 (+19 %), its process
-peaking at 8.0 GB against 6.1, for 4 % fewer bytes.
+504 MB in 545 requests in 470 ms, against 1 061 MB in 2 688 in 1 291 ms. A needle took a segment a
+column then, about a megabyte, where it took the small chunk of every column in one; it now reads the
+granules that hold its row, through the marks of their chunks.
 
-Chunks of a column do not end at every slice when a column gathers no further: a slice's end closes
-the group, not a chunk of the object's own. Ending the object's chunks around each slice's first row
-was tried before columns gathered: on six hours of requests at twenty a second, a read of whole
-objects took five times the requests, a request a chunk, and the rows a cut hour reads took 2.4 times
-the bytes, each small chunk carrying its own dictionaries and encodings.
+A read of a few granules slices a dictionary's codes but reads its values whole, as any row may name
+any of them, where FSST's bytes lie between its granules' marks. So an object, which its readers read
+granule by granule, writes a text chunk as FSST rather than a dictionary when the dictionary's values
+weigh more than one granule's share of it, so that a read of one granule reads more than twice its
+share, and FSST writes the chunk in no more than the dictionary does and one granule's share of it,
+an eighth at most. The values are priced as FSST would write them, at its ratio
+to the plain column. A file written alone keeps the dictionary. A trace identifier of 32 hexadecimal
+digits, one span in seven sharing its trace with a span a few rows before, read 2.07 MB of an object of
+3.40 MB for one trace's spans as a dictionary, and 494 KB of 3.63 MB as FSST.
 
-A job writes its rows into the object as they come, and ends a slice by flushing the writer at the
-first change of key past the slice's rows. A job of a schema with a variant column reads its rows twice,
-once to count the paths of each clustering value's rows and choose what its variant columns shred, once
-to write them; another job reads them once.
+## 10. Shredded variants
 
-A variant column is written whole by an append, and shredded by the job that rewrites it, so that
-ingestion pays nothing for shredding. Until that job runs, a query node that reads the variants of an
-object of level 0 shreds a copy of them in memory, once per object and under the session's budget, and
-keeps it until the object leaves level 0, so every question after the first reads typed columns there
-too. The job's first pass counts each top-level key, its class and its bytes, for each clustering value
-(`PathCensus`). From those counts a cost model chooses the keys the object shreds: a key earns a typed
-column when what its occurrences cost in the residual, at the measured price of each class, outweighs
-the column's overhead of about 200 bytes a chunk. The keys chosen are written in the reference's form,
-the `vortex.variant` encoding with a typed tree, integers of every width in one 64-bit column, each key
-encoded the same way in every chunk, and a chunk shreds only the keys its rows hold. The validity of a
-shredded field goes through the compressor as any column does, as runs where it has few of them, as a
-bitmap otherwise. A path map in each chunk's metadata (`vorticity.variant.paths.v1`) says which keys it
-holds and where. Counting and writing cost about 80 ns an attribute: 181 ns a row to count, and 310 ns
-a row more to write six to eight attributes shredded.
+A job of a schema with a variant column reads its rows twice, once to count the paths of each
+partition's rows and choose what its variant columns shred, once to write them; another job reads them
+once. A variant column is written whole by an append, and shredded by the job that rewrites it, so that
+ingestion pays nothing for shredding, unless the dataset asks its appends to shred the paths it declares
+(`DatasetOptions.ShredOnAppend`). Until that job runs, a query node that reads the variants of an object
+of level 0 shreds a copy of them in memory, once per object and under the session's budget, and keeps it
+until the object leaves level 0, so every question after the first reads typed columns there too.
 
-A body is a variant too: a line of text keeps its text, which the trigram indexes search, and an object
-is shredded as attributes are, and shown again from its columns and residual, keys in order.
+The job's first pass counts each top-level key, its class and its bytes (`PathCensus`). Every path whose
+dominant class the object holds 2 048 values of or more has its typed column, a stream of its own, dense,
+or sparse where the compressor finds nine nulls in ten (`vortex.sparse`); a rarer path stays in the
+residual, where the path directory says which granules hold it. When more paths qualify than a chunk's
+encoding tree may hold, those held most are kept. No saving in bytes decides: a sparse stream of `n`
+values takes about `6 n` bytes, its positions and its values, where the residual took about `3.6 n` for
+integers, and a question on the path then reads its values alone, where it parsed the residual of every
+row that holds it. A shredded path adds 154 to 217 bytes to each chunk and 4 to 10 tables to the chunk's
+encoding tree (`vortex-queries --micro shredcost`). A path the dataset declares shredded
+(`DatasetOptions.ShreddedPaths`) is a column of every object whatever share of its rows holds it.
 
-## 10. Deliberately not done
+The keys chosen are written in the reference's form, the `vortex.variant` encoding with a typed tree,
+integers of every width in one 64-bit column, each key encoded the same way in every chunk, and a chunk
+shreds only the keys its rows hold. The validity of a shredded field goes through the compressor as any
+column does, as runs where it has few of them, as a bitmap otherwise. A path map in each chunk's metadata
+(`vorticity.variant.paths.v1`) says which keys it holds and where. On a million rows of six to eight
+attributes, counting and choosing cost 256 ns a row, and the shredded write 310 ns a row more than the
+whole one (`vortex-queries --micro shredwrite`).
+
+A chunk's write holds its values and one typed column. The shredder takes each key's values at the rows
+that hold it, and nothing at the others, and the blob writer lays a typed column out over the chunk's
+rows only when it comes to it, in an arena emptied before the next. Laid out all at once, the columns
+of a chunk of a million rows of log attributes cost a slot a row a key, sixteen bytes of view for a
+text: a consolidation of 72 million such rows held 9.9 GB at its writer's peak, and allocated 1 145
+bytes a row; written a column at a time, 3.1 GB and 56 bytes, its write 8 % shorter
+(`vortex-queries --micro consolidation`).
+
+A body is a variant too: a line of text keeps its text, which the trigram and token indexes search, and
+an object is shredded as attributes are, and shown again from its columns and residual, keys in order.
+
+## 11. Deliberately not done
 
 | approach | why not |
 |---|---|
@@ -492,7 +514,7 @@ is shredded as attributes are, and shown again from its columns and residual, ke
 | rewriting without decoding, passing encoded arrays through | a separate feature, worth an order of magnitude on rewrites and compactions and nothing on first writes |
 | buffering a column for global decisions, or a global sorted index | it breaks streaming and bounds memory by the file. Sorted runs per chunk, merged, give the same answers (see [sorted runs](10-indexes.md#52-vorticitysortedrunsv1-value-to-rows-exact)) |
 | one FSST symbol table shared across chunks | measured at 4.3 % more bytes |
-| the `vortex.dict` layout, one values child per column | what the [determinism limit](#7-determinism-and-its-limit) would need. It changes the bytes of every dictionary column, and has to be weighed on the size ratchet and the cross-check together |
+| the `vortex.dict` layout, one values child per column, for any file | what the [determinism limit](#7-determinism-and-its-limit) would need. It changes the bytes of every dictionary column, and has to be weighed on the size ratchet and the cross-check together; a dataset's writers emit it for the columns whose values they know ahead |
 
 The reference writer this is measured against is `vortex-file`'s strategy and `vortex-btrblocks`'
 schemes at 0.86.1. The kernels follow FastLanes (Afroozeh and Boncz, VLDB 2023) and ALP (Afroozeh,

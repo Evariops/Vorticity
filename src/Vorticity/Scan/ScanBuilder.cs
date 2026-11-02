@@ -89,9 +89,6 @@ internal sealed class ScanBuilder
         return this;
     }
 
-    /// <summary>Whether the decoders may deliver dictionary and run-end columns encoded.</summary>
-    internal bool KeepEncodings => _keepEncodings;
-
     /// <summary>Lets the decoders deliver dictionary and run-end columns in their encoded form.</summary>
     /// <param name="keep">Whether they may.</param>
     /// <param name="sinkDecodes">Whether the consumer reads the encoded forms itself, so that only the blocks it decodes count as decoded.</param>
@@ -126,6 +123,57 @@ internal sealed class ScanBuilder
     }
 
     private IReadOnlyDictionary<string, string[]>? _variantKeys;
+
+    /// <summary>
+    /// Says what the question this scan belongs to read already, which its pruning reads the variant directories through,
+    /// and keeps what it reads for the question's other scans (<see cref="Indexes.QuestionReads"/>).
+    /// </summary>
+    internal ScanBuilder WithQuestionReads(Indexes.QuestionReads? question)
+    {
+        _question = question;
+        return this;
+    }
+
+    private Indexes.QuestionReads? _question;
+
+    /// <summary>
+    /// Says that the top-level columns of <paramref name="keys"/>, by name, are read only through those functions of them:
+    /// a split whose zones send each function to one value takes the zones' values in place of the column, which it then
+    /// does not read (<see cref="ZoneKeyReads"/>), for a consumer that keeps the encodings and a scan in the file's order.
+    /// </summary>
+    internal ScanBuilder WithZoneKeys(ZoneKeyReads.Request? keys)
+    {
+        _zoneKeys = keys;
+        return this;
+    }
+
+    private ZoneKeyReads.Request? _zoneKeys;
+
+    /// <summary>
+    /// Reads a part of a chunk by its granules alone (spec C, 2), where <paramref name="geometry"/> knows the chunk's tree
+    /// and marks: what a dataset's object, whose table of contents names them, gives a read of a few of its granules. Null
+    /// reads every chunk whole.
+    /// </summary>
+    internal ScanBuilder WithGranules(Indexes.GranuleGeometry? geometry)
+    {
+        _granules = geometry;
+        return this;
+    }
+
+    private Indexes.GranuleGeometry? _granules;
+
+    /// <summary>
+    /// Reads only the blocks <paramref name="granted"/> keeps, those where a row the filter selects may lie by structures the
+    /// caller read, a dataset's object's index of where its values lie (spec D, 4.3): the scan's pruning starts from them
+    /// and adds its own. Null for every block.
+    /// </summary>
+    internal ScanBuilder WithGranuleMask(BlockMask? granted)
+    {
+        _granted = granted;
+        return this;
+    }
+
+    private BlockMask? _granted;
 
     internal ScanBuilder(VortexFile file)
     {
@@ -567,20 +615,92 @@ internal sealed class ScanBuilder
     private IAsyncEnumerable<RecordBatch> BatchesAsync(IRowExclusion? excluded)
     {
         IAsyncEnumerable<RecordBatch> scan = WholeAsync(excluded, out BatchAsyncEnumerable batches);
-        return _variantKeys is { } keys ? new KeyedBatches(scan, batches, _file, keys) : scan;
+        batches.Granules = _granules;
+        IReadOnlyDictionary<string, string[]>? filtered = FilterOnlyKeys();
+        // The zones of the columns read through functions, which the file keeps from the first scan that loaded them.
+        ZoneKeyReads.Request? zoned = _keepEncodings && _orderPath is null ? _zoneKeys : null;
+        if (zoned is not null && ZoneKeyReads.TryHeld(_file, zoned, _filter, _granules is not null, out ZoneKeyReads? held))
+        {
+            batches.ZoneKeys = held;
+            zoned = null;
+        }
+
+        return _variantKeys is not null || filtered is not null || zoned is not null
+            ? new KeyedBatches(scan, batches, _file, _variantKeys, filtered, zoned, _granules is not null, _filter, _metrics)
+            : scan;
     }
 
     /// <summary>
-    /// A scan whose variant columns are read through some shredded keys alone: the file's path maps
-    /// are read once, before its first batch, and the lanes told which chunks they read by keys.
+    /// The keys of the variant columns the filter alone reads through top-level keys, those the projection reads whole: what
+    /// the filter's own pass reads them through (<see cref="Indexes.VariantKeyReads"/>); null for none, and for a file of no
+    /// variant column or a filter whose paths all lie in columns the scan reads by keys, with nothing made.
+    /// </summary>
+    private IReadOnlyDictionary<string, string[]>? FilterOnlyKeys()
+    {
+        VariantPathSeeker seeker = new VariantPathSeeker(_variantKeys);
+        if (_filter is null || !HoldsVariant(_file.DType) || VisitFields(_filter, ref seeker) || Indexes.VariantKeyReads.Of([], _filter) is not { } asked)
+        {
+            return null;
+        }
+
+        Dictionary<string, string[]>? filtered = null;
+        foreach ((string column, string[] keys) in asked)
+        {
+            if (_variantKeys?.ContainsKey(column) != true)
+            {
+                (filtered ??= new Dictionary<string, string[]>(StringComparer.Ordinal))[column] = keys;
+            }
+        }
+
+        return filtered;
+
+        static bool HoldsVariant(DType schema)
+        {
+            for (int f = 0; schema.Kind == DTypeKind.Struct && f < schema.FieldCount; f++)
+            {
+                if (schema.GetField(f).Kind == DTypeKind.Variant)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// A walk of a filter's columns that stops at the first path into a variant the scan does not read by keys already
+    /// (<paramref name="keyed"/>): none met, it walks them all.
+    /// </summary>
+    private readonly struct VariantPathSeeker(IReadOnlyDictionary<string, string[]>? keyed) : IFieldVisitor
+    {
+        public bool Visit(FieldExpr field) => field is not Compute.VariantFieldExpr path || keyed?.ContainsKey(path.Column.Path) == true;
+    }
+
+    /// <summary>
+    /// A scan whose variant columns are read through some shredded keys alone, by the scan or by its filter's own pass, or
+    /// whose columns read through functions alone are taken from their zones where they give a split's values: the file's
+    /// path maps and those zones are read once, before its first batch, and the lanes told which chunks they read by keys
+    /// and which columns their splits take from the zones.
     /// </summary>
     private sealed class KeyedBatches(
-        IAsyncEnumerable<RecordBatch> scan, BatchAsyncEnumerable batches, VortexFile file, IReadOnlyDictionary<string, string[]> keys)
+        IAsyncEnumerable<RecordBatch> scan, BatchAsyncEnumerable batches, VortexFile file,
+        IReadOnlyDictionary<string, string[]>? keys, IReadOnlyDictionary<string, string[]>? filtered,
+        ZoneKeyReads.Request? zoned, bool byGranules, VortexExpr? filter, ScanCounters? metrics)
         : IAsyncEnumerable<RecordBatch>
     {
         public async IAsyncEnumerator<RecordBatch> GetAsyncEnumerator(CancellationToken cancellationToken = default)
         {
-            batches.VariantKeys ??= await Indexes.VariantKeyReads.LoadAsync(file, keys, cancellationToken).ConfigureAwait(false);
+            if (keys is not null || filtered is not null)
+            {
+                batches.VariantKeys ??= await Indexes.VariantKeyReads.LoadAsync(file, keys, filtered, cancellationToken).ConfigureAwait(false);
+            }
+
+            if (zoned is not null)
+            {
+                batches.ZoneKeys ??= await ZoneKeyReads.LoadAsync(file, zoned, filter, byGranules, metrics, cancellationToken).ConfigureAwait(false);
+            }
+
             await foreach (RecordBatch batch in scan.WithCancellation(cancellationToken).ConfigureAwait(false))
             {
                 yield return batch;
@@ -632,11 +752,32 @@ internal sealed class ScanBuilder
         if (_filter is null && _take is null)
         {
             // A mask with no filter is an aggregation's: the blocks its zone maps answered, which
-            // no split reads.
-            return _pruned && _live is not null ? new LiveBatches(batches, _live) : batches;
+            // no split reads; or the blocks a caller's structures leave, which alone are read, a
+            // split a block (Frame), so that none reads a row of a block they leave out. Read whole,
+            // the rest of a dataset object's granules its statistics answered was counted twice.
+            BlockMask? live = _pruned ? _live : null;
+            if (_granted is { } granted)
+            {
+                live = live is null ? granted : Both(live, granted);
+            }
+
+            return live is not null ? new LiveBatches(batches, live) : batches;
         }
 
-        return new FilteredBatches(batches, _filter, _prune, _indexes, rows) { Refined = _pruned, Live = _live };
+        return new FilteredBatches(batches, _filter, _prune, _indexes, rows) { Refined = _pruned, Live = _live, Granted = _granted, Question = _question };
+    }
+
+    /// <summary>The blocks both <paramref name="first"/> and <paramref name="second"/> keep, a mask of its own.</summary>
+    private static BlockMask Both(BlockMask first, BlockMask second)
+    {
+        BlockMask both = new BlockMask(first.RowCount, first.BlockRows);
+        both.Keep(first.Words);
+        if (second.BlockRows == first.BlockRows && second.BlockCount == first.BlockCount)
+        {
+            both.Keep(second.Words);
+        }
+
+        return both;
     }
 
     /// <summary>The batches of an unfiltered scan that reads only the splits a mask keeps.</summary>
@@ -705,8 +846,11 @@ internal sealed class ScanBuilder
 
     /// <summary>
     /// The plan of this scan without executing it: splits and blocks, what each structure prunes,
-    /// the segments and bytes the live splits would read, against the file.
+    /// the segments and bytes the live splits would read, against the file; without
+    /// <paramref name="analyze"/>, from the layout and the file statistics alone, every block they
+    /// do not rule out taken as live, no structure read (spec B, 7).
     /// </summary>
+    /// <param name="analyze">Whether to read the structures the scan would consult: zone maps, indexes, a sorted column.</param>
     /// <param name="cancellationToken">Cancels the one read this makes.</param>
     /// <returns>The plan.</returns>
     /// <remarks>
@@ -720,7 +864,7 @@ internal sealed class ScanBuilder
     /// and what it did.
     /// </remarks>
     public async System.Threading.Tasks.ValueTask<ScanExplanation> ExplainAsync(
-        System.Threading.CancellationToken cancellationToken = default)
+        bool analyze, System.Threading.CancellationToken cancellationToken = default)
     {
         LayoutTree tree = _file.LayoutTree;
         ScanProjection keep = _fields is null ? ScanProjection.All : ScanProjection.Create(_fields.Build());
@@ -731,9 +875,9 @@ internal sealed class ScanBuilder
         // Each structure is credited with the blocks it pruned among those the scan's rows reach, so
         // that the blocks, the live ones and what each structure pruned add up.
         List<PruningStep> steps = [];
-        Compute.ZonePruningPlan.PruningPlan pruning = _filter is not null && _prune
+        Compute.ZonePruningPlan.PruningPlan pruning = analyze && _filter is not null && _prune
             ? await Compute.ZonePruningPlan
-                .PlanAsync(_file, tree, _filter, cancellationToken, steps, metrics: null, _indexes, Scope(tree, rows, natural))
+                .PlanAsync(_file, tree, _filter, cancellationToken, steps, metrics: null, _indexes, Scope(tree, rows, natural), proofs: true)
                 .ConfigureAwait(false)
             : default;
         Compute.BlockMask? live = pruning.Live;
@@ -744,8 +888,9 @@ internal sealed class ScanBuilder
         // What the scan's first step does after the pruning: ask the filter's exact source, when
         // it has one, for the rows it proves, unless the zone maps already show they cannot fit a
         // batch. When they fit, the scan reads the splits holding them and nothing else.
-        (RowSelection? proven, string? structure, ScanCounters? probe) =
-            await ProbeAsync(rows, natural, plan, pruning, cancellationToken).ConfigureAwait(false);
+        (RowSelection? proven, string? structure, ScanCounters? probe) = analyze
+            ? await ProbeAsync(rows, natural, plan, pruning, cancellationToken).ConfigureAwait(false)
+            : (null, null, null);
 
         // Counted over the splits the scan's rows touch, as the scan counts what it decodes and
         // prunes: a range or a take covers the blocks it reaches, not the file's, and a block is
@@ -769,7 +914,7 @@ internal sealed class ScanBuilder
         {
             walk = Union(read, [Expr.Field(_orderPath)]).RootMask;
             keyZones = pruning.Zones?.Column(_orderPath);
-            if (keyZones is null)
+            if (keyZones is null && analyze)
             {
                 orderCost = new ScanCounters();
                 keyZones = (await Compute.ZonePruningPlan
@@ -778,12 +923,23 @@ internal sealed class ScanBuilder
             }
         }
 
+        // The columns the scan takes from their zones where they give a split's values, whose zones it reads first and whose
+        // segments those splits do not register, as the scan does.
+        ScanCounters? zoneCost = null;
+        ZoneKeyReads? zoneKeys = null;
+        if (analyze && _keepEncodings && _orderPath is null && _zoneKeys is { } keyed)
+        {
+            zoneCost = new ScanCounters();
+            zoneKeys = await ZoneKeyReads.LoadAsync(_file, keyed, _filter, _granules is not null, zoneCost, cancellationToken).ConfigureAwait(false);
+        }
+
         int splits = 0;
         int zoneLiveSplits = 0;
         int liveSplits = 0;
         IO.SegmentRequestSet segments = new IO.SegmentRequestSet();
         try
         {
+            segments.ZoneKeys = zoneKeys;
             LayoutNode root = tree.Root;
             LayoutReader reader = LayoutReaderTable.Require(in root);
             FieldMask mask = walk;
@@ -844,9 +1000,15 @@ internal sealed class ScanBuilder
                 bytes += orderCost.BytesRequested;
             }
 
+            if (zoneCost is not null)
+            {
+                toRead += checked((int)zoneCost.SegmentRequests);
+                bytes += zoneCost.BytesRequested;
+            }
+
             // The whole file-level answer: the statistics, then the file filters when indexes are on.
             bool fileMayMatch = _filter is null
-                || (_indexes
+                || (_indexes && analyze
                     ? await _file.MayMatchAsync(_filter, cancellationToken).ConfigureAwait(false)
                     : Compute.FileStatisticsPruner.MayMatch(_file, _filter));
             // The exact cover, the first tier a count takes: a scan whose cover holds a batch or
@@ -854,11 +1016,16 @@ internal sealed class ScanBuilder
             CountExplanation? count = null;
             if (_filter is not null)
             {
-                (bool exact, long covered) = await ExactAsync(pruning.Zones, cancellationToken).ConfigureAwait(false);
+                (bool exact, long covered) = analyze ? await ExactAsync(pruning.Zones, cancellationToken).ConfigureAwait(false) : (false, 0L);
                 count = new CountExplanation(exact, covered, splitsPruned, splitsProven, zoneLiveSplits - splitsProven);
             }
 
-            OrderExplanation? order = _orderPath is null ? null : await OrderAsync(keyZones, cancellationToken).ConfigureAwait(false);
+            OrderExplanation? order = _orderPath is null ? null
+                : analyze ? await OrderAsync(keyZones, cancellationToken).ConfigureAwait(false)
+                : new OrderExplanation(
+                    _orderComposite is null ? _orderPath : "(" + string.Join(", ", _orderComposite) + ")",
+                    _orderComposite is null && Keys.KeyCursorBuilder.StatedSorted(_file, _orderPath) ? KeySourceKind.SortedColumn : KeySourceKind.None,
+                    0, 0, null, 0, _descending);
             return new ScanExplanation(
                 _take?.Count ?? rows.Length, blockRows, checked((int)blocks), checked((int)liveBlocks), steps, splits, liveSplits,
                 proven?.Count ?? 0, toRead, bytes, _file.FileLength, fileMayMatch)
@@ -940,7 +1107,6 @@ internal sealed class ScanBuilder
         string structure = cover.Kind switch
         {
             KeySourceKind.SortedColumn => "sorted column",
-            KeySourceKind.Slices => "time slices",
             _ => "sorted runs",
         };
         long[]? proven;
@@ -1172,7 +1338,8 @@ internal sealed class ScanBuilder
             natural = int.MaxValue;
         }
 
-        long batch = _filter is null && _take is null && _orderPath is null ? WindowBatch(natural) : natural;
+        // A caller's mask of blocks with no filter is read a block a split: wider, a split would run into a block it leaves out.
+        long batch = _filter is null && _take is null && _orderPath is null && _granted is null ? WindowBatch(natural) : natural;
 
         return (rows, natural, Capped(batch));
     }
@@ -1208,7 +1375,7 @@ internal sealed class ScanBuilder
             ? _variantKeys ?? Indexes.VariantKeyReads.Of([], _filter)
             : null;
         return new TerminalScan(
-            _file, tree, _filter, rows, wholeFile, cap, read, _take, _prune, _tiers, _metrics, _indexes, excluded, keys);
+            _file, tree, _filter, rows, wholeFile, cap, read, _take, _prune, _tiers, _metrics, _indexes, excluded, keys, _granules);
     }
 
     /// <summary>The projection of exactly the fields a filter reads, plus one.</summary>

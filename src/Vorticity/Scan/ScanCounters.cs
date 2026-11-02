@@ -76,6 +76,16 @@ internal sealed class ScanCounters
 
     internal void AddResidualChunk() => Interlocked.Increment(ref _residualChunks);
 
+    private long _variantSlices;
+
+    /// <summary>
+    /// Slices of rows a variant shredded into more columns than a slice holds was rebuilt in, each slice's columns decoded
+    /// and thrown away before the next: what keeps a wide shredding's read to a slice of its columns at once.
+    /// </summary>
+    public long VariantSlices => Interlocked.Read(ref _variantSlices);
+
+    internal void AddVariantSlice() => Interlocked.Increment(ref _variantSlices);
+
     /// <summary>
     /// The range an aggregation answered under <see cref="ScanOptions.AlignWindow"/> when the source grew the one asked:
     /// its conjuncts on the column the source is ordered by; null when the filter applied is the one asked.

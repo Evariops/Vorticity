@@ -97,7 +97,7 @@ public class DatasetRankThresholdBenchmarks
         DatasetOptions options = new DatasetOptions
         {
             Seed = 0xC1057E_5EED,
-            ClusteringKey = ["key"],
+            Layout = new DatasetLayout { SortKey = [LayoutValue.Column("key")] },
         };
 
         VortexDataset dataset = await VortexDataset.CreateAsync(_store, schema, options).ConfigureAwait(false);

@@ -1,5 +1,6 @@
 using System;
 using System.Buffers;
+using System.Threading;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Buffers;
@@ -25,6 +26,11 @@ namespace Vorticity.Compute;
 /// open: not at all when it decided every row, and over those rows alone, gathered from the columns
 /// the right side reads, when they are few enough for the gather to cost less than the rows it
 /// spares.
+///
+/// A filter that is a conjunction of several predicates judges them in an order of its own (spec B,
+/// 5): the cheapest a row it rules out first, by the price of judging it, numbers before bytes, over
+/// the share of the rows it ruled out, observed batch after batch. A conjunction gives the same
+/// truth in any order, so only the work changes.
 /// </remarks>
 internal sealed class FilterEvaluator
 {
@@ -74,11 +80,73 @@ internal sealed class FilterEvaluator
     /// <summary>The smoothed share, per mille, under which a scan reading whole goes back to the kept rows alone.</summary>
     private const int LeaveMostPerMille = 270;
 
+    // The filter's conjuncts, when it is a conjunction of two to MostConjuncts predicates, in the order written; null
+    // otherwise.
+    private readonly VortexExpr[]? _conjuncts;
+
+    // The price of judging a row of each conjunct, in tenths of a nanosecond: a number's comparison or a null check is
+    // cheap, a predicate on bytes, lists or a set of candidates (Costly) about fifteen times as dear (spec B, 2.1).
+    private readonly int[]? _prices;
+
+    // The share of the rows each conjunct judged that it ruled out, per mille, smoothed over the batches; -1 before the
+    // first, which sets it whole and is ranked an even share till then. Lanes race on it, as on _keptShare: a lost update
+    // moves a share by one batch's weight.
+    private readonly int[]? _shares;
+
+    // The order the conjuncts are judged in, four bits a place, the first in the lowest bits: read whole, written whole.
+    private long _order;
+
+    /// <summary>The most conjuncts whose order the evaluator keeps; a longer conjunction is judged as written.</summary>
+    private const int MostConjuncts = 16;
+
+    /// <summary>The least share, per mille, a conjunct's price is divided by: one that rules nothing out still has a rank.</summary>
+    private const int LeastShare = 16;
+
     /// <summary>Prepares an evaluator for one filter, for the length of one scan.</summary>
     /// <param name="filter">The expression every call will evaluate.</param>
     internal FilterEvaluator(VortexExpr filter)
+        : this(filter, reorders: true)
+    {
+    }
+
+    /// <summary>
+    /// Prepares an evaluator for one filter: for a scan, which orders a conjunction's predicates by what it learns batch
+    /// after batch, with <paramref name="reorders"/>; for one batch, which judges them as written and keeps nothing, without.
+    /// </summary>
+    private FilterEvaluator(VortexExpr filter, bool reorders)
     {
         _filter = filter;
+        if (reorders && filter is LogicalExpr { IsAnd: true })
+        {
+            System.Collections.Generic.List<VortexExpr> conjuncts = [];
+            Conjuncts(filter, conjuncts);
+            if (conjuncts.Count <= MostConjuncts)
+            {
+                _conjuncts = [.. conjuncts];
+                _prices = new int[conjuncts.Count];
+                _shares = new int[conjuncts.Count];
+                for (int c = 0; c < conjuncts.Count; c++)
+                {
+                    _prices[c] = Costly(conjuncts[c]) ? 30 : 2;
+                    _shares[c] = -1;
+                }
+
+                Reorder();
+            }
+        }
+    }
+
+    /// <summary>The operands of <paramref name="filter"/> joined by AND, at any depth, in the order written.</summary>
+    private static void Conjuncts(VortexExpr filter, System.Collections.Generic.List<VortexExpr> into)
+    {
+        if (filter is LogicalExpr { IsAnd: true } and)
+        {
+            Conjuncts(and.Left, into);
+            Conjuncts(and.Right, into);
+            return;
+        }
+
+        into.Add(filter);
     }
 
     /// <summary>
@@ -97,14 +165,18 @@ internal sealed class FilterEvaluator
     /// </summary>
     /// <param name="root">The file's dtype.</param>
     /// <param name="shape">The dtype of the batches the scan delivers.</param>
+    /// <param name="variants">
+    /// Whether batches that hold a variant are read in two passes: where the filter's pass reads keys of a variant the
+    /// projection reads whole. A variant both passes read by its keys is decoded by each, and judged in one pass.
+    /// </param>
     /// <param name="columns">The filter's columns, each whole.</param>
     /// <returns>
     /// Whether the filter reads only fields of a non-nullable root struct, each named by itself, and
     /// every column of the batch has a zero-row form.
     /// </returns>
-    internal bool TryOwnColumns(DType root, DType shape, out Layouts.FieldMask columns)
+    internal bool TryOwnColumns(DType root, DType shape, bool variants, out Layouts.FieldMask columns)
     {
-        FilterColumns planned = _columns ??= FilterColumns.Plan(_filter, root, shape);
+        FilterColumns planned = _columns ??= FilterColumns.Plan(_filter, root, shape, variants);
         columns = planned.Mask;
         return !ReferenceEquals(planned, FilterColumns.None);
     }
@@ -156,9 +228,9 @@ internal sealed class FilterEvaluator
 
         internal Layouts.FieldMask Mask { get; }
 
-        internal static FilterColumns Plan(VortexExpr filter, DType root, DType shape)
+        internal static FilterColumns Plan(VortexExpr filter, DType root, DType shape, bool variants)
         {
-            if (root.Kind != DTypeKind.Struct || root.IsNullable || !CanonicalFill.CanBuild(shape))
+            if (root.Kind != DTypeKind.Struct || root.IsNullable || !(variants ? CanonicalFill.Builds(shape) : CanonicalFill.CanBuild(shape)))
             {
                 return None;
             }
@@ -252,7 +324,7 @@ internal sealed class FilterEvaluator
     internal static void Evaluate(
         VortexExpr filter, CanonicalArena arena, int rootIndex, int rows, Span<byte> destination)
     {
-        new FilterEvaluator(filter).Evaluate(arena, rootIndex, rows, destination);
+        new FilterEvaluator(filter, reorders: false).Evaluate(arena, rootIndex, rows, destination);
     }
 
     /// <summary>
@@ -293,6 +365,12 @@ internal sealed class FilterEvaluator
     /// <exception cref="NotSupportedException">A column's type is not one the filter supports.</exception>
     internal void Evaluate(CanonicalArena arena, int rootIndex, int rows, Span<byte> destination)
     {
+        if (_conjuncts is not null)
+        {
+            EvaluateConjuncts(arena, rootIndex, rows, destination);
+            return;
+        }
+
         Evaluate(_filter, arena, rootIndex, rows, default, destination, 0);
     }
 
@@ -310,7 +388,115 @@ internal sealed class FilterEvaluator
     /// </remarks>
     internal void EvaluateColumn(CanonicalArena arena, int column, int rows, Span<byte> destination)
     {
+        if (_conjuncts is not null)
+        {
+            EvaluateConjuncts(arena, ~column, rows, destination);
+            return;
+        }
+
         Evaluate(_filter, arena, ~column, rows, default, destination, 0);
+    }
+
+    /// <summary>
+    /// Judges the filter's conjuncts in their order (<see cref="Reorder"/>): the first over every row, each next over the
+    /// rows the ones before left open, alone when they are few enough, as a conjunction's right side is; none once every
+    /// row is ruled out. Notes the share each one ruled out, and orders them again for the next batch.
+    /// </summary>
+    private void EvaluateConjuncts(CanonicalArena arena, int rootIndex, int rows, Span<byte> destination)
+    {
+        VortexExpr[] conjuncts = _conjuncts!;
+        long order = Volatile.Read(ref _order);
+        int first = (int)(order & 15);
+        Evaluate(conjuncts[first], arena, rootIndex, rows, default, destination, 1);
+        int evaluated = destination.Length;
+        int ruledOut = destination.Count(Trilean.False);
+        Observe(first, ruledOut, evaluated);
+        byte[]? right = null;
+        try
+        {
+            for (int place = 1; place < conjuncts.Length; place++)
+            {
+                int next = (int)((order >> (4 * place)) & 15);
+                int few = evaluated / (Costly(conjuncts[next]) ? CostlyOpenDivisor : CheapOpenDivisor);
+                int open = OpenUpTo(destination, Trilean.False, few);
+                if (open == 0)
+                {
+                    break;
+                }
+
+                right ??= ArrayPool<byte>.Shared.Rent(evaluated);
+                Span<byte> other = right.AsSpan(0, evaluated);
+                if (open <= few)
+                {
+                    EvaluateOpen(conjuncts[next], arena, rootIndex, rows, default, destination, Trilean.False, open, other, 1);
+                }
+                else
+                {
+                    Evaluate(conjuncts[next], arena, rootIndex, rows, default, other, 2);
+                }
+
+                Trilean.And(destination, other);
+                int now = destination.Count(Trilean.False);
+                Observe(next, now - ruledOut, evaluated - ruledOut);
+                ruledOut = now;
+            }
+        }
+        finally
+        {
+            if (right is not null)
+            {
+                ArrayPool<byte>.Shared.Return(right);
+            }
+        }
+
+        Reorder();
+    }
+
+    /// <summary>Notes that conjunct <paramref name="conjunct"/>, judged over <paramref name="judged"/> open rows, ruled out <paramref name="ruledOut"/> of them.</summary>
+    private void Observe(int conjunct, int ruledOut, int judged)
+    {
+        if (judged > 0)
+        {
+            int share = (int)(ruledOut * 1_000L / judged);
+            int held = _shares![conjunct];
+            _shares[conjunct] = held < 0 ? share : ((held * 7) + share) / 8;
+        }
+    }
+
+    /// <summary>
+    /// Orders the conjuncts by what judging one costs a row it rules out, the least first: its price over the share it rules
+    /// out, ties in the order written.
+    /// </summary>
+    private void Reorder()
+    {
+        int count = _conjuncts!.Length;
+        Span<int> ranked = stackalloc int[MostConjuncts];
+        Span<long> prices = stackalloc long[MostConjuncts];
+        Span<long> shares = stackalloc long[MostConjuncts];
+        for (int c = 0; c < count; c++)
+        {
+            prices[c] = _prices![c];
+            int share = _shares![c];
+            shares[c] = Math.Max(share < 0 ? 500 : share, LeastShare);
+            int at = c;
+
+            // a's price over its share comes before b's when a's price times b's share is the lesser.
+            while (at > 0 && prices[c] * shares[ranked[at - 1]] < prices[ranked[at - 1]] * shares[c])
+            {
+                ranked[at] = ranked[at - 1];
+                at--;
+            }
+
+            ranked[at] = c;
+        }
+
+        long order = 0;
+        for (int place = 0; place < count; place++)
+        {
+            order |= (long)ranked[place] << (4 * place);
+        }
+
+        Volatile.Write(ref _order, order);
     }
 
     /// <summary>
@@ -758,6 +944,7 @@ internal sealed class FilterEvaluator
             return field switch
             {
                 FunctionFieldExpr alone => alone.Apply(arena, only),
+                MappedFieldExpr mapped => mapped.Apply(arena, only),
                 VariantFieldExpr path => path.Apply(arena, only),
                 _ => only,
             };
@@ -825,6 +1012,7 @@ internal sealed class FilterEvaluator
         return field switch
         {
             FunctionFieldExpr function => function.Apply(arena, current),
+            MappedFieldExpr mapped => mapped.Apply(arena, current),
             VariantFieldExpr path => path.Apply(arena, current),
             _ => current,
         };

@@ -25,7 +25,7 @@ internal static class PeerCacheMicro
         {
             await using MemoryObjectStore memory = new MemoryObjectStore();
             await using CountingObjectStore store = new CountingObjectStore(memory);
-            await using (VortexDataset writer = await VortexDataset.CreateAsync(store, PeerRow.Schema, new DatasetOptions { ClusteringKey = [nameof(PeerRow.Id)] }))
+            await using (VortexDataset writer = await VortexDataset.CreateAsync(store, PeerRow.Schema, new DatasetOptions { Layout = new DatasetLayout { SortKey = [LayoutValue.Column(nameof(PeerRow.Id))] } }))
             {
                 Random random = new Random(0x9EE2);
                 for (int part = 0; part < objects; part++)

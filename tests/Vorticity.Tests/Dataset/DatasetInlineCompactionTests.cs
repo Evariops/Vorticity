@@ -184,7 +184,7 @@ public sealed class DatasetInlineCompactionTests
     private static DatasetOptions Options() => new DatasetOptions
     {
         Seed = 0x1_9_11E,
-        ClusteringKey = ["Key"],
+        Layout = new DatasetLayout { SortKey = [LayoutValue.Column("Key")] },
         Write = new VortexWriteOptions { RowBlockSize = 64, DataBlockTargetBytes = 2 << 10 },
     };
 

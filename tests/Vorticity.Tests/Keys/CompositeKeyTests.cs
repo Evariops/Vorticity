@@ -239,7 +239,7 @@ public sealed class CompositeKeyTests
 
         Assert.Equal(oracle.ConvertAll(e => $"{Country((int)e.Row)}|{City((int)e.Row)}|{Number((int)e.Row)}"), delivered);
 
-        ScanExplanation plan = await written.File.ScanBuilder().InKeyOrder(["country", "city"], descending).ExplainAsync(ct);
+        ScanExplanation plan = await written.File.ScanBuilder().InKeyOrder(["country", "city"], descending).ExplainAsync(analyze: true, ct);
         Assert.Equal("(country, city)", plan.Order!.Path);
         Assert.Equal(KeySourceKind.SortedRuns, plan.Order.Source);
 

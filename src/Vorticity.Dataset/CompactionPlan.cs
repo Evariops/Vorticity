@@ -7,7 +7,7 @@ namespace Vorticity.Dataset;
 /// <summary>How a dataset merges its levels.</summary>
 public enum CompactionStyle
 {
-    /// <summary>Leveled when the dataset declares a clustering key, tiered otherwise.</summary>
+    /// <summary>Leveled when the dataset declares a sort key, tiered otherwise.</summary>
     Auto = 0,
 
     /// <summary>
@@ -19,7 +19,7 @@ public enum CompactionStyle
     /// <summary>
     /// Size tiers: a level holds up to <c>F</c> objects of its size and they may overlap. Rewrites
     /// each row about once per level, and a lookup is output-sensitive rather than bounded. Refused
-    /// for a dataset with a clustering key, whose reads by key take every level above 0 to be
+    /// for a dataset with a sort key, whose reads by key take every level above 0 to be
     /// key-disjoint.
     /// </summary>
     Tiered = 2,
@@ -85,6 +85,18 @@ public enum CompactionTrigger
     /// order as merges make them grow with keys at random.
     /// </summary>
     Neighbours = 6,
+
+    /// <summary>
+    /// A partition of a tiered dataset holds at level 0 as many objects of one size class as the fan-out: the earliest
+    /// arrived of them are merged into one of the class below, in level 0.
+    /// </summary>
+    Tier = 7,
+
+    /// <summary>
+    /// A partition of a tiered dataset with a key is calm, or asked for: its level 0 joins its level 1, merged with the
+    /// consolidated objects it meets into objects disjoint by key, or moved there whole.
+    /// </summary>
+    Consolidation = 8,
 }
 
 /// <summary>
@@ -141,8 +153,8 @@ public sealed record CompactionOptions
     public int MaxFragments { get; init; } = DefaultMaxFragments;
 
     /// <summary>
-    /// Leveled, tiered, or whichever the clustering key implies. A plan refuses tiered for a dataset
-    /// with a clustering key, which compacts leveled only.
+    /// Leveled, tiered, or whichever the sort key implies. A plan refuses tiered for a dataset
+    /// with a sort key, which compacts leveled only.
     /// </summary>
     public CompactionStyle Style { get; init; } = CompactionStyle.Auto;
 
@@ -283,12 +295,12 @@ public sealed record CompactionOptions
     internal bool MovesFirst(CompactionStyle style) => Pick == CompactionPick.Auto && style == CompactionStyle.Leveled;
 
     /// <summary>
-    /// The style this dataset merges under, never <see cref="CompactionStyle.Auto"/>: leveled with a clustering key,
+    /// The style this dataset merges under, never <see cref="CompactionStyle.Auto"/>: leveled with a sort key,
     /// whatever was asked, since a plan refuses the others there first.
     /// </summary>
-    internal CompactionStyle StyleFor(bool clustered) => Style switch
+    internal CompactionStyle StyleFor(bool keyed) => Style switch
     {
-        _ when clustered => CompactionStyle.Leveled,
+        _ when keyed => CompactionStyle.Leveled,
         CompactionStyle.Leveled => CompactionStyle.Leveled,
         _ => CompactionStyle.Tiered,
     };
@@ -347,7 +359,7 @@ public sealed record CompactionJob
     /// <summary>The level it writes into; the same level for a fragment compaction.</summary>
     public int ToLevel { get; init; }
 
-    /// <summary>Whether it merges on the clustering key or concatenates.</summary>
+    /// <summary>Whether it merges on the sort key or concatenates.</summary>
     public CompactionStyle Style { get; init; }
 
     /// <summary>Why it is due.</summary>
@@ -419,8 +431,8 @@ public sealed record CompactionPlan
     /// <summary>What level 0 holds above its ceiling: the extra objects every lookup touches until compaction catches up.</summary>
     public long Lag { get; init; }
 
-    /// <summary>Whether the dataset declares a clustering key.</summary>
-    public bool IsClustered { get; init; }
+    /// <summary>Whether the dataset declares a sort key.</summary>
+    public bool IsKeyed { get; init; }
 
     /// <summary>The style the dataset merges under.</summary>
     public CompactionStyle Style { get; init; }
@@ -439,6 +451,12 @@ public sealed record CompactionPlan
     /// compacting those reads index bytes only, and is planned once no compaction that moves rows is due.
     /// </summary>
     public long FragmentedObjects { get; init; }
+
+    /// <summary>
+    /// What each partition of a tiered dataset holds at level 0 and owes, in the tree's order; empty for a dataset that
+    /// is not.
+    /// </summary>
+    public ImmutableArray<PartitionCompaction> Partitions { get; init; } = [];
 
     /// <summary>Whether a compaction is due.</summary>
     public bool HasWork => Job is not null;

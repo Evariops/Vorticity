@@ -24,6 +24,7 @@ internal sealed class KeyCursorBuilder
     private Scanning.IRowExclusion? _excluded;
     private Func<CancellationToken, ValueTask<ExcludedKey[]>>? _excludedKeys;
     private bool _ranksAreRows;
+    private bool _inRowOrder;
 
     internal KeyCursorBuilder(VortexFile file, string path)
     {
@@ -78,6 +79,17 @@ internal sealed class KeyCursorBuilder
     public KeyCursorBuilder WithSource(KeySourceKind source)
     {
         _forced = source;
+        return this;
+    }
+
+    /// <summary>
+    /// Says the file's rows are in this column's key order, its nulls last, as a dataset's writer sorts an object: the
+    /// column itself is the source, whatever the statistics say, its entries the rows before the nulls.
+    /// </summary>
+    /// <returns>This builder.</returns>
+    internal KeyCursorBuilder InRowOrder()
+    {
+        _inRowOrder = true;
         return this;
     }
 
@@ -239,12 +251,6 @@ internal sealed class KeyCursorBuilder
             {
                 return (source, KeySourceKind.SortedRuns);
             }
-
-            (SlicedKeySource? sliced, _) = await SlicedKeySource.OpenAsync(file, path, cancellationToken).ConfigureAwait(false);
-            if (sliced is not null)
-            {
-                return (sliced, KeySourceKind.Slices);
-            }
         }
 
         return (null, KeySourceKind.None);
@@ -271,17 +277,16 @@ internal sealed class KeyCursorBuilder
     /// The cheapest source that serves, and why each other one was not taken.
     /// </summary>
     /// <remarks>
-    /// Rows: the sorted column, the sorted runs, then the time slices, which read a slice's instants
-    /// to rank them; the sources that hold keys without rows are rejected by name. Keys
-    /// (<see cref="Distinct"/>): the sorted column, the postings, the dictionaries, the sorted runs,
-    /// the time slices. A later source is opened only to say why it lost, which is what
+    /// Rows: the sorted column, then the sorted runs; the sources that hold keys without rows are
+    /// rejected by name. Keys (<see cref="Distinct"/>): the sorted column, the postings, the
+    /// dictionaries, the sorted runs. A later source is opened only to say why it lost, which is what
     /// <see cref="ExplainAsync"/> reports.
     /// </remarks>
     private async ValueTask<Choice> ChooseAsync(CancellationToken cancellationToken)
     {
         KeySourceKind[] order = _distinct
-            ? [KeySourceKind.SortedColumn, KeySourceKind.Postings, KeySourceKind.Dictionary, KeySourceKind.SortedRuns, KeySourceKind.Slices]
-            : [KeySourceKind.SortedColumn, KeySourceKind.SortedRuns, KeySourceKind.Slices, KeySourceKind.Postings, KeySourceKind.Dictionary];
+            ? [KeySourceKind.SortedColumn, KeySourceKind.Postings, KeySourceKind.Dictionary, KeySourceKind.SortedRuns]
+            : [KeySourceKind.SortedColumn, KeySourceKind.SortedRuns, KeySourceKind.Postings, KeySourceKind.Dictionary];
         List<KeySourceRejection> rejected = [];
         KeySource? chosen = null;
         KeySourceKind kind = KeySourceKind.None;
@@ -350,14 +355,8 @@ internal sealed class KeyCursorBuilder
         if (candidate == KeySourceKind.SortedColumn)
         {
             (SortedColumnSource? column, string? reason) =
-                await SortedColumnSource.OpenAsync(_file, _path, cancellationToken).ConfigureAwait(false);
+                await SortedColumnSource.OpenAsync(_file, _path, cancellationToken, inRowOrder: _inRowOrder).ConfigureAwait(false);
             return column is null ? (null, reason) : (new SortedColumnWalker(column), null);
-        }
-
-        if (candidate == KeySourceKind.Slices)
-        {
-            (SlicedKeySource? sliced, string? reason) = await SlicedKeySource.OpenAsync(_file, _path, cancellationToken).ConfigureAwait(false);
-            return (sliced, reason);
         }
 
         (SortedRunsSource? runs, string? why) = _composite is not null

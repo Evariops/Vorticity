@@ -1,4 +1,6 @@
 using System;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.IO;
@@ -8,7 +10,7 @@ namespace Vorticity;
 /// <summary>
 /// The states of an aggregation's groups over a part of its rows: what a node that ran the part sends to the one that
 /// merges, which folds the partials of every part to the answer the whole question gives, to the same bits
-/// (<see cref="Aggregation.Merge"/>).
+/// (<see cref="Aggregation.Merge(System.Collections.Generic.IEnumerable{AggregationPartial})"/>).
 /// </summary>
 /// <remarks>
 /// <para>
@@ -25,7 +27,7 @@ namespace Vorticity;
 /// </remarks>
 public sealed class AggregationPartial
 {
-    private AggregationPartial(ReadOnlyMemory<byte> bytes) => Bytes = bytes;
+    private AggregationPartial(ReadOnlyMemory<byte> bytes) => Bytes = Aligned(bytes);
 
     /// <summary>The partial as bytes, a Vortex file, to send to the node that merges.</summary>
     public ReadOnlyMemory<byte> Bytes { get; }
@@ -41,4 +43,18 @@ public sealed class AggregationPartial
     /// <summary>The partial's file, opened in <paramref name="session"/> over its bytes.</summary>
     internal ValueTask<VortexFile> OpenAsync(VortexSession session, CancellationToken cancellationToken) =>
         session.OpenAsync(new MemorySegmentSource(Bytes), VortexOpenOptions.Default, cancellationToken);
+
+    /// <summary>
+    /// <paramref name="bytes"/> copied once into memory the collector does not move, on a boundary of
+    /// <see cref="VortexLimits.MaxAlignment"/>: an open reads them in place there, where it would copy them at every open.
+    /// </summary>
+    private static unsafe ReadOnlyMemory<byte> Aligned(ReadOnlyMemory<byte> bytes)
+    {
+        const int Alignment = VortexLimits.MaxAlignment;
+        byte[] held = GC.AllocateUninitializedArray<byte>(bytes.Length + Alignment - 1, pinned: true);
+        nuint address = (nuint)Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(held));
+        int offset = (int)((Alignment - (address & (Alignment - 1))) & (Alignment - 1));
+        bytes.Span.CopyTo(held.AsSpan(offset));
+        return new ReadOnlyMemory<byte>(held, offset, bytes.Length);
+    }
 }

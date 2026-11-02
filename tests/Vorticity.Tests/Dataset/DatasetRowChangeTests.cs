@@ -182,16 +182,15 @@ public sealed class DatasetRowChangeTests
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
         await using MemoryObjectStore store = new MemoryObjectStore();
-        (VortexDataset dataset, List<ChangeRow> written) = await CreateAsync(store, clustered: true, interleaved: false, ct);
+        (VortexDataset dataset, List<ChangeRow> written) = await CreateAsync(store, clustered: true, interleaved: false, ct, objectBytes: 2 << 10);
         await using (dataset)
         {
-            // Objects capped at 2 KiB, so that the rows lie in several key-disjoint objects whatever
+            // Objects the layout caps at 2 KiB, so that the rows lie in several key-disjoint objects whatever
             // level they land in.
             CompactionOptions compaction = new CompactionOptions
             {
                 LevelZeroCeiling = 1,
                 TargetBytesAtLevelOne = 2 << 10,
-                MaxObjectBytes = 2 << 10,
             };
             while (await dataset.CompactAsync(compaction, ct) is not null)
             {
@@ -291,10 +290,10 @@ public sealed class DatasetRowChangeTests
     /// <paramref name="interleaved"/> the keys congruent to its number, appended out of order.
     /// </summary>
     private static async Task<(VortexDataset Dataset, List<ChangeRow> Written)> CreateAsync(
-        IObjectStore store, bool clustered, bool interleaved, CancellationToken ct)
+        IObjectStore store, bool clustered, bool interleaved, CancellationToken ct, long objectBytes = 1L << 30)
     {
         Decoders.EnsureRegistered();
-        VortexDataset dataset = await VortexDataset.CreateAsync(store, ChangeRow.Schema, Options(clustered), ct);
+        VortexDataset dataset = await VortexDataset.CreateAsync(store, ChangeRow.Schema, Options(clustered, objectBytes), ct);
         List<ChangeRow> written = [];
         foreach (int part in (int[])[3, 0, 4, 1, 2])
         {
@@ -314,11 +313,11 @@ public sealed class DatasetRowChangeTests
         return (dataset, written);
     }
 
-    private static DatasetOptions Options(bool clustered) => new DatasetOptions
+    private static DatasetOptions Options(bool clustered, long objectBytes = 1L << 30) => new DatasetOptions
     {
         Seed = 0xDE1E7E,
         Write = new VortexWriteOptions { RowBlockSize = 64, DataBlockTargetBytes = 2 << 10 },
-        ClusteringKey = clustered ? ["Key"] : null,
+        Layout = clustered ? new DatasetLayout { SortKey = [LayoutValue.Column("Key")], ObjectBytes = objectBytes } : null,
     };
 
     private static async Task<List<ChangeRow>> RowsAsync(VortexDataset dataset, CancellationToken ct) =>

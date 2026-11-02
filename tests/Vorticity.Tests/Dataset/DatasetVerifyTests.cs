@@ -295,7 +295,7 @@ public sealed class DatasetVerifyTests
     private static DatasetOptions Options() => new DatasetOptions
     {
         Seed = 0x7E81_F1ED,
-        ClusteringKey = ["key"],
+        Layout = new DatasetLayout { SortKey = [LayoutValue.Column("key")] },
         Rule = new FillBoundaryRule(400),
         Write = new VortexWriteOptions { RowBlockSize = 64, DataBlockTargetBytes = 512 },
     };

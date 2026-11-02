@@ -475,12 +475,12 @@ public static class VortexFileIndexer
         // column's give the rows every column's must start at.
         int fields = schema.FieldCount;
         LayoutTree tree = file.LayoutTree;
-        (LayoutNode chunks, long zoneLength) = VortexFileWriter.AppendPlan.ColumnNode(tree, 0, Refused);
+        (LayoutNode chunks, long zoneLength) = VortexFileWriter.AppendPlan.ColumnNode(tree, 0, Refused, codes: true);
         LayoutNode[] columnNodes = new LayoutNode[fields];
         columnNodes[0] = chunks;
         for (int field = 1; field < fields; field++)
         {
-            (columnNodes[field], long length) = VortexFileWriter.AppendPlan.ColumnNode(tree, field, Refused);
+            (columnNodes[field], long length) = VortexFileWriter.AppendPlan.ColumnNode(tree, field, Refused, codes: true);
             if (!VortexFileWriter.AppendPlan.SameChunks(chunks, columnNodes[field])
                 || (length != 0 && zoneLength != 0 && length != zoneLength))
             {
@@ -526,7 +526,8 @@ public static class VortexFileIndexer
             policy, schema, isTabular: true, fields,
             options?.IndexBudgetPerMille ?? VortexWriteOptions.Default.IndexBudgetPerMille, blockRows, options?.KeyEncoder,
             options?.ScratchDirectory, options?.ScratchMemoryBytes ?? IndexWriter.DefaultScratchMemoryBytes,
-            options?.WideRowsAbove ?? uint.MaxValue, sealScratch || file.SealedLayout is not null || file.Session.Seals)
+            options?.WideRowsAbove ?? uint.MaxValue, sealScratch || file.SealedLayout is not null || file.Session.Seals,
+            hashedUnitBytes: options?.HashedUnitBytes ?? 0)
         {
             Fences = options?.Fences ?? FenceShape.Default,
             Spared = options?.BudgetSpares,

@@ -17,8 +17,7 @@ public sealed partial class DatasetUnreadDeleteTests
 
     private static DatasetOptions Options() => new DatasetOptions
     {
-        ClusteringKey = [nameof(Reading.At)],
-        Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour) },
+        Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(Reading.At)).Truncate(CalendarUnit.Hour), SortKey = [LayoutValue.Column(nameof(Reading.At))], Organization = LayoutOrganization.Leveled },
     };
 
     /// <summary>

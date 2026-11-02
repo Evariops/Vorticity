@@ -75,9 +75,6 @@ internal sealed class HttpTransport : IDisposable
         _rate = RequestBudget.ForStore(_requests.RequestsPerSecond, options.TimeProvider);
     }
 
-    /// <summary>The store's options.</summary>
-    internal StoreTransportOptions Options => _options;
-
     /// <summary>The budget's tokens left, for tests.</summary>
     internal int BudgetLeft => _budget.Tokens;
 
@@ -86,6 +83,15 @@ internal sealed class HttpTransport : IDisposable
 
     /// <summary>The requests a second the store sends now at most, under the budget's, halved by a throttle.</summary>
     internal double RequestRate => _rate.CurrentRequestsPerSecond;
+
+    /// <summary>
+    /// A token for a request that its caller's giving up must not cut short, the start of an upload, which its answer
+    /// alone names: cancelled by nothing until <see cref="Outlive"/> gives it the abort's deadline.
+    /// </summary>
+    internal CancellationTokenSource Outliving() => new CancellationTokenSource(Timeout.InfiniteTimeSpan, _options.TimeProvider);
+
+    /// <summary>Gives a token of <see cref="Outliving"/> the abort's deadline from now, its caller having given up.</summary>
+    internal void Outlive(CancellationTokenSource outliving) => outliving.CancelAfter(_options.AbortTimeout);
 
     /// <summary>
     /// Sends a request built by <paramref name="build"/> and hands its answer to

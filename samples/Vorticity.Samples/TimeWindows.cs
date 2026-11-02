@@ -7,7 +7,7 @@ using Vorticity.IO;
 
 namespace Vorticity.Samples;
 
-/// <summary>A request as a dataset clustered by day holds it.</summary>
+/// <summary>A request as a dataset partitioned by day holds it.</summary>
 [VortexRecord]
 public partial record struct Request(DateTimeOffset At, string Service, string Method, short Status, string RequestId, long Bytes);
 
@@ -36,12 +36,12 @@ internal static class TimeWindows
         string needle;
         await using (VortexDataset dataset = await VortexDataset.CreateAsync(store, Request.Schema, new DatasetOptions
         {
-            ClusteringKey = [nameof(Request.At)],
-            Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Day) },
+            Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(Request.At)).Truncate(CalendarUnit.Day), SortKey = [LayoutValue.Column(nameof(Request.At))] },
             Identifiers = [nameof(Request.RequestId)],
         }))
         {
-            // Three days of a request every five seconds, appended ten minutes at a time, then compacted.
+            // Three days of a request every five seconds, appended ten minutes at a time and merged as they come; the days,
+            // written here in seconds, are consolidated at once rather than an hour after their last append.
             Random random = new Random(7);
             for (int part = 0; part < 3 * 24 * 6; part++)
             {
@@ -61,6 +61,7 @@ internal static class TimeWindows
             {
             }
 
+            await dataset.ConsolidateAsync();
             needle = "req-200-7";
             Console.WriteLine($"{dataset.RowCount} requests over three days in {dataset.ObjectCount} objects");
 
@@ -125,8 +126,7 @@ internal static class TimeWindows
         await using IObjectStore infoStore = new FileObjectStore(Demo.Path("retention-info"));
         DatasetOptions options = new DatasetOptions
         {
-            ClusteringKey = [nameof(Logged.At)],
-            Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour) },
+            Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(Logged.At)).Truncate(CalendarUnit.Hour), SortKey = [LayoutValue.Column(nameof(Logged.At))] },
         };
         await using VortexDataset debug = await VortexDataset.CreateAsync(debugStore, Logged.Schema, options);
         await using VortexDataset info = await VortexDataset.CreateAsync(infoStore, Logged.Schema, options);

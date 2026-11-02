@@ -91,21 +91,6 @@ internal sealed class PcoBinTrainer : IDisposable
     /// </summary>
     internal bool IsTrivial => Count == 0 || (Count == 1 && _offsetBits[0] == 0);
 
-    /// <summary>The widest offset any bin stores.</summary>
-    internal int MaxOffsetBits
-    {
-        get
-        {
-            int widest = 0;
-            foreach (int bits in OffsetBits)
-            {
-                widest = Math.Max(widest, bits);
-            }
-
-            return widest;
-        }
-    }
-
     /// <summary>
     /// The average bits a latent costs, <c>avg_bits_per_latent</c>: each bin's ANS bits and offset
     /// bits, weighed by its share of the table.

@@ -60,21 +60,6 @@ internal sealed class DeletedCounts
         return null;
     }
 
-    /// <summary>The bytes the counts hold in memory.</summary>
-    internal long Bytes
-    {
-        get
-        {
-            long bytes = 0;
-            foreach ((_, ColumnCounts counts) in Columns)
-            {
-                bytes += counts.Bytes;
-            }
-
-            return bytes;
-        }
-    }
-
     /// <summary>
     /// The rows of <paramref name="earlier"/> and of <paramref name="later"/> together, column by column, entry by entry; null
     /// when they count other columns or other measures, as when the object's counts changed between two deletes, which no

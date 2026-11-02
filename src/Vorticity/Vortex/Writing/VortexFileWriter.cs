@@ -165,13 +165,13 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     internal long DataBytes => _reportBytes.Data;
 
     /// <summary>
-    /// Once a sliced file is completed, its table of contents (<see cref="Indexes.ObjectContents"/>), for
-    /// the entry a dataset keeps of it: what a reader of its slices needs with no open.
-    /// Null for a file without slices.
+    /// Once a file that carries a table of contents (<see cref="VortexWriteOptions.CarriesContents"/>) is
+    /// completed, its table (<see cref="Indexes.ObjectContents"/>), for the entry a dataset keeps of it: what a
+    /// reader of a few spans of its rows needs with no open. Null for a file without one.
     /// </summary>
     internal byte[]? TableOfContents { get; private set; }
 
-    // The table of contents of a sliced file, built once its regions are written, before the directory's.
+    // The table of contents of a file that carries one, built once its regions are written, before the directory's.
     private ObjectContents? _contents;
 
     /// <summary>The chunks of each top-level column's data, by its place: one a segment it wrote.</summary>
@@ -187,31 +187,81 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     }
 
     /// <summary>
-    /// The table of contents of a sliced file: its slices' table and chunk directories, its variant columns' path
+    /// What each top-level column's values cost the processor, as the table of contents keeps it
+    /// (<see cref="ObjectContents.ColumnClasses"/>): a column's count of classes, then for each its units over the file's
+    /// rows in 256ths, rounded up, shifted past the class.
+    /// </summary>
+    private uint[] ColumnClasses()
+    {
+        if (_classUnits is not { } units || _rowCount <= 0)
+        {
+            return [];
+        }
+
+        List<uint> classes = new List<uint>(units.Length);
+        for (int field = 0; field < units.Length / ChunkClasses.Count; field++)
+        {
+            int count = classes.Count;
+            classes.Add(0);
+            for (int kind = 0; kind < ChunkClasses.Count; kind++)
+            {
+                long held = units[(field * ChunkClasses.Count) + kind];
+                if (held > 0)
+                {
+                    ulong share = (((ulong)held * 256) + (ulong)_rowCount - 1) / (ulong)_rowCount;
+                    classes.Add((uint)Math.Min(share, uint.MaxValue >> 3) << 3 | (uint)kind);
+                    classes[count]++;
+                }
+            }
+        }
+
+        return [.. classes];
+    }
+
+    /// <summary>
+    /// The table of contents of a file: its rows, its key's sparse index, its chunk directories, its variant columns' path
     /// directories.
     /// </summary>
     private ObjectContents Contents(
-        SliceTable table, SliceChunks chunks, IndexSegment[] directories, List<(int Field, IndexSegment Region)> pathDirectories, ChunkPaging? paging,
-        List<(int Field, IndexSegment Region)> sheets, List<(int Field, IndexSegment Region)> counts, List<(int Field, IndexSegment Region)> sketches,
-        List<(int Field, IndexSegment Region)> blocks, List<(int Field, IndexSegment Region)> blockStats, List<(int Field, IndexSegment Region)> wheres,
-        long[] columnBytes, long[] columnChunks) =>
-        new ObjectContents(Types.Serialization.DTypeFlatBuffers.Serialize(_schema), chunks.Encodings, table, directories, pathDirectories)
+        IndexSegment? keyIndex, IndexSegment? keyPages, SliceChunks chunks, IndexSegment[] directories, List<(int Field, IndexSegment Region)> pathDirectories, ChunkPaging? paging,
+        List<(int Field, IndexSegment Region)> sheets, List<(int Field, IndexSegment Region)> counts, List<(int Field, int[] Measures, bool LeavesOut)> carried,
+        List<(int Field, IndexSegment Region)> sketches,
+        List<(int Field, IndexSegment Region)> granuleStats, long[] listed, long[] single, List<(int Component, IndexSegment Region, long SingleRows)> keyRuns,
+        List<(int Field, IndexSegment Region)> granuleHistograms, List<(int Field, IndexSegment Region)> locates,
+        List<(int Field, string Key, Types.Variants.PathClass Class, IndexSegment Region)> pathLocates,
+        List<(int Field, string Key, Types.Variants.PathClass Class, IndexSegment Region)> pathStats, List<long> pathSingle,
+        long[] columnBytes, long[] columnChunks, IndexSegment[] marks, ColumnDictionary?[] dictionaries) =>
+        new ObjectContents(Types.Serialization.DTypeFlatBuffers.Serialize(_schema), chunks.Encodings, _rowCount, directories, pathDirectories)
         {
+            KeyIndex = keyIndex,
+            KeyPages = keyPages,
             Paging = paging,
             Sheets = sheets,
             Counts = counts,
+            Carried = carried,
             Sketches = sketches,
-            Blocks = blocks,
-            BlockStats = blockStats,
-            Wheres = wheres,
+            GranuleStats = granuleStats,
+            GranuleHistograms = granuleHistograms,
+            Locates = locates,
+            PathLocates = pathLocates,
+            PathGranuleStats = pathStats,
+            PathSingleRows = pathSingle,
             ColumnBytes = columnBytes,
             ColumnChunks = columnChunks,
-            PureBlockRows = blocks.Count > 0 && _blocks is { } declared ? declared.Table.PureRows : -1,
+            ColumnClasses = ColumnClasses(),
+            ColumnWholeBytes = _isTabular && _wholeBytes is { } whole ? whole : [],
+            PureGranuleRows = granuleStats.Count > 0 ? PureGranuleRows() : -1,
+            ListedRows = listed,
+            SingleRows = single,
+            KeyRuns = keyRuns,
+            Marks = marks,
+            Dictionaries = dictionaries,
         };
 
     /// <summary>
     /// The entries of the locating indexes as the table of contents names them: each on the field of the root its path
-    /// starts with, the root's own for none, at its region in the file, the directory written at <paramref name="offset"/>
+    /// starts with, the root's own for none, with the key of a variant column it lies on and the bytes of its segments, at
+    /// its region in the file, the directory written at <paramref name="offset"/>
     /// with the bytes <paramref name="directory"/>, where <paramref name="located"/> says each lies; null for none.
     /// </summary>
     private static LocatingEntry[]? Locating(List<(IndexEntry Entry, int Start, int Length)> located, byte[] directory, long offset)
@@ -225,10 +275,23 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         for (int i = 0; i < entries.Length; i++)
         {
             (IndexEntry entry, int start, int length) = located[i];
+            long bytes = entry.WrittenBytes;
+            foreach (IndexRun run in bytes > 0 ? [] : entry.Runs)
+            {
+                foreach (IndexSegment payload in run.Payload)
+                {
+                    bytes += payload.Length;
+                }
+            }
+
             entries[i] = new LocatingEntry(
                 entry.ColumnPath.Count > 0 ? entry.ColumnPath[0] : IndexDirectory.RootColumn,
                 entry.Kind,
-                IndexSegment.Of(offset + start, directory.AsSpan(start, length), 0));
+                IndexSegment.Of(offset + start, directory.AsSpan(start, length), 0))
+            {
+                Key = entry.VariantPath is { Count: > 0 } keys ? string.Join(Compute.VariantFieldExpr.NestedKeys, keys) : null,
+                Bytes = bytes,
+            };
         }
 
         return entries;
@@ -317,6 +380,9 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// <summary>The rows after which every column that gathers writes what it holds, or 0 (<see cref="VortexWriteOptions.GatheredGroupRows"/>).</summary>
     private long _groupRows;
 
+    /// <summary>The encoded bytes the columns that gather aim their chunks at, or 0 (<see cref="VortexWriteOptions.GatheredChunkBytes"/>).</summary>
+    private long _gatheredBytes;
+
     /// <summary>The rows the columns that gather took since their chunks last ended together.</summary>
     private long _groupTaken;
 
@@ -324,26 +390,35 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     private long? _sheetBytes;
 
     /// <summary>
-    /// What the columns that gather hold and have not written, as the bytes it would encode to at each one's last rate:
-    /// what a caller sizing the file adds to the bytes its sink took.
+    /// What the writer holds and has not written, as the bytes it would encode to: what each column that gathers holds, at
+    /// its last rate, and the rows that wait for a chunk of the file, staged or in transit, at the rate of what the columns
+    /// hold, their mean rate when they hold nothing, a first guess with none: what a caller sizing the file adds to the
+    /// bytes its sink took.
     /// </summary>
-    internal long GatheredBytes
+    internal long HeldBytes
     {
         get
         {
-            long held = 0;
+            long canonical = 0;
+            double encoded = 0;
+            double rates = 0;
+            int columns = 0;
             if (_gathering is { } gathering)
             {
                 foreach (Gathering? column in gathering)
                 {
                     if (column is not null)
                     {
-                        held += (long)(column.Bytes * column.Rate);
+                        canonical += column.Bytes;
+                        encoded += column.Bytes * column.Rate;
+                        rates += column.Rate;
+                        columns++;
                     }
                 }
             }
 
-            return held;
+            double rate = canonical > 0 ? encoded / canonical : columns > 0 ? rates / columns : Gathering.FirstRate;
+            return (long)(encoded + ((_pendingBytes + (_staging?.Bytes ?? 0)) * rate));
         }
     }
 
@@ -358,6 +433,9 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
     /// <summary>By column, the shredded keys whose values are counted block by block; null when no column shreds one.</summary>
     private (int Index, string Key, Types.Variants.PathClass Class)[]?[]? _countedKeys;
+
+    /// <summary>By column, the counts of its shredded keys over the chunk being written, emptied for each (BoundsFor).</summary>
+    private ChunkBlockBounds?[]? _chunkBounds;
 
     /// <summary>By column, the block statistics of its shredded keys as its chunks are written.</summary>
     private VariantBlockStats.Builder?[]? _blockStats;
@@ -418,75 +496,88 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     private static readonly byte[] Magic = VortexFileFormat.MagicBytes.ToArray();
     private readonly bool _fileStatistics;
 
+    /// <summary>Whether the file keeps its columns' zone maps (<see cref="VortexWriteOptions.Zones"/>).</summary>
+    private bool _zones = true;
+
     /// <summary>The identity the options pinned, or null for a fresh one.</summary>
     private readonly Guid? _identity;
     // Null when the policy asks for nothing, so such a write allocates none of the index machinery.
     private readonly IndexWriter? _indexes;
 
-    // The time slices the caller declared, written with the indexes at completion; null for none.
-    private (int Field, SliceTable Table)? _slices;
+    // The geometry of each column's chunks, collected as their blobs are written, for a file that carries a table of
+    // contents: what a reader of a few granules needs before their bytes (ColumnMarks); null for a file that carries none.
+    private List<ChunkGeometry>[]? _geometry;
+    private ChunkGeometryBuilder? _geometryBuilder;
 
-    // The blocks the caller declared on its key's first column, written after the counts at completion; null for none.
-    private (int Field, BlockTable Table)? _blocks;
+    // The units each column's values cost the processor, by class (ChunkClasses), a column's classes after the other's,
+    // added as their chunks' blobs are written, for a file that carries a table of contents; null for one that carries none.
+    private long[]? _classUnits;
 
-    // Where the blocks end, which the caller declares as it writes and every column's statistics over them read; null for
-    // a file that keeps none.
-    private BlockCuts? _cuts;
+    // The bytes of each column's chunks that a read of a part of one reads whole (ChunkGeometryBuilder.WholeOf), added as their
+    // blobs are written, for a file that carries a table of contents; null for one that carries none.
+    private long[]? _wholeBytes;
+
+    // Whether the file carries a table of contents (VortexWriteOptions.CarriesContents).
+    private bool _carriesContents;
+
+    // What each column's index of where its values lie is handed to once complete (VortexWriteOptions.Located); null for none.
+    private Func<int, byte[], CancellationToken, ValueTask>? _located;
+
+    // The sparse index of the file's key the caller declared, the key of each granule's first row and the last row's, built
+    // and written at completion; null for none.
+    private (int Components, IReadOnlyList<byte[]> Keys, byte[] LastKey, long PureRows)? _keyIndex;
+
+    // The values each component of the key that is a function of a column takes in each granule, which the caller declared,
+    // each its place in the key, its region's bytes and the rows of its granules of one value; written at completion.
+    private IReadOnlyList<(int Component, byte[] Region, long SingleRows)>? _keyRuns;
 
     /// <summary>
-    /// Declares that a block ends after the file's first <paramref name="rows"/> rows, before the rows it ends in are
-    /// written: every column's statistics over the blocks cut there (<see cref="VortexWriteOptions.Blocked"/>). The
-    /// blocks declared at completion (<see cref="DeclareBlocks"/>) must end at the same rows, or the file keeps no
-    /// statistics over them. Nothing for a file that keeps none.
+    /// Declares the values each component of the file's key that is a function of a column takes in each granule
+    /// (<see cref="GranuleKeyRuns"/>), which completion writes and names in the table of contents beside the key's sparse
+    /// index: the caller, which writes its rows in the key's order, counts them as they come.
     /// </summary>
-    internal void EndBlock(long rows) => _cuts?.Add(rows);
-
-    /// <summary>
-    /// Declares the file's blocks on its key's first column <paramref name="column"/>, which completion writes in a region
-    /// its table of contents names: the caller, which writes its rows in the key's order, knows where the column's values
-    /// change. They must cover the file's rows once, which completion checks.
-    /// </summary>
-    /// <exception cref="InvalidOperationException">The writer builds no index, so it writes no directory to hold them.</exception>
-    /// <exception cref="ArgumentException"><paramref name="column"/> names no top-level column.</exception>
-    internal void DeclareBlocks(string column, BlockTable table)
+    /// <exception cref="InvalidOperationException">The writer carries no table of contents, or cuts no granules.</exception>
+    internal void DeclareKeyRuns(IReadOnlyList<(int Component, byte[] Region, long SingleRows)> runs)
     {
-        ArgumentNullException.ThrowIfNull(table);
-        if (_indexes is null)
+        ArgumentNullException.ThrowIfNull(runs);
+        if (!_carriesContents || _indexes is null || _blockRows <= 0)
         {
-            throw new InvalidOperationException("A file's blocks ride in its index directory, which a writer that builds no index does not write.");
+            throw new InvalidOperationException("A key's values by granule ride in the file's table of contents, over granules, which this writer does not write.");
         }
 
-        int field = _isTabular ? _schema.IndexOfField(column) : -1;
-        _blocks = field >= 0
-            ? (field, table)
-            : throw new ArgumentException($"'{column}' is no top-level column of the file.", nameof(column));
+        _keyRuns = runs;
     }
 
     /// <summary>
-    /// Declares the file's time slices on its top-level instant column <paramref name="column"/>, which
-    /// completion writes into the index directory: the caller, which writes its rows slice by slice,
-    /// knows them. They must cover the file's rows once, in order, which completion checks.
+    /// The rows of the file's granules that hold one value of its key's indexed prefix (<see cref="ObjectContents.PureGranuleRows"/>),
+    /// which the caller declared with its sparse index; -1 when it declared none.
     /// </summary>
-    /// <exception cref="InvalidOperationException">The writer builds no index, so it writes no directory to hold them.</exception>
-    /// <exception cref="ArgumentException"><paramref name="column"/> names no top-level column.</exception>
-    internal void DeclareSlices(string column, SliceTable table)
+    private long PureGranuleRows() => _keyIndex is { } declared ? declared.PureRows : -1;
+
+    /// <summary>
+    /// Declares the sparse index of the file's key (<see cref="GranuleKeys"/>): the key of the first row of each granule of
+    /// <see cref="BlockRows"/> rows, row-encoded over <paramref name="components"/> components, and the last row's, which
+    /// completion builds the index of, writes and names in the table of contents; and the rows of the granules that hold one
+    /// value of the components, <paramref name="pureRows"/> (<see cref="ObjectContents.PureGranuleRows"/>). The caller, which
+    /// writes its rows in the key's order, knows them; the keys are the writer's until it completes.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">The writer carries no table of contents, or cuts no granules.</exception>
+    internal void DeclareKeyIndex(int components, IReadOnlyList<byte[]> keys, byte[] lastKey, long pureRows)
     {
-        ArgumentNullException.ThrowIfNull(table);
-        if (_indexes is null)
+        ArgumentNullException.ThrowIfNull(keys);
+        ArgumentNullException.ThrowIfNull(lastKey);
+        if (!_carriesContents || _indexes is null || _blockRows <= 0)
         {
-            throw new InvalidOperationException("A file's time slices ride in its index directory, which a writer that builds no index does not write.");
+            throw new InvalidOperationException("A file's key index rides in its table of contents, over granules, which this writer does not write.");
         }
 
-        int field = _isTabular ? _schema.IndexOfField(column) : -1;
-        _slices = field >= 0
-            ? (field, table)
-            : throw new ArgumentException($"'{column}' is no top-level column of the file.", nameof(column));
+        _keyIndex = (components, keys, lastKey, pureRows);
     }
 
     /// <summary>
     /// Declares the path directory of the top-level variant column <paramref name="column"/> before the file completes,
     /// as <see cref="VortexWriteOptions.VariantDirectories"/> does before its first row: a caller that counts the paths as
-    /// it writes the rows, and the slices they fall in, declares it once the last is written.
+    /// it writes the rows, and the groups of rows they fall in, declares it once the last is written.
     /// </summary>
     /// <exception cref="ArgumentException"><paramref name="column"/> is no top-level variant column of the file.</exception>
     internal void DeclareDirectory(string column, VariantDirectory directory)
@@ -514,7 +605,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             for (int chunk = 0; chunk < spans.Length; chunk++)
             {
                 SegmentSpec spec = _segments[segments[chunk]];
-                spans[chunk] = new ChunkSpan(spec.Offset, spec.Length, spec.AlignmentExponent, row, chunkRows[chunk]);
+                spans[chunk] = new ChunkSpan(spec.Offset, spec.Length, spec.AlignmentExponent, row, chunkRows[chunk], chunk);
                 row += chunkRows[chunk];
             }
 
@@ -550,8 +641,9 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         long blockBytes, bool fileStatistics, WritePolicy indexes, int indexBudgetPerMille, IKeyEncoder? keyEncoder,
         int stringBoundBytes, Guid? identity, string? scratchDirectory, long scratchMemoryBytes, long wideRowsAbove,
         FenceShape fences, bool elementStatistics, IReadOnlyDictionary<string, EncodingHint>? hints, bool budgetSparesRequired,
-        bool sealScratch = false, bool carriesSlices = false,
-        IReadOnlyList<(int Field, string Key, Types.Variants.PathClass Class)>? variantKeys = null)
+        bool sealScratch = false, bool carriesContents = false,
+        IReadOnlyList<(int Field, string Key, Types.Variants.PathClass Class)>? variantKeys = null,
+        Func<string, IHashTap?>? hashTaps = null, long hashedUnitBytes = 0)
     {
         VortexRuntimeChecks.Require();
         _sink = sink;
@@ -595,10 +687,10 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             Pin(hints);
         }
 
-        _indexes = IndexWriter.Asks(indexes) || carriesSlices
+        _indexes = IndexWriter.Asks(indexes) || carriesContents
             ? new IndexWriter(
                 indexes, schema, _isTabular, _fieldCount, indexBudgetPerMille, _blockRows, keyEncoder,
-                scratchDirectory, scratchMemoryBytes, wideRowsAbove, sealScratch, variantKeys)
+                scratchDirectory, scratchMemoryBytes, wideRowsAbove, sealScratch, variantKeys, hashTaps, hashedUnitBytes)
             {
                 Fences = fences,
                 BudgetSparesRequired = budgetSparesRequired,
@@ -769,9 +861,6 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         }
     }
 
-    /// <summary>The schema every batch must match.</summary>
-    internal DType DType => _schema;
-
     /// <summary>Starts a file over <paramref name="sink"/>.</summary>
     /// <param name="sink">Where the bytes go.</param>
     /// <param name="schema">The file's dtype. A struct makes it tabular; anything else is one column.</param>
@@ -820,8 +909,9 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             options.StringBoundBytes, options.Identity, options.ScratchDirectory, options.ScratchMemoryBytes,
             options.WideRowsAbove, options.Fences, options.ElementStatistics, options.EncodingHints, options.BudgetSparesRequired,
             options.SealScratch,
-            options.CarriesSlices || options.ColumnSheetBytes is not null || options.ShreddedVariants is { Count: > 0 } || options.VariantDirectories is { Count: > 0 },
-            IndexWriter.Asks(indexes) ? IndexedKeys(schema, options.ShreddedVariants) : null)
+            options.CarriesContents || options.ColumnSheetBytes is not null || options.ShreddedVariants is { Count: > 0 } || options.VariantDirectories is { Count: > 0 },
+            IndexWriter.Asks(indexes) || options.Granulated ? IndexedKeys(schema, options.ShreddedVariants) : null,
+            options.HashTaps, options.HashedUnitBytes)
         {
             _sizeFirst = options.Compression == CompressionProfile.Smallest,
             _zstdLevel = options.ZstdLevel,
@@ -829,8 +919,22 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             _automaticChunks = options.AutomaticChunks,
             _lanes = options.DegreeOfParallelism > 0 ? options.DegreeOfParallelism : session?.Options.MaxDegreeOfParallelism ?? 1,
             _budget = session?.WriteLanes,
+            _located = options.Located,
+            _zones = options.Zones,
         };
         writer._leastChunkBlocks = LeastChunkBlocks(options.RowBound, schema, writer._rowBlock);
+        if (options.CarriesContents)
+        {
+            writer._carriesContents = true;
+            writer._classUnits = new long[writer._fieldCount * ChunkClasses.Count];
+            writer._wholeBytes = new long[writer._fieldCount];
+            writer._geometry = new List<ChunkGeometry>[writer._fieldCount];
+            for (int field = 0; field < writer._fieldCount; field++)
+            {
+                writer._geometry[field] = [];
+            }
+        }
+
         if (writer._indexes is { } built)
         {
             built.Spared = options.BudgetSpares;
@@ -859,6 +963,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             {
                 gathering[field] ??= Gathering.Encoded(options.GatheredChunkBytes);
             }
+
+            writer._gatheredBytes = options.GatheredChunkBytes;
         }
 
         writer._groupRows = writer._gathering is null ? 0 : options.GatheredGroupRows;
@@ -874,11 +980,11 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             {
                 writer._indexes?.AddCounts(plan);
 
-                // And each column's statistics over the blocks the caller declares, with where each value lives.
-                if (options.Blocked && writer._indexes is { } blocked)
+                // And each column's statistics over the granules, and where each value lies, granule by granule.
+                if (options.Granulated && writer._indexes is { } granulated)
                 {
-                    writer._cuts = new BlockCuts();
-                    blocked.AddBlockStats(schema, writer._cuts);
+                    granulated.AddGranuleStats(schema);
+                    granulated.AddLocates(schema);
                 }
             }
         }
@@ -908,6 +1014,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             if (ChunkBlockBounds.Counted(column.Value) is { Length: > 0 } counted)
             {
                 (writer._countedKeys ??= new (int, string, Types.Variants.PathClass)[]?[writer._fieldCount])[field] = counted;
+                writer._chunkBounds ??= new ChunkBlockBounds?[writer._fieldCount];
                 writer._variantTextBound = options.StringBoundBytes;
             }
 
@@ -1202,9 +1309,15 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
         // The writer's own builder hands its chunks over already cut, whole blocks with nothing in
         // transit, and those go out as they are, like any sealed batch.
-        if (_automaticChunks && !(seal && _pending.Count == 0 && rows % _rowBlock == 0))
+        // Under columns that gather, rows written at once are taken a few blocks at a time, the widest column's bytes those a
+        // gathered chunk aims at: a column cuts its chunks where the file's end, and a merge that hands over long runs would
+        // leave chunks of a whole run, which a read of a few rows fetches whole.
+        long gathered = _gatheredBytes > 0 && rows > _rowBlock ? GatheredChunkRows(arena, root, rows) : long.MaxValue;
+        if ((_automaticChunks && !(seal && _pending.Count == 0 && rows % _rowBlock == 0)) || gathered < rows)
         {
-            await WriteInChunksAsync(arena, root, rows, cancellationToken).ConfigureAwait(false);
+            (long widest, long total) = _automaticChunks ? ColumnBytes(arena, root) : (0, 0);
+            long chunk = _automaticChunks ? Math.Min(AutomaticChunkRows(widest, total, rows), gathered) : gathered;
+            await WriteInChunksAsync(arena, root, rows, chunk, cancellationToken).ConfigureAwait(false);
             while (seal && _pendingRows >= _rowBlock)
             {
                 await EmitBlockAsync(cancellationToken).ConfigureAwait(false);
@@ -1235,7 +1348,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     }
 
     /// <summary>
-    /// Takes a batch into chunks the writer sizes, cutting it where its chunks end before anything
+    /// Takes a batch into chunks of <paramref name="chunk"/> rows, cutting it where its chunks end before anything
     /// reads it: every chunk it holds whole is written where it lies, and the rest waits in transit
     /// for the rows that complete its chunk, which then goes out whole with nothing carried.
     /// </summary>
@@ -1246,10 +1359,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// width -- its widest column and all of them, per row -- and the rows already in transit keep
     /// theirs until their chunk goes out.
     /// </remarks>
-    private async ValueTask WriteInChunksAsync(CanonicalArena arena, int root, int rows, CancellationToken cancellationToken)
+    private async ValueTask WriteInChunksAsync(CanonicalArena arena, int root, int rows, long chunk, CancellationToken cancellationToken)
     {
-        (long widest, long total) = ColumnBytes(arena, root);
-        long chunk = AutomaticChunkRows(widest, total, rows);
         int offset = 0;
         while (offset < rows)
         {
@@ -1289,6 +1400,17 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         {
             await EmitBlockAsync(cancellationToken).ConfigureAwait(false);
         }
+    }
+
+    /// <summary>
+    /// The rows a batch of <paramref name="rows"/> rows is taken in under columns that gather: whole blocks whose widest
+    /// column's canonical bytes are those a gathered chunk aims at, a block at least.
+    /// </summary>
+    private long GatheredChunkRows(CanonicalArena arena, int root, int rows)
+    {
+        (long widest, _) = ColumnBytes(arena, root);
+        long perBlock = Math.Max(1, widest * _rowBlock / rows);
+        return Math.Max(1, _gatheredBytes / perBlock) * _rowBlock;
     }
 
     /// <summary>
@@ -1764,7 +1886,6 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
         indexes.AccumulateKeys(arena, _fieldNodes, start, count);
         indexes.AccumulateNested(arena, _fieldNodes, start, count);
-        indexes.AccumulateVariants(arena, _fieldNodes, start, count);
     }
 
     /// <summary>Seals the open block of every column.</summary>
@@ -1838,11 +1959,17 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         }
     }
 
+    /// <summary>The rows of the granules a reader reads a part of a chunk by: the block, in a file that carries its table of contents.</summary>
+    private int GranuleReadRows => _carriesContents ? _blockRows : 0;
+
     /// <summary>
     /// The workspace every blob is assembled in, one after the other: a column's chunk, a zone map,
     /// an index payload.
     /// </summary>
-    private ArrayBlobWriter.Workspace Blobs => _blobs ??= new ArrayBlobWriter.Workspace { FrameRows = _rowBlock, Fan = Fan, SizeFirst = _sizeFirst, ZstdLevel = _zstdLevel };
+    private ArrayBlobWriter.Workspace Blobs => _blobs ??= new ArrayBlobWriter.Workspace
+    {
+        FrameRows = _rowBlock, GranuleRows = GranuleReadRows, Fan = Fan, SizeFirst = _sizeFirst, ZstdLevel = _zstdLevel,
+    };
 
     /// <summary>The writer's threads, or null when it has one.</summary>
     private WorkFan? Fan => _lanes > 1 ? _fan ??= WorkFan.Rent(_lanes, _budget) : null;
@@ -2059,10 +2186,15 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         // statistics of its rows as they came do not describe.
         ChunkStats stats = default;
         ChunkBlockBounds? bounds = null;
-        if (_shredding?[field] is { } plan)
+        VariantShredding? plan = _shredding?[field];
+        if (plan is not null)
         {
             bounds = BoundsFor(field);
-            node = VariantShredder.Shred(arena, new DTypeArena(), node, plan, bounds);
+        }
+        else if (Codes(field))
+        {
+            // The chunk's codes, which the statistics of its values do not describe.
+            node = Coded(field, arena, node);
         }
         else
         {
@@ -2074,7 +2206,9 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         blobs.ColumnLevel = ZstdLevelOf(field);
         try
         {
-            blob = ArrayBlobWriter.Write(blobs, arena, node, _arrayEncodings, _compress, stats);
+            blob = plan is not null
+                ? VariantShredder.Write(blobs, arena, node, plan, bounds, _arrayEncodings, _compress)
+                : ArrayBlobWriter.Write(blobs, arena, node, _arrayEncodings, _compress, stats);
         }
         finally
         {
@@ -2086,7 +2220,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
     /// <summary>
     /// The shredded keys an index policy may index, each in the class its typed column holds: the
-    /// top-level primitive keys of each variant column <paramref name="shredding"/> names; null for none.
+    /// primitive keys of each variant column <paramref name="shredding"/> names, top-level or nested in its objects, a
+    /// nested one under the name its keys give it (<see cref="Compute.VariantFieldExpr.KeyName"/>); null for none.
     /// </summary>
     private static List<(int Field, string Key, Types.Variants.PathClass Class)>? IndexedKeys(
         DType schema, IReadOnlyDictionary<string, VariantShredding>? shredding)
@@ -2102,25 +2237,49 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
             foreach (ShreddedKey key in column.Value.Keys)
             {
-                if (key.Field.Kind == VariantShreddingKind.Primitive)
-                {
-                    (keys ??= []).Add((field, key.Name, key.Field.Class switch
-                    {
-                        VariantClass.Integer => Types.Variants.PathClass.Integer,
-                        VariantClass.Double => Types.Variants.PathClass.Double,
-                        VariantClass.Boolean => Types.Variants.PathClass.Boolean,
-                        _ => Types.Variants.PathClass.String,
-                    }));
-                }
+                Collect(field, key, [], ref keys);
             }
         }
 
         return keys;
+
+        // A primitive key, or those an object's key holds, under the name the keys it steps through give it.
+        static void Collect(int field, ShreddedKey key, Compute.VariantStep[] above, ref List<(int, string, Types.Variants.PathClass)>? keys)
+        {
+            Compute.VariantStep[] steps = [.. above, Compute.VariantStep.Of(key.Name)];
+            if (Compute.VariantFieldExpr.KeyNameOf(steps) is not { } name)
+            {
+                return;
+            }
+
+            if (key.Field.Kind == VariantShreddingKind.Primitive)
+            {
+                (keys ??= []).Add((field, name, key.Field.Class switch
+                {
+                    VariantClass.Integer => Types.Variants.PathClass.Integer,
+                    VariantClass.Double => Types.Variants.PathClass.Double,
+                    VariantClass.Boolean => Types.Variants.PathClass.Boolean,
+                    _ => Types.Variants.PathClass.String,
+                }));
+            }
+            else if (key.Field.Kind == VariantShreddingKind.Object)
+            {
+                foreach (ShreddedKey nested in key.Field.Keys)
+                {
+                    Collect(field, nested, steps, ref keys);
+                }
+            }
+        }
     }
 
-    /// <summary>Where a chunk of column <paramref name="field"/> counts its shredded keys block by block; null when it counts none.</summary>
+    /// <summary>
+    /// Where a chunk of column <paramref name="field"/> counts its shredded keys block by block, the column's counts
+    /// emptied of the chunk before, which the file's statistics took as its blob went out; null when it counts none.
+    /// </summary>
     private ChunkBlockBounds? BoundsFor(int field) =>
-        _countedKeys?[field] is { } keys ? new ChunkBlockBounds(keys, _blockRows, _variantTextBound) : null;
+        _countedKeys?[field] is { } keys
+            ? (_chunkBounds![field] ??= new ChunkBlockBounds(keys, _blockRows, _variantTextBound)).Cleared()
+            : null;
 
     /// <summary>
     /// The ingest statistics of column <paramref name="field"/> over the chunk, counted for the
@@ -2128,6 +2287,11 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// </summary>
     private ChunkStats ChunkStatsOf(int field, CanonicalArena arena, int node, long rows, int firstBlock, int blocks)
     {
+        if (Codes(field))
+        {
+            return default;
+        }
+
         // The chunk's statistics, computed at ingest over exactly these rows. The chooser checks the
         // row count against the node it is given and measures the column again when they disagree,
         // so a mismatch costs a pass and never a wrong plan.
@@ -2170,7 +2334,17 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
         using (blob)
         {
-            _written[field].Add(WrittenAs.Of(blob.Memory.Span, _arrayEncodings.Ids, _isTabular ? _schema.GetField(field) : _schema));
+            if (Codes(field))
+            {
+                // The column's values, right before its first chunk.
+                await WriteDictionaryAsync(field, cancellationToken).ConfigureAwait(false);
+                _written[field].Add(nameof(EncodingHint.Dictionary));
+            }
+            else
+            {
+                _written[field].Add(WrittenAs.Of(blob.Memory.Span, _arrayEncodings.Ids, _isTabular ? _schema.GetField(field) : _schema));
+            }
+
             // A tree that declares no buffer, a sequence's, is the chunk whole: inlined in the flat's
             // metadata as well, it spares a read of the chunk its segment, which keeps the blob for
             // a reader that ignores the field. A reader older than the editions of 2026 refuses a
@@ -2181,6 +2355,29 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                 if (!tree.IsEmpty)
                 {
                     _flatMetadata.AddTree(field, _columnSegments[field].Count, tree);
+                }
+            }
+
+            if (_geometry is { } geometry)
+            {
+                // The chunk's tree, and where its granules start in its buffers of variable length, while its blob is in hand.
+                long rows = _columns[field].Chunk(firstBlock, blocks).Rows;
+                ChunkGeometryBuilder builder = _geometryBuilder ??= new ChunkGeometryBuilder();
+                ChunkGeometry chunk = builder.Of(blob.Memory.Span, _arrayEncodings.Ids, ChunkType(field), checked((int)rows), _blockRows);
+                geometry[field].Add(chunk);
+
+                // What a read of any part of it reads whole, which a planner prices each chunk a part of the column touches by.
+                _wholeBytes![field] += builder.WholeOf(chunk, _arrayEncodings.Ids, ChunkType(field), checked((int)rows), _blockRows);
+
+                // What its values cost the processor: a code a row gathered through the column's dictionary, or what its tree holds.
+                Span<long> units = _classUnits.AsSpan(field * ChunkClasses.Count, ChunkClasses.Count);
+                if (Codes(field))
+                {
+                    units[(int)IO.EncodingClass.Medium] += rows;
+                }
+                else
+                {
+                    ChunkClasses.Add(blob.Memory.Span, _arrayEncodings.Ids, _isTabular ? _schema.GetField(field) : _schema, rows, units);
                 }
             }
 
@@ -2293,6 +2490,12 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         }
     }
 
+    /// <summary>
+    /// The canonical bytes a column that gathers to encoded bytes (<see cref="VortexWriteOptions.GatheredChunkBytes"/>)
+    /// holds at most, in its targets: what a job's memory counts its writer's columns at.
+    /// </summary>
+    internal const int MostGatheredPerTarget = 16;
+
     /// <summary>The rows a column with a chunk target of its own holds until they reach it, and the chunks it has written.</summary>
     private sealed class Gathering(long target)
     {
@@ -2300,13 +2503,13 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         /// The share of its canonical bytes a column's first chunk is guessed to encode to, before one has: a column of
         /// codes or of narrow integers takes less, and its next chunks gather more.
         /// </summary>
-        private const double FirstRate = 0.25;
+        internal const double FirstRate = 0.25;
 
         /// <summary>
-        /// The least share a column is taken to encode to: past 16 times its target in canonical bytes, it holds no more,
-        /// which bounds what a writer holds of a column that compresses better still.
+        /// The least share a column is taken to encode to: past <see cref="MostGatheredPerTarget"/> times its target in
+        /// canonical bytes, it holds no more, which bounds what a writer holds of a column that compresses better still.
         /// </summary>
-        private const double LeastRate = 1.0 / 16;
+        private const double LeastRate = 1.0 / MostGatheredPerTarget;
 
         internal readonly long Target = target;
         internal readonly List<int> Nodes = [];
@@ -2404,6 +2607,10 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
         await EmitGatheredAsync(cancellationToken).ConfigureAwait(false);
 
+        // The values of a column written against an object dictionary went out before its first chunk; those of a column
+        // no chunk was written of, after the data.
+        await WriteDictionariesAsync(cancellationToken).ConfigureAwait(false);
+
         // The last runs, after the last data segment and before the zone maps: the generation the
         // end of the data left open, and the file-level filter.
         long dataEnd = _sink.Position;
@@ -2419,10 +2626,6 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         _indexes?.SettleBudget(dataEnd - interleaved);
         await FlushIndexesAsync(cancellationToken, judged: true).ConfigureAwait(false);
         _indexes?.Close(_columns, _chunkRows, _blockRows, dataEnd - interleaved);
-        if (_slices is { } slices)
-        {
-            _indexes!.AddSlices(slices.Field, slices.Table, _rowCount, _blockRows);
-        }
 
         // Before any byte of the tail: a file missing an index its policy required is not completed.
         if (_indexes?.MissingRequired() is { } missing)
@@ -2432,7 +2635,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         }
 
         // The columns' sheets and counts, then a long run's fence pages, which name the regions just written, then where the
-        // chunks of a sliced file lie, for a reader that opens no footer.
+        // chunks of a file with a table of contents lie, for a reader that opens no footer.
         if (_indexes is { } closed)
         {
             // What each column holds, for a question on a value the file lacks, which passes it unopened; and each column's
@@ -2441,10 +2644,16 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             // no read of those bridges them. A file too small for a reader to ask its sheets before it keeps neither.
             List<(int Field, IndexSegment Region)> sheets = [];
             List<(int Field, IndexSegment Region)> counts = [];
+            List<(int Field, int[] Measures, bool LeavesOut)> carried = [];
             List<(int Field, IndexSegment Region)> sketches = [];
-            List<(int Field, IndexSegment Region)> blocks = [];
             List<(int Field, IndexSegment Region)> stated = [];
-            List<(int Field, IndexSegment Region)> wheres = [];
+            long[] listed = [];
+            long[] single = [];
+            List<(int Field, IndexSegment Region)> histogrammed = [];
+            List<(int Field, IndexSegment Region)> locates = [];
+            List<(int Field, string Key, Types.Variants.PathClass Class, IndexSegment Region)> pathLocates = [];
+            List<(int Field, string Key, Types.Variants.PathClass Class, IndexSegment Region)> pathStats = [];
+            List<long> pathSingle = [];
             bool keepsSheets = _sheetBytes is { } least && _sink.Position >= least;
             for (int field = 0; keepsSheets && field < _fieldCount; field++)
             {
@@ -2462,6 +2671,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                 {
                     counts.Add((field, await closed.AddColumnRegionAsync(
                         _sink, IndexKinds.ColumnCounts, field, counted.Counts, _rowCount, _blockRows, cancellationToken).ConfigureAwait(false)));
+                    carried.Add((field, counted.Measures, counted.LeavesOut));
                     if (counted.Sketches is { } sketched)
                     {
                         sketches.Add((field, await closed.AddColumnRegionAsync(
@@ -2470,32 +2680,74 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                 }
             }
 
-            // The blocks of the key's first column, which a sliced file's table of contents names beside the counts; as its sheets
-            // and counts, kept only by a file large enough for a reader to ask them before it, which a smaller one reads whole.
-            if (_blocks is { } declared && _slices is not null && keepsSheets)
+            // Each column's statistics over the granules, which a question reads to answer them without their rows, side by side
+            // for a question of sums to read in one request, then the measures' histograms, which a quantile reads with them;
+            // which a file's table of contents names beside the counts; as its sheets and counts, kept only by a file large
+            // enough for a reader to ask them before it, which a smaller one reads whole.
+            if (_carriesContents && keepsSheets)
             {
-                if (declared.Table.TotalRows != _rowCount)
+                List<(int Field, byte[] Bytes)> histograms = [];
+                for (int field = 0; field < _fieldCount; field++)
                 {
-                    throw new InvalidOperationException($"The blocks cover {declared.Table.TotalRows} rows of a file of {_rowCount}: they cover each row once.");
-                }
-
-                blocks.Add((declared.Field, await closed.AddColumnRegionAsync(
-                    _sink, IndexKinds.BlockTable, declared.Field, declared.Table.ToBytes(), _rowCount, _blockRows, cancellationToken).ConfigureAwait(false)));
-
-                // Each column's statistics over the blocks, right after where its values live, which a question on a value
-                // reads with them in one request.
-                for (int field = 0; _cuts is not null && field < _fieldCount; field++)
-                {
-                    if (closed.BlockStatsOf(field)?.Finish(declared.Table) is ({ } statistics, var where))
+                    if (closed.GranuleStatsOf(field)?.Finish(_rowCount) is { } finished)
                     {
-                        if (where is not null)
+                        if (finished.ListedRows > 0)
                         {
-                            wheres.Add((field, await closed.AddColumnRegionAsync(
-                                _sink, IndexKinds.ColumnWhere, field, where, _rowCount, _blockRows, cancellationToken).ConfigureAwait(false)));
+                            Array.Resize(ref listed, _fieldCount);
+                            listed[field] = finished.ListedRows;
+                        }
+
+                        if (finished.SingleRows > 0)
+                        {
+                            Array.Resize(ref single, _fieldCount);
+                            single[field] = finished.SingleRows;
                         }
 
                         stated.Add((field, await closed.AddColumnRegionAsync(
-                            _sink, IndexKinds.BlockStats, field, statistics, _rowCount, _blockRows, cancellationToken).ConfigureAwait(false)));
+                            _sink, IndexKinds.GranuleStats, field, finished.Statistics, _rowCount, _blockRows, cancellationToken).ConfigureAwait(false)));
+                        if (finished.Histograms is { } histogram)
+                        {
+                            histograms.Add((field, histogram));
+                        }
+                    }
+                }
+
+                foreach ((int field, byte[] histogram) in histograms)
+                {
+                    histogrammed.Add((field, await closed.AddColumnRegionAsync(
+                        _sink, IndexKinds.GranuleHistograms, field, histogram, _rowCount, _blockRows, cancellationToken).ConfigureAwait(false)));
+                }
+
+                // Where each value of each column lies, granule by granule, which a filter on a value reads before its granules.
+                for (int field = 0; field < _fieldCount; field++)
+                {
+                    if (closed.LocateOf(field)?.Finish(_rowCount, _blockRows) is { } lying)
+                    {
+                        if (_located is { } handed)
+                        {
+                            await handed(field, lying, cancellationToken).ConfigureAwait(false);
+                        }
+
+                        locates.Add((field, await closed.AddColumnRegionAsync(
+                            _sink, IndexKinds.ColumnLocate, field, lying, _rowCount, _blockRows, cancellationToken).ConfigureAwait(false)));
+                    }
+                }
+
+                // Where each value of each shredded key read in its class lies, a slot of the index writer each (spec E, 3.3),
+                // and its statistics over the granules.
+                for (int slot = _fieldCount; slot < closed.Slots; slot++)
+                {
+                    if (closed.VariantOf(slot) is { } path && closed.LocateOf(slot)?.Finish(_rowCount, _blockRows) is { } lying)
+                    {
+                        pathLocates.Add((path.Field, path.Key, path.Class, await closed.AddColumnRegionAsync(
+                            _sink, IndexKinds.ColumnLocate, slot, lying, _rowCount, _blockRows, cancellationToken).ConfigureAwait(false)));
+                    }
+
+                    if (closed.VariantOf(slot) is { } keyed && closed.GranuleStatsOf(slot)?.Finish(_rowCount) is { } finished)
+                    {
+                        pathStats.Add((keyed.Field, keyed.Key, keyed.Class, await closed.AddColumnRegionAsync(
+                            _sink, IndexKinds.GranuleStats, slot, finished.Statistics, _rowCount, _blockRows, cancellationToken).ConfigureAwait(false)));
+                        pathSingle.Add(finished.SingleRows);
                     }
                 }
             }
@@ -2503,9 +2755,38 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             await closed.WriteFencePagesAsync(_sink, cancellationToken).ConfigureAwait(false);
             SliceChunks? chunks = null;
             IndexSegment[] chunkDirectories = [];
+            IndexSegment[] marks = [];
+            ColumnDictionary?[] dictionaries = Dictionaries();
             ChunkPaging? paging = null;
-            if (_slices is not null)
+            IndexSegment? keyIndex = null;
+            IndexSegment? keyPages = null;
+            List<(int Component, IndexSegment Region, long SingleRows)> keyRuns = [];
+            if (_carriesContents)
             {
+                // The key's sparse index over the file's granules: its pages, when they do not ride in its table, then the
+                // table, which the table of contents names and the directory's entry holds.
+                if (_keyIndex is { } declaredKeys && _rowCount > 0)
+                {
+                    (byte[] table, byte[] pages) = GranuleKeys.Build(
+                        _blockRows, _rowCount, declaredKeys.Components, declaredKeys.Keys, declaredKeys.LastKey);
+                    if (pages.Length > 0)
+                    {
+                        keyPages = IndexSegment.Of(_sink.Position, pages, 0);
+                        await _sink.WriteAsync(pages, cancellationToken).ConfigureAwait(false);
+                    }
+
+                    keyIndex = IndexSegment.Of(_sink.Position, table, 0);
+                    await _sink.WriteAsync(table, cancellationToken).ConfigureAwait(false);
+                    closed.AddKeyIndex(table, keyPages, _rowCount, _blockRows);
+                }
+
+                // Beside it, the values of its components that are functions of a column, granule by granule.
+                foreach ((int component, byte[] region, long ones) in _rowCount > 0 ? _keyRuns ?? [] : [])
+                {
+                    keyRuns.Add((component, IndexSegment.Of(_sink.Position, region, 0), ones));
+                    await _sink.WriteAsync(region, cancellationToken).ConfigureAwait(false);
+                }
+
                 // The columns of more than a page of chunks, which start at the same rows, lay their directories in pages,
                 // the first row of each page the table of contents' once.
                 chunks = ChunkDirectory();
@@ -2515,6 +2796,20 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                 paging = paged is { } laid
                     ? new ChunkPaging(_chunkPageEntries, chunks.Columns[laid.Columns[0]].Length, laid.PageRows, laid.Columns)
                     : null;
+
+                // Each column's geometry beside where its chunks lie, when every chunk's was collected.
+                if (_geometry is { } geometry && Array.TrueForAll(geometry, static column => column.Count > 0)
+                    && chunks.Columns.Count == geometry.Length)
+                {
+                    ColumnMarks[] columns = new ColumnMarks[geometry.Length];
+                    for (int field = 0; field < columns.Length; field++)
+                    {
+                        columns[field] = new ColumnMarks(
+                            _blockRows, geometry[field].Count == chunks.Columns[field].Length ? [.. geometry[field]] : []);
+                    }
+
+                    marks = await closed.AddMarksAsync(_sink, columns, dictionaries, _rowCount, _blockRows, cancellationToken).ConfigureAwait(false);
+                }
             }
 
             // Where each shredded key of a variant column lies, for a reader of one key.
@@ -2544,11 +2839,11 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                 }
             }
 
-            // A sliced file's table of contents, now that every region it names is written.
-            if (_slices is { } sliced)
+            // The file's table of contents, now that every region it names is written.
+            if (_carriesContents)
             {
                 _contents = Contents(
-                    sliced.Table, chunks!, chunkDirectories, pathDirectories, paging, sheets, counts, sketches, blocks, stated, wheres, closed.ColumnBytes(_isTabular ? _fieldCount : 0), ColumnChunks());
+                    keyIndex, keyPages, chunks!, chunkDirectories, pathDirectories, paging, sheets, counts, carried, sketches, stated, listed, single, keyRuns, histogrammed, locates, pathLocates, pathStats, pathSingle, closed.ColumnBytes(_isTabular ? _fieldCount : 0), ColumnChunks(), marks, dictionaries);
             }
 
             // The block statistics of the shredded keys, where they can prune, within what the budget leaves.
@@ -2593,7 +2888,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             await _sink.WriteAsync(directory, cancellationToken).ConfigureAwait(false);
         }
 
-        // A sliced file's table of contents names the directory too, now that it is written, and the entry of each index
+        // A file's table of contents names the directory too, now that it is written, and the entry of each index
         // that locates a column's values in it, which a lookup reads alone.
         if (_contents is { } contents)
         {
@@ -2740,6 +3035,11 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// </remarks>
     private async ValueTask WriteZoneMapsAsync(CancellationToken cancellationToken)
     {
+        if (!_zones)
+        {
+            return;
+        }
+
         // An edition without `vortex.zoned` has nowhere to put a zone map. Omitted rather than
         // approximated with the legacy `vortex.stats`, which no reference release emits: pruning is
         // an optimization, so dropping it costs correctness nothing.
@@ -2929,6 +3229,12 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
                 int data = LayoutWriter.Write(
                     builder, chunked, (ulong)_rowCount, chunkedMetadata[..metadataLength], chunks.AsSpan(0, segments.Count), []);
+
+                // A column written against an object dictionary: its chunks are the codes, beside its values.
+                if (Codes(field))
+                {
+                    data = DictLayout(builder, field, data, flat);
+                }
 
                 fieldLayouts[field] = Zone(builder, field, data, ref zoned);
             }
@@ -3187,6 +3493,11 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                 {
                     values.Min = ScalarProtobuf.SerializeValue(Bound(scalars, stored.PType, merged.Min));
                     values.Max = ScalarProtobuf.SerializeValue(Bound(scalars, stored.PType, merged.Max));
+                }
+
+                if (stored.Kind == DTypeKind.Primitive && stored.PType.IsFloat() && !merged.NansUnknown)
+                {
+                    values.NanCount = (ulong)merged.NanCount;
                 }
             }
 

@@ -81,9 +81,6 @@ internal sealed class SealedSegmentReader : ISegmentReader
     /// <summary>What the object's trailer says: its descriptor and its epochs.</summary>
     internal SealedLayout Layout => _layout;
 
-    /// <summary>The source of the sealed bytes.</summary>
-    internal ISegmentReader Inner => _inner;
-
     /// <summary>
     /// Opens the sealed object <paramref name="inner"/> reads: one read of its trailer and its last
     /// frames, the data key from <paramref name="unwrap"/>, the commitment of every epoch checked, and

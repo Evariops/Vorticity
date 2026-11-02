@@ -41,19 +41,42 @@ public sealed class PlannerBudgetTests : IClassFixture<DatasetPlannerTests.Fixtu
     /// partials a scan begins ahead of the objects it reads next. The quantiles by service lowered the same day to 2 % above
     /// 338,928 bytes, the larger of this machine's figure and CI's Linux runner's, from 1,036,385: a quantile read in place
     /// from its sketch.
+    /// <para>
+    /// Measured again on 2026-10-27, after the redesign, an object an hour as before (the fixture's compaction aims past an
+    /// hour's bytes since a job's objects keep to their target). Cold, a question lists the learned partials of its family
+    /// and of the families that serve it, reads those families' texts and the partials that answer the appended objects,
+    /// and writes the partials it learns, which the fixture's store keeps for the questions after it: 6 to 17 requests,
+    /// fewer bytes where a partial answers what rows did. Warm, a plan weighs each object's alternatives and serves the
+    /// appended objects from their partials, each opened as a file: 2 to 24 % more than before, after what a945e8b0 to
+    /// the partial files without zones took off (1.2 MB an ask for count by route and day before them). The allocations
+    /// of the questions that pass keep their ceilings.
+    /// </para>
+    /// <para>
+    /// Set again on 2026-10-31, the learned partials withdrawn, each at what it measured, its allocations 2 % above: cold, a
+    /// question lists, reads and writes no partial, 6 requests, 2 for the aligned window, where it took 6 to 17; the two
+    /// appended objects, which keep no counts and no longer learn a partial as they are appended, are read as rows, 31 KB
+    /// more cold where a partial answered them (count by service 3,908 to 35,130 bytes, by hour of one service 4,969 to
+    /// 36,149), and warm their rows from the handle's open objects: 2 to 21 % more allocated, a quantile by service 81 %
+    /// less, its states no longer served from a partial's file.
+    /// </para>
+    /// <para>
+    /// The quantiles by service raised on 2026-11-01 to 2 % above 68,040 bytes: the granules' histograms kept at the grid a
+    /// quantile asks by default, the planner weighs the granules of each object for it too, where it declined them at once;
+    /// the same reads cold.
+    /// </para>
     /// </summary>
     private static readonly Dictionary<string, Budget> Ceilings = new(StringComparer.Ordinal)
     {
-        ["count by service"] = new(6, 41647, 0, 0, 45378),
-        ["count by service and hour"] = new(6, 41647, 0, 0, 51825),
-        ["measures by service"] = new(6, 41647, 0, 0, 69491),
-        ["count by day"] = new(6, 41647, 0, 0, 59062),
-        ["count by hour, one service"] = new(6, 41647, 0, 0, 64554),
-        ["count by service, an aligned window"] = new(2, 762, 0, 0, 37248),
-        ["measures by service, an unaligned window"] = new(5, 402495, 2, 270920, 78360),
-        ["quantiles by service"] = new(6, 74337, 0, 0, 345707),
-        ["distinct services by hour"] = new(6, 41647, 0, 0, 53513),
-        ["count by route and day"] = new(6, 93472, 0, 0, 56475),
+        ["count by service"] = new(6, 35130, 0, 0, 54664),
+        ["count by service and hour"] = new(6, 35386, 0, 0, 61837),
+        ["measures by service"] = new(6, 36149, 0, 0, 74436),
+        ["count by day"] = new(6, 36149, 0, 0, 67263),
+        ["count by hour, one service"] = new(6, 36149, 0, 0, 79895),
+        ["count by service, an aligned window"] = new(2, 401, 0, 0, 46047),
+        ["measures by service, an unaligned window"] = new(5, 402466, 2, 270920, 93375),
+        ["quantiles by service"] = new(6, 68839, 0, 0, 69401),
+        ["distinct services by hour"] = new(6, 35386, 0, 0, 63526),
+        ["count by route and day"] = new(6, 48486, 0, 0, 62669),
     };
 
     private readonly DatasetPlannerTests.Fixture _fixture;

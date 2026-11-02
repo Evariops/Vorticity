@@ -64,7 +64,7 @@ public sealed partial class DatasetGroupBudgetTests
     /// <summary>Six million rows in twelve objects, keys 0 to 5.7 M at random so that most keys hold one row, and some two.</summary>
     private static async Task FillAsync(IObjectStore store)
     {
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Counted.Schema, new DatasetOptions { ClusteringKey = [nameof(Counted.Id)] }, Ct);
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Counted.Schema, new DatasetOptions { Layout = new DatasetLayout { SortKey = [LayoutValue.Column(nameof(Counted.Id))] } }, Ct);
         Random random = new Random(0x5_7);
         for (int part = 0; part < 12; part++)
         {

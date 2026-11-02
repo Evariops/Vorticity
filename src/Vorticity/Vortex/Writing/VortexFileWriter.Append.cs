@@ -378,10 +378,14 @@ public sealed partial class VortexFileWriter
         BlockStats fresh = writer.Chunk(append.Boundary, writer.Blocks.Count - append.Boundary);
         DType column = Stored(_isTabular ? _schema.GetField(field) : _schema);
 
-        // Nulls: the old blocks' zones are exact, the new blocks' counts too.
+        // Nulls: the old blocks' zones are exact, the new blocks' counts too; a float's NaNs where every old zone stated its own.
         if (old.HasZones || append.Boundary == 0)
         {
             values.NullCount = (ulong)all.NullCount;
+            if (column.Kind == DTypeKind.Primitive && column.PType.IsFloat() && !all.NansUnknown)
+            {
+                values.NanCount = (ulong)all.NanCount;
+            }
         }
 
         // Bounds: the old statistics cover every old row, and every old row is in the file.
@@ -640,7 +644,7 @@ public sealed partial class VortexFileWriter
                     bool exact = bounds.IsExact && bounds.HasMin && bounds.HasMax;
                     blocks[z] = BlockStats.Summary(
                         zoneRows, bounds.NullCount, bounded,
-                        exact ? bounds.Min : null, exact ? bounds.Max : null, scheme);
+                        exact ? bounds.Min : null, exact ? bounds.Max : null, scheme, bounds.HasNanCount ? bounds.NanCount : null);
                     if (strings is not null)
                     {
                         strings[z] = OldString(bounds, zoneRows);
@@ -848,8 +852,12 @@ public sealed partial class VortexFileWriter
         /// <param name="tree">The file's layout.</param>
         /// <param name="field">The column.</param>
         /// <param name="refuse">What a shape this cannot continue throws; an append's refusal when null.</param>
+        /// <param name="codes">
+        /// Whether a column written against an object dictionary gives its codes' chunks, which hold its rows, as a reader of
+        /// its chunks takes them; an append, which would write rows the dictionary lacks, refuses it.
+        /// </param>
         internal static (LayoutNode Node, long ZoneLength) ColumnNode(
-            LayoutTree tree, int field, Func<string, VortexUnsupportedException>? refuse = null)
+            LayoutTree tree, int field, Func<string, VortexUnsupportedException>? refuse = null, bool codes = false)
         {
             refuse ??= Refused;
             LayoutNode root = tree.Root;
@@ -868,6 +876,11 @@ public sealed partial class VortexFileWriter
                 }
 
                 node = node.GetChild(0);
+            }
+
+            if (codes && node.Encoding == LayoutEncodingId.Dict && node.ChildCount == 2)
+            {
+                node = node.GetChild(1);
             }
 
             if (node.Encoding == LayoutEncodingId.Flat && node.Segments.Length == 1)

@@ -18,7 +18,7 @@ internal static class ConcurrentWriters
         await using MemoryObjectStore store = new MemoryObjectStore();
         await using VortexDataset a = await VortexDataset.CreateAsync(store, SpanCount.Schema, new DatasetOptions
         {
-            ClusteringKey = [SpanCount.ColumnNames.Until],
+            Layout = new DatasetLayout { SortKey = [LayoutValue.Column(SpanCount.ColumnNames.Until)] },
         });
 
         SourceCommit start = await CountAsync(a, 0, 41_200);

@@ -32,10 +32,191 @@ internal sealed class RunEndDecoder : ArrayDecoder
     public override bool SelectsWithoutFullDecode => true;
 
     /// <inheritdoc/>
+    public override bool EvaluatesWithoutFullDecode => true;
+
+    /// <inheritdoc/>
     public override int Decode(ArrayDecodeContext context, in ArrayNode node, DType dtype, int length)
     {
         ArgumentNullException.ThrowIfNull(context);
         return Core(context, in node, dtype, length, wanted: default, selective: false, start: 0, count: length);
+    }
+
+    /// <summary>
+    /// Judges each run's value once, asked of the values' own encoding or over them decoded, and spreads the verdicts over
+    /// the runs' rows: a cost of the runs and of the rows over 64, where decoding writes every row.
+    /// </summary>
+    /// <remarks>
+    /// The verdicts are the comparison kernels' over the run values (<see cref="Compute.ValueVerdicts"/>), so the answer is
+    /// the one the decoded column gives, a null run unknown. It declines a node of as many runs as rows, which has nothing to
+    /// spare, and a match of bytes on no text.
+    /// </remarks>
+    /// <inheritdoc/>
+    public override bool TryEvaluate(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, Compute.EncodedPredicate predicate,
+        ref Compute.PredicateBits bits)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        if (predicate.Kind is Compute.EncodedPredicateKind.Prefix or Compute.EncodedPredicateKind.Contains
+            && dtype.Kind is not (DTypeKind.Utf8 or DTypeKind.Binary))
+        {
+            return false;
+        }
+
+        ArrayDecodeContext.RequireBufferCount(node.BufferCount, 0, Id);
+        ArrayDecodeContext.RequireChildCount(node.ChildCount, 2, Id);
+        RunEndMetadata metadata = RunEndMetadata.Read(node.Metadata);
+        if (!metadata.EndsPType.IsUnsignedInteger())
+        {
+            CompressedThrow.Format(
+                $"{Id} run ends must be unsigned integers; the metadata declares {metadata.EndsPType.Name()}.");
+        }
+
+        int runCount = ArrayDecodeContext.CheckedLength(metadata.NumRuns, Id, "num_runs");
+        int offset = ArrayDecodeContext.CheckedLength(metadata.Offset, Id, "offset");
+        if (runCount == 0 || runCount >= length)
+        {
+            return false;
+        }
+
+        DType endsType = context.Types.Primitive(metadata.EndsPType, Nullability.NonNullable);
+        int endsIndex = context.DecodeChild(in node, 0, endsType, runCount);
+        ReadOnlySpan<byte> ends = CompressedValues.RequireIndexChild(context, endsIndex, metadata.EndsPType, runCount, Id, "ends");
+        if (!context.IsNodeChecked(in node))
+        {
+            ValidateEnds(ends, metadata.EndsPType, runCount, offset, length);
+            context.MarkNodeChecked(in node);
+        }
+
+        int words = Compute.PredicateBits.WordsOf(runCount);
+        ulong[] answers = System.Buffers.ArrayPool<ulong>.Shared.Rent(2 * words);
+        byte[] rented = System.Buffers.ArrayPool<byte>.Shared.Rent(2 * runCount);
+        try
+        {
+            // A state a run: the values' encoding asked first, a dictionary answering on its own values, else the values
+            // decoded, one a run, and judged.
+            Span<byte> states = rented.AsSpan(0, runCount);
+            Compute.PredicateBits runs = new Compute.PredicateBits(answers.AsSpan(0, words), answers.AsSpan(words, words), runCount);
+            if (context.TryEvaluateChild(in node, 1, dtype, runCount, predicate, ref runs))
+            {
+                for (int run = 0; run < runCount; run++)
+                {
+                    ulong bit = 1UL << (run & 63);
+                    states[run] = (runs.Truth[run >> 6] & bit) != 0 ? Compute.Trilean.True
+                        : runs.Unknown && (runs.Known[run >> 6] & bit) == 0 ? Compute.Trilean.Unknown
+                        : Compute.Trilean.False;
+                }
+            }
+            else
+            {
+                int valuesIndex = context.DecodeChild(in node, 1, dtype, runCount);
+                ValueReader values = ValueReader.Of(context.Canonical, valuesIndex, Id);
+                if (values.Length != runCount)
+                {
+                    CompressedThrow.ChildLength(Id, "values", values.Length, runCount);
+                }
+
+                if (!Compute.ValueVerdicts.TryJudge(context.Canonical, valuesIndex, predicate, states, rented.AsSpan(runCount, runCount)))
+                {
+                    return false;
+                }
+            }
+
+            Spread(ends, metadata.EndsPType, runCount, offset, length, states, ref bits);
+            return true;
+        }
+        finally
+        {
+            System.Buffers.ArrayPool<byte>.Shared.Return(rented);
+            System.Buffers.ArrayPool<ulong>.Shared.Return(answers);
+        }
+    }
+
+    /// <summary>
+    /// The runs' states over their rows, from the run row 0 falls in: a range set a run selected, and a state a row once a
+    /// run is unknown, which a null value makes.
+    /// </summary>
+    private static void Spread(
+        ReadOnlySpan<byte> ends, PType endsPType, int runCount, int offset, int length, ReadOnlySpan<byte> states,
+        ref Compute.PredicateBits bits)
+    {
+        int first = FindRun(ends, endsPType, runCount, (ulong)offset, 0);
+        if (first < 0)
+        {
+            CompressedThrow.Format($"{Id} row 0 falls outside the {length} rows its runs cover.");
+        }
+
+        byte[]? rows = states[first..].Contains(Compute.Trilean.Unknown)
+            ? System.Buffers.ArrayPool<byte>.Shared.Rent(length)
+            : null;
+        try
+        {
+            bits.Fill(false);
+            Span<byte> spread = rows is null ? default : rows.AsSpan(0, length);
+
+            // The ends' type resolved once for the walk, as the checks and a take's searches resolve it.
+            int position = endsPType switch
+            {
+                PType.U8 => Spread(MemoryMarshal.Cast<byte, byte>(ends)[..runCount], first, (ulong)offset, length, states, spread, ref bits),
+                PType.U16 => Spread(MemoryMarshal.Cast<byte, ushort>(ends)[..runCount], first, (ulong)offset, length, states, spread, ref bits),
+                PType.U32 => Spread(MemoryMarshal.Cast<byte, uint>(ends)[..runCount], first, (ulong)offset, length, states, spread, ref bits),
+                PType.U64 => Spread(MemoryMarshal.Cast<byte, ulong>(ends)[..runCount], first, (ulong)offset, length, states, spread, ref bits),
+                _ => throw new System.Diagnostics.UnreachableException($"{Id} run ends are checked unsigned before they are walked."),
+            };
+
+            if (position != length)
+            {
+                CompressedThrow.Format(
+                    $"{Id} runs cover {position} of {length} rows; the last run end must reach offset + length.");
+            }
+
+            if (rows is not null)
+            {
+                bits.FromStates(spread);
+            }
+        }
+        finally
+        {
+            if (rows is not null)
+            {
+                System.Buffers.ArrayPool<byte>.Shared.Return(rows);
+            }
+        }
+    }
+
+    /// <summary>
+    /// The walk of <see cref="Spread(ReadOnlySpan{byte}, PType, int, int, int, ReadOnlySpan{byte}, ref Compute.PredicateBits)"/>
+    /// from run <paramref name="first"/>: a range set a run selected, or each run's state over its rows into
+    /// <paramref name="spread"/> when it is not empty; the rows covered.
+    /// </summary>
+    private static int Spread<TEnd>(
+        ReadOnlySpan<TEnd> ends, int first, ulong offset, int length, ReadOnlySpan<byte> states, Span<byte> spread,
+        ref Compute.PredicateBits bits)
+        where TEnd : unmanaged
+    {
+        ref TEnd start = ref MemoryMarshal.GetReference(ends);
+        int position = 0;
+        for (int run = first; run < ends.Length && position < length; run++)
+        {
+            ulong end = End(ref start, run) - offset;
+            int endRow = end > (ulong)(uint)length ? length : (int)end;
+            if (endRow <= position)
+            {
+                continue;
+            }
+
+            if (!spread.IsEmpty)
+            {
+                spread[position..endRow].Fill(states[run]);
+            }
+            else if (states[run] == Compute.Trilean.True)
+            {
+                bits.SetRange(position, endRow - position);
+            }
+
+            position = endRow;
+        }
+
+        return position;
     }
 
     /// <inheritdoc/>

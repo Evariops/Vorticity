@@ -28,7 +28,7 @@ namespace Vorticity.Dataset;
 /// <remarks>
 /// Nothing here knows a time: a window on an instant is a conjunct like any, which an object's summaries prove true over
 /// its rows or not, and a truncation of an instant a function like any, constant over an object or not. The objects the
-/// application cuts by its values (<see cref="ClusteringOptions"/>) answer whole the questions that keep to those values.
+/// application partitions (<see cref="DatasetLayout.Partition"/>) answer whole the questions that keep to their partitions.
 /// </remarks>
 internal sealed class CountsAnswer
 {
@@ -51,7 +51,7 @@ internal sealed class CountsAnswer
 
     private CountsAnswer(
         StateRequest request, DatasetSchema version, int? column, bool keyed, byte[][]? values, VortexExpr? rest,
-        (int Field, string Path, FieldExpr Key)[] constants)
+        (int Field, string Path, FieldExpr Key)[] constants, bool readsPaths)
     {
         VortexSchema columns = version.Columns;
         DType schema = version.DType;
@@ -59,6 +59,7 @@ internal sealed class CountsAnswer
         _schema = version;
         Column = column;
         Keyed = keyed;
+        ReadsPaths = readsPaths;
         Values = values;
         _rest = rest is null ? null : new SummaryPruner(rest);
         _constants = constants;
@@ -92,6 +93,12 @@ internal sealed class CountsAnswer
     /// <summary>The column a key or the filter reads, whose counts answer; null for a question of no column, which any column's counts answer.</summary>
     internal int? Column { get; }
 
+    /// <summary>
+    /// Whether a key or a measure reads a path of a variant, whose values no object's counts hold: no object nor rollup is
+    /// answered by them, and the batches' layout serves the statistics of the path's granules alone (<see cref="GranuleAnswer"/>).
+    /// </summary>
+    internal bool ReadsPaths { get; }
+
     /// <summary>Whether a key or a distinct count reads the column's values, which the entries of the values a budget left out do not give.</summary>
     internal bool Keyed { get; }
 
@@ -124,28 +131,33 @@ internal sealed class CountsAnswer
 
     /// <summary>
     /// How the objects' counts answer <paramref name="request"/> under <paramref name="filter"/> over the columns of
-    /// <paramref name="version"/>; null when they answer no object of it: a key of two columns that are no function of
-    /// each other, a key, a value or a measure on a path, or a measure no column is. Every object is then read as rows.
+    /// <paramref name="version"/>; null when they answer no object of it, nor lay out batches for its granules: a key of
+    /// no top-level column, or a measure that is neither such a column nor a path. Every object is then read as rows. A
+    /// key or a measure on a path answers no object either, but lays the batches out (<see cref="ReadsPaths"/>).
     /// </summary>
-    internal static CountsAnswer? Of(StateRequest request, VortexExpr? filter, DatasetSnapshot version)
+    internal static CountsAnswer? Of(StateRequest request, VortexExpr? filter, DatasetSnapshot version) => Of(request, filter, version, out _);
+
+    /// <summary><see cref="Of(StateRequest, VortexExpr?, DatasetSnapshot)"/>, and why it declines, for an explanation; null when it does not.</summary>
+    internal static CountsAnswer? Of(StateRequest request, VortexExpr? filter, DatasetSnapshot version, out string? declined)
     {
         DType schema = version.Schema.DType;
         if (schema.IsDefault)
         {
+            declined = "the version has no columns";
             return null;
         }
 
         // The filter: values of one column by equality or a set, which its counts answer; every other conjunct, which an
         // object's summaries prove true over its rows. Values of the key's first column, under a question keyed by another
-        // column, are proven so too: the clustering holds a value's rows together, so that each object holds the values
+        // column, are proven so too: the sort key holds a value's rows together, so that each object holds the values
         // asked alone, and the other column's counts answer it whatever that column holds.
         int? column = null;
         List<byte[]>? values = null;
         List<VortexExpr> rest = [];
-        (int Field, string Path, VortexExpr Found)? exclusion = null;
+        ExcludedValue? exclusion = null;
         if (filter is not null)
         {
-            int? leading = version.Schema.Key is { } clustering ? Top(Expr.Field(clustering.InstantPath), schema) : null;
+            int? leading = version.Schema.KeyColumns is [{ } first, ..] ? Top(Expr.Field(first), schema) : null;
             bool keyedElsewhere = false;
             foreach (FieldExpr key in request.Keys)
             {
@@ -171,7 +183,7 @@ internal sealed class CountsAnswer
                     && other.Value.Kind != FilterLiteralKind.Null && Top(excluded, schema) is int identifier
                     && Identifies(version.Schema, identifier))
                 {
-                    exclusion = (identifier, excluded.Path, new ComparisonExpr(excluded, ComparisonOp.Equal, other.Value));
+                    exclusion = new ExcludedValue(identifier, excluded.Path, new ComparisonExpr(excluded, ComparisonOp.Equal, other.Value));
                     continue;
                 }
 
@@ -182,8 +194,16 @@ internal sealed class CountsAnswer
         // The keys: a column itself is the one counted, the first met when the filter asks none; another column, or a
         // function of one, each object holds constant; a function of the counted column, its counts give.
         List<(int Field, string Path, FieldExpr Key)> constants = [];
+        bool paths = false;
         foreach (FieldExpr key in request.Keys)
         {
+            // A path's values are no column's: no object's counts hold them, its granules' statistics may.
+            if (key is VariantFieldExpr)
+            {
+                paths = true;
+                continue;
+            }
+
             if (key is not ColumnFieldExpr)
             {
                 continue;
@@ -191,6 +211,7 @@ internal sealed class CountsAnswer
 
             if (Top(key, schema) is not int field)
             {
+                declined = "a key reads no top-level column";
                 return null;
             }
 
@@ -218,6 +239,7 @@ internal sealed class CountsAnswer
 
             if (Top(inner, schema) is not int field)
             {
+                declined = "a key is a function of no top-level column";
                 return null;
             }
 
@@ -227,11 +249,13 @@ internal sealed class CountsAnswer
             }
         }
 
-        // The measures: top-level columns, which the counts carry as numbers.
+        // The measures: top-level columns, which the counts carry as numbers; or paths, which their granules' statistics may.
         foreach (FieldExpr? input in request.InputFields)
         {
-            if (input is not null && Top(input, schema) is null)
+            paths |= input is VariantFieldExpr;
+            if (input is not (null or VariantFieldExpr) && Top(input, schema) is null)
             {
+                declined = "a measure reads no top-level column";
                 return null;
             }
         }
@@ -242,15 +266,16 @@ internal sealed class CountsAnswer
             keyed |= Top(Inner(key), schema) is int field && field == column;
         }
 
+        declined = null;
         return new CountsAnswer(
-            request, version.Schema, column, keyed, values?.ToArray(), GroupPredicates.And(null, rest), [.. constants])
+            request, version.Schema, column, keyed, values?.ToArray(), GroupPredicates.And(null, rest), [.. constants], paths)
         {
             Exclusion = exclusion,
         };
     }
 
     /// <summary>Whether a column of <paramref name="dtype"/> named <paramref name="path"/> holds no null: its type says so, or the summaries.</summary>
-    private static bool NoNull(ObjectSummaries summaries, string path, DType dtype) =>
+    internal static bool NoNull(ObjectSummaries summaries, string path, DType dtype) =>
         !dtype.IsNullable || (summaries.TryGet(path, out ColumnSummary column) && column.HasNullCount && column.NullCount == 0);
 
     /// <summary>Whether column <paramref name="field"/> of <paramref name="version"/> is a declared identifier, which every job indexes.</summary>
@@ -276,32 +301,49 @@ internal sealed class CountsAnswer
     /// object whose summaries do not prove the column holds none is read as rows. Null for none; a second is a conjunct
     /// like any, which summaries prove or not.
     /// </summary>
-    internal (int Field, string Path, VortexExpr Found)? Exclusion { get; private init; }
+    internal ExcludedValue? Exclusion { get; private init; }
 
     /// <summary>
     /// The summaries an object <paramref name="held"/> is judged by: its entry's, the key's first column bounded by its keys
-    /// where they do not bound it (<see cref="PositionedObject.Summaries"/>).
+    /// where they do not bound it, the partition's column held to its value (<see cref="PositionedObject.Summaries(DatasetSchema)"/>).
     /// </summary>
-    internal ObjectSummaries SummariesOf(in PositionedObject held) => held.Summaries(_schema.Key);
+    internal ObjectSummaries SummariesOf(in PositionedObject held) => held.Summaries(_schema);
 
     /// <summary>
     /// The column whose counts answer for the object <paramref name="held"/>: the column asked, or for a question of no
     /// column the one whose counts' region is least; null when its rows are read: rows a delete marked, which its counts
     /// still hold, unless the delete counted them and the question subtracts them; a conjunct or a key its summaries do
-    /// not prove true over every row or constant; no counts of the column; or columns of an earlier schema, which its
-    /// counts name by their places.
+    /// not prove true over every row or constant; no counts of the column that answer (<see cref="Carries"/>); or columns of
+    /// an earlier schema, which its counts name by their places.
     /// </summary>
-    internal int? FieldOf(in PositionedObject held)
+    internal int? FieldOf(in PositionedObject held) => FieldOf(held, out _);
+
+    /// <summary><see cref="FieldOf(in PositionedObject)"/>, and why no column answers, for an explanation; null when one does.</summary>
+    internal int? FieldOf(in PositionedObject held, out string? declined)
     {
         ObjectEntry entry = held.Entry;
-        if ((entry.HasDeletions && !(entry.HasNegatives && Subtracts)) || entry.Contents is not { Counts.Count: > 0 } contents || !_schema.Holds(entry))
+        if (ReadsPaths)
         {
+            declined = "a key or a measure reads a path, whose values no object's counts hold";
+            return null;
+        }
+
+        if (entry.HasDeletions && !(entry.HasNegatives && Subtracts))
+        {
+            declined = "a delete marked rows its counts still hold";
+            return null;
+        }
+
+        if (entry.Contents is not { Counts.Count: > 0 } contents || !_schema.Holds(entry))
+        {
+            declined = entry.Contents is { Counts.Count: > 0 } ? "its columns are an earlier schema's" : "it keeps no counts";
             return null;
         }
 
         ObjectSummaries summaries = SummariesOf(held);
         if (_rest is { } rest && !rest.MustMatch(summaries.Columns, entry.PhysicalRows))
         {
+            declined = "its summaries do not prove the filter's conjuncts on other columns true over its rows";
             return null;
         }
 
@@ -310,6 +352,7 @@ internal sealed class CountsAnswer
         if (Exclusion is (int excluded, string excludedPath, _)
             && (!Subtracts || entry.HasDeletions || contents.DirectoryRegion is null || !NoNull(summaries, excludedPath, _schema.DType.GetField(excluded))))
         {
+            declined = !Subtracts ? "a value is left out of a question its counts cannot subtract from" : "a value is left out where its postings or its column's nulls are unknown";
             return null;
         }
 
@@ -317,12 +360,44 @@ internal sealed class CountsAnswer
         {
             if (ConstantOf(summaries, path, key) is null)
             {
+                declined = "a key's column is not constant in it, nor the counted one";
                 return null;
             }
         }
 
-        int counted = Column ?? Least(contents.Counts);
-        return contents.CountsOf(counted) is null ? null : counted;
+        int? answered = Column is { } asked
+            ? contents.CountsOf(asked) is not null && Carries(contents, asked) ? asked : null
+            : Least(contents);
+        declined = answered is null ? "its counts of the column do not carry what the question reads" : null;
+        return answered;
+    }
+
+    /// <summary>
+    /// Whether the counts of column <paramref name="field"/> of an object of <paramref name="contents"/> answer the request:
+    /// sketched under a quantile, and, as its contents say, carrying every measure it reads, and every value where a key or
+    /// the values asked read them, a budget having left none out; taken to where the contents do not say.
+    /// </summary>
+    private bool Carries(ObjectContents contents, int field)
+    {
+        if (AsksSketches && contents.SketchesOf(field) is null)
+        {
+            return false;
+        }
+
+        if (contents.CarriedOf(field) is not { } carried)
+        {
+            return true;
+        }
+
+        foreach ((_, int measure, _, _) in Measures)
+        {
+            if (Array.IndexOf(carried.Measures, measure) < 0)
+            {
+                return false;
+            }
+        }
+
+        return !carried.LeavesOut || (!Keyed && Values is null);
     }
 
     /// <summary>
@@ -333,7 +408,7 @@ internal sealed class CountsAnswer
     /// </summary>
     internal int? FieldOf(RollupEntry rollup)
     {
-        if ((_rest is { } rest && !rest.MustMatch(rollup.Summaries.Columns, rollup.Rows)) || rollup.Columns.Count == 0 || Exclusion is not null)
+        if ((_rest is { } rest && !rest.MustMatch(rollup.Summaries.Columns, rollup.Rows)) || rollup.Columns.Count == 0 || Exclusion is not null || ReadsPaths)
         {
             return null;
         }
@@ -360,13 +435,13 @@ internal sealed class CountsAnswer
     /// <summary>
     /// The column whose counts by bucket answer for the rollup <paramref name="rollup"/> bucket by bucket, where its totals
     /// do not (<see cref="FieldOf(RollupEntry)"/>), and the summaries of each bucket: the rollup's, the key's first column
-    /// bounded by the bucket's (<see cref="ClusteringKey.Within"/>), which prove every conjunct the counts do not hold true
+    /// bounded by the bucket's (<see cref="DatasetKey.Within"/>), which prove every conjunct the counts do not hold true
     /// over the bucket's rows and every other key constant; null for a bucket they refute the filter over
     /// (<paramref name="pruner"/>), which gives no row. Null when a bucket does neither, or the rollup keeps no buckets.
     /// </summary>
-    internal (int Field, ObjectSummaries?[] Buckets)? BucketsOf(RollupEntry rollup, ClusteringKey key, SummaryPruner? pruner)
+    internal (int Field, ObjectSummaries?[] Buckets)? BucketsOf(RollupEntry rollup, DatasetKey key, SummaryPruner? pruner)
     {
-        if (rollup.Buckets.Count < 2 || Exclusion is not null)
+        if (rollup.Buckets.Count < 2 || Exclusion is not null || ReadsPaths)
         {
             return null;
         }
@@ -584,15 +659,29 @@ internal sealed class CountsAnswer
     /// <summary>
     /// The batches' columns of <paramref name="request"/> over <paramref name="columns"/>: each key's column once, under the
     /// name a batch of states gives it, the rows, each measure's states, then the sketches a quantile asks, typed in
-    /// <paramref name="types"/>.
+    /// <paramref name="types"/>. A path a key or a measure reads is numbered past the columns, in the order the keys, then
+    /// the measures, first read it; a key's carries its values under its text, of the type its read gives them.
     /// </summary>
     internal static (int[] KeyFields, (string Name, int Field, bool Floats, bool Sketch)[] Measures, DType Type) Layout(
         StateRequest request, VortexSchema columns, DType schema, DTypeArena types)
     {
         List<int> keyFields = [];
         List<VortexField> fields = [];
+        List<string>? paths = null;
         foreach (FieldExpr key in request.Keys)
         {
+            if (key is VariantFieldExpr path)
+            {
+                int numbered = columns.Count + PathNumber(paths ??= [], path.Text);
+                if (!keyFields.Contains(numbered))
+                {
+                    keyFields.Add(numbered);
+                    fields.Add(new VortexField(path.Text, VariantFieldExpr.TypeOf(path.Read)));
+                }
+
+                continue;
+            }
+
             FieldExpr inner = Inner(key);
             int field = columns.IndexOf(inner.Path);
             if (!keyFields.Contains(field))
@@ -616,6 +705,12 @@ internal sealed class CountsAnswer
             if (at >= 0)
             {
                 measures[at] = measures[at] with { Sketch = measures[at].Sketch || sketch };
+                continue;
+            }
+
+            if (request.InputFields[i] is VariantFieldExpr path)
+            {
+                measures.Add((name, columns.Count + PathNumber(paths ??= [], path.Text), path.Read is VariantRead.AsDouble or VariantRead.ToDouble, sketch));
                 continue;
             }
 
@@ -646,6 +741,19 @@ internal sealed class CountsAnswer
         return ([.. keyFields], [.. measures], VortexTypes.ToDType(VortexSchema.Create([.. fields]), types));
     }
 
+    /// <summary>The place of the path <paramref name="text"/> among <paramref name="paths"/>, added at their end the first time.</summary>
+    private static int PathNumber(List<string> paths, string text)
+    {
+        int at = paths.IndexOf(text);
+        if (at < 0)
+        {
+            paths.Add(text);
+            at = paths.Count - 1;
+        }
+
+        return at;
+    }
+
     /// <summary>
     /// The column and the values <paramref name="conjunct"/> asks by equality, by a set, or by a disjunction of them over
     /// one column; (null, null) for any other.
@@ -666,16 +774,19 @@ internal sealed class CountsAnswer
             ? index
             : null;
 
-    /// <summary>The column of the least counts region among <paramref name="regions"/>.</summary>
-    private static int Least(IReadOnlyList<(int Field, IndexSegment Region)> regions)
+    /// <summary>The column of the least counts region of <paramref name="contents"/> among those that answer (<see cref="Carries"/>); null for none.</summary>
+    private int? Least(ObjectContents contents)
     {
-        (int field, long bytes) least = (regions[0].Field, long.MaxValue);
-        foreach ((int field, IndexSegment region) in regions)
+        (int Field, long Bytes)? least = null;
+        foreach ((int field, IndexSegment region) in contents.Counts)
         {
-            least = region.Length < least.bytes ? (field, region.Length) : least;
+            if (Carries(contents, field) && region.Length < (least?.Bytes ?? long.MaxValue))
+            {
+                least = (field, region.Length);
+            }
         }
 
-        return least.field;
+        return least?.Field;
     }
 
     /// <summary>The bytes of each of <paramref name="literals"/> as a column of <paramref name="dtype"/> stores them, each once; null for one it cannot hold so.</summary>
@@ -766,7 +877,7 @@ internal sealed class StateRows : StateTable
     }
 
     /// <summary>The rows of states: an entry each.</summary>
-    internal override int Count => _count;
+    internal int Count => _count;
 
     /// <inheritdoc/>
     protected override void FillWords(Span<long> into, int start, int word)
@@ -795,7 +906,12 @@ internal sealed class StateRows : StateTable
     protected override byte[]? KeyOf(int row, int key) => _constants[key] ?? ValueOf(_entries[row]);
 
     /// <inheritdoc/>
-    protected override byte[]? SketchOf(int row, int measure) => _sketches!.SketchOf(_entries[row], _places[measure]);
+    protected override bool SketchOf(int row, int measure, out ReadOnlySpan<byte> sketch)
+    {
+        byte[]? held = _sketches!.SketchOf(_entries[row], _places[measure]);
+        sketch = held;
+        return held is not null;
+    }
 
     /// <summary>The value of the group entry <paramref name="entry"/> belongs to; null for the nulls'.</summary>
     private byte[]? ValueOf(int entry)
@@ -818,4 +934,73 @@ internal sealed class StateRows : StateTable
 
         return groups[low].Value;
     }
+}
+
+/// <summary>
+/// One value of a declared identifier a filter leaves out (<see cref="CountsAnswer.Exclusion"/>), or of another column
+/// (<see cref="GranuleAnswer"/>): the column, its name, and the equality its postings, or another column's locate, Bloom
+/// filters or postings, place the rows of. The question that asks it places the value through it, an identifier's lookup
+/// over the partitions' indexes made once, the objects it may be placed in noted as the plan finds them, and its places in
+/// the objects answered through their granules as their reads find them; made apart, it costs nothing to the questions
+/// that leave no value out.
+/// </summary>
+internal sealed class ExcludedValue(int field, string path, VortexExpr found, bool identifier = true)
+{
+    private PartitionLookup? _lookup;
+    private bool _looked;
+    private HashSet<UInt128>? _placed;
+    private System.Collections.Concurrent.ConcurrentDictionary<UInt128, List<RowRange>?>? _places;
+
+    /// <summary>The value's column.</summary>
+    internal int Field { get; } = field;
+
+    /// <summary>
+    /// The shredded key of the variant column <see cref="Field"/> the value is left out of, read in a class its statistics
+    /// over the granules list; null for a column's value. A row that holds no value of the key is left out too.
+    /// </summary>
+    internal VariantFieldExpr? Key { get; init; }
+
+    /// <summary>
+    /// Whether the column is a declared identifier, whose postings place the value, an object they do not place it in left to
+    /// its rows; another column's is placed by its object's indexes, an object none of them places it in judged under the
+    /// whole filter.
+    /// </summary>
+    internal bool Identifier { get; } = identifier;
+
+    /// <summary>Its name, as the filter names it.</summary>
+    internal string Path { get; } = path;
+
+    /// <summary><c>id == v</c>, which the identifier's postings place the rows of.</summary>
+    internal VortexExpr Found { get; } = found;
+
+    /// <summary>The lookup of the value over the partitions' indexes of <paramref name="version"/>, made once; null where they hold none.</summary>
+    internal PartitionLookup? Lookup(VortexDataset dataset, DatasetSnapshot version)
+    {
+        if (!_looked)
+        {
+            _lookup = PartitionLookup.Of(dataset, version, Found);
+            _looked = true;
+        }
+
+        return _lookup;
+    }
+
+    /// <summary>
+    /// Notes <paramref name="places"/>, the runs of the rows of the object <paramref name="uid"/> that may hold the value, as
+    /// its read found them, beside its statistics; null where its postings did not say. Read side by side, objects note theirs
+    /// at once.
+    /// </summary>
+    internal void Hold(UInt128 uid, List<RowRange>? places) =>
+        System.Threading.LazyInitializer.EnsureInitialized(ref _places, static () => new System.Collections.Concurrent.ConcurrentDictionary<UInt128, List<RowRange>?>())[uid] = places;
+
+    /// <summary>The places of the value in the object <paramref name="uid"/> its read noted, taken; null for none.</summary>
+    internal List<RowRange>? PlacesOf(UInt128 uid) => _places is { } held && held.TryRemove(uid, out List<RowRange>? places) ? places : null;
+
+    /// <summary>Notes that the postings of an identifier may place the value in the object <paramref name="uid"/>.</summary>
+    internal void Place(UInt128 uid) => (_placed ??= []).Add(uid);
+
+    /// <summary>Whether the postings of an identifier may place the value in the object <paramref name="uid"/>, as noted.</summary>
+    internal bool Placed(UInt128 uid) => _placed?.Contains(uid) == true;
+
+    internal void Deconstruct(out int field, out string path, out VortexExpr found) => (field, path, found) = (Field, Path, Found);
 }

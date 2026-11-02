@@ -111,8 +111,8 @@ public sealed partial class ExtremeTests : IDisposable
                         ScanCounters metrics = new();
                         try
                         {
-                            footer = await file.Source.ExtremeAsync(new ScanSpec(), field, min, metrics, Ct);
-                            data = await file.Source.ExtremeAsync(new ScanSpec { Options = new ScanOptions { UseStatistics = false } }, field, min, new ScanCounters(), Ct);
+                            footer = (await file.Source.Rows.AnswerAsync(new ScanSpec(), new ExtremeShape(field, min), metrics, Ct)).Value;
+                            data = (await file.Source.Rows.AnswerAsync(new ScanSpec { Options = new ScanOptions { UseStatistics = false } }, new ExtremeShape(field, min), new ScanCounters(), Ct)).Value;
                         }
                         catch (Exception e) when (e is ArgumentException or NotSupportedException or VortexSchemaException or ParquetUnsupportedException or ParquetFormatException)
                         {

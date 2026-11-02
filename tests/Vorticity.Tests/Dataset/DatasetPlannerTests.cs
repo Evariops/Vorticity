@@ -59,25 +59,34 @@ public sealed partial class DatasetPlannerTests : IClassFixture<DatasetPlannerTe
         store.Reset();
         List<string> states = await AskAsync(dataset, question, synopses: true);
         (long requests, long bytes) = (store.Requests, store.BytesRead);
-        ScanPlan plan = await Ask(dataset, question, synopses: true).ExplainAsync(Ct);
-        Console.WriteLine($"PLANNER {question}: {rowBytes} bytes read as rows, {bytes} in {requests} requests with the counts of " +
-            $"{plan.States.Count(step => step.Read == "states")} objects");
+        ScanPlan plan = await Ask(dataset, question, synopses: true).ExplainAsync(analyze: true, Ct);
+        Console.WriteLine($"PLANNER {question}: {rowBytes} bytes read as rows, {bytes} in {requests} requests with the synopses of " +
+            $"{plan.Units.Count(Synopses)} objects");
         Assert.True(bytes < rowBytes, $"{question}: {bytes} bytes with the counts, against {rowBytes} as rows");
         Assert.NotEmpty(rows);
         Assert.Equal(rows, states);
-        Assert.Contains(plan.States, step => step.Read == "states");
+        Assert.Contains(plan.Units, Synopses);
     }
+
+    /// <summary>
+    /// Whether <paramref name="step"/> answers its unit from synopses rather than rows: an object's counts or its granules'
+    /// statistics, whichever weighs less, a rollup's totals, or the entry.
+    /// </summary>
+    internal static bool Synopses(UnitStep step) => step.Alternative is "counts" or "granules" or "rollup" or "entry";
 
     [Fact]
     public async Task AWindowThatCutsAnObjectReadsItsRows()
     {
         // Cut at 37.5 and 155.25 minutes, the window holds the second hour's object whole, whose counts answer, and reads the
-        // rows of the two it cuts; on the hours, it holds its two objects whole.
+        // rows of the two it cuts; on the hours, it holds its two objects whole, which their synopses answer: their counts or
+        // the statistics of their granules, whichever weighs less.
         await using VortexDataset dataset = await VortexDataset.OpenAsync(_fixture.Store, Options(), Ct);
-        ScanPlan plan = await Ask(dataset, "measures by service, an unaligned window", synopses: true).ExplainAsync(Ct);
-        Assert.Equal(1, plan.States.Count(step => step.Read == "states"));
-        ScanPlan aligned = await Ask(dataset, "count by service, an aligned window", synopses: true).ExplainAsync(Ct);
-        Assert.Equal(2, aligned.States.Count(step => step.Read == "states"));
+        ScanPlan plan = await Ask(dataset, "measures by service, an unaligned window", synopses: true).ExplainAsync(analyze: true, Ct);
+        Assert.Equal(1, plan.Units.Count(step => step.Alternative == "counts"));
+        Assert.Equal(2, plan.Units.Count(step => step.Alternative == "rows"));
+        ScanPlan aligned = await Ask(dataset, "count by service, an aligned window", synopses: true).ExplainAsync(analyze: true, Ct);
+        Assert.Equal(2, aligned.Units.Length);
+        Assert.All(aligned.Units, step => Assert.True(Synopses(step), $"{step.Unit} answered by its {step.Alternative}"));
     }
 
     // Questions drawn at random on the tables DatasetCountsTests draws, columns of every kind and nulls among them: a key
@@ -103,17 +112,20 @@ public sealed partial class DatasetPlannerTests : IClassFixture<DatasetPlannerTe
             (string[] keys, string[] results, string? filter) = Draw(random, columns, rows);
             string asked = $"seed {seed}: by ({string.Join(", ", keys)}) {string.Join(", ", results)} where {filter ?? "true"}";
             List<string> read = await AskAsync(dataset, keys, results, filter, synopses: false);
+
+            // The plan of the question asked first, before an answer learned of it: what its objects' synopses give.
+            ScanPlan plan = await Ask(dataset, keys, results, filter, synopses: true).ExplainAsync(analyze: true, Ct);
+            answered += plan.Units.Any(Synopses) ? 1 : 0;
             List<string> counted = await AskAsync(dataset, keys, results, filter, synopses: true);
             Assert.True(read.SequenceEqual(counted), $"{asked}: {read.Count} groups as rows, {counted.Count} with the counts, " +
                 $"first apart: '{read.Except(counted).FirstOrDefault()}' against '{counted.Except(read).FirstOrDefault()}'");
-            ScanPlan plan = await Ask(dataset, keys, results, filter, synopses: true).ExplainAsync(Ct);
-            answered += plan.States.Any(step => step.Read == "states") ? 1 : 0;
         }
 
         // A window that cuts every object it reaches reads their rows, and so does a number column of many values, which no
-        // counts keep: the counts answer a third of the questions at least.
-        Console.WriteLine($"PLANNER seed {seed}: the counts answered {answered} questions of {Questions}");
-        Assert.True(answered >= Questions / 3, $"seed {seed}: the counts answered {answered} questions of {Questions}");
+        // counts keep, and a measure of a number of few values, which the counts keep as a column of its own and carry as no
+        // measure: the synopses answer a fifth of the questions at least.
+        Console.WriteLine($"PLANNER seed {seed}: the synopses answered {answered} questions of {Questions}");
+        Assert.True(answered >= Questions / 5, $"seed {seed}: the synopses answered {answered} questions of {Questions}");
     }
 
     // The same questions drawn at random under a key led by a drawn column, a code of a few values, the rows of each value
@@ -135,8 +147,7 @@ public sealed partial class DatasetPlannerTests : IClassFixture<DatasetPlannerTe
         await using CountingObjectStore store = new CountingObjectStore(memory);
         await using VortexDataset dataset = await DatasetCountsTests.WriteAsync(store, columns, rows, new DatasetOptions
         {
-            ClusteringKey = ["c1", "At"],
-            Clustering = new ClusteringOptions { BlockValue = ClusteringValue.Truncate(CalendarUnit.Hour) },
+            Layout = new DatasetLayout { SortKey = [LayoutValue.Column("c1"), LayoutValue.Column("At").Truncate(CalendarUnit.Hour), LayoutValue.Column("At")], IndexedPrefix = 2 },
             ContentsObjectBytes = 0,
             SheetObjectBytes = 0,
         });
@@ -150,20 +161,20 @@ public sealed partial class DatasetPlannerTests : IClassFixture<DatasetPlannerTe
             List<string> answers = await AskAsync(dataset, keys, results, filter, synopses: true);
             Assert.True(read.SequenceEqual(answers), $"{asked}: {read.Count} groups as rows, {answers.Count} with the synopses, " +
                 $"first apart: '{read.Except(answers).FirstOrDefault()}' against '{answers.Except(read).FirstOrDefault()}'");
-            ScanPlan plan = await Ask(dataset, keys, results, filter, synopses: true).ExplainAsync(Ct);
-            answered += plan.States.Any(step => step.Read == "blocks") ? 1 : 0;
+            ScanPlan plan = await Ask(dataset, keys, results, filter, synopses: true).ExplainAsync(analyze: true, Ct);
+            answered += plan.Units.Any(step => step.Alternative == "granules") ? 1 : 0;
         }
 
         Console.WriteLine($"PLANNER BY A COLUMN seed {seed}: the blocks answered objects of {answered} questions of {Questions}");
         Assert.True(answered > 0, $"seed {seed}: the blocks answered no question");
 
-        // Every object that keeps its blocks keeps each column's statistics over them: merged from several inputs, its
-        // blocks end where its writes do too, which its columns' statistics must cut alike.
+        // Every object, its rows in the key's order, keeps its columns' statistics over its granules: merged from several inputs,
+        // its granules end where its writes do too, which its columns' statistics must cut alike.
         await foreach (PositionedObject held in dataset.ScanBuilder().ObjectsAsync(Ct))
         {
-            if (held.Entry.Contents is { Blocks.Count: > 0 } contents)
+            if (held.Entry.Contents is { } contents)
             {
-                Assert.True(contents.BlockStats.Count > 0, $"seed {seed}: an object of {held.Entry.Rows} rows keeps its blocks and no statistics over them");
+                Assert.True(contents.GranuleStats.Count > 0, $"seed {seed}: an object of {held.Entry.Rows} rows keeps no statistics over its granules");
             }
         }
     }
@@ -176,8 +187,7 @@ public sealed partial class DatasetPlannerTests : IClassFixture<DatasetPlannerTe
         await using MemoryObjectStore store = new MemoryObjectStore();
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Call.Schema, Options() with
         {
-            ClusteringKey = [nameof(Call.At)],
-            Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour) }, ContentsObjectBytes = 0,
+            Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(Call.At)).Truncate(CalendarUnit.Hour), SortKey = [LayoutValue.Column(nameof(Call.At))], Organization = LayoutOrganization.Leveled }, ContentsObjectBytes = 0,
         }, Ct);
         Random random = new Random(87);
         for (int part = 0; part < 24; part++)
@@ -358,8 +368,7 @@ public sealed partial class DatasetPlannerTests : IClassFixture<DatasetPlannerTe
         {
             await using VortexDataset dataset = await VortexDataset.CreateAsync(Store, Call.Schema, Options() with
             {
-                ClusteringKey = [nameof(Call.At)],
-                Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour) }, ContentsObjectBytes = 0,
+                Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(Call.At)).Truncate(CalendarUnit.Hour), SortKey = [LayoutValue.Column(nameof(Call.At))], Organization = LayoutOrganization.Leveled }, ContentsObjectBytes = 0,
             });
             Random random = new Random(83);
             int row = 0;
@@ -367,7 +376,7 @@ public sealed partial class DatasetPlannerTests : IClassFixture<DatasetPlannerTe
             {
                 if (part == Hours * 12)
                 {
-                    while (await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 2 }) is not null)
+                    while (await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 2, TargetBytesAtLevelOne = 1L << 30 }) is not null)
                     {
                     }
                 }

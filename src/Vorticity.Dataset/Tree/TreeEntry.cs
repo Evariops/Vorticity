@@ -6,7 +6,7 @@ namespace Vorticity.Dataset;
 /// One data object, as a leaf page carries it. Entries are ordered by <c>memcmp</c> over the key,
 /// which is what the row encoding exists to make meaningful.
 /// </summary>
-/// <param name="Key">Its sort key: the row-encoded clustering key, or its first row position.</param>
+/// <param name="Key">Its sort key: the row-encoded sort key, or its first row position.</param>
 /// <param name="Value">Everything else about the object, opaque to the tree.</param>
 /// <param name="Rows">The object's rows, summed up the tree.</param>
 internal readonly record struct TreeEntry(ReadOnlyMemory<byte> Key, ReadOnlyMemory<byte> Value, long Rows)

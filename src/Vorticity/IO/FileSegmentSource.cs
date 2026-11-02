@@ -96,13 +96,6 @@ public sealed class FileSegmentSource : ISegmentSource, ISegmentReader
     /// <exception cref="ArgumentNullException"><paramref name="path"/> is null.</exception>
     internal static FileSegmentSource Open(string path) => new FileSegmentSource(path);
 
-    /// <summary>Wraps an already-open handle with the default options.</summary>
-    /// <param name="handle">A readable file handle.</param>
-    /// <param name="ownsHandle">Whether <see cref="DisposeAsync"/> disposes the handle.</param>
-    /// <returns>A source over the whole file.</returns>
-    internal static FileSegmentSource Create(SafeFileHandle handle, bool ownsHandle) =>
-        new FileSegmentSource(handle, ownsHandle, SegmentReadOptions.Default);
-
     private static SafeFileHandle OpenHandle(string path)
     {
         ArgumentNullException.ThrowIfNull(path);

@@ -1,5 +1,5 @@
-// The planner's questions on a dataset without periods: its objects cut where the hour of their instant changes, by a
-// clustering value the application declares, each with its columns' counts once a job writes it.
+// The planner's questions on a dataset partitioned by the hour of its instant, a partition the application declares,
+// each object with its columns' counts once a job writes it.
 //
 // WHAT IS HELD: every question DatasetPlannerTests asks gives the same answer whether the objects' counts answer it as
 // states or every object is read as rows, and the counts answer some objects of each; the same with objects cut by size
@@ -41,12 +41,12 @@ public sealed partial class DatasetPlannerGenericTests : IClassFixture<DatasetPl
         await using VortexDataset dataset = await VortexDataset.OpenAsync(byHour ? _fixture.ByHour : _fixture.BySize, Options(), Ct);
         List<string> rows = await DatasetPlannerTests.AskAsync(dataset, question, synopses: false);
         List<string> states = await DatasetPlannerTests.AskAsync(dataset, question, synopses: true);
-        ScanPlan plan = await DatasetPlannerTests.Ask(dataset, question, synopses: true).ExplainAsync(Ct);
-        int answered = plan.States.Count(step => step.Read == "states");
-        Console.WriteLine($"PLANNER {(byHour ? "BY HOUR" : "BY SIZE")} {question}: the counts of {answered} objects answered");
+        ScanPlan plan = await DatasetPlannerTests.Ask(dataset, question, synopses: true).ExplainAsync(analyze: true, Ct);
+        int answered = plan.Units.Count(DatasetPlannerTests.Synopses);
+        Console.WriteLine($"PLANNER {(byHour ? "BY HOUR" : "BY SIZE")} {question}: the synopses of {answered} objects answered");
         Assert.NotEmpty(rows);
         Assert.Equal(rows, states);
-        Assert.True(!byHour || answered > 0, $"{question}: no object's counts answered");
+        Assert.True(!byHour || answered > 0, $"{question}: no object's synopses answered");
     }
 
     // The unaligned window of the planner's questions, cut at 37.5 and 155.25 minutes past noon, grows under AlignWindow to
@@ -58,10 +58,10 @@ public sealed partial class DatasetPlannerGenericTests : IClassFixture<DatasetPl
         await using VortexDataset dataset = await VortexDataset.OpenAsync(_fixture.ByHour, Options(), Ct);
         VortexExpr asked = VortexExpr.Parse("At >= '2026-10-19T12:37:30.0000000+00:00' and At < '2026-10-19T14:35:15.0000000+00:00'");
         Vorticity.Scan aligned = ByService(dataset, asked, new ScanOptions { AlignWindow = true });
-        ScanPlan plan = await aligned.ExplainAsync(Ct);
+        ScanPlan plan = await aligned.ExplainAsync(analyze: true, Ct);
         VortexExpr window = Assert.IsAssignableFrom<VortexExpr>(plan.Window);
         Console.WriteLine($"ALIGNED {asked} grows to {window}");
-        Assert.Equal(3, plan.States.Count(step => step.Read == "states"));
+        Assert.Equal(3, plan.Units.Count(DatasetPlannerTests.Synopses));
         List<string> answered = await DatasetAlignedWindowTests.RowsAsync(aligned);
         Assert.Equal(window.ToString(), aligned.Metrics.Window?.ToString());
         Assert.Equal(await DatasetAlignedWindowTests.RowsAsync(ByService(dataset, window, new ScanOptions { UseSynopses = false })), answered);
@@ -85,19 +85,18 @@ public sealed partial class DatasetPlannerGenericTests : IClassFixture<DatasetPl
 
         public async ValueTask InitializeAsync()
         {
-            await WriteAsync(ByHour, new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour) }, VortexWriteOptions.Default);
+            LayoutValue at = LayoutValue.Column(nameof(DatasetPlannerTests.Call.At));
+            await WriteAsync(ByHour, new DatasetLayout { Partition = at.Truncate(CalendarUnit.Hour), SortKey = [at], Organization = LayoutOrganization.Leveled }, VortexWriteOptions.Default);
 
-            // Blocks of a few kilobytes, so that an object's size moves as its rows are written and a cut at 96 KiB shows: an
-            // object goes past the size it aims at by a block at most.
-            await WriteAsync(BySize, new ClusteringOptions { ObjectBytes = 96L << 10 }, new VortexWriteOptions { RowBlockSize = 512, DataBlockTargetBytes = 8 << 10 });
+            // Blocks of a few kilobytes, so that an object's size moves as its rows are written and a cut at 96 KiB shows.
+            await WriteAsync(BySize, new DatasetLayout { SortKey = [at], ObjectBytes = 96L << 10 }, new VortexWriteOptions { RowBlockSize = 512, DataBlockTargetBytes = 8 << 10 });
         }
 
-        private static async Task WriteAsync(MemoryObjectStore store, ClusteringOptions clustering, VortexWriteOptions write)
+        private static async Task WriteAsync(MemoryObjectStore store, DatasetLayout layout, VortexWriteOptions write)
         {
             await using VortexDataset dataset = await VortexDataset.CreateAsync(store, DatasetPlannerTests.Call.Schema, Options() with
             {
-                ClusteringKey = [nameof(DatasetPlannerTests.Call.At)],
-                Clustering = clustering,
+                Layout = layout,
                 Write = write,
             });
             Random random = new Random(83);
@@ -108,7 +107,7 @@ public sealed partial class DatasetPlannerGenericTests : IClassFixture<DatasetPl
             {
                 if (part == 4 * 12)
                 {
-                    while (await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 2 }) is not null)
+                    while (await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 2, TargetBytesAtLevelOne = 1L << 30 }) is not null)
                     {
                     }
                 }

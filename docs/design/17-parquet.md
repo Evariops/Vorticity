@@ -624,8 +624,7 @@ is sorted, and an ordered read is never cut into pieces read side by side.
 - **The other way**, an order backwards on a file sorted forwards, is a sort too: a row group read
   backwards would need its rows reversed, held whole.
 - **A group by** on the column streams, each group out once the scan reads past it: the source
-  says the order comes on asking (`OrdersOnAsking`), which the core asks of a dataset's clustering
-  key.
+  says the order comes on asking (`OrdersOnAsking`), which the core asks of a dataset's sort key.
 - **A declaration** is believed, as statistics are (§8); the verifier holds a row group's rows to
   it. One malformed orders nothing.
 

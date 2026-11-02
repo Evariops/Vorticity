@@ -76,7 +76,7 @@ public sealed partial class DatasetPartsBudgetTests
     /// <summary>Four objects of 200 000 rows, their keys at random among 600 000.</summary>
     private static async Task FillAsync(IObjectStore store)
     {
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Counted.Schema, new DatasetOptions { ClusteringKey = [nameof(Counted.Id)] }, Ct);
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Counted.Schema, new DatasetOptions { Layout = new DatasetLayout { SortKey = [LayoutValue.Column(nameof(Counted.Id))] } }, Ct);
         Random random = new Random(0x9A_27);
         for (int o = 0; o < Objects; o++)
         {

@@ -198,7 +198,7 @@ public sealed partial class DatasetGroupTests
         Tick[] ticks = [.. Enumerable.Range(0, 60_000).Select(i => new Tick(random.Next(400), Desks[i % Desks.Length], i % 97))];
         await using MemoryObjectStore store = new MemoryObjectStore();
         await using VortexDataset dataset = await VortexDataset.CreateAsync(
-            store, VortexTypes.ToDType(Tick.Schema, new Vorticity.Types.DTypeArena()), new DatasetOptions { Seed = 13, ClusteringKey = ["Day"] }, Ct);
+            store, VortexTypes.ToDType(Tick.Schema, new Vorticity.Types.DTypeArena()), new DatasetOptions { Seed = 13, Layout = new DatasetLayout { SortKey = [LayoutValue.Column("Day")] } }, Ct);
         for (int o = 0; o < 6; o++)
         {
             await using ObjectDraft draft = dataset.StartObject();

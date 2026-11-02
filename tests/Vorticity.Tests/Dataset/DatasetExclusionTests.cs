@@ -50,17 +50,21 @@ public sealed partial class DatasetExclusionTests
         Assert.Equal(["13"], await DatasetPlannerTests.AskAsync(dataset, [], ["count_distinct(Host)"], "RequestId != 'r-absent'", synopses: true));
         Assert.Equal(["12"], await DatasetPlannerTests.AskAsync(dataset, [], ["count_distinct(Host)"], $"RequestId != '{Solo}'", synopses: true));
 
-        // Every object answers by its counts, less the rows its postings find.
-        ScanPlan plan = await dataset.Scan<Call>().With(new ScanOptions { UseSynopses = true }).Where(c => c.RequestId != Solo)
-            .GroupBy(c => c.Service).Select(g => (g.Key, g.Count())).ExplainAsync(Ct);
-        Assert.NotEmpty(plan.States);
-        Assert.All(plan.States, step => Assert.Contains("its postings find", step.Detail, StringComparison.Ordinal));
+        // Every object answers by its counts, less the rows its postings find, once the partials the questions learned are gone.
+        await DatasetBlockAnswerTests.ForgetLearnedAsync(store);
+        await using VortexDataset explained = await VortexDataset.OpenAsync(store, new DatasetOptions { CostProfile = Vorticity.IO.CostProfile.Memory }, Ct);
+        ScanPlan plan = await explained.Scan<Call>().With(new ScanOptions { UseSynopses = true }).Where(c => c.RequestId != Solo)
+            .GroupBy(c => c.Service).Select(g => (g.Key, g.Count())).ExplainAsync(analyze: true, Ct);
+        Assert.NotEmpty(plan.Units);
+        Assert.All(plan.Units, step => Assert.Contains("its postings find", step.Detail, StringComparison.Ordinal));
     }
 
     /// <summary>
     /// Counts and sums by service but one request's (QP-5): each object reads its counts and the identifier's postings, a
     /// fraction of its rows' bytes, and the object that holds the request the chunks of the identifier, the counted column
-    /// and the measure that hold its row, here every row's, one chunk a column: less than the rows all the same.
+    /// and the measure that hold its row, here every row's, one chunk a column: less than the rows all the same. Objects of
+    /// 7,000 rows are priced by their bytes alone: at a remote request's price, their rows read in three requests weigh less
+    /// than the counts and the postings they read in nine.
     /// </summary>
     [Theory]
     [InlineData("r-absent", 4)]
@@ -75,7 +79,7 @@ public sealed partial class DatasetExclusionTests
         foreach (bool synopses in (bool[])[false, true])
         {
             await using VortexSession session = VortexSession.Create(_ => { });
-            await using VortexDataset dataset = await VortexDataset.OpenAsync(store, new DatasetOptions { Session = session }, Ct);
+            await using VortexDataset dataset = await VortexDataset.OpenAsync(store, new DatasetOptions { Session = session, CostProfile = Vorticity.IO.CostProfile.Memory }, Ct);
             store.Reset();
             await DatasetPlannerTests.AskAsync(dataset, ["Service"], ["Service", "count()", "sum(Size)"], $"RequestId != '{left}'", synopses);
             (bytes[synopses ? 1 : 0], requests[synopses ? 1 : 0]) = (store.BytesRead, store.Requests);
@@ -112,11 +116,11 @@ public sealed partial class DatasetExclusionTests
         random.Shuffle(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(rows));
         VortexDataset dataset = await VortexDataset.CreateAsync(store, Call.Schema, new DatasetOptions
         {
-            ClusteringKey = [nameof(Call.Service), nameof(Call.At)],
-            Clustering = new ClusteringOptions { ObjectBytes = 256 << 10 },
+            Layout = new DatasetLayout { SortKey = [LayoutValue.Column(nameof(Call.Service)), LayoutValue.Column(nameof(Call.At))], IndexedPrefix = 1, ObjectBytes = 256 << 10 },
             Identifiers = [nameof(Call.RequestId)],
             ContentsObjectBytes = 1,
             SheetObjectBytes = 0,
+            CostProfile = Vorticity.IO.CostProfile.Memory,
         }, Ct);
         for (int from = 0; from < rows.Count; from += 20_000)
         {

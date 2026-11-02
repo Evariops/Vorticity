@@ -5,6 +5,7 @@ using System.Threading.Tasks;
 using Vorticity.Expressions;
 using Vorticity.Indexes;
 using Vorticity.Types;
+using Vorticity.Types.Variants;
 
 namespace Vorticity.Dataset;
 
@@ -12,8 +13,9 @@ namespace Vorticity.Dataset;
 /// What a filter asks of the sheets of an object's columns (<see cref="ColumnSheet"/>): an equality or a set of constants
 /// on a top-level column refuted when the column's filter lacks every constant, through <c>AND</c> and <c>OR</c>, so that
 /// an object whose sheets prove no row matches is passed unopened. An object that keeps where each value of the columns
-/// asked lives (<see cref="ColumnWhere"/>) is judged by those indexes in place of its sheets: exactly, and to the ranges of
-/// its rows where a selected row may lie, which a scan reads alone.
+/// asked lies (<see cref="ColumnLocate"/>) is judged by those indexes in place of its sheets, or by the index of its
+/// partition for the values asked (<see cref="PartitionLocates"/>): exactly, and to the granules where a selected row may lie
+/// (<see cref="GranuleAlgebra"/>), which a scan reads alone.
 /// </summary>
 internal static class SheetPruning
 {
@@ -23,6 +25,66 @@ internal static class SheetPruning
         List<int> columns = [];
         Collect(filter, schema, columns);
         return columns;
+    }
+
+    /// <summary>
+    /// The shredded keys of variant columns of <paramref name="schema"/> whose values <paramref name="filter"/>'s
+    /// equalities, sets and prefixes ask, through <c>AND</c> and <c>OR</c>, each once (spec E, 3.3); empty for none.
+    /// </summary>
+    internal static List<(int Field, string Key, PathClass Class)> Paths(VortexExpr filter, DType schema)
+    {
+        List<(int Field, string Key, PathClass Class)> paths = [];
+        CollectPaths(filter, schema, paths);
+        return paths;
+    }
+
+    private static void CollectPaths(VortexExpr filter, DType schema, List<(int Field, string Key, PathClass Class)> paths)
+    {
+        switch (filter)
+        {
+            case ComparisonExpr { Op: ComparisonOp.Equal } equal when GranuleAlgebra.PathOf(equal.Field, schema) is { } path:
+                AddPath(paths, path);
+                break;
+            case InExpr set when GranuleAlgebra.PathOf(set.Field, schema) is { } path:
+                AddPath(paths, path);
+                break;
+            case StringMatchExpr { Op: StringMatchOp.StartsWith } prefix when GranuleAlgebra.PathOf(prefix.Field, schema) is { } path:
+                AddPath(paths, path);
+                break;
+            case LogicalExpr logical:
+                CollectPaths(logical.Left, schema, paths);
+                CollectPaths(logical.Right, schema, paths);
+                break;
+            default:
+                break;
+        }
+    }
+
+    private static void AddPath(List<(int Field, string Key, PathClass Class)> paths, (int Field, string Key, PathClass Class) path)
+    {
+        foreach ((int field, string key, PathClass @class) in paths)
+        {
+            if (field == path.Field && @class == path.Class && string.Equals(key, path.Key, StringComparison.Ordinal))
+            {
+                return;
+            }
+        }
+
+        paths.Add(path);
+    }
+
+    /// <summary>Whether the object <paramref name="entry"/> names keeps where the values of one of <paramref name="paths"/> lie.</summary>
+    internal static bool LocatesPaths(ObjectEntry entry, List<(int Field, string Key, PathClass Class)> paths)
+    {
+        foreach ((int field, string key, PathClass @class) in paths)
+        {
+            if (entry.Contents?.PathLocateOf(field, key, @class) is not null)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>
@@ -40,35 +102,38 @@ internal static class SheetPruning
         };
 
     /// <summary>
-    /// Whether a scan reads the sheets of the object <paramref name="entry"/> names before it: an object of
-    /// <see cref="DatasetOptions.SheetObjectBytes"/> or more whose table of contents names sheets, and which holds the
-    /// columns of <paramref name="schema"/> in their places (<see cref="DatasetSchema.Holds"/>). A smaller one costs no
-    /// more to read than its sheets, and keeps none.
+    /// Whether the object <paramref name="entry"/> names keeps sheets a scan may read before it: its table of contents names
+    /// sheets, and it holds the columns of <paramref name="schema"/> in their places (<see cref="DatasetSchema.Holds"/>).
+    /// Whether reading them pays, the scan's rule of consultation says (<see cref="DatasetScanBuilder.ReadsSheets"/>).
     /// </summary>
-    internal static bool Reads(ObjectEntry entry, DatasetOptions options, DatasetSchema schema) =>
-        entry.Bytes >= options.SheetObjectBytes && entry.Contents is { Sheets.Count: > 0 } && schema.Holds(entry);
+    internal static bool Keeps(ObjectEntry entry, DatasetSchema schema) => entry.Contents is { Sheets.Count: > 0 } && schema.Holds(entry);
 
     /// <summary>
     /// What a scan reads of the object <paramref name="entry"/> names before it, under a filter that asks
-    /// <paramref name="columns"/> for values: where their values live when each keeps that index, else their sheets; nothing
-    /// for an object whose sheets it does not read (<see cref="Reads"/>).
+    /// <paramref name="columns"/> for values: where their values lie when each keeps that index, else their sheets.
     /// </summary>
-    internal static PathCosts.Cost Cost(ObjectEntry entry, DatasetOptions options, DatasetSchema schema, List<int> columns)
+    internal static PathCosts.Cost Cost(ObjectEntry entry, List<int> columns, PathCosts costs, List<(int Field, string Key, PathClass Class)>? paths = null)
     {
-        if (!Reads(entry, options, schema) || columns.Count == 0)
+        if (entry.Contents is null || (columns.Count == 0 && paths is not { Count: > 0 }))
         {
             return default;
         }
 
         ObjectContents contents = entry.Contents!;
-        bool places = Places(entry, columns);
-        IndexSegment?[] regions = new IndexSegment?[columns.Count];
-        for (int i = 0; i < regions.Length; i++)
+        bool lies = Locates(entry, columns);
+        int count = columns.Count + (paths?.Count ?? 0);
+        Span<IndexSegment?> regions = count <= 16 ? stackalloc IndexSegment?[count] : new IndexSegment?[count];
+        for (int i = 0; i < columns.Count; i++)
         {
-            regions[i] = places ? contents.WhereOf(columns[i]) : contents.SheetOf(columns[i]);
+            regions[i] = lies ? contents.LocateOf(columns[i]) : contents.SheetOf(columns[i]);
         }
 
-        return PathCosts.Regions(regions);
+        for (int i = 0; i < (paths?.Count ?? 0); i++)
+        {
+            regions[columns.Count + i] = contents.PathLocateOf(paths![i].Field, paths[i].Key, paths[i].Class);
+        }
+
+        return costs.Regions(entry.Uid, regions);
     }
 
     /// <summary>
@@ -88,28 +153,36 @@ internal static class SheetPruning
 
     /// <summary>
     /// The objects of <paramref name="batch"/> whose sheets do not refute <paramref name="filter"/>, over <paramref name="schema"/>, in its order: those
-    /// whose sheets a scan reads (<see cref="Reads"/>), but those <paramref name="unread"/> leaves, have their sheets of
-    /// <paramref name="columns"/> read side by side with no open of them; or, for an object that keeps where each value of
-    /// every column of <paramref name="columns"/> lives, those indexes, which <paramref name="narrowed"/> is told the
-    /// ranges of the object's rows a selected row may lie in by, when they leave some out.
+    /// <paramref name="consulted"/> says the scan reads the sheets of have their sheets of <paramref name="columns"/> read
+    /// side by side with no open of them; or, for an object that keeps where each value of every column of
+    /// <paramref name="columns"/> lies, those indexes, or the index of its partition for the values asked
+    /// (<paramref name="partitions"/>), which <paramref name="narrowed"/> is told the granules a selected row may lie in by, a
+    /// bit a granule, when they leave some out.
     /// </summary>
     internal static async Task<List<PositionedObject>> KeptAsync(
         VortexDataset dataset, DatasetSchema schema, List<PositionedObject> batch, VortexExpr filter, List<int> columns, DatasetScanCounters? metrics,
-        Func<PositionedObject, bool>? unread, CancellationToken cancellationToken, Action<PositionedObject, RowRange[]>? narrowed = null)
+        Func<PositionedObject, bool> consulted, CancellationToken cancellationToken, Action<PositionedObject, ulong[]>? narrowed = null,
+        PartitionLocates? partitions = null, List<(int Field, string Key, PathClass Class)>? paths = null)
     {
         Task<ColumnSheet?[]>?[] reads = new Task<ColumnSheet?[]>?[batch.Count];
-        Task<(ColumnWhere? Where, ColumnBlocks? Blocks)[]>?[]? placed = null;
+        Task<IValueGranules?[]>?[]? located = null;
+        Task<ColumnLocate?[]>?[]? pathsLie = null;
         for (int i = 0; i < batch.Count; i++)
         {
-            if (Reads(batch[i].Entry, dataset.Options, schema) && unread?.Invoke(batch[i]) != true)
+            if (consulted(batch[i]))
             {
-                if (Places(batch[i].Entry, columns))
+                if (Locates(batch[i].Entry, columns))
                 {
-                    (placed ??= new Task<(ColumnWhere?, ColumnBlocks?)[]>?[batch.Count])[i] = dataset.ReadBlockColumnsAsync(batch[i].Entry, columns, stats: false, cancellationToken).AsTask();
+                    (located ??= new Task<IValueGranules?[]>?[batch.Count])[i] = LocatesAsync(dataset, partitions, batch[i], columns, cancellationToken);
                 }
-                else
+                else if (columns.Count > 0)
                 {
                     reads[i] = dataset.ReadSheetsAsync(batch[i].Entry, columns, cancellationToken).AsTask();
+                }
+
+                if (paths is { Count: > 0 } && LocatesPaths(batch[i].Entry, paths))
+                {
+                    (pathsLie ??= new Task<ColumnLocate?[]>?[batch.Count])[i] = dataset.ReadPathLocatesAsync(batch[i].Entry, paths, cancellationToken).AsTask();
                 }
             }
         }
@@ -127,19 +200,24 @@ internal static class SheetPruning
                 }
             }
 
-            if (placed?[i] is { } place)
+            if (located?[i] is not null || pathsLie?[i] is not null)
             {
-                (ColumnWhere? Where, ColumnBlocks? Blocks)[] wheres = await place.ConfigureAwait(false);
-                RowRange[]? ranges = RangesOf(filter, schema.DType, field => columns.IndexOf(field) is int at and >= 0 ? wheres[at].Where : null);
-                if (ranges is { Length: 0 })
+                IValueGranules?[] locates = located?[i] is { } lying ? await lying.ConfigureAwait(false) : [];
+                ColumnLocate?[] pathLocates = pathsLie?[i] is { } pathLying ? await pathLying.ConfigureAwait(false) : [];
+                ObjectEntry entry = batch[i].Entry;
+                int granules = GranulesOf(locates, pathLocates);
+                ulong[]? may = granules == 0 ? null : GranuleAlgebra.May(
+                    filter, schema.DType, field => columns.IndexOf(field) is int at and >= 0 && at < locates.Length ? locates[at] : null, granules,
+                    path => paths!.IndexOf(path) is int at and >= 0 && at < pathLocates.Length ? pathLocates[at] : null);
+                if (may is not null && GranuleAlgebra.None(may))
                 {
                     Refuted(metrics);
                     continue;
                 }
 
-                if (ranges is not null)
+                if (may is not null && GranuleAlgebra.Count(may) < granules)
                 {
-                    narrowed?.Invoke(batch[i], ranges);
+                    narrowed?.Invoke(batch[i], may);
                 }
             }
 
@@ -147,6 +225,43 @@ internal static class SheetPruning
         }
 
         return kept;
+    }
+
+    /// <summary>The granules of the object the first index of <paramref name="locates"/> or <paramref name="paths"/> describes; 0 for none.</summary>
+    private static int GranulesOf(IValueGranules?[] locates, ColumnLocate?[] paths)
+    {
+        foreach (IValueGranules? locate in locates)
+        {
+            if (locate is not null)
+            {
+                return locate.Granules;
+            }
+        }
+
+        foreach (ColumnLocate? path in paths)
+        {
+            if (path is not null)
+            {
+                return path.Granules;
+            }
+        }
+
+        return 0;
+    }
+
+    /// <summary>
+    /// Where the values of <paramref name="columns"/> lie in the object <paramref name="held"/>: by the index of its partition
+    /// for the values asked when it covers the object for each, else by the object's own indexes.
+    /// </summary>
+    private static async Task<IValueGranules?[]> LocatesAsync(
+        VortexDataset dataset, PartitionLocates? partitions, PositionedObject held, List<int> columns, CancellationToken cancellationToken)
+    {
+        if (partitions is not null && await partitions.LocatesAsync(held, cancellationToken).ConfigureAwait(false) is { } found)
+        {
+            return found;
+        }
+
+        return await dataset.ReadLocatesAsync(held.Entry, columns, cancellationToken).ConfigureAwait(false);
     }
 
     private static void Refuted(DatasetScanCounters? metrics)
@@ -157,129 +272,23 @@ internal static class SheetPruning
         }
     }
 
-    /// <summary>Whether the object <paramref name="entry"/> names keeps where the values of every column of <paramref name="columns"/> live.</summary>
-    internal static bool Places(ObjectEntry entry, List<int> columns)
+    /// <summary>Whether the object <paramref name="entry"/> names keeps where the values of every column of <paramref name="columns"/> lie.</summary>
+    internal static bool Locates(ObjectEntry entry, List<int> columns)
     {
-        if (entry.Contents is not { Wheres.Count: > 0 } contents || columns.Count == 0)
+        if (entry.Contents is not { Locates.Count: > 0 } contents || columns.Count == 0)
         {
             return false;
         }
 
         foreach (int field in columns)
         {
-            if (contents.WhereOf(field) is null)
+            if (contents.LocateOf(field) is null)
             {
                 return false;
             }
         }
 
         return true;
-    }
-
-    /// <summary>
-    /// The ranges of an object's rows, ascending and apart, where a row <paramref name="filter"/> selects may lie, by where
-    /// the values of its columns live (<paramref name="whereOf"/>): an equality or a set on a column the ranges of the
-    /// values asked, none for a value the column lacks, through <c>AND</c> and <c>OR</c>; null for every row, where a
-    /// conjunct asks no index or a value lives everywhere.
-    /// </summary>
-    internal static RowRange[]? RangesOf(VortexExpr filter, DType schema, Func<int, ColumnWhere?> whereOf) =>
-        filter switch
-        {
-            ComparisonExpr { Op: ComparisonOp.Equal } equal when Column(equal.Field, schema) is int field && whereOf(field) is { } where =>
-                Placed([equal.Value], schema.GetField(field), where),
-            InExpr set when Column(set.Field, schema) is int field && whereOf(field) is { } where => Placed(set.Literals, schema.GetField(field), where),
-            LogicalExpr { IsAnd: true } and => Intersect(RangesOf(and.Left, schema, whereOf), RangesOf(and.Right, schema, whereOf)),
-            LogicalExpr or => Union(RangesOf(or.Left, schema, whereOf), RangesOf(or.Right, schema, whereOf)),
-            _ => null,
-        };
-
-    /// <summary>The ranges of the values <paramref name="literals"/> of a column of <paramref name="dtype"/>; null where one lives everywhere, or cannot be told.</summary>
-    private static RowRange[]? Placed(FilterLiteral[] literals, DType dtype, ColumnWhere where)
-    {
-        if (CountsAnswer.ValuesOf(literals, dtype) is not { } values)
-        {
-            return null;
-        }
-
-        RowRange[] ranges = [];
-        foreach (byte[] value in values)
-        {
-            int place = where.Find(value);
-            if (place < 0)
-            {
-                continue;
-            }
-
-            if (where.Everywhere(place))
-            {
-                return null;
-            }
-
-            List<RowRange> own = [];
-            foreach ((long start, long end) in where.RangesOf(place))
-            {
-                own.Add(new RowRange(start, end));
-            }
-
-            ranges = Union(ranges, [.. own])!;
-        }
-
-        return ranges;
-    }
-
-    /// <summary>The rows in both lists of ranges, null for every row.</summary>
-    private static RowRange[]? Intersect(RowRange[]? left, RowRange[]? right)
-    {
-        if (left is null || right is null)
-        {
-            return left ?? right;
-        }
-
-        List<RowRange> both = [];
-        for (int l = 0, r = 0; l < left.Length && r < right.Length;)
-        {
-            RowRange common = left[l].Intersect(right[r]);
-            if (!common.IsEmpty)
-            {
-                both.Add(common);
-            }
-
-            if (left[l].End <= right[r].End)
-            {
-                l++;
-            }
-            else
-            {
-                r++;
-            }
-        }
-
-        return [.. both];
-    }
-
-    /// <summary>The rows in either list of ranges, joined where they touch, null for every row.</summary>
-    private static RowRange[]? Union(RowRange[]? left, RowRange[]? right)
-    {
-        if (left is null || right is null)
-        {
-            return null;
-        }
-
-        List<RowRange> either = [];
-        for (int l = 0, r = 0; l < left.Length || r < right.Length;)
-        {
-            RowRange next = r == right.Length || (l < left.Length && left[l].Start <= right[r].Start) ? left[l++] : right[r++];
-            if (either.Count > 0 && next.Start <= either[^1].End)
-            {
-                either[^1] = new RowRange(either[^1].Start, Math.Max(either[^1].End, next.End));
-            }
-            else
-            {
-                either.Add(next);
-            }
-        }
-
-        return [.. either];
     }
 
     private static bool Any(FilterLiteral[] literals, ColumnSheet sheet, DType dtype)

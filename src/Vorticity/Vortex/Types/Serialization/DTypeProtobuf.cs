@@ -915,9 +915,6 @@ internal ref struct ProtoScratchList<T>
     private T[]? _array;
     private int _count;
 
-    /// <summary>Number of elements added so far.</summary>
-    internal readonly int Count => _count;
-
     /// <summary>The elements, in insertion order. Valid until the next <see cref="Add"/> or <see cref="Dispose"/>.</summary>
     internal readonly ReadOnlySpan<T> Span => _array is null ? default : new ReadOnlySpan<T>(_array, 0, _count);
 

@@ -138,12 +138,34 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
     /// </summary>
     internal Indexes.VariantKeyReads? VariantKeys { get; set; }
 
-    /// <summary>The enumerator, its lanes told which chunks of variants they read by keys.</summary>
+    /// <summary>
+    /// The columns the scan's consumer reads through functions alone whose zones give a split their values, the columns then
+    /// not read; null for none. Set before the scan starts.
+    /// </summary>
+    internal ZoneKeyReads? ZoneKeys { get; set; }
+
+    /// <summary>
+    /// The geometry of the chunks the scan may read a part of by their granules, which each lane plans its reads by; null
+    /// when it reads every chunk whole. Set before the scan starts.
+    /// </summary>
+    internal Indexes.GranuleGeometry? Granules { get; set; }
+
+    /// <summary>The enumerator, its lanes told which chunks of variants they read by keys, and which chunks' geometry they know.</summary>
     private BatchAsyncEnumerator Keyed(BatchAsyncEnumerator enumerator)
     {
         if (VariantKeys is { } keys)
         {
             enumerator.VariantKeys = keys;
+        }
+
+        if (ZoneKeys is { } zoned)
+        {
+            enumerator.ZoneKeys = zoned;
+        }
+
+        if (Granules is { } geometry)
+        {
+            enumerator.Granules = geometry;
         }
 
         return enumerator;
@@ -490,9 +512,13 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         // A scan of one lane that asks for it, an aggregation's lane, whose decode is the caller's,
         // reads ahead over a source whose read is a round trip, as many splits as its admission granted,
         // and as its plan holds. Over a mapping a read is a view, and there is nothing to overlap; the file
-        // the scan reads through may be the one the open read whole, which is asked of its source.
-        _extras = readAhead > 0 && window == 1 && !file.Source.ReadsInPlace
-            ? new AheadReads(Math.Min(readAhead, Math.Max(1, plan.BoundaryCount - 1)))
+        // the scan reads through may be the one the open read whole, which is asked of its source. Past its own, the
+        // splits the pass's lanes that finished gave up, up to ReadAheadPool.Most: the pool the count carries.
+        int splits = Math.Max(1, plan.BoundaryCount - 1);
+        int own = ReadAheadPool.SplitsOf(readAhead);
+        ReadAheadPool? pool = ReadAheadPool.Of(readAhead);
+        _extras = own > 0 && window == 1 && !file.Source.ReadsInPlace
+            ? new AheadReads(Math.Min(own, splits), pool is null ? 0 : Math.Max(0, Math.Min(ReadAheadPool.Most, splits) - own), pool)
             : window > 1 ? NewWindow(file, schema, plan, window) : null;
         _segments = new ScanSegments(Ahead is { } ahead ? ahead.Lanes.Length : degree);
 
@@ -521,7 +547,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         }
         else if (Ahead is { } reads)
         {
-            reads.Lanes[0] = _lanes[0];
+            reads.Keep(_lanes[0]!);
         }
     }
 
@@ -558,7 +584,42 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         ScanContext first = _lanes[0]!.Context;
         Lane lane = NewLane(first.File, first.LiveBlocks, first.Metrics, first.KeepEncodings);
         lane.Context.VariantKeys = first.VariantKeys;
+        lane.Context.ZoneKeys = first.ZoneKeys;
+        lane.Context.Granules = _granules is { } geometry
+            ? new Indexes.GranulePlans(geometry, first.File, _take, _live, Scanned, lane.Context.GranuleScratch)
+            : null;
         return lane;
+    }
+
+    // The geometry of the chunks the scan may read a part of, which each lane plans its granule reads by; null for none.
+    private Indexes.GranuleGeometry? _granules;
+
+    /// <summary>The rows the scan reads, from its plan's first boundary to its last.</summary>
+    private RowRange Scanned
+    {
+        get
+        {
+            SplitPlan plan = _cursor.Plan;
+            return plan.BoundaryCount == 0 ? default : new RowRange(plan.BoundaryAt(0), plan.BoundaryAt(plan.BoundaryCount - 1));
+        }
+    }
+
+    /// <summary>Tells the lanes the geometry of the chunks they may read a part of, each planning its own reads by it.</summary>
+    internal Indexes.GranuleGeometry? Granules
+    {
+        set
+        {
+            _granules = value;
+            foreach (Lane? lane in _lanes)
+            {
+                if (lane is not null)
+                {
+                    lane.Context.Granules = value is null
+                        ? null
+                        : new Indexes.GranulePlans(value, lane.Context.File, _take, _live, Scanned, lane.Context.GranuleScratch);
+                }
+            }
+        }
     }
 
     /// <summary>Tells the lanes which chunks of variants they read through shredded keys alone.</summary>
@@ -571,6 +632,21 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
                 if (lane is not null)
                 {
                     lane.Context.VariantKeys = value;
+                }
+            }
+        }
+    }
+
+    /// <summary>Tells the lanes which columns their splits take from the zones (<see cref="Scanning.ZoneKeyReads"/>).</summary>
+    internal ZoneKeyReads? ZoneKeys
+    {
+        set
+        {
+            foreach (Lane? lane in _lanes)
+            {
+                if (lane is not null)
+                {
+                    lane.Context.ZoneKeys = value;
                 }
             }
         }
@@ -746,8 +822,9 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
             return false;
         }
 
-        (Lane lane, ValueTask read) = ahead.TakeOldest(_started);
+        (Lane lane, ValueTask read) = ahead.TakeOldest();
         await read.ConfigureAwait(false);
+        ahead.Settle();
 
         _currentLane = lane;
         ScanCounters.Served(_metrics, lane.Context.Segments);
@@ -764,27 +841,29 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     /// <summary>Starts reads until <paramref name="ahead"/> has as many in flight as it reads ahead, or no split is left.</summary>
     private void FillAhead(AheadReads ahead)
     {
-        // Every lane the reads take, made at the first, so that no split read ahead makes one: a lane is made
-        // as the first's, its variant keys among what it copies, set by then.
+        // The lanes its own reads take, made at the first, so that no split read ahead makes one: a lane is made
+        // as the first's, its variant keys among what it copies, set by then. A read taken from the pool makes one
+        // when none is free.
         if (!ahead.Made)
         {
             ahead.Made = true;
-            for (int slot = 0; slot < ahead.Lanes.Length; slot++)
+            while (ahead.MadeCount < ahead.Base + 1)
             {
-                ahead.Lanes[slot] ??= NextLane();
+                ahead.Keep(NextLane());
             }
         }
 
-        while (ahead.Count < ahead.Reads.Length && !_drained)
+        while (!_drained && ahead.MayStart())
         {
             if (!TryNextSplit(out RowRange split))
             {
                 _drained = true;
+                ahead.Settle();
                 return;
             }
 
             long sequence = _started++;
-            Lane lane = ahead.Lanes[(int)(sequence % ahead.Lanes.Length)] ??= NextLane();
+            Lane lane = ahead.TakeFree() ?? ahead.Track(NextLane());
             lane.Rows = split;
             lane.Sequence = sequence;
             PlanAlong(lane);
@@ -808,7 +887,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
                 throw;
             }
 
-            ahead.Add(ReadAheadAsync(lane));
+            ahead.Add(lane, ReadAheadAsync(lane));
         }
     }
 
@@ -862,7 +941,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         ReleaseCurrent();
         while (ahead.Count > 0)
         {
-            (Lane lane, ValueTask read) = ahead.TakeOldest(_started);
+            (Lane lane, ValueTask read) = ahead.TakeOldest();
             try
             {
                 await read.ConfigureAwait(false);
@@ -1027,41 +1106,120 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
 
     /// <summary>
     /// The reads a scan of one lane has in flight ahead of the split it decodes: each on a lane of
-    /// its own, the split numbered s on lane s modulo their count, one more than the reads, for the
-    /// split being decoded; the reads in the order of their splits, oldest first.
+    /// its own, taken from those holding no split, the reads in the order of their splits, oldest
+    /// first. Its own <see cref="Base"/> of them, and past it as many as it takes from the
+    /// <see cref="Pool"/> its pass's lanes that finished gave up, each given back once its read lands.
+    /// A lane is made for a read that finds none free: as many as the reads in flight and the split
+    /// being decoded need, where lanes taken in turn made one for each place the reads could reach.
     /// </summary>
     private sealed class AheadReads : LaneExtras
     {
+        private readonly Lane?[] _inFlight;
+        private readonly Lane?[] _idle;
+        private int _idleCount;
         private int _first;
 
-        internal AheadReads(int depth)
+        internal AheadReads(int depth, int borrowable, ReadAheadPool? pool)
         {
-            Lanes = new Lane?[depth + 1];
-            Reads = new ValueTask[depth];
+            Base = depth;
+            Pool = borrowable > 0 ? pool : null;
+            int most = depth + (Pool is null ? 0 : borrowable);
+            Lanes = new Lane?[most + 1];
+            Reads = new ValueTask[most];
+            _inFlight = new Lane?[most];
+            _idle = new Lane?[most + 1];
         }
 
+        /// <summary>Every lane made, the scan's first lane first.</summary>
         internal Lane?[] Lanes { get; }
+
+        /// <summary>How many lanes were made.</summary>
+        internal int MadeCount { get; private set; }
 
         internal ValueTask[] Reads { get; }
 
-        /// <summary>Whether every lane was made.</summary>
+        /// <summary>The reads the scan has in flight of its own.</summary>
+        internal int Base { get; }
+
+        /// <summary>The splits the pass's lanes that finished gave up; null for none.</summary>
+        internal ReadAheadPool? Pool { get; }
+
+        /// <summary>The splits taken from the pool and not given back.</summary>
+        internal int Borrowed { get; private set; }
+
+        /// <summary>Whether the first lanes were made.</summary>
         internal bool Made { get; set; }
 
         /// <summary>The reads in flight.</summary>
         internal int Count { get; private set; }
 
-        internal void Add(ValueTask read)
+        /// <summary>Notes <paramref name="lane"/>, made, as one of the scan's, holding no split.</summary>
+        internal void Keep(Lane lane) => Free(Track(lane));
+
+        /// <summary>Notes <paramref name="lane"/>, made, as one of the scan's, which its disposal returns.</summary>
+        internal Lane Track(Lane lane)
         {
-            Reads[(_first + Count) % Reads.Length] = read;
+            Lanes[MadeCount++] = lane;
+            return lane;
+        }
+
+        /// <summary>A lane holding no split; null when none is.</summary>
+        internal Lane? TakeFree()
+        {
+            if (_idleCount == 0)
+            {
+                return null;
+            }
+
+            Lane lane = _idle[--_idleCount]!;
+            _idle[_idleCount] = null;
+            return lane;
+        }
+
+        /// <summary>Takes <paramref name="lane"/> back, holding no split.</summary>
+        internal void Free(Lane lane) => _idle[_idleCount++] = lane;
+
+        /// <summary>Whether another read may start: one of its own, or one taken from the pool.</summary>
+        internal bool MayStart()
+        {
+            if (Count < Base)
+            {
+                return true;
+            }
+
+            if (Count < Reads.Length && Pool is { } pool && pool.TryTake())
+            {
+                Borrowed++;
+                return true;
+            }
+
+            return false;
+        }
+
+        /// <summary>Gives the pool back the splits taken past the reads in flight beyond its own.</summary>
+        internal void Settle()
+        {
+            for (; Borrowed > Math.Max(0, Count - Base); Borrowed--)
+            {
+                Pool!.Give(1);
+            }
+        }
+
+        internal void Add(Lane lane, ValueTask read)
+        {
+            int at = (_first + Count) % Reads.Length;
+            Reads[at] = read;
+            _inFlight[at] = lane;
             Count++;
         }
 
-        /// <summary>The oldest read in flight and its lane, given the number of the next split to start.</summary>
-        internal (Lane Lane, ValueTask Read) TakeOldest(long started)
+        /// <summary>The oldest read in flight and its lane; what it took of the pool goes back once it lands (<see cref="Settle"/>).</summary>
+        internal (Lane Lane, ValueTask Read) TakeOldest()
         {
-            Lane lane = Lanes[(int)((started - Count) % Lanes.Length)]!;
+            Lane lane = _inFlight[_first]!;
             ValueTask read = Reads[_first];
             Reads[_first] = default;
+            _inFlight[_first] = null;
             _first = (_first + 1) % Reads.Length;
             Count--;
             return (lane, read);
@@ -1209,6 +1367,8 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         {
             ahead.Release();
             ahead.VariantKeys = null;
+            ahead.ZoneKeys = null;
+            ahead.Granules = null;
         }
 
         // In the order of the file, the segments ahead whose gaps to one another a read bridges, a chain of them read as
@@ -1264,6 +1424,8 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     {
         ahead.Release();
         ahead.VariantKeys = lane.Context.VariantKeys;
+        ahead.ZoneKeys = lane.Context.ZoneKeys;
+        ahead.Granules = lane.Context.Granules;
         LayoutReaderTable.Require(in root).RegisterSegments(in root, rows, in _mask, ahead);
         VortexFile.FillFromTail(_source, ahead);
     }
@@ -1588,7 +1750,9 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     /// </summary>
     private int ExecuteFiltered(Lane lane, RowRange split)
     {
-        if (_push != PushDeclined && Pushable() is { } pushable)
+        // A split the zone maps prove the filter keeps whole is delivered without the filter, pushed to its encodings or not.
+        bool proven = ZoneProven(split);
+        if (!proven && _push != PushDeclined && Pushable() is { } pushable)
         {
             int answered = ExecutePushed(lane, split, pushable);
             if (answered >= 0)
@@ -1597,9 +1761,9 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
             }
         }
 
-        if (FilterReadsAlone(out FieldMask columns))
+        if (FilterReadsAlone(lane.Context, out FieldMask columns))
         {
-            if (!ZoneProven(split))
+            if (!proven)
             {
                 return ExecuteLate(lane, split, in columns);
             }
@@ -1611,25 +1775,28 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
 
         int root = SplitExecution.Execute(lane.Context, _tree, in _mask, split, _take);
         lane.ReadRoot = root;
-        return ApplyFilter(lane, root, ZoneProven(split));
+        return ApplyFilter(lane, root, proven);
     }
 
     /// <summary>Whether the filter is evaluated on its own columns, read in a pass of their own.</summary>
+    /// <param name="context">The lane's context, which tells whether the filter's pass reads keys of a variant apart.</param>
     /// <param name="columns">The filter's columns.</param>
     /// <remarks>
     /// Not while a comparison may still be answered by its column's encoding, which decodes nothing
     /// for the filter at all, nor with a take, whose rows are pushed down already.
     /// </remarks>
-    private bool FilterReadsAlone(out FieldMask columns)
+    private bool FilterReadsAlone(ScanContext context, out FieldMask columns)
     {
+        // A pass of the filter's columns reads each through the root's child of its own: a file laid out whole in one flat
+        // segment has none.
         if (_evaluator is not { } evaluator || _take is not null || _filterProven ||
-            (_push != PushDeclined && Pushable() is not null))
+            (_push != PushDeclined && Pushable() is not null) || _tree.Root.Encoding != LayoutEncodingId.Struct)
         {
             columns = default;
             return false;
         }
 
-        return evaluator.TryOwnColumns(_tree.Root.DType, Shape, out columns);
+        return evaluator.TryOwnColumns(_tree.Root.DType, Shape, context.VariantKeys?.FilterPass is not null, out columns);
     }
 
     /// <summary>The dtype of the batches: the file's own when the projection keeps everything.</summary>
@@ -1680,16 +1847,28 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         // derived per scan.
         bool alone = columns.NamedFieldCount == 1;
         int first;
-        FilterWindow(context, split);
-        if (alone)
+
+        // A variant the projection reads whole is read by the filter through its keys, where its rows' variants put back
+        // together cost a filter on a user's id over a week of log records 2 µs a row; the projection decodes the rows kept.
+        Indexes.VariantKeyReads? projected = context.VariantKeys;
+        context.VariantKeys = projected?.FilterPass ?? projected;
+        try
         {
-            LayoutNode column = _tree.Root.GetChild(columns.GetNamedField(0));
-            FieldMask whole = FieldMask.All;
-            first = LayoutReaderTable.Require(in column).Execute(in column, split, in whole, context);
+            FilterWindow(context, split);
+            if (alone)
+            {
+                LayoutNode column = _tree.Root.GetChild(columns.GetNamedField(0));
+                FieldMask whole = FieldMask.All;
+                first = LayoutReaderTable.Require(in column).Execute(in column, split, in whole, context);
+            }
+            else
+            {
+                first = SplitExecution.Execute(context, _tree, in columns, split, null);
+            }
         }
-        else
+        finally
         {
-            first = SplitExecution.Execute(context, _tree, in columns, split, null);
+            context.VariantKeys = projected;
         }
 
         ProjectionWindow(context, split);
@@ -1795,44 +1974,162 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     private byte _push = PushUnasked;
 
     /// <summary>
-    /// The one comparison this scan may offer to an encoding, or null when it has none to offer.
+    /// The predicate this scan offers to an encoding, worked out at the first ask: null before it,
+    /// <see cref="NoPush"/> when the filter is none an encoding answers.
+    /// </summary>
+    private PushPlan? _pushPlan;
+
+    /// <summary>A filter no encoding answers.</summary>
+    internal static readonly PushPlan NoPush = new PushPlan(null!, null!);
+
+    /// <summary>The most members of an <c>IN</c> offered to an encoding: past them, a hash of the decoded rows.</summary>
+    private const int MostPushedMembers = 4_096;
+
+    /// <summary>
+    /// The one predicate this scan may offer to an encoding, or null when it has none to offer.
     /// </summary>
     /// <remarks>
-    /// Derived rather than stored: these paths are held to a ceiling in bytes and the test is two
-    /// type checks on a reference the enumerator already holds. The conditions are narrow on
-    /// purpose. A conjunction is not pushed because answering one arm does not select the rows, a
-    /// take is not pushed because its own selection already owns the row space, and a dotted path
-    /// is not pushed because only the struct reader resolves one and it resolves a name.
+    /// Worked out once a scan, an object of it held for every split: the predicate carries what
+    /// an encoding of integers answers by, worked out from its literals once. The conditions are
+    /// narrow on purpose. A conjunction is not pushed because answering one arm does not select the
+    /// rows, unless both arms bound the same column, which is a range; a take is not pushed because
+    /// its own selection already owns the row space; a dotted path is not pushed because only the
+    /// struct reader resolves one and it resolves a name; and a function of a column is not the
+    /// column, whose encoding answers for its own values.
     /// <para>
-    /// A prefix match is offered too, as the one string match an encoding answers from a part of
-    /// each value: a compressed string has to be decompressed only as far as the prefix is long.
+    /// A set and a prefix match are offered too: a set is a range of codes or of packed values
+    /// tested as it is unpacked, and a compressed string has to be decompressed only as far as a
+    /// prefix is long.
     /// </para>
     /// </remarks>
-    private PushedPredicate? Pushable()
+    private PushPlan? Pushable()
     {
         if (_take is not null || _filterProven)
         {
             return null;
         }
 
-        return _evaluator?.Filter switch
+        PushPlan plan = _pushPlan ??= PlanPush(_evaluator?.Filter);
+        return ReferenceEquals(plan, NoPush) ? null : plan;
+    }
+
+    /// <summary>The predicate <paramref name="filter"/> offers an encoding, or <see cref="NoPush"/>; worked out once a filter.</summary>
+    /// <remarks>
+    /// The scans of a question's objects share its filter, and each made its plan anew once a scan that delivers selections
+    /// asked too: some 2 KB a question of a route's pods, an aggregation over a few dozen objects (2026-11-02).
+    /// </remarks>
+    internal static PushPlan PlanPush(VortexExpr? filter) =>
+        filter is null ? Planned(null) : PushPlans.GetValue(filter, static shared => Planned(shared));
+
+    /// <summary>The plan of each filter a scan has asked for, kept while the filter lives.</summary>
+    private static readonly ConditionalWeakTable<VortexExpr, PushPlan> PushPlans = new();
+
+    /// <summary>The predicate <paramref name="filter"/> offers an encoding, or <see cref="NoPush"/>, worked out.</summary>
+    private static PushPlan Planned(VortexExpr? filter)
+    {
+        // A filter on a variant's path is fenced off from the pruners (VariantFilterExpr); an encoding's answer is exact, and
+        // looks through the fence as the evaluator does.
+        switch (Unfenced(filter))
         {
-            // A function of the column is not the column, whose encoding answers for its own values.
-            ComparisonExpr comparison when comparison.Field.SegmentsUtf8.Length == 1 && comparison.Field is not Compute.FunctionFieldExpr =>
-                new PushedPredicate(comparison.Field, comparison.Op, comparison.Value, Prefix: false),
-            StringMatchExpr { Op: StringMatchOp.StartsWith } match
-                when match.Field.SegmentsUtf8.Length == 1 && match.Pattern.Kind == FilterLiteralKind.Bytes =>
-                new PushedPredicate(match.Field, ComparisonOp.Equal, match.Pattern, Prefix: true),
-            _ => null,
-        };
+            case ComparisonExpr comparison when Target(comparison.Field) is { } target:
+                return new PushPlan(target.Column, Compute.EncodedPredicate.Compare(comparison.Op, comparison.Value), target.Key);
+
+            case LogicalExpr { IsAnd: true } both
+                when Unfenced(both.Left) is ComparisonExpr left && Unfenced(both.Right) is ComparisonExpr right && Target(left.Field) is { } target && Target(right.Field) is { } other && SameTarget(target, other):
+                // A range: one arm a low bound and the other a high one, in either order.
+                (ComparisonExpr? low, ComparisonExpr? high) = IsLow(left.Op) && IsHigh(right.Op) ? (left, right)
+                    : IsLow(right.Op) && IsHigh(left.Op) ? (right, left)
+                    : (null, null);
+                return low is null || high is null
+                    ? NoPush
+                    : Answerable(target, Compute.EncodedPredicate.Between(
+                        low.Value, low.Op == ComparisonOp.GreaterOrEqual, high.Value, high.Op == ComparisonOp.LessOrEqual));
+
+            case InExpr set when Target(set.Field) is { } target && set.Literals.Length <= MostPushedMembers:
+                return Answerable(target, Compute.EncodedPredicate.In(set.Literals));
+
+            case StringMatchExpr { Op: StringMatchOp.StartsWith } match
+                when Target(match.Field) is { } target && match.Pattern.Kind == FilterLiteralKind.Bytes:
+                return new PushPlan(target.Column, Compute.EncodedPredicate.Prefix(match.Pattern), target.Key);
+
+            case StringMatchExpr { Op: StringMatchOp.Contains } match
+                when Target(match.Field) is { } target && match.Pattern.Kind == FilterLiteralKind.Bytes:
+                return new PushPlan(target.Column, Compute.EncodedPredicate.Contains(match.Pattern), target.Key);
+
+            default:
+                return NoPush;
+        }
+
+        static VortexExpr? Unfenced(VortexExpr? expr) => expr is Compute.VariantFilterExpr fence ? fence.Inner : expr;
+        static bool IsLow(ComparisonOp op) => op is ComparisonOp.Greater or ComparisonOp.GreaterOrEqual;
+        static bool IsHigh(ComparisonOp op) => op is ComparisonOp.Less or ComparisonOp.LessOrEqual;
+
+        // A range or a set of numbers, which the encodings of integers answer, or of bytes, which a dictionary answers on
+        // its values: a column of text with none decodes its first split for nothing, once.
+        static PushPlan Answerable((FieldExpr Column, Compute.PushedVariantKey? Key) target, Compute.EncodedPredicate predicate) =>
+            predicate.Integers is null && predicate.Members is null && predicate.Decimals is null && predicate.DecimalMembers is null
+                && !Bytes(predicate)
+                ? NoPush
+                : new PushPlan(target.Column, predicate, target.Key);
+
+        static bool Bytes(Compute.EncodedPredicate predicate)
+        {
+            if (predicate.Kind == Compute.EncodedPredicateKind.Between)
+            {
+                return predicate.Literal.Kind == FilterLiteralKind.Bytes && predicate.High.Kind == FilterLiteralKind.Bytes;
+            }
+
+            foreach (FilterLiteral member in predicate.Values)
+            {
+                if (member.Kind != FilterLiteralKind.Bytes)
+                {
+                    return false;
+                }
+            }
+
+            return predicate.Values.Length > 0;
+        }
     }
 
     /// <summary>
-    /// A predicate an encoding may answer: a comparison of a top-level field, or when
-    /// <paramref name="Prefix"/> a prefix match of it on <paramref name="Literal"/>.
+    /// The top-level column a predicate's field reads and, for one key of a variant column read as a string or an integer,
+    /// the key and its class, whose typed column an encoding may answer for (spec E, 4.2); null for any other field.
     /// </summary>
-    private readonly record struct PushedPredicate(FieldExpr Field, ComparisonOp Op, FilterLiteral Literal, bool Prefix);
+    private static (FieldExpr Column, Compute.PushedVariantKey? Key)? Target(FieldExpr field) => field switch
+    {
+        ColumnFieldExpr { SegmentsUtf8.Length: 1 } => (field, null),
+        Compute.VariantFieldExpr
+        {
+            Steps: [{ IsKey: true, Key: { } key }], Read: Compute.VariantRead.AsString or Compute.VariantRead.AsInt64,
+            Column: ColumnFieldExpr { SegmentsUtf8.Length: 1 } column,
+        } path => (column, new Compute.PushedVariantKey(key, path.Read)),
+        _ => null,
+    };
 
+    /// <summary>Whether two fields read the same column, or the same key of it in the same class.</summary>
+    private static bool SameTarget(
+        (FieldExpr Column, Compute.PushedVariantKey? Key) left, (FieldExpr Column, Compute.PushedVariantKey? Key) right) =>
+        left.Column.SegmentsUtf8[0].AsSpan().SequenceEqual(right.Column.SegmentsUtf8[0]) && left.Key == right.Key;
+
+    /// <summary>A predicate an encoding may answer, on a top-level field or on the typed column of a key of one.</summary>
+    internal sealed class PushPlan(FieldExpr field, Compute.EncodedPredicate predicate, Compute.PushedVariantKey? key = null)
+    {
+        /// <summary>The field.</summary>
+        internal FieldExpr Field { get; } = field;
+
+        /// <summary>The predicate on it.</summary>
+        internal Compute.EncodedPredicate Predicate { get; } = predicate;
+
+        /// <summary>The key of the variant column whose typed column the predicate reads, and its class; null for the column itself.</summary>
+        internal Compute.PushedVariantKey? Key { get; } = key;
+
+        /// <summary>
+        /// Whether an encoding of the column declined the predicate, in some scan of the filter: the scans that deliver
+        /// selections ask it no more, a decline costing each the column's decode for nothing, two a question of the
+        /// distinct hosts by region, whose ids no encoding answers (2026-11-02). Raced, and written true by all.
+        /// </summary>
+        internal bool Declined { get; set; }
+    }
     /// <summary>
     /// Offers the comparison to the predicate's column and, when its encoding answers, reads the
     /// projection over the rows it kept.
@@ -1844,46 +2141,14 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     /// do. When it declines, the first pass has decoded that one column for nothing, once, and no
     /// split of this scan asks again.
     /// </remarks>
-    private int ExecutePushed(Lane lane, RowRange split, PushedPredicate pushable)
+    private int ExecutePushed(Lane lane, RowRange split, PushPlan pushable)
     {
         ScanContext context = lane.Context;
-
-        // Resolved against the layout's struct and not against the batch's schema, which is the
-        // keep projection's: a filter-only column is absent from it, and a projected one can sit at
-        // another index. A mask is a path through the file's fields, so the file's dtype is the
-        // only one that names them.
-        byte[] name = pushable.Field.SegmentsUtf8[0];
-        DType root = _tree.Root.DType;
-        int field = root.Kind == DTypeKind.Struct ? root.IndexOfField(name) : -1;
-        if (field < 0 || !_mask.Includes(field))
+        int answer = PushedAnswer(context, split, pushable);
+        if (answer < 0)
         {
-            _push = PushDeclined;
             return -1;
         }
-
-        FieldMask only = FieldMask.Single(field);
-        (byte[]? Field, ComparisonOp Op, FilterLiteral Literal, bool Prefix) saved =
-            context.ExchangePushedPredicate(name, pushable.Op, pushable.Literal, pushable.Prefix);
-        int answer;
-        FilterWindow(context, split);
-        try
-        {
-            answer = SplitExecution.Execute(context, _tree, in only, split, null);
-        }
-        finally
-        {
-            context.ExchangePushedPredicate(saved.Field, saved.Op, saved.Literal, saved.Prefix);
-            ProjectionWindow(context, split);
-        }
-
-        if (!context.PredicateAnswered)
-        {
-            _push = PushDeclined;
-            return -1;
-        }
-
-        _push = PushAnswered;
-        context.PredicateAnswered = false;
 
         int rows = (int)(split.End - split.Start);
         int[] kept = ArrayPool<int>.Shared.Rent(Math.Max(rows, 1));
@@ -1897,6 +2162,60 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         }
     }
 
+    /// <summary>
+    /// The answer of the predicate's column to <paramref name="pushable"/> over <paramref name="split"/>, a struct of one
+    /// boolean column in <paramref name="context"/>'s arena; -1 when its encoding declined, which no later split asks again.
+    /// </summary>
+    private int PushedAnswer(ScanContext context, RowRange split, PushPlan pushable)
+    {
+        // Resolved against the layout's struct and not against the batch's schema, which is the
+        // keep projection's: a filter-only column is absent from it, and a projected one can sit at
+        // another index. A mask is a path through the file's fields, so the file's dtype is the
+        // only one that names them.
+        byte[] name = pushable.Field.SegmentsUtf8[0];
+        DType root = _tree.Root.DType;
+        int field = root.Kind == DTypeKind.Struct ? root.IndexOfField(name) : -1;
+        // A key of a variant is answered by its typed column where its chunks are read by their keys: the filter's own reads
+        // when the projection reads the column whole (VariantKeyReads.FilterPass), none on a file that reads no key apart.
+        Indexes.VariantKeyReads? projected = context.VariantKeys;
+        Indexes.VariantKeyReads? keyed = pushable.Key is null ? projected : projected?.FilterPass ?? projected;
+        if (field < 0 || !_mask.Includes(field) || (pushable.Key is not null && keyed is null))
+        {
+            _push = PushDeclined;
+            return -1;
+        }
+
+        FieldMask only = FieldMask.Single(field);
+        (byte[]? Field, Compute.EncodedPredicate? Predicate) saved =
+            context.ExchangePushedPredicate(name, pushable.Predicate);
+        Compute.PushedVariantKey? savedKey = context.ExchangePushedKey(pushable.Key);
+        context.VariantKeys = keyed;
+        int answer;
+        FilterWindow(context, split);
+        try
+        {
+            answer = SplitExecution.Execute(context, _tree, in only, split, null);
+        }
+        finally
+        {
+            context.VariantKeys = projected;
+            context.ExchangePushedPredicate(saved.Field, saved.Predicate);
+            context.ExchangePushedKey(savedKey);
+            ProjectionWindow(context, split);
+        }
+
+        if (!context.PredicateAnswered)
+        {
+            _push = PushDeclined;
+            pushable.Declined = true;
+            return -1;
+        }
+
+        _push = PushAnswered;
+        context.PredicateAnswered = false;
+        return answer;
+    }
+
     /// <summary>Reads the rows an answered comparison selects, in the split's space.</summary>
     /// <param name="context">The context whose arena holds the answer.</param>
     /// <param name="answer">The struct the first pass produced, holding one boolean column.</param>
@@ -1906,7 +2225,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     /// A row is selected by its own bit, true and valid; the bits are read a word at a time, see
     /// <see cref="RowIndices.FromBits"/>.
     /// </remarks>
-    private static int Selected(ScanContext context, int answer, Span<int> into)
+    internal static int Selected(ScanContext context, int answer, Span<int> into)
     {
         CanonicalArena arena = context.Canonical;
         CanonicalNode node = arena.GetNode(answer);
@@ -2016,10 +2335,16 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         ScanContext context = lane.Context;
         lane.Selection = default;
         lane.Selected = 0;
+        bool proven = ZoneProven(split);
+        if (_evaluator is not null && !proven && _push != PushDeclined && Pushable() is { Declined: false } pushable
+            && PushedAnswer(context, split, pushable) is int answer and >= 0)
+        {
+            return ExecuteAnswered(lane, split, answer);
+        }
+
         int root = SplitExecution.Execute(context, _tree, in _mask, split, null);
         lane.ReadRoot = root;
         int rows = context.Canonical.GetNode(root).Length;
-        bool proven = ZoneProven(split);
         if (_take is null && (_evaluator is null || proven))
         {
             return ProjectionTrim.Apply(context.Canonical, root, in _mask, in _keep, _schema);
@@ -2081,6 +2406,74 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         }
 
         return ProjectionTrim.Apply(context.Canonical, root, in _mask, in _keep, _schema);
+    }
+
+    /// <summary>
+    /// A split delivered whole, its rows marked as its predicate's encoding answered them (<see cref="PushedAnswer"/>): the
+    /// projection decoded, and the predicate's column for the filter none. A first pass of a trace's spans, which reads its
+    /// identifiers to place the rows it keeps, decoded each granule's identifiers, eight thousand texts, for a comparison
+    /// their codes answer: a quarter of the question (2026-11-02).
+    /// </summary>
+    private int ExecuteAnswered(Lane lane, RowRange split, int answer)
+    {
+        ScanContext context = lane.Context;
+        lane.Selection = AnswerWords(context.Canonical, answer, (int)(split.End - split.Start), out int selected);
+        lane.Selected = selected;
+        int root = SplitExecution.Execute(context, _tree, in _keep, split, null);
+        lane.ReadRoot = root;
+        return ProjectionTrim.Apply(context.Canonical, root, in _keep, in _keep, _schema);
+    }
+
+    /// <summary>
+    /// The rows an encoding's answer selects, true and known, as 64-bit words in the batch's arena, copied from its bits: by
+    /// the rows' indices then a state a row, a filter that keeps nearly every row, as one that leaves out a request's id
+    /// does, paid three passes of a split for them, a tenth of a question of the distinct hosts by region (2026-11-02).
+    /// </summary>
+    private static Buffers.VortexBuffer AnswerWords(CanonicalArena arena, int answer, int rows, out int selected)
+    {
+        CanonicalNode node = arena.GetNode(answer);
+        if (node.Kind == CanonicalKind.Struct)
+        {
+            node = arena.GetNode(node.GetFieldIndex(0));
+        }
+
+        int words = Math.Max((rows + 63) >> 6, 1);
+        Buffers.VortexBuffer buffer = arena.AllocateUninitialized(words * 8, 64, out Span<byte> raw);
+        raw.Clear();
+        selected = 0;
+        Arrays.Decoders.Canonical.ValidityMask valid = Arrays.Decoders.Canonical.ValidityMask.From(arena, node.Validity);
+        if (valid.AllInvalid || rows == 0)
+        {
+            return buffer;
+        }
+
+        Span<ulong> bits = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, ulong>(raw);
+        CanonicalSupport.CopyBits(node.Bits.Span, node.BitOffset, raw, 0, rows);
+        if (!valid.AllValid)
+        {
+            ulong[] known = ArrayPool<ulong>.Shared.Rent(words);
+            try
+            {
+                Span<ulong> knownWords = known.AsSpan(0, words);
+                knownWords.Clear();
+                CanonicalSupport.CopyBits(valid.Bits, valid.BitOffset, System.Runtime.InteropServices.MemoryMarshal.AsBytes(knownWords), 0, rows);
+                for (int w = 0; w < words; w++)
+                {
+                    bits[w] &= knownWords[w];
+                }
+            }
+            finally
+            {
+                ArrayPool<ulong>.Shared.Return(known);
+            }
+        }
+
+        for (int w = 0; w < words; w++)
+        {
+            selected += System.Numerics.BitOperations.PopCount(bits[w]);
+        }
+
+        return buffer;
     }
 
     /// <summary>
@@ -2558,6 +2951,10 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         {
             lanes.Return(lane);
         }
+        else if (Ahead is { } ahead)
+        {
+            ahead.Free(lane);
+        }
     }
 
     /// <summary>How many lanes the scan has made: on the lanes, as many as its splits in flight needed; else its one lane.</summary>
@@ -2577,9 +2974,10 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
             }
         }
 
-        // The lanes of the reads ahead past the first, which is the scan's first lane.
+        // The lanes of the reads ahead past the first, which is the scan's first lane; what they took of the pool, back.
         if (Ahead is { } ahead)
         {
+            ahead.Settle();
             for (int i = 1; i < ahead.Lanes.Length; i++)
             {
                 if (ahead.Lanes[i] is { } lane)

@@ -30,7 +30,7 @@ Five requirements, each of which becomes a test or a ratchet once built:
 |---|---|
 | the same API | a file opens, scans and is written with the calls it has on a path, given a location instead, though an object takes no append. A dataset takes a store, or a location. Nothing else in the public API changes, whichever provider holds the bytes |
 | few round trips | every operation has a count of requests and of dependent steps, written in [the budget](#5-requests-per-operation), and counting tests hold it. Opening a file is one request on a store that reads suffixes, and opening an object of a dataset is one request on any store. Nothing that a response already said is asked again |
-| the bandwidth of the link | reads run in parallel on many connections, coalesced into ranges of up to 8 MiB across gaps of up to 256 KiB, and large objects go up in parts sent in parallel |
+| the bandwidth of the link | reads run in parallel on many connections, coalesced into ranges of up to 8 MiB across gaps of up to 256 KiB (a remote store's [cost profile](#4-the-store-interface-revised)), and large objects go up in parts sent in parallel |
 | bounded allocation, one copy | a request allocates a constant amount, never a buffer the size of its body, and this library's own code allocates nothing per batch. A response body reaches the block the scan decodes from with no copy but the one TLS makes |
 | secure by default | HTTPS only, credentials from the platform's identity where the platform offers one, no secret in a message, a log or a trace, and a conditional write whose outcome cannot be proven reported as unknown, never as lost |
 
@@ -189,9 +189,9 @@ gap closed:
 
 | change | before | revised | what it buys |
 |---|---|---|---|
-| a read fills the caller's buffer | `GetRangeAsync` returns bytes the store owns, and the dataset's object source copies each segment out of them into an aligned block (`ObjectSegmentSource.cs`, `Aligned`) | `ReadAsync(key, offset, destination, ifToken)` reads into memory the caller gives and returns the bytes read, the object's length and its token | the body lands in the block the scan decodes from, and the per-segment copy disappears |
+| a read fills the caller's buffer | `GetRangeAsync` returns bytes the store owns, and the dataset's object source copies each segment out of them into an aligned block (`ObjectStoreSource.cs`, `Aligned`) | `ReadAsync(key, offset, destination, ifToken)` reads into memory the caller gives and returns the bytes read, the object's length and its token | the body lands in the block the scan decodes from, and the per-segment copy disappears |
 | the end of an object, without its length | the open asks the length first (`GetLengthAsync`, a head), then reads the tail (`VortexFile.cs`, the open path) | `ReadTailAsync(key, destination)` reads the last bytes and returns the object's length with them | one request instead of two on a store that reads suffixes. Another store answers with a head and a read, as today |
-| a condition on the token | a range's token is compared with the first one after the bytes arrived (`ObjectSegmentSource.cs`, `Note`) | the token travels with the read as a condition, and the store answers 412 rather than bytes of another object | an object replaced under a reader fails the next read, and its bytes are never downloaded |
+| a condition on the token | a range's token is compared with the first one after the bytes arrived (`ObjectStoreSource.cs`, `Note`) | the token travels with the read as a condition, and the store answers 412 rather than bytes of another object | an object replaced under a reader fails the next read, and its bytes are never downloaded |
 | a put says its condition | `PutIfAbsentAsync` only, and an object is never overwritten | `PutAsync(key, content, length, condition)`, where the condition is absent, matching a token, or none, and `PutOutcome` gains `Changed` for a token that no longer matches | a file written to a location replaces the object as a path's rename does, and a caller that read an object replaces it only if nothing else did in between |
 | a listing says what it knows | keys only, so vacuum asks for a head per candidate (`DatasetVacuum.cs`, one awaited after another) | `ListAsync` yields each key with its length, token and creation time, and the lock when the store's listing reports it | vacuum stops asking for heads, except for the locks that S3 and the clouds speaking its API report only in a head |
 
@@ -209,6 +209,17 @@ a caller chooses the cheaper path without trying the other:
 
 A listing says on each entry whether it gave the object's lock: Azure's, Cloud Storage's and the
 memory store's do, the file store's does by saying none, and S3's never does, so a head tells there.
+
+A store says, too, what reading it costs: its cost profile (`IObjectStore.CostProfile`), a round
+trip's latency, the requests in flight and the bytes a second, a request worth the bytes the link
+carries during its share of the latency. A remote store's is the default, 30 ms among 128 requests
+over 1.25 GB/s, a request worth some 293 KB. The file store gives a local disk's, 0.1 ms among 64
+over 3 GB/s, some 4.7 KB, and the memory store memory's, nothing. The profile sets how a store's reads
+are coalesced, two ranges joined across a request's worth rounded down to a power of two (256 KiB,
+4 KiB on a disk, none in memory) up to 8 MiB a request, and it prices every path a dataset's planner
+weighs before reading anything, with the tiers its caches hold regions in and the processor's price of
+a value by encoding class ([16-queries.md](16-queries.md)). A dataset's options may give another
+(`DatasetOptions.CostProfile`), for a store behind a cache, or on another link than its kind's.
 
 A capability marked to check is taken as absent until the contract tests prove it against the
 service, so a store whose suffix reads are not proven opens a file with a head and a read, as today.
@@ -300,7 +311,7 @@ message handler that answers with delays, resets, throttling and refusals.
 
 The allocations that matter are this library's own. The dataset's object source allocated on every
 batch: a list of slots, an array of tasks and a task per read, an array of ranges and a sorting
-delegate (`ObjectSegmentSource.cs`, `ReadManyAsync`, before the revision). They went, replaced by
+delegate (`ObjectStoreSource.cs`, `ReadManyAsync`, before the revision). They went, replaced by
 pooled arrays and value tasks (`ObjectStoreSource.cs`), so that what a scan over a store allocates per
 batch is the platform's constant per request and nothing else.
 
@@ -600,7 +611,7 @@ whole object's hashes only, so a ranged read relies on TLS and the format's chec
 
 The session's bound on reads in flight counts batch reads, 128 by default, on every store: a batch
 takes one slot, and the source then issues every coalesced range of the batch at once
-(`SessionReader.cs`, `ReadManyAsync`, and `ObjectSegmentSource.cs`, the reads issued together). Over
+(`SessionReader.cs`, `ReadManyAsync`, and `ObjectStoreSource.cs`, the reads issued together). Over
 HTTP/1.1 a request in flight is a connection, and the store sends at most `MaxConnections` requests
 at once, so the memory the reads hold and the connections they open are both bounded. Every store of
 the process draws besides from one budget of requests (`RequestBudget`, 256 in flight and 2 000 a
@@ -628,7 +639,7 @@ store 5 ms away to bound a scan of rows by its latency.
 ### 10.2 Bytes land once
 
 Today a range arrives in a buffer the store owns, and each segment is then copied into an aligned
-block of its own (`ObjectSegmentSource.cs`, `Aligned`). Revised, the dataset's source rents one
+block of its own (`ObjectStoreSource.cs`, `Aligned`). Revised, the dataset's source rents one
 64-byte aligned block from the engine pool for each coalesced range, the store reads the body into
 it, and each segment is a slice of that block, its owner shared by a reference count as the session
 cache's results already are. Coalesced ranges start on a 64-byte boundary, so each segment keeps its
@@ -654,8 +665,9 @@ be checked against the service ([Azure's checksums](#83-checksums)).
 ### 10.5 The synopsis cache on the local disk
 
 A session may keep on the local disk what questions read of a dataset's objects without their data
-(`VortexSessionOptions.SynopsisCache`): their slices' chunk directories, their index directories and
-their variant columns' path directories, and the fence pages and run segments a lookup of an identifier
+(`VortexSessionOptions.SynopsisCache`): every region an object's table of contents declares, its chunk
+directory and marks, its index directory, its granules' statistics and locates, its sparse key index and
+its variant columns' path directories, and the fence pages and run segments a lookup of an identifier
 reads; and the pages of the dataset's tree, by the hash of their bytes ([the pages a handle
 keeps](13-dataset.md#3-objects-and-keys)), unless the dataset is sealed. Only a region of an index
 enters it, never the data nor the footer: one an object's table of contents declares, with a checksum,
@@ -889,8 +901,8 @@ upload.
 
 A rewrite, a compaction's or a delete's that keeps some of an object's rows, announces a bound with
 that put (`ObjectBound`): what it reads, times 1.03, the most bytes a rewrite wrote for each byte it
-read on the lifecycle bench, measured when the library compacted by periods too (1.024 at worst over
-periods of a day and of an hour and the leveled style, 1.000 for a seal). Without it, parts sized for
+read on the lifecycle bench (1.024 at worst over the compaction styles measured then, the leveled one
+among them, 1.000 for a seal). Without it, parts sized for
 an unknown length reach about a terabyte on S3, but 168 GB on R2, whose parts keep one size, and 106 GB
 on Scaleway, which takes a thousand parts, short of an object of a day at a few thousand rows a second,
 which would fail at its end, every time it ran. With it, the parts are sized for the bound from the
@@ -1135,14 +1147,14 @@ a proposal of this design, to be measured.
 
 | claim | where it comes from |
 |---|---|
-| a dataset's object opens with a head then the tail, although its entry knows the length | code: `ObjectCache.cs` (the open passes no length), `ObjectSegmentSource.cs` (`GetLengthAsync` asks a head), `VortexFile.cs` (the length before the tail) |
+| a dataset's object opens with a head then the tail, although its entry knows the length | code: `ObjectCache.cs` (the open passes no length), `ObjectStoreSource.cs` (`GetLengthAsync` asks a head), `VortexFile.cs` (the length before the tail) |
 | vacuum asks a head for each commit and each unreferenced data object, one after another | code: `DatasetVacuum.cs` |
-| the session's bound counts a batch read once, and the object source issues all its ranges together | code: `SessionReader.cs`, `ObjectSegmentSource.cs` |
-| each segment of a range is copied into an aligned block of its own | code: `ObjectSegmentSource.cs`, `Aligned` |
+| the session's bound counts a batch read once, and the object source issues all its ranges together | code: `SessionReader.cs`, `ObjectStoreSource.cs` |
+| each segment of a range is copied into an aligned block of its own | code: `ObjectStoreSource.cs`, `Aligned` |
 | a refused commit is rebuilt on the version that exists | code: `DatasetCommitter.cs`, the conditional creation |
 | vacuum keeps every unreferenced object younger than its window, and the latest version it lists | code: `DatasetVacuum.cs` |
 | the sink hashes every object with XXH3-128 | code: `ObjectSegmentSink.cs` |
-| the dataset's object source allocates per batch: a list, task arrays, a task per read, an array of ranges, a delegate | code: `ObjectSegmentSource.cs`, `ReadManyAsync` |
+| the dataset's object source allocates per batch: a list, task arrays, a task per read, an array of ranges, a delegate | code: `ObjectStoreSource.cs`, `ReadManyAsync` |
 | `System.IO.Hashing` 11 takes the parameters of any CRC, CRC-64/NVME and CRC-32C among them, where 10's `Crc64` was ECMA-182's alone | code: `Crc64ParameterSet.cs` and `Crc64.cs` in dotnet/runtime, and the documentation of `System.IO.Hashing` 10.0.12 |
 | `SocketsHttpHandler` reads a response body straight from the TLS stream into the caller's memory when its own buffer is empty, which starts at 4 KiB | code: dotnet/runtime, `HttpConnection.ReadAsync(Memory<byte>)` and `ReadBufferedAsync`, read on 2026-10-10 |
 | one range per S3 `GET`, suffix ranges, Object Lock headers on reads and heads | source: Amazon S3 API reference, `GetObject` |

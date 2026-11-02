@@ -843,4 +843,20 @@ public sealed class SharedPoolTests
         // The ceiling's blocks are the budget; a return past it is freed rather than parked.
         Assert.Equal(Math.Min(ceiling, before + rented.Length), AlignedBufferPool.Shared.ParkedCount(large));
     }
+
+    /// <summary>
+    /// A reservation a process's budget refuses first takes back the blocks the pool keeps parked for the next rents: native
+    /// memory, which a container's limit counts, and the room of the queries is what that limit leaves.
+    /// </summary>
+    [Fact]
+    public void The_shared_pool_gives_back_what_it_parks_when_a_process_budget_refuses()
+    {
+        NativeSegmentOwner block = AlignedBufferPool.Shared.Rent(64 * 1024, 64);
+        AlignedBufferPool.Shared.Return(block);
+        Assert.True(AlignedBufferPool.Shared.ParkedBytes > 0);
+
+        QueryMemoryBudget process = new QueryMemoryBudget(1 << 20, process: null);
+        Assert.False(process.TryReserve(1L << 40));
+        Assert.Equal(0, AlignedBufferPool.Shared.ParkedBytes);
+    }
 }

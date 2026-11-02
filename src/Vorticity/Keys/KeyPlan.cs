@@ -26,11 +26,7 @@ public enum KeySourceKind : byte
     /// <summary>A query's result: its column's values, read and sorted in memory when the cursor opens.</summary>
     InMemory = 5,
 
-    /// <summary>
-    /// A <c>vorticity.slices.v1</c> table on an instant column, whose rows are cut in time slices: the
-    /// table finds a key's slice, and the slice's instants are read and ranked when first needed.
-    /// </summary>
-    Slices = 6,
+    // 6 named the time slices of a file cut by periods, retired with them: never reused.
 }
 
 /// <summary>What a cursor over one column would be served by.</summary>
@@ -50,7 +46,11 @@ public sealed record KeyPlan(
     int Runs,
     long? EntryCount,
     bool HasRows,
-    IReadOnlyList<KeySourceRejection> Rejected);
+    IReadOnlyList<KeySourceRejection> Rejected)
+{
+    /// <summary>The walk asked, in words: the column's keys or its distinct ones, and the source it walks.</summary>
+    public string Logical { get; init; } = string.Empty;
+}
 
 /// <summary>One source that was not chosen, and the reason.</summary>
 /// <param name="Source">The source.</param>

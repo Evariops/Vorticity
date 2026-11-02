@@ -12,7 +12,7 @@ namespace Vorticity.Indexes;
 /// counts the objects would keep as one, with no row read: the entries of a value add up word for word, their quantile
 /// sketches bucket by bucket and their registers register by register, so that each entry holds what the rows of its
 /// value in every object would give. The merge carries the measures, the sketches and the wide columns every input
-/// carries. A caller that sums by a grain of its own, a clustering value say, keeps a merge for each.
+/// carries. A caller that sums by a grain of its own, a partition value say, keeps a merge for each.
 /// </summary>
 /// <remarks>
 /// An input's entry of the values its budget left out may hold any value that input does not keep: a value one such input
@@ -52,9 +52,6 @@ internal sealed class CountsMerge
 
     /// <param name="entryLimit">The entries the merge keeps at most, past which the values of fewest rows are left out.</param>
     internal CountsMerge(int entryLimit = ColumnCountsBuilder.EntryLimit) => _entryLimit = entryLimit;
-
-    /// <summary>The entries the merge holds.</summary>
-    internal int Entries => _entries.Count;
 
     /// <summary>Adds the entries of <paramref name="counts"/>, with <paramref name="sketches"/> their sketches when it keeps any.</summary>
     internal void Add(ColumnCounts counts, ColumnSketches? sketches)

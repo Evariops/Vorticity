@@ -155,6 +155,18 @@ internal abstract class ValueFunction
     /// </summary>
     protected abstract Int128 Reach { get; }
 
+    /// <summary>
+    /// For a floor to a fixed width, the start of the bucket after the one that starts at <paramref name="image"/>, an
+    /// image of the function: where <see cref="TryLeast"/> finds the least value of a bucket's successor without a
+    /// search, which cost a question of a route's errors by hour 17 % of its time (2026-11-02). False for buckets whose
+    /// widths vary (a month, a zone's hours) or an image the storage's least value saturates, which a search finds.
+    /// </summary>
+    protected virtual bool TryNext(Int128 image, out Int128 next)
+    {
+        next = default;
+        return false;
+    }
+
     /// <summary>The function of one value of an integer storage, within it.</summary>
     protected abstract Int128 Image(Int128 value);
 
@@ -186,7 +198,8 @@ internal abstract class ValueFunction
     /// The least value of the storage whose image is at least <paramref name="value"/>: where the
     /// rows of <c>f(x) ≥ value</c> begin, every value before it having an image below. A floor sends
     /// nothing below <paramref name="value"/> that far, so the search starts there, bisects the next
-    /// <see cref="Reach"/> and the rest of the storage only when that holds no such value.
+    /// <see cref="Reach"/> and the rest of the storage only when that holds no such value. A floor to
+    /// a fixed width (<see cref="TryNext"/>) needs no search: the start of the next bucket.
     /// </summary>
     /// <returns>False when no value of the storage has such an image, or the storage is a float's.</returns>
     internal bool TryLeast(Int128 value, out Int128 least)
@@ -204,9 +217,23 @@ internal abstract class ValueFunction
         }
 
         Int128 low = Int128.Max(value, min);
-        if (Image(low) >= value)
+        Int128 image = Image(low);
+        if (image >= value)
         {
             least = low;
+            return true;
+        }
+
+        // The value lies inside the bucket that starts at its image, every value before the next bucket's start
+        // sent to that image or below.
+        if (TryNext(image, out Int128 next))
+        {
+            if (next > max)
+            {
+                return false;
+            }
+
+            least = next;
             return true;
         }
 
@@ -350,12 +377,6 @@ internal sealed class InstantTruncate : ValueFunction
 
     internal override string Text { get; }
 
-    /// <summary>The calendar unit an instant is truncated to the start of.</summary>
-    internal CalendarUnit Unit => _unit;
-
-    /// <summary>Whether the truncation goes by a zone's calendar, whose offsets move its units' starts off the stored ones.</summary>
-    internal bool Zoned => _zone is not null;
-
     internal override PType Storage => PType.I64;
 
     protected override Int128 Reach => (_unit switch
@@ -371,6 +392,21 @@ internal sealed class InstantTruncate : ValueFunction
     {
         ZoneCursor cursor = default;
         return Truncate((long)value, ref cursor);
+    }
+
+    /// <summary>A minute, an hour, a day or a week as stored is a bucket of a fixed width.</summary>
+    protected override bool TryNext(Int128 image, out Int128 next)
+    {
+        long width = _zone is not null ? 0 : _unit switch
+        {
+            CalendarUnit.Minute => 60 * _second,
+            CalendarUnit.Hour => 3_600 * _second,
+            CalendarUnit.Day => _day,
+            CalendarUnit.Week => 7 * _day,
+            _ => 0,
+        };
+        next = image + width;
+        return width > 0 && image != long.MinValue;
     }
 
     protected override void Map(PType ptype, ReadOnlySpan<byte> source, Span<byte> destination)
@@ -431,6 +467,13 @@ internal sealed class DateTruncate(CalendarUnit unit) : ValueFunction
 
     protected override Int128 Image(Int128 value) => Day((long)value);
 
+    /// <summary>A week is a bucket of seven days.</summary>
+    protected override bool TryNext(Int128 image, out Int128 next)
+    {
+        next = image + 7;
+        return unit == CalendarUnit.Week && image != int.MinValue;
+    }
+
     protected override void Map(PType ptype, ReadOnlySpan<byte> source, Span<byte> destination)
     {
         ReadOnlySpan<int> from = MemoryMarshal.Cast<byte, int>(source);
@@ -454,6 +497,12 @@ internal sealed class InstantBucket(long width, TimeSpan span) : ValueFunction
     protected override Int128 Reach => width;
 
     protected override Int128 Image(Int128 value) => Civil.FloorTo((long)value, width);
+
+    protected override bool TryNext(Int128 image, out Int128 next)
+    {
+        next = image + width;
+        return image != long.MinValue;
+    }
 
     protected override void Map(PType ptype, ReadOnlySpan<byte> source, Span<byte> destination) =>
         Civil.FloorRuns(MemoryMarshal.Cast<byte, long>(source), MemoryMarshal.Cast<byte, long>(destination), width);
@@ -483,6 +532,13 @@ internal sealed class NumberBucket : ValueFunction
     protected override Int128 Reach => _integer;
 
     protected override Int128 Image(Int128 value) => Int128.Max(Floor(value), Integers(Storage).Min);
+
+    /// <summary>The bucket after the one holding <paramref name="image"/>, the type's least value standing for the bucket it falls in.</summary>
+    protected override bool TryNext(Int128 image, out Int128 next)
+    {
+        next = Floor(image) + _integer;
+        return true;
+    }
 
     protected override double Image(double value)
     {

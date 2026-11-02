@@ -800,6 +800,17 @@ internal sealed class ColumnWriter
         _widthsLive = scheme == ColumnScheme.BitPacked;
     }
 
+    /// <summary>
+    /// Makes this a column whose chunks hold an object dictionary's codes, which no plan of its values describes: no
+    /// distinct table and no widths run on its rows, whatever a pin asked.
+    /// </summary>
+    internal void Code()
+    {
+        Memory = null;
+        _live = false;
+        _widthsLive = false;
+    }
+
     /// <summary>Child <paramref name="index"/>, creating the nodes on the first batch.</summary>
     internal ColumnWriter Descend(int index, int count) => Children(count)[index];
 

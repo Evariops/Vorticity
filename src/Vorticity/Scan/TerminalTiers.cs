@@ -42,6 +42,12 @@ internal enum TerminalTiers
     /// </summary>
     ZoneBounds = 16,
 
+    /// <summary>
+    /// The filter offered to its column's encoding, which answers with the rows it keeps over its own values, as a scan's
+    /// batches offer it: the column read and not decoded, a count of the rows its answer selects.
+    /// </summary>
+    Encoded = 32,
+
     /// <summary>Every tier, cheapest first.</summary>
-    All = ExactCover | FullBlock | Decode | FileStatistic | ZoneBounds,
+    All = ExactCover | FullBlock | Decode | FileStatistic | ZoneBounds | Encoded,
 }

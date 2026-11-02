@@ -30,6 +30,13 @@ internal static class IndexKinds
     public const string PostingsNgram3 = "vorticity.postings.ngram3.v1";
 
     /// <summary>
+    /// Token to blocks: the words of a text column, each a maximal run of ASCII letters and digits and of non-ASCII bytes,
+    /// its first 64 bytes, folded to ASCII lower case when its options say so, in the postings' format
+    /// (<see cref="Indexes.Tokens"/>, spec G, 6).
+    /// </summary>
+    public const string PostingsTokens = "vorticity.postings.tokens.v1";
+
+    /// <summary>
     /// Value to blocks through the value's hash, a superset at block granularity: each run holds its
     /// (hash, block) pairs sorted by hash, the hashes cut to as many bits as its pairs need plus ten,
     /// per segment as gaps beside the blocks (<see cref="KeyRunOptions.HashShift"/>).
@@ -37,17 +44,26 @@ internal static class IndexKinds
     public const string PostingsHashed = "vorticity.postings.hashed.v1";
 
     /// <summary>
-    /// The time slices of a file, on its instant column: per slice its bounds, its first row and its
-    /// row count, held in the entry's options with no payload (<see cref="SliceTable"/>).
+    /// The sparse index of a sorted object, on the root: the key of the first row of each granule, the prefix of the sort
+    /// key the object indexes, and the key of its last row, in its options a table of pages and their first keys, its pages in
+    /// the payload, none when the table keeps the one page (<see cref="Indexes.GranuleKeys"/>). It replaces the slices of
+    /// <c>vorticity.slices.v1</c>, retired.
     /// </summary>
-    public const string Slices = "vorticity.slices.v1";
+    public const string KeyIndex = "vorticity.key.index.v1";
 
     /// <summary>
     /// Where the chunks of every top-level column lie and the array encodings their trees name, on
-    /// the root, the encodings in its options and a payload region per column: what reads a slice's
+    /// the root, the encodings in its options and a payload region per column: what reads a span of
     /// rows without the footer (<see cref="Indexes.SliceChunks"/>).
     /// </summary>
     public const string SliceChunks = "vorticity.slices.chunks.v1";
+
+    /// <summary>
+    /// The geometry of every top-level column's chunks, on the root, a payload region per column: each chunk's encoding
+    /// tree and where each granule starts in its buffers of variable length, which a read of a few granules needs before it
+    /// reads their bytes alone (<see cref="Indexes.ColumnMarks"/>).
+    /// </summary>
+    public const string Marks = "vorticity.marks.v1";
 
     /// <summary>
     /// Where each shredded key of a variant column lies, chunk by chunk, on that column: the
@@ -93,26 +109,31 @@ internal static class IndexKinds
     /// </summary>
     public const string ColumnSketches = "vorticity.column.sketches.v1";
 
-    /// <summary>
-    /// The blocks of a file whose rows follow a key, on its first column: runs of rows of one value of it, each its rows and
-    /// the first and the last key it holds, in one payload region that a table of contents names, which the statistics of
-    /// each column of each block extend (<see cref="Indexes.BlockTable"/>).
-    /// </summary>
-    public const string BlockTable = "vorticity.block.table.v1";
+    // vorticity.block.table.v1 held each block's rows and its first and last keys, written and never read: retired, its
+    // name never reused.
+
+    // vorticity.block.stats.v1 held a column's statistics over runs of the key's prefix of 4,096 to 65,536 rows, and
+    // vorticity.column.where.v1 the ranges of those runs each value lived in: retired, their names never reused.
 
     /// <summary>
-    /// One column's statistics over the blocks of <see cref="BlockTable"/>: each block's rows, nulls, values and their
-    /// rows, and a measure's count, exact sum and extremes, in one payload region that a table of contents names
-    /// (<see cref="ColumnBlocks"/>).
+    /// One column's statistics over the granules of a file whose rows follow a key: each granule's rows, nulls, values and
+    /// their rows, and a measure's count, exact sum and extremes, with the values' dictionary, in one payload region that a
+    /// table of contents names (<see cref="GranuleStats"/>).
     /// </summary>
-    public const string BlockStats = "vorticity.block.stats.v1";
+    public const string GranuleStats = "vorticity.granule.stats.v1";
 
     /// <summary>
-    /// Where each value of a column lives: its values by their bytes, each with the ranges of rows of the blocks it appears
-    /// in, or none where it lives everywhere, in one payload region that a table of contents names
-    /// (<see cref="Indexes.ColumnWhere"/>).
+    /// A measure's histograms over the granules of a file whose rows follow a key: each granule's values in a log-linear
+    /// sketch, apart from its statistics so that a sum never reads them, in one payload region that a table of contents names
+    /// (<see cref="Indexes.GranuleHistograms"/>).
     /// </summary>
-    public const string ColumnWhere = "vorticity.column.where.v1";
+    public const string GranuleHistograms = "vorticity.granule.histograms.v1";
+
+    /// <summary>
+    /// Where each value of a column lies, granule by granule: its values by their bytes, each with the granules it lies in,
+    /// or none where it lies everywhere, in one payload region that a table of contents names (<see cref="Indexes.ColumnLocate"/>).
+    /// </summary>
+    public const string ColumnLocate = "vorticity.locate.v1";
 
     /// <summary>
     /// Whether this library knows the kind. An unknown kind is ignored, never rejected: an index
@@ -124,33 +145,35 @@ internal static class IndexKinds
         kind switch
         {
             BloomSbbf or BloomNgram3 or DictProbe or PostingsBlocks or SortedRuns
-                or PostingsNgram3 or PostingsHashed or Slices or SliceChunks or VariantPaths or VariantDirectory or VariantBlocks
-                or ColumnSheet or ColumnCounts or ColumnSketches or BlockTable or BlockStats or ColumnWhere => true,
+                or PostingsNgram3 or PostingsTokens or PostingsHashed or KeyIndex or SliceChunks or Marks or VariantPaths or VariantDirectory or VariantBlocks
+                or ColumnSheet or ColumnCounts or ColumnSketches or GranuleStats or GranuleHistograms or ColumnLocate => true,
             _ => false,
         };
 
     /// <summary>
     /// Whether the kind carries payload segments. <see cref="DictProbe"/> does not, its whole content
-    /// being the statement that the column's chunks are dictionary-encoded, and neither does
-    /// <see cref="Slices"/>, whose table fits in its options.
+    /// being the statement that the column's chunks are dictionary-encoded, and neither need
+    /// <see cref="KeyIndex"/>, whose table keeps an object's one page.
     /// </summary>
     /// <param name="kind">The name.</param>
     /// <returns>Whether a run of this kind must carry at least one payload segment.</returns>
     public static bool HasPayload(string kind) =>
         kind switch
         {
-            DictProbe or Slices => false,
+            DictProbe or KeyIndex => false,
             _ => true,
         };
 
     /// <summary>
     /// Whether the kind locates the blocks that hold a column's values, which a lookup of rows by a value reads with no open
     /// of the file (<c>KeyIndexPruner</c>): sorted runs, postings of blocks, hashed postings, postings of trigrams, and the
-    /// dictionary probe where none of them answers.
+    /// dictionary probe where none of them answers; or the blocks that may hold them, which a Bloom filter's refuse
+    /// (<c>BloomPruner</c>), so that a value left out is placed by either.
     /// </summary>
     /// <param name="kind">The name.</param>
     /// <returns>Whether a lookup reads it.</returns>
-    internal static bool Locates(string kind) => kind is SortedRuns or PostingsBlocks or PostingsHashed or PostingsNgram3 or DictProbe;
+    internal static bool Locates(string kind) =>
+        kind is SortedRuns or PostingsBlocks or PostingsHashed or PostingsNgram3 or PostingsTokens or DictProbe or BloomSbbf or BloomNgram3;
 
     /// <summary>The kind a policy of <paramref name="policy"/> builds, or null for a policy that names none.</summary>
     /// <param name="policy">The policy's kind.</param>
@@ -163,6 +186,7 @@ internal static class IndexKinds
             IndexPolicyKind.Postings => PostingsBlocks,
             IndexPolicyKind.SortedRuns => SortedRuns,
             IndexPolicyKind.NgramPostings => PostingsNgram3,
+            IndexPolicyKind.TokenPostings => PostingsTokens,
             IndexPolicyKind.HashedPostings => PostingsHashed,
             _ => null,
         };

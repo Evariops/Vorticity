@@ -15,19 +15,19 @@ public class ColumnsBuilder
 {
     private readonly int[]? _map;
 
-    internal ColumnsBuilder(StructStore store, VortexSchema schema, int[]? map, VortexFileWriter? writer)
+    internal ColumnsBuilder(StructStore store, VortexSchema schema, int[]? map, object? owner)
     {
         Store = store;
         Schema = schema;
         _map = map;
-        Writer = writer;
+        Owner = owner;
     }
 
     /// <summary>The struct whose fields this builder fills: the writer's root, or a nested struct column.</summary>
     internal StructStore Store { get; }
 
-    /// <summary>The writer whose rows this builder holds; null for a nested struct's builder.</summary>
-    internal VortexFileWriter? Writer { get; }
+    /// <summary>The writer whose rows this builder holds, a file's or a dataset's; null for a nested struct's builder.</summary>
+    internal object? Owner { get; }
 
     /// <summary>The columns the builder holds.</summary>
     public VortexSchema Schema { get; }
@@ -179,8 +179,8 @@ public class ColumnsBuilder
 public sealed class ColumnsBuilder<TRecord> : ColumnsBuilder
     where TRecord : IVortexRecord<TRecord>
 {
-    internal ColumnsBuilder(StructStore store, int[]? map, VortexFileWriter? writer)
-        : base(store, TRecord.Schema, map, writer)
+    internal ColumnsBuilder(StructStore store, int[]? map, object? owner)
+        : base(store, TRecord.Schema, map, owner)
     {
     }
 

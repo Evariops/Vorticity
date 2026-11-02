@@ -273,15 +273,15 @@ internal static class ChosenFetch
             KeepEncodings = false,
             SinkDecodes = false,
             PositionsUnread = false,
-            Pruned = false,
-            Live = null,
+            Analysis = null,
+            Answering = null,
             Options = spec.Options with { Compact = true },
         };
 
         // Each batch of the take: for each choice, its rows among the batch's, read into its columns.
         int first = 0;
         int[] read = ofChoice[..^1];
-        await foreach (RecordBatch batch in source.BatchesAsync(take, metrics).WithCancellation(cancellationToken).ConfigureAwait(false))
+        await foreach (RecordBatch batch in source.Rows.BatchesAsync(take, metrics).WithCancellation(cancellationToken).ConfigureAwait(false))
         {
             int rows = batch.RowCount;
             if (first + rows > distinct)

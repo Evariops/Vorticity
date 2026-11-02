@@ -17,7 +17,7 @@ namespace Vorticity;
 /// <typeparam name="TRecord">The record whose members are the scan's columns.</typeparam>
 /// <remarks>
 /// A builder is single-use and not thread-safe: every composition call returns it, and a second
-/// sink throws. <see cref="ExplainAsync"/> may be asked before the sink.
+/// sink throws. <see cref="ExplainAsync(CancellationToken)"/> may be asked before the sink.
 /// </remarks>
 public sealed partial class Scan<TRecord>
     where TRecord : IVortexRecord<TRecord>
@@ -66,6 +66,41 @@ public sealed partial class Scan<TRecord>
 
         _filter &= rows;
         return this;
+    }
+
+    /// <summary>The distinct values a semi-join takes at most by default (spec G, 4): past them, filter its first question further.</summary>
+    public const int SemiJoinValues = 1 << 20;
+
+    /// <summary>
+    /// Keeps the rows whose <paramref name="column"/> is one of the values <paramref name="values"/> gives, a semi-join
+    /// (spec G, 4): the first question read now, each of its values once, the set an <c>In</c> of this scan's filter, which
+    /// the column's localisation, postings and zone maps prune by and its rows are judged by.
+    /// </summary>
+    /// <typeparam name="TKey">The column's type.</typeparam>
+    /// <param name="column">The column the values are looked for in.</param>
+    /// <param name="values">The first question: a projection of one value a row, over any source.</param>
+    /// <param name="maxValues">The distinct values taken at most.</param>
+    /// <param name="cancellationToken">Cancels the first question.</param>
+    /// <returns>This scan, the first question read; with no value, a scan that keeps no row and reads none.</returns>
+    /// <exception cref="InvalidOperationException">The first question gives more than <paramref name="maxValues"/> distinct values.</exception>
+    public async ValueTask<Scan<TRecord>> WhereInAsync<TKey>(
+        Func<Probe<TRecord>, Sym<TKey>> column, Projection<TKey> values, int maxValues = SemiJoinValues, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(column);
+        ArgumentNullException.ThrowIfNull(values);
+        ArgumentOutOfRangeException.ThrowIfNegative(maxValues);
+        HashSet<TKey> distinct = [];
+        await foreach (TKey value in values.ToValuesAsync(cancellationToken).ConfigureAwait(false))
+        {
+            if (value is not null && distinct.Add(value) && distinct.Count > maxValues)
+            {
+                throw new InvalidOperationException(
+                    $"The first question of a semi-join gives more than {maxValues:N0} values: filter it further, or take more of them.");
+            }
+        }
+
+        TKey[] set = [.. distinct];
+        return Where(record => column(record).In(set));
     }
 
     /// <summary>Scans the rows of <paramref name="range"/> only.</summary>
@@ -127,7 +162,7 @@ public sealed partial class Scan<TRecord>
     {
         ArgumentNullException.ThrowIfNull(key);
         ColumnSym column = key(new Probe<TRecord>(Binding)).Column;
-        if (column.Field is Compute.FunctionFieldExpr)
+        if (column.Field is Compute.FunctionFieldExpr or Compute.MappedFieldExpr)
         {
             throw new ArgumentException(
                 $"'{column.Field.Key}' is a function of a column: a scan's order walks a column's key source, and a function of one has none. Order the groups of a GroupBy by it instead.",
@@ -174,7 +209,7 @@ public sealed partial class Scan<TRecord>
         // The one sink whose consumer can read a column encoded: Column<T>.Encoding and its views.
         ScanSpec spec = Spec() with { KeepEncodings = true };
         CancellationToken token = cancellationToken.CanBeCanceled ? cancellationToken : _cancellation;
-        return new AsyncEnumerator(this, _source.BatchesAsync(spec, _counters).GetAsyncEnumerator(token), binding);
+        return new AsyncEnumerator(this, _source.Rows.BatchesAsync(spec, _counters).GetAsyncEnumerator(token), binding);
     }
 
     /// <summary>The batches, each owned by the caller, who disposes it.</summary>
@@ -185,7 +220,7 @@ public sealed partial class Scan<TRecord>
         Begin();
         try
         {
-            await foreach (RecordBatch batch in _source.BatchesAsync(Spec(), _counters).WithCancellation(cancellationToken).ConfigureAwait(false))
+            await foreach (RecordBatch batch in _source.Rows.BatchesAsync(Spec(), _counters).WithCancellation(cancellationToken).ConfigureAwait(false))
             {
                 yield return Own(batch);
             }
@@ -206,7 +241,7 @@ public sealed partial class Scan<TRecord>
         TRecord[] rows = [];
         try
         {
-            await foreach (RecordBatch batch in _source.BatchesAsync(Spec(), _counters).WithCancellation(cancellationToken).ConfigureAwait(false))
+            await foreach (RecordBatch batch in _source.Rows.BatchesAsync(Spec(), _counters).WithCancellation(cancellationToken).ConfigureAwait(false))
             {
                 int count = Fill(batch, binding, ref rows);
                 for (int i = 0; i < count; i++)
@@ -234,7 +269,7 @@ public sealed partial class Scan<TRecord>
         Begin();
         try
         {
-            return await _source.CountAsync(Spec().Reading([]), _counters, cancellationToken).ConfigureAwait(false);
+            return (await _source.Rows.AnswerAsync(Query(LogicalShape.Count).Spec().Reading([]), LogicalShape.Count, _counters, cancellationToken).ConfigureAwait(false)).Rows;
         }
         finally
         {
@@ -250,7 +285,7 @@ public sealed partial class Scan<TRecord>
         Begin();
         try
         {
-            return await _source.AnyAsync(Spec().Reading([]), _counters, cancellationToken).ConfigureAwait(false);
+            return (await _source.Rows.AnswerAsync(Query(LogicalShape.Any).Spec().Reading([]), LogicalShape.Any, _counters, cancellationToken).ConfigureAwait(false)).Rows > 0;
         }
         finally
         {
@@ -274,23 +309,36 @@ public sealed partial class Scan<TRecord>
     public ValueTask<T?> MaxAsync<T>(Func<Probe<TRecord>, Sym<T>> column, CancellationToken cancellationToken = default) =>
         ExtremeAsync(column, min: false, cancellationToken);
 
-    /// <summary>What the scan will do, from statistics, zone maps and indexes, without reading a data segment.</summary>
-    /// <param name="cancellationToken">Cancels the reads of the structures consulted.</param>
+    /// <summary>What the scan will do, worked out from what the source holds in memory, reading nothing (spec B, 7).</summary>
+    /// <param name="cancellationToken">Cancels the explanation.</param>
     /// <returns>The plan.</returns>
     public ValueTask<ScanPlan> ExplainAsync(CancellationToken cancellationToken = default) =>
-        _source.ExplainAsync(Spec(), cancellationToken);
+        _source.PlanAsync(Spec(), analyze: false, cancellationToken);
 
-    /// <summary>The spec the sinks run.</summary>
-    internal ScanSpec Spec() => new ScanSpec
+    /// <summary>
+    /// What the scan will do; with <paramref name="analyze"/>, the structures its read would consult read as it reads them,
+    /// statistics, zone maps, indexes, which give what it prunes exactly, and no data segment.
+    /// </summary>
+    /// <param name="analyze">Whether to read the structures the read would consult.</param>
+    /// <param name="cancellationToken">Cancels the reads of the structures consulted.</param>
+    /// <returns>The plan.</returns>
+    public ValueTask<ScanPlan> ExplainAsync(bool analyze, CancellationToken cancellationToken = default) =>
+        _source.PlanAsync(Spec(), analyze, cancellationToken);
+
+    /// <summary>The spec the sinks of rows run: the rows of the question, in its order.</summary>
+    internal ScanSpec Spec() => Query(_orderPath is null ? RowsShape.All : new RowsShape(_orderPath, _descending)).Spec();
+
+    /// <summary>The question the scan asks, its answer of <paramref name="shape"/>.</summary>
+    internal LogicalQuery Query(LogicalShape shape) => new LogicalQuery(_source.Logical, _source.Schema, shape)
     {
-        Projection = Binding.Mask,
-        Filter = _filter.Node,
+        Reads = Binding.Mask,
+
+        // A predicate on a column through a table, as one on the column (spec G, 5).
+        Filter = Compute.TableFunctions.Preimages(_filter.Node),
         MatchesNothing = _filter.IsNone,
-        Rows = _rows,
-        Take = _take,
-        OrderPath = _orderPath,
-        Descending = _descending,
-        Options = _take is not null && _filter.IsAll ? _options with { Compact = false } : _options,
+        Range = _rows,
+        Positions = _take,
+        Options = _options,
     };
 
     internal ScanCounters Counters => _counters;
@@ -331,7 +379,8 @@ public sealed partial class Scan<TRecord>
         FilterLiteral value;
         try
         {
-            value = await _source.ExtremeAsync(Spec().Reading([target.Field]), target.Field, min, _counters, cancellationToken).ConfigureAwait(false);
+            ExtremeShape extreme = new ExtremeShape(target.Field, min);
+            value = (await _source.Rows.AnswerAsync(Query(extreme).Spec().Reading([target.Field]), extreme, _counters, cancellationToken).ConfigureAwait(false)).Value;
         }
         finally
         {

@@ -141,6 +141,13 @@ internal abstract class AggregateSlot
     internal abstract void MergeFrom(AggregateSlot other, ReadOnlySpan<int> from, ReadOnlySpan<int> into);
 
     /// <summary>
+    /// As <see cref="MergeFrom(AggregateSlot, ReadOnlySpan{int}, ReadOnlySpan{int})"/>, from a partition read no more once
+    /// merged, its groups each merged into one table only: a group this one holds no state of yet may take the other's as
+    /// it is, which the other then holds no more.
+    /// </summary>
+    internal virtual void MoveFrom(AggregateSlot other, ReadOnlySpan<int> from, ReadOnlySpan<int> into) => MergeFrom(other, from, into);
+
+    /// <summary>
     /// The groups of several partitions merged apart, read as one: group <c>g</c> is group
     /// <c>g - offsets[p]</c> of <c>parts[p]</c>, <c>p</c> the last whose offset is at or below it.
     /// </summary>

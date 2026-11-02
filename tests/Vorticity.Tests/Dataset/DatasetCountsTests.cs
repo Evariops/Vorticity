@@ -220,8 +220,9 @@ public sealed class DatasetCountsTests
                 MeasureKind kind = counts.Kinds[i];
                 Assert.Equal(values.Length, words[at + MeasureLayout.Values]);
 
-                // The entry's quantile sketch of the measure: the one its values give, a column of at most 1 000 values keeping them.
-                Assert.Equal(distinct <= ColumnCountsBuilder.SketchValues, counts.Sketched);
+                // The entry's quantile sketch of the measure: the one its values give, a column whose values hold 256 rows each on
+                // average keeping them.
+                Assert.Equal(rows.Count(r => r[c + 1] is not null) >= (long)ColumnCountsBuilder.SketchRows * distinct, counts.Sketched);
                 Assert.Equal(counts.Sketched, sketches?.Sketches is not null);
                 if (counts.Sketched)
                 {
@@ -264,12 +265,13 @@ public sealed class DatasetCountsTests
 
     /// <summary>
     /// Holds the registers <paramref name="counts"/> of column <paramref name="c"/>, of <paramref name="distinct"/> values,
-    /// keep of the wide columns to those their values in each entry's rows give: a column of at most 100 values keeps those
-    /// of every text column of more than 1 000 values that repeat, but itself; any other none.
+    /// keep of the wide columns to those their values in each entry's rows give: a column whose values hold 2 048 rows each on
+    /// average, of 8 192 values at most, keeps those of every text column of more than 1 000 values that repeat, but itself;
+    /// any other none.
     /// </summary>
     internal static void CheckDistinct(ColumnCounts counts, ColumnSketches? sketches, int c, Drawn[] columns, object?[][] rows, int distinct)
     {
-        int[] wide = distinct > ColumnCountsBuilder.AttachValues ? [] : [.. Enumerable.Range(0, columns.Length).Where(w =>
+        int[] wide = rows.Count(r => r[c + 1] is not null) < (long)ColumnCountsBuilder.AttachRows * distinct || distinct > ColumnCountsBuilder.AttachCeiling ? [] : [.. Enumerable.Range(0, columns.Length).Where(w =>
         {
             int values = rows.Select(r => r[w + 1]).Where(v => v is not null).Distinct().Count();
             long held = rows.Count(r => r[w + 1] is not null);
@@ -436,12 +438,14 @@ public sealed class DatasetCountsTests
     internal static Task<VortexDataset> WriteAsync(CountingObjectStore store, Drawn[] columns, object?[][] rows) =>
         WriteAsync(store, columns, rows, new DatasetOptions
         {
-            ClusteringKey = ["At"],
-            Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour) }, ContentsObjectBytes = 0,
+            Layout = new DatasetLayout { Partition = LayoutValue.Column("At").Truncate(CalendarUnit.Hour), SortKey = [LayoutValue.Column("At")], Organization = LayoutOrganization.Leveled }, ContentsObjectBytes = 0,
             SheetObjectBytes = 0,
         });
 
-    /// <summary>A dataset of <paramref name="options"/> holding <paramref name="rows"/>, appended in parts of five minutes and compacted to the end.</summary>
+    /// <summary>
+    /// A dataset of <paramref name="options"/> holding <paramref name="rows"/>, appended in parts of five minutes and compacted
+    /// to the end, each object as large as its layout lets it: a period's rows, or the bytes the layout aims at.
+    /// </summary>
     internal static async Task<VortexDataset> WriteAsync(CountingObjectStore store, Drawn[] columns, object?[][] rows, DatasetOptions options)
     {
         List<VortexField> fields = [new VortexField("At", VortexType.Timestamp(TimeUnit.Microseconds, "UTC"))];
@@ -469,7 +473,7 @@ public sealed class DatasetCountsTests
             await dataset.AppendAsync(draft, Ct);
         }
 
-        while (await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 2 }, Ct) is not null)
+        while (await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 2, TargetBytesAtLevelOne = 1L << 30 }, Ct) is not null)
         {
         }
 

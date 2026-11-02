@@ -189,9 +189,4 @@ internal static class MetadataProto
     [MethodImpl(MethodImplOptions.NoInlining)]
     internal static void ThrowOutOfDomain(string message, string field, string detail) =>
         throw new VortexFormatException($"{message}.{field} is out of domain: {detail}");
-
-    [DoesNotReturn]
-    [MethodImpl(MethodImplOptions.NoInlining)]
-    internal static T ThrowOutOfDomain<T>(string message, string field, string detail) =>
-        throw new VortexFormatException($"{message}.{field} is out of domain: {detail}");
 }

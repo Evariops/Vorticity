@@ -1,7 +1,9 @@
 using System;
 using System.Collections.Generic;
+using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using Vorticity.Aggregating;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Buffers;
@@ -62,7 +64,10 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
 
     private const long RowsMask = (1L << IdShift) - 1;
 
-    private readonly byte[] _ranks = new byte[ColumnSheet.Registers];
+    // The builder's working arrays come from the process's shelf and go back to it as they grow and when the builder is
+    // done (Dispose): made new, an object's sheets took a third of a megabyte each, some 4.6 bytes a row of a consolidation
+    // of S1's logs, a sixth of what it allocated. What a sheet keeps once finished is its own.
+    private readonly byte[] _ranks = ArrayShelf.Retained.Take<byte>(ColumnSheet.Registers, zeroed: true);
     private long _rows;
     private long _nulls;
     private long _check = FirstCheck;
@@ -70,9 +75,9 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
     // The distinct hashes, by open addressing on their mix, each beside its rows and its value's number, one line of the
     // cache a probe, and apart where its value's bytes lie in the heap, -1 when they did not fit; 0 is no hash, and the
     // hash 0 is counted apart. Null once the counts go.
-    private Slot[]? _slots = new Slot[FirstSlots];
-    private int[] _offsets = new int[FirstSlots];
-    private int[] _lengths = new int[FirstSlots];
+    private Slot[]? _slots = ArrayShelf.Retained.Take<Slot>(FirstSlots, zeroed: true);
+    private int[] _offsets = ArrayShelf.Retained.Take<int>(FirstSlots, zeroed: true);
+    private int[] _lengths = ArrayShelf.Retained.Take<int>(FirstSlots, zeroed: true);
     private int _distinct;
     private int _ids;
     private long _zeroRows;
@@ -81,6 +86,12 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
     private int _zeroLength;
     private byte[] _heap = [];
     private int _heapUsed;
+
+    // Each number's slot, ZeroSlot for the value of hash 0, Unkept for one whose bytes did not fit, built once the rows
+    // are in for the builders that read the values where they lie (KeptEveryValue); the rows it was built at.
+    private int[]? _slotOf;
+    private long _slotOfRows = -1;
+    private bool _keptEvery;
 
     // The views met last of a text column, three words an entry: the view's two halves and its slot plus one, or 1
     // once the counts go, 0 for none.
@@ -95,6 +106,9 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
     // for them; and whether every row fed of the batch has its hash.
     private ulong[]? _rowHashes;
     private bool _rowHashesWhole;
+
+    // Whether the working arrays went back to the shelf (Dispose), the ranks among them, which a second giving would lend twice.
+    private bool _disposed;
 
     /// <summary>Whether the builder can describe a column of <paramref name="dtype"/>: an integer, a float, a string or a binary, through any extension.</summary>
     internal static bool Supports(DType dtype) => KeyLayout.TryOf(dtype, out _);
@@ -125,13 +139,55 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
     internal ReadOnlySpan<int> RowIds => _rowIdsFilled ? _rowIds : default;
 
     /// <summary>Asks the builder to number each row's value as it takes it (<see cref="RowIds"/>), for the column's counts.</summary>
-    internal void NumberRows() => _rowIds ??= new int[1_024];
+    internal void NumberRows() => _rowIds ??= ArrayShelf.Retained.Take<int>(1_024, zeroed: false);
 
     /// <summary>Asks the builder to keep the hash of each row of a batch (<see cref="RowHashes"/>), for the distinct values another column's counts keep of it.</summary>
-    internal void HashRows() => _rowHashes ??= new ulong[1_024];
+    internal void HashRows() => _rowHashes ??= ArrayShelf.Retained.Take<ulong>(1_024, zeroed: true);
 
     /// <summary>Stops keeping the hash of each row: no column's counts asks for them any more.</summary>
-    internal void StopHashing() => _rowHashes = null;
+    internal void StopHashing()
+    {
+        Give(_rowHashes);
+        _rowHashes = null;
+    }
+
+    /// <summary>Gives <paramref name="array"/> back to the process's shelf; nothing for none, or for an empty one.</summary>
+    private static void Give<T>(T[]? array)
+    {
+        if (array is { Length: > 0 })
+        {
+            ArrayShelf.Retained.Give(array);
+        }
+    }
+
+    /// <summary>Every working array back to the process's shelf, once: the builder is not used again.</summary>
+    public override void Dispose()
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        _disposed = true;
+        Give(_slots);
+        Give(_offsets);
+        Give(_lengths);
+        Give(_heap);
+        Give(_views);
+        Give(_rowIds);
+        Give(_rowHashes);
+        Give(_ranks);
+        Give(_slotOf);
+        _slotOf = null;
+        _slots = null;
+        _offsets = [];
+        _lengths = [];
+        _heap = [];
+        _views = null;
+        _rowIds = null;
+        _rowHashes = null;
+        base.Dispose();
+    }
 
     /// <summary>
     /// The hash of each row of the batch fed last, by its row in the batch, 0 for a null; empty when a row of it has none,
@@ -149,7 +205,10 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
 
         if (_rowIds is { } held && held.Length < count)
         {
-            _rowIds = new int[Math.Max(count, held.Length * 2)];
+            Give(held);
+            // At a power of two, as the shelf lends by length: a batch's count asked as it came missed the shelf, a tenth of
+            // what a consolidation of log records allocated.
+            _rowIds = ArrayShelf.Retained.Take<int>((int)BitOperations.RoundUpToPowerOf2((uint)Math.Max(count, held.Length * 2)), zeroed: false);
         }
 
         // A batch's first rows start its hashes; its next pieces keep those before them.
@@ -158,7 +217,10 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
             _rowHashesWhole = start == 0 || _rowHashesWhole;
             if (hashes.Length < start + count)
             {
-                Array.Resize(ref _rowHashes, Math.Max(start + count, hashes.Length * 2));
+                ulong[] grown = ArrayShelf.Retained.Take<ulong>((int)BitOperations.RoundUpToPowerOf2((uint)Math.Max(start + count, hashes.Length * 2)), zeroed: true);
+                hashes.AsSpan(0, Math.Min(start, hashes.Length)).CopyTo(grown);
+                Give(hashes);
+                _rowHashes = grown;
             }
         }
 
@@ -239,25 +301,95 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
         Check();
     }
 
-    /// <summary>The bytes of each value counted by its number (<see cref="Numbered"/>), null for one whose bytes were not kept; while <see cref="Counting"/>.</summary>
+    private const int ZeroSlot = -2;
+    private const int Unkept = -1;
+
+    /// <summary>
+    /// Whether the sheet kept the bytes of every value it numbered (<see cref="Numbered"/>), which <see cref="ValueAt"/>
+    /// then reads where they lie; while <see cref="Counting"/>, once every row is in. The builders that list the values
+    /// read them so: copied out, a list for each of three of them, an object's sheets made a copy of every distinct value
+    /// three times over.
+    /// </summary>
+    internal bool KeptEveryValue
+    {
+        get
+        {
+            SlotsOf();
+            return _keptEvery;
+        }
+    }
+
+    /// <summary>
+    /// A copy of the bytes of each value counted by its number (<see cref="Numbered"/>), null for one whose bytes were not
+    /// kept; while <see cref="Counting"/>: for the counts, whose groups each hold their value's.
+    /// </summary>
     internal byte[]?[] ValuesByNumber()
     {
+        int[] slotOf = SlotsOf();
         byte[]?[] values = new byte[]?[_ids];
+        for (int id = 0; id < values.Length; id++)
+        {
+            values[id] = slotOf[id] == Unkept ? null : ValueAt(id).ToArray();
+        }
+
+        return values;
+    }
+
+    /// <summary>The bytes of value number <paramref name="id"/>, where the sheet keeps them: every value kept (<see cref="KeptEveryValue"/>).</summary>
+    internal ReadOnlySpan<byte> ValueAt(int id) => _slotOf![id] is int slot and >= 0
+        ? _heap.AsSpan(_offsets[slot], _lengths[slot])
+        : _heap.AsSpan(_zeroOffset, _zeroLength);
+
+    /// <summary>Each number's slot, built once for the rows fed so far.</summary>
+    private int[] SlotsOf()
+    {
+        if (_slotOf is { } built && _slotOfRows == _rows)
+        {
+            return built;
+        }
+
+        if (_slotOf is null || _slotOf.Length < _ids)
+        {
+            Give(_slotOf);
+            _slotOf = ArrayShelf.Retained.Take<int>((int)BitOperations.RoundUpToPowerOf2((uint)Math.Max(_ids, 1)), zeroed: false);
+        }
+
+        int[] slotOf = _slotOf;
+        slotOf.AsSpan(0, _ids).Fill(Unkept);
         Slot[] slots = _slots!;
         for (int i = 0; i < slots.Length; i++)
         {
             if (slots[i].Key != 0 && _offsets[i] >= 0)
             {
-                values[(int)(slots[i].Count >> IdShift)] = _heap.AsSpan(_offsets[i], _lengths[i]).ToArray();
+                slotOf[(int)(slots[i].Count >> IdShift)] = i;
             }
         }
 
         if (_zeroId >= 0 && _zeroOffset >= 0)
         {
-            values[_zeroId] = _heap.AsSpan(_zeroOffset, _zeroLength).ToArray();
+            slotOf[_zeroId] = ZeroSlot;
         }
 
-        return values;
+        _keptEvery = !slotOf.AsSpan(0, _ids).Contains(Unkept);
+        _slotOfRows = _rows;
+        return slotOf;
+    }
+
+    /// <summary>Numbers in the order of their values' bytes, every value kept.</summary>
+    internal readonly struct ByValue(ColumnSheetBuilder sheet) : IComparer<int>
+    {
+        public int Compare(int x, int y) => sheet.ValueAt(x).SequenceCompareTo(sheet.ValueAt(y));
+    }
+
+    /// <summary>
+    /// The first <paramref name="count"/> values of <paramref name="sheet"/>, every value kept, read where they lie: by
+    /// their numbers, or in the numbers' order <paramref name="order"/> gives.
+    /// </summary>
+    internal readonly struct Values(ColumnSheetBuilder sheet, int[]? order, int count) : IValuesByNumber
+    {
+        public int Count => count;
+
+        public ReadOnlySpan<byte> this[int index] => sheet.ValueAt(order is null ? index : order[index]);
     }
 
     /// <summary>The number of the value slot <paramref name="slot"/> holds.</summary>
@@ -429,7 +561,7 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
             return;
         }
 
-        ulong[] met = _views ??= new ulong[Views * 3];
+        ulong[] met = _views ??= ArrayShelf.Retained.Take<ulong>(Views * 3, zeroed: true);
         ref byte origin = ref MemoryMarshal.GetReference(views);
         Span<int> ids = _rowIds is { } numbered ? numbered.AsSpan(0, count) : default;
         bool numbering = !ids.IsEmpty;
@@ -518,7 +650,7 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
     /// <summary>A text column's valid rows <c>[start, start + count)</c> once the counts are gone: each value's register raised.</summary>
     private void Dropped(ReadOnlySpan<byte> views, ReadOnlySpan<VortexBuffer> buffers, int start, int count)
     {
-        ulong[] met = _views ??= new ulong[Views * 3];
+        ulong[] met = _views ??= ArrayShelf.Retained.Take<ulong>(Views * 3, zeroed: true);
         ref byte origin = ref MemoryMarshal.GetReference(views);
         for (int row = start; row < start + count; row++)
         {
@@ -635,6 +767,10 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
     /// <summary>Drops the counts, the values and the filter's keys: the registers go on alone, and the views met say only that they were.</summary>
     private void Drop()
     {
+        Give(_slots);
+        Give(_offsets);
+        Give(_lengths);
+        Give(_heap);
         _slots = null;
         _offsets = [];
         _lengths = [];
@@ -665,7 +801,11 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
 
         if (_heapUsed + value.Length > _heap.Length)
         {
-            Array.Resize(ref _heap, Math.Min(ValueBytesLimit, Math.Max(_heap.Length * 2, Math.Max(4_096, _heapUsed + value.Length))));
+            byte[] grown = ArrayShelf.Retained.Take<byte>(
+                Math.Min(ValueBytesLimit, Math.Max(_heap.Length * 2, Math.Max(4_096, _heapUsed + value.Length))), zeroed: false);
+            _heap.AsSpan(0, _heapUsed).CopyTo(grown);
+            Give(_heap);
+            _heap = grown;
         }
 
         value.CopyTo(_heap.AsSpan(_heapUsed));
@@ -681,9 +821,9 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
         int[] offsets = _offsets;
         int[] lengths = _lengths;
         int size = slots.Length * 2;
-        Slot[] grown = _slots = new Slot[size];
-        _offsets = new int[size];
-        _lengths = new int[size];
+        Slot[] grown = _slots = ArrayShelf.Retained.Take<Slot>(size, zeroed: true);
+        _offsets = ArrayShelf.Retained.Take<int>(size, zeroed: false);
+        _lengths = ArrayShelf.Retained.Take<int>(size, zeroed: false);
         int mask = size - 1;
         for (int i = 0; i < slots.Length; i++)
         {
@@ -703,6 +843,9 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
             _lengths[slot] = lengths[i];
         }
 
+        Give(slots);
+        Give(offsets);
+        Give(lengths);
         if (_views is { } views)
         {
             Array.Clear(views);

@@ -109,8 +109,7 @@ public sealed partial class DatasetSheetTests : IClassFixture<DatasetSheetTests.
         await using MemoryObjectStore store = new MemoryObjectStore();
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Call.Schema, new DatasetOptions
         {
-            ClusteringKey = [nameof(Call.At)],
-            Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour) }, ContentsObjectBytes = 0,
+            Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(Call.At)).Truncate(CalendarUnit.Hour), SortKey = [LayoutValue.Column(nameof(Call.At))], Organization = LayoutOrganization.Leveled }, ContentsObjectBytes = 0,
         }, Ct);
         for (int part = 0; part < 24; part++)
         {
@@ -168,8 +167,7 @@ public sealed partial class DatasetSheetTests : IClassFixture<DatasetSheetTests.
             // Its objects, of a few hundred kilobytes, keep sheets as objects of a megabyte or more do.
             await using VortexDataset dataset = await VortexDataset.CreateAsync(Store, Call.Schema, Options() with
             {
-                ClusteringKey = [nameof(Call.At)],
-                Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour) }, ContentsObjectBytes = 0,
+                Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(Call.At)).Truncate(CalendarUnit.Hour), SortKey = [LayoutValue.Column(nameof(Call.At))], Organization = LayoutOrganization.Leveled }, ContentsObjectBytes = 0,
             });
             for (int part = 0; part < Hours * 12; part++)
             {

@@ -267,13 +267,9 @@ public sealed class ObjectStoreRegistry
 /// </summary>
 internal sealed class PrefixedObjectStore(IObjectStore inner, string prefix) : IObjectStore
 {
-    /// <summary>The store under the view.</summary>
-    internal IObjectStore Inner => inner;
-
-    /// <summary>The keys' prefix in the store under the view.</summary>
-    internal string Prefix => prefix;
-
     public ObjectStoreCapabilities Capabilities => inner.Capabilities;
+
+    public CostProfile CostProfile => inner.CostProfile;
 
     public ValueTask<ObjectRead> ReadAsync(string key, long offset, Memory<byte> destination, string? ifToken, CancellationToken cancellationToken) =>
         inner.ReadAsync(prefix + key, offset, destination, ifToken, cancellationToken);

@@ -51,8 +51,7 @@ public sealed partial class DatasetLateRowsTests
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Numbered.Schema, new DatasetOptions
         {
             Seed = 0x1A7E_0001,
-            ClusteringKey = [nameof(Numbered.Id)],
-            Clustering = new ClusteringOptions { Value = ClusteringValue.Bucket(Value) },
+            Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(Numbered.Id)).Bucket(Value), SortKey = [LayoutValue.Column(nameof(Numbered.Id))], Organization = LayoutOrganization.Leveled },
         }, Ct);
         CompactionOptions compaction = new CompactionOptions();
 

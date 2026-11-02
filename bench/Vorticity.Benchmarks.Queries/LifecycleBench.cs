@@ -19,12 +19,14 @@ namespace Vorticity.Benchmarks.Queries;
 /// hour of data.
 /// </summary>
 /// <remarks>
-/// <c>--clustering hour</c>, the default, cuts the objects at every hour, <c>--clustering day</c> at every midnight,
-/// and <c>--clustering off</c> by the key alone; every one compacts by levels. Data time runs as fast as the
-/// machine writes, so the bench says what the policy writes, not whether a machine keeps up. <c>--neighbours
-/// off</c> turns off the merges of small neighbours at a level's end, <c>--max-object-mib</c> sets the cap on an
-/// object, and <c>--trace-overlaps N</c> prints the first N jobs that rewrite rather than move, with what the
-/// other levels hold inside their range.
+/// <c>--partition hour</c>, the default, cuts the objects at every hour, <c>--partition day</c> at every midnight,
+/// and <c>--partition off</c> by the key alone. Data time runs as fast as the machine writes, so the bench says what the
+/// policy writes, not whether a machine keeps up: the handles' clock follows the newest row appended, which a partition's
+/// calm (<see cref="DatasetLayout.CalmAfter"/>) is judged by. <c>--neighbours
+/// off</c> turns off the merges of small neighbours at a level's end, <c>--max-object-mib</c> sets the size the layout's
+/// objects aim at (<see cref="DatasetLayout.ObjectBytes"/>, 1 GiB by default), <c>--fanout</c> the fan-out of the levels
+/// and of the tiers' merges (10 and 8 by default), and <c>--trace-overlaps N</c> prints the first N jobs that rewrite
+/// rather than move, with what the other levels hold inside their range.
 /// </remarks>
 internal static class LifecycleBench
 {
@@ -32,34 +34,41 @@ internal static class LifecycleBench
         [("15 min", TimeSpan.FromMinutes(15)), ("1 h", TimeSpan.FromHours(1)), ("1 day", TimeSpan.FromDays(1)), ("30 days", TimeSpan.FromDays(30))];
 
     internal static async Task<int> Run(
-        int hours, double rate, int writers, int batchSeconds, string clustering, int deletesPerHour, int fanout, bool late,
+        int hours, double rate, int writers, int batchSeconds, string partition, int deletesPerHour, int fanout, bool late,
         bool neighbours, long maxObjectBytes, string? pick, int traceOverlaps)
     {
         await using MemoryObjectStore memory = new MemoryObjectStore();
         await using CountingObjectStore store = new CountingObjectStore(memory);
+        DataClock clock = new DataClock { Now = QuestionBench.Start };
+        DatasetLayout layout = new DatasetLayout
+        {
+            Partition = partition == "off" ? null : LayoutValue.Column(nameof(GeneratedRequest.At)).Truncate(partition == "day" ? CalendarUnit.Day : CalendarUnit.Hour),
+            SortKey = [LayoutValue.Column(nameof(GeneratedRequest.At))],
+        };
+        layout = maxObjectBytes > 0 ? layout with { ObjectBytes = maxObjectBytes } : layout;
+        layout = fanout > 0 ? layout with { MergeFanout = fanout } : layout;
         DatasetOptions options = new DatasetOptions
         {
-            ClusteringKey = [nameof(GeneratedRequest.At)],
-            Clustering = clustering == "off" ? null : new ClusteringOptions { Value = ClusteringValue.Truncate(clustering == "day" ? CalendarUnit.Day : CalendarUnit.Hour) },
+            TimeProvider = clock,
+            Layout = layout,
             Identifiers = [nameof(GeneratedRequest.RequestId)],
         };
         VortexDataset[] handles = new VortexDataset[writers];
         handles[0] = await VortexDataset.CreateAsync(store, GeneratedRequest.Schema, options);
         for (int w = 1; w < writers; w++)
         {
-            handles[w] = await VortexDataset.OpenAsync(store);
+            handles[w] = await VortexDataset.OpenAsync(store, options);
         }
 
-        await using VortexDataset compactor = await VortexDataset.OpenAsync(store);
-        await using VortexDataset deleter = await VortexDataset.OpenAsync(store);
+        await using VortexDataset compactor = await VortexDataset.OpenAsync(store, options);
+        await using VortexDataset deleter = await VortexDataset.OpenAsync(store, options);
         CompactionOptions compaction = new CompactionOptions
         {
             Fanout = fanout > 0 ? fanout : CompactionOptions.DefaultFanout,
-            MaxObjectBytes = maxObjectBytes > 0 ? maxObjectBytes : CompactionOptions.DefaultMaxObjectBytes,
             MergeNeighbours = neighbours,
             Pick = pick switch { "largest" => CompactionPick.Largest, "roundrobin" => CompactionPick.RoundRobin, _ => CompactionPick.Auto },
         };
-        TimeUnit unit = UnitOf(compactor.Key!);
+        TimeUnit unit = UnitOf(compactor);
 
         Ledger ledger = new Ledger { TraceLeft = traceOverlaps, Tracing = traceOverlaps > 0 };
         RequestGenerator generator = new RequestGenerator(41);
@@ -96,6 +105,7 @@ internal static class LifecycleBench
                 }
 
                 round.Clear();
+                clock.Now = newest;
 
                 // Then the jobs that are due, while a delete of a request a few minutes old runs beside them.
                 Task deleting = Task.CompletedTask;
@@ -128,7 +138,7 @@ internal static class LifecycleBench
             }
         }
 
-        Print(hours, rate, writers, batchSeconds, clustering, late, compaction, appended, store, ledger, Stopwatch.GetElapsedTime(begin));
+        Print(hours, rate, writers, batchSeconds, partition, late, layout, compaction, appended, store, ledger, Stopwatch.GetElapsedTime(begin));
         return 0;
     }
 
@@ -210,7 +220,7 @@ internal static class LifecycleBench
         }
 
         DatasetSnapshot snapshot = dataset.Snapshot;
-        string instant = dataset.Key!.InstantPath;
+        const string instant = nameof(GeneratedRequest.At);
         long from = long.MaxValue;
         long to = long.MinValue;
         foreach (CompactionInput input in job.Inputs)
@@ -259,7 +269,7 @@ internal static class LifecycleBench
             ledger.TraceLeft--;
         }
 
-        TimeUnit unit = UnitOf(dataset.Key!);
+        TimeUnit unit = UnitOf(dataset);
         long origin = InstantOf(QuestionBench.Start, unit);
         double perMinute = InstantOf(QuestionBench.Start.AddMinutes(1), unit) - origin;
         string Range(ObjectEntry entry)
@@ -283,8 +293,12 @@ internal static class LifecycleBench
             ? (summary.Min.SignedValue, summary.Max.SignedValue)
             : (long.MinValue, long.MaxValue);
 
-    /// <summary>The unit the key's first column, a timestamp, counts its instants in.</summary>
-    private static TimeUnit UnitOf(ClusteringKey key) => VortexTypes.FromDType(key.LeadingType).Unit ?? TimeUnit.Microseconds;
+    /// <summary>The unit the instant column, a timestamp the key leads with, counts its instants in.</summary>
+    private static TimeUnit UnitOf(VortexDataset dataset)
+    {
+        Vorticity.Types.DType schema = dataset.Snapshot.Schema.DType;
+        return VortexTypes.FromDType(schema.GetField(schema.IndexOfField(nameof(GeneratedRequest.At)))).Unit ?? TimeUnit.Microseconds;
+    }
 
     /// <summary><paramref name="at"/> as a column of <paramref name="unit"/> counts it.</summary>
     private static long InstantOf(DateTimeOffset at, TimeUnit unit)
@@ -304,7 +318,7 @@ internal static class LifecycleBench
     private static async Task SampleAsync(VortexDataset dataset, TimeUnit unit, DateTimeOffset newest, Ledger ledger)
     {
         await dataset.RefreshAsync();
-        string instant = dataset.Key!.InstantPath;
+        const string instant = nameof(GeneratedRequest.At);
         long end = InstantOf(newest, unit);
         long[] counts = new long[Windows.Length];
         long objects = 0;
@@ -329,13 +343,16 @@ internal static class LifecycleBench
     }
 
     private static void Print(
-        int hours, double rate, int writers, int batchSeconds, string clustering, bool late, CompactionOptions compaction, long appended,
-        CountingObjectStore store, Ledger ledger, TimeSpan elapsed)
+        int hours, double rate, int writers, int batchSeconds, string partition, bool late, DatasetLayout layout, CompactionOptions compaction,
+        long appended, CountingObjectStore store, Ledger ledger, TimeSpan elapsed)
     {
+        // What the dataset works to: the layout's object size, and the fan-out of its organization.
+        string organized = partition == "off"
+            ? $"no partition, levels of fan-out {compaction.Fanout}, neighbours {(compaction.MergeNeighbours ? "merged" : "left")}, pick {compaction.Pick}"
+            : $"partitioned by {(partition == "day" ? "day" : "hour")}, tiers merged {layout.MergeFanout} at a time";
         Console.WriteLine(
             $"{appended} rows over {hours} hours at {rate}/s{(late ? string.Empty : ", none late")}, {writers} writers appending {batchSeconds} s each, " +
-            $"{(clustering == "off" ? "no clustering value" : clustering == "day" ? "clustered by day" : "clustered by hour")}, fan-out {compaction.Fanout}, objects up to " +
-            $"{compaction.MaxObjectBytes >> 20} MiB, neighbours {(compaction.MergeNeighbours ? "merged" : "left")}, pick {compaction.Pick}; {elapsed.TotalSeconds:F1} s");
+            $"{organized}, objects up to {layout.ObjectBytes >> 20} MiB; {elapsed.TotalSeconds:F1} s");
         if (ledger.Tracing)
         {
             Console.WriteLine(
@@ -371,6 +388,14 @@ internal static class LifecycleBench
 
             Console.WriteLine($"  {"all",-8} {ledger.Samples.Average(s => s.Objects),7:F1} {ledger.Samples.Max(s => s.Objects),5}");
         }
+    }
+
+    /// <summary>The handles' clock: the newest row appended, as data time runs.</summary>
+    private sealed class DataClock : TimeProvider
+    {
+        internal DateTimeOffset Now { get; set; }
+
+        public override DateTimeOffset GetUtcNow() => Now;
     }
 
     private sealed class Ledger

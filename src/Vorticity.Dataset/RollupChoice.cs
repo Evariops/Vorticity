@@ -35,10 +35,12 @@ internal sealed class RollupChoice
 
     /// <summary>
     /// The rollups <paramref name="answer"/> takes over <paramref name="version"/>, those <paramref name="pruner"/> refutes
-    /// left to the walk, which finds no row in them; null when it takes none.
+    /// left to the walk, which finds no row in them, and those <paramref name="keeps"/> says weigh more than their objects
+    /// left to those below them; null when it takes none.
     /// </summary>
     internal static async ValueTask<RollupChoice?> OfAsync(
-        DatasetSnapshot version, CountsAnswer answer, SummaryPruner? pruner, CancellationToken cancellationToken)
+        DatasetSnapshot version, CountsAnswer answer, SummaryPruner? pruner, CancellationToken cancellationToken,
+        Func<RollupEntry, int, ObjectSummaries?[]?, CancellationToken, ValueTask<bool>>? keeps = null)
     {
         if (version.Levels.Rollups.IsEmpty)
         {
@@ -60,7 +62,7 @@ internal sealed class RollupChoice
             left.Rank != right.Rank ? right.Rank.CompareTo(left.Rank)
             : left.Level != right.Level ? left.Level.CompareTo(right.Level)
             : left.FirstKey.Span.SequenceCompareTo(right.FirstKey.Span));
-        ClusteringKey? key = version.Schema.Key;
+        DatasetKey? key = version.Schema.RollupKey;
         List<(RollupEntry Rollup, int Field, ObjectSummaries?[]? Buckets)> chosen = [];
         foreach (RollupEntry rollup in candidates)
         {
@@ -71,9 +73,13 @@ internal sealed class RollupChoice
 
             if (answer.FieldOf(rollup) is int field)
             {
-                chosen.Add((rollup, field, null));
+                if (keeps is null || await keeps(rollup, field, null, cancellationToken).ConfigureAwait(false))
+                {
+                    chosen.Add((rollup, field, null));
+                }
             }
-            else if (key is not null && answer.BucketsOf(rollup, key, pruner) is (int byBucket, var buckets) && ByBucket(rollup, byBucket, buckets, answer))
+            else if (key is not null && answer.BucketsOf(rollup, key, pruner) is (int byBucket, var buckets) && ByBucket(rollup, byBucket, buckets, answer, version.Costs.Profile)
+                && (keeps is null || await keeps(rollup, byBucket, buckets, cancellationToken).ConfigureAwait(false)))
             {
                 chosen.Add((rollup, byBucket, buckets));
             }
@@ -131,12 +137,12 @@ internal sealed class RollupChoice
 
     /// <summary>
     /// Whether reading the counts by bucket of column <paramref name="field"/> of <paramref name="rollup"/> costs no more
-    /// than descending to the rollups below it, about: the bytes read, and for each request the bytes a read bridges
-    /// rather than ask again (<see cref="SegmentReadOptions.DefaultCoalesceGapBytes"/>), against the totals of as many
-    /// children as the buckets answered hold, each taken as large as the rollup's own, which a column of many values comes
-    /// near: a window that keeps a few of a rollup's buckets reads their children.
+    /// than descending to the rollups below it, about: the bytes read, and a request's worth a request at
+    /// <paramref name="profile"/>, against the totals of as many children as the buckets answered hold, each taken as large
+    /// as the rollup's own, which a column of many values comes near: a window that keeps a few of a rollup's buckets reads
+    /// their children.
     /// </summary>
-    private static bool ByBucket(RollupEntry rollup, int field, ObjectSummaries?[] buckets, CountsAnswer answer)
+    private static bool ByBucket(RollupEntry rollup, int field, ObjectSummaries?[] buckets, CountsAnswer answer, CostProfile profile)
     {
         RollupColumn column = rollup.ColumnOf(field)!.Value;
         int answered = 0;
@@ -146,25 +152,26 @@ internal sealed class RollupChoice
         }
 
         double children = Math.Max(1.0, (double)rollup.Children / rollup.Buckets.Count);
-        return Cost(column, answer, buckets: true) <= answered * children * Cost(column, answer, buckets: false);
+        return Cost(column, answer, buckets: true, profile) <= answered * children * Cost(column, answer, buckets: false, profile);
     }
 
     /// <summary>
     /// What reading the totals of <paramref name="column"/>, or its counts by bucket under <paramref name="buckets"/>, costs
-    /// <paramref name="answer"/>, about: its bytes, in part under the values asked, a chunk a value, and a request's.
+    /// <paramref name="answer"/>, about: its bytes, in part under the values asked, a chunk a value, and a request's worth
+    /// at <paramref name="profile"/> a request.
     /// </summary>
-    private static double Cost(RollupColumn column, CountsAnswer answer, bool buckets)
+    private static double Cost(RollupColumn column, CountsAnswer answer, bool buckets, CostProfile profile)
     {
-        const double Request = SegmentReadOptions.DefaultCoalesceGapBytes;
+        double request = profile.RequestBytes;
         (IndexSegment? counts, IndexSegment? sketches, int countsHead, int sketchesHead) = column.Regions(buckets);
         IndexSegment? sketched = answer.AsksSketches ? sketches : null;
         if (VortexDataset.ReadsInPart(column, answer.AsksSketches, answer.Values, buckets))
         {
             double chunks = (double)answer.Values!.Length * ColumnCounts.ChunkBytes;
-            return countsHead + chunks + (sketched is null ? 0 : sketchesHead + chunks) + (2 * Request);
+            return countsHead + chunks + (sketched is null ? 0 : sketchesHead + chunks) + (2 * request);
         }
 
-        return (counts?.Length ?? 0) + (sketched?.Length ?? 0) + Request;
+        return (counts?.Length ?? 0) + (sketched?.Length ?? 0) + request;
     }
 
     /// <summary>Whether <paramref name="rollup"/> covers a key of its level a rollup of <paramref name="chosen"/> covers.</summary>

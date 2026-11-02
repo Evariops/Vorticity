@@ -3,9 +3,10 @@
 // One batch of 8,192 views, each naming an ASCII value of 24 or 400 bytes in one data buffer, the
 // values laid in row order with a gap between them: none, as a writer lays a chunk and a window of
 // it reads a run of it, up to thousands of bytes, as when a window's views are scattered over a
-// buffer that holds far more than they name. `Original` sweeps the span from the first value named
-// to the end of the last (`ViewValidationBefore.cs`); `Library` sweeps it unless the views leave
-// much of it unnamed, and then checks the values named one by one.
+// buffer that holds far more than they name. `Library` sweeps the span from the first value named to
+// the end of the last unless the views leave much of it unnamed, and then checks the values named
+// one by one; the validation it replaced always swept, 330 µs where it takes 21.9 for values of 24
+// bytes 4,096 bytes apart (d359c176, the measure against a checkout of the original).
 using System;
 using System.Buffers.Binary;
 
@@ -55,15 +56,6 @@ public class ViewValidationBenchmarks
             BinaryPrimitives.WriteInt32LittleEndian(view[8..], 0);
             BinaryPrimitives.WriteInt32LittleEndian(view[12..], i * stride);
         }
-    }
-
-    /// <summary>The span from the first value named to the last swept.</summary>
-    [Benchmark(Baseline = true)]
-    public int Original()
-    {
-        ReadOnlySpan<VortexBuffer> buffers = [_buffer];
-        ViewValidationBefore.ValidateViews(_views, buffers, ValidityMask.NonNullable, Views, requireUtf8: true);
-        return buffers.Length;
     }
 
     /// <summary>The library's validation.</summary>

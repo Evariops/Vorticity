@@ -56,7 +56,7 @@ public sealed partial class ExtensionZoneTests
 
                 foreach ((Func<Probe<Event>, Predicate> filter, Func<Event, bool> oracle) in ranges)
                 {
-                    ScanPlan plan = await file.Scan<Event>().Where(filter).With(new ScanOptions { UseIndexes = false }).ExplainAsync(ct);
+                    ScanPlan plan = await file.Scan<Event>().Where(filter).With(new ScanOptions { UseIndexes = false }).ExplainAsync(analyze: true, ct);
                     PruningStep zones = Assert.Single(plan.Pruning, step => step.Structure == "zone map");
                     Assert.True(plan.LiveBlocks <= 4, $"{plan.LiveBlocks} of {plan.Blocks} blocks live: {string.Join(", ", plan.Pruning)}");
                     Assert.Equal(plan.Blocks - plan.LiveBlocks, zones.BlocksPruned);
@@ -66,7 +66,7 @@ public sealed partial class ExtensionZoneTests
 
             // The file's statistics bound the instants too: a range past them is answered without a block.
             DateTime later = Start.AddYears(1);
-            ScanPlan past = await file.Scan<Event>().Where(e => e.At >= later).ExplainAsync(ct);
+            ScanPlan past = await file.Scan<Event>().Where(e => e.At >= later).ExplainAsync(analyze: true, ct);
             Assert.False(past.MayMatch);
         }
         finally

@@ -80,10 +80,15 @@ and a zeroed filter is caught by its checksum rather than dropping rows.
 A lookup by a value needs the entries of the indexes that locate it, not the whole directory. The
 table of contents a dataset's entry carries for an object ([what a node
 carries](13-dataset.md#42-what-a-node-carries)) names each entry of a locating kind (sorted runs,
-block postings, hashed postings, trigram postings and the dictionary probe): its column, its kind,
-and where its message lies within the directory, with an XXH3-64 of those bytes. A lookup reads the
-messages of its filter's columns alone and checks each against its checksum, so an entry that fails
-costs only itself. A day's directory held 11.5 MB, of which the identifier's hashed postings, what a
+block postings, hashed postings, trigram postings and the dictionary probe), and each Bloom filter's,
+which refuses the blocks that cannot hold a value: its column, the key of a variant column it lies on,
+its kind, the bytes of its segments (a Bloom filter's whole tree), and where its message lies within the
+directory, with an XXH3-64 of those bytes. A plan prices placing a value through it by those bytes,
+before reading anything: a Bloom filter of a user's key nearly all of whose values are distinct took
+787 KB of an object whose rows took 1.1 MB. A lookup reads the messages of its filter's
+columns alone and checks each against its checksum, so an entry that fails costs only itself; the
+Bloom filters are asked, with no open of the object, where no postings answer, and give the blocks
+that may hold a value left out ([22-on-the-fly-and-synopses.md](22-on-the-fly-and-synopses.md#6-deletes-exclusions-late-rows-window-edges)). A day's directory held 11.5 MB, of which the identifier's hashed postings, what a
 lookup reads, took 558 bytes. An object whose table of contents names none is looked up through its
 whole directory.
 
@@ -213,40 +218,57 @@ own rows, a lane's part of an object its part's, and reads them together, 32 MiB
 chunk's values are looked up among the literals, sorted once, where they lie, nothing sorted per
 chunk, and a chunk that is not a dictionary claims nothing.
 
-### 4.4 `vorticity.slices.v1`: the slices of a file
+### 4.4 `vorticity.key.index.v1`: the first key of each granule
 
-A file a dataset's job writes in slices carries its slice table: per slice, its first row and its row
-count, in order, covering every row once, and its bounds. Like the dictionary probe it has no payload.
-The entry is on the column the bounds are on, one run over every block, and its options hold the table
-behind a version byte. A key table (version 6), which a job writes into each object of a mebibyte or
-more, holds the slice count, then per slice its rows and its first key, row-encoded as the key orders
-it and kept as the bytes it shares with the first key before it and the rest, then the last key of the
-last slice the same way; its entry is on the key's first column, and a job cuts a slice only at a
-change of key, so that a key lies in one slice. A time table (version 5) holds the instant's unit, then
-per slice the gap from the previous slice's end, its width and its rows, each a varint, a few bytes a
-slice: the datasets an earlier release compacted by periods wrote their objects in time slices, which
-a reader still walks. Version 4 followed the time slices with the columns each slice's rows were sorted
-by and the paths the file's synopsis counted, which a reader skips; the three before it, which only the
-first writers of the format made and no store keeps, are not read. A table that does not decode, or
-whose rows are not the file's, is not read. The writer declares the slices before it completes the
-file, which checks that they cover its rows ([key
-slices](11-write-strategy.md#9-key-slices-and-shredded-variants)), and writes an index directory for
-them even when its policy asks for no index. A time table is also the instant's key source for those
-objects of periods ([sources of order](12-index-reads.md#2-sources-of-order)). A scan of an object's
-rows under a range of the key's first column, or under a window on a time table's instant, covers the
-rows of the slices the range reaches, which the table of the object's entry names before any read: its
-plan, its zone maps and its walk then count those slices' blocks alone.
+A sorted object a dataset's job writes carries the sparse index of its key: the key of the first row of
+each granule, cut to the layout's indexed prefix, and the key of its last row ([the sparse key
+index](23-query-architecture.md#52-the-sparse-key-index)). The entry is on the root, one run over every
+block. Its options hold, behind a version byte (1), the rows of a granule (the writer's block, 8 192 by
+default), the object's rows and the components a key holds, the granules a page holds (128) and the
+pages; then each page's first key, coded forward against the page before (the bytes they share as a
+varint, then the rest's length and bytes), where the page lies in the payload and its XXH3-64; then the
+last row's key whole. The payload holds the pages: in each, every granule's key coded forward against
+the one before, the first against the key the options give the page. An object of one page keeps it in
+the options and writes no payload. A key is the row encoding of the prefix's components, nulls last, the
+one the tree and the merges compare. A granule's rows hold keys from its key to the next granule's, both
+included, since granules are not cut where the key changes.
 
-A sliced file also says where its chunks lie, under the kind `vorticity.slices.chunks.v1`, on the
+The object's table of contents names the entry and its payload, so a reader reads the options with no
+open of the object, then every page in one request, and keeps them with the entry's table of contents.
+A scan under a filter on the key's components reads the granules whose bounds may hold a row it keeps.
+Two keys bound the rows between them: on the components they share, those values; on the next one, a
+value between theirs; on the rest, anything. That box, mapped to the columns the components read, a
+function's bounds through its preimage, is judged by the pruner of the summaries; a range of entries it
+refutes is passed over, and any other of more than one entry is cut in eight, each judged in turn, over
+the pages first, then over the granules of the pages kept. Leading components bound a range of granules
+in a few judgments; a later one prunes where the components before it hold few values, as a filter on
+the hour under `(service, hour)` keeps in each service the granules of its hours. An object's own key
+range, from its tree key to its last key, is judged the same way before it is opened. About sixteen
+bytes a granule for a prefix of a few components: an object of a gibibyte, some 3 300 granules, holds an
+index of some fifty kilobytes. A dataset's writers build it at completion from the keys they declare,
+over the object's own granules and rows. It replaces the slices of `vorticity.slices.v1`, cut at
+changes of key, retired with it.
+
+A file with a table of contents also says where its chunks lie, under the kind `vorticity.slices.chunks.v1`, on the
 root. Its options hold the file's table of array encodings, and its one run has a payload region per
 top-level column, in column order. A column's region holds, behind a version byte, its chunks, each
 its offset, length, alignment and rows as varints. That is about ten bytes a chunk, 250 KB a column
 for a day of 10⁹ rows, so the regions are read when needed rather than kept in the options every open
-reads, and a read of one column, the instant at the edges of a window, fetches that column's region
-alone. With it a reader decodes the chunks that hold a slice from their own bytes, since a chunk's
+reads, and a read of one column fetches that column's region alone. With it a reader decodes the chunks that hold a span of rows from their own bytes, since a chunk's
 segment ends with its encoding tree, and never reads the footer ([the rows of a
-slice](12-index-reads.md#51-the-rows-of-a-slice-without-the-footer)). An append drops both slice
-kinds, since they describe the file as its writer cut it.
+slice](12-index-reads.md#51-the-rows-of-a-span-without-the-footer)). An append drops it, since it
+describes the file as its writer cut it.
+
+Beside it, under the kind `vorticity.marks.v1`, on the root, a file with a table of contents keeps the
+geometry of every top-level column's chunks, a payload region per column: each chunk's encoding tree, and
+where each granule starts in each of its buffers of variable length, a variant's parts and a struct's
+fields among them. A read of a shredded key by its granules finds its text's starts there, in the
+buffers of its range of the chunk. A read of a few granules of a chunk
+needs that before it reads their bytes alone: the buffers of fixed width give a granule's range by
+arithmetic, and the others by these starts ([reading a granule, not a
+chunk](23-query-architecture.md#53-reading-a-granule-not-a-chunk)). The table of contents names each
+column's region, which a reader fetches with the object's open when it lies in the tail the open reads,
+and beside the open otherwise.
 
 A column of more chunks than a page lays its region out in pages instead (version 2,
 `Vortex/Indexes/SliceChunks.cs`): a page table, then pages of 128 entries, each 24 bytes, a chunk's
@@ -256,8 +278,8 @@ are those whose chunks start at the rows of the first one's and share one alignm
 of each page is the same for all of them, and the object's table of contents holds it once ([what a
 node carries](13-dataset.md#42-what-a-node-carries)). A column cut otherwise, a variant column's
 shapes, keeps version 1, as does a column of a page or fewer. A day's column held 43 946 chunks in a
-region of about half a megabyte, which every read of a slice and every lookup read and parsed whole:
-5.9 MB of directories an object. Paged, a read of a slice reads the column's page table and the pages
+region of about half a megabyte, which every read of a span and every lookup read and parsed whole:
+5.9 MB of directories an object. Paged, a read of a span reads the column's page table and the pages
 that hold its rows, in the round trips the whole region took, checks each page against its checksum,
 and reads the entries where they lie. A lookup learns its rows from the postings, so it reads the
 tables first and the pages then, one round trip more for far fewer bytes. A reader of the file alone
@@ -280,20 +302,20 @@ drops the entry.
 
 ### 4.6 `vorticity.variant.directory.v1`: every path a variant holds
 
-A job that writes an object in key slices counts the paths of each variant column as the object's rows
-are written ([shredded variants](11-write-strategy.md#9-key-slices-and-shredded-variants)), and the
+A job that writes an object with a sparse index counts the paths of each variant column as the object's rows
+are written ([shredded variants](11-write-strategy.md#10-shredded-variants)), and the
 object carries what it counted: for every path and class of value the rows hold there (a boolean, an
 integer, a number, a text, a timestamp, an object, a list, a null, anything else), how many values, where
 they lie (the typed column a shredded path keeps, the values of other classes beside it, or the
 residual), and their bounds. An integer or a timestamp keeps its least and greatest, a number its least
 and greatest and whether one was NaN, a boolean which of the two it saw, and a text its least and
 greatest cut to the bytes a text column's zones keep, the greatest one past its cut when a longer text
-shares it. Each path also names, a bit each, the slices of the object it may hold a value in, from the
-spans of rows its values lie in as the rows are written: two values closer than a slice is long share a
-span, so a path keeps about a span per slice at most, and the bits are a superset of the slices that hold
-it. An object of an earlier release's period counted the spans by time, its rows in time order. The entry
-is on the variant column. Its one run holds one region, behind a version byte and the body's length, the
-body one zstd frame.
+shares it. Each path also names, a bit each, the granules of the object it may hold a value in, from the
+spans of rows its values lie in as the rows are written: two values closer than a granule is long share a
+span, so a path keeps about a span per granule at most, and the bits are a superset of the granules that
+hold it. The entry
+is on the variant column. Its one run holds one region, behind a version byte (2; version 1 named the
+slices of the key) and the body's length, the body one zstd frame.
 
 The directory fits the file's index budget. Over it, the paths of the residual held least are left
 out first, and the directory says it is partial, after which a path's absence proves nothing.
@@ -305,9 +327,8 @@ parsing every entry made 4 MB of an hour of log records at every question. It re
 fenced predicate asks for a path the file never holds, for a class the path never holds there, or for
 values outside its bounds, under the filter's conjunctions and disjunctions. A presence asked absent, a
 conversion of any class, and a negation refute nothing. A refuted file reads no block (`ScanPlan.MayMatch` is false, and `Explain`
-names the step `path directory`). Otherwise it asks the same of each slice, and kills the blocks that
-lie wholly inside the runs of slices refuted. An append drops the entry, since it parses none of its
-rows.
+names the step `path directory`). Otherwise it asks the same of each granule, and kills the blocks of
+the granules refuted. An append drops the entry, since it parses none of its rows.
 
 ### 4.7 `vorticity.variant.blocks.v1`: a shredded key's zone map
 
@@ -340,12 +361,14 @@ filter judged against the bytes of that key's ranges. A filter's question of the
 and a question of another class never does. A policy may also name one key in one class as a column
 of its own, `Attributes['user'].AsString()`, which a dataset does for an identifier among the
 attributes: that key's entry is then built under that policy, a Bloom filter or [hashed
-postings](#57-vorticitypostingshashedv1-value-to-blocks-through-the-hash), the only locating kind a
-path takes for now. An object that does not shred the key has no slot for it, and no entry.
+postings](#57-vorticitypostingshashedv1-value-to-blocks-through-the-hash). Besides, each shredded key
+read as a text or an integer says where each of its values lies, granule by granule
+([4.13](#413-vorticitylocatev1-where-each-value-lies-granule-by-granule)). An object that does not
+shred the key has no slot for it, and no entry.
 
 ### 4.8 `vorticity.column.sheet.v1`: what a column holds
 
-A dataset's object in slices, of a mebibyte or more, keeps a sheet of each top-level column an index
+A dataset's object with a table of contents, of a mebibyte or more, keeps a sheet of each top-level column an index
 keys, an integer, a float, a string or a binary through any extension: its rows and nulls, its distinct
 values, a sketch of them, its most frequent values, and a filter of its values when they repeat
 ([22-on-the-fly-and-synopses.md](22-on-the-fly-and-synopses.md#51-the-column-sheet)); a smaller object,
@@ -394,8 +417,7 @@ measure's states as varints, a float sum as its three bins, the values it skippe
 part, and a float's extremes as their eight bytes. A reader refuses groups out of that order, which it
 searches a value in, and one that wants a few values reads the header, then their chunks, each checked
 against its sum. Entries of two objects of the same value merge word for word, which is how a rollup's
-are summed ([rollups](15-compaction.md#rollups)). The counts of version 1, by the hours of a period's
-instant, which an earlier writer of this branch kept, are read as no counts. The sheets and the counts of
+are summed ([rollups](15-compaction.md#rollups)). The sheets and the counts of
 an object lie right after its data, where no read of the structures a scan reads together bridges them.
 On the design's requests, two measures one of them a float, an entry takes 52 to 61 bytes, and the counts
 cost the writer 9.4 to 12.0 ns a counted column a row, one thread (`vortex-queries --micro counts`).
@@ -425,72 +447,79 @@ repeat, is no wide column: its distinct values in an entry are the entry's rows.
 merge register by register. The sheet of a wide column hashes each row of a batch for them, and the
 columns of few values raise their entries' registers once the whole batch is in.
 
-### 4.11 `vorticity.block.table.v1`: an object's blocks
+### 4.11 `vorticity.granule.stats.v1`: a column over the granules
 
-An object a compaction job writes in slices bounded by keys keeps its blocks on its key's first column,
-in a region of their own right after the counts, which its table of contents names. As with its sheets
-and counts, only an object of 1 MiB or more keeps them: a smaller one is read whole. A block is a run of
-the object's rows in key order. It ends where the key's first column changes once it holds 4 096 rows,
-and at 65 536 rows whatever its rows hold. A first column whose runs are shorter, such as an identifier,
-gives blocks of several values rather than one block per row: the values of a block change only within
-its first 4 096 rows. Under a block value the application declares, a function of the key's second
-column, a block ends where that value changes too, past the same rows. Blocks are row ranges,
-independent of the file's chunks and zones.
+An object a dataset's job writes with a table of contents keeps, for each top-level column with a sheet,
+the column's statistics over its granules: the writer's blocks, 8 192 rows by default, which are also the
+zones of its zone maps and the places of its sparse index, so that one granule serves every structure.
+A granule is a range of rows, never cut where the key changes. The statistics are built as the column is
+written, right after its sheet and counts, from the values the sheet numbers; the object's table of
+contents names their region, so a reader fetches them with no open of the object. They replace the
+statistics over blocks cut on the key's prefix, `vorticity.block.stats.v1`, retired with its name.
 
-The region holds a version byte, the count of blocks, then for each block its rows and its first and
-last keys, as the clustering key encodes them. Each key is written as the bytes it shares with the key
-before it, a count, and the rest. The blocks cover the object's rows once, in order, and their keys
-follow the key. A reader reads the region with no open of the object, in one request, and the statistics
-of each column of each block extend it ([section 4.12](#412-vorticityblockstatsv1-a-column-over-the-blocks)).
-On sixty sources whose runs are a few rows, thousands, or more than two blocks, a block took 46 bytes,
-the keys a source text and an integer. The writer finds the end of a block by halves in the runs it
-merges, one bisection per change of the first column and a key copied per run *(computed: a few dozen
-comparisons per block)*.
-
-### 4.12 `vorticity.block.stats.v1`: a column over the blocks
-
-An object that keeps blocks keeps, for each top-level column with a sheet, that column's statistics over
-them, in a region of their own that its table of contents names, right after where the column's values
-live ([section 4.13](#413-vorticitycolumnwherev1-where-each-value-lives)): a reader takes both in one
-request. They are built as the column is written. The dataset's job declares each block's end before it
-writes the rows the block ends in, and each column's builder, fed right after the column's sheet and
-counts, cuts its blocks there; at the end they must be the table's blocks, or the column keeps none.
-
-The region holds a version, the count of blocks and the parts it holds, then a section a part, so that a
+The region holds a version, the count of granules and the parts it holds, then a section a part, so that a
 part given up midway is dropped whole:
 
-- **rows:** each block's rows and nulls;
-- **values:** each block's count of distinct values, then, for a block of at most 256 of them, their
+- **rows:** each granule's rows and nulls;
+- **values:** each granule's count of distinct values, then, for a granule of at most 256 of them, their
   numbers ascending, as the gaps between them, and past one value each one's rows. A number names a value
-  in the column's index of section 4.13. The part holds while the column's sheet numbers every row and
-  keeps every value's bytes;
-- **a measure:** for a number column the counts carry as a measure, of more than 64 values, each block's
-  count of values, the words of its exact sum, an `Int128` or a float's wide sum, its least and its
-  greatest, as the counts keep a measure's states. An integer under an extension, an instant or a date,
-  which the counts do not carry, is a measure of its own blocks too: its extremes say which group of a
-  function of it, a truncation, a block falls in whole.
+  in the region's own dictionary, which follows the sections, each value its length then its bytes. The
+  part holds while the column's sheet numbers every row and keeps every value's bytes;
+- **a measure:** for a number column the counts carry as a measure, each granule's count of values, the
+  words of its exact sum, an `Int128` or a float's wide sum, its least and its greatest, as the counts
+  keep a measure's states. An integer under an extension, an instant or a date, which the counts do not
+  carry, is a measure of its own granules too: its extremes say which group of a function of it, a
+  truncation, a granule falls in whole.
 
-A column that keeps neither part keeps no region: an identifier, an instant. On three million requests of
-the design over four hours, in the order of a key by emitter and cut as a job cuts them, 335 blocks of
-8 955 rows, every column's statistics cost 12.2 ns a row on one thread, and took 369 bytes a block, of
-which the endpoints took 129 and the hosts 83, the values of a service's block, each a number and its
-rows, and the instant 32, its extremes *(measured, `--micro blocks`)*.
+A column that keeps neither part keeps no region: an identifier, whose values hardly repeat. A granule
+whose columns of a question hold one value each answers that question for its rows from these alone,
+and a granule where one column varies gives the count of each of its values under a question of counts
+([22-on-the-fly-and-synopses.md](22-on-the-fly-and-synopses.md)). On three million requests of the
+design over four hours, 367 granules, the statistics and the locates of every column cost 19.1 ns a row
+on one thread, and the statistics took 1 307.7 bytes a granule, most of them the values listed by the
+columns of many values, the endpoints 677 and the hosts 423 *(measured, `--micro granules`)*.
 
-### 4.13 `vorticity.column.where.v1`: where each value lives
+Each key of a variant that a job shreds, top-level or nested in its objects (`Attributes['http']['status']`),
+read as an integer or a text, keeps a region of the same kind, built from the sheet its locate numbers its values by ([4.13](#413-vorticitylocatev1-where-each-value-lies-granule-by-granule)),
+the rows that hold no value of that class counted as its nulls; the table of contents names it by the
+variant column, the key and the class, beside the rows of its granules of one value, a nested key by the
+keys it steps through joined by U+001F, as its locate and its Bloom filter are. A key whose granules
+list no values keeps its rows and nulls alone, where a column would keep nothing: no summary of the
+object says which rows hold no value of a key, and a filter that leaves a value of the key out needs
+them. A double and a boolean keep none, nor a path through a list. A nested key keeps no zone map by block
+([4.7](#47-vorticityvariantblocksv1-a-shredded-keys-zone-map)): its statistics over the granules judge it.
 
-For each column whose blocks list values, the column's values in the order of their bytes, each with its
-number and the ranges of rows of the blocks it appears in, consecutive blocks joined into one range. A
-filter on a value reads its ranges alone, whatever column it is on: the key's first, or one that depends
-on it. A value that appears in more than half the blocks, or in more ranges than a sixteenth of them,
-lives *everywhere* and lists no range: its ranges would spare a reader nothing. While the column is
-written, its values' ranges are held to four a block, and a thousand more; past that, the column's values
-spread wider than a filter skips blocks by, and they all live everywhere. A column whose every value lives
-everywhere and whose blocks list none keeps no index.
+### 4.12 `vorticity.granule.histograms.v1`: a measure's histograms over the granules
 
-The region holds a version, the object's rows and the count of values, then each value: its bytes, as
-those it shares with the value before it, a count, and the rest; its number; its count of ranges, then
-each range as the rows from the end of the one before it and its rows. On the requests of section 4.12,
-the index took 209 KB, most of it the endpoints' and hosts' names, which an object holds once each.
+For each measure a question's plan reads, the object keeps, apart from its statistics so that a sum never
+reads them, each granule's values in a log-linear sketch of six mantissa bits: within 1/129, about
+0.77 %, of any value of a bucket, the grid a quantile asks by default. A quantile or a distribution over
+the granules a question answers merges their sketches. The durations of the design's requests keep
+575 bytes a granule, 0.35 % of the table, where three bits kept 112 *(calculated, `--micro
+histograms`)*; an object written at three bits answers the coarser quantiles alone. The region holds a version, the count of granules and the bits of the grid, then each
+granule's sketch, its length then its bytes, as the engine's quantile sketch encodes it; a reader takes
+them back into one array, each granule's sketch a slice of it.
+
+### 4.13 `vorticity.locate.v1`: where each value lies, granule by granule
+
+For each column whose sheet numbers its values, the column's values in the order of their bytes, each
+with the granules it lies in. A filter on a value, a set of them or a prefix reads the granules of its
+values alone, whatever column it is on and wherever the key puts them: the key's first, or one that
+depends on it, an endpoint under its service. A value that lies in more than three granules in four lies
+*everywhere* and lists none, since its granules would spare a reader nothing. While the column is
+written, a value met in a granule is a pair of eight bytes; a column whose values make more than 256
+pairs a granule on average is no column a filter skips granules by, and gives its index up. Each
+shredded key of a variant column read as a text or an integer keeps its own, its values numbered in a
+sheet of its own, under the same rules; the table of contents names it by variant column, key and
+class. It replaces the ranges of `vorticity.column.where.v1`, retired with its name.
+
+The region holds a version, the file's rows, the rows of a granule and the count of values, then each
+value: the bytes it shares with the value before it, a count, and the rest, its length first; then its
+granules, their count shifted past two bits that say how they are given: everywhere, a list of the gaps
+from the one before, or a map of a bit a granule, the shorter of the two. On the requests of section
+4.11, the locates took 209.4 KB, 570.6 bytes a granule. A consolidated partition's index carries the
+locates of its objects' columns, so that a question on a value over a window of days reads one page of
+it a day ([13-dataset.md](13-dataset.md#44-the-index-of-a-consolidated-partition)).
 
 ### 4.14 The file-level filter
 
@@ -622,6 +651,24 @@ costs](../guide/indexes.md)).
 The block numbers take what the run's blocks need, 9 bits here and 19 in an object of 2³² rows, where
 a pair weighs about 4 bytes. Two probes in a thousand for values the column lacks answered a block.
 
+A dataset's identifiers place their values at units of granules rather than at blocks: by default a unit
+that holds about a mebibyte of the identifier's values, from the width of its type, or the granule
+itself for a dataset whose questions are mostly lookups (`DatasetOptions.IdentifierLocation`); the
+entry's block length says the unit. A lookup reads the identifier's units, then the other columns at the
+rows it kept. Once a partition is consolidated, its objects' postings go to the partition's index instead
+([13-dataset.md](13-dataset.md#44-the-index-of-a-consolidated-partition)), where a unique identifier
+takes 2.25 bytes a row, its hashes cut as an object's are and packed at their bits.
+
+### 5.8 `vorticity.postings.tokens.v1`: words to blocks
+
+A text column searched by its words, a log's message, keeps postings of its tokens: each a maximal run of
+ASCII letters and digits and of non-ASCII bytes, so that a word of UTF-8 stays whole, cut to its first 64
+bytes and folded to ASCII lower case when its options say so, in the format of the postings of section
+5.1. `HasToken(word)`, and a filter whose every match must hold a word, read the blocks of the word alone;
+the same words are what the predicate requires of a value before the index may rule its block out. A
+rare word, one line in 40 000 of 120 000 log lines, read 1 block of 18 with the postings, where a search
+of the column decoded all 18 *(measured, `DatasetTokenPostingsTests`)*.
+
 An append adds the kind's runs and never reads old ones back to merge them. A run keeps only the bits
 of its hashes its own pairs need, which a larger run cannot extend, so the runs are listed as they
 are, as a Bloom filter's are, and a probe reads one segment per run.
@@ -658,13 +705,10 @@ A required index (`required: true`) is never dropped by the budget to make room.
 built, because its builder gave it up or the required indexes alone exceed the budget,
 `CompleteAsync` throws a `VortexException` naming it and the reason before the file's tail is
 written. The flag is stored in the directory, so an append that reuses the policy keeps it. A
-dataset's clustering key is such an index (see [what a compaction
-does](13-dataset.md#53-what-a-compaction-does)), and the dataset writes it exempt from the budget: it
-is kept even when it alone is over the budget, and reported with what it cost, since a run on a
-narrow table is as large as the column it orders and no object is big enough to bring it under a
-share of the data. A dataset's declared identifiers (`DatasetOptions.Identifiers`) get the same:
-required [hashed postings](#57-vorticitypostingshashedv1-value-to-blocks-through-the-hash) on each, in
-every object it writes, appends and jobs alike, exempt from the budget. A Bloom filter is never tried
+dataset's declared identifiers (`DatasetOptions.Identifiers`) are such indexes: required [hashed
+postings](#57-vorticitypostingshashedv1-value-to-blocks-through-the-hash) on each, in every object it
+writes, appends and jobs alike, exempt from the budget, kept even when they alone pass it and reported
+with what they cost, since a lookup reads them in place of the object's rows. A Bloom filter is never tried
 on one, since a tree of filters loses its upper nodes past what one filter holds, which the values of
 an identifier always pass. An identifier may be a key of a variant column read as a string or an
 integer, `Attributes['user'].AsString()`: a job then shreds that key wherever a row holds one of that
@@ -720,7 +764,7 @@ A dataset is indexed after the fact by `VortexDataset.IndexAsync(policy)`, which
 the dataset before it gives them to the objects. Its first commit adds them to the policy the
 dataset's commits carry, in the bytes a directory stores a policy in, and from that version on every
 write and every compaction builds them into the objects it writes, whatever its own options say. Its
-budget spares them as it spares a dataset's clustering run, since they were asked for by name, but
+budget spares them as it spares a dataset's identifiers, since they were asked for by name, but
 they are not required: a block of too few distinct values still leaves its filter out. The order
 matters: a compaction rewrites the objects it merges, and one that did not know the indexes
 would write its output without them and drop the fragments of its inputs, so an indexing that ran

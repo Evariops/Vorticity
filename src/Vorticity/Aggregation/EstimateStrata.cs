@@ -8,7 +8,7 @@ using Vorticity.Serialization.Schemas;
 namespace Vorticity.Aggregating;
 
 /// <summary>
-/// The ranges an estimate draws from in a file or an object (<see cref="ScanSource.StrataAsync"/>): its rows cut where the
+/// The ranges an estimate draws from in a file or an object (<see cref="ITasksCapability.StrataAsync"/>): its rows cut where the
 /// chunks of every column the question reads end together, gathered until a range holds a given number of bytes of the
 /// narrowest of them. A range then reads whole chunks of each column, never a block alone: a block holds some 15 KB of
 /// two columns, and drawn one by one a share of a month would be as many requests as blocks.
@@ -59,7 +59,7 @@ internal static class EstimateStrata
         LayoutNode root = tree.Root;
         if (root.Encoding != LayoutEncodingId.Struct)
         {
-            return Bytes(root, segments);
+            return LayoutTree.BytesUnder(root, segments);
         }
 
         long least = long.MaxValue;
@@ -69,27 +69,10 @@ internal static class EstimateStrata
             int field = mask.IsAll ? i : mask.GetNamedField(i);
             if (field < root.ChildCount)
             {
-                least = Math.Min(least, Bytes(root.GetChild(field), segments));
+                least = Math.Min(least, LayoutTree.BytesUnder(root.GetChild(field), segments));
             }
         }
 
-        return least == long.MaxValue ? Bytes(root, segments) : least;
-    }
-
-    /// <summary>The bytes of every segment under <paramref name="node"/>.</summary>
-    private static long Bytes(LayoutNode node, ReadOnlySpan<SegmentSpec> segments)
-    {
-        long bytes = 0;
-        foreach (uint segment in node.Segments)
-        {
-            bytes += segments[(int)segment].Length;
-        }
-
-        for (int c = 0; c < node.ChildCount; c++)
-        {
-            bytes += Bytes(node.GetChild(c), segments);
-        }
-
-        return bytes;
+        return least == long.MaxValue ? LayoutTree.BytesUnder(root, segments) : least;
     }
 }

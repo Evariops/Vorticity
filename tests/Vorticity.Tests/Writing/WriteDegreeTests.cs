@@ -88,6 +88,59 @@ public sealed class WriteDegreeTests
         }
     }
 
+    [Theory]
+    [InlineData(4)]
+    [InlineData(8)]
+    public async Task AFileWrittenAfterOneWhoseColumnsGatherIsTheBytesOfOneWrittenOnOneThread(int degree)
+    {
+        // A writer whose columns gather to a target of their own writes what they hold side by side at its completion,
+        // then gives the columns of its chunks back to the process's spares, which the next writer on several threads
+        // takes: that one, handed its rows at once as a partial's groups come, must still write every chunk of every
+        // column, the chunks after the first ingested and compressed in one pass.
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Decoders.EnsureRegistered();
+        Table table = Build();
+        Table flat = Flat();
+        string onePath = Temp();
+        string gatheredPath = Temp();
+        string manyPath = Temp();
+        try
+        {
+            await WriteAsync(table, onePath, 1, ct, batchRows: Rows);
+            byte[] one = await System.IO.File.ReadAllBytesAsync(onePath, ct);
+            for (int round = 0; round < 4; round++)
+            {
+                await WriteGatheredAsync(flat, gatheredPath, degree, ct);
+                (int manyAcross, _) = await WriteAsync(table, manyPath, degree, ct, batchRows: Rows);
+                Assert.True(manyAcross > 0, "the chunks must be ingested across threads");
+                Assert.Equal(one, await System.IO.File.ReadAllBytesAsync(manyPath, ct));
+            }
+        }
+        finally
+        {
+            System.IO.File.Delete(onePath);
+            System.IO.File.Delete(gatheredPath);
+            System.IO.File.Delete(manyPath);
+        }
+    }
+
+    /// <summary>Writes the table in batches, each column gathering to a target of its own, as a dataset's objects do.</summary>
+    private static async Task WriteGatheredAsync(Table table, string path, int degree, CancellationToken ct)
+    {
+        await using VortexFileWriter writer = VortexFileWriter.Create(
+            path, table.Schema, new VortexWriteOptions { Identity = Pinned, DegreeOfParallelism = degree, GatheredChunkBytes = 64 << 10, GatheredGroupRows = 50_000 });
+        for (int start = 0; start < Rows; start += BatchRows)
+        {
+            int count = Math.Min(BatchRows, Rows - start);
+            int slice = CanonicalSlice.SliceAcross(table.Arena, table.Arena, table.Root, start, count);
+            using RecordBatch batch = new RecordBatch(table.Arena, slice, start);
+            await writer.WriteAsync(batch, ct);
+        }
+
+        await writer.CompleteAsync(ct);
+        Assert.True(writer.ColumnChunksAcross > 0, "the gathered columns must be compressed side by side");
+    }
+
     /// <summary>
     /// Writes the table in batches and returns what <see cref="WriteAsync"/> does, with the column
     /// chunks compressed side by side and those renumbered.
@@ -110,16 +163,17 @@ public sealed class WriteDegreeTests
     }
 
     /// <summary>
-    /// Writes the table in batches and returns how many were ingested across threads, and the
-    /// column chunks a distinct table served.
+    /// Writes the table in batches of <paramref name="batchRows"/> rows and returns how many were ingested across
+    /// threads, and the column chunks a distinct table served.
     /// </summary>
-    private static async Task<(int Across, long FromTable)> WriteAsync(Table table, string path, int degree, CancellationToken ct)
+    private static async Task<(int Across, long FromTable)> WriteAsync(
+        Table table, string path, int degree, CancellationToken ct, int batchRows = BatchRows)
     {
         await using VortexFileWriter writer = VortexFileWriter.Create(
             path, table.Schema, new VortexWriteOptions { Identity = Pinned, DegreeOfParallelism = degree });
-        for (int start = 0; start < Rows; start += BatchRows)
+        for (int start = 0; start < Rows; start += batchRows)
         {
-            int count = Math.Min(BatchRows, Rows - start);
+            int count = Math.Min(batchRows, Rows - start);
             int slice = CanonicalSlice.SliceAcross(table.Arena, table.Arena, table.Root, start, count);
             using RecordBatch batch = new RecordBatch(table.Arena, slice, start);
             await writer.WriteAsync(batch, ct);
@@ -165,6 +219,23 @@ public sealed class WriteDegreeTests
         int tagsNode = Lists(arena, tags, i64);
         int flagNode = Flags(arena, bits, flag);
         int root = arena.AddStruct(schema, Rows, Validity.NonNullable, [id, city, name, score, pointNode, tagsNode, flagNode]);
+        return new Table(schema, arena, root);
+    }
+
+    /// <summary>Integers, a nullable text column and nullable floats: columns no batch shares with another, which gather side by side.</summary>
+    private static Table Flat()
+    {
+        DTypeArena types = new DTypeArena();
+        DType i64 = types.Primitive(PType.I64, Nullability.NonNullable);
+        DType f64 = types.Primitive(PType.F64, Nullability.Nullable);
+        DType text = types.Utf8(Nullability.Nullable);
+        DType bits = types.Bool(Nullability.NonNullable);
+        DType schema = types.Struct(["id", "city", "score"], [i64, text, f64], Nullability.NonNullable);
+        CanonicalArena arena = new CanonicalArena();
+        int id = Longs(arena, i64, row => row * 5L);
+        int city = Strings(arena, bits, text, row => row % 11 == 4 ? null : Cities[(row * 7) % Cities.Length]);
+        int score = Doubles(arena, bits, f64, row => row % 13 == 6 ? null : (row % 1_000) / 8.0);
+        int root = arena.AddStruct(schema, Rows, Validity.NonNullable, [id, city, score]);
         return new Table(schema, arena, root);
     }
 

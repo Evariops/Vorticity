@@ -5,23 +5,25 @@ using Vorticity.Expressions;
 
 namespace Vorticity.Keys;
 
-/// <summary>A position in a sorted column's entries.</summary>
+/// <summary>A position in a sorted column's entries, or in other entries that are rows in key order (<see cref="ISortedEntries"/>).</summary>
 /// <remarks>
-/// The entries are the column's non-null rows, contiguous and already in key order, so there is no
+/// The entries are rows, contiguous and already in key order, so there is no
 /// merge to do: a step is an addition, a rank is a subtraction, and reversing direction costs
 /// nothing. That is why this source is preferred over the sorted runs whenever it exists.
 /// </remarks>
 internal sealed class SortedColumnWalker : KeySource
 {
-    private readonly SortedColumnSource _source;
+    private readonly ISortedEntries _source;
     private long _entry = -1;
 
-    internal SortedColumnWalker(SortedColumnSource source) => _source = source;
+    internal SortedColumnWalker(ISortedEntries source) => _source = source;
 
     /// <summary>The file row of the first entry: the column's entries are the rows from here on.</summary>
     internal long FirstRow => _source.RowOf(0);
 
     internal override FilterLiteralKind KeyKind => _source.KeyKind;
+
+    internal override string? KeyFormat => _source.KeyFormat;
 
     internal override long? EntryCount => _source.EntryCount;
 
@@ -66,7 +68,7 @@ internal sealed class SortedColumnWalker : KeySource
                 // `lower_bound` lands on the first entry that is not below the key, which is the
                 // key itself when it is present and its successor when it is not.
                 await _source.EnsureEntryAsync(at, cancellationToken).ConfigureAwait(false);
-                if (SortedColumnSource.Compare(_source.LoadedKey(at), key) != 0)
+                if (_source.Compare(_source.LoadedKey(at), key) != 0)
                 {
                     Invalidate();
                     return false;

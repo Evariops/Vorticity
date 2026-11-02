@@ -260,22 +260,11 @@ internal sealed class SynopsisCacheReader : ISegmentReader, IIndexRegionReader
             if (waited is null)
             {
                 await _inner.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
+                Release(mine, requests, null);
             }
             else
             {
-                await ReadBesideAsync(requests, waited, cancellationToken).ConfigureAwait(false);
-            }
-
-            foreach ((int slot, IndexSegment region, bool data, _) in mine)
-            {
-                if (data)
-                {
-                    _cache.AdmitData(_uid, region, requests.GetOwner(slot), requests.GetBuffer(slot));
-                }
-                else
-                {
-                    _cache.Admit(_uid, region, requests.GetOwner(slot), requests.GetBuffer(slot));
-                }
+                await ReadBesideAsync(requests, waited, mine, cancellationToken).ConfigureAwait(false);
             }
         }
         catch
@@ -293,12 +282,55 @@ internal sealed class SynopsisCacheReader : ISegmentReader, IIndexRegionReader
     }
 
     /// <summary>
-    /// Reads the slots of <paramref name="requests"/> no other reader is fetching in a set of their own, beside
-    /// the reads <paramref name="waited"/> waits for; then those slots from the disk, or from the store when
-    /// the other read did not leave them there.
+    /// Hands the regions this reader fetched, <paramref name="mine"/>, to the cache, and lets the readers that wait for them
+    /// go; <paramref name="mine"/> is emptied. <paramref name="read"/> is the set they were read in, its slot of each the
+    /// one <paramref name="placed"/> gives it, or its own slot without.
     /// </summary>
+    private void Release(
+        List<(int Slot, IndexSegment Region, bool Data, TaskCompletionSource Mine)> mine, SegmentRequestSet read, List<(int Slot, int Own)>? placed)
+    {
+        foreach ((int slot, IndexSegment region, bool data, _) in mine)
+        {
+            int at = slot;
+            for (int p = 0; placed is not null && p < placed.Count; p++)
+            {
+                if (placed[p].Slot == slot)
+                {
+                    at = placed[p].Own;
+                    break;
+                }
+            }
+
+            if (data)
+            {
+                _cache.AdmitData(_uid, region, read.GetOwner(at), read.GetBuffer(at));
+            }
+            else
+            {
+                _cache.Admit(_uid, region, read.GetOwner(at), read.GetBuffer(at));
+            }
+        }
+
+        foreach ((_, IndexSegment region, bool data, TaskCompletionSource reading) in mine)
+        {
+            EndRead(region, data, reading);
+        }
+
+        mine.Clear();
+    }
+
+    /// <summary>
+    /// Reads the slots of <paramref name="requests"/> no other reader is fetching in a set of their own, beside
+    /// the reads <paramref name="waited"/> waits for, and releases the regions it fetched for others, <paramref name="mine"/>,
+    /// before it waits; then those slots from the disk, or from the store when the other read did not leave them there.
+    /// </summary>
+    /// <remarks>
+    /// A reader that waited for another's regions before releasing its own could wait on one that waits on it: two lanes
+    /// whose sets cross, each fetching a region the other asks, waited for each other for good.
+    /// </remarks>
     private async ValueTask ReadBesideAsync(
-        SegmentRequestSet requests, List<(int Slot, IndexSegment Region, bool Data, Task Theirs)> waited, CancellationToken cancellationToken)
+        SegmentRequestSet requests, List<(int Slot, IndexSegment Region, bool Data, Task Theirs)> waited,
+        List<(int Slot, IndexSegment Region, bool Data, TaskCompletionSource Mine)> mine, CancellationToken cancellationToken)
     {
         HashSet<int> theirs = [];
         Task[] others = new Task[waited.Count];
@@ -318,23 +350,19 @@ internal sealed class SynopsisCacheReader : ISegmentReader, IIndexRegionReader
             }
         }
 
-        Task reading = placed.Count > 0 ? _inner.ReadManyAsync(own, cancellationToken).AsTask() : Task.CompletedTask;
-        try
+        // This read's own segments first, while the reads it waits for go on: they are in flight already.
+        if (placed.Count > 0)
         {
-            await Task.WhenAll(others).WaitAsync(cancellationToken).ConfigureAwait(false);
-        }
-        finally
-        {
-            // This read's own segments are taken, or given back, whatever the wait did.
-#pragma warning disable VSTHRD003
-            await reading.ConfigureAwait(false);
-#pragma warning restore VSTHRD003
+            await _inner.ReadManyAsync(own, cancellationToken).ConfigureAwait(false);
         }
 
         foreach ((int slot, int at) in placed)
         {
             requests.SetSharedResult(slot, own.GetOwner(at), own.GetBuffer(at));
         }
+
+        Release(mine, own, placed);
+        await Task.WhenAll(others).WaitAsync(cancellationToken).ConfigureAwait(false);
 
         using SegmentRequestSet late = new SegmentRequestSet();
         List<(int Slot, int Late)> missed = [];

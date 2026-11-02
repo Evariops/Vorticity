@@ -54,6 +54,15 @@ public sealed partial class VortexFileWriter
     public int BlockRows => _blockRows;
 
     /// <summary>
+    /// The rows after which the chunks of every column that gathers end together, or 0 (<see cref="VortexWriteOptions.GatheredGroupRows"/>):
+    /// a write that ends past a group ends them there, so a caller that holds many rows writes them a group at most at a time.
+    /// </summary>
+    internal long GroupRows => _groupRows;
+
+    /// <summary>The bytes the file's indexes spilled to disk as it was written, past what their scratch's memory held.</summary>
+    internal long ScratchBytes => _indexes?.ScratchBytes ?? 0;
+
+    /// <summary>
     /// Bytes accepted and not yet handed to the sink by a flush: encoded chunks the sink holds, and
     /// rows waiting for their chunk.
     /// </summary>
@@ -107,7 +116,7 @@ public sealed partial class VortexFileWriter
     {
         ArgumentNullException.ThrowIfNull(builder);
         ThrowIfDone();
-        if (!ReferenceEquals(builder.Writer, this))
+        if (!ReferenceEquals(builder.Owner, this))
         {
             throw new ArgumentException(
                 "A builder is written by the writer that handed it out; this one is another writer's, or a nested struct's.", nameof(builder));
@@ -491,6 +500,7 @@ public sealed partial class VortexFileWriter
         // The blob workspace's builder and metadata writer rent from the shared pool, and the threads
         // go back to the process's.
         _blobs?.Dispose();
+        _geometryBuilder?.Dispose();
         _blobs = null;
         ReleaseColumnsAcross();
         if (_fan is { } fan)
@@ -723,9 +733,6 @@ public sealed partial class VortexFileWriter
 
     /// <summary>Whether the file was completed: its footer is with the sink.</summary>
     internal bool IsFinished => _finished;
-
-    /// <summary>Whether the file was given up, by <see cref="Abandon"/> or by a disposal before completion.</summary>
-    internal bool IsAbandoned => _abandoned;
 
     /// <summary>Truncates an append made over another sink back to the file's length before it.</summary>
     private void TruncateAppended()

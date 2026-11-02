@@ -7,7 +7,7 @@ namespace Vorticity.Indexes;
 /// <summary>
 /// Counts kept by bucket (<see cref="ColumnCounts.Buckets"/>): the counts of each bucket put together, a group a value with
 /// an entry for each bucket it has rows in, and a bucket's taken apart again. A rollup keeps its objects' counts so, a
-/// bucket a clustering value, so that a reader of one value finds its rows in every bucket in the chunk that holds it.
+/// bucket a partition value, so that a reader of one value finds its rows in every bucket in the chunk that holds it.
 /// </summary>
 internal static class CountsBuckets
 {

@@ -18,6 +18,9 @@ public sealed class CountsMergeTests
 {
     private const long MicrosPerHour = 3_600_000_000L;
 
+    /// <summary>The rows of an hour.</summary>
+    private const int RowsAnHour = 480;
+
     [Fact]
     public void TheCountsOfSeveralObjectsMergeAsTheirRowsDo()
     {
@@ -220,18 +223,19 @@ public sealed class CountsMergeTests
     }
 
     /// <summary>
-    /// Rows from hour <paramref name="from"/> to hour <paramref name="to"/>, in order, eighty an hour, each of one of
-    /// <paramref name="keys"/> values, the low values far the most frequent when <paramref name="skewed"/>.
+    /// Rows from hour <paramref name="from"/> to hour <paramref name="to"/>, in order, <see cref="RowsAnHour"/> an hour, each of
+    /// one of <paramref name="keys"/> values, the low values far the most frequent when <paramref name="skewed"/>: enough that
+    /// a value holds the rows an object's counts keep sketches for, 256 on average.
     /// </summary>
     private static List<(long At, long Key, long Amount, double Price)> Rows(Random random, int from, int to, int keys = 30, bool skewed = false)
     {
         List<(long At, long Key, long Amount, double Price)> rows = [];
         for (int hour = from; hour < to; hour++)
         {
-            for (int i = 0; i < 80; i++)
+            for (int i = 0; i < RowsAnHour; i++)
             {
                 long key = skewed ? (long)Math.Floor(keys * Math.Pow(random.NextDouble(), 3)) : random.Next(keys);
-                rows.Add(((hour * MicrosPerHour) + (i * (MicrosPerHour / 80)), key, random.NextInt64(-1_000, 1_000_000), Math.Round(random.NextDouble() * 100, 2)));
+                rows.Add(((hour * MicrosPerHour) + (i * (MicrosPerHour / RowsAnHour)), key, random.NextInt64(-1_000, 1_000_000), Math.Round(random.NextDouble() * 100, 2)));
             }
         }
 

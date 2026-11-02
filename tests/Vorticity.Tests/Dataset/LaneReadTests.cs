@@ -81,7 +81,7 @@ public sealed partial class LaneReadTests : IClassFixture<LaneReadTests.Fixture>
 
         // Pieces of four blocks or more, so that eight lanes and thirty-two cut every hour into parts.
         await using VortexDataset dataset = await VortexDataset.OpenAsync(store, new DatasetOptions { Session = session, LeastPieceRows = 4_096 }, Ct);
-        long planned = (await Ask(dataset, question, lanes).ExplainAsync(Ct)).BytesToRead;
+        long planned = (await Ask(dataset, question, lanes).ExplainAsync(analyze: true, Ct)).BytesToRead;
         Vorticity.Aggregation asked = Ask(dataset, question, lanes);
         store.Reset();
         List<string> rows = [];
@@ -134,8 +134,7 @@ public sealed partial class LaneReadTests : IClassFixture<LaneReadTests.Fixture>
             // bytes would move, the jobs sizing their levels by the objects' bytes.
             await using VortexDataset dataset = await VortexDataset.CreateAsync(Store, Call.Schema, new DatasetOptions
             {
-                ClusteringKey = [nameof(Call.At)],
-                Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour) }, ContentsObjectBytes = 0, SliceTargetRows = 10_000,
+                Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(Call.At)).Truncate(CalendarUnit.Hour), SortKey = [LayoutValue.Column(nameof(Call.At))], Organization = LayoutOrganization.Leveled }, ContentsObjectBytes = 0,
                 Write = new VortexWriteOptions { BlockRows = 1_024, ChunkTargetBytes = 4_096 },
                 SheetObjectBytes = long.MaxValue,
             });

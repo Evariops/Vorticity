@@ -9,7 +9,7 @@ namespace Vorticity.Benchmarks.Queries;
 
 /// <summary>
 /// The questions of the time-window and variant designs, asked of generated datasets (<c>--micro questions</c>):
-/// requests (<see cref="RequestGenerator"/>) and log records (<see cref="LogGenerator"/>) over hours clustered by hour,
+/// requests (<see cref="RequestGenerator"/>) and log records (<see cref="LogGenerator"/>) over hours partitioned by hour,
 /// in memory behind a store that counts and waits a round trip per request. Each question is asked cold, by a
 /// handle and a session opened for it with an empty synopsis cache on disk, then warm, by the same handle
 /// again, its cache filled, from its synopses and then from its rows. Each line says what the store saw
@@ -43,7 +43,7 @@ internal static class QuestionBench
         (long requestRows, string needle) = await FillRequestsAsync(requests, hours, rate, write, keyring);
         long logRows = await FillLogsAsync(logs, hours, rate / 2, write, keyring);
         Console.WriteLine(
-            $"{requestRows} requests and {logRows} log records over {hours} hours clustered by hour{(encrypted ? ", sealed" : string.Empty)}, written and compacted in " +
+            $"{requestRows} requests and {logRows} log records over {hours} hours partitioned by hour{(encrypted ? ", sealed" : string.Empty)}, written and compacted in " +
             $"{Stopwatch.GetElapsedTime(begin).TotalSeconds:F1} s; tables up to {budget} ‰ of the data; {latency} ms a round trip; warm is the best of {rounds}");
         requestBytes.Latency = TimeSpan.FromMilliseconds(latency);
         logBytes.Latency = TimeSpan.FromMilliseconds(latency);
@@ -115,8 +115,7 @@ internal static class QuestionBench
         {
             Session = session ?? VortexSession.Default,
             Encrypted = keyring is not null,
-            ClusteringKey = [nameof(GeneratedRequest.At)],
-            Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour) },
+            Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(GeneratedRequest.At)).Truncate(CalendarUnit.Hour), SortKey = [LayoutValue.Column(nameof(GeneratedRequest.At))], Organization = LayoutOrganization.Leveled },
             Identifiers = [nameof(GeneratedRequest.RequestId)],
             Write = write,
         });
@@ -153,8 +152,7 @@ internal static class QuestionBench
         {
             Session = session ?? VortexSession.Default,
             Encrypted = keyring is not null,
-            ClusteringKey = [nameof(LogRow.At)],
-            Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour) },
+            Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(LogRow.At)).Truncate(CalendarUnit.Hour), SortKey = [LayoutValue.Column(nameof(LogRow.At))], Organization = LayoutOrganization.Leveled },
             Write = write,
         });
 
@@ -187,14 +185,14 @@ internal static class QuestionBench
         }
 
         int objects = 0;
-        int sliced = 0;
+        int listed = 0;
         await foreach (PositionedObject held in dataset.Snapshot.WalkAsync(null, 0, long.MaxValue, null, default))
         {
             objects++;
-            sliced += held.Entry.Contents is not null ? 1 : 0;
+            listed += held.Entry.Contents is not null ? 1 : 0;
         }
 
-        Console.WriteLine($"{objects} objects, {sliced} in time slices with a table of contents");
+        Console.WriteLine($"{objects} objects, {listed} with a table of contents");
     }
 
     /// <summary>
@@ -293,10 +291,10 @@ internal static class QuestionBench
         ScanPlan plan = await ask(dataset.Scan<TRecord>().With(new ScanOptions { AlignWindow = align })).ExplainAsync();
         SortedDictionary<string, int> kinds = new SortedDictionary<string, int>(StringComparer.Ordinal);
         string? why = null;
-        foreach (StatesStep step in plan.States)
+        foreach (UnitStep step in plan.Units)
         {
-            kinds[step.Read] = kinds.GetValueOrDefault(step.Read) + 1;
-            why ??= step.Read == "rows" ? step.Detail : null;
+            kinds[step.Alternative] = kinds.GetValueOrDefault(step.Alternative) + 1;
+            why ??= step.Alternative == "rows" ? step.Detail : null;
         }
 
         return kinds.Count == 0

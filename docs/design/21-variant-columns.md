@@ -126,9 +126,9 @@ select (g.Key, g.Count())
 |---|---|
 | reading both shredded forms, the reference's tree and the Parquet layout, and writing the reference's | [90-registry.md](90-registry.md#1-array-encodings), [01-scope.md](01-scope.md), [04-conformance.md](04-conformance.md) for the corpus the reference writes |
 | the `Variant` type, paths, `As…`, `To…` and `Has` in questions, typed and on the tool path | [07-dotnet-mapping.md](07-dotnet-mapping.md), [14-public-api.md](14-public-api.md), [16-queries.md, variant paths](16-queries.md#36-variant-paths), [08-semantics.md](08-semantics.md) for a path absent or of another type |
-| what an object shreds, the cost model, shapes, bodies, the validity of shredded fields, level 0's variants | [11-write-strategy.md, key slices and shredded variants](11-write-strategy.md#9-key-slices-and-shredded-variants), [90-registry.md, the writer's schemes](90-registry.md#5-the-writers-schemes-and-their-ids) |
-| the path map, the path directory, block statistics and indexes on paths | [10-indexes.md](10-indexes.md#45-vorticityvariantpathsv1-where-each-shredded-key-of-a-variant-lies), and the three kinds after it |
-| the synopses on paths, per column, to come | [22-on-the-fly-and-synopses.md](22-on-the-fly-and-synopses.md#5-the-synopses-all-per-column) |
+| what an object shreds, the presence rule, shapes, bodies, the validity of shredded fields, level 0's variants | [11-write-strategy.md, shredded variants](11-write-strategy.md#10-shredded-variants), [90-registry.md, the writer's schemes](90-registry.md#5-the-writers-schemes-and-their-ids) |
+| the path map, the path directory, the shredded keys' zone maps, their locates and indexes on paths | [10-indexes.md](10-indexes.md#45-vorticityvariantpathsv1-where-each-shredded-key-of-a-variant-lies), and the three kinds after it |
+| the synopses on paths: where a shredded key's values lie, and its statistics, granule by granule; counts and sheets are top-level columns' alone | [10-indexes.md](10-indexes.md#411-vorticitygranulestatsv1-a-column-over-the-granules), [4.13](10-indexes.md#413-vorticitylocatev1-where-each-value-lies-granule-by-granule), [22-on-the-fly-and-synopses.md](22-on-the-fly-and-synopses.md#5-the-synopses-all-per-column) |
 
 The guide shows them from the caller's side ([records.md](../guide/records.md),
 [untyped-files.md](../guide/untyped-files.md), [indexes.md](../guide/indexes.md),
@@ -180,7 +180,7 @@ written before anything was built.
 | a count per `Attributes["http.route"]` and per day, 30 days, the path shredded | its typed column, as for a declared column; once the synopses come, the counts of its objects of a day |
 | `ServiceName` under `Attributes["http.response.status_code"] >= 500`, per minute, the last hour | the two columns over the last hour, the path's typed one and the declared one |
 | the rows holding `Attributes["feature.flag.new-cart"]`, per minute, the last day | the path's typed column, or the residual of the chunks that hold the key |
-| `Attributes["feature.flag.new-cart"] == "on"`, per service and per day, 30 days, the key left in the residual of most objects | the residual of the chunks that hold it, and the partial learned for the next time |
+| `Attributes["feature.flag.new-cart"] == "on"`, per service and per day, 30 days, the key left in the residual of most objects | the residual of the chunks that hold it |
 | the average of `Attributes["http.server.request.duration"]` per route and per day | the typed columns of the two paths |
 | the keys that are data most often held, such as `Attributes["user.4711.score"]` and its siblings, 30 days | the path directories' counts per object |
 | the count per `Attributes["http.route"]` of the first row, cold | two round trips per object, in parallel: the path directory, then the typed column's chunks |
@@ -188,7 +188,7 @@ written before anything was built.
 | the same with `ToInt64()`, which converts the text | the typed column, and the field's `value` on that source's rows, parsed |
 
 The same questions run on generated logs of three sources, at a 2 500th of the example's rate, 24
-hours clustered by hour, behind a store that counts and waits 30 ms a round trip (`vortex-queries --micro
+hours partitioned by hour, behind a store that counts and waits 30 ms a round trip (`vortex-queries --micro
 questions`): every one reads its rows, a path's typed column where its object shreds it. A key the
 application declares shredded (`DatasetOptions.ShreddedPaths`) is a column of every object whatever
 share of the rows holds it. `ToInt64()` reads every class, and `AsDouble()` reads floats too, which the
@@ -218,6 +218,8 @@ double class leaves out, from the field's `value` of the rows that hold them.
 | a variant whose chunks carry no path map: an object another writer wrote, or one written before this design | each chunk's segment read whole | the next compaction that rewrites the object builds its path map | the whole segment, until then |
 | many shredded paths over many chunks | path map entries, and trees, in proportion to paths times chunks | long variant chunks, per-chunk shredding of the keys a chunk holds, and the column budget | the paths past the budget stay in the residual |
 | a question touching many paths of one chunk | as many buffer ranges per chunk | coalescing, which joins neighbouring ranges | close to the whole segment, which is then what it reads |
+| a wide shredding read whole | the rebuild reads each shredded column a view or a value a row: a log's attributes, shredded into up to 434 columns, came to 7 KB a row, and a chunk of half a million rows decoded whole held a merge's input at 8 GB (measured) | the reader decodes a window of a chunk at a time, the variant decoding a range of its rows as its children do, and rebuilds the rows a slice at a time, the slice's shredded columns decoded in an arena cleared before the next slice: 32 MiB of them (`VortexReadOptions.VariantSliceBytes`), whole blocks of 1 024 rows. An input of a merge held 384 MB | the columns of one slice, decoded and thrown away |
+| a wide shredding written | each typed column a slot a row of its chunk, whether the row holds the key or not: laid out all at once, the columns of a chunk of a million rows of log attributes held 2.8 GB of views of text, and a consolidation's writer 9.9 GB at its peak (measured) | the shredder takes each key's values at the rows that hold them, and the blob writer lays a typed column out only when it comes to it, in an arena emptied before the next: the writer held 3.1 GB (measured) | the chunk's values, and one column laid out at a time |
 
 ## 6. How it is held
 
@@ -239,6 +241,7 @@ double class leaves out, from the field's `value` of the rows that hold them.
 | a key in the residual puts nothing back | a key no chunk shreds, read as stored, converted and under a filter, from the residuals alone, answers as on the rows written whole; beside a shredded key, the chunks are put back as before (`VariantKeyReadTests`) |
 | keys that are data are counted | four hundred user keys among others, at every append and compaction, appended and written objects alike (`VariantDiscoveryTests`) |
 | a path with dots stays one key | `http.route` and `http` holding `route` are two paths, in an index policy, the tool path and a plan |
+| a wide shredding is read a window and a slice at a time | the reference's chunks in both its shredded spellings and the writer's own, read whole, in windows and taken, a slice of a block at a time, as their rows unshredded; the slices counted per read (`ScanCounters.VariantSlices`): four for the writer's chunk read in windows, where decoding the chunk whole made twenty (`ShreddedVariantSliceTests`) |
 
 ## 7. Decisions
 
@@ -265,7 +268,7 @@ double class leaves out, from the field's `value` of the rows that hold them.
 | 19 | the validity of a shredded field | through the compressor, as runs where it has few, which Rust reads. `vortex.sparse` at nine nulls in ten, where each byte it saves costs about a third of a nanosecond of decode on integers, doubles and text alike (measured) | a plain bitmap, a bit per row and per field, or `vortex.sparse` chosen per chunk by that price, which makes about the same choices and needs the dense plan priced first |
 | 20 | the shapes a variant chunk holds | each chunk shreds the keys its rows hold (measured) | chunks cut where the shape changes, or a budget that counts a chunk's shapes |
 | 21 | a path's encoding across chunks | chosen per chunk, each key's region of the path map one zstd frame, 32 to 82 bytes a chunk (measured) | fixed per object, at a cost in compression |
-| 22 | the variants of level 0 | shredded in memory once per query node and object, kept until it leaves level 0, a lock per object and its memory reserved before the copy; an object an append shredded read as it lies, with no copy | shredded in the append, from the previous object's choice of paths, for every handle |
+| 22 | the variants of level 0 | shredded in memory once per query node and object, kept until it leaves level 0, the copy made beside the first question, which parses the object as it lies, one copy of an object at a time and its memory reserved before it; an object an append shredded read as it lies, with no copy. Made on the first question's path, the copy kept the services under a status of 500 or more over the logs of a short S1 at 1 045 ms at first at 32 lanes, 255 beside it, the questions after alike (measured) | shredded in the append, from the previous object's choice of paths, for every handle |
 
 ## 8. Alternatives weighed
 

@@ -100,16 +100,16 @@ internal static class DatasetTelemetry
     private static readonly Counter<long> VacuumDeleted = VortexTelemetry.Meter.CreateCounter<long>(
         "vortex.dataset.vacuum.objects_deleted", "{object}", "Objects vacuums deleted.");
 
-    private static readonly Counter<long> ClusteringAvoidableBytes = VortexTelemetry.Meter.CreateCounter<long>(
-        "vortex.dataset.clustering.avoidable_bytes", "By",
-        "Bytes the objects read as rows under a filter would have been spared by a clustering of the filter's column, by column (ClusteringAdvice).");
+    private static readonly Counter<long> LayoutAvoidableBytes = VortexTelemetry.Meter.CreateCounter<long>(
+        "vortex.dataset.layout.avoidable_bytes", "By",
+        "Bytes the objects read as rows under a filter would have been spared by an order of the rows by the filter's column or variant key, by value (ComponentAdvice).");
 
-    /// <summary>Counts the bytes a clustering by <paramref name="column"/> would have spared an object read as rows, once an object.</summary>
-    internal static void ClusteringAvoidable(string column, long bytes)
+    /// <summary>Counts the bytes an order by <paramref name="value"/> would have spared an object read as rows, once an object.</summary>
+    internal static void LayoutAvoidable(string value, long bytes)
     {
-        if (ClusteringAvoidableBytes.Enabled)
+        if (LayoutAvoidableBytes.Enabled)
         {
-            ClusteringAvoidableBytes.Add(bytes, new KeyValuePair<string, object?>("vortex.column", column));
+            LayoutAvoidableBytes.Add(bytes, new KeyValuePair<string, object?>("vortex.column", value));
         }
     }
 
@@ -197,9 +197,10 @@ internal static class DatasetTelemetry
 
     /// <summary>
     /// Starts the activity of one pass of a compaction job, a child of the job's, or returns null when nothing
-    /// listens: <c>plan</c>, the first pass of a job that writes key slices over a variant column, which counts the paths
-    /// of each clustering value's rows,
-    /// or <c>write</c>, the pass that reads the rows again and writes the outputs.
+    /// listens: <c>plan</c>, the first pass of a job that writes indexed objects over a variant column, which counts the paths
+    /// of each partition value's rows; <c>unions</c>, a merge's object dictionaries, the union of its inputs'; <c>ranges</c>,
+    /// a consolidation's ranges of the key; <c>write</c>, the pass that reads the rows again and writes the outputs;
+    /// and <c>index</c>, a consolidation's index of its partition. The commit has an activity of its own.
     /// </summary>
     internal static Activity? StartCompactionPass(string pass) =>
         VortexTelemetry.Source.StartActivity($"vortex.dataset.compaction.{pass}", ActivityKind.Internal);

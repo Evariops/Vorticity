@@ -14,7 +14,7 @@ namespace Vorticity.Dataset;
 /// </summary>
 /// <remarks>
 /// <para>
-/// On the clustering key an object's cursor opens only once it could hold the next key. Walking
+/// On the sort key an object's cursor opens only once it could hold the next key. Walking
 /// up, its tree key is an exact lower bound on its keys. Walking down, the levels above 0 are
 /// key-disjoint, so the tree key of the next object of its level is a strict upper bound on them;
 /// level 0's objects, and a late level's, which nothing bounds from above, open at the seek. On any other column every
@@ -34,7 +34,7 @@ namespace Vorticity.Dataset;
 internal sealed partial class DatasetKeyCursor : IKeyWalker
 {
     private readonly DatasetSnapshot _version;
-    private readonly ClusteringKey _key;
+    private readonly DatasetKey _key;
     private readonly bool _bounded;
     private readonly bool _distinct;
     private readonly bool _indexes;
@@ -73,7 +73,7 @@ internal sealed partial class DatasetKeyCursor : IKeyWalker
     private Slot? _current;
     private bool _disposed;
 
-    private DatasetKeyCursor(DatasetSnapshot version, ClusteringKey key, bool bounded, bool distinct, bool indexes)
+    private DatasetKeyCursor(DatasetSnapshot version, DatasetKey key, bool bounded, bool distinct, bool indexes)
     {
         _version = version;
         _key = key;
@@ -101,7 +101,7 @@ internal sealed partial class DatasetKeyCursor : IKeyWalker
     }
 
     /// <summary>
-    /// How many objects' cursors the walk has opened. A seek on the clustering key opens at most
+    /// How many objects' cursors the walk has opened. A seek on the sort key opens at most
     /// level 0's objects and one per level above it; a walk opens the rest as it reaches them.
     /// </summary>
     public int Cursors { get; private set; }
@@ -136,34 +136,38 @@ internal sealed partial class DatasetKeyCursor : IKeyWalker
     public ObjectEntry Object => Positioned().Entry;
 
     /// <summary>
-    /// Prepares a walk of the clustering key over the objects of the dataset's current version. The
+    /// Prepares a walk of the sort key over the objects of the dataset's current version. The
     /// cursor comes back unpositioned, with no object opened; seek it first.
     /// </summary>
     /// <exception cref="ArgumentNullException"><paramref name="dataset"/> is null.</exception>
-    /// <exception cref="InvalidOperationException">The dataset declares no clustering key.</exception>
+    /// <exception cref="InvalidOperationException">The dataset declares no sort key.</exception>
     public static ValueTask<DatasetKeyCursor> OpenAsync(
         VortexDataset dataset, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(dataset);
         DatasetSnapshot version = dataset.Snapshot;
-        ClusteringKey key = version.Schema.Key ?? throw new InvalidOperationException(
-            "A key-ordered walk needs a clustering key; this dataset is ordered by row position, " +
+        DatasetKey key = version.Schema.Key ?? throw new InvalidOperationException(
+            "A key-ordered walk needs a sort key; this dataset is ordered by row position, " +
             "whose order a scan already delivers.");
         return OpenAsync(version, key, bounded: true, distinct: false, indexes: true, cancellationToken);
     }
 
     /// <summary>
-    /// Prepares a walk of one column over the objects of <paramref name="version"/>: the clustering
-    /// key's own walk when the column is that key, a walk that opens every object otherwise.
+    /// Prepares a walk of one column over the objects of <paramref name="version"/>: the sort
+    /// key's own walk when the column is that key, a walk that opens every object otherwise. The
+    /// layout's first key column is walked in each object's own order, whatever else it is.
     /// </summary>
     /// <exception cref="ArgumentException"><paramref name="path"/> names no column of the dataset.</exception>
     internal static ValueTask<DatasetKeyCursor> OpenAsync(
         DatasetSnapshot version, string path, bool distinct, bool indexes, CancellationToken cancellationToken)
     {
-        ClusteringKey? key = version.Schema.Key;
-        bool clustering = key is { IsComposite: false } && string.Equals(key.Paths[0], path, StringComparison.Ordinal);
-        ClusteringKey walked = clustering ? key! : ClusteringKey.For([path], version.Schema.DType)!;
-        return OpenAsync(version, walked, clustering, distinct, indexes, cancellationToken);
+        DatasetKey? key = version.Schema.Key;
+        bool keyed = key is { IsComposite: false } && string.Equals(key.Paths[0], path, StringComparison.Ordinal);
+        bool leading = version.Schema.KeyColumns is { Count: > 0 } columns && string.Equals(columns[0], path, StringComparison.Ordinal);
+        DatasetKey walked = keyed ? key!
+            : leading ? DatasetKey.OfLayout([path], version.Schema.DType)!
+            : DatasetKey.For([path], version.Schema.DType)!;
+        return OpenAsync(version, walked, keyed, distinct, indexes, cancellationToken);
     }
 
     /// <summary>
@@ -324,7 +328,7 @@ internal sealed partial class DatasetKeyCursor : IKeyWalker
     /// the window of its own ranks still candidates.
     /// </summary>
     /// <remarks>
-    /// On the clustering key the objects take part in the order of their bounds, until they hold
+    /// On the sort key the objects take part in the order of their bounds, until they hold
     /// more entries than the rank; the ones left waiting hold only keys at or above their bounds.
     /// Once the entry is found, the waiting objects whose bounds are at or below its key take part
     /// and the selection runs again, which can only find a smaller key, so none is left that could
@@ -715,7 +719,7 @@ internal sealed partial class DatasetKeyCursor : IKeyWalker
     /// pages are read as the walk first needs them.
     /// </summary>
     private static ValueTask<DatasetKeyCursor> OpenAsync(
-        DatasetSnapshot version, ClusteringKey key, bool bounded, bool distinct, bool indexes, CancellationToken cancellationToken)
+        DatasetSnapshot version, DatasetKey key, bool bounded, bool distinct, bool indexes, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         return new ValueTask<DatasetKeyCursor>(new DatasetKeyCursor(version, key, bounded, distinct, indexes));
@@ -742,7 +746,7 @@ internal sealed partial class DatasetKeyCursor : IKeyWalker
                 ParsedPage child = await page.ChildAsync(i, _version.Pages, cancellationToken).ConfigureAwait(false);
                 rank += await RankUnderAsync(child, level, key, sought, cancellationToken).ConfigureAwait(false);
             }
-            else if (await CursorOfAsync(SlotOf(page, slots, i, level), cancellationToken).ConfigureAwait(false) is { } cursor)
+            else if (await CursorOfAsync(SlotOf(page, slots, i), cancellationToken).ConfigureAwait(false) is { } cursor)
             {
                 rank += await cursor.RankAsync(key, cancellationToken).ConfigureAwait(false);
             }
@@ -763,21 +767,21 @@ internal sealed partial class DatasetKeyCursor : IKeyWalker
         return slots;
     }
 
-    /// <summary>The walk's state of entry <paramref name="index"/> of a leaf of <paramref name="level"/>, made the first time the walk reaches it.</summary>
-    private Slot SlotOf(ParsedPage leaf, Slot?[] slots, int index, int level)
+    /// <summary>The walk's state of entry <paramref name="index"/> of a leaf, made the first time the walk reaches it.</summary>
+    private Slot SlotOf(ParsedPage leaf, Slot?[] slots, int index)
     {
         if (slots[index] is { } slot)
         {
             return slot;
         }
 
-        slot = new Slot(leaf.ObjectAt(index), leaf.Key(index), level);
+        slot = new Slot(leaf.ObjectAt(index), leaf.Key(index));
         slots[index] = slot;
         _reached.Add(slot);
         return slot;
     }
 
-    /// <summary>The encoded minimum of the object past the place of <paramref name="level"/>; empty off the clustering key, where none is known.</summary>
+    /// <summary>The encoded minimum of the object past the place of <paramref name="level"/>; empty off the sort key, where none is known.</summary>
     private ReadOnlySpan<byte> Bound(LevelWalk level) => _bounded ? level.NextBound : default;
 
     /// <summary>
@@ -1054,7 +1058,7 @@ internal sealed partial class DatasetKeyCursor : IKeyWalker
     /// <summary>
     /// Walking down, whether the object past the place of <paramref name="level"/> bounds the keys
     /// of the next one to open, strictly from above: the levels above 0 are key-disjoint. Nothing
-    /// bounds them in level 0 or a late level, past a level's last object, and off the clustering key.
+    /// bounds them in level 0 or a late level, past a level's last object, and off the sort key.
     /// </summary>
     private bool HasLimit(LevelWalk level) => _bounded && level.Disjoint && level.HasNext;
 
@@ -1203,17 +1207,17 @@ internal sealed partial class DatasetKeyCursor : IKeyWalker
             paths = named;
         }
 
-        // An object above level 0 is a merge's, its rows in the clustering key's order with null keys
-        // last, so on that key an entry's rank is its row and a deleted row's rank needs no read; not
-        // for a dataset of periods, whose objects may order each slice by another column.
+        // Every object is written in the layout key's order with null keys last, an append's as a merge's, so on that
+        // key an entry's rank is its row and a deleted row's rank needs no read.
         slot.Cursor = await _key.TryOpenAsync(
-                slot.Lease.File, paths, _indexes, slot.Entry.Deletions, ranksAreRows: _bounded && _version.Levels.RowsInKeyOrder(slot.Level), cancellationToken)
+                slot.Lease.File, paths, _indexes, slot.Entry.Deletions, ranksAreRows: _bounded || _key.InRowOrder, cancellationToken,
+                slot.Entry.Contents?.Keys is { HoldsEvery: true } index ? index : null)
             .ConfigureAwait(false)
             ?? throw new VortexUnsupportedException(
                 slot.Entry.Key,
                 ComponentKind.Index,
-                $"The object has no run on '{string.Join(", ", _key.Paths)}' and no sorted column to stand in, so a " +
-                "key-ordered walk would leave its rows out. Rewrite it through the dataset, or index it.");
+                $"The object has no source of keys on '{string.Join(", ", _key.Paths)}': no run its policy asked for, and the " +
+                "column is not one its rows are sorted by, so a key-ordered walk would leave its rows out. Index it.");
         Cursors++;
         return slot.Cursor;
     }
@@ -1251,15 +1255,12 @@ internal sealed partial class DatasetKeyCursor : IKeyWalker
     }
 
     /// <summary>The walk's state of one object of the version, made once the walk reaches it.</summary>
-    private sealed class Slot(ObjectEntry entry, ReadOnlyMemory<byte> treeKey, int level)
+    private sealed class Slot(ObjectEntry entry, ReadOnlyMemory<byte> treeKey)
     {
         internal ObjectEntry Entry { get; } = entry;
 
         /// <summary>The key its level's tree orders it by: its bound, then its uid.</summary>
         internal ReadOnlyMemory<byte> TreeKey { get; } = treeKey;
-
-        /// <summary>The level whose tree holds the object.</summary>
-        internal int Level { get; } = level;
 
         /// <summary>Where the object's rows start among the dataset's; negative until the walk first takes one of its entries.</summary>
         internal long FirstRow { get; set; } = -1;

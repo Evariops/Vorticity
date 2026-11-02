@@ -10,11 +10,12 @@ using Vorticity.IO;
 namespace Vorticity.Benchmarks.Queries;
 
 /// <summary>
-/// A dataset of requests at the time-window design's own scale, for <c>--micro paths --design</c>: hours at
-/// 5 × 10⁴ requests a second, an object an hour in key slices of 3 × 10⁶ rows, a terabyte and more on the disk.
+/// A dataset of requests at the design's own scale, for <c>--micro paths --design</c>: hours at 5 × 10⁴ requests
+/// a second, partitioned by hour and sorted by the instant, a terabyte and more on the disk.
 /// Each hour is drawn by a generator of its own, seeded by the hour, several hours at once, each written into
 /// objects of <c>partMinutes</c> minutes while the hours before it are appended in the order of their instants,
-/// each followed by the compaction it made due; the objects the compactions replaced are then vacuumed.
+/// each followed by the compaction it made due; the objects the compactions replaced are then vacuumed. Under the design's
+/// layout (<see cref="IdiomLayouts.Requests"/>) the days are tiered and consolidated by the data's clock.
 /// </summary>
 internal static class DesignBuild
 {
@@ -33,22 +34,26 @@ internal static class DesignBuild
     };
 
     internal static async Task<(long Rows, string Needle)> FillAsync(
-        IObjectStore store, int hours, double rate, int budget, int parallel, int writeDegree, int partMinutes, string scratch, bool randomIds = false)
+        IObjectStore store, int hours, double rate, int budget, int parallel, int writeDegree, int partMinutes, string scratch, bool randomIds = false, bool idiom = false)
     {
         // The runs the writers move to disk wait beside the store, on its disk.
         System.IO.Directory.CreateDirectory(scratch);
         await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = writeDegree);
+        IdiomLayouts.DataClock? clock = idiom ? new IdiomLayouts.DataClock() : null;
         VortexDataset dataset = await VortexDataset.CreateAsync(store, GeneratedRequest.Schema, new DatasetOptions
         {
             Session = session,
-            ClusteringKey = [nameof(GeneratedRequest.At)],
-            Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour) },
+            Layout = idiom ? IdiomLayouts.Requests
+                : new DatasetLayout { Partition = LayoutValue.Column(nameof(GeneratedRequest.At)).Truncate(CalendarUnit.Hour), SortKey = [LayoutValue.Column(nameof(GeneratedRequest.At))], Organization = LayoutOrganization.Leveled },
+            TimeProvider = clock ?? TimeProvider.System,
             Identifiers = [nameof(GeneratedRequest.RequestId)],
             Write = WriteOptions(budget, scratch),
         });
 
         await using (dataset)
         {
+            // The indexes the handle's writes build, declared to the dataset: its jobs build them into what they write too.
+            await dataset.IndexAsync(WriteOptions(budget, scratch).Indexes);
             long perHour = (long)(rate * 3_600);
             Task<List<ObjectDraft>>[] written = new Task<List<ObjectDraft>>[hours];
             int next = 0;
@@ -68,6 +73,13 @@ internal static class DesignBuild
             for (int hour = 0; hour < hours; hour++)
             {
                 List<ObjectDraft> drafts = await written[hour];
+
+                // The hour's objects arrive as it ends: the clock first, so that the day being written is not calm.
+                if (clock is not null)
+                {
+                    clock.Now = QuestionBench.Start.AddHours(hour + 1);
+                }
+
                 foreach (ObjectDraft draft in drafts)
                 {
                     await using (draft)
@@ -91,8 +103,14 @@ internal static class DesignBuild
                 Console.WriteLine($"  hour {hour + 1} of {hours} appended and compacted, {(hour + 1) * perHour / seconds / 1e6:F2} M rows a second so far");
                 if ((hour + 1) % 12 == 0)
                 {
-                    await VacuumAsync(dataset);
+                    await VacuumAsync(dataset, writing: true);
                 }
+            }
+
+            // Every day calm by the end, consolidated as a sealed day is.
+            if (clock is not null)
+            {
+                clock.Now = QuestionBench.Start.AddHours(hours + 2);
             }
 
             await QuestionBench.CompactAsync(dataset);
@@ -160,10 +178,16 @@ internal static class DesignBuild
         }
     }
 
-    /// <summary>Deletes the objects no version needs any more: the clock a month ahead, past every version's window.</summary>
-    private static async Task VacuumAsync(VortexDataset dataset)
+    /// <summary>
+    /// Deletes the objects no version needs any more: the clock a month ahead, past every version's window, once nothing is
+    /// written beside; while the hours ahead are written, the window ahead less half an hour, so that the objects they wrote
+    /// in that half hour and did not append yet stay, young, as a writer's in flight. A month ahead, they were old: the
+    /// vacuum at the twelfth hour of the requests at 5 000 a second deleted them, and the next hour's job lost its inputs.
+    /// </summary>
+    private static async Task VacuumAsync(VortexDataset dataset, bool writing = false)
     {
-        VacuumResult vacuumed = await dataset.VacuumAsync(new VacuumOptions { TimeProvider = new Ahead(TimeSpan.FromDays(30)) });
+        TimeSpan ahead = writing ? DatasetVacuum.DefaultWindow - TimeSpan.FromMinutes(30) : TimeSpan.FromDays(30);
+        VacuumResult vacuumed = await dataset.VacuumAsync(new VacuumOptions { TimeProvider = new Ahead(ahead) });
         Console.WriteLine($"  vacuum: {vacuumed.Deleted.Length} objects deleted");
     }
 

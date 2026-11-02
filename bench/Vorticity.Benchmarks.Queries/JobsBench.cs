@@ -48,8 +48,7 @@ internal static class JobsBench
             await using VortexDataset dataset = await VortexDataset.CreateAsync(new FileObjectStore(Path.Combine(directory, "store")), GeneratedRequest.Schema, new DatasetOptions
             {
                 Session = session,
-                ClusteringKey = [nameof(GeneratedRequest.At)],
-                Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(days ? CalendarUnit.Day : CalendarUnit.Hour) },
+                Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(GeneratedRequest.At)).Truncate(days ? CalendarUnit.Day : CalendarUnit.Hour), SortKey = [LayoutValue.Column(nameof(GeneratedRequest.At))], Organization = LayoutOrganization.Leveled },
                 Identifiers = [nameof(GeneratedRequest.RequestId)],
                 Write = new VortexWriteOptions { Indexes = IndexPolicy.Auto.WithBudgetPerMille(budget), ScratchDirectory = scratch },
             });
@@ -142,18 +141,18 @@ internal static class JobsBench
                 CultureInfo.InvariantCulture,
                 $"{jobs} jobs in {seconds:F1} s, {busy / seconds:F1} cores busy of {Environment.ProcessorCount}, {peak / 1e9:F2} GB private at most in a job, a peak of {self.PeakWorkingSet64 / 1e9:F2} GB in memory"));
 
-            // What the jobs wrote: each object's slices.
+            // What the jobs wrote: each object's granules, and the rows of those of one value of the key's indexed prefix.
+            int granuleRows = new VortexWriteOptions().BlockRows;
             await foreach (PositionedObject held in dataset.Snapshot.WalkAsync(null, 0, long.MaxValue, null, default))
             {
-                await using ObjectLease lease = await dataset.RentAsync(held.Entry, default);
-                if (await SliceTable.ReadAsync(lease.File, default) is not { } table)
+                if (held.Entry.Contents is not { } contents)
                 {
                     continue;
                 }
 
                 Console.WriteLine(string.Create(
                     CultureInfo.InvariantCulture,
-                    $"  object of {held.Entry.Rows:N0} rows, {held.Entry.Bytes:N0} bytes: {table.Slices.Count} slices of {table.Slices.Min(s => s.Rows):N0} to {table.Slices.Max(s => s.Rows):N0} rows"));
+                    $"  object of {held.Entry.Rows:N0} rows, {held.Entry.Bytes:N0} bytes: {(held.Entry.Rows + granuleRows - 1) / granuleRows:N0} granules, {contents.PureGranuleRows:N0} rows in granules of one key"));
             }
         }
         finally

@@ -13,18 +13,17 @@ public sealed partial class ObjectContentsTests
 {
     /// <summary>
     /// Two sealed hours of calls in chunks of 16 rows, their chunk directories laid in pages of four chunks: the contents say
-    /// the pages, each column's page table the region they name; every slice reads the rows a whole open holds, its read
-    /// asking for its columns' page tables and the pages of its rows alone, never a directory whole; and a later reader of
-    /// the object asks for no table again, its pages read by their checksums.
+    /// the pages, each column's page table the region they name; every span of 160 rows reads the rows a whole open holds,
+    /// its read asking for its columns' page tables and the pages of its rows alone, never a directory whole; and a later
+    /// reader of the object asks for no table again, its pages read by their checksums.
     /// </summary>
     [Fact]
-    public async Task ASliceReadsThePagesOfItsRowsAlone()
+    public async Task ASpanReadsThePagesOfItsRowsAlone()
     {
         await using MemoryObjectStore store = new MemoryObjectStore();
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Call.Schema, new DatasetOptions
         {
-            ClusteringKey = [nameof(Call.At)],
-            Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour) }, ContentsObjectBytes = 0, SliceTargetRows = 500,
+            Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(Call.At)).Truncate(CalendarUnit.Hour), SortKey = [LayoutValue.Column(nameof(Call.At))], Organization = LayoutOrganization.Leveled }, ContentsObjectBytes = 0,
             Write = new VortexWriteOptions { Indexes = IndexPolicy.None.WithBudgetPerMille(1_000), BlockRows = 16, ChunkTargetBytes = 1, ChunkPageEntries = 4 },
             ChunkBytes = 1,
         }, Ct);
@@ -66,30 +65,31 @@ public sealed partial class ObjectContentsTests
         await using ObjectLease lease = await dataset.RentAsync(hour, Ct);
         List<Call> stored = await lease.File.Scan<Call>().ToRecordsAsync(Ct).ToListAsync(Ct);
         int pageBytes = paging.PageEntries * SliceChunks.EntryBytes;
-        for (int s = 0; s < contents.Slices.Slices.Count; s++)
+        const long Span = 160;
+        for (long first = 0; first < contents.Rows; first += Span)
         {
-            TimeSlice slice = contents.Slices.Slices[s];
+            long count = Math.Min(Span, contents.Rows - first);
             TestSegmentSource source = new(bytes) { Ranges = [] };
-            using (SliceReader reader = SliceReader.Open(source, null, contents)!)
-            using (RecordBatch batch = await reader.ReadSliceAsync(s, null, Ct))
+            using (SpanReader reader = SpanReader.Open(source, null, contents)!)
+            using (RecordBatch batch = await reader.ReadRowsAsync(first, count, null, Ct))
             {
                 Columns<Call> columns = batch.As<Call>();
                 DateTimeOffset[] at = new DateTimeOffset[batch.RowCount];
                 long[] durations = new long[batch.RowCount];
                 columns.Column<DateTimeOffset>(0).CopyTo(at);
                 columns.Column<long>(3).CopyTo(durations);
-                Assert.Equal(stored.GetRange((int)slice.FirstRow, (int)slice.Rows).Select(r => (r.At, r.Duration)), at.Zip(durations));
+                Assert.Equal(stored.GetRange((int)first, (int)count).Select(r => (r.At, r.Duration)), at.Zip(durations));
             }
 
-            // Of each column's directory, its page table, the first reader's alone, and the pages of the slice's rows, each whole.
-            (int from, int to) = paging.PagesOf(slice.FirstRow, slice.Rows);
+            // Of each column's directory, its page table, the first reader's alone, and the pages of the span's rows, each whole.
+            (int from, int to) = paging.PagesOf(first, count);
             for (int c = 0; c < contents.ChunkDirectories.Count; c++)
             {
                 IndexSegment table = contents.ChunkDirectories[c];
                 long start = (long)table.Offset;
                 long end = start + table.Length + ((long)paging.Count * SliceChunks.EntryBytes);
                 List<(long Offset, long Length)> read = [.. source.Ranges!.Where(r => r.Offset >= start && r.Offset < end)];
-                Assert.Equal(s == 0 ? 1 : 0, read.Count(r => r.Offset == start && r.Length == table.Length));
+                Assert.Equal(first == 0 ? 1 : 0, read.Count(r => r.Offset == start && r.Length == table.Length));
                 Assert.Equal(
                     Enumerable.Range(from, to - from + 1).Select(page => (start + table.Length + ((long)page * pageBytes), (long)paging.Page(page).Length)),
                     read.Where(r => r.Offset != start).OrderBy(r => r.Offset));

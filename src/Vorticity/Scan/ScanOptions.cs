@@ -43,10 +43,10 @@ public sealed record ScanOptions
 
     /// <summary>
     /// Whether an aggregation over a dataset may grow its filter's range on the first column of the dataset's
-    /// clustering key, of any type, so that the objects it cuts are answered whole by their synopses rather than
+    /// sort key, of any type, so that the objects it cuts are answered whole by their synopses rather than
     /// read as rows: each bound that falls inside such objects moves out to the furthest of their own bounds on
     /// the column, unless another such object would then hold values on both sides of it, where the bound stays.
-    /// Objects cut by a clustering value hold none in common. The answer is then the exact answer of the range applied, which
+    /// Objects cut by a partition value hold none in common. The answer is then the exact answer of the range applied, which
     /// <see cref="ScanMetrics.Window"/> and <see cref="ScanPlan.Window"/> give. False by default: the range asked,
     /// exactly.
     /// </summary>
