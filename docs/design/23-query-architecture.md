@@ -130,6 +130,15 @@ This is not precomputation; it is the order of the rows. Every question that fil
 about 60 times fewer bytes for them, and the engine folds a run as a weighted row
 ([section 6.1](#61-runs-codes-and-constants)).
 
+Two rules settle the rest of the key, from what the questions ask. A column that questions filter or group by, and that
+the entity does not settle, goes right after the entity: `Region` is the service's but for the probes some services
+receive from three other regions, and behind the host every granule of a probed service mixes regions, which a question
+by region then reads as rows: distinct hosts per region read 194 MB of four hours of requests *(measured, 2026-11-02)*,
+where the granules' statistics would answer with ~0.9 MB once the region follows the service *(computed)*. And the fine grain is the shortest window asked: under the hour, the
+last fifteen minutes of a service share every granule the window cuts with the rest of their hour; a bucket of fifteen
+minutes gives them granules of their own, and a question by the hour still takes its groups from the buckets' runs, each
+bucket falling in one hour.
+
 ### 4.4 Sorted objects, from the first write
 
 Every object a dataset writes holds one partition and is sorted by the sort key, appended objects included. An append

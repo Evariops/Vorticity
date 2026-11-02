@@ -9,11 +9,17 @@ namespace Vorticity.Benchmarks.Queries;
 /// sorted by its service first, tiered, and consolidated once a day is calm by the data's own clock
 /// (<see cref="DataClock"/>).
 /// </summary>
+/// <remarks>
+/// A column a filter keeps and the entity does not settle comes right after the entity: the region of a request, which is
+/// its service's but for the probes of a service in ten, sent from three regions. The grain of time is the shortest window
+/// the questions ask, a quarter of an hour for the spans. Stores built before 2026-11-02 hold the earlier keys, the region
+/// out of the requests' and the hour in the spans'.
+/// </remarks>
 internal static class IdiomLayouts
 {
     /// <summary>
-    /// The requests, the design's reference table: the service, its version and host, the hour, the status and the
-    /// endpoint, then the instant; the first four indexed.
+    /// The requests, the design's reference table: the service, the region, the service's version and host, the hour, the
+    /// status and the endpoint, then the instant; the first five indexed.
     /// </summary>
     internal static DatasetLayout Requests { get; } = new DatasetLayout
     {
@@ -21,6 +27,7 @@ internal static class IdiomLayouts
         SortKey =
         [
             LayoutValue.Column(nameof(GeneratedRequest.Service)),
+            LayoutValue.Column(nameof(GeneratedRequest.Region)),
             LayoutValue.Column(nameof(GeneratedRequest.Version)),
             LayoutValue.Column(nameof(GeneratedRequest.Host)),
             LayoutValue.Column(nameof(GeneratedRequest.At)).Truncate(CalendarUnit.Hour),
@@ -28,17 +35,17 @@ internal static class IdiomLayouts
             LayoutValue.Column(nameof(GeneratedRequest.Endpoint)),
             LayoutValue.Column(nameof(GeneratedRequest.At)),
         ],
-        IndexedPrefix = 4,
+        IndexedPrefix = 5,
     };
 
-    /// <summary>The client's spans: the service, the hour, the span's status, its HTTP status and route, then the instant; the first two indexed.</summary>
+    /// <summary>The client's spans: the service, the quarter of an hour, the span's status, its HTTP status and route, then the instant; the first two indexed.</summary>
     internal static DatasetLayout Spans { get; } = new DatasetLayout
     {
         Partition = LayoutValue.Column(nameof(GeneratedSpanV2.At)).Truncate(CalendarUnit.Day),
         SortKey =
         [
             LayoutValue.Column(nameof(GeneratedSpanV2.Service)),
-            LayoutValue.Column(nameof(GeneratedSpanV2.At)).Truncate(CalendarUnit.Hour),
+            LayoutValue.Column(nameof(GeneratedSpanV2.At)).Bucket(TimeSpan.FromMinutes(15)),
             LayoutValue.Column(nameof(GeneratedSpanV2.Status)),
             LayoutValue.Column(nameof(GeneratedSpanV2.HttpStatus)),
             LayoutValue.Column(nameof(GeneratedSpanV2.Route)),

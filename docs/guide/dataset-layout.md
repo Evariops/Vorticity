@@ -85,6 +85,14 @@ Within an hour of a host the rows run by status, then by route: those columns be
 filters or groups them reads tens of times fewer bytes for them, the engine folding a run as one weighted row. This is
 not precomputation; it is the order of the rows.
 
+Two choices decide what a question's granules hold besides its rows. A column that questions filter or group by, and
+that the entity does not settle, goes right after the entity: a request's region is its service's, but for the probes a
+few services receive from other regions; behind the host, every granule of a probed service would mix regions, and a
+question by region would read their rows. And the grain of time is the shortest window the questions ask: with the hour
+in the key, the last fifteen minutes of a service lie mixed with the rest of their hour in every granule the window
+cuts, where `LayoutValue.Column("At").Bucket(TimeSpan.FromMinutes(15))` keeps them in granules of their own. A
+question by the hour still takes its groups from the quarters' runs, each quarter falling in one hour.
+
 ## How the objects are organized
 
 Appends land as small sorted objects. Within each partition, objects of one size class merge: when a partition holds
