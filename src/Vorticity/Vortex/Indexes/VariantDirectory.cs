@@ -757,43 +757,27 @@ internal sealed class VariantDirectory
     /// entries those of <paramref name="wanted"/>'s paths alone (<see cref="From(ReadOnlySpan{byte}, IReadOnlyList{byte[][]})"/>),
     /// or every entry for null; null when the file carries none, or one that does not decode.
     /// </summary>
+    /// <param name="file">The file.</param>
+    /// <param name="field">The variant column's top-level field.</param>
+    /// <param name="wanted">The paths whose entries are kept; every path for null.</param>
+    /// <param name="cancellationToken">Cancels the read.</param>
+    /// <param name="question">What the question asking has read already, which keeps this directory for its other scans; null for none.</param>
     internal static async ValueTask<(VariantDirectory? Directory, int Segments, long Bytes)> ReadAsync(
-        VortexFile file, int field, IReadOnlyList<byte[][]>? wanted, CancellationToken cancellationToken)
+        VortexFile file, int field, IReadOnlyList<byte[][]>? wanted, CancellationToken cancellationToken, QuestionReads? question = null)
     {
         ArgumentNullException.ThrowIfNull(file);
-        string paths = KeyOf(wanted);
-        if (file.TryGetVariantDirectory(field, paths, out VariantDirectory? kept))
+        string? paths = question is null ? null : KeyOf(wanted);
+        if (question is not null && question.TryGetDirectory(file, field, paths!, out VariantDirectory? kept))
         {
             return (kept, 0, 0);
         }
 
-        IndexDirectory? directory = await file.ReadIndexDirectoryAsync(cancellationToken).ConfigureAwait(false);
-        if (directory is null)
-        {
-            return (null, 0, 0);
-        }
-
-        foreach (IndexEntry entry in directory.Entries)
-        {
-            if (entry.Kind != IndexKinds.VariantDirectory || entry.ColumnPath is not [uint column] || column != (uint)field
-                || entry.Runs is not [IndexRun { Payload: [IndexSegment region] }])
-            {
-                continue;
-            }
-
-            using Vorticity.IO.SegmentRequestSet requests = new Vorticity.IO.SegmentRequestSet(1);
-            int slot = requests.Add(new Vorticity.Serialization.Schemas.SegmentSpec(region.Offset, region.Length, region.AlignmentExponent, 0, 0));
-            await file.Segments.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
-            ReadOnlySpan<byte> bytes = requests.GetBuffer(slot).Span;
-            VariantDirectory? read = region.Holds(bytes) ? From(bytes, wanted) : null;
-            file.KeepVariantDirectory(field, paths, read);
-            return (read, 1, region.Length);
-        }
-
-        return (null, 0, 0);
+        (VariantDirectory? Directory, int Segments, long Bytes) read = await ReadFromAsync(file, field, wanted, cancellationToken).ConfigureAwait(false);
+        question?.KeepDirectory(file, field, paths!, read.Directory);
+        return read;
     }
 
-    /// <summary>The paths <paramref name="wanted"/> names, as the key a file keeps their directory under: each key's text, a unit apart, each path a record apart; every path for null.</summary>
+    /// <summary>The paths <paramref name="wanted"/> names, as the key a question keeps their directory under: each key's text, a unit apart, each path a record apart; every path for null.</summary>
     private static string KeyOf(IReadOnlyList<byte[][]>? wanted)
     {
         if (wanted is null)
@@ -813,6 +797,34 @@ internal sealed class VariantDirectory
         }
 
         return key.ToString();
+    }
+
+    /// <summary>The directory as <see cref="ReadAsync(VortexFile, int, IReadOnlyList{byte[][]}?, CancellationToken, QuestionReads?)"/> says, read from the file.</summary>
+    private static async ValueTask<(VariantDirectory? Directory, int Segments, long Bytes)> ReadFromAsync(
+        VortexFile file, int field, IReadOnlyList<byte[][]>? wanted, CancellationToken cancellationToken)
+    {
+        IndexDirectory? directory = await file.ReadIndexDirectoryAsync(cancellationToken).ConfigureAwait(false);
+        if (directory is null)
+        {
+            return (null, 0, 0);
+        }
+
+        foreach (IndexEntry entry in directory.Entries)
+        {
+            if (entry.Kind != IndexKinds.VariantDirectory || entry.ColumnPath is not [uint column] || column != (uint)field
+                || entry.Runs is not [IndexRun { Payload: [IndexSegment region] }])
+            {
+                continue;
+            }
+
+            using Vorticity.IO.SegmentRequestSet requests = new Vorticity.IO.SegmentRequestSet(1);
+            int slot = requests.Add(new Vorticity.Serialization.Schemas.SegmentSpec(region.Offset, region.Length, region.AlignmentExponent, 0, 0));
+            await file.Segments.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
+            ReadOnlySpan<byte> bytes = requests.GetBuffer(slot).Span;
+            return (region.Holds(bytes) ? From(bytes, wanted) : null, 1, region.Length);
+        }
+
+        return (null, 0, 0);
     }
 
     /// <summary>The decimal digits of <paramref name="value"/>, not negative.</summary>

@@ -1599,6 +1599,12 @@ internal sealed partial class DatasetScanBuilder
             scan.WithVariantKeys(_variantKeys).WithZoneKeys(_zoneKeys);
         }
 
+        // The question's reads, for a filter a variant's directories may refute: what its scans read of them, read once.
+        if (Compute.VariantFilters.AsksPaths(filter))
+        {
+            scan.WithQuestionReads(Reads);
+        }
+
         if (projection is { } mask)
         {
             scan.ProjectMask(in mask);

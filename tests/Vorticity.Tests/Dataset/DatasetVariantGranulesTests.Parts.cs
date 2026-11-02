@@ -40,11 +40,12 @@ public sealed partial class DatasetVariantGranulesTests
     }
 
     /// <summary>
-    /// An object's variant directory asked again for the same paths: the one its file kept, nothing read; asked for other
-    /// paths, read again and kept apart, each answering for its own paths.
+    /// An object's variant directory asked again by the same question for the same paths: the one the question kept, nothing
+    /// read; asked for other paths, read and kept apart; asked by another question, read again, nothing kept past the question
+    /// that read it.
     /// </summary>
     [Fact]
-    public async Task AFileKeepsTheVariantDirectoryAQuestionReadForItsPaths()
+    public async Task AQuestionKeepsTheVariantDirectoriesItReadForItsOtherScans()
     {
         await using MemoryObjectStore memory = new MemoryObjectStore();
         await using CountingObjectStore store = new CountingObjectStore(memory);
@@ -57,7 +58,8 @@ public sealed partial class DatasetVariantGranulesTests
         await foreach (PositionedObject held in dataset.ScanBuilder().ObjectsAsync(Ct))
         {
             await using ObjectLease lease = await dataset.RentAsync(held.Entry, Ct);
-            (VariantDirectory? first, int read, _) = await VariantDirectory.ReadAsync(lease.File, attributes, code, Ct);
+            QuestionReads question = new QuestionReads();
+            (VariantDirectory? first, int read, _) = await VariantDirectory.ReadAsync(lease.File, attributes, code, Ct, question);
             if (first is null)
             {
                 continue;
@@ -65,13 +67,16 @@ public sealed partial class DatasetVariantGranulesTests
 
             objects++;
             Assert.Equal(1, read);
-            (VariantDirectory? again, int readAgain, long bytesAgain) = await VariantDirectory.ReadAsync(lease.File, attributes, [[.. code[0]]], Ct);
+            (VariantDirectory? again, int readAgain, long bytesAgain) = await VariantDirectory.ReadAsync(lease.File, attributes, [[.. code[0]]], Ct, question);
             Assert.Same(first, again);
             Assert.Equal((0, 0L), (readAgain, bytesAgain));
-            (VariantDirectory? other, int readOther, _) = await VariantDirectory.ReadAsync(lease.File, attributes, route, Ct);
+            (VariantDirectory? other, int readOther, _) = await VariantDirectory.ReadAsync(lease.File, attributes, route, Ct, question);
             Assert.NotNull(other);
             Assert.NotSame(first, other);
             Assert.Equal(1, readOther);
+            (VariantDirectory? next, int readNext, _) = await VariantDirectory.ReadAsync(lease.File, attributes, code, Ct, new QuestionReads());
+            Assert.NotSame(first, next);
+            Assert.Equal(1, readNext);
         }
 
         Assert.True(objects > 0);

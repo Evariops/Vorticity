@@ -125,6 +125,18 @@ internal sealed class ScanBuilder
     private IReadOnlyDictionary<string, string[]>? _variantKeys;
 
     /// <summary>
+    /// Says what the question this scan belongs to read already, which its pruning reads the variant directories through,
+    /// and keeps what it reads for the question's other scans (<see cref="Indexes.QuestionReads"/>).
+    /// </summary>
+    internal ScanBuilder WithQuestionReads(Indexes.QuestionReads? question)
+    {
+        _question = question;
+        return this;
+    }
+
+    private Indexes.QuestionReads? _question;
+
+    /// <summary>
     /// Says that the top-level columns of <paramref name="keys"/>, by name, are read only through those functions of them:
     /// a split whose zones send each function to one value takes the zones' values in place of the column, which it then
     /// does not read (<see cref="ZoneKeyReads"/>), for a consumer that keeps the encodings and a scan in the file's order.
@@ -752,7 +764,7 @@ internal sealed class ScanBuilder
             return live is not null ? new LiveBatches(batches, live) : batches;
         }
 
-        return new FilteredBatches(batches, _filter, _prune, _indexes, rows) { Refined = _pruned, Live = _live, Granted = _granted };
+        return new FilteredBatches(batches, _filter, _prune, _indexes, rows) { Refined = _pruned, Live = _live, Granted = _granted, Question = _question };
     }
 
     /// <summary>The blocks both <paramref name="first"/> and <paramref name="second"/> keep, a mask of its own.</summary>

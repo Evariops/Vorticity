@@ -213,10 +213,7 @@ public sealed class PathAllocationTests
         // the handle through once they wait on one another on Windows, where a handle runs its
         // reads one at a time: 16 bytes an open, on every axis. The twin itself, 72 bytes, only a
         // scan whose reads waited on 2 MiB opens.
-        //
-        // A file keeps the variant directories its questions read, by column and paths, made at the first: one reference,
-        // 8 bytes an open, on every axis that opens (2026-11-02).
-        ("open, footer only", File, 3_960, FooterOnly),
+        ("open, footer only", File, 3_952, FooterOnly),
         // `VortexFile` holds one reference to the lazily parsed `LayoutTree` that every scan of
         // an open file shares instead of re-deriving: eight bytes once per OPEN, against a
         // layout-tree parse once per `ExecuteAsync`. This axis opens the file and reads one batch,
@@ -324,6 +321,10 @@ public sealed class PathAllocationTests
         //
         // A scan can take a column its consumer reads through functions alone from its zones: the builder and the
         // enumerable hold which ones, a reference each, 16 bytes on every axis that scans (2026-10-31).
+        //
+        // A scan says what the question it belongs to read already, which its pruning reads a variant's directories through
+        // and keeps them in for the question's other scans: one reference, 8 bytes on every axis that scans, and 16 more for
+        // the filtered batches and their enumerator on the axes a filter reads through them (2026-11-02).
         ("open, first batch", File, 49_152, FirstBatch),
         // A scan binds each batch into the object its previous batch was rather than allocating
         // one: 120 bytes less a batch after the first, on every axis below that reads more than
@@ -337,7 +338,7 @@ public sealed class PathAllocationTests
         // A take or a filter goes through the filtered delivery, whose enumerable and enumerator hold
         // one more field each: 16 bytes a scan.
         // A take reads its rows by their granules: 96 bytes besides the scan's 40 (2026-10-27).
-        ("take 64 rows from 64 splits", File, 50_496, ScatteredTake),
+        ("take 64 rows from 64 splits", File, 50_512, ScatteredTake),
         // The filter's field references hold one more field each, and the zone column the pruning
         // pass reads one more: 8 bytes a reference and 8 for the column, besides the arena of the
         // context that reads the zone map.
@@ -384,7 +385,7 @@ public sealed class PathAllocationTests
         //
         // The pushed predicate's plan notes whether an encoding declined it, which the scans of its filter share: 8 bytes on
         // both filtered axes (2026-11-02).
-        ("selective filter, pruning on", File, 35_136, PrunedFilter),
+        ("selective filter, pruning on", File, 35_152, PrunedFilter),
 
         // THE SAME FILTER WITH PRUNING OFF, because it is a different path and not a slower one:
         // pruning on reads the zone map and skips whole splits, pruning off decodes every split and
@@ -400,7 +401,7 @@ public sealed class PathAllocationTests
         // undone costs more than the whole gap that remains. The lane's context holds its zstd
         // decoder's field, 8 bytes, as above.
         // The plan's note of a decline, 8 bytes, as above (2026-11-02).
-        ("selective filter, pruning off", File, 27_040, UnprunedFilter),
+        ("selective filter, pruning off", File, 27_056, UnprunedFilter),
 
         // One scan per late component. They are single-column files of 4 096 rows, so the figure is
         // dominated by the decoder rather than by the open, which is the point of putting them here

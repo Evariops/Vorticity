@@ -350,6 +350,14 @@ internal sealed partial class DatasetScanBuilder
     private DatasetScanSource? _question;
 
     /// <summary>
+    /// What the question's scans read of its objects' indexes, kept for its other scans and dropped with it: the question's,
+    /// or, for a scan asked of no question, its own, which the parts it cuts share.
+    /// </summary>
+    private Indexes.QuestionReads Reads => _question?.Reads ?? LazyInitializer.EnsureInitialized(ref _reads);
+
+    private Indexes.QuestionReads? _reads;
+
+    /// <summary>
     /// The lookup of the values <paramref name="filter"/> seeks of <paramref name="columns"/> over the partitions' indexes:
     /// the question's, shared by its lanes, or the scan's own.
     /// </summary>
@@ -722,6 +730,7 @@ internal sealed partial class DatasetScanBuilder
             _settles = _settles,
             _geometries = LazyInitializer.EnsureInitialized(ref _geometries),
             _question = _question,
+            _reads = _question is null ? LazyInitializer.EnsureInitialized(ref _reads) : null,
         };
 
     /// <summary>

@@ -86,10 +86,11 @@ internal static class ZonePruningPlan
     /// it absent from (<see cref="ZonePruner.NoteAbsent"/>), which a scan of rows would read for
     /// nothing.
     /// </param>
+    /// <param name="question">What the question the scan belongs to read already, its variant directories kept for its other scans; null for none.</param>
     internal static async ValueTask<PruningPlan> PlanAsync(
         VortexFile file, LayoutTree tree, VortexExpr filter, CancellationToken cancellationToken,
         List<PruningStep>? steps = null, Scanning.ScanCounters? metrics = null, bool indexes = true,
-        BlockMask? scope = null, bool proofs = false)
+        BlockMask? scope = null, bool proofs = false, Indexes.QuestionReads? question = null)
     {
         long blockRows = Scanning.SplitPlan.NaturalBatchRows(tree);
 
@@ -118,7 +119,7 @@ internal static class ZonePruningPlan
         long pathBytes = 0;
         if (indexes && blockRows > 0 && VariantColumns(filter) is { } variants)
         {
-            (bool refuted, pathRanges, pathSegments, pathBytes, pathsConsulted) = await RefutedByPathsAsync(file, filter, variants, cancellationToken).ConfigureAwait(false);
+            (bool refuted, pathRanges, pathSegments, pathBytes, pathsConsulted) = await RefutedByPathsAsync(file, filter, variants, cancellationToken, question).ConfigureAwait(false);
             Scanning.ScanCounters.Note(metrics, pathSegments, pathBytes);
             if (refuted)
             {
@@ -165,7 +166,7 @@ internal static class ZonePruningPlan
             steps?.Add(new PruningStep("zone map", before - Counted(live, scope), segments, bytes));
         }
 
-        // Whether a directory answered, not whether one was read: a file keeps the directories its questions read (2026-11-02).
+        // Whether a directory answered, not whether one was read: a question keeps the directories its scans read (2026-11-02).
         if (pathsConsulted)
         {
             before = Counted(live, scope);
@@ -355,7 +356,7 @@ internal static class ZonePruningPlan
     /// of the groups they prove hold none, or null; and the segments and bytes read for them.
     /// </summary>
     private static async ValueTask<(bool Refuted, List<RowRange>? Ranges, int Segments, long Bytes, bool Consulted)> RefutedByPathsAsync(
-        VortexFile file, VortexExpr filter, List<string> columns, CancellationToken cancellationToken)
+        VortexFile file, VortexExpr filter, List<string> columns, CancellationToken cancellationToken, Indexes.QuestionReads? question = null)
     {
         Dictionary<string, Indexes.VariantDirectory>? directories = null;
         int segments = 0;
@@ -370,7 +371,7 @@ internal static class ZonePruningPlan
 
             // The directory holds the entries of the filter's paths alone, all its predicates ask of it.
             (Indexes.VariantDirectory? directory, int read, long readBytes) =
-                await Indexes.VariantDirectory.ReadAsync(file, field, PathsOf(filter, column), cancellationToken).ConfigureAwait(false);
+                await Indexes.VariantDirectory.ReadAsync(file, field, PathsOf(filter, column), cancellationToken, question).ConfigureAwait(false);
             segments += read;
             bytes += readBytes;
             if (directory is not null)

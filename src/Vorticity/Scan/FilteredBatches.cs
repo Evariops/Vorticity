@@ -37,6 +37,9 @@ internal sealed class FilteredBatches : IAsyncEnumerable<RecordBatch>
         _rows = rows ?? new RowRange(0, inner.File.RowCount);
     }
 
+    /// <summary>What the question this scan belongs to read already, which its pruning reads the variant directories through; null for none.</summary>
+    internal Indexes.QuestionReads? Question { get; init; }
+
     /// <summary>Whether <see cref="Live"/> is the filter's mask, refined already by the caller, so that no structure is read again.</summary>
     internal bool Refined { get; init; }
 
@@ -98,6 +101,7 @@ internal sealed class FilteredBatches : IAsyncEnumerable<RecordBatch>
         private readonly bool _refined;
         private readonly BlockMask? _live;
         private readonly BlockMask? _granted;
+        private readonly Indexes.QuestionReads? _question;
         private readonly CancellationToken _token;
         private IAsyncEnumerator<RecordBatch>? _inner;
 
@@ -111,6 +115,7 @@ internal sealed class FilteredBatches : IAsyncEnumerable<RecordBatch>
             _refined = owner.Refined;
             _live = owner.Live;
             _granted = owner.Granted;
+            _question = owner.Question;
             _token = token;
         }
 
@@ -168,7 +173,7 @@ internal sealed class FilteredBatches : IAsyncEnumerable<RecordBatch>
                     ? new ZonePruningPlan.PruningPlan(_live, null)
                     : _prune && _filter is not null
                         ? await ZonePruningPlan
-                            .PlanAsync(_source.File, _source.Tree, _filter, _token, steps: null, _source.Metrics, _indexes, scope)
+                            .PlanAsync(_source.File, _source.Tree, _filter, _token, steps: null, _source.Metrics, _indexes, scope, question: _question)
                             .ConfigureAwait(false)
                         : default;
 

@@ -50,6 +50,11 @@ internal sealed partial class DatasetScanSource
     /// <summary>The lookup of the partitions' indexes made for <see cref="Filter"/>; null where none answers it.</summary>
     private sealed record Locates(VortexExpr Filter, PartitionLocates? Lookup);
 
+    /// <summary>What the question's scans read of its objects' indexes, for its other scans (<see cref="Indexes.QuestionReads"/>); made at the first.</summary>
+    internal Indexes.QuestionReads Reads => LazyInitializer.EnsureInitialized(ref _reads);
+
+    private Indexes.QuestionReads? _reads;
+
     internal override VortexSchema Schema => _version.Schema.Columns;
 
     internal override VortexSession Session => _dataset.Session;
