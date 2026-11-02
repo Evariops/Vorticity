@@ -72,7 +72,11 @@ internal sealed class SessionReader : ISegmentReader, Indexes.IIndexRegionReader
             _gate.Release();
         }
 
-        _cache?.Add(_key, (long)spec.Offset, owner, owner.Buffer);
+        if (_cache is not null && !SegmentCache.Passing)
+        {
+            _cache.Add(_key, (long)spec.Offset, owner, owner.Buffer);
+        }
+
         return owner;
     }
 
@@ -143,7 +147,7 @@ internal sealed class SessionReader : ISegmentReader, Indexes.IIndexRegionReader
                 _gate.Release();
             }
 
-            if (_cache is not null)
+            if (_cache is not null && !SegmentCache.Passing)
             {
                 for (int slot = 0; slot < requests.Count; slot++)
                 {

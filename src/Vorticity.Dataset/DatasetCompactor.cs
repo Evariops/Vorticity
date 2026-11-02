@@ -102,7 +102,9 @@ internal static partial class DatasetCompactor
             throw new ArgumentException("A compaction reads at least one object.", nameof(job));
         }
 
-        // One activity over the job, its commit's as a child; a job counted however it ends.
+        // One activity over the job, its commit's as a child; a job counted however it ends. Its reads keep nothing in the
+        // session's segment cache: each object once, which questions would not find there again.
+        using SegmentCache.PassingScope passing = SegmentCache.Pass();
         Activity? activity = DatasetTelemetry.StartCompaction(job, dataset.Location);
         CompactionResult result;
         try

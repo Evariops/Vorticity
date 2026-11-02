@@ -40,6 +40,46 @@ public sealed class DatasetCompactionTests
     private const int Rows = Objects * PerObject;
 
     [Fact]
+    public async Task ACompactionKeepsNothingItReadsInTheSegmentCacheAQuestionKeepsWhatItReads()
+    {
+        // A merge reads each of its inputs once: kept, they would push out of the cache what questions read again. A store
+        // on files, whose reads the session wraps, where a store in memory hands out its bytes; objects past the 64 KiB an
+        // open reads from the end, whose segments the open serves and no cache keeps.
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Decoders.EnsureRegistered();
+        DTypeArena types = new DTypeArena();
+        DType schema = Schema(types);
+        SegmentCache cache = new SegmentCache(64L << 20);
+        await using VortexSession session = VortexSession.Create(o => o.SegmentCache = cache);
+        string root = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "vorticity-job-cache-" + Guid.NewGuid().ToString("N"));
+        const int Appended = 40_000;
+        try
+        {
+            await using FileObjectStore store = new FileObjectStore(root);
+            await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered() with { Session = session }, ct);
+            Random random = new Random(41);
+            for (int append = 0; append < 4; append++)
+            {
+                await dataset.AppendAsync(Of(types, schema, [.. Enumerable.Range(0, Appended).Select(_ => random.NextInt64(1L << 52))]), ct);
+            }
+
+            long before = cache.HeldBytes;
+            Assert.IsType<CompactionResult>(await dataset.CompactAsync(Options(target: 1 << 20), ct));
+            Assert.Equal(before, cache.HeldBytes);
+
+            Assert.Equal(4 * Appended, (await RowsAsync(dataset.ScanBuilder())).Count);
+            Assert.True(cache.HeldBytes > before, $"a question kept {cache.HeldBytes - before} bytes");
+        }
+        finally
+        {
+            if (System.IO.Directory.Exists(root))
+            {
+                System.IO.Directory.Delete(root, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
     public async Task ACompactionOfLevelZeroProducesTheObjectASortedInputWouldHave()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;

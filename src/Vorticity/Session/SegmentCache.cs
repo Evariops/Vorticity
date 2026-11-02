@@ -17,6 +17,9 @@ namespace Vorticity;
 /// </remarks>
 public sealed class SegmentCache
 {
+    // Whether the reads of the flow under way keep nothing new: a dataset's job's (Pass).
+    private static readonly AsyncLocal<bool> s_passing = new AsyncLocal<bool>();
+
     private readonly Lock _gate = new Lock();
     private readonly Dictionary<Key, Entry> _entries = [];
 
@@ -51,6 +54,9 @@ public sealed class SegmentCache
     /// <summary>The budget in bytes.</summary>
     public long CapacityBytes { get; }
 
+    /// <summary>Whether the reads of the flow under way keep nothing new in a cache (<see cref="Pass"/>).</summary>
+    internal static bool Passing => s_passing.Value;
+
     /// <summary>The bytes held now.</summary>
     public long HeldBytes => Interlocked.Read(ref _size);
 
@@ -59,6 +65,19 @@ public sealed class SegmentCache
 
     /// <summary>Segments looked up and not found since it was created.</summary>
     public long Misses => Interlocked.Read(ref _misses);
+
+    /// <summary>
+    /// Has the reads of the flow under way, and of the tasks it starts, keep nothing new in a cache until the scope ends,
+    /// what a cache holds still serving them: a merge or a consolidation reads each of its objects once, and what it kept
+    /// would push out what questions read again. A consolidation of four hours of log records read 1.8 GB through a cache
+    /// of 1 GiB, which it held full of segments no question would ask.
+    /// </summary>
+    internal static PassingScope Pass()
+    {
+        bool was = s_passing.Value;
+        s_passing.Value = true;
+        return new PassingScope(was);
+    }
 
     /// <summary>Drops every segment.</summary>
     public void Clear()
@@ -268,6 +287,12 @@ public sealed class SegmentCache
     }
 
     private readonly record struct Key(object Source, long Offset, int Length);
+
+    /// <summary>The scope of <see cref="Pass"/>, which gives the flow back what it kept before.</summary>
+    internal readonly struct PassingScope(bool was) : IDisposable
+    {
+        public void Dispose() => s_passing.Value = was;
+    }
 
     // Made at its first use, so that a process whose sessions each give their own makes none.
     private static class Process
