@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Vorticity.Aggregating;
@@ -197,7 +198,9 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
         if (_rowIds is { } held && held.Length < count)
         {
             Give(held);
-            _rowIds = ArrayShelf.Retained.Take<int>(Math.Max(count, held.Length * 2), zeroed: false);
+            // At a power of two, as the shelf lends by length: a batch's count asked as it came missed the shelf, a tenth of
+            // what a consolidation of log records allocated.
+            _rowIds = ArrayShelf.Retained.Take<int>((int)BitOperations.RoundUpToPowerOf2((uint)Math.Max(count, held.Length * 2)), zeroed: false);
         }
 
         // A batch's first rows start its hashes; its next pieces keep those before them.
@@ -206,7 +209,7 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
             _rowHashesWhole = start == 0 || _rowHashesWhole;
             if (hashes.Length < start + count)
             {
-                ulong[] grown = ArrayShelf.Retained.Take<ulong>(Math.Max(start + count, hashes.Length * 2), zeroed: true);
+                ulong[] grown = ArrayShelf.Retained.Take<ulong>((int)BitOperations.RoundUpToPowerOf2((uint)Math.Max(start + count, hashes.Length * 2)), zeroed: true);
                 hashes.AsSpan(0, Math.Min(start, hashes.Length)).CopyTo(grown);
                 Give(hashes);
                 _rowHashes = grown;
