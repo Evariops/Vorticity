@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Threading;
 using Vorticity.Compute;
 using Vorticity.Expressions;
 using Vorticity.Indexes;
@@ -211,7 +212,7 @@ internal sealed class KeyPruning
     /// row-encoded without the uid, may hold a row the filter keeps: its key range judged as one granule.
     /// </summary>
     internal bool MayHold(ReadOnlySpan<byte> first, ReadOnlySpan<byte> last) =>
-        last.IsEmpty || Judge(first, last, 0, default);
+        last.IsEmpty || Judge(first, last, 0, default, []);
 
     /// <summary>
     /// Whether every row of an object whose rows lie from tree key <paramref name="first"/> to tree key <paramref name="last"/>
@@ -227,7 +228,7 @@ internal sealed class KeyPruning
             return false;
         }
 
-        List<ColumnSummary> box = Box(first, last, 0, default, nonNull: true);
+        List<ColumnSummary> box = Box(first, last, 0, default, nonNull: true, []);
         return box.Count > 0 && keyed.MustMatch(Merged(box), 1);
     }
 
@@ -236,22 +237,58 @@ internal sealed class KeyPruning
     /// every page in hand. <paramref name="partition"/> is the object's partition, row-encoded as it leads its tree key, which
     /// the index leaves out; empty for a dataset without one.
     /// </summary>
+    /// <remarks>
+    /// Found once an object a question: a question at 32 lanes asks them of an object for each of its parts, and searched the
+    /// whole index each time, a list of summaries made at each node, 23 MB a question of the services under 5xx over the last
+    /// quarter of an hour (2026-11-02).
+    /// </remarks>
     internal List<(int First, int End)> Granules(GranuleKeys keys, ReadOnlySpan<byte> partition)
     {
+        lock (_keptLock)
+        {
+            if (_kept.TryGetValue(keys, out (byte[] Partition, (int First, int End)[] Ranges) found) && partition.SequenceEqual(found.Partition))
+            {
+                return [.. found.Ranges];
+            }
+        }
+
+        List<(int First, int End)> kept = Search(keys, partition);
+        lock (_keptLock)
+        {
+            _kept[keys] = (partition.ToArray(), [.. kept]);
+        }
+
+        return kept;
+    }
+
+    // The granules each object's index keeps, by the index, with the partition they were searched under.
+    private readonly Dictionary<GranuleKeys, (byte[] Partition, (int First, int End)[] Ranges)> _kept = new(ReferenceEqualityComparer.Instance);
+    private readonly Lock _keptLock = new Lock();
+
+    /// <summary>The searches of an object's index this pruning made, which an object asked again does not repeat.</summary>
+    internal int Searches => _searches;
+
+    private int _searches;
+
+    private List<(int First, int End)> Search(GranuleKeys keys, ReadOnlySpan<byte> partition)
+    {
+        Interlocked.Increment(ref _searches);
         List<(int First, int End)> kept = [];
         if (keys.Granules == 0)
         {
             return kept;
         }
 
-        // The pages first: a page runs from its first key to the next page's, the last one to the object's last key.
+        // The pages first: a page runs from its first key to the next page's, the last one to the object's last key. One list
+        // of summaries serves every node of the search.
+        List<ColumnSummary> box = new List<ColumnSummary>(_tree.Count + 1);
         List<(int First, int End)> pages = [];
-        Search(keys, partition, 0, keys.Pages, granules: false, pages);
+        Search(keys, partition, 0, keys.Pages, granules: false, pages, box);
         foreach ((int firstPage, int endPage) in pages)
         {
             int from = firstPage * keys.PageEntries;
             int to = (int)Math.Min((long)endPage * keys.PageEntries, keys.Granules);
-            Search(keys, partition, from, to, granules: true, kept);
+            Search(keys, partition, from, to, granules: true, kept, box);
         }
 
         // Neighbouring ranges as one; none when the object's box meets the filter's and no granule's does.
@@ -281,14 +318,14 @@ internal sealed class KeyPruning
     /// The exclusion search over entries <paramref name="from"/> to <paramref name="to"/>, pages or granules: a range the
     /// box of its bounds refutes is dropped, one of a single entry kept, any other cut in <see cref="Fanout"/>.
     /// </summary>
-    private void Search(GranuleKeys keys, ReadOnlySpan<byte> partition, int from, int to, bool granules, List<(int First, int End)> kept)
+    private void Search(GranuleKeys keys, ReadOnlySpan<byte> partition, int from, int to, bool granules, List<(int First, int End)> kept, List<ColumnSummary> box)
     {
         if (from >= to)
         {
             return;
         }
 
-        if (!Judge(EntryKey(keys, from, granules), NextKey(keys, to, granules), _skip, partition))
+        if (!Judge(EntryKey(keys, from, granules), NextKey(keys, to, granules), _skip, partition, box))
         {
             return;
         }
@@ -302,7 +339,7 @@ internal sealed class KeyPruning
         int step = Math.Max(1, (to - from + Fanout - 1) / Fanout);
         for (int at = from; at < to; at += step)
         {
-            Search(keys, partition, at, Math.Min(at + step, to), granules, kept);
+            Search(keys, partition, at, Math.Min(at + step, to), granules, kept, box);
         }
     }
 
@@ -321,20 +358,20 @@ internal sealed class KeyPruning
     /// <paramref name="from"/> on, both included, may hold a row the filter keeps; <paramref name="partition"/> the value of
     /// the positions before, which every row holds.
     /// </summary>
-    private bool Judge(ReadOnlySpan<byte> low, ReadOnlySpan<byte> high, int from, ReadOnlySpan<byte> partition)
+    private bool Judge(ReadOnlySpan<byte> low, ReadOnlySpan<byte> high, int from, ReadOnlySpan<byte> partition, List<ColumnSummary> box)
     {
-        List<ColumnSummary> box = Box(low, high, from, partition, nonNull: false);
+        box.Clear();
+        Box(low, high, from, partition, nonNull: false, box);
         return box.Count == 0 || _pruner.MayMatch(Merged(box), 1);
     }
 
     /// <summary>
     /// What rows between <paramref name="low"/> and <paramref name="high"/> hold of the components' columns, as
     /// <see cref="Judge"/> reads them; with <paramref name="nonNull"/>, a column bounded on both sides by values holds no
-    /// null, which the order puts after every value.
+    /// null, which the order puts after every value. Into <paramref name="box"/>, which it returns.
     /// </summary>
-    private List<ColumnSummary> Box(ReadOnlySpan<byte> low, ReadOnlySpan<byte> high, int from, ReadOnlySpan<byte> partition, bool nonNull)
+    private List<ColumnSummary> Box(ReadOnlySpan<byte> low, ReadOnlySpan<byte> high, int from, ReadOnlySpan<byte> partition, bool nonNull, List<ColumnSummary> box)
     {
-        List<ColumnSummary> box = [];
         if (from > 0 && !partition.IsEmpty)
         {
             FilterLiteral value = RowEncoder.ReadFirstValue(partition, _tree.TypeAt(0));

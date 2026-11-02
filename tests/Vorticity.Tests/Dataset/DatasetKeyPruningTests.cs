@@ -175,7 +175,8 @@ public sealed partial class DatasetKeyPruningTests
 
     /// <summary>
     /// In each object, the granules the key's pruning keeps of <paramref name="filter"/> against those its kept rows lie in:
-    /// every one of those, and at most one more at each end of each range kept.
+    /// every one of those, and at most one more at each end of each range kept; asked again of an object, the same ranges with
+    /// no second search of its index.
     /// </summary>
     private static async Task GranulesAsync(VortexDataset dataset, VortexExpr filter, Func<Row, bool> keep, string label)
     {
@@ -190,7 +191,10 @@ public sealed partial class DatasetKeyPruningTests
 
             ReadOnlySpan<byte> order = VortexDataset.OrderOf(held.TreeKey).Span;
             byte[] partition = order[..schema.Tree!.PrefixLength(order, 1)].ToArray();
+            int searches = pruning.Searches;
             List<(int First, int End)> kept = pruning.Granules(index, partition);
+            Assert.Equal(kept, pruning.Granules(index, partition));
+            Assert.Equal(searches + 1, pruning.Searches);
             HashSet<int> needed = [];
             List<Row> rows;
             await using (ObjectLease lease = await dataset.RentAsync(held.Entry, Ct))
