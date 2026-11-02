@@ -219,6 +219,28 @@ internal abstract class ArrayDecoder
         false;
 
     /// <summary>
+    /// As <see cref="TryEvaluate"/>, over rows <c>[start, start + count)</c> of the node alone, a bit a row of them into
+    /// <paramref name="bits"/>: what a read of a chunk by its granules asks, whose buffers hold those rows' bytes alone.
+    /// </summary>
+    /// <param name="context">Per-batch arenas, buffers, options and the decoder table.</param>
+    /// <param name="node">The serialized node.</param>
+    /// <param name="dtype">The DType this node would produce.</param>
+    /// <param name="length">The row count of the whole node.</param>
+    /// <param name="start">The first row answered.</param>
+    /// <param name="count">The rows answered.</param>
+    /// <param name="predicate">The comparison, range, set or prefix.</param>
+    /// <param name="bits">Receives the rows selected among those answered and, when some row is unknown, the rows known.</param>
+    /// <returns><see langword="false"/> when this encoding will not answer this predicate over a range.</returns>
+    /// <remarks>
+    /// An override reads nothing of the node past what decoding the same rows reads (<see cref="DecodesRange"/>): the
+    /// region a granule's plan lays leaves every other byte as the arena gives it.
+    /// </remarks>
+    public virtual bool TryEvaluateRange(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, int start, int count,
+        Compute.EncodedPredicate predicate, ref Compute.PredicateBits bits) =>
+        false;
+
+    /// <summary>
     /// Answers <paramref name="question"/>, asked of this node's integer patterns, a bit a row
     /// into <paramref name="bits"/>: what a parent of integers asks its child once it moved its
     /// own question into the child's patterns.

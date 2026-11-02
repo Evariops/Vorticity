@@ -1271,13 +1271,14 @@ internal sealed partial class DatasetScanBuilder
 
         // The pass reads the filter's columns alone, so a variant of them through the keys the filter names, where the
         // projection may read it whole: put back together row by row, a user's records over a week of log records spent
-        // three quarters of their cycles there.
+        // three quarters of their cycles there. It delivers none of them: the rows it keeps are all it says, which an
+        // encoding that answers the filter gives with no value decoded.
         IReadOnlyDictionary<string, string[]>? keys = FilterKeys(filter);
         try
         {
             for (int p = 0; p < parts.Length; p++)
             {
-                ScanBuilder scan = Of(file, held, filter, filtered, canonical: false, within: parts[p])
+                ScanBuilder scan = Of(file, held, filter, FieldMask.Empty, canonical: false, within: parts[p])
                     .WithCompaction(false).WithGranuleMask(granted).WithGranules(GeometryOf(held)).WithVariantKeys(keys);
                 await foreach (RecordBatch batch in scan.ExecuteAsync().WithCancellation(cancellationToken).ConfigureAwait(false))
                 {

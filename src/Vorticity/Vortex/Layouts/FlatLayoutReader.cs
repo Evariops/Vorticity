@@ -288,6 +288,16 @@ internal sealed class FlatLayoutReader : LayoutReader
 
         context.Decode.LoadBlob(plan.Tree.Span, region);
         ArrayNode root = context.Nodes.Root;
+
+        // A pushed comparison asked of the encoding over the batch's rows alone: a needle's first pass, which reads a trace's
+        // identifiers by their granules to place its spans, decoded eight thousand a granule for a comparison their codes
+        // answer, a quarter of the question (2026-11-02).
+        if (context.PredicateAtNode && context.PushedKey is null && AnswerRows(context, rows, length, out int asked, out int answering)
+            && RangeAnswer(in root, in node, context, total, asked, answering) is int answered and >= 0)
+        {
+            return answered;
+        }
+
         Decoded(context, length);
         if (context.HasSelection)
         {
@@ -1174,6 +1184,59 @@ internal sealed class FlatLayoutReader : LayoutReader
                 return -1;
             }
 
+            context.PredicateAnswered = true;
+            return Answer(context, ref bits);
+        }
+        finally
+        {
+            System.Buffers.ArrayPool<ulong>.Shared.Return(rented);
+        }
+    }
+
+    /// <summary>The reads by granules whose encoding answered a pushed comparison over their rows, over the process: for a test, run alone.</summary>
+    internal static long RangesAnswered => System.Threading.Interlocked.Read(ref s_rangesAnswered);
+
+    private static long s_rangesAnswered;
+
+    /// <summary>
+    /// The rows a read by granules answers a pushed comparison over: the batch's, or its selection when that is one range;
+    /// false for a selection of several, the rows between which no region holds.
+    /// </summary>
+    private static bool AnswerRows(ScanContext context, RowRange rows, int length, out int start, out int count)
+    {
+        if (!context.HasSelection)
+        {
+            start = (int)rows.Start;
+            count = length;
+            return true;
+        }
+
+        return context.TryGetSelectionRange(out start, out count);
+    }
+
+    /// <summary>
+    /// The encoding's answer to the pushed predicate over rows <c>[start, start + count)</c> of the node alone
+    /// (<see cref="ArrayDecoder.TryEvaluateRange"/>), as <see cref="TryAnswer"/> turns one into the column; -1 when it declined.
+    /// </summary>
+    private static int RangeAnswer(in ArrayNode root, in LayoutNode node, ScanContext context, int total, int start, int count)
+    {
+        ArrayDecoder decoder = ArrayDecoderTable.Require(context, root.Encoding, root.EncodingSpecIndex);
+        if (!decoder.EvaluatesWithoutFullDecode)
+        {
+            return -1;
+        }
+
+        ulong[] rented = System.Buffers.ArrayPool<ulong>.Shared.Rent(2 * Compute.PredicateBits.WordsOf(Math.Max(count, 1)));
+        try
+        {
+            int words = Compute.PredicateBits.WordsOf(count);
+            Compute.PredicateBits bits = new Compute.PredicateBits(rented.AsSpan(0, words), rented.AsSpan(words, words), count);
+            if (!decoder.TryEvaluateRange(context.Decode, in root, node.DType, total, start, count, context.PushedPredicate!, ref bits))
+            {
+                return -1;
+            }
+
+            System.Threading.Interlocked.Increment(ref s_rangesAnswered);
             context.PredicateAnswered = true;
             return Answer(context, ref bits);
         }

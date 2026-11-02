@@ -2126,7 +2126,30 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     private int ExecutePushed(Lane lane, RowRange split, PushPlan pushable)
     {
         ScanContext context = lane.Context;
+        int answer = PushedAnswer(context, split, pushable);
+        if (answer < 0)
+        {
+            return -1;
+        }
 
+        int rows = (int)(split.End - split.Start);
+        int[] kept = ArrayPool<int>.Shared.Rent(Math.Max(rows, 1));
+        try
+        {
+            return ExecuteKept(lane, split, kept, Selected(context, answer, kept), rows);
+        }
+        finally
+        {
+            ArrayPool<int>.Shared.Return(kept);
+        }
+    }
+
+    /// <summary>
+    /// The answer of the predicate's column to <paramref name="pushable"/> over <paramref name="split"/>, a struct of one
+    /// boolean column in <paramref name="context"/>'s arena; -1 when its encoding declined, which no later split asks again.
+    /// </summary>
+    private int PushedAnswer(ScanContext context, RowRange split, PushPlan pushable)
+    {
         // Resolved against the layout's struct and not against the batch's schema, which is the
         // keep projection's: a filter-only column is absent from it, and a projected one can sit at
         // another index. A mask is a path through the file's fields, so the file's dtype is the
@@ -2171,17 +2194,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
 
         _push = PushAnswered;
         context.PredicateAnswered = false;
-
-        int rows = (int)(split.End - split.Start);
-        int[] kept = ArrayPool<int>.Shared.Rent(Math.Max(rows, 1));
-        try
-        {
-            return ExecuteKept(lane, split, kept, Selected(context, answer, kept), rows);
-        }
-        finally
-        {
-            ArrayPool<int>.Shared.Return(kept);
-        }
+        return answer;
     }
 
     /// <summary>Reads the rows an answered comparison selects, in the split's space.</summary>
@@ -2303,10 +2316,16 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         ScanContext context = lane.Context;
         lane.Selection = default;
         lane.Selected = 0;
+        bool proven = ZoneProven(split);
+        if (_evaluator is not null && !proven && _push != PushDeclined && Pushable() is { } pushable
+            && PushedAnswer(context, split, pushable) is int answer and >= 0)
+        {
+            return ExecuteAnswered(lane, split, answer);
+        }
+
         int root = SplitExecution.Execute(context, _tree, in _mask, split, null);
         lane.ReadRoot = root;
         int rows = context.Canonical.GetNode(root).Length;
-        bool proven = ZoneProven(split);
         if (_take is null && (_evaluator is null || proven))
         {
             return ProjectionTrim.Apply(context.Canonical, root, in _mask, in _keep, _schema);
@@ -2368,6 +2387,41 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         }
 
         return ProjectionTrim.Apply(context.Canonical, root, in _mask, in _keep, _schema);
+    }
+
+    /// <summary>
+    /// A split delivered whole, its rows marked as its predicate's encoding answered them (<see cref="PushedAnswer"/>): the
+    /// projection decoded, and the predicate's column for the filter none. A first pass of a trace's spans, which reads its
+    /// identifiers to place the rows it keeps, decoded each granule's identifiers, eight thousand texts, for a comparison
+    /// their codes answer: a quarter of the question (2026-11-02).
+    /// </summary>
+    private int ExecuteAnswered(Lane lane, RowRange split, int answer)
+    {
+        ScanContext context = lane.Context;
+        int rows = (int)(split.End - split.Start);
+        int[] kept = ArrayPool<int>.Shared.Rent(Math.Max(rows, 1));
+        byte[] states = ArrayPool<byte>.Shared.Rent(Math.Max(rows, 1));
+        try
+        {
+            int count = Selected(context, answer, kept);
+            Span<byte> window = states.AsSpan(0, rows);
+            window.Fill(Trilean.False);
+            for (int i = 0; i < count; i++)
+            {
+                window[kept[i]] = Trilean.True;
+            }
+
+            int root = SplitExecution.Execute(context, _tree, in _keep, split, null);
+            lane.ReadRoot = root;
+            lane.Selection = SelectionWords(context.Canonical, window, rows, out int selected);
+            lane.Selected = selected;
+            return ProjectionTrim.Apply(context.Canonical, root, in _keep, in _keep, _schema);
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(states);
+            ArrayPool<int>.Shared.Return(kept);
+        }
     }
 
     /// <summary>

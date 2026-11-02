@@ -79,8 +79,40 @@ internal sealed class FsstDecoder : ArrayDecoder
     }
 
     /// <summary>
+    /// Answers an equality, or its negation, over a range of the rows on their codes (<see cref="CompareStates"/>): a read
+    /// of a chunk by its granules, whose region holds the codes and the offsets of their rows alone.
+    /// </summary>
+    /// <inheritdoc/>
+    public override bool TryEvaluateRange(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, int start, int count,
+        Compute.EncodedPredicate predicate, ref Compute.PredicateBits bits)
+    {
+        if (predicate.Kind != Compute.EncodedPredicateKind.Compare || start < 0 || count < 0 || start > length - count)
+        {
+            return false;
+        }
+
+        byte[] rented = System.Buffers.ArrayPool<byte>.Shared.Rent(Math.Max(count, 1));
+        try
+        {
+            Span<byte> states = rented.AsSpan(0, count);
+            if (!CompareStates(context, in node, dtype, length, predicate.Op, predicate.Literal, states, start, count))
+            {
+                return false;
+            }
+
+            bits.FromStates(states);
+            return true;
+        }
+        finally
+        {
+            System.Buffers.ArrayPool<byte>.Shared.Return(rented);
+        }
+    }
+
+    /// <summary>
     /// Answers an equality by compressing the literal and comparing code for code, so the column is
-    /// never decompressed.
+    /// never decompressed; rows <c>[start, start + count)</c> alone when <paramref name="count"/> says how many.
     /// </summary>
     /// <remarks>
     /// <para>
@@ -106,7 +138,7 @@ internal sealed class FsstDecoder : ArrayDecoder
     /// </remarks>
     private static bool CompareStates(
         ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
-        Expressions.ComparisonOp op, Expressions.FilterLiteral literal, Span<byte> destination)
+        Expressions.ComparisonOp op, Expressions.FilterLiteral literal, Span<byte> destination, int start = 0, int count = -1)
     {
         ArgumentNullException.ThrowIfNull(context);
         if (op is not (Expressions.ComparisonOp.Equal or Expressions.ComparisonOp.NotEqual) ||
@@ -135,7 +167,18 @@ internal sealed class FsstDecoder : ArrayDecoder
 
             ReadOnlySpan<byte> wanted = rented.AsSpan(0, needleLength);
             PType offsetsPType = metadata.CodesOffsetsPType;
-            RowCodes(context, in node, dtype, length, offsetsPType, out ReadOnlySpan<byte> raw, out ReadOnlySpan<byte> stream, out ValidityReader rows);
+            scoped ReadOnlySpan<byte> raw;
+            scoped ReadOnlySpan<byte> stream;
+            scoped ValidityReader rows;
+            if (count < 0)
+            {
+                RowCodes(context, in node, dtype, length, offsetsPType, out raw, out stream, out rows);
+            }
+            else
+            {
+                RowCodesRange(context, in node, dtype, length, start, count, offsetsPType, out raw, out stream, out rows);
+                length = count;
+            }
 
             byte match = op == Expressions.ComparisonOp.Equal
                 ? Compute.Trilean.True
@@ -674,6 +717,28 @@ internal sealed class FsstDecoder : ArrayDecoder
         raw = codesOffsets.Values.Span;
 
         Validity validity = context.DecodeValidity(in node, 2, dtype.Nullability, length);
+        rows = ValidityReader.Of(context.Canonical, validity);
+    }
+
+    /// <summary>
+    /// As <see cref="RowCodes"/>, for rows <c>[start, start + count)</c> alone: their offsets, the codes those bound, and
+    /// their validity, each read as a decode of the same rows reads them.
+    /// </summary>
+    private static void RowCodesRange(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, int start, int count, PType offsetsPType,
+        out ReadOnlySpan<byte> raw, out ReadOnlySpan<byte> stream, out ValidityReader rows)
+    {
+        CanonicalSupport.RequireIntegerPType(offsetsPType, Id + " codes_offsets");
+        int offsetCount = ArrayDecodeContext.CheckedLength((ulong)length + 1, Id + " codes_offsets");
+        DType offsetsType = context.Types.Primitive(offsetsPType, Nullability.NonNullable);
+        int offsetsIndex = context.DecodeChildRange(in node, 1, offsetsType, offsetCount, start, count + 1);
+        CanonicalNode codesOffsets = CanonicalSupport.RequirePrimitiveChild(
+            context, offsetsIndex, offsetsPType, count + 1, Id + " codes_offsets");
+
+        stream = CodeStream(codesOffsets, offsetsPType, count, node.GetBuffer(2));
+        raw = codesOffsets.Values.Span;
+
+        Validity validity = context.DecodeValidityRange(in node, 2, dtype.Nullability, length, start, count);
         rows = ValidityReader.Of(context.Canonical, validity);
     }
 
