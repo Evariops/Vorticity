@@ -1355,15 +1355,24 @@ internal sealed class GranuleAnswer
         bool[]? wholly = holding is null ? null : new bool[any.Count];
         SummaryPruner? whole = _excluding?.Whole;
         int touched = 0;
+
+        // Without deletions no bridge changes which granules are answered: the states a granule answered adds are kept
+        // and the second walk settles it no more. Settled twice, a granule of a question of the distinct hosts by region
+        // walked its prefix runs twice.
+        bool keep = deletions.IsEmpty;
         for (int b = lo; b < hi; b++)
         {
             long first = any.FirstRow(b);
             bool placed = Touches(holding, ref touched, first, first + any.Rows[b]);
             wholly?[b] = placed;
+            int mark = states.Count;
             answers[b] = first >= part.Start && first + any.Rows[b] <= part.End && deletions.DeletedIn(first, first + any.Rows[b]) == 0
                 && (placed ? whole is not null && SettleGranule(b, any.Rows[b], described, alike, summaries, judged, states, whole, prefixRuns)
                     : SettleGranule(b, any.Rows[b], described, alike, summaries, judged, states, judge, prefixRuns));
-            states.Truncate(0);
+            if (!keep || !answers[b])
+            {
+                states.Truncate(keep ? mark : 0);
+            }
         }
 
         if (!deletions.IsEmpty)
@@ -1379,7 +1388,11 @@ internal sealed class GranuleAnswer
             long rows = any.Rows[b];
             if (answers[b])
             {
-                SettleGranule(b, rows, described, alike, summaries, judged, states, wholly?[b] == true ? whole : judge, prefixRuns);
+                if (!keep)
+                {
+                    SettleGranule(b, rows, described, alike, summaries, judged, states, wholly?[b] == true ? whole : judge, prefixRuns);
+                }
+
                 settled++;
                 continue;
             }
