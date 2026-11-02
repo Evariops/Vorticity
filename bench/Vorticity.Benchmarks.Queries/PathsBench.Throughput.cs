@@ -40,6 +40,12 @@ internal static partial class PathsBench
         Console.WriteLine($"{"cache",-10} {"clients",7} {"asked",7} {"q/s",9} {"p50 ms",9} {"p99 ms",9} {"req/s",9} {"MB/s",8} {"cores",6}");
         foreach (Phase phase in (Phase[])[Phase.Warm, Phase.NoCache])
         {
+            // --qps-phase warm or no-cache: that phase alone, for a profiler.
+            if (settings.QpsPhase is "warm" or "no-cache" && settings.QpsPhase != (phase == Phase.Warm ? "warm" : "no-cache"))
+            {
+                continue;
+            }
+
             foreach (int clients in settings.Clients)
             {
                 await ThroughputAsync(settings, questions, builtOf, phase, clients, settings.SharedCache);
@@ -200,6 +206,10 @@ internal static partial class PathsBench
             {
                 store.Reset();
             }
+
+            // A profiler that attaches to the process waits for this line, and samples the timed part alone.
+            Console.WriteLine($"    phase: begins, process {Environment.ProcessId}");
+            Console.Out.Flush();
 
             double cpu = ProcessCpu.Milliseconds();
             long begin = Stopwatch.GetTimestamp();
