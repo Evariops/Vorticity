@@ -174,14 +174,14 @@ public sealed partial class DatasetVariantGranulesTests
     }
 
     /// <summary>The calls both tests ask, written to <paramref name="store"/> and consolidated into one object of a day.</summary>
-    private static async Task<Call[]> WrittenAsync(CountingObjectStore store)
+    internal static async Task<Call[]> WrittenAsync(CountingObjectStore store, Func<int, long>? coded = null)
     {
         Random random = new Random(61);
         Call[] calls = [.. Enumerable.Range(0, 6 * 65_536).Select(i =>
         {
             int service = i % 6;
             string tenant = $"t-{service / 2}";
-            long code = random.Next(20) == 0 ? 500 + random.Next(4) : 200 + random.Next(4);
+            long code = coded?.Invoke(i) ?? (random.Next(20) == 0 ? 500 + random.Next(4) : 200 + random.Next(4));
             List<(string, Variant)> fields = [("route", Variant.From($"/r/{random.Next(40)}")), ("tenant", Variant.From(tenant)), ("code", Variant.From(code))];
             if (service == 0 && code == 503)
             {

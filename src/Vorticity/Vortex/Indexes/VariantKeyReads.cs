@@ -591,7 +591,7 @@ internal sealed class VariantKeyReads
         /// 8,192 rows of each, and spent a third of its time expanding their runs (2026-11-02). A key's run ends and values,
         /// which every range reads whole, are decoded once a chunk for every range (<see cref="ArrayDecodeContext.DecodeWholeChild"/>).
         /// </remarks>
-        internal int DecodeRange(ScanContext context, DType variant, int start, int count, GranulePlans? plans, bool unplanned = false)
+        internal int DecodeRange(ScanContext context, DType variant, uint segment, int start, int count, GranulePlans? plans, bool unplanned = false)
         {
             RowRange rows = new RowRange(start, start + count);
             if (!unplanned)
@@ -627,7 +627,8 @@ internal sealed class VariantKeyReads
 
                 Buffers.VortexBuffer region = default;
                 ReadOnlyMemory<byte> tree = part.Tree;
-                if (part.Length > 0 && plans?.Find(part.Offset, rows) is { } plan)
+                GranulePlans.Plan? plan = part.Length > 0 ? plans?.Find(part.Offset, rows) : null;
+                if (plan is not null)
                 {
                     tree = plan.Tree;
                     region = Region(context, part, plan);
@@ -639,33 +640,50 @@ internal sealed class VariantKeyReads
 
                 context.Decode.LoadBlob(tree.Span, region);
                 ArrayNode root = context.Nodes.Root;
+
+                // A key read from its whole range, under a scope of its own: the children every range reads whole, a run
+                // end's ends and values, are retained for the scan's other parts of the chunk, which decompressed them again,
+                // a frame in two of a question of the services under 5xx over the last quarter of an hour (2026-11-02). A
+                // key read by its granules decodes from a region of their ranges alone, which no other part shares.
+                uint? scope = plan is null && part.Length > 0 && KeyScope(segment, k) is uint own ? own : null;
+                uint? outer = scope is uint opened ? context.Decode.BeginNodeCheckScope(opened) : null;
                 int metadata;
                 int values;
                 int typed;
-                if (key.Shape.Kind == DTypeKind.Variant)
+                try
                 {
-                    // The key's own variant, a range of its core of the values of other classes and of its typed column.
-                    if (!context.Decode.ChildDecodesRange(in root, 0) || !context.Decode.ChildDecodesRange(in root, 1))
+                    if (key.Shape.Kind == DTypeKind.Variant)
                     {
-                        return -1;
-                    }
+                        // The key's own variant, a range of its core of the values of other classes and of its typed column.
+                        if (!context.Decode.ChildDecodesRange(in root, 0) || !context.Decode.ChildDecodesRange(in root, 1))
+                        {
+                            return -1;
+                        }
 
-                    int core = context.Decode.DecodeChildRange(in root, 0, key.Shape, Rows, start, count);
-                    CanonicalNode storage = arena.GetNode(core);
-                    metadata = storage.GetFieldIndex(0);
-                    values = storage.GetFieldIndex(1);
-                    typed = context.Decode.DecodeChildRange(in root, 1, key.Typed, Rows, start, count);
+                        int core = context.Decode.DecodeChildRange(in root, 0, key.Shape, Rows, start, count);
+                        CanonicalNode storage = arena.GetNode(core);
+                        metadata = storage.GetFieldIndex(0);
+                        values = storage.GetFieldIndex(1);
+                        typed = context.Decode.DecodeChildRange(in root, 1, key.Typed, Rows, start, count);
+                    }
+                    else
+                    {
+                        if (unplanned && !context.Decode.DecodesRange(in root))
+                        {
+                            return -1;
+                        }
+
+                        metadata = None();
+                        values = metadata;
+                        typed = context.Decode.DecodeRootRange(in root, key.Shape, Rows, start, count, keepEncoding: false);
+                    }
                 }
-                else
+                finally
                 {
-                    if (unplanned && !context.Decode.DecodesRange(in root))
+                    if (scope is not null)
                     {
-                        return -1;
+                        context.Decode.EndNodeCheckScope(outer);
                     }
-
-                    metadata = None();
-                    values = metadata;
-                    typed = context.Decode.DecodeRootRange(in root, key.Shape, Rows, start, count, keepEncoding: false);
                 }
 
                 groups.Span[k] = arena.AddStruct(Groups[k], count, Validity.NonNullable, [metadata, values, typed]);
@@ -677,6 +695,13 @@ internal sealed class VariantKeyReads
 
             int None() => none >= 0 ? none : none = Nulls(arena, Binary, count);
         }
+
+        /// <summary>
+        /// The check scope of key <paramref name="key"/> of the chunk whose layout segment is <paramref name="segment"/>: a
+        /// chunk's keys share its segment and each decodes its own blob, whose children a scope of the segment alone would
+        /// mix; above every segment number a scope otherwise takes. Null past the numbers it holds.
+        /// </summary>
+        private static uint? KeyScope(uint segment, int key) => segment < (1u << 24) && key < 64 ? (1u << 30) | (segment << 6) | (uint)key : null;
 
         /// <summary>The region of the key's buffers, the ranges <paramref name="plan"/> read laid at their places, every other byte cleared.</summary>
         private static Buffers.VortexBuffer Region(ScanContext context, PathChunk part, GranulePlans.Plan plan)

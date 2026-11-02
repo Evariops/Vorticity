@@ -323,7 +323,7 @@ internal sealed class FlatLayoutReader : LayoutReader
         }
         // The keys read by the granules of the split's rows (spec E, 4.1): decoded from them alone, the selection gathered
         // out of them; nothing retained, which would read the rest of the chunk.
-        if (context.Granules is { } granules && chunk.DecodeRange(context, node.DType, (int)rows.Start, length, granules) is int ranged and >= 0)
+        if (context.Granules is { } granules && chunk.DecodeRange(context, node.DType, node.Segments[0], (int)rows.Start, length, granules) is int ranged and >= 0)
         {
             Decoded(context, length);
             return context.HasSelection ? GatherRebased(context, ranged, (int)rows.Start) : ranged;
@@ -332,7 +332,7 @@ internal sealed class FlatLayoutReader : LayoutReader
         // A part of the chunk: its keys' rows decoded from their whole ranges, where each key's encoding decodes a range, the
         // selection gathered out of them (VariantKeyReads.Chunk.DecodeRange); the chunk's whole decode, retained for its other
         // parts, otherwise.
-        if (length < total && chunk.DecodeRange(context, node.DType, (int)rows.Start, length, context.Granules, unplanned: true) is int part and >= 0)
+        if (length < total && chunk.DecodeRange(context, node.DType, node.Segments[0], (int)rows.Start, length, context.Granules, unplanned: true) is int part and >= 0)
         {
             Decoded(context, length);
             return context.HasSelection ? GatherRebased(context, part, (int)rows.Start) : part;
