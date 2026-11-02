@@ -58,7 +58,7 @@ public sealed partial class DatasetVariantGranulesTests
     /// The calls of <see cref="AKeysStatisticsAreThoseOfItsValuesAsAColumn"/>, asked as QP-3 and QP-10 ask the logs of S1: the
     /// services under a status code of 500 or more, the code varying in every granule; and the services of a tenant, which
     /// a granule holds one of. Both are answered by the granules with no block decoded, each key's statistics listing its
-    /// values granule by granule, where the rows' path decodes the attributes. Beside them, a predicate on a path no
+    /// values granule by granule, where the rows' path reads the attributes' chunks. Beside them, a predicate on a path no
     /// statistics describe, a rare debug key present, stays judged as a path, true of its rows alone, never as one on the
     /// attributes column, which no row leaves null and whose summaries would prove it of every row.
     /// </summary>
@@ -100,8 +100,9 @@ public sealed partial class DatasetVariantGranulesTests
                 continue;
             }
 
+            // The rows' path asks the key's typed column the comparison too, as a scan that delivers selections does since
+            // 2026-11-02, and decodes no block for it either: what sets the granules apart is the chunks they leave unread.
             Assert.Equal(0, decoded[1]);
-            Assert.True(decoded[0] > 0);
             Assert.True(bytes[1] < bytes[0], $"question {q}: {bytes[1]} bytes through the granules, {bytes[0]} through the rows");
         }
 

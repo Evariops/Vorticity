@@ -90,16 +90,26 @@ public sealed partial class QueryPathBudgetTests : IClassFixture<QueryPathBudget
     /// beside the other classes of `tests/runs-alone.sh`, 46,752 to 48,240, one binary moving between them: 48,240 four times,
     /// past the 48,217 it had.
     /// </para>
+    /// <para>
+    /// Every row but one id raised on 2026-11-02 to 53,220 bytes, 1 % above the 52,592 it measured alone: a scan that
+    /// delivers its rows with a selection offers its comparison to the column's encoding as one that compacts does, a plan
+    /// made once a filter, and an encoding that declines, as the ids' does, costs the first scan of a question a decode of
+    /// the column; the spans of a trace read a third faster for it, the pods of a route a tenth.
+    /// </para>
+    /// <para>
+    /// The count by service and hour raised the same day to 44,740 bytes, 1 % above the 44,296 it measured alone, by the
+    /// plan its scans make of their filter.
+    /// </para>
     /// </summary>
     private static readonly Dictionary<string, Budget> Ceilings = new(StringComparer.Ordinal)
     {
         ["count by service"] = new(4, 169512, 0, 0, 38516),
         ["count by service, at eight lanes"] = new(4, 169512, 0, 0, 61510),
-        ["count by service and hour"] = new(4, 169512, 0, 0, 44280),
+        ["count by service and hour"] = new(4, 169512, 0, 0, 44740),
         ["by minute, the last hour, under a predicate"] = new(1, 42106, 0, 0, 48446),
         ["an unaligned window"] = new(3, 127406, 0, 0, 52461),
         ["an unaligned window, at eight lanes"] = new(3, 127406, 0, 0, 80613),
-        ["every row but one id"] = new(4, 169512, 0, 0, 52176),
+        ["every row but one id"] = new(4, 169512, 0, 0, 53220),
         ["measures by region and hour"] = new(4, 169512, 0, 0, 51950),
         ["count by route, a shredded path"] = new(4, 169512, 0, 0, 49028),
         ["the rows of one id"] = new(4, 169512, 0, 0, 83768),

@@ -2013,8 +2013,19 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         return ReferenceEquals(plan, NoPush) ? null : plan;
     }
 
-    /// <summary>The predicate <paramref name="filter"/> offers an encoding, or <see cref="NoPush"/>.</summary>
-    internal static PushPlan PlanPush(VortexExpr? filter)
+    /// <summary>The predicate <paramref name="filter"/> offers an encoding, or <see cref="NoPush"/>; worked out once a filter.</summary>
+    /// <remarks>
+    /// The scans of a question's objects share its filter, and each made its plan anew once a scan that delivers selections
+    /// asked too: some 2 KB a question of a route's pods, an aggregation over a few dozen objects (2026-11-02).
+    /// </remarks>
+    internal static PushPlan PlanPush(VortexExpr? filter) =>
+        filter is null ? Planned(null) : PushPlans.GetValue(filter, static shared => Planned(shared));
+
+    /// <summary>The plan of each filter a scan has asked for, kept while the filter lives.</summary>
+    private static readonly ConditionalWeakTable<VortexExpr, PushPlan> PushPlans = new();
+
+    /// <summary>The predicate <paramref name="filter"/> offers an encoding, or <see cref="NoPush"/>, worked out.</summary>
+    private static PushPlan Planned(VortexExpr? filter)
     {
         // A filter on a variant's path is fenced off from the pruners (VariantFilterExpr); an encoding's answer is exact, and
         // looks through the fence as the evaluator does.
@@ -2111,6 +2122,13 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
 
         /// <summary>The key of the variant column whose typed column the predicate reads, and its class; null for the column itself.</summary>
         internal Compute.PushedVariantKey? Key { get; } = key;
+
+        /// <summary>
+        /// Whether an encoding of the column declined the predicate, in some scan of the filter: the scans that deliver
+        /// selections ask it no more, a decline costing each the column's decode for nothing, two a question of the
+        /// distinct hosts by region, whose ids no encoding answers (2026-11-02). Raced, and written true by all.
+        /// </summary>
+        internal bool Declined { get; set; }
     }
     /// <summary>
     /// Offers the comparison to the predicate's column and, when its encoding answers, reads the
@@ -2189,6 +2207,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         if (!context.PredicateAnswered)
         {
             _push = PushDeclined;
+            pushable.Declined = true;
             return -1;
         }
 
@@ -2317,7 +2336,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         lane.Selection = default;
         lane.Selected = 0;
         bool proven = ZoneProven(split);
-        if (_evaluator is not null && !proven && _push != PushDeclined && Pushable() is { } pushable
+        if (_evaluator is not null && !proven && _push != PushDeclined && Pushable() is { Declined: false } pushable
             && PushedAnswer(context, split, pushable) is int answer and >= 0)
         {
             return ExecuteAnswered(lane, split, answer);
@@ -2398,30 +2417,63 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     private int ExecuteAnswered(Lane lane, RowRange split, int answer)
     {
         ScanContext context = lane.Context;
-        int rows = (int)(split.End - split.Start);
-        int[] kept = ArrayPool<int>.Shared.Rent(Math.Max(rows, 1));
-        byte[] states = ArrayPool<byte>.Shared.Rent(Math.Max(rows, 1));
-        try
-        {
-            int count = Selected(context, answer, kept);
-            Span<byte> window = states.AsSpan(0, rows);
-            window.Fill(Trilean.False);
-            for (int i = 0; i < count; i++)
-            {
-                window[kept[i]] = Trilean.True;
-            }
+        lane.Selection = AnswerWords(context.Canonical, answer, (int)(split.End - split.Start), out int selected);
+        lane.Selected = selected;
+        int root = SplitExecution.Execute(context, _tree, in _keep, split, null);
+        lane.ReadRoot = root;
+        return ProjectionTrim.Apply(context.Canonical, root, in _keep, in _keep, _schema);
+    }
 
-            int root = SplitExecution.Execute(context, _tree, in _keep, split, null);
-            lane.ReadRoot = root;
-            lane.Selection = SelectionWords(context.Canonical, window, rows, out int selected);
-            lane.Selected = selected;
-            return ProjectionTrim.Apply(context.Canonical, root, in _keep, in _keep, _schema);
-        }
-        finally
+    /// <summary>
+    /// The rows an encoding's answer selects, true and known, as 64-bit words in the batch's arena, copied from its bits: by
+    /// the rows' indices then a state a row, a filter that keeps nearly every row, as one that leaves out a request's id
+    /// does, paid three passes of a split for them, a tenth of a question of the distinct hosts by region (2026-11-02).
+    /// </summary>
+    private static Buffers.VortexBuffer AnswerWords(CanonicalArena arena, int answer, int rows, out int selected)
+    {
+        CanonicalNode node = arena.GetNode(answer);
+        if (node.Kind == CanonicalKind.Struct)
         {
-            ArrayPool<byte>.Shared.Return(states);
-            ArrayPool<int>.Shared.Return(kept);
+            node = arena.GetNode(node.GetFieldIndex(0));
         }
+
+        int words = Math.Max((rows + 63) >> 6, 1);
+        Buffers.VortexBuffer buffer = arena.AllocateUninitialized(words * 8, 64, out Span<byte> raw);
+        raw.Clear();
+        selected = 0;
+        Arrays.Decoders.Canonical.ValidityMask valid = Arrays.Decoders.Canonical.ValidityMask.From(arena, node.Validity);
+        if (valid.AllInvalid || rows == 0)
+        {
+            return buffer;
+        }
+
+        Span<ulong> bits = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, ulong>(raw);
+        CanonicalSupport.CopyBits(node.Bits.Span, node.BitOffset, raw, 0, rows);
+        if (!valid.AllValid)
+        {
+            ulong[] known = ArrayPool<ulong>.Shared.Rent(words);
+            try
+            {
+                Span<ulong> knownWords = known.AsSpan(0, words);
+                knownWords.Clear();
+                CanonicalSupport.CopyBits(valid.Bits, valid.BitOffset, System.Runtime.InteropServices.MemoryMarshal.AsBytes(knownWords), 0, rows);
+                for (int w = 0; w < words; w++)
+                {
+                    bits[w] &= knownWords[w];
+                }
+            }
+            finally
+            {
+                ArrayPool<ulong>.Shared.Return(known);
+            }
+        }
+
+        for (int w = 0; w < words; w++)
+        {
+            selected += System.Numerics.BitOperations.PopCount(bits[w]);
+        }
+
+        return buffer;
     }
 
     /// <summary>

@@ -48,11 +48,16 @@ public sealed partial class PatternBudgetTests : IClassFixture<PatternBudgetTest
     /// QP-2, QP-4 and QP-6 allocate 0.5 to 9 % more warm, the per-question costs of the scans and plans the query paths
     /// name; QP-3 and QP-10 pass and keep their ceilings.
     /// </para>
+    /// <para>
+    /// QP-2 raised on 2026-11-02 to 78,260 bytes, 2 % above the 76,720 it measured alone: its route's comparison, which the
+    /// scans of an aggregation decoded the column to judge, is answered by the column's dictionary, which takes some
+    /// 1.5 KB a question, for a tenth of its time.
+    /// </para>
     /// </summary>
     private static readonly Dictionary<string, Budget> Ceilings = new(StringComparer.Ordinal)
     {
         ["QP-1 a service's routes under 5xx, per hour"] = new(8, 361216, 4, 98960, 86741),
-        ["QP-2 the pods of a route"] = new(4, 262256, 0, 0, 75211),
+        ["QP-2 the pods of a route"] = new(4, 262256, 0, 0, 78260),
         ["QP-3 the services under a shredded status of 500 or more"] = new(4, 262256, 0, 0, 101796),
         ["QP-4 the spans of a trace"] = new(5, 286996, 1, 24740, 81960),
         ["QP-6 the 99th percentile per service, the last quarter of an hour"] = new(2, 90304, 1, 24740, 140948),
