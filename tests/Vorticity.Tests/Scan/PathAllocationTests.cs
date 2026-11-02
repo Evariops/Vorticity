@@ -381,7 +381,10 @@ public sealed class PathAllocationTests
         //
         // A context keeps its lane's granule planning from one scan to the next (ScanContext.GranuleScratch), a reference:
         // 8 bytes for the context the pruning reads the zone map through (2026-11-02).
-        ("selective filter, pruning on", File, 35_128, PrunedFilter),
+        //
+        // The pushed predicate's plan notes whether an encoding declined it, which the scans of its filter share: 8 bytes on
+        // both filtered axes (2026-11-02).
+        ("selective filter, pruning on", File, 35_136, PrunedFilter),
 
         // THE SAME FILTER WITH PRUNING OFF, because it is a different path and not a slower one:
         // pruning on reads the zone map and skips whole splits, pruning off decodes every split and
@@ -396,7 +399,8 @@ public sealed class PathAllocationTests
         // and that context's arenas sized for what they hold rather than for a batch: either one
         // undone costs more than the whole gap that remains. The lane's context holds its zstd
         // decoder's field, 8 bytes, as above.
-        ("selective filter, pruning off", File, 27_032, UnprunedFilter),
+        // The plan's note of a decline, 8 bytes, as above (2026-11-02).
+        ("selective filter, pruning off", File, 27_040, UnprunedFilter),
 
         // One scan per late component. They are single-column files of 4 096 rows, so the figure is
         // dominated by the decoder rather than by the open, which is the point of putting them here
