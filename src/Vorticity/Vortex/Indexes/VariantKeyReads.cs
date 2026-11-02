@@ -703,21 +703,20 @@ internal sealed class VariantKeyReads
         /// </summary>
         private static uint? KeyScope(uint segment, int key) => segment < (1u << 24) && key < 64 ? (1u << 30) | (segment << 6) | (uint)key : null;
 
-        /// <summary>The region of the key's buffers, the ranges <paramref name="plan"/> read laid at their places, every other byte cleared.</summary>
+        /// <summary>
+        /// The region of the key's buffers, the ranges <paramref name="plan"/> read laid at their places, every other byte left as the
+        /// arena gives it, which no decoder reads (<see cref="Layouts.FlatLayoutReader"/>'s granules lay theirs alike).
+        /// </summary>
         private static Buffers.VortexBuffer Region(ScanContext context, PathChunk part, GranulePlans.Plan plan)
         {
             SegmentRequestSet segments = context.Segments;
             Buffers.VortexBuffer region = context.Canonical.AllocateUninitialized(checked((int)plan.RegionLength), 1 << plan.Alignment, out Span<byte> bytes);
-            long at = 0;
             foreach ((long start, long end) in plan.Ranges)
             {
-                bytes[(int)at..(int)start].Clear();
                 int slot = segments.Add(new SegmentSpec(part.Offset + (ulong)start, checked((uint)(end - start)), 0, 0, 0));
                 segments.GetBuffer(slot).Span[..(int)(end - start)].CopyTo(bytes[(int)start..]);
-                at = end;
             }
 
-            bytes[(int)at..].Clear();
             return region;
         }
 

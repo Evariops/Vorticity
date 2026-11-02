@@ -267,7 +267,8 @@ internal sealed class FlatLayoutReader : LayoutReader
 
     /// <summary>
     /// The batch's rows of a chunk read by the granules of a part of it (spec C, 2.3): the ranges read laid at their places in
-    /// a region of the chunk's buffers, every other byte of which is cleared, the tree loaded over it, and the batch's rows
+    /// a region of the chunk's buffers, every other byte of which is left as the arena gives it, which no decoder reads (the
+    /// whole suite gave the same answers with them poisoned), the tree loaded over it, and the batch's rows
     /// decoded from it, or its selection, a FastLanes block of 1 024 at a time where the encoding selects. Nothing that would
     /// read the rest of the chunk runs: no answer of the whole node, no retention.
     /// </summary>
@@ -277,16 +278,14 @@ internal sealed class FlatLayoutReader : LayoutReader
         SegmentSpec spec = SpecOf(in node, 0);
         SegmentRequestSet segments = context.Segments;
         VortexBuffer region = context.Canonical.AllocateUninitialized(checked((int)plan.RegionLength), 1 << plan.Alignment, out Span<byte> bytes);
-        long at = 0;
+        // The holes are not cleared: a part of a large chunk cleared every byte before its ranges, some 34 MB a question of a
+        // percentile by service to copy 0.85, a memset of 14.5 % of eight clients' cycles (2026-11-02).
         foreach ((long start, long end) in plan.Ranges)
         {
-            bytes[(int)at..(int)start].Clear();
             int slot = segments.Add(new SegmentSpec(spec.Offset + (ulong)start, checked((uint)(end - start)), 0, 0, 0));
             segments.GetBuffer(slot).Span[..(int)(end - start)].CopyTo(bytes[(int)start..]);
-            at = end;
         }
 
-        bytes[(int)at..].Clear();
         context.Decode.LoadBlob(plan.Tree.Span, region);
         ArrayNode root = context.Nodes.Root;
         Decoded(context, length);
