@@ -87,6 +87,12 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
     private byte[] _heap = [];
     private int _heapUsed;
 
+    // Each number's slot, ZeroSlot for the value of hash 0, Unkept for one whose bytes did not fit, built once the rows
+    // are in for the builders that read the values where they lie (KeptEveryValue); the rows it was built at.
+    private int[]? _slotOf;
+    private long _slotOfRows = -1;
+    private bool _keptEvery;
+
     // The views met last of a text column, three words an entry: the view's two halves and its slot plus one, or 1
     // once the counts go, 0 for none.
     private ulong[]? _views;
@@ -171,6 +177,8 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
         Give(_rowIds);
         Give(_rowHashes);
         Give(_ranks);
+        Give(_slotOf);
+        _slotOf = null;
         _slots = null;
         _offsets = [];
         _lengths = [];
@@ -293,25 +301,95 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
         Check();
     }
 
-    /// <summary>The bytes of each value counted by its number (<see cref="Numbered"/>), null for one whose bytes were not kept; while <see cref="Counting"/>.</summary>
+    private const int ZeroSlot = -2;
+    private const int Unkept = -1;
+
+    /// <summary>
+    /// Whether the sheet kept the bytes of every value it numbered (<see cref="Numbered"/>), which <see cref="ValueAt"/>
+    /// then reads where they lie; while <see cref="Counting"/>, once every row is in. The builders that list the values
+    /// read them so: copied out, a list for each of three of them, an object's sheets made a copy of every distinct value
+    /// three times over.
+    /// </summary>
+    internal bool KeptEveryValue
+    {
+        get
+        {
+            SlotsOf();
+            return _keptEvery;
+        }
+    }
+
+    /// <summary>
+    /// A copy of the bytes of each value counted by its number (<see cref="Numbered"/>), null for one whose bytes were not
+    /// kept; while <see cref="Counting"/>: for the counts, whose groups each hold their value's.
+    /// </summary>
     internal byte[]?[] ValuesByNumber()
     {
+        int[] slotOf = SlotsOf();
         byte[]?[] values = new byte[]?[_ids];
+        for (int id = 0; id < values.Length; id++)
+        {
+            values[id] = slotOf[id] == Unkept ? null : ValueAt(id).ToArray();
+        }
+
+        return values;
+    }
+
+    /// <summary>The bytes of value number <paramref name="id"/>, where the sheet keeps them: every value kept (<see cref="KeptEveryValue"/>).</summary>
+    internal ReadOnlySpan<byte> ValueAt(int id) => _slotOf![id] is int slot and >= 0
+        ? _heap.AsSpan(_offsets[slot], _lengths[slot])
+        : _heap.AsSpan(_zeroOffset, _zeroLength);
+
+    /// <summary>Each number's slot, built once for the rows fed so far.</summary>
+    private int[] SlotsOf()
+    {
+        if (_slotOf is { } built && _slotOfRows == _rows)
+        {
+            return built;
+        }
+
+        if (_slotOf is null || _slotOf.Length < _ids)
+        {
+            Give(_slotOf);
+            _slotOf = ArrayShelf.Retained.Take<int>((int)BitOperations.RoundUpToPowerOf2((uint)Math.Max(_ids, 1)), zeroed: false);
+        }
+
+        int[] slotOf = _slotOf;
+        slotOf.AsSpan(0, _ids).Fill(Unkept);
         Slot[] slots = _slots!;
         for (int i = 0; i < slots.Length; i++)
         {
             if (slots[i].Key != 0 && _offsets[i] >= 0)
             {
-                values[(int)(slots[i].Count >> IdShift)] = _heap.AsSpan(_offsets[i], _lengths[i]).ToArray();
+                slotOf[(int)(slots[i].Count >> IdShift)] = i;
             }
         }
 
         if (_zeroId >= 0 && _zeroOffset >= 0)
         {
-            values[_zeroId] = _heap.AsSpan(_zeroOffset, _zeroLength).ToArray();
+            slotOf[_zeroId] = ZeroSlot;
         }
 
-        return values;
+        _keptEvery = !slotOf.AsSpan(0, _ids).Contains(Unkept);
+        _slotOfRows = _rows;
+        return slotOf;
+    }
+
+    /// <summary>Numbers in the order of their values' bytes, every value kept.</summary>
+    internal readonly struct ByValue(ColumnSheetBuilder sheet) : IComparer<int>
+    {
+        public int Compare(int x, int y) => sheet.ValueAt(x).SequenceCompareTo(sheet.ValueAt(y));
+    }
+
+    /// <summary>
+    /// The first <paramref name="count"/> values of <paramref name="sheet"/>, every value kept, read where they lie: by
+    /// their numbers, or in the numbers' order <paramref name="order"/> gives.
+    /// </summary>
+    internal readonly struct Values(ColumnSheetBuilder sheet, int[]? order, int count) : IValuesByNumber
+    {
+        public int Count => count;
+
+        public ReadOnlySpan<byte> this[int index] => sheet.ValueAt(order is null ? index : order[index]);
     }
 
     /// <summary>The number of the value slot <paramref name="slot"/> holds.</summary>

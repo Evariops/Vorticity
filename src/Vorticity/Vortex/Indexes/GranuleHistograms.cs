@@ -59,6 +59,14 @@ internal sealed class GranuleHistograms
         writer.WriteVarint(WrittenBits);
     }
 
+    /// <summary>The header <see cref="WriteHeader(ref ProtoWriter, int)"/> writes, into <paramref name="into"/>, 30 bytes at most: its length.</summary>
+    internal static int WriteHeader(Span<byte> into, int granules)
+    {
+        int at = Serialization.Varint.Write(into, Version);
+        at += Serialization.Varint.Write(into[at..], (ulong)granules);
+        return at + Serialization.Varint.Write(into[at..], WrittenBits);
+    }
+
     /// <summary>The histograms <paramref name="bytes"/> encode; null when they do not decode.</summary>
     internal static GranuleHistograms? From(ReadOnlySpan<byte> bytes)
     {

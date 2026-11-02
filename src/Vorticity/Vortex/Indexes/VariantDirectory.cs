@@ -559,45 +559,45 @@ internal sealed class VariantDirectory
     };
 
     /// <summary>The region: behind a version byte and the body's length, the body as one zstd frame.</summary>
-    internal byte[] ToBytes() => ZstdRegion.Encode(Version, Body());
-
-    /// <summary>The rows, then each entry: its keys, class, count, place, bounds and texts.</summary>
-    private byte[] Body()
+    internal byte[] ToBytes()
     {
         ProtoWriter writer = new ProtoWriter();
         try
         {
-            writer.WriteVarint((ulong)Rows);
-            writer.WriteVarint((ulong)GroupRows);
-            writer.WriteVarint(Partial ? 1UL : 0);
-            writer.WriteVarint((ulong)Entries.Count);
-            foreach (PathEntry entry in Entries)
-            {
-                writer.WriteVarint((ulong)entry.Path.Length);
-                foreach (string key in entry.Path)
-                {
-                    byte[] utf8 = Encoding.UTF8.GetBytes(key);
-                    writer.WriteVarint((ulong)utf8.Length);
-                    writer.WriteRawBytes(utf8);
-                }
-
-                writer.WriteVarint((ulong)entry.Class);
-                writer.WriteVarint((ulong)entry.Values);
-                writer.WriteVarint((ulong)entry.Place);
-                writer.WriteVarint(Zigzag(entry.Low));
-                writer.WriteVarint(Zigzag(entry.High));
-                writer.WriteVarint(
-                    (entry.NaNs ? 1UL : 0) | (entry.MinText is null ? 0 : 2UL) | (entry.MaxText is null ? 0 : 4UL) | (entry.Groups is null ? 0 : 8UL));
-                Text(ref writer, entry.MinText);
-                Text(ref writer, entry.MaxText);
-                Text(ref writer, entry.Groups);
-            }
-
-            return writer.WrittenSpan.ToArray();
+            Body(ref writer);
+            return ZstdRegion.Encode(Version, writer.WrittenSpan);
         }
         finally
         {
             writer.Dispose();
+        }
+    }
+
+    /// <summary>The rows, then each entry: its keys, class, count, place, bounds and texts.</summary>
+    private void Body(ref ProtoWriter writer)
+    {
+        writer.WriteVarint((ulong)Rows);
+        writer.WriteVarint((ulong)GroupRows);
+        writer.WriteVarint(Partial ? 1UL : 0);
+        writer.WriteVarint((ulong)Entries.Count);
+        foreach (PathEntry entry in Entries)
+        {
+            writer.WriteVarint((ulong)entry.Path.Length);
+            foreach (string key in entry.Path)
+            {
+                writer.WriteLengthPrefixedUtf8(key);
+            }
+
+            writer.WriteVarint((ulong)entry.Class);
+            writer.WriteVarint((ulong)entry.Values);
+            writer.WriteVarint((ulong)entry.Place);
+            writer.WriteVarint(Zigzag(entry.Low));
+            writer.WriteVarint(Zigzag(entry.High));
+            writer.WriteVarint(
+                (entry.NaNs ? 1UL : 0) | (entry.MinText is null ? 0 : 2UL) | (entry.MaxText is null ? 0 : 4UL) | (entry.Groups is null ? 0 : 8UL));
+            Text(ref writer, entry.MinText);
+            Text(ref writer, entry.MaxText);
+            Text(ref writer, entry.Groups);
         }
 
         static void Text(ref ProtoWriter writer, byte[]? text)

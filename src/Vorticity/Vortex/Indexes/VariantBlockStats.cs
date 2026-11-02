@@ -434,9 +434,17 @@ internal sealed class VariantBlockStats
     /// </summary>
     private static byte[] Encode(int count, ReadOnlySpan<byte> blocks)
     {
-        byte[] plain = new byte[Varint.Size((ulong)count) + blocks.Length];
-        blocks.CopyTo(plain.AsSpan(Varint.Write(plain, (ulong)count)));
-        return ZstdRegion.Encode(Version, plain);
+        int length = Varint.Size((ulong)count) + blocks.Length;
+        byte[] plain = Aggregating.WorkArrays.Rent<byte>(length);
+        try
+        {
+            blocks.CopyTo(plain.AsSpan(Varint.Write(plain, (ulong)count)));
+            return ZstdRegion.Encode(Version, plain.AsSpan(0, length));
+        }
+        finally
+        {
+            Aggregating.WorkArrays.Return(plain);
+        }
     }
 
     /// <summary>The blocks of a key of <paramref name="class"/> its region <paramref name="bytes"/> holds, or null when they do not decode.</summary>
@@ -574,9 +582,25 @@ internal sealed class VariantBlockStats
         /// <summary>
         /// The statistics that can prune among the file's <paramref name="blocks"/> blocks, within
         /// <paramref name="maxBytes"/> bytes, those that narrow their blocks least left out first; null
-        /// when none can.
+        /// when none can. The builder's last use: its streams' bytes go back to the process's shelf.
         /// </summary>
         internal VariantBlockStats? Build(int blocks, long maxBytes)
+        {
+            try
+            {
+                return Built(blocks, maxBytes);
+            }
+            finally
+            {
+                // The builder's last use: its streams' bytes back to the shelf, the regions kept copies of them.
+                foreach (KeyStream stream in _streams)
+                {
+                    stream.GiveBack();
+                }
+            }
+        }
+
+        private VariantBlockStats? Built(int blocks, long maxBytes)
         {
             List<(int Key, double Narrowing)> kept = [];
             for (int key = 0; key < keys.Count; key++)
@@ -744,7 +768,12 @@ internal sealed class VariantBlockStats
                 ReadOnlySpan<byte> rest = chunk.Body[chunk.FirstBytes..];
                 if (_length + 10 + rest.Length > _bytes.Length)
                 {
-                    Array.Resize(ref _bytes, Math.Max(_length + 10 + rest.Length, Math.Max(256, _bytes.Length * 2)));
+                    // The process's shelf's, at a power of two, which the next object's streams find again.
+                    int size = Math.Max(_length + 10 + rest.Length, Math.Max(256, _bytes.Length * 2));
+                    byte[] grown = Aggregating.ArrayShelf.Retained.Take<byte>((int)System.Numerics.BitOperations.RoundUpToPowerOf2((uint)size), zeroed: false);
+                    Body.CopyTo(grown);
+                    GiveBack();
+                    _bytes = grown;
                 }
 
                 Write((ulong)(firstBlock + chunk.First - _previous));
@@ -756,6 +785,16 @@ internal sealed class VariantBlockStats
 
             /// <summary>The blocks held, read back in order.</summary>
             internal BoundsReader Read() => new BoundsReader(Body, Count);
+
+            /// <summary>Gives the stream's bytes back to the process's shelf; the stream holds none after.</summary>
+            internal void GiveBack()
+            {
+                if (_bytes.Length > 0)
+                {
+                    Aggregating.ArrayShelf.Retained.Give(_bytes);
+                    _bytes = [];
+                }
+            }
 
             private void Write(ulong value) => _length += Varint.Write(_bytes.AsSpan(_length), value);
 

@@ -203,6 +203,43 @@ internal sealed class GranuleStats
         writer.WriteVarint((ulong)parts);
     }
 
+    /// <summary>The header <see cref="WriteHeader(ref ProtoWriter, int, bool, MeasureKind?)"/> writes, into <paramref name="into"/>, 30 bytes at most: its length.</summary>
+    internal static int WriteHeader(Span<byte> into, int granules, bool values, MeasureKind? measure)
+    {
+        int parts = (values ? HoldsValues : 0) | (measure is { } kind ? HoldsMeasure | ((int)kind << KindShift) : 0);
+        int at = Varint.Write(into, Version);
+        at += Varint.Write(into[at..], (ulong)granules);
+        return at + Varint.Write(into[at..], (ulong)parts);
+    }
+
+    /// <summary>The bytes <see cref="WriteDictionary{TValues}(ref ProtoWriter, TValues)"/> writes of <paramref name="values"/>.</summary>
+    internal static long DictionaryBytes<TValues>(TValues values)
+        where TValues : IValuesByNumber
+    {
+        long bytes = Varint.Size((ulong)values.Count);
+        for (int id = 0; id < values.Count; id++)
+        {
+            int length = values[id].Length;
+            bytes += Varint.Size((ulong)length) + length;
+        }
+
+        return bytes;
+    }
+
+    /// <summary>Writes <paramref name="values"/> as <see cref="WriteDictionary{TValues}(ref ProtoWriter, TValues)"/> does, into <paramref name="into"/>, which holds them.</summary>
+    internal static void WriteDictionary<TValues>(Span<byte> into, TValues values)
+        where TValues : IValuesByNumber
+    {
+        int at = Varint.Write(into, (ulong)values.Count);
+        for (int id = 0; id < values.Count; id++)
+        {
+            ReadOnlySpan<byte> value = values[id];
+            at += Varint.Write(into[at..], (ulong)value.Length);
+            value.CopyTo(into[at..]);
+            at += value.Length;
+        }
+    }
+
     /// <summary>Writes a granule's rows and nulls, in the first section.</summary>
     internal static void WriteRows(ref ProtoWriter writer, long rows, long nulls)
     {
@@ -236,12 +273,17 @@ internal sealed class GranuleStats
     }
 
     /// <summary>Writes each number's value, the values' dictionary, the last section, after the measure's.</summary>
-    internal static void WriteDictionary(ref ProtoWriter writer, byte[]?[] values)
+    internal static void WriteDictionary(ref ProtoWriter writer, byte[]?[] values) => WriteDictionary(ref writer, new ArrayValues(values));
+
+    /// <summary>Writes <paramref name="values"/>, by their numbers, as the dictionary of the values' section.</summary>
+    internal static void WriteDictionary<TValues>(ref ProtoWriter writer, TValues values)
+        where TValues : IValuesByNumber
     {
-        writer.WriteVarint((ulong)values.Length);
-        foreach (byte[]? value in values)
+        writer.WriteVarint((ulong)values.Count);
+        for (int id = 0; id < values.Count; id++)
         {
-            writer.WriteVarint((ulong)value!.Length);
+            ReadOnlySpan<byte> value = values[id];
+            writer.WriteVarint((ulong)value.Length);
             writer.WriteRawBytes(value);
         }
     }

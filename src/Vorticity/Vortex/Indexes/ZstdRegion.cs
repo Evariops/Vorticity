@@ -16,32 +16,34 @@ internal static class ZstdRegion
     /// <exception cref="InvalidOperationException">The body did not compress into the bound zstd gives it.</exception>
     internal static byte[] Encode(ulong version, ReadOnlySpan<byte> body)
     {
-        byte[] frame = new byte[ZstdCompressor.GetMaxCompressedLength(body.Length)];
-        ZstdCompressor encoder = Writing.ZstdEncoders.Rent();
-        int written;
+        // The frame compressed into a rented array at zstd's bound, then the region made once at its length: a region of
+        // each shredded key of each object of a consolidation made both new.
+        byte[] frame = Aggregating.WorkArrays.Rent<byte>(ZstdCompressor.GetMaxCompressedLength(body.Length));
         try
         {
-            if (encoder.Compress(body, frame, out _, out written) != OperationStatus.Done)
+            ZstdCompressor encoder = Writing.ZstdEncoders.Rent();
+            int written;
+            try
             {
-                throw new InvalidOperationException("A region did not compress into the bound zstd gives it.");
+                if (encoder.Compress(body, frame, out _, out written) != OperationStatus.Done)
+                {
+                    throw new InvalidOperationException("A region did not compress into the bound zstd gives it.");
+                }
             }
-        }
-        finally
-        {
-            Writing.ZstdEncoders.Return(encoder);
-        }
+            finally
+            {
+                Writing.ZstdEncoders.Return(encoder);
+            }
 
-        ProtoWriter writer = new ProtoWriter();
-        try
-        {
-            writer.WriteVarint(version);
-            writer.WriteVarint((ulong)body.Length);
-            writer.WriteRawBytes(frame.AsSpan(0, written));
-            return writer.WrittenSpan.ToArray();
+            byte[] region = new byte[Serialization.Varint.Size(version) + Serialization.Varint.Size((ulong)body.Length) + written];
+            int at = Serialization.Varint.Write(region, version);
+            at += Serialization.Varint.Write(region.AsSpan(at), (ulong)body.Length);
+            frame.AsSpan(0, written).CopyTo(region.AsSpan(at));
+            return region;
         }
         finally
         {
-            writer.Dispose();
+            Aggregating.WorkArrays.Return(frame);
         }
     }
 

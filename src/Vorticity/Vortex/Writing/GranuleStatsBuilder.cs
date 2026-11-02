@@ -1,7 +1,9 @@
 using System;
 using System.Buffers;
 using System.Collections.Generic;
+using System.Numerics;
 using System.Runtime.InteropServices;
+using System.Threading;
 using Vorticity.Aggregating;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
@@ -57,12 +59,11 @@ internal sealed class GranuleStatsBuilder : IndexBuilder
     // The values met in the open granule: each number's rows and the granule it was last met in, plus one; the numbers met.
     private int[] _rowsOf = [];
     private int[] _seenIn = [];
-    private int[] _met = new int[64];
+    private int[] _met = [];
     private int _metCount;
 
     // The open granule's measure, a record in StateWords' layout; the rows' entries, all of it.
     private readonly long[] _state;
-    private int[] _zeros = new int[1_024];
 
     // The open granule's histogram of the measure the plan reads, a sketch of GranuleHistograms.WrittenBits, its encoding,
     // and the histograms, written as granules close; null for a column the plan reads as no measure.
@@ -84,7 +85,7 @@ internal sealed class GranuleStatsBuilder : IndexBuilder
         _sheet = sheet;
         _plan = plan;
         _measure = plan.MeasureOf(field);
-        _histogram = _measure >= 0 ? new QuantileSketch(GranuleHistograms.WrittenBits) : null;
+        _histogram = _measure >= 0 ? new QuantileSketch(GranuleHistograms.WrittenBits, ArrayShelf.Retained) : null;
         _own = _measure < 0 ? OwnOf(dtype) : null;
         _measured = _measure >= 0 || _own is not null;
         _state = new long[_measured ? MeasureLayout.Words(Kind == MeasureKind.Float) : 0];
@@ -223,7 +224,7 @@ internal sealed class GranuleStatsBuilder : IndexBuilder
                 seenIn[id] = mark;
                 if (_metCount == _met.Length)
                 {
-                    Array.Resize(ref _met, _met.Length * 2);
+                    _met = Regrown(_met, Math.Max(64, _met.Length * 2));
                 }
 
                 _met[_metCount++] = id;
@@ -236,9 +237,55 @@ internal sealed class GranuleStatsBuilder : IndexBuilder
     /// <summary>Makes room for the values numbered up to <paramref name="id"/>.</summary>
     private void Grow(int id)
     {
-        int size = Math.Max(id + 1, Math.Max(64, _rowsOf.Length * 2));
-        Array.Resize(ref _rowsOf, size);
-        Array.Resize(ref _seenIn, size);
+        int size = (int)BitOperations.RoundUpToPowerOf2((uint)Math.Max(id + 1, Math.Max(64, _rowsOf.Length * 2)));
+        int old = _rowsOf.Length;
+        _rowsOf = Regrown(_rowsOf, size);
+        _seenIn = Regrown(_seenIn, size);
+        _rowsOf.AsSpan(old).Clear();
+        _seenIn.AsSpan(old).Clear();
+    }
+
+    /// <summary>
+    /// <paramref name="held"/>'s elements in an array of the process's shelf's of <paramref name="length"/>, a power of two,
+    /// <paramref name="held"/> given back: the arrays of the builders of every column and shredded key of every object
+    /// written, which made them anew, 22 MB of a consolidation of four hours of log records.
+    /// </summary>
+    private static T[] Regrown<T>(T[] held, int length)
+    {
+        T[] grown = ArrayShelf.Retained.Take<T>(length, zeroed: false);
+        held.CopyTo(grown, 0);
+        if (held.Length > 0)
+        {
+            ArrayShelf.Retained.Give(held);
+        }
+
+        return grown;
+    }
+
+    // Zeros, the entries of a granule's rows, which every builder reads and none writes.
+    private static int[] s_zeros = new int[8_192];
+
+    /// <summary><paramref name="count"/> zeros.</summary>
+    private static ReadOnlySpan<int> Zeros(int count)
+    {
+        int[] zeros = Volatile.Read(ref s_zeros);
+        if (zeros.Length < count)
+        {
+            zeros = new int[BitOperations.RoundUpToPowerOf2((uint)count)];
+            Volatile.Write(ref s_zeros, zeros);
+        }
+
+        return zeros.AsSpan(0, count);
+    }
+
+    /// <summary>Gives <paramref name="array"/> back to the process's shelf, once.</summary>
+    private static void Give<T>(ref T[] array)
+    {
+        if (array.Length > 0)
+        {
+            ArrayShelf.Retained.Give(array);
+            array = [];
+        }
     }
 
     /// <summary>Folds the measure's values of the batch's rows <c>[start, start + count)</c> into the open granule's record.</summary>
@@ -251,12 +298,7 @@ internal sealed class GranuleStatsBuilder : IndexBuilder
             return;
         }
 
-        if (_zeros.Length < count)
-        {
-            _zeros = new int[Math.Max(count, _zeros.Length * 2)];
-        }
-
-        ReadOnlySpan<int> entries = _zeros.AsSpan(0, count);
+        ReadOnlySpan<int> entries = Zeros(count);
         ReadOnlySpan<byte> valid = measure.Valid is { } flags ? flags.AsSpan(start, count) : default;
         ref long state = ref MemoryMarshal.GetArrayDataReference(_state);
         switch (measure.Kind)
@@ -342,8 +384,11 @@ internal sealed class GranuleStatsBuilder : IndexBuilder
 
         if (_ownValues.Length < count)
         {
-            _ownValues = new long[Math.Max(count, _ownValues.Length * 2)];
-            _ownValid = new byte[_ownValues.Length];
+            int size = (int)BitOperations.RoundUpToPowerOf2((uint)Math.Max(count, _ownValues.Length * 2));
+            Give(ref _ownValues);
+            Give(ref _ownValid);
+            _ownValues = ArrayShelf.Retained.Take<long>(size, zeroed: false);
+            _ownValid = ArrayShelf.Retained.Take<byte>(size, zeroed: false);
         }
 
         bool constant = node.Kind == CanonicalKind.Constant;
@@ -365,19 +410,14 @@ internal sealed class GranuleStatsBuilder : IndexBuilder
             flags[i] = valid.AllInvalid ? (byte)0 : valid.AllValid || valid.IsValid(row) ? (byte)1 : (byte)0;
         }
 
-        if (_zeros.Length < count)
-        {
-            _zeros = new int[Math.Max(count, _zeros.Length * 2)];
-        }
-
         ref long state = ref MemoryMarshal.GetArrayDataReference(_state);
         if (signed)
         {
-            ColumnCountsBuilder.FoldSigned(ref state, _zeros.AsSpan(0, count), into, flags);
+            ColumnCountsBuilder.FoldSigned(ref state, Zeros(count), into, flags);
         }
         else
         {
-            ColumnCountsBuilder.FoldUnsigned(ref state, _zeros.AsSpan(0, count), into, flags);
+            ColumnCountsBuilder.FoldUnsigned(ref state, Zeros(count), into, flags);
         }
     }
 
@@ -426,7 +466,9 @@ internal sealed class GranuleStatsBuilder : IndexBuilder
                 _singleRows += rows;
             }
 
-            Span<long> counted = listed <= 64 ? stackalloc long[listed] : new long[listed];
+            // A granule lists 256 values at most (GranuleStats.ListedValues): on the stack, where past 64 each granule made its array.
+            Span<long> listing = stackalloc long[GranuleStats.ListedValues];
+            Span<long> counted = listing[..listed];
             for (int i = 0; i < met.Length; i++)
             {
                 int id = met[i];
@@ -476,63 +518,63 @@ internal sealed class GranuleStatsBuilder : IndexBuilder
     {
         End();
         _measured = _measured && (_own is not null || _plan.Measures[_measure].Live);
-        byte[]?[]? values = _values && _listing > 0 && _sheet.Counting ? _sheet.ValuesByNumber() : null;
-        if (values is not null && Array.Exists(values, value => value is null))
-        {
-            values = null;
-        }
-
-        if ((values is null && !_measured && !KeepsNulls) || _row != rows || _granules == 0)
+        bool listed = _values && _listing > 0 && _sheet.Counting && _sheet.KeptEveryValue;
+        if ((!listed && !_measured && !KeepsNulls) || _row != rows || _granules == 0)
         {
             return null;
         }
 
-        ProtoWriter writer = new ProtoWriter(_rowsSection.WrittenSpan.Length + _valuesSection.WrittenSpan.Length + _measureSection.WrittenSpan.Length + 16);
-        try
+        // Laid out once at its length, the sections copied in: through a writer rented at their sum, then copied out, the
+        // statistics of every column and key of every object came twice, 21 MB of a consolidation of log records.
+        Span<byte> header = stackalloc byte[32];
+        header = header[..GranuleStats.WriteHeader(header, _granules, listed, _measured ? Kind : null)];
+        ColumnSheetBuilder.Values values = new ColumnSheetBuilder.Values(_sheet, null, _sheet.Numbered);
+        ReadOnlySpan<byte> rowsPart = _rowsSection.WrittenSpan;
+        ReadOnlySpan<byte> valuesPart = listed ? _valuesSection.WrittenSpan : default;
+        ReadOnlySpan<byte> measurePart = _measured ? _measureSection.WrittenSpan : default;
+        long dictionary = listed ? GranuleStats.DictionaryBytes(values) : 0;
+        byte[] statistics = new byte[checked((int)(header.Length + rowsPart.Length + valuesPart.Length + measurePart.Length + dictionary))];
+        Span<byte> into = statistics;
+        into = Copied(header, into);
+        into = Copied(rowsPart, into);
+        into = Copied(valuesPart, into);
+        into = Copied(measurePart, into);
+
+        if (listed)
         {
-            GranuleStats.WriteHeader(ref writer, _granules, values is not null, _measured ? Kind : null);
-            writer.WriteRawBytes(_rowsSection.WrittenSpan);
-            if (values is not null)
-            {
-                writer.WriteRawBytes(_valuesSection.WrittenSpan);
-            }
-
-            if (_measured)
-            {
-                writer.WriteRawBytes(_measureSection.WrittenSpan);
-            }
-
-            if (values is not null)
-            {
-                GranuleStats.WriteDictionary(ref writer, values);
-            }
-
-            return (writer.WrittenSpan.ToArray(), _measured && _histogram is not null ? Histograms() : null, values is null ? 0 : _listedRows, values is null ? 0 : _singleRows);
+            GranuleStats.WriteDictionary(into, values);
         }
-        finally
-        {
-            writer.Dispose();
-        }
+
+        return (statistics, _measured && _histogram is not null ? Histograms() : null, listed ? _listedRows : 0, listed ? _singleRows : 0);
     }
 
     /// <summary>The measure's histograms over the granules, as <see cref="GranuleHistograms"/> encodes them.</summary>
+    /// <summary>Copies <paramref name="part"/> to the start of <paramref name="into"/>: what of <paramref name="into"/> follows it.</summary>
+    private static Span<byte> Copied(scoped ReadOnlySpan<byte> part, Span<byte> into)
+    {
+        part.CopyTo(into);
+        return into[part.Length..];
+    }
+
     private byte[] Histograms()
     {
-        ProtoWriter writer = new ProtoWriter(_histogramSection.WrittenSpan.Length + 16);
-        try
-        {
-            GranuleHistograms.WriteHeader(ref writer, _granules);
-            writer.WriteRawBytes(_histogramSection.WrittenSpan);
-            return writer.WrittenSpan.ToArray();
-        }
-        finally
-        {
-            writer.Dispose();
-        }
+        Span<byte> header = stackalloc byte[32];
+        header = header[..GranuleHistograms.WriteHeader(header, _granules)];
+        ReadOnlySpan<byte> section = _histogramSection.WrittenSpan;
+        byte[] histograms = new byte[header.Length + section.Length];
+        header.CopyTo(histograms);
+        section.CopyTo(histograms.AsSpan(header.Length));
+        return histograms;
     }
 
     public override void Dispose()
     {
+        Give(ref _rowsOf);
+        Give(ref _seenIn);
+        Give(ref _met);
+        Give(ref _ownValues);
+        Give(ref _ownValid);
+        _histogram?.Release();
         _rowsSection.Dispose();
         _valuesSection.Dispose();
         _measureSection.Dispose();

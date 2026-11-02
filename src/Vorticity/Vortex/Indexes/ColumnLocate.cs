@@ -277,8 +277,9 @@ internal sealed class ColumnLocate : IValueGranules
     /// <paramref name="granules"/> at <paramref name="starts"/>; a value in more than <paramref name="most"/> of them lies
     /// everywhere. Each value's granules are given as the shorter of a list and a map.
     /// </summary>
-    internal static byte[] ToBytes(
-        long rows, int granuleRows, IReadOnlyList<byte[]> values, ReadOnlySpan<int> starts, ReadOnlySpan<int> granules, int most)
+    internal static byte[] ToBytes<TValues>(
+        long rows, int granuleRows, TValues values, ReadOnlySpan<int> starts, ReadOnlySpan<int> granules, int most)
+        where TValues : IValuesByNumber
     {
         int count = (int)((rows + granuleRows - 1) / granuleRows);
         int mapBytes = (count + 7) / 8;
@@ -289,15 +290,15 @@ internal sealed class ColumnLocate : IValueGranules
             writer.WriteVarint((ulong)rows);
             writer.WriteVarint((ulong)granuleRows);
             writer.WriteVarint((ulong)values.Count);
-            byte[] previous = [];
+            ReadOnlySpan<byte> previous = default;
             byte[] map = new byte[mapBytes];
             for (int v = 0; v < values.Count; v++)
             {
-                byte[] value = values[v];
-                int shared = value.AsSpan().CommonPrefixLength(previous);
+                ReadOnlySpan<byte> value = values[v];
+                int shared = value.CommonPrefixLength(previous);
                 writer.WriteVarint((ulong)shared);
                 writer.WriteVarint((ulong)(value.Length - shared));
-                writer.WriteRawBytes(value.AsSpan(shared));
+                writer.WriteRawBytes(value[shared..]);
                 previous = value;
 
                 ReadOnlySpan<int> own = granules[starts[v]..starts[v + 1]];

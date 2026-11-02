@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using Vorticity.Serialization;
 using Vorticity.Serialization.Protobuf;
 using Vorticity.Types;
 
@@ -194,37 +195,49 @@ internal sealed class ColumnMarks
     /// <summary>The region's bytes.</summary>
     internal byte[] ToBytes()
     {
-        ProtoWriter writer = new ProtoWriter();
-        try
+        // Measured, then written at its length: through a writer grown by doubling from a few hundred bytes, then copied
+        // out, the marks of a column of an object rented each length in turn, 15 MB of a consolidation of four hours of
+        // log records.
+        long length = Varint.Size(Version) + Varint.Size((ulong)GranuleRows) + Varint.Size((ulong)Chunks.Length);
+        foreach (ChunkGeometry chunk in Chunks)
         {
-            writer.WriteVarint(Version);
-            writer.WriteVarint((ulong)GranuleRows);
-
-            writer.WriteVarint((ulong)Chunks.Length);
-            foreach (ChunkGeometry chunk in Chunks)
+            length += Varint.Size((ulong)chunk.Tree.Length) + chunk.Tree.Length + Varint.Size((ulong)chunk.Marks.Length);
+            foreach (ChunkMark mark in chunk.Marks)
             {
-                writer.WriteVarint((ulong)chunk.Tree.Length);
-                writer.WriteRawBytes(chunk.Tree.Span);
-                writer.WriteVarint((ulong)chunk.Marks.Length);
-                foreach (ChunkMark mark in chunk.Marks)
+                length += Varint.Size((ulong)mark.Buffer) + Varint.Size((ulong)mark.Starts.Length);
+                long before = 0;
+                foreach (long start in mark.Starts)
                 {
-                    writer.WriteVarint((ulong)mark.Buffer);
-                    writer.WriteVarint((ulong)mark.Starts.Length);
-                    long before = 0;
-                    foreach (long start in mark.Starts)
-                    {
-                        writer.WriteVarint((ulong)(start - before));
-                        before = start;
-                    }
+                    length += Varint.Size((ulong)(start - before));
+                    before = start;
                 }
             }
+        }
 
-            return writer.WrittenSpan.ToArray();
-        }
-        finally
+        byte[] bytes = new byte[checked((int)length)];
+        int at = Varint.Write(bytes, Version);
+        at += Varint.Write(bytes.AsSpan(at), (ulong)GranuleRows);
+        at += Varint.Write(bytes.AsSpan(at), (ulong)Chunks.Length);
+        foreach (ChunkGeometry chunk in Chunks)
         {
-            writer.Dispose();
+            at += Varint.Write(bytes.AsSpan(at), (ulong)chunk.Tree.Length);
+            chunk.Tree.Span.CopyTo(bytes.AsSpan(at));
+            at += chunk.Tree.Length;
+            at += Varint.Write(bytes.AsSpan(at), (ulong)chunk.Marks.Length);
+            foreach (ChunkMark mark in chunk.Marks)
+            {
+                at += Varint.Write(bytes.AsSpan(at), (ulong)mark.Buffer);
+                at += Varint.Write(bytes.AsSpan(at), (ulong)mark.Starts.Length);
+                long before = 0;
+                foreach (long start in mark.Starts)
+                {
+                    at += Varint.Write(bytes.AsSpan(at), (ulong)(start - before));
+                    before = start;
+                }
+            }
         }
+
+        return bytes;
     }
 
     /// <summary>

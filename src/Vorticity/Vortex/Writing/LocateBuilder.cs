@@ -1,5 +1,6 @@
 using System;
-using System.Collections.Generic;
+using System.Numerics;
+using Vorticity.Aggregating;
 using Vorticity.Arrays;
 using Vorticity.Indexes;
 
@@ -14,7 +15,9 @@ namespace Vorticity.Writing;
 /// Like a sheet and a column's counts, what an object says of its columns: no index budget weighs it, its own rule does.
 /// A row costs a look at its value's mark; a value met in a granule, a pair of eight bytes. A column whose values make more
 /// than <see cref="MostPairsAGranule"/> pairs a granule is no column a filter skips granules by: its index is given up,
-/// and its pairs with it. At the end, a value that lies in more than three granules in four lies everywhere.
+/// and its pairs with it. At the end, a value that lies in more than three granules in four lies everywhere. Its arrays are
+/// the process's shelf's, at powers of two, given back with the builder: a consolidation writes a builder for each column
+/// and shredded key of each object, whose arrays a shelf lending by length finds again only at such lengths.
 /// </remarks>
 internal sealed class LocateBuilder : IndexBuilder
 {
@@ -22,6 +25,9 @@ internal sealed class LocateBuilder : IndexBuilder
     internal const int MostPairsAGranule = 256;
 
     private const int None = -1;
+
+    // The pairs the first granules make room for at once.
+    private const int FirstPairs = 1_024;
 
     private readonly ColumnSheetBuilder _sheet;
 
@@ -35,8 +41,8 @@ internal sealed class LocateBuilder : IndexBuilder
     private int[] _last = [];
 
     // The pairs, a value's as a list through _next: each pair's granule.
-    private int[] _granules = new int[1_024];
-    private int[] _next = new int[1_024];
+    private int[] _granules = [];
+    private int[] _next = [];
     private int _pairs;
 
     /// <param name="sheet">The column's sheet, fed first, which numbers its rows' values.</param>
@@ -94,17 +100,20 @@ internal sealed class LocateBuilder : IndexBuilder
     internal override void Abandon(string reason)
     {
         base.Abandon(reason);
-        (_seenIn, _first, _last, _granules, _next) = ([], [], [], [], []);
+        GiveBack();
     }
+
+    public override void Dispose() => GiveBack();
 
     /// <summary>Makes room for the values numbered up to <paramref name="id"/>.</summary>
     private void Grow(int id)
     {
-        int size = Math.Max(id + 1, Math.Max(64, _seenIn.Length * 2));
+        int size = (int)BitOperations.RoundUpToPowerOf2((uint)Math.Max(id + 1, Math.Max(64, _seenIn.Length * 2)));
         int old = _seenIn.Length;
-        Array.Resize(ref _seenIn, size);
-        Array.Resize(ref _first, size);
-        Array.Resize(ref _last, size);
+        _seenIn = Regrown(_seenIn, size);
+        _first = Regrown(_first, size);
+        _last = Regrown(_last, size);
+        _seenIn.AsSpan(old).Clear();
         _first.AsSpan(old).Fill(None);
         _last.AsSpan(old).Fill(None);
     }
@@ -114,8 +123,9 @@ internal sealed class LocateBuilder : IndexBuilder
     {
         if (_pairs == _granules.Length)
         {
-            Array.Resize(ref _granules, _pairs * 2);
-            Array.Resize(ref _next, _pairs * 2);
+            int size = Math.Max(FirstPairs, _pairs * 2);
+            _granules = Regrown(_granules, size);
+            _next = Regrown(_next, size);
         }
 
         int pair = _pairs++;
@@ -139,45 +149,88 @@ internal sealed class LocateBuilder : IndexBuilder
     /// </summary>
     internal byte[]? Finish(long rows, int granuleRows)
     {
-        if (Abandoned is not null || !_sheet.Counting || _rows != rows || rows == 0 || granuleRows <= 0)
+        if (Abandoned is not null || !_sheet.Counting || _rows != rows || rows == 0 || granuleRows <= 0 || !_sheet.KeptEveryValue)
         {
             return null;
         }
 
-        byte[]?[] values = _sheet.ValuesByNumber();
-        if (Array.Exists(values, value => value is null))
-        {
-            return null;
-        }
-
-        // The values in the order of their bytes, each with its granules, ascending as they were met.
+        // The values in the order of their bytes, read where the sheet keeps them, each with its granules, ascending as they
+        // were met.
+        int values = _sheet.Numbered;
         int granules = (int)((rows + granuleRows - 1) / granuleRows);
         int most = granules - (granules / 4);
-        int[] order = new int[values.Length];
-        byte[][] keys = new byte[values.Length][];
-        for (int id = 0; id < values.Length; id++)
+        int[] order = Taken(values);
+        int[] starts = Taken(values + 1);
+        int[] placed = Taken(_pairs);
+        try
         {
-            (order[id], keys[id]) = (id, values[id]!);
-        }
-
-        Array.Sort(keys, order, Comparer<byte[]>.Create(static (left, right) => left.AsSpan().SequenceCompareTo(right)));
-        int[] starts = new int[values.Length + 1];
-        int[] placed = new int[_pairs];
-        int at = 0;
-        bool spares = false;
-        for (int v = 0; v < order.Length; v++)
-        {
-            starts[v] = at;
-            int id = order[v];
-            for (int pair = id < _first.Length ? _first[id] : None; pair != None; pair = _next[pair])
+            Span<int> sorted = order.AsSpan(0, values);
+            for (int id = 0; id < values; id++)
             {
-                placed[at++] = _granules[pair];
+                sorted[id] = id;
             }
 
-            spares |= at - starts[v] <= most;
+            sorted.Sort(new ColumnSheetBuilder.ByValue(_sheet));
+            int at = 0;
+            bool spares = false;
+            for (int v = 0; v < values; v++)
+            {
+                starts[v] = at;
+                int id = sorted[v];
+                for (int pair = id < _first.Length ? _first[id] : None; pair != None; pair = _next[pair])
+                {
+                    placed[at++] = _granules[pair];
+                }
+
+                spares |= at - starts[v] <= most;
+            }
+
+            starts[values] = at;
+            return spares
+                ? ColumnLocate.ToBytes(rows, granuleRows, new ColumnSheetBuilder.Values(_sheet, order, values), starts.AsSpan(0, values + 1), placed.AsSpan(0, at), most)
+                : null;
+        }
+        finally
+        {
+            ArrayShelf.Retained.Give(order);
+            ArrayShelf.Retained.Give(starts);
+            ArrayShelf.Retained.Give(placed);
+        }
+    }
+
+    /// <summary>An array of the shelf's of <paramref name="length"/> elements at least, at a power of two.</summary>
+    private static int[] Taken(int length) =>
+        ArrayShelf.Retained.Take<int>((int)BitOperations.RoundUpToPowerOf2((uint)Math.Max(length, 1)), zeroed: false);
+
+    /// <summary><paramref name="held"/>'s elements in an array of the shelf's of <paramref name="length"/>, <paramref name="held"/> given back.</summary>
+    private static int[] Regrown(int[] held, int length)
+    {
+        int[] grown = ArrayShelf.Retained.Take<int>(length, zeroed: false);
+        held.CopyTo(grown, 0);
+        if (held.Length > 0)
+        {
+            ArrayShelf.Retained.Give(held);
         }
 
-        starts[values.Length] = at;
-        return spares ? ColumnLocate.ToBytes(rows, granuleRows, keys, starts, placed.AsSpan(0, at), most) : null;
+        return grown;
+    }
+
+    /// <summary>Gives every array back to the shelf, once.</summary>
+    private void GiveBack()
+    {
+        Give(ref _seenIn);
+        Give(ref _first);
+        Give(ref _last);
+        Give(ref _granules);
+        Give(ref _next);
+    }
+
+    private static void Give(ref int[] array)
+    {
+        if (array.Length > 0)
+        {
+            ArrayShelf.Retained.Give(array);
+            array = [];
+        }
     }
 }
