@@ -430,7 +430,7 @@ public sealed class QueryMemoryBudget
     /// collector's limit; a container's, a quarter of it, applies past the native memory too
     /// (<see cref="Available"/>).
     /// </summary>
-    private static long ProcessLimit()
+    internal static long ProcessLimit()
     {
         long collector = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes;
         long limit = collector - (collector / 8);

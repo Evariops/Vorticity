@@ -150,8 +150,10 @@ read are served from it. A file shorter than that window is read entirely by its
 each segment once, and a segment that spans several batches is shared by them rather than read
 again. A `SegmentCache` works across scans: the first scan of the session reads the 45 segments and
 finds none in the cache, and a second scan of the same file reads nothing because all 45 come from
-the cache. When every read is a request to a remote service, that is the reason to give the session
-a cache.
+the cache. A session given none shares the process's, `SegmentCache.Shared`, a sixteenth of the
+memory the process may use and 1 GiB at most; give it one to size what it keeps, or one of 0 bytes to
+keep nothing. When every read is a request to a remote service, the cache is what spares a question
+asked again its round trips.
 
 ## Watch out
 

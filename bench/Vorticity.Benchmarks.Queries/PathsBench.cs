@@ -163,10 +163,27 @@ internal static partial class PathsBench
 
         /// <summary>
         /// The bytes of the segment cache of the session a question is asked warm by (<see cref="VortexSessionOptions.SegmentCache"/>,
-        /// <c>--segment-cache-mb</c>), as a query node keeps the segments it read; zero for none, the default, which has every
-        /// warm round read its rows again.
+        /// <c>--segment-cache-mb</c>), as a query node keeps the segments it read; zero for none, which has every warm round read
+        /// its rows again; negative, the default, for the session's own default, the process's cache.
         /// </summary>
-        internal long SegmentCacheBytes { get; init; }
+        internal long SegmentCacheBytes { get; init; } = -1;
+
+        /// <summary>
+        /// The cache a session of the bench is given, null for the process's; a cold round empties the process's first
+        /// (<see cref="Cold"/>).
+        /// </summary>
+        internal SegmentCache? SegmentCache() => SegmentCacheBytes < 0 ? null : new SegmentCache(SegmentCacheBytes);
+
+        /// <summary>What the header says of the segment cache.</summary>
+        internal string SegmentCacheSaid => SegmentCacheBytes switch
+        {
+            < 0 => $"segments kept in the process's {Vorticity.SegmentCache.Shared.CapacityBytes >> 20} MiB",
+            0 => "no segment cache",
+            _ => $"segments kept in {SegmentCacheBytes >> 20} MiB",
+        };
+
+        /// <summary>Empties the process's segment cache, which the sessions of the bench share unless given their own, before a cold round.</summary>
+        internal static void Cold() => Vorticity.SegmentCache.Shared.Clear();
 
         /// <summary>Whether the store keeps each object it reads open (<see cref="HeldFileObjectStore"/>) rather than open and close its file at every read.</summary>
         internal bool KeepHandles { get; init; }
@@ -265,7 +282,7 @@ internal static partial class PathsBench
             $"{settings.Latency} ms a request{(settings.LatencyP99 > settings.Latency ? $" at the median, {settings.LatencyP99} at the 99th percentile" : string.Empty)}, " +
             $"{(settings.LinkBitsPerSecond > 0 ? $"a link of {settings.LinkBitsPerSecond / 1e9:0.##} Gb/s" : "no limit on the link")}{(settings.BytesPerSecond > 0 ? $", {settings.BytesPerSecond / 1e6:0} MB/s a read" : string.Empty)}" +
             $"{(settings.ReadsPerSecondPerPrefix > 0 ? $", {settings.ReadsPerSecondPerPrefix:0} reads a second a prefix" : string.Empty)}; " +
-            $"warm is the median of {settings.Rounds} ({settings.RowsRounds} for rows){(settings.SegmentCacheBytes > 0 ? $", segments kept in {settings.SegmentCacheBytes >> 20} MiB" : string.Empty)}; processor time from cycles at {ProcessCpu.GigaHertz:F2} GHz; {label}");
+            $"warm is the median of {settings.Rounds} ({settings.RowsRounds} for rows), {settings.SegmentCacheSaid}; processor time from cycles at {ProcessCpu.GigaHertz:F2} GHz; {label}");
         Console.WriteLine(
             $"{"question",-62} {"path",-8} {"",-4} {"dop",3} {"ms",9} {"cpu ms",9} {"alloc MB",9} {"priv MB",8} {"ws MB",8} {"req",6} {"steps",6} {"MB",8} {"states",9} {"rows",11} {"groups",7}");
 
@@ -504,11 +521,13 @@ internal static partial class PathsBench
             string cache = Path.Combine(settings.Store, "cache", Guid.NewGuid().ToString("N"));
             try
             {
+                Settings.Cold();
                 await using VortexSession session = VortexSession.Create(o =>
                 {
                     o.MaxDegreeOfParallelism = degree;
                     o.MaxConcurrentReads = settings.MaxReads > 0 ? settings.MaxReads : o.MaxConcurrentReads;
                     o.SynopsisCache = new SynopsisCache(cache, 8L << 30);
+                    o.SegmentCache = settings.SegmentCache();
                 });
                 await using VortexDataset dataset = await VortexDataset.OpenAsync(store, new DatasetOptions { Session = session });
                 Measured again = await MeasureAsync(store, dataset, question, options, !settings.NoDigest);
@@ -582,12 +601,13 @@ internal static partial class PathsBench
         string cache = Path.Combine(settings.Store, "cache", Guid.NewGuid().ToString("N"));
         try
         {
+            Settings.Cold();
             await using VortexSession session = VortexSession.Create(o =>
             {
                 o.MaxDegreeOfParallelism = degree;
                 o.MaxConcurrentReads = settings.MaxReads > 0 ? settings.MaxReads : o.MaxConcurrentReads;
                 o.SynopsisCache = new SynopsisCache(cache, 8L << 30);
-                o.SegmentCache = settings.SegmentCacheBytes > 0 ? new SegmentCache(settings.SegmentCacheBytes) : null;
+                o.SegmentCache = settings.SegmentCache();
             });
             await using VortexDataset dataset = await VortexDataset.OpenAsync(store, new DatasetOptions { Session = session });
             using TextWriter? trace = settings.TraceReads is { } traced ? TextWriter.Synchronized(new StreamWriter(traced, append: true)) : null;

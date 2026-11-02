@@ -2088,6 +2088,7 @@ Vorticity:     field byte value__
 Vorticity: sealed class Vorticity.SegmentCache
 Vorticity:     ctor SegmentCache(long)
 Vorticity:     method void Clear()
+Vorticity:     property SegmentCache Shared { get; }
 Vorticity:     property long CapacityBytes { get; }
 Vorticity:     property long HeldBytes { get; }
 Vorticity:     property long Hits { get; }

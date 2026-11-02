@@ -55,13 +55,18 @@ public sealed class VortexSessionOptions
     }
 
     /// <summary>
-    /// Segments kept across scans, one budget for every file of the session whose reads do I/O;
-    /// null keeps none.
+    /// Segments kept across scans, one budget for every file of the session whose reads do I/O. Null,
+    /// the default, shares the process's, <see cref="SegmentCache.Shared"/>, unless the session has a
+    /// <see cref="Keyring"/>; a cache of 0 bytes keeps none.
     /// </summary>
     /// <remarks>
     /// A file does I/O when it is opened from an <see cref="ISegmentSource"/> that reads, or from a
     /// path while <see cref="MapFiles"/> is false. A mapped file, or bytes in memory, have nothing to
     /// keep: their segments are read where they lie.
+    /// <para>
+    /// A session with a keyring keeps the plaintext of the sealed files it reads in its cache: it
+    /// shares none unless given one, which its host chooses to share or not.
+    /// </para>
     /// </remarks>
     public SegmentCache? SegmentCache
     {
@@ -302,6 +307,14 @@ public sealed class VortexSessionOptions
     /// default: a library opens no connection and reads no credential on a host that did not ask.
     /// </summary>
     public ObjectStoreRegistry ObjectStores { get; } = new ObjectStoreRegistry();
+
+    /// <summary>The cache the session's reads go through: the one given, the process's when none is and the session has no keyring, none for a cache of 0 bytes.</summary>
+    internal SegmentCache? ReadCache => _segmentCache switch
+    {
+        null => _keyring is null ? SegmentCache.Shared : null,
+        { CapacityBytes: 0 } => null,
+        { } given => given,
+    };
 
     /// <summary>The engine's pool: the aligned pool's own, or the shared one.</summary>
     internal AlignedBufferPool EnginePool => _memoryPool is AlignedMemoryPool aligned ? aligned.Inner : AlignedBufferPool.Shared;
@@ -775,7 +788,7 @@ public sealed class VortexSession : IAsyncDisposable
             Volatile.Write(ref _disposed, 1);
         }
 
-        Options.SegmentCache?.Clear();
+        ClearSegmentCache();
         Options.SynopsisCache?.Dispose();
         Mappings?.Clear();
         Keys?.Dispose();
@@ -789,6 +802,15 @@ public sealed class VortexSession : IAsyncDisposable
     }
 
     internal void Detach(VortexFile file) => _open.TryRemove(file, out _);
+
+    /// <summary>Drops the segments of the cache given to the session; the process's, which other sessions share, keeps theirs.</summary>
+    private void ClearSegmentCache()
+    {
+        if (Options.SegmentCache is { } given && !ReferenceEquals(given, SegmentCache.Shared))
+        {
+            given.Clear();
+        }
+    }
 
     /// <summary>Counts <paramref name="file"/> among the files the session has open, or closes it when the session was disposed while it opened.</summary>
     /// <param name="file">The file just opened.</param>
@@ -815,7 +837,7 @@ public sealed class VortexSession : IAsyncDisposable
 
         // What the file gives back as it closes, a mapping it took over, goes with the rest.
         await file.DisposeAsync().ConfigureAwait(false);
-        Options.SegmentCache?.Clear();
+        ClearSegmentCache();
         Mappings?.Clear();
         ThrowIfDisposed();
     }

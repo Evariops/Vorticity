@@ -6,8 +6,8 @@ using Vorticity.Buffers;
 namespace Vorticity;
 
 /// <summary>
-/// Segments kept across the scans of a session, least recently used first out, within one budget in
-/// bytes for every file of the session.
+/// Segments kept across scans, least recently used first out, within one budget in bytes for every
+/// file of the sessions that share it.
 /// </summary>
 /// <remarks>
 /// A scan reads each segment it needs once whether or not a cache is set; the cache is what makes a
@@ -36,6 +36,17 @@ public sealed class SegmentCache
         ArgumentOutOfRangeException.ThrowIfNegative(capacityBytes);
         CapacityBytes = capacityBytes;
     }
+
+    /// <summary>
+    /// The process's cache, which every session that gives none shares (<see cref="VortexSessionOptions.SegmentCache"/>):
+    /// a sixteenth of the memory the process may use, 1 GiB at most.
+    /// </summary>
+    /// <remarks>
+    /// Its segments are keyed by the reader that read them, as any cache's: a file opened by one session finds nothing
+    /// another kept, except the objects of one store a dataset reads, whose bytes a key names once. A file that closes
+    /// takes its segments with it.
+    /// </remarks>
+    public static SegmentCache Shared => Process.Cache;
 
     /// <summary>The budget in bytes.</summary>
     public long CapacityBytes { get; }
@@ -257,6 +268,12 @@ public sealed class SegmentCache
     }
 
     private readonly record struct Key(object Source, long Offset, int Length);
+
+    // Made at its first use, so that a process whose sessions each give their own makes none.
+    private static class Process
+    {
+        internal static readonly SegmentCache Cache = new SegmentCache(Math.Min(1L << 30, QueryMemoryBudget.ProcessLimit() / 16));
+    }
 
     /// <summary>A segment kept, in the order of use and in its source's chain.</summary>
     private sealed class Entry(Key key, SegmentOwner owner, VortexBuffer buffer)

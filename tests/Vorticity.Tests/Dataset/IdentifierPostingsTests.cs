@@ -172,7 +172,12 @@ public sealed partial class IdentifierPostingsTests
         {
             await using MemoryObjectStore inner = new MemoryObjectStore();
             await using CountingObjectStore store = new CountingObjectStore(inner);
-            await using VortexSession session = VortexSession.Create(options => options.SynopsisCache = new SynopsisCache(directory, 64 << 20));
+            // No segment cache, which would answer the warm lookup's blocks too: what the synopsis cache spares alone.
+            await using VortexSession session = VortexSession.Create(options =>
+            {
+                options.SynopsisCache = new SynopsisCache(directory, 64 << 20);
+                options.SegmentCache = new SegmentCache(0);
+            });
             await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Request.Schema, new DatasetOptions
             {
                 Session = session,

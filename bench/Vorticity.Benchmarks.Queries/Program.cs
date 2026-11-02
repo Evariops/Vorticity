@@ -200,7 +200,7 @@ Dictionary<string, (string Help, Func<Task<int>> Run)> micros = new Dictionary<s
         NoDigest = args.Contains("--no-digest"),
         AllocTypes = args.Contains("--alloc-types"),
         MaxReads = Option(args, "--max-reads", 0),
-        SegmentCacheBytes = Option(args, "--segment-cache-mb", 0) * (1L << 20),
+        SegmentCacheBytes = Option(args, "--segment-cache-mb", -1) is int mb and >= 0 ? mb * (1L << 20) : -1,
         KeepHandles = args.Contains("--keep-handles"),
         WarmSeconds = args.Contains("--warm") ? double.Parse(Text(args, "--warm")!, CultureInfo.InvariantCulture) : 3,
         QpsSeconds = args.Contains("--qps") ? double.Parse(Text(args, "--qps")!, CultureInfo.InvariantCulture) : 0,

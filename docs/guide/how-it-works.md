@@ -37,7 +37,7 @@ plan: 14 of 123 blocks live, 13 segments, 211004 bytes; ran: 100000 rows, 14 blo
 ## The session
 
 Everything runs inside a `VortexSession`. It owns one memory pool that every batch, segment and
-builder buffer comes from, an optional segment cache shared by all its files, a bound on the reads
+builder buffer comes from, a segment cache shared by all its files (the process's unless it is given one), a bound on the reads
 in flight, a degree of parallelism, and the extension types it knows. A session is thread-safe and
 meant to be shared by the whole process. `VortexSession.Default`, which `VortexFile.OpenAsync(path)`
 and the samples use, is immutable and takes no cores it was not given: its parallelism is 1. See

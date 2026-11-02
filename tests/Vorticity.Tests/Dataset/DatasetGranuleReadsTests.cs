@@ -385,6 +385,7 @@ public sealed partial class DatasetGranuleReadsTests
         Row[] rows = [.. Enumerable.Range(0, 600_000).Select(i => new Row(random.Next(0, 7), $"svc-{random.Next(0, 50):D2}", Start.AddMilliseconds(i * 37L), sequences[i], random.NextDouble()))];
         VortexDataset dataset = await VortexDataset.CreateAsync(store, Row.Schema, new DatasetOptions
         {
+            Session = Uncached.Session,
             Layout = new DatasetLayout
             {
                 Partition = LayoutValue.Column(nameof(Row.At)).Truncate(partition),

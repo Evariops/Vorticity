@@ -36,7 +36,7 @@ A `VortexSession` holds what would otherwise be process-wide state, so a host de
 | option | default | what it governs |
 |---|---|---|
 | `MemoryPool` | `AlignedMemoryPool.Shared` | every batch and builder buffer, and the segments read by a source of yours. The file sources of the library read into `AlignedMemoryPool.Shared` |
-| `SegmentCache` | none | segments kept across scans, one budget for every file of the session whose reads do I/O |
+| `SegmentCache` | the process's, `SegmentCache.Shared`: a sixteenth of the memory the process may use, 1 GiB at most; none for a session with a `Keyring` | segments kept across scans, one budget for every file of the sessions that share it whose reads do I/O. A cache of 0 bytes keeps none |
 | `MaxConcurrentReads` | 128 | reads in flight across every scan of every file of the session whose reads do I/O |
 | `MaxDegreeOfParallelism` | 1 | how many chunks a scan decodes and aggregates at once, and how many threads a writer uses |
 | `IndexCacheBytes` | 64 MiB | decoded index runs kept per open file |

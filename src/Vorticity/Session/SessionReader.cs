@@ -42,7 +42,7 @@ internal sealed class SessionReader : ISegmentReader, Indexes.IIndexRegionReader
     internal static ISegmentReader Wrap(ISegmentReader inner, VortexSession session) =>
         inner is MemorySegmentSource or MemoryMappedSegmentSource or SessionReader
             ? inner
-            : new SessionReader(inner, session.ReadGate, session.Options.SegmentCache);
+            : new SessionReader(inner, session.ReadGate, session.Options.ReadCache);
 
     /// <summary>The store's reader under the session's, and under the synopsis cache's when there is one.</summary>
     internal static ISegmentReader Unwrap(ISegmentReader reader)

@@ -60,6 +60,9 @@ public sealed partial class DatasetKeyAbsenceProofsTests
     /// <summary>
     /// Asks the first <paramref name="questions"/> questions of <paramref name="store"/>, through the granules and through the
     /// rows: the answers LINQ's, every unit answered by its granules, which read <paramref name="least"/> times fewer bytes.
+    /// Without a segment cache: the rows' second pass reads again the segments of the filter's key its first read, which a
+    /// cache serves (question 0 of the Bloom filter's: 1.17 MB through the rows, 1.44 through the granules, where without
+    /// one they read 2.28 and 2.04).
     /// </summary>
     private static async Task AskedAsync(CountingObjectStore store, Call[] calls, int questions, int least)
     {
@@ -72,7 +75,7 @@ public sealed partial class DatasetKeyAbsenceProofsTests
             long[] bytes = new long[2];
             foreach (bool synopses in (bool[])[false, true])
             {
-                await using VortexDataset fresh = await VortexDataset.OpenAsync(store, new DatasetOptions { ContentsObjectBytes = 0, SheetObjectBytes = 0, CostProfile = CostProfile.Memory }, Ct);
+                await using VortexDataset fresh = await VortexDataset.OpenAsync(store, new DatasetOptions { Session = Uncached.Session, ContentsObjectBytes = 0, SheetObjectBytes = 0, CostProfile = CostProfile.Memory }, Ct);
                 store.Reset();
                 Vorticity.Aggregation question = Asked(fresh.Scan<Call>().With(new ScanOptions { UseSynopses = synopses }), q, user, other);
                 string[] answers = [.. (await question.As<GroupCount>().ToRecordsAsync(Ct).ToListAsync(Ct)).Select(static a => $"{a.Key}:{a.Count}")];

@@ -130,13 +130,14 @@ internal static partial class PathsBench
         VortexSession? session = null;
         try
         {
+            Settings.Cold();
             session = VortexSession.Create(o =>
             {
                 o.MaxConcurrentReads = settings.MaxReads > 0 ? settings.MaxReads : o.MaxConcurrentReads;
                 o.SynopsisCache = phase == Phase.NoCache ? null
                     : sharedRoot is { } root ? SynopsisCache.OpenShared(root, 8L << 30)
                     : new SynopsisCache(cache, 8L << 30);
-                o.SegmentCache = settings.SegmentCacheBytes > 0 ? new SegmentCache(settings.SegmentCacheBytes) : null;
+                o.SegmentCache = settings.SegmentCache();
             });
 
             // A store, as remote as the profile says, and --handles handles a set the questions read, which the clients share in
