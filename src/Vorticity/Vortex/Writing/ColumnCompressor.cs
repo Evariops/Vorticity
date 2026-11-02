@@ -185,7 +185,7 @@ internal readonly struct ColumnPlan
     /// </remarks>
     internal DistinctTable? Table { get; init; }
 
-    /// <summary>With <see cref="Table"/>, how many codes are the chunk's entries.</summary>
+    /// <summary>How many entries a dictionary has: codes of <see cref="Table"/>, or rows of <see cref="Gather"/>.</summary>
     internal int Entries { get; init; }
 
     /// <summary>How many rows the chunk has: how much of <see cref="Codes"/> is a code.</summary>
@@ -193,6 +193,12 @@ internal readonly struct ColumnPlan
 
     /// <summary>Whether <see cref="Codes"/> came from the pool and the encoder owes it back.</summary>
     internal bool CodesRented { get; init; }
+
+    /// <summary>Whether a dictionary's <see cref="Gather"/> came from the pool, longer than its entries, and the encoder owes it back.</summary>
+    internal bool GatherRented { get; init; }
+
+    /// <summary>A dictionary's first row of each entry, walked for: <see cref="Entries"/> of <see cref="Gather"/>.</summary>
+    internal ReadOnlySpan<int> EntryRows => Gather.AsSpan(0, Math.Min(Entries, Gather.Length));
 
     /// <summary>
     /// The rows to gather as the values child: one per run for <see cref="ColumnScheme.RunEnd"/>,
@@ -229,17 +235,20 @@ internal readonly struct ColumnPlan
     internal ReadOnlySpan<int> RunEnds => Codes.AsSpan(0, RunCount);
 
     internal static ColumnPlan Dictionary(int[] firstOccurrences, int[] codes) =>
-        new ColumnPlan(ColumnScheme.Dict, firstOccurrences, codes) { Rows = codes.Length };
+        new ColumnPlan(ColumnScheme.Dict, firstOccurrences, codes) { Rows = codes.Length, Entries = firstOccurrences.Length };
 
     /// <summary>
-    /// The same, over a <paramref name="codes"/> array rented for <paramref name="rows"/> entries
-    /// and longer than them, which the encoder hands back once it has narrowed it into the arena.
+    /// The same, over arrays rented longer than they are used: <paramref name="firstOccurrences"/> for
+    /// <paramref name="entries"/> entries, which the encoder hands back once it has gathered the values, and
+    /// <paramref name="codes"/> for <paramref name="rows"/> rows, once it has narrowed them into the arena.
     /// </summary>
-    internal static ColumnPlan RentedDictionary(int[] firstOccurrences, int[] codes, int rows) =>
+    internal static ColumnPlan RentedDictionary(int[] firstOccurrences, int entries, int[] codes, int rows) =>
         new ColumnPlan(ColumnScheme.Dict, firstOccurrences, codes)
         {
             Rows = rows,
+            Entries = entries,
             CodesRented = true,
+            GatherRented = true,
         };
 
     internal static ColumnPlan ForFsst(FsstPlan plan) =>
@@ -286,6 +295,11 @@ internal readonly struct ColumnPlan
             WorkArrays.Return(Codes);
         }
 
+        if (GatherRented)
+        {
+            WorkArrays.Return(Gather);
+        }
+
         if (RunsRented)
         {
             WorkArrays.Return(Gather);
@@ -327,8 +341,8 @@ internal readonly struct ColumnPlan
             $"dict entries={Entries} rows={Rows} codes={Fingerprint(Table.Codes[..Rows]):x} " +
             $"first={Fingerprint(Table.FirstRows[..Entries]):x}",
         ColumnScheme.Dict =>
-            $"dict entries={Gather.Length} rows={Rows} codes={Fingerprint(Codes.AsSpan(0, Rows)):x} " +
-            $"first={Fingerprint(Gather):x}",
+            $"dict entries={EntryRows.Length} rows={Rows} codes={Fingerprint(Codes.AsSpan(0, Rows)):x} " +
+            $"first={Fingerprint(EntryRows):x}",
         ColumnScheme.BitPacked => Describe(BitPack.GetValueOrDefault()),
         ColumnScheme.Sequence =>
             $"sequence base={Sequence.GetValueOrDefault().BaseBits} step={Sequence.GetValueOrDefault().Step}",
@@ -1576,12 +1590,11 @@ internal static class ColumnCompressor
                 return ColumnPlan.Canonical;
             }
 
-            // The entries become a real array: there are `distinct` of them, and the writer keeps
-            // them past the point the rentals go back. The codes do not. There is one per row, a
-            // full row vector, and the only thing the writer does with them is narrow them into an
-            // arena buffer, so the rental travels with the plan and is handed back there.
+            // The rentals travel with the plan and are handed back by the writer: the first rows once it has gathered
+            // the values from them, the codes once it has narrowed them into an arena buffer. A copy of the first rows
+            // at their length made a tenth of what a consolidation of log records allocated.
             kept = true;
-            return ColumnPlan.RentedDictionary(firstRows.AsSpan(0, distinct).ToArray(), codes, length)
+            return ColumnPlan.RentedDictionary(firstRows, distinct, codes, length)
                 with { PredictedBytes = encoded };
         }
         finally
@@ -1589,9 +1602,9 @@ internal static class ColumnCompressor
             if (!kept)
             {
                 WorkArrays.Return(codes);
+                WorkArrays.Return(firstRows);
             }
 
-            WorkArrays.Return(firstRows);
             WorkArrays.Return(chain);
             WorkArrays.Return(buckets);
         }
@@ -2508,7 +2521,7 @@ internal static class ColumnCompressor
             return dictionary;
         }
 
-        int entries = dictionary.Table is not null ? dictionary.Entries : dictionary.Gather.Length;
+        int entries = dictionary.Entries;
         long codes = CodeBytes(length, entries, Allows(target, "fastlanes.bitpacked"));
         long values = dictionary.PredictedBytes - codes;
         long granules = length / granuleRows;

@@ -400,7 +400,13 @@ internal static class ArrayBlobWriter
         // underneath: compressed rather than written flat.
         int values = plan.Table is not null
             ? plan.Table.BuildValues(arena, arena.GetNode(nodeIndex), plan.Entries)
-            : CanonicalFilter.Apply(arena, nodeIndex, plan.Scheme == ColumnScheme.RunEnd ? plan.RunStarts : plan.Gather);
+            : CanonicalFilter.Apply(arena, nodeIndex, plan.Scheme == ColumnScheme.RunEnd ? plan.RunStarts : plan.EntryRows);
+
+        // The values are gathered: the first rows a walked dictionary rented go back.
+        if (plan.Scheme == ColumnScheme.Dict && plan.GatherRented)
+        {
+            WorkArrays.Return(plan.Gather);
+        }
 
         if (plan.Scheme == ColumnScheme.RunEnd)
         {
