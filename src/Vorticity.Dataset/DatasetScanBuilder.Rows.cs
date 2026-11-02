@@ -1,4 +1,5 @@
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using System.Threading;
@@ -1272,44 +1273,62 @@ internal sealed partial class DatasetScanBuilder
         // projection may read it whole: put back together row by row, a user's records over a week of log records spent
         // three quarters of their cycles there.
         IReadOnlyDictionary<string, string[]>? keys = FilterKeys(filter);
-        for (int p = 0; p < parts.Length; p++)
+        try
         {
-            ScanBuilder scan = Of(file, held, filter, filtered, canonical: false, within: parts[p])
-                .WithCompaction(false).WithGranuleMask(granted).WithGranules(GeometryOf(held)).WithVariantKeys(keys);
-            await foreach (RecordBatch batch in scan.ExecuteAsync().WithCancellation(cancellationToken).ConfigureAwait(false))
+            for (int p = 0; p < parts.Length; p++)
             {
-                ReadOnlySpan<ulong> words = batch.SelectionWords;
-                keptGranules += PredicatePages.Note(words, batch.StartRow, batch.RowCount, granuleRows, granuleBits);
-                keptBlocks += PredicatePages.Note(words, batch.StartRow, batch.RowCount, TwoPhaseReads.BlockRows, blockBits);
-                kept += batch.SelectedRows;
-                placed &= kept <= blocks;
-                if (placed && batch.SelectedRows > 0)
+                ScanBuilder scan = Of(file, held, filter, filtered, canonical: false, within: parts[p])
+                    .WithCompaction(false).WithGranuleMask(granted).WithGranules(GeometryOf(held)).WithVariantKeys(keys);
+                await foreach (RecordBatch batch in scan.ExecuteAsync().WithCancellation(cancellationToken).ConfigureAwait(false))
                 {
-                    if (kept > places.Length)
+                    ReadOnlySpan<ulong> words = batch.SelectionWords;
+                    keptGranules += PredicatePages.Note(words, batch.StartRow, batch.RowCount, granuleRows, granuleBits);
+                    keptBlocks += PredicatePages.Note(words, batch.StartRow, batch.RowCount, TwoPhaseReads.BlockRows, blockBits);
+                    kept += batch.SelectedRows;
+                    placed &= kept <= blocks;
+                    if (placed && batch.SelectedRows > 0)
                     {
-                        // Made at the first kept row, for an object that keeps one.
-                        Array.Resize(ref places, (int)Math.Min(blocks, Math.Max(Math.Max(places.Length * 2L, 1_024), kept)));
+                        if (kept > places.Length)
+                        {
+                            // Rented at the first kept row, for an object that keeps one, and grown from the pool.
+                            long[] grown = ArrayPool<long>.Shared.Rent((int)Math.Min(blocks, Math.Max(Math.Max(places.Length * 2L, 1_024), kept)));
+                            places.AsSpan(0, count).CopyTo(grown);
+                            Returned(places);
+                            places = grown;
+                        }
+
+                        count = Append(words, batch.StartRow, batch.RowCount, places, count);
                     }
 
-                    count = Append(words, batch.StartRow, batch.RowCount, places, count);
+                    if (!TwoPhaseReads.Spares(keptBlocks, blocks, widest, joined) && (joined > 0 || keptGranules * 2L > granules))
+                    {
+                        return null;
+                    }
                 }
 
-                if (!TwoPhaseReads.Spares(keptBlocks, blocks, widest, joined) && (joined > 0 || keptGranules * 2L > granules))
+                // The first part, read whole, says what the rest would.
+                if (p == 0 && parts.Length > 1
+                    && !TwoPhaseReads.ByPlaces(keptBlocks, parts[0].Length / TwoPhaseReads.BlockRows) && keptGranules * 2L > parts[0].Length / granuleRows)
                 {
                     return null;
                 }
             }
 
-            // The first part, read whole, says what the rest would.
-            if (p == 0 && parts.Length > 1
-                && !TwoPhaseReads.ByPlaces(keptBlocks, parts[0].Length / TwoPhaseReads.BlockRows) && keptGranules * 2L > parts[0].Length / granuleRows)
-            {
-                return null;
-            }
+            bool byPlaces = placed && TwoPhaseReads.ByPlaces(keptBlocks, blocks);
+            return new FirstPass(kept, granuleBits, byPlaces, byPlaces ? places[..count] : []);
+        }
+        finally
+        {
+            Returned(places);
         }
 
-        bool byPlaces = placed && TwoPhaseReads.ByPlaces(keptBlocks, blocks);
-        return new FirstPass(kept, granuleBits, byPlaces, byPlaces ? places[..count] : []);
+        static void Returned(long[] rented)
+        {
+            if (rented.Length > 0)
+            {
+                ArrayPool<long>.Shared.Return(rented);
+            }
+        }
     }
 
     /// <summary>The bytes of the widest column the scan reads of the object <paramref name="held"/> besides <paramref name="fields"/>, as its table of contents says.</summary>
