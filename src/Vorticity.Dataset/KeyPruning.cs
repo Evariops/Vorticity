@@ -244,26 +244,28 @@ internal sealed class KeyPruning
     /// </remarks>
     internal List<(int First, int End)> Granules(GranuleKeys keys, ReadOnlySpan<byte> partition)
     {
-        lock (_keptLock)
+        // Made at the first object asked, a pruning that asks none holding nothing; the dictionary its own lock.
+        Dictionary<GranuleKeys, (byte[] Partition, (int First, int End)[] Ranges)> known = Volatile.Read(ref _kept)
+            ?? Interlocked.CompareExchange(ref _kept, new(ReferenceEqualityComparer.Instance), null) ?? _kept!;
+        lock (known)
         {
-            if (_kept.TryGetValue(keys, out (byte[] Partition, (int First, int End)[] Ranges) found) && partition.SequenceEqual(found.Partition))
+            if (known.TryGetValue(keys, out (byte[] Partition, (int First, int End)[] Ranges) found) && partition.SequenceEqual(found.Partition))
             {
                 return [.. found.Ranges];
             }
         }
 
         List<(int First, int End)> kept = Search(keys, partition);
-        lock (_keptLock)
+        lock (known)
         {
-            _kept[keys] = (partition.ToArray(), [.. kept]);
+            known[keys] = (partition.ToArray(), [.. kept]);
         }
 
         return kept;
     }
 
     // The granules each object's index keeps, by the index, with the partition they were searched under.
-    private readonly Dictionary<GranuleKeys, (byte[] Partition, (int First, int End)[] Ranges)> _kept = new(ReferenceEqualityComparer.Instance);
-    private readonly Lock _keptLock = new Lock();
+    private Dictionary<GranuleKeys, (byte[] Partition, (int First, int End)[] Ranges)>? _kept;
 
     /// <summary>The searches of an object's index this pruning made, which an object asked again does not repeat.</summary>
     internal int Searches => _searches;

@@ -127,27 +127,32 @@ public sealed partial class VortexFile : IIndexHost
     /// <summary>The variant directory of column <paramref name="field"/> for <paramref name="paths"/> this file kept, if any.</summary>
     internal bool TryGetVariantDirectory(int field, string paths, out Indexes.VariantDirectory? directory)
     {
-        lock (_indexLock)
+        directory = null;
+        if (Volatile.Read(ref _variantDirectories) is not { } kept)
         {
-            directory = null;
-            return _variantDirectories is { } kept && kept.TryGetValue((field, paths), out directory);
+            return false;
+        }
+
+        lock (kept)
+        {
+            return kept.TryGetValue((field, paths), out directory);
         }
     }
 
     /// <summary>Keeps <paramref name="directory"/>, the variant directory of column <paramref name="field"/> for <paramref name="paths"/>, while there is room.</summary>
     internal void KeepVariantDirectory(int field, string paths, Indexes.VariantDirectory? directory)
     {
-        lock (_indexLock)
+        // Made at the first directory kept, a file whose questions read none holding nothing for it; the dictionary its own lock.
+        Dictionary<(int Field, string Paths), Indexes.VariantDirectory?> kept = Volatile.Read(ref _variantDirectories)
+            ?? Interlocked.CompareExchange(ref _variantDirectories, [], null) ?? _variantDirectories!;
+        lock (kept)
         {
-            Dictionary<(int Field, string Paths), Indexes.VariantDirectory?> kept = _variantDirectories ??= [];
             if (kept.Count < VariantDirectoriesKept)
             {
                 kept.TryAdd((field, paths), directory);
             }
         }
     }
-
-    private readonly Lock _indexLock = new Lock();
 
     /// <summary>
     /// The decoded runs this file keeps for its cursors, created on first use and bounded by
