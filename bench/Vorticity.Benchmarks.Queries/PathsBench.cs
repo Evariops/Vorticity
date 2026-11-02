@@ -146,6 +146,9 @@ internal static partial class PathsBench
 
         internal double LoopSeconds { get; init; }
 
+        /// <summary>Whether the questions read with no synopsis cache (<c>--no-synopsis-cache</c>), for a comparison of what the cache costs warm.</summary>
+        internal bool NoSynopsisCache { get; init; }
+
         /// <summary>How long to ask the question cold again and again, each by a handle and a cache of its own, for a profiler; zero for no loop.</summary>
         internal double LoopColdSeconds { get; init; }
 
@@ -585,14 +588,7 @@ internal static partial class PathsBench
         }
         while (Stopwatch.GetTimestamp() < compiledBy);
 
-        // And the JIT's recompilations in the background done: no method compiled for a tenth of a second, two seconds at most.
-        for (int calm = 0, waited = 0; calm < 2 && waited < 20; waited++)
-        {
-            long compiled = System.Runtime.JitInfo.GetCompiledMethodCount();
-            await Task.Delay(100);
-            calm = System.Runtime.JitInfo.GetCompiledMethodCount() == compiled ? calm + 1 : 0;
-        }
-
+        await JitCalmAsync();
         remote.Latency = TimeSpan.FromMilliseconds(settings.Latency);
         remote.LatencyP99 = TimeSpan.FromMilliseconds(settings.LatencyP99);
         remote.ReadsPerSecondPerPrefix = settings.ReadsPerSecondPerPrefix;
@@ -606,7 +602,7 @@ internal static partial class PathsBench
             {
                 o.MaxDegreeOfParallelism = degree;
                 o.MaxConcurrentReads = settings.MaxReads > 0 ? settings.MaxReads : o.MaxConcurrentReads;
-                o.SynopsisCache = new SynopsisCache(cache, 8L << 30);
+                o.SynopsisCache = settings.NoSynopsisCache ? null : new SynopsisCache(cache, 8L << 30);
                 o.SegmentCache = settings.SegmentCache();
             });
             await using VortexDataset dataset = await VortexDataset.OpenAsync(store, new DatasetOptions { Session = session });
@@ -706,6 +702,17 @@ internal static partial class PathsBench
             catch (IOException)
             {
             }
+        }
+    }
+
+    /// <summary>Waits for the JIT's recompilations in the background to end: no method compiled for a tenth of a second, two seconds at most.</summary>
+    private static async Task JitCalmAsync()
+    {
+        for (int calm = 0, waited = 0; calm < 2 && waited < 20; waited++)
+        {
+            long compiled = System.Runtime.JitInfo.GetCompiledMethodCount();
+            await Task.Delay(100);
+            calm = System.Runtime.JitInfo.GetCompiledMethodCount() == compiled ? calm + 1 : 0;
         }
     }
 

@@ -185,6 +185,17 @@ internal static partial class PathsBench
                 }
             }
 
+            // Then each in turn, untimed, for as long as --warm says, and the JIT's recompilations done: a phase timed right after
+            // one ask of each ran their code at the JIT's first tier at its start, where the phase after it did not, 266
+            // questions a second warm against 366 with no synopsis cache, which costs a question 1 to 2 % (2026-11-02).
+            long warmUntil = Stopwatch.GetTimestamp() + (long)(settings.WarmSeconds * Stopwatch.Frequency);
+            for (int turn = 0; Stopwatch.GetTimestamp() < warmUntil; turn++)
+            {
+                Question question = questions[turn % questions.Count];
+                await AskOnceAsync(question, sets[builtOf(question)].Datasets[0]);
+            }
+
+            await JitCalmAsync();
             foreach ((FileObjectStore _, CountingObjectStore store, VortexDataset[] _) in sets.Values)
             {
                 store.Reset();
