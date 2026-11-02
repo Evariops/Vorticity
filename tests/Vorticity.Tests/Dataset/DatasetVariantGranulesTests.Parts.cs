@@ -6,6 +6,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 using Vorticity.Dataset;
+using Vorticity.Indexes;
 using Xunit;
 
 namespace Vorticity.Tests.Dataset;
@@ -36,5 +37,43 @@ public sealed partial class DatasetVariantGranulesTests
         long decoded = scan.Counters.ValuesDecoded;
         Console.WriteLine($"PARTS: {decoded} values decoded for {calls.Length / 6} calls of one service, {calls.Length} in all");
         Assert.True(decoded < calls.Length / 2, $"{decoded} values decoded for a sixth of {calls.Length} rows");
+    }
+
+    /// <summary>
+    /// An object's variant directory asked again for the same paths: the one its file kept, nothing read; asked for other
+    /// paths, read again and kept apart, each answering for its own paths.
+    /// </summary>
+    [Fact]
+    public async Task AFileKeepsTheVariantDirectoryAQuestionReadForItsPaths()
+    {
+        await using MemoryObjectStore memory = new MemoryObjectStore();
+        await using CountingObjectStore store = new CountingObjectStore(memory);
+        _ = await WrittenAsync(store);
+        await using VortexDataset dataset = await VortexDataset.OpenAsync(store, new DatasetOptions { ContentsObjectBytes = 0, SheetObjectBytes = 0 }, Ct);
+        int attributes = dataset.Snapshot.Schema.DType.IndexOfField(nameof(Call.Attributes));
+        byte[][][] code = [[System.Text.Encoding.UTF8.GetBytes("code")]];
+        byte[][][] route = [[System.Text.Encoding.UTF8.GetBytes("route")]];
+        int objects = 0;
+        await foreach (PositionedObject held in dataset.ScanBuilder().ObjectsAsync(Ct))
+        {
+            await using ObjectLease lease = await dataset.RentAsync(held.Entry, Ct);
+            (VariantDirectory? first, int read, _) = await VariantDirectory.ReadAsync(lease.File, attributes, code, Ct);
+            if (first is null)
+            {
+                continue;
+            }
+
+            objects++;
+            Assert.Equal(1, read);
+            (VariantDirectory? again, int readAgain, long bytesAgain) = await VariantDirectory.ReadAsync(lease.File, attributes, [[.. code[0]]], Ct);
+            Assert.Same(first, again);
+            Assert.Equal((0, 0L), (readAgain, bytesAgain));
+            (VariantDirectory? other, int readOther, _) = await VariantDirectory.ReadAsync(lease.File, attributes, route, Ct);
+            Assert.NotNull(other);
+            Assert.NotSame(first, other);
+            Assert.Equal(1, readOther);
+        }
+
+        Assert.True(objects > 0);
     }
 }

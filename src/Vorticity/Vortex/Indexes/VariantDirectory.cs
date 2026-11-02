@@ -761,6 +761,12 @@ internal sealed class VariantDirectory
         VortexFile file, int field, IReadOnlyList<byte[][]>? wanted, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(file);
+        string paths = KeyOf(wanted);
+        if (file.TryGetVariantDirectory(field, paths, out VariantDirectory? kept))
+        {
+            return (kept, 0, 0);
+        }
+
         IndexDirectory? directory = await file.ReadIndexDirectoryAsync(cancellationToken).ConfigureAwait(false);
         if (directory is null)
         {
@@ -779,10 +785,34 @@ internal sealed class VariantDirectory
             int slot = requests.Add(new Vorticity.Serialization.Schemas.SegmentSpec(region.Offset, region.Length, region.AlignmentExponent, 0, 0));
             await file.Segments.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
             ReadOnlySpan<byte> bytes = requests.GetBuffer(slot).Span;
-            return (region.Holds(bytes) ? From(bytes, wanted) : null, 1, region.Length);
+            VariantDirectory? read = region.Holds(bytes) ? From(bytes, wanted) : null;
+            file.KeepVariantDirectory(field, paths, read);
+            return (read, 1, region.Length);
         }
 
         return (null, 0, 0);
+    }
+
+    /// <summary>The paths <paramref name="wanted"/> names, as the key a file keeps their directory under: each key's text, a unit apart, each path a record apart; every path for null.</summary>
+    private static string KeyOf(IReadOnlyList<byte[][]>? wanted)
+    {
+        if (wanted is null)
+        {
+            return "*";
+        }
+
+        StringBuilder key = new StringBuilder();
+        foreach (byte[][] path in wanted)
+        {
+            foreach (byte[] step in path)
+            {
+                key.Append(Encoding.UTF8.GetString(step)).Append('\u001f');
+            }
+
+            key.Append('\u001e');
+        }
+
+        return key.ToString();
     }
 
     /// <summary>The decimal digits of <paramref name="value"/>, not negative.</summary>

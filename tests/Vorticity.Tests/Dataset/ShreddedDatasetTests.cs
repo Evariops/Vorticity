@@ -105,12 +105,17 @@ public sealed partial class ShreddedDatasetTests
             await levels.Scan<Event>().Where(r => r.Attributes["deploy"].AsString() == "v1").CountAsync(Ct),
             await clustered.Scan<Event>().Where(r => r.Attributes["deploy"].AsString() == "v1").CountAsync(Ct));
 
-        // Two of the three objects lack the key: each read its directory, one region, and none of its blocks.
-        ScanPlan plan = await clustered.Scan<Event>().Where(r => r.Attributes.Has("deploy")).ExplainAsync(analyze: true, Ct);
+        // Two of the three objects lack the key: each read its directory, one region, and none of its blocks, by a handle
+        // that asked nothing yet; the handle that asked keeps the directories, and prunes the same blocks reading none.
+        await using VortexDataset fresh = await VortexDataset.OpenAsync(clusteredStore, new DatasetOptions { ContentsObjectBytes = 0 }, Ct);
+        ScanPlan plan = await fresh.Scan<Event>().Where(r => r.Attributes.Has("deploy")).ExplainAsync(analyze: true, Ct);
         PruningStep step = Assert.Single(plan.Pruning, s => s.Structure == "path directory");
         Assert.Equal(3, step.SegmentsRead);
         Assert.InRange(step.BlocksPruned, 1, plan.Blocks - 1);
         Assert.Equal(plan.Blocks - step.BlocksPruned, plan.LiveBlocks);
+        ScanPlan again = await clustered.Scan<Event>().Where(r => r.Attributes.Has("deploy")).ExplainAsync(analyze: true, Ct);
+        PruningStep kept = Assert.Single(again.Pruning, s => s.Structure == "path directory");
+        Assert.Equal((0, step.BlocksPruned, plan.LiveBlocks), (kept.SegmentsRead, kept.BlocksPruned, again.LiveBlocks));
 
         // A bound no object reaches refutes them all: what is read is their directories alone.
         ScanPlan none = await clustered.Scan<Event>().Where(r => r.Attributes["status"].AsInt64() > 10_000).ExplainAsync(analyze: true, Ct);

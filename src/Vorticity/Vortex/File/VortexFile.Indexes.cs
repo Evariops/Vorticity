@@ -118,6 +118,37 @@ public sealed partial class VortexFile : IIndexHost
 
     private IndexState? _indexState;
 
+    // The variant directories questions read of this file, by column and the paths asked of it, at most VariantDirectoriesKept:
+    // a question asked each object's directory again, its region checked, decompressed and walked, a tenth of a question of a
+    // feature flag by service (2026-11-02). Each is a few paths' entries, immutable.
+    private const int VariantDirectoriesKept = 32;
+    private Dictionary<(int Field, string Paths), Indexes.VariantDirectory?>? _variantDirectories;
+
+    /// <summary>The variant directory of column <paramref name="field"/> for <paramref name="paths"/> this file kept, if any.</summary>
+    internal bool TryGetVariantDirectory(int field, string paths, out Indexes.VariantDirectory? directory)
+    {
+        lock (_indexLock)
+        {
+            directory = null;
+            return _variantDirectories is { } kept && kept.TryGetValue((field, paths), out directory);
+        }
+    }
+
+    /// <summary>Keeps <paramref name="directory"/>, the variant directory of column <paramref name="field"/> for <paramref name="paths"/>, while there is room.</summary>
+    internal void KeepVariantDirectory(int field, string paths, Indexes.VariantDirectory? directory)
+    {
+        lock (_indexLock)
+        {
+            Dictionary<(int Field, string Paths), Indexes.VariantDirectory?> kept = _variantDirectories ??= [];
+            if (kept.Count < VariantDirectoriesKept)
+            {
+                kept.TryAdd((field, paths), directory);
+            }
+        }
+    }
+
+    private readonly Lock _indexLock = new Lock();
+
     /// <summary>
     /// The decoded runs this file keeps for its cursors, created on first use and bounded by
     /// <see cref="VortexReadOptions.IndexCacheBytes"/>.

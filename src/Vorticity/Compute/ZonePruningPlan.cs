@@ -113,11 +113,12 @@ internal static class ZonePruningPlan
         // The path directories first among the indexes: one small read refutes the whole file, or the
         // groups of its rows that hold no path the filter asks for.
         List<RowRange>? pathRanges = null;
+        bool pathsConsulted = false;
         int pathSegments = 0;
         long pathBytes = 0;
         if (indexes && blockRows > 0 && VariantColumns(filter) is { } variants)
         {
-            (bool refuted, pathRanges, pathSegments, pathBytes) = await RefutedByPathsAsync(file, filter, variants, cancellationToken).ConfigureAwait(false);
+            (bool refuted, pathRanges, pathSegments, pathBytes, pathsConsulted) = await RefutedByPathsAsync(file, filter, variants, cancellationToken).ConfigureAwait(false);
             Scanning.ScanCounters.Note(metrics, pathSegments, pathBytes);
             if (refuted)
             {
@@ -136,7 +137,7 @@ internal static class ZonePruningPlan
         Dictionary<string, List<(string Key, Types.Variants.PathClass Class)>>? keysRead = indexes && blockRows > 0 ? KeysRead(filter) : null;
         if (zones is null && blooms is null && locating is null && pathRanges is null && keysRead is null)
         {
-            if (pathSegments > 0)
+            if (pathsConsulted)
             {
                 steps?.Add(new PruningStep("path directory", 0, pathSegments, pathBytes));
             }
@@ -164,7 +165,8 @@ internal static class ZonePruningPlan
             steps?.Add(new PruningStep("zone map", before - Counted(live, scope), segments, bytes));
         }
 
-        if (pathSegments > 0)
+        // Whether a directory answered, not whether one was read: a file keeps the directories its questions read (2026-11-02).
+        if (pathsConsulted)
         {
             before = Counted(live, scope);
             foreach (RowRange range in pathRanges ?? [])
@@ -352,7 +354,7 @@ internal static class ZonePruningPlan
     /// <paramref name="file"/> matches <paramref name="filter"/>; when they do not, the rows of the runs
     /// of the groups they prove hold none, or null; and the segments and bytes read for them.
     /// </summary>
-    private static async ValueTask<(bool Refuted, List<RowRange>? Ranges, int Segments, long Bytes)> RefutedByPathsAsync(
+    private static async ValueTask<(bool Refuted, List<RowRange>? Ranges, int Segments, long Bytes, bool Consulted)> RefutedByPathsAsync(
         VortexFile file, VortexExpr filter, List<string> columns, CancellationToken cancellationToken)
     {
         Dictionary<string, Indexes.VariantDirectory>? directories = null;
@@ -379,12 +381,12 @@ internal static class ZonePruningPlan
 
         if (directories is null)
         {
-            return (false, null, segments, bytes);
+            return (false, null, segments, bytes, false);
         }
 
         if (!Indexes.VariantDirectory.MayMatch(filter, directories))
         {
-            return (true, null, segments, bytes);
+            return (true, null, segments, bytes, true);
         }
 
         // Group by group of rows, when every directory names the same groups of the file's rows.
@@ -398,7 +400,7 @@ internal static class ZonePruningPlan
 
         if (groupRows <= 0)
         {
-            return (false, null, segments, bytes);
+            return (false, null, segments, bytes, true);
         }
 
         int groups = (int)((rows + groupRows - 1) / groupRows);
@@ -425,7 +427,7 @@ internal static class ZonePruningPlan
             (ranges ??= []).Add(new RowRange(start, end));
         }
 
-        return (false, ranges, segments, bytes);
+        return (false, ranges, segments, bytes, true);
     }
 
     /// <summary>
