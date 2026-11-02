@@ -1,5 +1,7 @@
 using System;
 using System.Numerics;
+using System.Runtime.CompilerServices;
+using Vorticity.Compute;
 
 namespace Vorticity.Aggregating;
 
@@ -24,6 +26,9 @@ internal sealed class DistributionSlot<TValue, TResult> : SketchSlot<QuantileSke
     private TValue[] _values = [];
     private MaskCache _rows;
     private ulong[] _clip = [];
+
+    // The values a filter keeps of a range, compacted.
+    private TValue[] _picked = [];
 
     // The bytes the sketches grew by, and the values and states stepped into them, over the slot's life: what a value
     // costs them on average once their windows densify and widen, where a sparse bucket's twelve bytes left the budget
@@ -67,6 +72,15 @@ internal sealed class DistributionSlot<TValue, TResult> : SketchSlot<QuantileSke
         _stepped += rows;
     }
 
+    /// <summary>Lets the sketches go, and gives the slot's buffers back to the process's shelf, which the next query's take.</summary>
+    internal override void Release()
+    {
+        base.Release();
+        Scratch.Return(ref _values);
+        Scratch.Return(ref _clip);
+        Scratch.Return(ref _picked);
+    }
+
     internal override void StepRange(in BatchInput input, int start, int end, int group)
     {
         ReadOnlySpan<TValue> values = FixedReader.Values(input.Arena, input.Node, StorageKind.Primitive, ref _values, out ReadOnlySpan<ulong> valid);
@@ -85,7 +99,17 @@ internal sealed class DistributionSlot<TValue, TResult> : SketchSlot<QuantileSke
         Selection rows = start == 0 && end == input.Rows && input.Selection.IsEmpty
             ? new Selection(input.Rows)
             : RowMasks.Window(input.Selection, input.Rows, start, end, ref _clip);
-        if (rows.Count > 0)
+        if (rows.Count > 0 && valid.IsEmpty && end > start && Unsafe.SizeOf<TValue>() is 1 or 2 or 4 or 8)
+        {
+            // The rows a filter keeps of the range, none of them null, compacted a register at a time, then counted as a
+            // block: a row at a time, through the selection's enumerator and the sketch's checks, cost a question of a
+            // percentile by service 30 % of its time (2026-11-02).
+            int from = start & ~63;
+            Scratch.Grow(ref _picked, rows.Count);
+            MaskFilter.Compress(values[from..end], _clip.AsSpan(from >> 6, (end - from + 63) >> 6), _picked.AsSpan(0, rows.Count));
+            Took(Sketch(group).AddAll<TValue>(_picked.AsSpan(0, rows.Count)), rows.Count);
+        }
+        else if (rows.Count > 0)
         {
             QuantileSketch sketch = Sketch(group);
             long grown = 0;
