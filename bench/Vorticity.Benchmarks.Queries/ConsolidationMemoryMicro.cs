@@ -16,7 +16,9 @@ namespace Vorticity.Benchmarks.Queries;
 /// and the declared keys S1's build writes them with, in objects of a quarter of a gibibyte, and left in level 0; then
 /// copied, and consolidated alone on one lane, in one piece, and on eight, in ranges side by side. For each job: its passes'
 /// seconds and the process's memory over them, the ranges it ran at once and what it reserved. The store of level 0 is built
-/// once, in <c>DIR/base</c>; <c>--lanes N</c> consolidates on N lanes alone.
+/// once, in <c>DIR/base</c>; <c>--lanes N</c> consolidates on N lanes alone. <c>--again</c> consolidates each copy twice in the
+/// process: the second pays what a node already running pays a row, the process's shelf holding what the first left, where
+/// the first pays too each array's first take of a length.
 /// </summary>
 internal static class ConsolidationMemoryMicro
 {
@@ -26,7 +28,7 @@ internal static class ConsolidationMemoryMicro
     /// </summary>
     private const long ObjectBytes = 256L << 20;
 
-    internal static async Task<int> Run(string root, int hours, double rate, int only)
+    internal static async Task<int> Run(string root, int hours, double rate, int only, bool again = false)
     {
         string source = Path.Combine(root, "base");
         if (!System.IO.File.Exists(source + ".built"))
@@ -43,9 +45,17 @@ internal static class ConsolidationMemoryMicro
                 Directory.Delete(copy, recursive: true);
             }
 
-            Copy(source, copy);
-            Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"{lanes} lanes:"));
-            await ConsolidateAsync(root, copy, lanes);
+            for (int pass = 0; pass < (again ? 2 : 1); pass++)
+            {
+                if (pass > 0)
+                {
+                    Directory.Delete(copy, recursive: true);
+                }
+
+                Copy(source, copy);
+                Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"{lanes} lanes{(pass > 0 ? ", again" : string.Empty)}:"));
+                await ConsolidateAsync(root, copy, lanes);
+            }
         }
 
         return 0;
@@ -140,7 +150,7 @@ internal static class ConsolidationMemoryMicro
 
         Console.WriteLine(string.Create(
             CultureInfo.InvariantCulture,
-            $"    {allocated / 1e9:F1} GB allocated, {allocated / (double)Math.Max(rows, 1):F0} bytes a row; {GC.CollectionCount(2)} full collections"));
+            $"    {allocated / 1e9:F1} GB allocated, {allocated / (double)Math.Max(rows, 1):F1} bytes a row; {GC.CollectionCount(2)} full collections"));
     }
 
     /// <summary>Copies the directory <paramref name="from"/> into <paramref name="to"/>, every file.</summary>
