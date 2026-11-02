@@ -2,6 +2,7 @@ using System;
 using System.Threading;
 using Vorticity.Aggregating;
 using Vorticity.Expressions;
+using Vorticity.Keys;
 using Vorticity.Serialization;
 using Vorticity.Serialization.Protobuf;
 
@@ -135,9 +136,65 @@ internal sealed class GranuleStats
     }
 
     // What the readers of the statistics decode once and keep with them, the first to ask for every one after it: each
-    // named value as a literal, each granule's least value of its measure as the column stores it; null before.
+    // named value as a literal, each granule's least value of its measure as the column stores it, each listed granule's
+    // least and greatest value by number; null before.
     private FilterLiteral?[]? _literals;
     private byte[]?[]? _measureLeast;
+    private int[]? _extremes;
+
+    /// <summary>
+    /// The numbers of the least and the greatest value granule <paramref name="granule"/> lists, by the order of their
+    /// literals through <paramref name="layout"/>, the column's, the first of equal ones; -1 for a granule that lists none
+    /// or a value no literal stands for.
+    /// </summary>
+    /// <remarks>
+    /// Found for every granule the first time, then read: a question judges each granule's values by their extremes, its
+    /// summary, whether it holds one value or one group, and comparing up to <see cref="ListedValues"/> literals a granule
+    /// at each of those cost a question of a route's pods 41 % of its time (2026-11-02).
+    /// </remarks>
+    internal (int Least, int Greatest) ListedExtremes(int granule, in KeyLayout layout)
+    {
+        int[] extremes = Volatile.Read(ref _extremes) ?? FindExtremes(layout);
+        return (extremes[2 * granule], extremes[(2 * granule) + 1]);
+    }
+
+    private int[] FindExtremes(in KeyLayout layout)
+    {
+        FilterLiteral?[] literals = Literals(layout);
+        int[] extremes = new int[2 * Count];
+        for (int granule = 0; granule < Count; granule++)
+        {
+            int least = -1;
+            int greatest = -1;
+            FilterLiteral low = default;
+            FilterLiteral high = default;
+            foreach (int id in ValuesOf(granule).Ids.Span)
+            {
+                if ((uint)id >= (uint)literals.Length || literals[id] is not { } value)
+                {
+                    least = greatest = -1;
+                    break;
+                }
+
+                if (least < 0 || KeyOrder.Total(value, low) < 0)
+                {
+                    least = id;
+                    low = value;
+                }
+
+                if (greatest < 0 || KeyOrder.Total(value, high) > 0)
+                {
+                    greatest = id;
+                    high = value;
+                }
+            }
+
+            extremes[2 * granule] = least;
+            extremes[(2 * granule) + 1] = greatest;
+        }
+
+        return Interlocked.CompareExchange(ref _extremes, extremes, null) ?? extremes;
+    }
 
     /// <summary>Each named value as the literal <paramref name="layout"/>, the column's, makes of it, by its number.</summary>
     internal FilterLiteral?[] Literals(in KeyLayout layout)

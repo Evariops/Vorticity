@@ -1953,20 +1953,13 @@ internal sealed class GranuleColumn(string path, DType dtype, GranuleStats? stat
             return stats.MeasureBounds(granule);
         }
 
-        FilterLiteral? least = null;
-        FilterLiteral? greatest = null;
-        foreach (int id in stats.ValuesOf(granule).Ids.Span)
+        if (!_keyed)
         {
-            if (LiteralOf(id) is not { } value)
-            {
-                return (null, null);
-            }
-
-            least = least is { } low && KeyCursor.Compare(low, value) <= 0 ? low : value;
-            greatest = greatest is { } high && KeyCursor.Compare(high, value) >= 0 ? high : value;
+            return (null, null);
         }
 
-        return (least, greatest);
+        (int least, int greatest) = stats.ListedExtremes(granule, _layout);
+        return least < 0 ? (null, null) : (LiteralOf(least), LiteralOf(greatest));
     }
 
     /// <summary>Whether granule <paramref name="granule"/> of <paramref name="rows"/> rows holds one value of the column, or nulls alone.</summary>
