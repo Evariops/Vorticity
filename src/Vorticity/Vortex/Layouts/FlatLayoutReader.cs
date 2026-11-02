@@ -329,6 +329,15 @@ internal sealed class FlatLayoutReader : LayoutReader
             return context.HasSelection ? GatherRebased(context, ranged, (int)rows.Start) : ranged;
         }
 
+        // A part of the chunk: its keys' rows decoded from their whole ranges, where each key's encoding decodes a range, the
+        // selection gathered out of them (VariantKeyReads.Chunk.DecodeRange); the chunk's whole decode, retained for its other
+        // parts, otherwise.
+        if (length < total && chunk.DecodeRange(context, node.DType, (int)rows.Start, length, context.Granules, unplanned: true) is int part and >= 0)
+        {
+            Decoded(context, length);
+            return context.HasSelection ? GatherRebased(context, part, (int)rows.Start) : part;
+        }
+
         if (!context.HasSelection && rows.Start == 0 && length == total)
         {
             Decoded(context, total);

@@ -580,23 +580,35 @@ internal sealed class VariantKeyReads
         /// <summary>
         /// Rows <c>[start, start + count)</c> of the chunk as a variant node of <paramref name="variant"/>'s dtype, each key
         /// decoded from the granules <paramref name="plans"/> read of it for them, or, read whole, from its range; -1 when no
-        /// key was read by its granules, the chunk's decode, retained for all its splits, then serving.
+        /// key was read by its granules, the chunk's decode, retained for all its splits, then serving. With
+        /// <paramref name="unplanned"/>, a part of a chunk whatever read its keys: each key's rows decoded from its whole
+        /// range, a key that keeps values of other classes beside its typed column too; -1 when a key's encoding decodes no
+        /// range of its rows, which the chunk's whole decode then serves.
         /// </summary>
-        internal int DecodeRange(ScanContext context, DType variant, int start, int count, GranulePlans plans)
+        /// <remarks>
+        /// A question that reads one granule of each chunk decoded the whole of each chunk for it, retained for splits that
+        /// never came: the hosts' 5xx by service read 59 chunks of some 216,000 rows a key, 49 of them at each question,
+        /// 8,192 rows of each, and spent a third of its time expanding their runs (2026-11-02). A key's run ends and values,
+        /// which every range reads whole, are decoded once a chunk for every range (<see cref="ArrayDecodeContext.DecodeWholeChild"/>).
+        /// </remarks>
+        internal int DecodeRange(ScanContext context, DType variant, int start, int count, GranulePlans? plans, bool unplanned = false)
         {
             RowRange rows = new RowRange(start, start + count);
-            bool planned = false;
-            foreach (Key key in Keys)
+            if (!unplanned)
             {
-                if (key.Part is { Length: > 0 } part)
+                bool planned = false;
+                foreach (Key key in Keys)
                 {
-                    planned |= plans.Find(part.Offset, rows) is not null;
+                    if (key.Part is { Length: > 0 } part)
+                    {
+                        planned |= plans?.Find(part.Offset, rows) is not null;
+                    }
                 }
-            }
 
-            if (!planned || !Typed)
-            {
-                return -1;
+                if (!planned || !Typed)
+                {
+                    return -1;
+                }
             }
 
             CanonicalArena arena = context.Canonical;
@@ -615,7 +627,7 @@ internal sealed class VariantKeyReads
 
                 Buffers.VortexBuffer region = default;
                 ReadOnlyMemory<byte> tree = part.Tree;
-                if (part.Length > 0 && plans.Find(part.Offset, rows) is { } plan)
+                if (part.Length > 0 && plans?.Find(part.Offset, rows) is { } plan)
                 {
                     tree = plan.Tree;
                     region = Region(context, part, plan);
@@ -627,9 +639,36 @@ internal sealed class VariantKeyReads
 
                 context.Decode.LoadBlob(tree.Span, region);
                 ArrayNode root = context.Nodes.Root;
-                int typed = context.Decode.DecodeRootRange(in root, key.Shape, Rows, start, count, keepEncoding: false);
-                int metadata = None();
-                groups.Span[k] = arena.AddStruct(Groups[k], count, Validity.NonNullable, [metadata, metadata, typed]);
+                int metadata;
+                int values;
+                int typed;
+                if (key.Shape.Kind == DTypeKind.Variant)
+                {
+                    // The key's own variant, a range of its core of the values of other classes and of its typed column.
+                    if (!context.Decode.ChildDecodesRange(in root, 0) || !context.Decode.ChildDecodesRange(in root, 1))
+                    {
+                        return -1;
+                    }
+
+                    int core = context.Decode.DecodeChildRange(in root, 0, key.Shape, Rows, start, count);
+                    CanonicalNode storage = arena.GetNode(core);
+                    metadata = storage.GetFieldIndex(0);
+                    values = storage.GetFieldIndex(1);
+                    typed = context.Decode.DecodeChildRange(in root, 1, key.Typed, Rows, start, count);
+                }
+                else
+                {
+                    if (unplanned && !context.Decode.DecodesRange(in root))
+                    {
+                        return -1;
+                    }
+
+                    metadata = None();
+                    values = metadata;
+                    typed = context.Decode.DecodeRootRange(in root, key.Shape, Rows, start, count, keepEncoding: false);
+                }
+
+                groups.Span[k] = arena.AddStruct(Groups[k], count, Validity.NonNullable, [metadata, values, typed]);
             }
 
             int struct_ = arena.AddStruct(Tree, count, Validity.NonNullable, groups.Span);
