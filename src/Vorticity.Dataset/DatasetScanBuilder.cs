@@ -996,13 +996,17 @@ internal sealed partial class DatasetScanBuilder
     /// every granule (<see cref="KeyPruning.HoldsWhole"/>), or reading the index weighs more than it may spare
     /// (<see cref="ReadsKeyIndex"/>), and, unless <paramref name="read"/>, when the handle does not hold it.
     /// </summary>
+    /// <remarks>
+    /// An index the handle holds is searched on the same terms: one a question on a service left in hand made each question
+    /// on a pod's exceptions after it search every object's index for no granule refuted, 4.6 ms and 2 MB a question where it
+    /// takes 0.17 ms and 63 KB (2026-11-02).
+    /// </remarks>
     internal async ValueTask<(List<(int First, int End)> Ranges, Indexes.GranuleKeys Keys)?> KeptGranulesAsync(
         PositionedObject held, KeyPruning pruning, ReadOnlyMemory<byte> first, bool read, CancellationToken cancellationToken)
     {
         if (!held.Entry.Deletions.IsEmpty || held.Entry.Contents is not { KeyIndex: { } index } contents
             || (!read && contents.Keys is not { HoldsEvery: true }) || !ReadsKeyIndex(held)
-            || (contents.Keys is not { HoldsEvery: true }
-                && (!pruning.IndexMayRefute(held.Summaries(_version.Schema), held.Entry.PhysicalRows) || pruning.HoldsWhole(first.Span, held.Entry.LastKey.Span)))
+            || !pruning.IndexMayRefute(held.Summaries(_version.Schema), held.Entry.PhysicalRows) || pruning.HoldsWhole(first.Span, held.Entry.LastKey.Span)
             || await KeysAsync(held, contents, index, cancellationToken).ConfigureAwait(false) is not { } keys
             || keys.Rows != held.Entry.PhysicalRows)
         {
