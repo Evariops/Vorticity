@@ -28,8 +28,17 @@ internal static class KeyIndexMicro
 
     private static readonly DateTime Start = new DateTime(2026, 10, 1, 0, 0, 0, DateTimeKind.Utc);
 
-    internal static async Task<int> Run(int rounds)
+    /// <summary>
+    /// With <paramref name="directory"/>, the sparse indexes of every object of the dataset there instead: their granules, the
+    /// bytes their pages take on disk, and those they hold once read.
+    /// </summary>
+    internal static async Task<int> Run(int rounds, string? directory = null)
     {
+        if (directory is not null)
+        {
+            return await HeldAsync(directory);
+        }
+
         await using MemoryObjectStore store = new MemoryObjectStore();
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, KeyIndexRow.Schema, new DatasetOptions
         {
@@ -127,6 +136,44 @@ internal static class KeyIndexMicro
             }
         }
 
+        return 0;
+    }
+
+    /// <summary>The sparse indexes of the objects of the dataset at <paramref name="directory"/>, read and weighed.</summary>
+    private static async Task<int> HeldAsync(string directory)
+    {
+        await using FileObjectStore files = new FileObjectStore(directory);
+        await using VortexDataset dataset = await VortexDataset.OpenAsync(files, new DatasetOptions { KeyIndexCacheBytes = 0 });
+        long objects = 0;
+        long granules = 0;
+        long onDisk = 0;
+        long held = 0;
+        long whole = 0;
+        await foreach (PositionedObject positioned in dataset.WalkAsync(null, 0, long.MaxValue, null, default))
+        {
+            if (positioned.Entry.Contents is not { KeyIndex: { } table } contents
+                || await dataset.KeyIndexAsync(positioned.Entry, contents, default) is not { } keys)
+            {
+                continue;
+            }
+
+            objects++;
+            granules += keys.Granules;
+            onDisk += table.Length + (contents.KeyPages?.Length ?? 0);
+            held += keys.ResidentBytes;
+
+            // What the keys took decoded whole, as the index held them before: each key and where it ends.
+            GranuleKeys.KeyReader reader = default;
+            for (int granule = 0; granule < keys.Granules; granule++)
+            {
+                whole += reader.Key(keys, granule).Length + sizeof(int);
+            }
+
+            reader.Dispose();
+        }
+
+        Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+            $"keyindex {directory}: {objects:N0} objects, {granules:N0} granules, {(double)onDisk / Math.Max(granules, 1):0.0} bytes a granule on disk, {(double)held / Math.Max(granules, 1):0.0} held, {(double)whole / Math.Max(granules, 1):0.0} decoded whole"));
         return 0;
     }
 
