@@ -651,6 +651,10 @@ internal sealed class FilterEvaluator
                 Evaluate(((VariantFilterExpr)filter).Inner, arena, rootIndex, rows, selection, destination, depth + 1);
                 return;
 
+            case ExprKind.TupleIn:
+                EvaluateTuples((TupleInExpr)filter, arena, rootIndex, rows, selection, destination);
+                return;
+
             default:
                 // A bare field or literal is not a predicate. The expression factories make this
                 // unreachable from the public API; the throw keeps another node kind from being
@@ -889,12 +893,68 @@ internal sealed class FilterEvaluator
     }
 
     /// <summary>
+    /// Answers whether each row's values of <paramref name="tuples"/>' columns are one of its tuples: by the tuples' set,
+    /// built once for the kinds of the columns' storage, encoded columns materialized; with no set for a kind, a list, a
+    /// boolean, a wide decimal, as the <c>OR</c> of each tuple's <c>AND</c> of equalities.
+    /// </summary>
+    private static void EvaluateTuples(
+        TupleInExpr tuples, CanonicalArena arena, int rootIndex, int rows, ReadOnlySpan<int> selection, Span<byte> destination)
+    {
+        int arity = tuples.Arity;
+        Span<int> nodes = stackalloc int[arity];
+        Span<int> columns = stackalloc int[arity];
+        Span<CandidateKind> kinds = stackalloc CandidateKind[arity];
+        for (int column = 0; column < arity; column++)
+        {
+            nodes[column] = Column(arena, rootIndex, tuples.Fields[column], rows, selection);
+            int storage = ComparisonKernels.Unwrap(arena, nodes[column]);
+            if (EncodedAnswers.IsEncoded(arena, storage))
+            {
+                storage = arena.MaterializeEncoded(storage);
+            }
+
+            columns[column] = storage;
+            kinds[column] = ComparisonKernels.CandidatesFor(arena, storage);
+        }
+
+        if (tuples.SetFor(kinds) is { } set)
+        {
+            set.Apply(arena, columns, destination);
+            return;
+        }
+
+        byte[] rented = ArrayPool<byte>.Shared.Rent(Math.Max(destination.Length * 2, 1));
+        try
+        {
+            Span<byte> tuple = rented.AsSpan(0, destination.Length);
+            Span<byte> value = rented.AsSpan(destination.Length, destination.Length);
+            Trilean.Fill(destination, Trilean.False);
+            for (int t = 0; t < tuples.Count; t++)
+            {
+                ReadOnlySpan<FilterLiteral> values = tuples.Tuple(t);
+                Trilean.Fill(tuple, Trilean.True);
+                for (int column = 0; column < arity; column++)
+                {
+                    ComparisonKernels.Compare(arena, nodes[column], ComparisonOp.Equal, values[column], value);
+                    Trilean.And(tuple, value);
+                }
+
+                Trilean.Or(destination, tuple);
+            }
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(rented);
+        }
+    }
+
+    /// <summary>
     /// Whether <paramref name="filter"/> reads bytes, lists or a set of candidates, whose cost a row
     /// is what makes evaluating it over a gathered part of the rows pay.
     /// </summary>
     private static bool Costly(VortexExpr filter) => filter.Kind switch
     {
-        ExprKind.StringMatch or ExprKind.ListContains or ExprKind.In or ExprKind.ColumnComparison => true,
+        ExprKind.StringMatch or ExprKind.ListContains or ExprKind.In or ExprKind.ColumnComparison or ExprKind.TupleIn => true,
         ExprKind.Comparison => ((ComparisonExpr)filter).Value.Kind == FilterLiteralKind.Bytes,
         ExprKind.Not => Costly(((NotExpr)filter).Operand),
         ExprKind.Logical => Costly(((LogicalExpr)filter).Left) || Costly(((LogicalExpr)filter).Right),

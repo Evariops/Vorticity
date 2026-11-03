@@ -551,8 +551,27 @@ internal sealed class ObjectColumns
 
             case InExpr membership:
                 return Leaf(membership.Field, pushable: false) is { } member
-                    ? (Truth.Expression, ReferenceEquals(member, membership.Field) ? membership : new InExpr(member, membership.Literals))
+                    ? (Truth.Expression, ReferenceEquals(member, membership.Field) ? membership : new InExpr(member, membership.Literals) { Projects = membership.Projects })
                     : Missing(membership.Field);
+
+            case TupleInExpr tuples:
+            {
+                FieldExpr[] fields = new FieldExpr[tuples.Arity];
+                bool renamed = false;
+                for (int column = 0; column < fields.Length; column++)
+                {
+                    if (Leaf(tuples.Fields[column], pushable: false) is not { } field)
+                    {
+                        // A column the object lacks holds nulls: each row is unknown or false, which only a selection tells apart.
+                        return Absent(tuples.Fields[column]) && select ? (Truth.False, null) : (Truth.Unsettled, null);
+                    }
+
+                    fields[column] = field;
+                    renamed |= !ReferenceEquals(field, tuples.Fields[column]);
+                }
+
+                return (Truth.Expression, renamed ? tuples.Over(fields) : tuples);
+            }
 
             case StringMatchExpr match:
                 return Leaf(match.Field, pushable: false) is { } matched
