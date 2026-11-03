@@ -65,6 +65,12 @@ internal sealed class ObjectContents(
     /// <summary>Keeps <paramref name="keys"/>, read and checked, as the file's sparse index; the first kept stays.</summary>
     internal GranuleKeys KeepKeys(GranuleKeys keys) => System.Threading.Interlocked.CompareExchange(ref _keys, keys, null) ?? keys;
 
+    /// <summary>
+    /// Forgets <paramref name="keys"/> when it is the file's sparse index kept, which a handle's budget let go: the next read
+    /// reads it again, and a search that holds it finishes with it.
+    /// </summary>
+    internal void ForgetKeys(GranuleKeys keys) => System.Threading.Interlocked.CompareExchange(ref _keys, null, keys);
+
     /// <summary>Each top-level column's chunk directory, the regions of its index entry.</summary>
     internal IReadOnlyList<IndexSegment> ChunkDirectories { get; } = chunkDirectories;
 

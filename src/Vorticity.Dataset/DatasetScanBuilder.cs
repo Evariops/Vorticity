@@ -1036,6 +1036,7 @@ internal sealed partial class DatasetScanBuilder
     {
         if (contents.Keys is { HoldsEvery: true } known)
         {
+            _dataset.KeyIndexes.Touch(known);
             return known;
         }
 

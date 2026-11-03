@@ -42,6 +42,7 @@ public sealed class VortexDataset : IAsyncDisposable
     private readonly DatasetOptions _options;
     private readonly ObjectCache _objects;
     private readonly PageCache _pageCache;
+    private readonly KeyIndexCache _keyIndexes;
     private DatasetSnapshot _snapshot;
     private Exception? _inlineFailure;
 
@@ -62,6 +63,7 @@ public sealed class VortexDataset : IAsyncDisposable
         _options = options;
         _objects = new ObjectCache(store, options.MaxOpenObjects, options.Session);
         _pageCache = new PageCache(options.PageCacheBytes);
+        _keyIndexes = new KeyIndexCache(options.KeyIndexCacheBytes);
         _snapshot = new DatasetSnapshot(commit, PagesOf(version, commit), _objects, knownAt, Costs);
     }
 
@@ -3876,7 +3878,8 @@ public sealed class VortexDataset : IAsyncDisposable
     /// The sparse index of the object <paramref name="entry"/> names, every page in hand, kept on its table of contents: its
     /// table, then its pages in one request, some fifty kilobytes for an object of a gibibyte; none once they are held. Read
     /// through <paramref name="opened"/>, the object's open, whose tail serves what it holds; with no open of the object
-    /// otherwise. Null when the object keeps none, or what was read does not decode.
+    /// otherwise. Null when the object keeps none, or what was read does not decode. The handle holds the indexes it reads
+    /// within <see cref="DatasetOptions.KeyIndexCacheBytes"/>, the least recently used let go first.
     /// </summary>
     internal async ValueTask<Indexes.GranuleKeys?> KeyIndexAsync(
         ObjectEntry entry, Indexes.ObjectContents contents, CancellationToken cancellationToken, ISegmentReader? opened = null)
@@ -3888,20 +3891,34 @@ public sealed class VortexDataset : IAsyncDisposable
 
         if (contents.Keys is { HoldsEvery: true } held)
         {
+            _keyIndexes.Touch(held);
             return held;
         }
 
+        Indexes.GranuleKeys? read;
         if (opened is not null)
         {
-            return await KeysThroughAsync(opened, contents, table, cancellationToken).ConfigureAwait(false);
+            read = await KeysThroughAsync(opened, contents, table, cancellationToken).ConfigureAwait(false);
+        }
+        else
+        {
+            ISegmentReader source = await OpenFooterlessAsync(entry, contents, cancellationToken).ConfigureAwait(false);
+            await using (source.ConfigureAwait(false))
+            {
+                read = await KeysThroughAsync(Footerless(source, entry, contents), contents, table, cancellationToken).ConfigureAwait(false);
+            }
         }
 
-        ISegmentReader source = await OpenFooterlessAsync(entry, contents, cancellationToken).ConfigureAwait(false);
-        await using (source.ConfigureAwait(false))
+        if (read is { HoldsEvery: true })
         {
-            return await KeysThroughAsync(Footerless(source, entry, contents), contents, table, cancellationToken).ConfigureAwait(false);
+            _keyIndexes.Admit(contents, read);
         }
+
+        return read;
     }
+
+    /// <summary>The sparse indexes the handle holds in hand, within <see cref="DatasetOptions.KeyIndexCacheBytes"/>.</summary>
+    internal KeyIndexCache KeyIndexes => _keyIndexes;
 
     /// <summary><see cref="KeyIndexAsync"/>'s reads through <paramref name="reader"/>: the table of <paramref name="contents"/>'s sparse index, unless held, then its pages.</summary>
     private static async ValueTask<Indexes.GranuleKeys?> KeysThroughAsync(

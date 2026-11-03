@@ -1,6 +1,7 @@
 // The key's pruning over the sparse indexes a handle holds: an index in hand is searched only where it may refute a granule,
 // as one still to read is.
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 using Vorticity.Dataset;
@@ -69,5 +70,62 @@ public sealed partial class DatasetKeyPruningTests
         Assert.Equal(objects, byService.Searches);
         Assert.Equal(all.Count(row => row.At >= ten && row.At < eleven), await dataset.ScanBuilder().Where(window).CountAsync(Ct));
         Assert.Equal(all.Count(static row => row.Service == "svc-01"), await dataset.ScanBuilder().Where(service).CountAsync(Ct));
+    }
+
+    /// <summary>
+    /// A handle whose budget of key indexes holds about two of its objects' indexes: questions on each service in turn read
+    /// every object's index, hold no more than the budget, let the oldest go, and return the rows LINQ keeps, those let go
+    /// read again. Every index read stayed on its object's entry before.
+    /// </summary>
+    [Fact]
+    public async Task TheIndexesAHandleHoldsStayWithinItsBudget()
+    {
+        Random random = new Random(70);
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        DatasetOptions options = new DatasetOptions
+        {
+            Layout = new DatasetLayout
+            {
+                SortKey = [LayoutValue.Column(nameof(Row.Service)), LayoutValue.Column(nameof(Row.At)).Truncate(CalendarUnit.Hour)],
+                IndexedPrefix = 1,
+            },
+            ContentsObjectBytes = 0,
+            CostProfile = CostProfile.Remote,
+            ChunkBytes = 64 << 10,
+            Write = new VortexWriteOptions { BlockRows = 1_024 },
+        };
+        List<Row> all = [];
+        long indexBytes = 0;
+        await using (VortexDataset writing = await VortexDataset.CreateAsync(store, Row.Schema, options, Ct))
+        {
+            for (int a = 0; a < 6; a++)
+            {
+                Row[] rows = [.. Enumerable.Range(0, 100_000).Select(i =>
+                    new Row(0, $"svc-{random.Next(0, 3):D2}", Start.AddTicks((long)(random.NextDouble() * TimeSpan.TicksPerDay) / 10 * 10), all.Count + i, random.NextDouble()))];
+                all.AddRange(rows);
+                await using ObjectDraft draft = writing.StartObject();
+                await draft.Writer.WriteAsync<Row>(rows, Ct);
+                await writing.AppendAsync(draft, Ct);
+            }
+
+            await foreach (PositionedObject held in writing.ScanBuilder().ObjectsAsync(Ct))
+            {
+                indexBytes = Math.Max(indexBytes, (await writing.KeyIndexAsync(held.Entry, held.Entry.Contents!, Ct))!.ResidentBytes);
+            }
+        }
+
+        await using VortexDataset dataset = await VortexDataset.OpenAsync(store, new DatasetOptions { KeyIndexCacheBytes = (2 * indexBytes) + 1 }, Ct);
+        for (int round = 0; round < 2; round++)
+        {
+            for (int s = 0; s < 3; s++)
+            {
+                string service = $"svc-{s:D2}";
+                Assert.Equal(all.Count(row => row.Service == service), await dataset.ScanBuilder().Where(Eq(nameof(Row.Service), FilterLiteral.From(service))).CountAsync(Ct));
+                Assert.True(dataset.KeyIndexes.Size <= dataset.KeyIndexes.Capacity, $"{dataset.KeyIndexes.Size} bytes of indexes held over {dataset.KeyIndexes.Capacity}");
+            }
+        }
+
+        Assert.True(dataset.KeyIndexes.Count is > 0 and <= 2, $"{dataset.KeyIndexes.Count} indexes held");
+        Assert.True(dataset.KeyIndexes.Evictions > 0, "no index let go");
     }
 }
