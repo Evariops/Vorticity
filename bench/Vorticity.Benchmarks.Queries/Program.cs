@@ -55,6 +55,7 @@ Dictionary<string, (string Help, Func<Task<int>> Run)> micros = new Dictionary<s
 {
     ["keys"] = ("a key's groups found alone, in memory, with the statistics' bounds and without (KeyMicro.cs)", () => Task.FromResult(KeyMicro.Run(rounds))),
     ["words"] = ("a short text key's groups found alone, in memory (WordMicro.cs)", () => Task.FromResult(WordMicro.Run(rounds))),
+    ["keyindex"] = ("the search of one object's sparse index alone, in memory, by three filters (KeyIndexMicro.cs)", () => KeyIndexMicro.Run(rounds)),
     ["floatsum"] = ("a grouped exact float sum alone, in memory (FloatSumMicro.cs)", () => Task.FromResult(FloatSumMicro.Run(rounds))),
     ["variants"] = ("a variant's path extracted alone, in memory (VariantMicro.cs)", () => Task.FromResult(VariantMicro.Run(rounds))),
     ["sketches"] = ("the grids of a distribution weighed, in buckets and speed (SketchMicro.cs)", () => Task.FromResult(SketchMicro.Run(rounds))),
