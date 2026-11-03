@@ -88,6 +88,7 @@ explains why it is built this way.
 | `v.Pages.Contains(7)` | a list holds a value |
 | `v.Origin.Country.In("FR", "BE")` | a field of a nested record |
 | `r.High > r.Low`, on a record with two such columns | two columns of the same type |
+| `(r.City, r.Day).In(visits)` | a tuple of two to four columns, as SQL's `(city, day) IN (…)` |
 
 And here is what does not compile, in the compiler's own words:
 
@@ -96,6 +97,35 @@ r.Day >= "900"            CS0019: Operator '>=' cannot be applied to operands of
 r.Day % 2 == 0            CS0619: 'Sym<int>.operator %(Sym<int>, int)' is obsolete: 'Vortex does not push arithmetic down. Compute it on the columns after the scan.'
 Math.Abs(r.Celsius) > 1   CS1503: Argument 1: cannot convert from 'Vorticity.Sym<double?>' to 'decimal'
 r.City.Length > 3         CS1061: 'Sym<string>' does not contain a definition for 'Length'
+```
+
+## Tuples of columns
+
+`(r.City, r.Day).In(visits)` keeps the rows whose values of the two columns are, together, one of the pairs:
+
+```csharp
+(string, int)[] visits = [("Paris", 900), ("Lyon", 912)];
+Scan<Reading> scan = file.Scan<Reading>().Where(r => (r.City, r.Day).In(visits));
+```
+
+A tuple takes two to four of the scan's columns, each a column or a field of a record, never a function of one. A
+pair that holds a null, or a value its column cannot hold, matches no row. A row with a null is unknown where a pair
+holds its other value, and false otherwise, as the `or` of the pairs' equalities would be.
+
+The filter carries, beside the pairs, each column's set of their values: `City in ('Paris', 'Lyon') and Day in (900,
+912)`. The zone maps, the indexes and a dataset's partitions prune by those sets, as they prune any set. Each row
+left is then looked up among the pairs, which the scan hashes once. A dataset whose sort key leads with the columns
+finds each pair's granules by a bisection of every object's sparse index ([dataset-layout.md](dataset-layout.md)).
+
+The text grammar writes the same filter `(City, Day) in (('Paris', 900), ('Lyon', 912))`.
+
+A semi-join, `WhereInAsync`, reads a first question now and keeps the rows that hold one of its values. It takes a
+tuple too, the first question projecting as many columns:
+
+```csharp
+Scan<Reading> hot = await file.Scan<Reading>().WhereInAsync(
+    r => (r.City, r.Day),
+    other.Scan<Reading>().Where(r => r.Celsius > 30).Select(r => (r.City, r.Day)));
 ```
 
 ## What happens, in order

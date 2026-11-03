@@ -246,7 +246,12 @@ its pages in one request.
 The filter's conjuncts on the leading components give intervals of keys, as ClickHouse's condition on a continuous range
 of the primary key:
 - equalities, sets and null checks on the first `j` components, at most 256 tuples;
+- or a set of tuples of the first `j` components' columns, `(a, b) IN (…)`, a tuple an interval, at most 65 536, where
+  it bounds more components than the product of the columns' sets;
 - then a range on the next component, through the component's function.
+
+A set of tuples is a filter node no pruner judges: its rows are looked up among the tuples, hashed once a scan. The filter
+carries each column's set of the tuples' values beside them, by which zone maps, postings and partitions prune.
 
 A bisection finds each interval's granules. Granule `i` may hold a key of the interval when the next granule's key reaches
 its low bound and its own key does not pass its high one. The later intervals gallop from where the one before landed:

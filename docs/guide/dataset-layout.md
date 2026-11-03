@@ -108,8 +108,10 @@ The layout is ClickHouse's MergeTree key under other names:
 The key serves four things.
 * **Pruning.** A filter's equalities, sets and null checks on the leading components, then a range on the next, are
   intervals of the key. A bisection finds their granules in each object's index: an equality on the service costs
-  some twenty key comparisons and 1.6 µs in an object of 3 300 granules, the index read from the caches included. A
-  filter on a later component alone is judged on ranges of granules, as ClickHouse's exclusion search.
+  some twenty key comparisons and 1.6 µs in an object of 3 300 granules, the index read from the caches included.
+  Sets multiply into at most 256 intervals; a set of tuples of the leading columns, `(r.Service, r.Code).In(pairs)`,
+  gives an interval a tuple, up to 65 536 ([filter-rows.md](filter-rows.md#tuples-of-columns)). A filter on a later
+  component alone is judged on ranges of granules, as ClickHouse's exclusion search.
 * **Order.** Every object's rows lie in the order of the columns the key orders: a column as it is, and a function
   followed by its column. `(Service, Bucket(Sequence, 1000), Sequence)` orders by the service then the sequence. A read
   in that order, `OrderBy` on the first such column or `InKeyOrder` on several, bounds each object by its keys and holds
