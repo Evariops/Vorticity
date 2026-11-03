@@ -325,58 +325,89 @@ internal sealed class KeyPruning
 
         // The intervals the filter bounds first, by bisection: exact, they are the answer; else the boxes are judged within them.
         KeyIntervals intervals = bisect ? Intervals : KeyIntervals.Unbounded;
-        List<(int First, int End)>? within = null;
-        if (intervals.Bounded)
+        if (intervals is { Bounded: true, Exact: true })
         {
             int compared = 0;
-            within = intervals.Exact ? kept : [];
-            intervals.Ranges(keys, within, ref compared);
+            intervals.Ranges(keys, kept, ref compared);
             Interlocked.Add(ref _comparisons, compared);
-            if (intervals.Exact || within.Count == 0)
-            {
-                return Merge(kept);
-            }
+            return Merge(kept);
         }
 
-        int judged = 0;
-
-        // The pages first, unless the intervals bound the granules: a page runs from its first key to the next page's, the last
-        // one to the object's last key. One list of summaries serves every node of the search, and each text or binary the
-        // keys hold is read once.
-        List<ColumnSummary> box = new List<ColumnSummary>(_tree.Count + 1);
-        Dictionary<byte[], FilterLiteral> values = new Dictionary<byte[], FilterLiteral>(ByteKeys.Instance);
-        if (within is null)
+        Scratch scratch = Interlocked.Exchange(ref _spare, null) ?? new Scratch(_tree.Count + 1);
+        try
         {
-            within = [];
-            Search(keys, partition, 0, keys.Pages, granules: false, within, box, values, ref judged, default);
-            for (int i = 0; i < within.Count; i++)
+            List<(int First, int End)> within = scratch.Within;
+            int judged = 0;
+            if (intervals.Bounded)
             {
-                (int firstPage, int endPage) = within[i];
-                within[i] = (firstPage * keys.PageEntries, (int)Math.Min((long)endPage * keys.PageEntries, keys.Granules));
+                int compared = 0;
+                intervals.Ranges(keys, within, ref compared);
+                Interlocked.Add(ref _comparisons, compared);
             }
-        }
+            else
+            {
+                // The pages first: a page runs from its first key to the next page's, the last one to the object's last key.
+                Search(keys, partition, 0, keys.Pages, granules: false, within, scratch, ref judged, default);
+                for (int i = 0; i < within.Count; i++)
+                {
+                    (int firstPage, int endPage) = within[i];
+                    within[i] = (firstPage * keys.PageEntries, (int)Math.Min((long)endPage * keys.PageEntries, keys.Granules));
+                }
+            }
 
-        // A range's keys decoded once, one record each, and its boxes judged over them, in rented buffers: the search reads
-        // them in any order, each from its run's whole key otherwise.
-        foreach ((int from, int to) in Merge(within))
+            // A range's keys decoded once, one record each, and its boxes judged over them, in rented buffers: the search reads
+            // them in any order, each from its run's whole key otherwise.
+            foreach ((int from, int to) in Merge(within))
+            {
+                int last = Math.Min(to + 1, keys.Granules);
+                byte[] decoded = ArrayPool<byte>.Shared.Rent((last - from) * Math.Max(keys.Longest(from, last), 1));
+                int[] ends = ArrayPool<int>.Shared.Rent(last - from);
+                try
+                {
+                    keys.Decode(from, last, decoded, ends);
+                    Search(keys, partition, from, to, granules: true, kept, scratch, ref judged, new RangeKeys(from, decoded, ends));
+                }
+                finally
+                {
+                    ArrayPool<byte>.Shared.Return(decoded);
+                    ArrayPool<int>.Shared.Return(ends);
+                }
+            }
+
+            Interlocked.Add(ref _judgments, judged);
+        }
+        finally
         {
-            int last = Math.Min(to + 1, keys.Granules);
-            byte[] decoded = ArrayPool<byte>.Shared.Rent((last - from) * Math.Max(keys.Longest(from, last), 1));
-            int[] ends = ArrayPool<int>.Shared.Rent(last - from);
-            try
+            scratch.Within.Clear();
+            if (scratch.Values.Count > Scratch.MostValues)
             {
-                keys.Decode(from, last, decoded, ends);
-                Search(keys, partition, from, to, granules: true, kept, box, values, ref judged, new RangeKeys(from, decoded, ends));
+                scratch.Values.Clear();
             }
-            finally
-            {
-                ArrayPool<byte>.Shared.Return(decoded);
-                ArrayPool<int>.Shared.Return(ends);
-            }
+
+            Interlocked.CompareExchange(ref _spare, scratch, null);
         }
 
-        Interlocked.Add(ref _judgments, judged);
         return Merge(kept);
+    }
+
+    // The scratch of a search, kept for the question's next one: a lane that finds it taken makes its own.
+    private Scratch? _spare;
+
+    /// <summary>
+    /// What a search judges its boxes with: one list of summaries for every node, each text or binary its keys hold read
+    /// once a question rather than once an object, and the ranges it searches within. A search of an index by a host,
+    /// past the leading components, made a dictionary of the keys' texts and grew its lists anew, 220 KB an object.
+    /// </summary>
+    private sealed class Scratch(int components)
+    {
+        /// <summary>The most texts the scratch keeps from one search to the next.</summary>
+        internal const int MostValues = 4_096;
+
+        internal List<ColumnSummary> Box { get; } = new List<ColumnSummary>(components);
+
+        internal Dictionary<byte[], FilterLiteral> Values { get; } = new Dictionary<byte[], FilterLiteral>(ByteKeys.Instance);
+
+        internal List<(int First, int End)> Within { get; } = [];
     }
 
     /// <summary>Neighbouring ranges of <paramref name="kept"/>, ascending, as one, in place.</summary>
@@ -409,8 +440,8 @@ internal sealed class KeyPruning
     /// box of its bounds refutes is dropped, one of a single entry kept, any other cut in <see cref="Fanout"/>.
     /// </summary>
     private void Search(
-        GranuleKeys keys, ReadOnlySpan<byte> partition, int from, int to, bool granules, List<(int First, int End)> kept, List<ColumnSummary> box,
-        Dictionary<byte[], FilterLiteral> values, ref int judged, in RangeKeys range)
+        GranuleKeys keys, ReadOnlySpan<byte> partition, int from, int to, bool granules, List<(int First, int End)> kept, Scratch scratch,
+        ref int judged, in RangeKeys range)
     {
         if (from >= to)
         {
@@ -418,21 +449,30 @@ internal sealed class KeyPruning
         }
 
         judged++;
-        if (!Judge(EntryKey(keys, from, granules, in range), NextKey(keys, to, granules, in range), _skip, partition, box, values))
+        if (!Judge(EntryKey(keys, from, granules, in range), NextKey(keys, to, granules, in range), _skip, partition, scratch.Box, scratch.Values))
         {
             return;
         }
 
         if (to - from == 1)
         {
-            kept.Add((from, to));
+            // A granule next to the last kept lengthens its range: a search that keeps most granules grows no list.
+            if (kept.Count > 0 && kept[^1].End >= from)
+            {
+                kept[^1] = (kept[^1].First, Math.Max(kept[^1].End, to));
+            }
+            else
+            {
+                kept.Add((from, to));
+            }
+
             return;
         }
 
         int step = Math.Max(1, (to - from + Fanout - 1) / Fanout);
         for (int at = from; at < to; at += step)
         {
-            Search(keys, partition, at, Math.Min(at + step, to), granules, kept, box, values, ref judged, in range);
+            Search(keys, partition, at, Math.Min(at + step, to), granules, kept, scratch, ref judged, in range);
         }
     }
 

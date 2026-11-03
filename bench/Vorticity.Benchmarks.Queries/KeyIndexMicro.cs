@@ -12,7 +12,7 @@ namespace Vorticity.Benchmarks.Queries;
 /// <summary>
 /// The search of one object's sparse index alone, in memory (<c>--micro keyindex</c>): an index of 3 300 granules, an
 /// object of a gibibyte, under the key <c>(Service, Hour(At), Host)</c> of 600 services, searched for a service, a service
-/// and an hour, and a host, which bounds no leading component. A search per fresh pruning, as each question makes one; the
+/// and an hour, and a host, which bounds no leading component. A pruning a question, searching 64 objects; the
 /// time, the boxes judged, the keys compared and the bytes allocated a search, and the bytes the index holds a granule.
 /// </summary>
 internal static class KeyIndexMicro
@@ -21,7 +21,10 @@ internal static class KeyIndexMicro
 
     private const int Services = 600;
 
-    private const int Searches = 2_000;
+    private const int Searches = 2_048;
+
+    /// <summary>The objects a question searches, each a copy of the index.</summary>
+    private const int Objects = 64;
 
     private static readonly DateTime Start = new DateTime(2026, 10, 1, 0, 0, 0, DateTimeKind.Utc);
 
@@ -55,7 +58,15 @@ internal static class KeyIndexMicro
             ("host", Eq(nameof(KeyIndexRow.Host), Text("host-0042"))),
         ];
 
-        GranuleKeys index = Index(table, pages);
+        // The same index read again for each object a question searches: a pruning searches each copy once, as it does
+        // each object of its question, and keeps what it found of each.
+        GranuleKeys[] objects = new GranuleKeys[Objects];
+        for (int i = 0; i < objects.Length; i++)
+        {
+            objects[i] = Index(table, pages);
+        }
+
+        GranuleKeys index = objects[0];
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
             $"keyindex: {Granules:N0} granules, {index.ResidentBytes:N0} bytes held, {(double)index.ResidentBytes / Granules:0.0} a granule"));
         Console.WriteLine($"{"filter",-22} {"µs/search",10} {"judged",8} {"compared",9} {"bytes",8} {"ranges",7}");
@@ -65,11 +76,10 @@ internal static class KeyIndexMicro
             long bytes = 0;
             int judged = 0;
             int compared = 0;
-
             int ranges = 0;
             for (int round = 0; round < Math.Max(1, rounds); round++)
             {
-                KeyPruning[] prunings = new KeyPruning[Searches];
+                KeyPruning[] prunings = new KeyPruning[Searches / Objects];
                 for (int i = 0; i < prunings.Length; i++)
                 {
                     prunings[i] = KeyPruning.Of(schema, filter)!;
@@ -77,9 +87,12 @@ internal static class KeyIndexMicro
 
                 long before = GC.GetAllocatedBytesForCurrentThread();
                 long started = Stopwatch.GetTimestamp();
-                for (int i = 0; i < prunings.Length; i++)
+                foreach (KeyPruning pruning in prunings)
                 {
-                    ranges = prunings[i].Granules(index, default).Count;
+                    foreach (GranuleKeys searched in objects)
+                    {
+                        ranges = pruning.Granules(searched, default).Count;
+                    }
                 }
 
                 double us = Stopwatch.GetElapsedTime(started).TotalMicroseconds / Searches;
@@ -88,13 +101,30 @@ internal static class KeyIndexMicro
                 {
                     best = us;
                     bytes = allocated;
-                    judged = prunings[0].Judgments;
-                    compared = prunings[0].Comparisons;
-
+                    judged = prunings[0].Judgments / Objects;
+                    compared = prunings[0].Comparisons / Objects;
                 }
             }
 
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"{name,-22} {best,10:0.00} {judged,8} {compared,9} {bytes,8} {ranges,7}"));
+            if (bytes > 4 << 10)
+            {
+                // What the searches that allocate most allocate, by type, as the runtime's ticks sample them.
+                using AllocationSampler sampler = new AllocationSampler();
+                for (int i = 0; i < Searches / Objects; i++)
+                {
+                    KeyPruning pruning = KeyPruning.Of(schema, filter)!;
+                    foreach (GranuleKeys searched in objects)
+                    {
+                        pruning.Granules(searched, default);
+                    }
+                }
+
+                foreach (string line in sampler.Lines(Searches, 6))
+                {
+                    Console.WriteLine(line);
+                }
+            }
         }
 
         return 0;
