@@ -223,15 +223,24 @@ chunk, and a chunk that is not a dictionary claims nothing.
 A sorted object a dataset's job writes carries the sparse index of its key: the key of the first row of
 each granule, cut to the layout's indexed prefix, and the key of its last row ([the sparse key
 index](23-query-architecture.md#52-the-sparse-key-index)). The entry is on the root, one run over every
-block. Its options hold, behind a version byte (1), the rows of a granule (the writer's block, 8 192 by
-default), the object's rows and the components a key holds, the granules a page holds (128) and the
-pages; then each page's first key, coded forward against the page before (the bytes they share as a
-varint, then the rest's length and bytes), where the page lies in the payload and its XXH3-64; then the
-last row's key whole. The payload holds the pages: in each, every granule's key coded forward against
-the one before, the first against the key the options give the page. An object of one page keeps it in
-the options and writes no payload. A key is the row encoding of the prefix's components, nulls last, the
-one the tree and the merges compare. A granule's rows hold keys from its key to the next granule's, both
-included, since granules are not cut where the key changes.
+block. Its options hold, behind a version byte (1 or 2) and, for version 2, how the keys are coded, the
+rows of a granule (the writer's block, 8 192 by default), the object's rows and the components a key
+holds, the granules a page holds (128) and the pages; then each page's first key, coded forward against
+the page before (the bytes they share as a varint, then the rest's length and bytes), where the page lies
+in the payload and its XXH3-64; then the last row's key whole. The payload holds the pages: in each, every
+granule's key coded forward against the one before, the first against the key the options give the page.
+An object of one page keeps it in the options and writes no payload. A granule's rows hold keys from its
+key to the next granule's, both included, since granules are not cut where the key changes.
+
+A key of version 1 is the row encoding of the prefix's components, nulls last, the one the tree and the
+merges compare, which pads a text to blocks of 32 bytes. Version 2 (coding 1) writes each non-empty text
+and binary unpadded: its leading byte, its bytes with a zero written `01 01` and a one `01 02`, then a
+zero that ends it; empty values, nulls and fixed widths as the row encoding has them. The code keeps the
+order and is free of prefixes, so keys and bounds of whole values compare as row-encoded ones do. The
+writer builds both and keeps the smaller, version 1 on a tie, which keys of integers alone always are; a
+reader that knows neither version or coding reads the object without its index. Each reader compares in
+the coding of the index it reads: a filter's bounds are coded once a question for each coding met, and a
+consolidation, which compares the keys of several objects, widens them to the row encoding.
 
 The object's table of contents names the entry and its payload, so a reader reads the options with no
 open of the object, then every page in one request, and keeps them with the entry's table of contents.
@@ -243,9 +252,10 @@ refutes is passed over, and any other of more than one entry is cut in eight, ea
 the pages first, then over the granules of the pages kept. Leading components bound a range of granules
 in a few judgments; a later one prunes where the components before it hold few values, as a filter on
 the hour under `(service, hour)` keeps in each service the granules of its hours. An object's own key
-range, from its tree key to its last key, is judged the same way before it is opened. About sixteen
-bytes a granule for a prefix of a few components: an object of a gibibyte, some 3 300 granules, holds an
-index of some fifty kilobytes. A dataset's writers build it at completion from the keys they declare,
+range, from its tree key to its last key, is judged the same way before it is opened. With its texts
+unpadded, the index takes 12.6 bytes a granule for the requests of the reference store and 8.2 for its
+spans, where row-encoded keys took 31.9 and 19.4 *(measured, `--micro keyindex --store`)*: an object of a
+gibibyte, some 3 300 granules, holds an index of some forty kilobytes. A dataset's writers build it at completion from the keys they declare,
 over the object's own granules and rows. It replaces the slices of `vorticity.slices.v1`, cut at
 changes of key, retired with it.
 

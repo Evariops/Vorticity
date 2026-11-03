@@ -25,8 +25,9 @@ namespace Vorticity.Indexes;
 /// reader reads nothing past it.
 /// </para>
 /// <para>
-/// About sixteen bytes a granule for a prefix of a few components, a few where neighbouring granules share most of their
-/// key: an object of a gibibyte, some 3 300 granules, holds an index of some fifty kilobytes, read in one request.
+/// With its texts unpadded, 12.6 bytes a granule for the reference store's requests and 8.2 for its spans, where row-encoded
+/// keys took 31.9 and 19.4: an object of a gibibyte, some 3 300 granules, holds an index of some forty kilobytes, read in
+/// one request.
 /// </para>
 /// <para>
 /// An index is read for one search, over the bytes read of it, the table's and the pages', which <see cref="Dispose"/> gives

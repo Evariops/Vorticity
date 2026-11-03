@@ -3874,7 +3874,7 @@ public sealed class VortexDataset : IAsyncDisposable
 
     /// <summary>
     /// The sparse index of the object <paramref name="entry"/> names, for one search, which disposes it: its table, then its
-    /// pages in one request, some fifty kilobytes for an object of a gibibyte. Read through <paramref name="opened"/>, the
+    /// pages in one request, some forty kilobytes for an object of a gibibyte. Read through <paramref name="opened"/>, the
     /// object's open, whose tail serves what it holds; with no open of the object otherwise. Nothing of it is kept past
     /// its dispose: its bytes stay where an index's regions stay, in the session's segment cache and disk cache. Null
     /// when the object keeps none, or what was read does not decode.

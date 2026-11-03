@@ -240,7 +240,8 @@ in the tree of commits names each structure, so a reader finds any of them witho
 ### 5.2 The sparse key index
 
 For each granule, the indexed prefix of its first row, front-coded against the granule before it, in pages of 128
-granules (`vorticity.key.index.v1`). A reader finds it through the object's entry, without opening the object, and reads
+granules (`vorticity.key.index.v1`), its texts and binaries unpadded where that takes fewer bytes
+([10-indexes.md](10-indexes.md)). A reader finds it through the object's entry, without opening the object, and reads
 its pages in one request.
 
 The filter's conjuncts on the leading components give intervals of keys, as ClickHouse's condition on a continuous range
@@ -269,7 +270,8 @@ component past the prefix varies within a granule, and the zone maps judge it: Q
 prefix of two, read every object's index for no granule refuted, 0.9 s of processor and 334 MB allocated a question at
 32 lanes where the rows take 0.4 s and 110 MB without them *(measured)*.
 
-It costs at most ~16 bytes a granule: ~52 KB for an object of 1 GiB, ~8 MB a day and ~3.3 GB over 13 months of the
+It takes 12.6 bytes a granule for the requests of the reference store and 8.2 for its spans, where row-encoded keys
+took 31.9 and 19.4 *(measured)*: ~42 KB for an object of 1 GiB, ~6.6 MB a day and ~2.6 GB over 13 months of the
 reference table *(computed)*.
 
 No index stays in memory past the search that reads it, where ClickHouse keeps its primary index resident. Each search

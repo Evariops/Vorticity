@@ -123,7 +123,8 @@ The key serves four things.
 
 No index stays in memory past the search that reads it: each search reads its object's index again, from the object's
 open, the process's segment cache or the session's disk cache (`SynopsisCache`), and gives it back. An index holds the
-key of each granule's first row, coded against the one before; a search decodes only the pages its bounds reach.
+key of each granule's first row, coded against the one before, its texts unpadded where that takes fewer bytes; a search
+decodes only the pages its bounds reach.
 
 What the key does not do:
 * It keeps no uniqueness: rows of one key all stay, and nothing replaces an older row, as ClickHouse's replacing merges do.
