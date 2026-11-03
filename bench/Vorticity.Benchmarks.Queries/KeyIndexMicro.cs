@@ -6,6 +6,7 @@ using System.Threading.Tasks;
 using Vorticity.Dataset;
 using Vorticity.Expressions;
 using Vorticity.Indexes;
+using Vorticity.Types;
 
 namespace Vorticity.Benchmarks.Queries;
 
@@ -169,7 +170,10 @@ internal static class KeyIndexMicro
 
     /// <summary>
     /// The sparse indexes of the objects of the dataset at <paramref name="directory"/>, read and weighed: the bytes read of
-    /// them, those an index holds besides once every page is reached, and those its keys take decoded whole.
+    /// them, those an index holds besides once every page is reached, and those its keys take decoded whole. Then what its
+    /// records would take with each text unpadded: the blocks of 32 bytes the row encoding pads a text to, with the byte
+    /// after each, as an escaping code that keeps the order writes it instead, a zero byte doubled and two bytes to end it;
+    /// the keys coded forward again, page by page.
     /// </summary>
     private static async Task<int> HeldAsync(string directory)
     {
@@ -180,6 +184,10 @@ internal static class KeyIndexMicro
         long onDisk = 0;
         long held = 0;
         long whole = 0;
+        long records = 0;
+        long escapedRecords = 0;
+        long keyBytes = 0;
+        long escapedKeyBytes = 0;
         await foreach (PositionedObject positioned in dataset.WalkAsync(null, 0, long.MaxValue, null, default))
         {
             if (positioned.Entry.Contents is not { KeyIndex: { } table } contents
@@ -192,21 +200,93 @@ internal static class KeyIndexMicro
             objects++;
             granules += keys.Granules;
             onDisk += table.Length + (contents.KeyPages?.Length ?? 0);
+            Vorticity.Dataset.SortKey shape = Vorticity.Dataset.SortKey.Of(dataset.Snapshot.Schema.Layout!, partition: false, keys.Components);
 
-            // What the keys take decoded whole: each key and where it ends.
+            // What the keys take decoded whole: each key and where it ends; and each record, as written and unpadded.
             GranuleKeys.KeyReader reader = default;
+            byte[] previous = [];
+            byte[] previousEscaped = [];
             for (int granule = 0; granule < keys.Granules; granule++)
             {
-                whole += reader.Key(keys, granule).Length + sizeof(int);
+                byte[] key = reader.Key(keys, granule).ToArray();
+                byte[] escaped = Unpadded(shape, key);
+                whole += key.Length + sizeof(int);
+                keyBytes += key.Length;
+                escapedKeyBytes += escaped.Length;
+                bool first = granule % keys.PageEntries == 0;
+                records += RecordBytes(first ? key : previous, key);
+                escapedRecords += RecordBytes(first ? escaped : previousEscaped, escaped);
+                previous = key;
+                previousEscaped = escaped;
             }
 
             reader.Dispose();
             held += keys.HeldBytes;
         }
 
+        double per = Math.Max(granules, 1);
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
-            $"keyindex {directory}: {objects:N0} objects, {granules:N0} granules, {(double)onDisk / Math.Max(granules, 1):0.0} bytes a granule on disk, {(double)held / Math.Max(granules, 1):0.0} held, {(double)whole / Math.Max(granules, 1):0.0} decoded whole"));
+            $"keyindex {directory}: {objects:N0} objects, {granules:N0} granules, {onDisk / per:0.0} bytes a granule on disk, {held / per:0.0} held, {whole / per:0.0} decoded whole"));
+        Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+            $"  texts unpadded: records {records / per:0.0} -> {escapedRecords / per:0.0} bytes a granule ({100.0 * (records - escapedRecords) / Math.Max(records, 1):0.0} % less); keys {keyBytes / per:0.0} -> {escapedKeyBytes / per:0.0} bytes ({100.0 * (keyBytes - escapedKeyBytes) / Math.Max(keyBytes, 1):0.0} % less)"));
         return 0;
+    }
+
+    /// <summary>The bytes of <paramref name="key"/>'s record coded forward against <paramref name="before"/>: the bytes they share, the rest's length, the rest.</summary>
+    private static int RecordBytes(byte[] before, byte[] key)
+    {
+        int shared = key.AsSpan().CommonPrefixLength(before);
+        return VarintBytes(shared) + VarintBytes(key.Length - shared) + (key.Length - shared);
+    }
+
+    private static int VarintBytes(int value) => value < 0x80 ? 1 : value < 0x4000 ? 2 : value < 0x200000 ? 3 : 5;
+
+    /// <summary>
+    /// <paramref name="key"/> with each text component's blocks written unpadded: its leading byte, its bytes with a zero
+    /// doubled as zero then 0xFF, then two zero bytes, which orders as the blocks do. Other components as they are.
+    /// </summary>
+    private static byte[] Unpadded(Vorticity.Dataset.SortKey shape, byte[] key)
+    {
+        const int Block = 32;
+        List<byte> into = new List<byte>(key.Length);
+        int start = 0;
+        for (int component = 0; component < shape.Count && start < key.Length; component++)
+        {
+            int end = shape.PrefixLength(key, component + 1);
+            DType type = shape.TypeAt(component);
+            DType storage = type.Kind == DTypeKind.Extension ? type.StorageType : type;
+            if (storage.Kind is not (DTypeKind.Utf8 or DTypeKind.Binary) || key[start] != 0x02)
+            {
+                for (int i = start; i < end; i++)
+                {
+                    into.Add(key[i]);
+                }
+
+                start = end;
+                continue;
+            }
+
+            into.Add(key[start]);
+            for (int at = start + 1; at < end; at += Block + 1)
+            {
+                byte marker = key[at + Block];
+                int length = marker == 0xFF ? Block : marker;
+                for (int i = at; i < at + length; i++)
+                {
+                    into.Add(key[i]);
+                    if (key[i] == 0)
+                    {
+                        into.Add(0xFF);
+                    }
+                }
+            }
+
+            into.Add(0);
+            into.Add(0);
+            start = end;
+        }
+
+        return [.. into];
     }
 
     /// <summary>The index of <paramref name="table"/> and <paramref name="pages"/>, as a read hands them.</summary>
