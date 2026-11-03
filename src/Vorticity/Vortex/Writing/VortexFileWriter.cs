@@ -526,9 +526,16 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     // What each column's index of where its values lie is handed to once complete (VortexWriteOptions.Located); null for none.
     private Func<int, byte[], CancellationToken, ValueTask>? _located;
 
-    // The sparse index of the file's key the caller declared, the key of each granule's first row and the last row's, built
-    // and written at completion, with the same keys unpadded when it gave them; null for none.
-    private (int Components, IReadOnlyList<byte[]> Keys, byte[] LastKey, long PureRows, (IReadOnlyList<byte[]> Keys, byte[] LastKey)? Unpadded)? _keyIndex;
+    // The sparse index of the file's key the caller declared, built and written at completion; null for none, which every
+    // write but a dataset's sorted object's is, so that the writer carries a reference for it alone.
+    private DeclaredKeyIndex? _keyIndex;
+
+    /// <summary>
+    /// A sparse index declared (<see cref="DeclareKeyIndex"/>): the key of each granule's first row and the last row's, the
+    /// rows of the granules of one value, and the same keys unpadded when the caller gave them.
+    /// </summary>
+    private sealed record DeclaredKeyIndex(
+        int Components, IReadOnlyList<byte[]> Keys, byte[] LastKey, long PureRows, (IReadOnlyList<byte[]> Keys, byte[] LastKey)? Unpadded);
 
     // The values each component of the key that is a function of a column takes in each granule, which the caller declared,
     // each its place in the key, its region's bytes and the rows of its granules of one value; written at completion.
@@ -577,7 +584,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             throw new InvalidOperationException("A file's key index rides in its table of contents, over granules, which this writer does not write.");
         }
 
-        _keyIndex = (components, keys, lastKey, pureRows, _unpaddedKeyIndex ? unpadded : null);
+        _keyIndex = new DeclaredKeyIndex(components, keys, lastKey, pureRows, _unpaddedKeyIndex ? unpadded : null);
     }
 
     /// <summary>
