@@ -335,9 +335,16 @@ internal sealed partial class DatasetScanSource
     /// read on one lane of eight, where the pass read them on four, and at one lane allocated three times what the pass
     /// did, in 1.5 times its time.
     /// </summary>
+    /// <remarks>
+    /// The first column the tree's keys order, or under a partition the first the objects' own order: a read in its order
+    /// bounds each object by its keys and holds open an object of each partition (<see cref="DatasetSchema.TreeOrder"/>,
+    /// <see cref="DatasetSchema.ObjectOrder"/>). A window of the services by day read every object's services for its
+    /// first rows.
+    /// </remarks>
     public bool OrdersOnAsking(FieldExpr column, bool stopsEarly) =>
-        stopsEarly && _version.Schema.Key is { } key && key.Paths.Count > 0
-        && string.Equals(key.Paths[0], column.Path, System.StringComparison.Ordinal);
+        stopsEarly
+        && (string.Equals(_version.Schema.TreeOrder?.Paths[0], column.Path, System.StringComparison.Ordinal)
+            || string.Equals(_version.Schema.ObjectOrder?.Paths[0], column.Path, System.StringComparison.Ordinal));
 
     /// <summary>Any column but the first of the sort key, which the objects lie in the order of (spec G, 2).</summary>
     public bool ReadsTopLate(FieldExpr column) => !OrdersOnAsking(column, stopsEarly: true);

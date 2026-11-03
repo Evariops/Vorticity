@@ -115,6 +115,71 @@ public sealed partial class DatasetKeyOrderReadTests
     }
 
     /// <summary>
+    /// Partitioned by day under the key <c>(Service, Sequence)</c>: the first ten rows by the service, through a fresh handle,
+    /// are LINQ's and read an object of each partition and the few that meet at their ends, the source reading in the
+    /// service's order on asking. They read every object's services first, the order asked of no source under a partition.
+    /// </summary>
+    [Fact]
+    public async Task TheFirstRowsByTheKeyUnderAPartitionReadAnObjectOfEachPartition()
+    {
+        Random random = new Random(68);
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        List<KeyRow> all;
+        int objects = 0;
+        await using (VortexDataset building = await VortexDataset.CreateAsync(store, KeyRow.Schema, new DatasetOptions
+        {
+            Layout = new DatasetLayout
+            {
+                Partition = LayoutValue.Column(nameof(KeyRow.Day)),
+                SortKey = [LayoutValue.Column(nameof(KeyRow.Service)), LayoutValue.Column(nameof(KeyRow.Sequence))],
+                ObjectBytes = 32 << 10,
+                MergeFanout = 4,
+                CalmAfter = null,
+            },
+            ContentsObjectBytes = 0,
+        }, Ct))
+        {
+            all = await AppendAsync(building, random, appends: 6, rows: 10_000);
+            await foreach (PositionedObject held in building.ScanBuilder().ObjectsAsync(Ct))
+            {
+                objects++;
+            }
+        }
+
+        HashSet<string> read = [];
+        store.Fails = (operation, key) =>
+        {
+            if (operation == ObjectOperation.Read && key.StartsWith(CommitKey.DataPrefix, StringComparison.Ordinal))
+            {
+                lock (read)
+                {
+                    read.Add(key);
+                }
+            }
+
+            return false;
+        };
+        await using VortexDataset dataset = await VortexDataset.OpenAsync(store, cancellationToken: Ct);
+        Assert.True(new DatasetScanSource(dataset, dataset.Snapshot).OrdersOnAsking(new Vorticity.Expressions.ColumnFieldExpr(nameof(KeyRow.Service)), stopsEarly: true));
+        List<string?> first = await dataset.Scan<KeyRow>().OrderBy(r => r.Service).Select(r => r.Service).Take(10).ToListAsync(Ct);
+        Assert.Equal(
+            all.Where(static row => row.Service is not null).Select(static row => row.Service).Order(StringComparer.Ordinal).Take(10),
+            first);
+        Assert.True(read.Count is > 0 and <= 3 + 2, $"{read.Count} objects read of {objects}");
+
+        // The first services' groups, in order, through another fresh handle: final once a greater service is read.
+        read.Clear();
+        await using VortexDataset grouping = await VortexDataset.OpenAsync(store, cancellationToken: Ct);
+        List<ServiceCount> groups = await grouping.Scan<KeyRow>().GroupBy(r => r.Service).OrderBy(g => g.Key).Take(5)
+            .Select(g => (g.Key, g.Count())).As<ServiceCount>().ToRecordsAsync(Ct).ToListAsync(Ct);
+        Assert.Equal(
+            all.Where(static row => row.Service is not null).GroupBy(static row => row.Service).OrderBy(static g => g.Key, StringComparer.Ordinal).Take(5)
+                .Select(static g => new ServiceCount(g.Key, g.Count())),
+            groups);
+        Assert.True(read.Count is > 0 and <= 3 + 2, $"the first groups read {read.Count} objects of {objects}");
+    }
+
+    /// <summary>
     /// <paramref name="appends"/> appends of <paramref name="rows"/> rows over three days and 300 services, one in twenty
     /// null, merged every second append, then consolidated; no object keeps a sorted run.
     /// </summary>
@@ -174,4 +239,8 @@ public sealed partial class DatasetKeyOrderReadTests
 
         return read;
     }
+
+    /// <summary>A service's rows counted.</summary>
+    [VortexRecord]
+    public partial record struct ServiceCount(string? Service, long Count);
 }
