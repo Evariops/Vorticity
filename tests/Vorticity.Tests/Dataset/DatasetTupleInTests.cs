@@ -85,6 +85,10 @@ public sealed partial class DatasetTupleInTests
             }
 
             Assert.True(failures.Count == 0, $"{failures.Count} wrong:\n{string.Join('\n', failures.Take(10))}");
+
+            // Tuples that all hold a null leave the tuples alone, with no column's set beside them: no row, and every row negated.
+            Assert.Equal(0, await dataset.Scan().Where(VortexExpr.Parse("(Service, Code) in (('svc-01', null))")).CountAsync(Ct));
+            Assert.Equal(all.Count, await dataset.Scan().Where(VortexExpr.Parse("not ((Service, Code) in (('svc-01', null)))")).CountAsync(Ct));
         }
     }
 
