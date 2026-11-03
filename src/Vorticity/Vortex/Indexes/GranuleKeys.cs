@@ -215,6 +215,65 @@ internal sealed class GranuleKeys
     }
 
     /// <summary>
+    /// The first granule from <paramref name="from"/> on whose key reaches <paramref name="bound"/> (<see cref="Reaches"/>),
+    /// <see cref="Granules"/> when none does, every page in hand; each key compared added to <paramref name="compared"/>.
+    /// From the first granule, a bisection; from a later one, a gallop then a bisection, so that the ascending bounds of
+    /// one search each cost the logarithm of how far the next lies rather than of the whole index.
+    /// </summary>
+    internal int First(ReadOnlySpan<byte> bound, int from, bool past, ref int compared)
+    {
+        int granules = Granules;
+        int lo = from;
+        int hi = granules;
+        if (from > 0)
+        {
+            // Every granule before lo falls short; hi the first probe that reaches, or the end.
+            int probe = from;
+            int step = 1;
+            while (probe < granules)
+            {
+                compared++;
+                if (Reaches(Key(probe), bound, past))
+                {
+                    break;
+                }
+
+                lo = probe + 1;
+                probe = lo + step - 1;
+                step <<= 1;
+            }
+
+            hi = Math.Min(probe, granules);
+        }
+
+        while (lo < hi)
+        {
+            int middle = lo + ((hi - lo) >> 1);
+            compared++;
+            if (Reaches(Key(middle), bound, past))
+            {
+                hi = middle;
+            }
+            else
+            {
+                lo = middle + 1;
+            }
+        }
+
+        return lo;
+    }
+
+    /// <summary>
+    /// Whether <paramref name="key"/> lies at or past <paramref name="bound"/>, a key or its leading values; with
+    /// <paramref name="past"/>, whether its leading bytes, as many as the bound holds, lie past it. A value's encoding ends
+    /// on its own and orders as the value does, so the leading bytes of a key compare as its leading values.
+    /// </summary>
+    internal static bool Reaches(ReadOnlySpan<byte> key, ReadOnlySpan<byte> bound, bool past) =>
+        past
+            ? (key.Length > bound.Length ? key[..bound.Length] : key).SequenceCompareTo(bound) > 0
+            : key.SequenceCompareTo(bound) >= 0;
+
+    /// <summary>
     /// The table and the pages of the index of an object of <paramref name="rows"/> rows in granules of
     /// <paramref name="granuleRows"/>, from the key of each granule's first row and the last row's key, each of
     /// <paramref name="components"/> components; the pages empty when the table keeps the one page.

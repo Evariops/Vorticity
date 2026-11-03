@@ -13,7 +13,7 @@ namespace Vorticity.Benchmarks.Queries;
 /// The search of one object's sparse index alone, in memory (<c>--micro keyindex</c>): an index of 3 300 granules, an
 /// object of a gibibyte, under the key <c>(Service, Hour(At), Host)</c> of 600 services, searched for a service, a service
 /// and an hour, and a host, which bounds no leading component. A search per fresh pruning, as each question makes one; the
-/// time, the boxes judged and the bytes allocated a search, and the bytes the index holds a granule.
+/// time, the boxes judged, the keys compared and the bytes allocated a search, and the bytes the index holds a granule.
 /// </summary>
 internal static class KeyIndexMicro
 {
@@ -58,12 +58,13 @@ internal static class KeyIndexMicro
         GranuleKeys index = Index(table, pages);
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
             $"keyindex: {Granules:N0} granules, {index.ResidentBytes:N0} bytes held, {(double)index.ResidentBytes / Granules:0.0} a granule"));
-        Console.WriteLine($"{"filter",-22} {"µs/search",10} {"judged",8} {"bytes",8} {"ranges",7}");
+        Console.WriteLine($"{"filter",-22} {"µs/search",10} {"judged",8} {"compared",9} {"bytes",8} {"ranges",7}");
         foreach ((string name, VortexExpr filter) in filters)
         {
             double best = double.MaxValue;
             long bytes = 0;
             int judged = 0;
+            int compared = 0;
 
             int ranges = 0;
             for (int round = 0; round < Math.Max(1, rounds); round++)
@@ -88,11 +89,12 @@ internal static class KeyIndexMicro
                     best = us;
                     bytes = allocated;
                     judged = prunings[0].Judgments;
+                    compared = prunings[0].Comparisons;
 
                 }
             }
 
-            Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"{name,-22} {best,10:0.00} {judged,8} {bytes,8} {ranges,7}"));
+            Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"{name,-22} {best,10:0.00} {judged,8} {compared,9} {bytes,8} {ranges,7}"));
         }
 
         return 0;

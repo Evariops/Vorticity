@@ -178,7 +178,7 @@ internal sealed class KeyPruning
     /// The name a component's values are judged under: its column's path, or, for a read of a variant's key, its text behind
     /// a character no column's name holds.
     /// </summary>
-    private static string NameOf(LayoutColumn source) => source.Read is { } read ? "\0" + read.Text : source.Value.SourcePath;
+    internal static string NameOf(LayoutColumn source) => source.Read is { } read ? "\0" + read.Text : source.Value.SourcePath;
 
     /// <summary>The name of the component that reads <paramref name="path"/>, the same key in the same class; null for none.</summary>
     private static string? Named(LayoutColumn?[] sources, VariantFieldExpr path)
@@ -278,7 +278,42 @@ internal sealed class KeyPruning
 
     private int _judgments;
 
-    private List<(int First, int End)> Search(GranuleKeys keys, ReadOnlySpan<byte> partition)
+    /// <summary>The keys the searches of objects' indexes compared, finding where the filter's key intervals lie.</summary>
+    internal int Comparisons => _comparisons;
+
+    private int _comparisons;
+
+    /// <summary>The intervals of the indexed components' keys the filter bounds, made at the first search (<see cref="KeyIntervals"/>).</summary>
+    internal KeyIntervals Intervals
+    {
+        get
+        {
+            if (Volatile.Read(ref _intervals) is { } known)
+            {
+                return known;
+            }
+
+            string?[] names = new string?[_indexedSources.Length];
+            for (int i = 0; i < names.Length; i++)
+            {
+                names[i] = _indexedSources[i] is { } source ? NameOf(source) : null;
+            }
+
+            string? partition = _skip > 0 && _sources[0] is { } leading ? NameOf(leading) : null;
+            KeyIntervals made = KeyIntervals.Of(_judged, _indexedSources, names, partition, _tree, _skip);
+            return Interlocked.CompareExchange(ref _intervals, made, null) ?? made;
+        }
+    }
+
+    private KeyIntervals? _intervals;
+
+    /// <summary>
+    /// The granules of <paramref name="keys"/> that the exclusion search alone keeps, the intervals unused: what the
+    /// bisection keeps within, which its tests compare it with. Not kept for the question.
+    /// </summary>
+    internal List<(int First, int End)> Excluded(GranuleKeys keys, ReadOnlySpan<byte> partition) => Search(keys, partition, bisect: false);
+
+    private List<(int First, int End)> Search(GranuleKeys keys, ReadOnlySpan<byte> partition, bool bisect = true)
     {
         Interlocked.Increment(ref _searches);
         List<(int First, int End)> kept = [];
@@ -287,24 +322,51 @@ internal sealed class KeyPruning
             return kept;
         }
 
+        // The intervals the filter bounds first, by bisection: exact, they are the answer; else the boxes are judged within them.
+        KeyIntervals intervals = bisect ? Intervals : KeyIntervals.Unbounded;
+        List<(int First, int End)>? within = null;
+        if (intervals.Bounded)
+        {
+            int compared = 0;
+            within = intervals.Exact ? kept : [];
+            intervals.Ranges(keys, within, ref compared);
+            Interlocked.Add(ref _comparisons, compared);
+            if (intervals.Exact || within.Count == 0)
+            {
+                return Merge(kept);
+            }
+        }
+
         int judged = 0;
 
-        // The pages first: a page runs from its first key to the next page's, the last one to the object's last key. One list
-        // of summaries serves every node of the search, and each text or binary the keys hold is read once.
+        // The pages first, unless the intervals bound the granules: a page runs from its first key to the next page's, the last
+        // one to the object's last key. One list of summaries serves every node of the search, and each text or binary the
+        // keys hold is read once.
         List<ColumnSummary> box = new List<ColumnSummary>(_tree.Count + 1);
         Dictionary<byte[], FilterLiteral> values = new Dictionary<byte[], FilterLiteral>(ByteKeys.Instance);
-        List<(int First, int End)> pages = [];
-        Search(keys, partition, 0, keys.Pages, granules: false, pages, box, values, ref judged);
-        foreach ((int firstPage, int endPage) in pages)
+        if (within is null)
         {
-            int from = firstPage * keys.PageEntries;
-            int to = (int)Math.Min((long)endPage * keys.PageEntries, keys.Granules);
+            within = [];
+            Search(keys, partition, 0, keys.Pages, granules: false, within, box, values, ref judged);
+            for (int i = 0; i < within.Count; i++)
+            {
+                (int firstPage, int endPage) = within[i];
+                within[i] = (firstPage * keys.PageEntries, (int)Math.Min((long)endPage * keys.PageEntries, keys.Granules));
+            }
+        }
+
+        foreach ((int from, int to) in Merge(within))
+        {
             Search(keys, partition, from, to, granules: true, kept, box, values, ref judged);
         }
 
         Interlocked.Add(ref _judgments, judged);
+        return Merge(kept);
+    }
 
-        // Neighbouring ranges as one; none when the object's box meets the filter's and no granule's does.
+    /// <summary>Neighbouring ranges of <paramref name="kept"/>, ascending, as one, in place.</summary>
+    private static List<(int First, int End)> Merge(List<(int First, int End)> kept)
+    {
         if (kept.Count == 0)
         {
             return kept;
