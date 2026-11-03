@@ -126,6 +126,41 @@ public sealed partial class GranuleKeysTests
     }
 
     /// <summary>
+    /// Keys row-encoded make a table of version 1, which every reader reads; keys coded otherwise one of version 2, which
+    /// says how behind the version byte and reads back with its keys; a coding or a version a reader does not know is refused.
+    /// </summary>
+    [Fact]
+    public void ATableSaysHowItCodesItsKeys()
+    {
+        List<byte[]> keys = [[0x01, 0x02], [0x01, 0x05], [0x03]];
+        (byte[] rows, _) = GranuleKeys.Build(10, 30, 1, keys, [0x04]);
+        (byte[] coded, _) = GranuleKeys.Build(10, 30, 1, keys, [0x04], coding: KeyCoding.UnpaddedTexts);
+        Assert.Equal(1, rows[0]);
+        Assert.Equal([2, (byte)KeyCoding.UnpaddedTexts], coded[..2]);
+        Assert.Equal(rows[1..], coded[2..]);
+        using (GranuleKeys read = GranuleKeys.From(rows)!)
+        {
+            Assert.Equal(KeyCoding.Rows, read.Coding);
+        }
+
+        using (GranuleKeys read = GranuleKeys.From(coded)!)
+        {
+            Assert.Equal(KeyCoding.UnpaddedTexts, read.Coding);
+            GranuleKeys.KeyReader reader = default;
+            Assert.Equal(keys[1], reader.Key(read, 1).ToArray());
+            reader.Dispose();
+            Assert.Equal(2, read.FirstAtOrPast([0x02]));
+        }
+
+        byte[] unknown = [.. coded];
+        unknown[1] = 7;
+        Assert.Null(GranuleKeys.From(unknown));
+        byte[] later = [.. rows];
+        later[0] = 3;
+        Assert.Null(GranuleKeys.From(later));
+    }
+
+    /// <summary>
     /// Four appends of 30 000 rows keyed by a service, an hour and a sequence, drawn with a skew so that the runs of a
     /// prefix range from a row to thousands, merged, the index on the first one, two or three components: each object's
     /// index holds, for each granule, the prefix of its first row's key, its rows, its last key; lookups on the first
@@ -189,6 +224,13 @@ public sealed partial class GranuleKeysTests
 
             using GranuleKeys read = keys;
             indexed++;
+
+            // A key led by a text takes fewer bytes unpadded: the writer keeps that coding.
+            if (keys.Coding != KeyCoding.UnpaddedTexts)
+            {
+                failures.Add($"{entry.Key}: its keys coded {keys.Coding}");
+            }
+
             List<byte[]> rowKeys = [];
             await using (ObjectLease lease = await dataset.RentAsync(entry, Ct))
             {
@@ -209,14 +251,14 @@ public sealed partial class GranuleKeysTests
             for (int row = 0; row < rowKeys.Count; row += keys.GranuleRows)
             {
                 granules++;
-                if (!reader.Key(keys, row / keys.GranuleRows).SequenceEqual(rowKeys[row].AsSpan(0, sortKey.PrefixLength(rowKeys[row], prefix))))
+                if (!reader.Key(keys, row / keys.GranuleRows).SequenceEqual(Coded(keys, sortKey, rowKeys[row].AsSpan(0, sortKey.PrefixLength(rowKeys[row], prefix)))))
                 {
                     failures.Add($"{entry.Key}: the key of granule {row / keys.GranuleRows}");
                 }
             }
 
             reader.Dispose();
-            byte[] lastKey = rowKeys[^1][..sortKey.PrefixLength(rowKeys[^1], prefix)];
+            byte[] lastKey = Coded(keys, sortKey, rowKeys[^1].AsSpan(0, sortKey.PrefixLength(rowKeys[^1], prefix)));
             if (rowKeys.Count != keys.Rows || keys.Components != prefix || !keys.LastKey.SequenceEqual(lastKey))
             {
                 failures.Add($"{entry.Key}: {keys.Rows} rows of {rowKeys.Count}, {keys.Components} components of {prefix}, the last key {(keys.LastKey.SequenceEqual(lastKey) ? "equal" : "other")}");
@@ -238,6 +280,10 @@ public sealed partial class GranuleKeysTests
         Assert.True(failures.Count == 0, $"{failures.Count} wrong:\n{string.Join('\n', failures.Take(10))}");
         Assert.True(indexed > 0 && granules > 0, $"{indexed} objects indexed, {granules} granules");
     }
+
+    /// <summary>A row-encoded key of the prefix, as <paramref name="keys"/> codes its keys.</summary>
+    private static byte[] Coded(GranuleKeys keys, SortKey sortKey, ReadOnlySpan<byte> key) =>
+        keys.Coding == KeyCoding.Rows ? key.ToArray() : UnpaddedKeys.Narrow(key, sortKey.Widths[..keys.Components]);
 
     private static byte[] RandomKey(Random random)
     {

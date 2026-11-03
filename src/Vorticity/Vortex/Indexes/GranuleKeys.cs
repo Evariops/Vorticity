@@ -16,7 +16,8 @@ namespace Vorticity.Indexes;
 /// </summary>
 /// <remarks>
 /// <para>
-/// The keys lie in pages of <see cref="PageEntries"/> granules. The table holds, behind a version byte, the rows of a
+/// The keys lie in pages of <see cref="PageEntries"/> granules. The table holds, behind a version byte, the coding of the
+/// keys for version 2 (<see cref="KeyCoding"/>; version 1 holds them as the row encoding writes them), the rows of a
 /// granule, the object's rows and the components a key holds; then each page's first key, coded forward against the page
 /// before (the bytes they share as a varint, then the rest as a varint of its length and its bytes), where its bytes lie in
 /// the pages and their XXH3-64; then the last row's key whole. In a page, each granule's key is coded forward against the
@@ -37,7 +38,11 @@ namespace Vorticity.Indexes;
 /// </remarks>
 internal sealed class GranuleKeys : IDisposable
 {
-    private const byte Version = 1;
+    /// <summary>The version of a table whose keys are row-encoded, as every reader reads them.</summary>
+    private const byte RowsVersion = 1;
+
+    /// <summary>The version of a table that says how it codes its keys, behind the version byte.</summary>
+    private const byte CodedVersion = 2;
 
     /// <summary>The granules a page holds by default.</summary>
     internal const int DefaultPageEntries = 128;
@@ -62,10 +67,11 @@ internal sealed class GranuleKeys : IDisposable
     private int _wholeUsed;
 
     private GranuleKeys(
-        Bytes table, int granuleRows, long rows, int components, int pageEntries, int pages, byte[] pageKeys, int[] ints,
+        Bytes table, KeyCoding coding, int granuleRows, long rows, int components, int pageEntries, int pages, byte[] pageKeys, int[] ints,
         ulong[] places, int lastKeyAt, int lastKeyLength, bool inline)
     {
         _table = table;
+        Coding = coding;
         GranuleRows = granuleRows;
         Rows = rows;
         Components = components;
@@ -78,6 +84,12 @@ internal sealed class GranuleKeys : IDisposable
         _lastKeyLength = lastKeyLength;
         _inline = inline;
     }
+
+    /// <summary>
+    /// How the keys are coded: as the row encoding writes them, or with their texts unpadded. A key, a bound and a page's
+    /// first key compare in it alike; a reader that compares them with keys of rows codes those the same way.
+    /// </summary>
+    internal KeyCoding Coding { get; }
 
     /// <summary>The rows of a granule, the last fewer.</summary>
     internal int GranuleRows { get; }
@@ -539,11 +551,13 @@ internal sealed class GranuleKeys : IDisposable
     /// <summary>
     /// The table and the pages of the index of an object of <paramref name="rows"/> rows in granules of
     /// <paramref name="granuleRows"/>, from the key of each granule's first row and the last row's key, each of
-    /// <paramref name="components"/> components; the pages empty when the table keeps the one page.
+    /// <paramref name="components"/> components, coded as <paramref name="coding"/> says; the pages empty when the table keeps
+    /// the one page. Keys as the row encoding writes them make a table of version 1, which every reader reads.
     /// </summary>
     /// <exception cref="ArgumentException">The keys are not one a granule, or go back.</exception>
     internal static (byte[] Table, byte[] Pages) Build(
-        int granuleRows, long rows, int components, IReadOnlyList<byte[]> keys, byte[] lastKey, int pageEntries = DefaultPageEntries)
+        int granuleRows, long rows, int components, IReadOnlyList<byte[]> keys, byte[] lastKey, int pageEntries = DefaultPageEntries,
+        KeyCoding coding = KeyCoding.Rows)
     {
         long granules = (rows + granuleRows - 1) / granuleRows;
         if (granules != keys.Count || granules == 0)
@@ -580,7 +594,12 @@ internal sealed class GranuleKeys : IDisposable
                 regions[page] = (start, written.Length, XxHash3.HashToUInt64(written));
             }
 
-            table.WriteVarint(Version);
+            table.WriteVarint(coding == KeyCoding.Rows ? RowsVersion : CodedVersion);
+            if (coding != KeyCoding.Rows)
+            {
+                table.WriteVarint((ulong)coding);
+            }
+
             table.WriteVarint((ulong)granuleRows);
             table.WriteVarint((ulong)rows);
             table.WriteVarint((ulong)components);
@@ -633,7 +652,8 @@ internal sealed class GranuleKeys : IDisposable
         {
             ReadOnlySpan<byte> bytes = table.Span;
             int at = 0;
-            if (!Varint(bytes, ref at, out int version) || version != Version
+            if (!Varint(bytes, ref at, out int version) || version is not (RowsVersion or CodedVersion)
+                || !CodingOf(version, bytes, ref at, out KeyCoding coding)
                 || !Varint(bytes, ref at, out int granuleRows) || !Varint64(bytes, ref at, out ulong rows)
                 || !Varint(bytes, ref at, out int components) || !Varint(bytes, ref at, out int pageEntries)
                 || !Varint(bytes, ref at, out int pages))
@@ -723,7 +743,7 @@ internal sealed class GranuleKeys : IDisposable
 
             ints.AsSpan(pages, pages).Fill(-1);
             GranuleKeys keys = new GranuleKeys(
-                table, granuleRows, (long)rows, components, pageEntries, pages, pageKeys, ints, places, lastKeyAt, lastKeyLength, inline == 1);
+                table, coding, granuleRows, (long)rows, components, pageEntries, pages, pageKeys, ints, places, lastKeyAt, lastKeyLength, inline == 1);
             pageKeys = null;
             ints = null;
             places = null;
@@ -753,6 +773,24 @@ internal sealed class GranuleKeys : IDisposable
                 ArrayPool<ulong>.Shared.Return(places);
             }
         }
+    }
+
+    /// <summary>The coding of a table of <paramref name="version"/>, read past the version byte for version 2; false for a coding unknown.</summary>
+    private static bool CodingOf(int version, ReadOnlySpan<byte> bytes, ref int at, out KeyCoding coding)
+    {
+        coding = KeyCoding.Rows;
+        if (version == RowsVersion)
+        {
+            return true;
+        }
+
+        if (!Varint(bytes, ref at, out int read) || read != (int)KeyCoding.UnpaddedTexts)
+        {
+            return false;
+        }
+
+        coding = KeyCoding.UnpaddedTexts;
+        return true;
     }
 
     /// <summary>A varint of at most 64 bits at <paramref name="at"/>, which moves past it; false past the bytes or the bits.</summary>
@@ -952,4 +990,17 @@ internal readonly record struct GranuleGrid(int GranuleRows, long Rows)
 {
     /// <summary>The object's granules.</summary>
     internal int Granules => (int)((Rows + GranuleRows - 1) / GranuleRows);
+}
+
+/// <summary>How a sparse index codes its keys (<see cref="GranuleKeys.Coding"/>).</summary>
+internal enum KeyCoding : byte
+{
+    /// <summary>As the row encoding writes them, a text padded to blocks of 32 bytes: a table of version 1.</summary>
+    Rows = 0,
+
+    /// <summary>
+    /// Their texts and binaries unpadded, a zero and a one escaped and a zero ending each (Vorticity.RowEncoding's
+    /// UnpaddedKeys): a table of version 2.
+    /// </summary>
+    UnpaddedTexts = 1,
 }

@@ -133,12 +133,13 @@ internal sealed class ObjectKeyEntries : ISortedEntries
         }
 
         int granules = (int)((_rows + _granuleRows - 1) / _granuleRows);
+        byte[]? coded = Coded(key);
         int low = 0;
         int high = granules;
         while (low < high)
         {
             int middle = low + ((high - low) >> 1);
-            if (await FirstPastAsync(middle, key, strict, cancellationToken).ConfigureAwait(false))
+            if (await FirstPastAsync(middle, key, coded, strict, cancellationToken).ConfigureAwait(false))
             {
                 high = middle;
             }
@@ -159,23 +160,39 @@ internal sealed class ObjectKeyEntries : ISortedEntries
 
     /// <summary>
     /// Whether granule <paramref name="granule"/>'s first tuple lies at or past <paramref name="key"/>, or strictly past it:
-    /// by its key in the sparse index when that decides, a prefix of the tuple that is no prefix of the sought key, and by
-    /// its first row otherwise.
+    /// by its key in the sparse index when that decides, a prefix of the tuple that is no prefix of the sought key
+    /// <paramref name="coded"/> as the index codes it, and by its first row otherwise.
     /// </summary>
-    private async ValueTask<bool> FirstPastAsync(int granule, byte[] key, bool strict, CancellationToken cancellationToken)
+    private async ValueTask<bool> FirstPastAsync(int granule, byte[] key, byte[]? coded, bool strict, CancellationToken cancellationToken)
     {
-        if (_index is { } index)
+        if (_index is { } index && coded is not null)
         {
             ReadOnlySpan<byte> first = _reader.Key(index, granule);
-            if (!key.AsSpan().StartsWith(first))
+            if (!coded.AsSpan().StartsWith(first))
             {
-                return first.SequenceCompareTo(key) > 0;
+                return first.SequenceCompareTo(coded) > 0;
             }
         }
 
         await LoadAsync(granule, cancellationToken).ConfigureAwait(false);
         int order = Loaded(0).SequenceCompareTo(key);
         return strict ? order > 0 : order >= 0;
+    }
+
+    /// <summary>
+    /// <paramref name="key"/> as the sparse index codes its keys, to compare with them: itself for keys row-encoded, its
+    /// leading components unpadded for an index that codes its texts so; null with no index, or one whose components the
+    /// key cannot be coded by.
+    /// </summary>
+    private byte[]? Coded(byte[] key)
+    {
+        if (_index is not { } index)
+        {
+            return null;
+        }
+
+        ReadOnlySpan<int> widths = _key.Widths[..Math.Min(index.Components, _key.Count)];
+        return index.Coding == KeyCoding.Rows ? key : UnpaddedKeys.Codes(widths) ? UnpaddedKeys.Narrow(key, widths) : null;
     }
 
     /// <summary>The first loaded row from <paramref name="from"/> to <paramref name="to"/> whose tuple lies at or past <paramref name="key"/>, or past it.</summary>

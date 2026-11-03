@@ -499,6 +499,9 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// <summary>Whether the file keeps its columns' zone maps (<see cref="VortexWriteOptions.Zones"/>).</summary>
     private bool _zones = true;
 
+    /// <summary>Whether the key's sparse index may code its texts unpadded (<see cref="VortexWriteOptions.UnpaddedKeyIndex"/>).</summary>
+    private bool _unpaddedKeyIndex = true;
+
     /// <summary>The identity the options pinned, or null for a fresh one.</summary>
     private readonly Guid? _identity;
     // Null when the policy asks for nothing, so such a write allocates none of the index machinery.
@@ -524,8 +527,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     private Func<int, byte[], CancellationToken, ValueTask>? _located;
 
     // The sparse index of the file's key the caller declared, the key of each granule's first row and the last row's, built
-    // and written at completion; null for none.
-    private (int Components, IReadOnlyList<byte[]> Keys, byte[] LastKey, long PureRows)? _keyIndex;
+    // and written at completion, with the same keys unpadded when it gave them; null for none.
+    private (int Components, IReadOnlyList<byte[]> Keys, byte[] LastKey, long PureRows, (IReadOnlyList<byte[]> Keys, byte[] LastKey)? Unpadded)? _keyIndex;
 
     // The values each component of the key that is a function of a column takes in each granule, which the caller declared,
     // each its place in the key, its region's bytes and the rows of its granules of one value; written at completion.
@@ -559,10 +562,13 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// <see cref="BlockRows"/> rows, row-encoded over <paramref name="components"/> components, and the last row's, which
     /// completion builds the index of, writes and names in the table of contents; and the rows of the granules that hold one
     /// value of the components, <paramref name="pureRows"/> (<see cref="ObjectContents.PureGranuleRows"/>). The caller, which
-    /// writes its rows in the key's order, knows them; the keys are the writer's until it completes.
+    /// writes its rows in the key's order, knows them; the keys are the writer's until it completes. With
+    /// <paramref name="unpadded"/>, the same keys with their texts unpadded (<see cref="KeyCoding.UnpaddedTexts"/>): the index
+    /// is written in the coding that takes fewer bytes, the row encoding's when they tie.
     /// </summary>
     /// <exception cref="InvalidOperationException">The writer carries no table of contents, or cuts no granules.</exception>
-    internal void DeclareKeyIndex(int components, IReadOnlyList<byte[]> keys, byte[] lastKey, long pureRows)
+    internal void DeclareKeyIndex(
+        int components, IReadOnlyList<byte[]> keys, byte[] lastKey, long pureRows, (IReadOnlyList<byte[]> Keys, byte[] LastKey)? unpadded = null)
     {
         ArgumentNullException.ThrowIfNull(keys);
         ArgumentNullException.ThrowIfNull(lastKey);
@@ -571,7 +577,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             throw new InvalidOperationException("A file's key index rides in its table of contents, over granules, which this writer does not write.");
         }
 
-        _keyIndex = (components, keys, lastKey, pureRows);
+        _keyIndex = (components, keys, lastKey, pureRows, _unpaddedKeyIndex ? unpadded : null);
     }
 
     /// <summary>
@@ -921,6 +927,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             _budget = session?.WriteLanes,
             _located = options.Located,
             _zones = options.Zones,
+            _unpaddedKeyIndex = options.UnpaddedKeyIndex,
         };
         writer._leastChunkBlocks = LeastChunkBlocks(options.RowBound, schema, writer._rowBlock);
         if (options.CarriesContents)
@@ -2769,6 +2776,16 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                 {
                     (byte[] table, byte[] pages) = GranuleKeys.Build(
                         _blockRows, _rowCount, declaredKeys.Components, declaredKeys.Keys, declaredKeys.LastKey);
+                    if (declaredKeys.Unpadded is { } unpadded)
+                    {
+                        (byte[] Table, byte[] Pages) coded = GranuleKeys.Build(
+                            _blockRows, _rowCount, declaredKeys.Components, unpadded.Keys, unpadded.LastKey, coding: KeyCoding.UnpaddedTexts);
+                        if (coded.Table.Length + coded.Pages.Length < table.Length + pages.Length)
+                        {
+                            (table, pages) = coded;
+                        }
+                    }
+
                     if (pages.Length > 0)
                     {
                         keyPages = IndexSegment.Of(_sink.Position, pages, 0);

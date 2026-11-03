@@ -476,7 +476,7 @@ internal sealed class KeyPruning
         }
 
         judged++;
-        if (!Judge(EntryKey(keys, from, granules, in range), NextKey(keys, to, granules, in range), _skip, partition, scratch.Box, scratch.Values))
+        if (!Judge(EntryKey(keys, from, granules, in range), NextKey(keys, to, granules, in range), _skip, partition, scratch.Box, scratch.Values, keys.Coding))
         {
             return;
         }
@@ -529,15 +529,15 @@ internal sealed class KeyPruning
 
     /// <summary>
     /// Whether rows between <paramref name="low"/> and <paramref name="high"/>, keys of the tree's components from position
-    /// <paramref name="from"/> on, both included, may hold a row the filter keeps; <paramref name="partition"/> the value of
-    /// the positions before, which every row holds.
+    /// <paramref name="from"/> on coded as <paramref name="coding"/> says, both included, may hold a row the filter keeps;
+    /// <paramref name="partition"/> the value of the positions before, row-encoded, which every row holds.
     /// </summary>
     private bool Judge(
         ReadOnlySpan<byte> low, ReadOnlySpan<byte> high, int from, ReadOnlySpan<byte> partition, List<ColumnSummary> box,
-        Dictionary<byte[], FilterLiteral>? values = null)
+        Dictionary<byte[], FilterLiteral>? values = null, KeyCoding coding = KeyCoding.Rows)
     {
         box.Clear();
-        Box(low, high, from, partition, nonNull: false, box, values);
+        Box(low, high, from, partition, nonNull: false, box, values, coding);
         return box.Count == 0 || _pruner.MayMatch(Merged(box), 1);
     }
 
@@ -548,11 +548,11 @@ internal sealed class KeyPruning
     /// </summary>
     private List<ColumnSummary> Box(
         ReadOnlySpan<byte> low, ReadOnlySpan<byte> high, int from, ReadOnlySpan<byte> partition, bool nonNull, List<ColumnSummary> box,
-        Dictionary<byte[], FilterLiteral>? values = null)
+        Dictionary<byte[], FilterLiteral>? values = null, KeyCoding coding = KeyCoding.Rows)
     {
         if (from > 0 && !partition.IsEmpty)
         {
-            FilterLiteral value = Value(partition, 0, values);
+            FilterLiteral value = Value(partition, 0, values, KeyCoding.Rows);
             Bound(box, 0, value, value, nonNull);
         }
 
@@ -560,9 +560,9 @@ internal sealed class KeyPruning
         int highAt = 0;
         for (int position = from; position < _tree.Count && lowAt < low.Length && highAt < high.Length; position++)
         {
-            DType type = _tree.TypeAt(position);
-            int lowLength = RowEncoder.ValueLength(low[lowAt..], type);
-            int highLength = RowEncoder.ValueLength(high[highAt..], type);
+            int width = _tree.WidthAt(position);
+            int lowLength = ValueLength(low[lowAt..], width, coding);
+            int highLength = ValueLength(high[highAt..], width, coding);
             if (lowLength <= 0 || highLength <= 0 || lowAt + lowLength > low.Length || highAt + highLength > high.Length)
             {
                 break;
@@ -570,7 +570,7 @@ internal sealed class KeyPruning
 
             ReadOnlySpan<byte> lowValue = low.Slice(lowAt, lowLength);
             ReadOnlySpan<byte> highValue = high.Slice(highAt, highLength);
-            Bound(box, position, Value(lowValue, position, values), Value(highValue, position, values), nonNull);
+            Bound(box, position, Value(lowValue, position, values, coding), Value(highValue, position, values, coding), nonNull);
 
             // Past the first component the two keys part on, the next ones are free.
             if (!lowValue.SequenceEqual(highValue))
@@ -585,28 +585,39 @@ internal sealed class KeyPruning
         return box;
     }
 
+    /// <summary>The bytes the first value of <paramref name="key"/> takes, coded as <paramref name="coding"/> says, a value of the encoded width <paramref name="width"/>.</summary>
+    private static int ValueLength(ReadOnlySpan<byte> key, int width, KeyCoding coding) =>
+        coding == KeyCoding.Rows ? RowEncoder.ValueLength(key, width) : UnpaddedKeys.ValueLength(key, width);
+
     /// <summary>
-    /// The value <paramref name="encoded"/> holds, of the component at <paramref name="position"/>: a text's or a binary's read
-    /// once a search, by its bytes, into <paramref name="values"/> when there are some. Each granule's bounds made their
-    /// values' bytes anew: a search of a service's objects read the same few names thousands of times, a tenth of what the
-    /// questions of a node allocated (2026-11-02).
+    /// The value <paramref name="encoded"/> holds, of the component at <paramref name="position"/>, coded as
+    /// <paramref name="coding"/> says: a text's or a binary's read once a search, by its bytes, into <paramref name="values"/>
+    /// when there are some. Each granule's bounds made their values' bytes anew: a search of a service's objects read the
+    /// same few names thousands of times, a tenth of what the questions of a node allocated (2026-11-02). The two codings of
+    /// a non-empty text never share their bytes, the last one 1 to 32 row-encoded and zero unpadded, and the others alike.
     /// </summary>
-    private FilterLiteral Value(ReadOnlySpan<byte> encoded, int position, Dictionary<byte[], FilterLiteral>? values)
+    private FilterLiteral Value(ReadOnlySpan<byte> encoded, int position, Dictionary<byte[], FilterLiteral>? values, KeyCoding coding)
     {
         if (values is null || _tree.WidthAt(position) != RowEncoder.VariableWidth)
         {
-            return RowEncoder.ReadFirstValue(encoded, _tree.TypeAt(position));
+            return Read(encoded, position, coding);
         }
 
         Dictionary<byte[], FilterLiteral>.AlternateLookup<ReadOnlySpan<byte>> lookup = values.GetAlternateLookup<ReadOnlySpan<byte>>();
         if (!lookup.TryGetValue(encoded, out FilterLiteral value))
         {
-            value = RowEncoder.ReadFirstValue(encoded, _tree.TypeAt(position));
+            value = Read(encoded, position, coding);
             lookup[encoded] = value;
         }
 
         return value;
     }
+
+    /// <summary>The value <paramref name="encoded"/> holds, of the component at <paramref name="position"/>, coded as <paramref name="coding"/> says.</summary>
+    private FilterLiteral Read(ReadOnlySpan<byte> encoded, int position, KeyCoding coding) =>
+        coding == KeyCoding.Rows
+            ? RowEncoder.ReadFirstValue(encoded, _tree.TypeAt(position))
+            : UnpaddedKeys.ReadFirstValue(encoded, _tree.TypeAt(position));
 
     /// <summary>
     /// Adds to <paramref name="box"/> what values from <paramref name="low"/> to <paramref name="high"/> of the component at

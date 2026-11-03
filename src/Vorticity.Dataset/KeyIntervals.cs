@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Threading;
 using Vorticity.Aggregating;
 using Vorticity.Compute;
 using Vorticity.Expressions;
@@ -12,8 +13,9 @@ namespace Vorticity.Dataset;
 /// <summary>
 /// The intervals of an object's sparse index keys that a filter's conjuncts on the indexed components bound: equalities and
 /// sets on the leading components, then a range on the next one, each through the component's function, as ClickHouse's
-/// condition on a continuous range of the key. Ascending and disjoint, each row-encoded once a question; an object's index
-/// finds the granules of each by a bisection (<see cref="Ranges"/>), where the exclusion search judges boxes.
+/// condition on a continuous range of the key. Ascending and disjoint, each row-encoded once a question, and coded once a
+/// question as the indexes it meets code their keys; an object's index finds the granules of each by a bisection
+/// (<see cref="Ranges"/>), where the exclusion search judges boxes.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -39,16 +41,18 @@ internal sealed class KeyIntervals
     internal const int MostTuples = 65_536;
 
     /// <summary>The intervals of a filter that bounds no leading component: the exclusion search alone.</summary>
-    internal static readonly KeyIntervals Unbounded = new KeyIntervals([], [], lowStrict: false, highStrict: false, exact: false, bounded: false);
+    internal static readonly KeyIntervals Unbounded = new KeyIntervals([], [], [], lowStrict: false, highStrict: false, exact: false, bounded: false);
 
-    // The bounds end to end, an interval's low then its high; where each ends, two an interval.
-    private readonly byte[] _bytes;
-    private readonly int[] _ends;
+    // The bounds row-encoded; the encoded width of each indexed component, which codes them with their texts unpadded at the
+    // first index that codes its keys so.
+    private readonly Coded _rows;
+    private readonly int[] _widths;
+    private Coded? _unpadded;
 
-    private KeyIntervals(byte[] bytes, int[] ends, bool lowStrict, bool highStrict, bool exact, bool bounded)
+    private KeyIntervals(byte[] bytes, int[] ends, int[] widths, bool lowStrict, bool highStrict, bool exact, bool bounded)
     {
-        _bytes = bytes;
-        _ends = ends;
+        _rows = new Coded(bytes, ends);
+        _widths = widths;
         LowStrict = lowStrict;
         HighStrict = highStrict;
         Exact = exact;
@@ -62,7 +66,7 @@ internal sealed class KeyIntervals
     internal bool Exact { get; }
 
     /// <summary>The intervals, none when no row may keep the conjuncts.</summary>
-    internal int Count => _ends.Length / 2;
+    internal int Count => _rows.Ends.Length / 2;
 
     /// <summary>Whether the low bounds exclude their own keys.</summary>
     internal bool LowStrict { get; }
@@ -70,18 +74,58 @@ internal sealed class KeyIntervals
     /// <summary>Whether the high bounds exclude their own keys.</summary>
     internal bool HighStrict { get; }
 
-    /// <summary>The low bound of interval <paramref name="interval"/>, a key or its leading values; empty for none.</summary>
-    internal ReadOnlySpan<byte> Low(int interval)
+    /// <summary>The bounds end to end, an interval's low then its high, and where each ends, two an interval.</summary>
+    private sealed record Coded(byte[] Bytes, int[] Ends)
     {
-        int start = interval == 0 ? 0 : _ends[(2 * interval) - 1];
-        return _bytes.AsSpan(start, _ends[2 * interval] - start);
+        /// <summary>The low bound of interval <paramref name="interval"/>, a key or its leading values; empty for none.</summary>
+        internal ReadOnlySpan<byte> Low(int interval)
+        {
+            int start = interval == 0 ? 0 : Ends[(2 * interval) - 1];
+            return Bytes.AsSpan(start, Ends[2 * interval] - start);
+        }
+
+        /// <summary>The high bound of interval <paramref name="interval"/>, a key or its leading values; empty for none.</summary>
+        internal ReadOnlySpan<byte> High(int interval)
+        {
+            int start = Ends[2 * interval];
+            return Bytes.AsSpan(start, Ends[(2 * interval) + 1] - start);
+        }
     }
 
-    /// <summary>The high bound of interval <paramref name="interval"/>, a key or its leading values; empty for none.</summary>
-    internal ReadOnlySpan<byte> High(int interval)
+    /// <summary>
+    /// The bounds as <paramref name="coding"/> codes keys: row-encoded, or with their texts unpadded, made once a question at
+    /// the first index that asks, each bound whole values.
+    /// </summary>
+    private Coded In(KeyCoding coding)
     {
-        int start = _ends[2 * interval];
-        return _bytes.AsSpan(start, _ends[(2 * interval) + 1] - start);
+        if (coding == KeyCoding.Rows)
+        {
+            return _rows;
+        }
+
+        if (Volatile.Read(ref _unpadded) is { } known)
+        {
+            return known;
+        }
+
+        int[] ends = new int[_rows.Ends.Length];
+        int length = 0;
+        for (int bound = 0; bound < ends.Length; bound++)
+        {
+            length += UnpaddedKeys.NarrowedLength(Bound(bound), _widths);
+            ends[bound] = length;
+        }
+
+        byte[] bytes = new byte[length];
+        for (int bound = 0; bound < ends.Length; bound++)
+        {
+            UnpaddedKeys.Narrow(Bound(bound), _widths, bytes.AsSpan(bound == 0 ? 0 : ends[bound - 1]));
+        }
+
+        Coded made = new Coded(bytes, ends);
+        return Interlocked.CompareExchange(ref _unpadded, made, null) ?? made;
+
+        ReadOnlySpan<byte> Bound(int bound) => (bound & 1) == 0 ? _rows.Low(bound >> 1) : _rows.High(bound >> 1);
     }
 
     /// <summary>
@@ -91,12 +135,13 @@ internal sealed class KeyIntervals
     /// </summary>
     internal void Ranges(GranuleKeys keys, List<(int First, int End)> into, ref int compared)
     {
+        Coded bounds = In(keys.Coding);
         int granules = keys.Granules;
         int from = 0;
         for (int interval = 0; interval < Count; interval++)
         {
-            ReadOnlySpan<byte> low = Low(interval);
-            ReadOnlySpan<byte> high = High(interval);
+            ReadOnlySpan<byte> low = bounds.Low(interval);
+            ReadOnlySpan<byte> high = bounds.High(interval);
             int start = 0;
             if (!low.IsEmpty)
             {
@@ -197,7 +242,7 @@ internal sealed class KeyIntervals
         {
             if (at.IsEmpty)
             {
-                return new KeyIntervals([], [], false, false, exact: true, bounded: true);
+                return new KeyIntervals([], [], [], false, false, exact: true, bounded: true);
             }
 
             if (at.Points is not { } values)
@@ -231,7 +276,7 @@ internal sealed class KeyIntervals
         {
             if (tupled.Count == 0 || (points < indexed.Length && bounds[points] is { Failed: false, IsEmpty: true }))
             {
-                return new KeyIntervals([], [], false, false, exact: true, bounded: true);
+                return new KeyIntervals([], [], [], false, false, exact: true, bounded: true);
             }
 
             ranged = points < indexed.Length && bounds[points] is { Failed: false, Points: null } next && (next.Low is not null || next.High is not null);
@@ -288,7 +333,7 @@ internal sealed class KeyIntervals
         }
 
         return new KeyIntervals(
-            [.. bytes], ends, range is { Low: not null, LowStrict: true }, range is { High: not null, HighStrict: true }, exact, bounded: true);
+            [.. bytes], ends, tree.Widths.Slice(skip, indexed.Length).ToArray(), range is { Low: not null, LowStrict: true }, range is { High: not null, HighStrict: true }, exact, bounded: true);
     }
 
     /// <summary>The leading components whose columns are all among the columns of <paramref name="tuples"/>.</summary>

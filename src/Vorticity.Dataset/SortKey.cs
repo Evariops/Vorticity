@@ -61,6 +61,9 @@ internal sealed class SortKey
     /// <summary>The encoded width of the value at <paramref name="position"/> (<see cref="RowEncoder.EncodedWidth"/>).</summary>
     internal int WidthAt(int position) => _widths[position];
 
+    /// <summary>The encoded width of each value, in the key's order: what a key with its texts unpadded is coded by (<see cref="UnpaddedKeys"/>).</summary>
+    internal ReadOnlySpan<int> Widths => _widths;
+
     /// <summary>Whether the value at <paramref name="position"/> is a function of a column, a truncation, rather than a column as it is or a variant's key.</summary>
     internal bool IsFunctionOfColumn(int position) => _sources[position] is { Function: not null, Read: null };
 
