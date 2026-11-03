@@ -234,8 +234,22 @@ in the tree of commits names each structure, so a reader finds any of them witho
 
 For each granule, the indexed prefix of its first row, front-coded against the granule before it, in pages of 128
 granules (`vorticity.key.index.v1`). A reader finds it through the object's entry, without opening the object, and reads
-its pages in one request. A binary search finds the granules of a prefix. A filter on a
-component that is not leading is judged on ranges of granules: when the bounds of a range share their first `j`
+its pages in one request.
+
+The filter's conjuncts on the leading components give intervals of keys, as ClickHouse's condition on a continuous range
+of the primary key:
+- equalities, sets and null checks on the first `j` components, at most 256 tuples;
+- then a range on the next component, through the component's function.
+
+A bisection finds each interval's granules. Granule `i` may hold a key of the interval when the next granule's key reaches
+its low bound and its own key does not pass its high one. The later intervals gallop from where the one before landed:
+`V` values over `G` granules cost `O(V log(G/V))` comparisons, and an equality on the head costs some 17 for an object of
+3,300 granules, with no box judged, where the exclusion search judged 37 *(measured, `--micro keyindex`)*. Intervals that
+hold every conjunct a box could judge are the answer. Otherwise, and for a filter that bounds no leading component, the
+exclusion search runs within them.
+
+The exclusion search judges a filter on a
+component that is not leading on ranges of granules: when the bounds of a range share their first `j`
 components, the component after them is bounded by theirs, and the filter is judged on that box; ranges the box refutes
 are skipped, the others split and judged again. An object's index is read only where it may refute a granule: the filter
 bounds a component of the prefix, and the object's summaries do not prove that bound over every row of it. A bound on a
@@ -435,7 +449,9 @@ the object, the range of granules.
 ### 8.2 Index analysis
 
 Partitions are kept by the filter on their source; objects by the summaries in the tree; granules by the sparse key
-index, the zone maps, presence, locating indexes and postings, consulted cheapest first. A structure is consulted only
+index, the zone maps, presence, locating indexes and postings, consulted cheapest first. In the sparse key index, a
+bisection finds the intervals of the key the leading components' conjuncts bound, and boxes are judged only for what the
+intervals do not hold ([5.2](#52-the-sparse-key-index)). A structure is consulted only
 when it costs less than reading what it could exclude. The sets it returns are combined: `AND` intersects, `OR` unites,
 and `NOT` applies only where a set is exact. The filter is evaluated again on the rows, each structure being a safe
 superset.
