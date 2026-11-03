@@ -48,12 +48,24 @@ internal sealed partial class DatasetScanBuilder
         long objects = 0;
         long rows = 0;
         List<long> keptByLevel = [];
+
+        // The partitions the kept objects lie in, which the walk gives one after the other by the tree's keys.
+        long partitions = 0;
+        ReadOnlyMemory<byte> partition = default;
+        SortKey? tree = _version.Schema.Partitioned ? _version.Schema.Tree : null;
         await foreach (PositionedObject held in _version
             .WalkAsync(Pruner(), _from, _to, metrics, cancellationToken).ConfigureAwait(false))
         {
             if (Covered(held) == 0)
             {
                 continue;
+            }
+
+            if (tree is not null && VortexDataset.OrderOf(held.TreeKey) is { IsEmpty: false } order
+                && tree.PrefixLength(order.Span, 1) is > 0 and int length && (partitions == 0 || !order.Span[..length].SequenceEqual(partition.Span)))
+            {
+                partitions++;
+                partition = order[..length];
             }
 
             objects++;
@@ -83,7 +95,7 @@ internal sealed partial class DatasetScanBuilder
             metrics.ObjectsSkipped,
             metrics.SubtreesSkipped,
             _orderPaths is null ? null : _orderPaths.Length == 1 ? _orderPaths[0] : "(" + string.Join(", ", _orderPaths) + ")",
-            CursorBound(objects, keptByLevel));
+            CursorBound(objects, keptByLevel, partitions));
     }
 
     /// <summary>

@@ -58,6 +58,63 @@ public sealed partial class DatasetKeyOrderReadTests
     }
 
     /// <summary>
+    /// Partitioned by day under the key <c>(Service, Sequence)</c>, in small objects consolidated, several a partition: a read
+    /// by the service, or by the whole key, each both ways, holds open an object of each partition and the few whose keys
+    /// meet at their ends, downward too the one whose null services a read gives last, and returns every row in order. It
+    /// held every object open at once, the services bounding none by their summaries.
+    /// </summary>
+    [Fact]
+    public async Task AReadInTheKeysOrderUnderAPartitionHoldsAnObjectOfEachPartitionOpen()
+    {
+        Random random = new Random(67);
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, KeyRow.Schema, new DatasetOptions
+        {
+            Layout = new DatasetLayout
+            {
+                Partition = LayoutValue.Column(nameof(KeyRow.Day)),
+                SortKey = [LayoutValue.Column(nameof(KeyRow.Service)), LayoutValue.Column(nameof(KeyRow.Sequence))],
+                ObjectBytes = 32 << 10,
+                MergeFanout = 4,
+                CalmAfter = null,
+            },
+            ContentsObjectBytes = 0,
+        }, Ct);
+        List<KeyRow> all = await AppendAsync(dataset, random, appends: 6, rows: 10_000);
+        int objects = 0;
+        await foreach (PositionedObject held in dataset.ScanBuilder().ObjectsAsync(Ct))
+        {
+            objects++;
+        }
+
+        Assert.True(objects >= 4 * 3, $"{objects} objects over 3 partitions");
+        Dictionary<long, KeyRow> bySequence = all.ToDictionary(static row => row.Sequence);
+        foreach (string[] paths in (string[][])[[nameof(KeyRow.Service)], [nameof(KeyRow.Service), nameof(KeyRow.Sequence)]])
+        {
+            foreach (bool descending in (bool[])[false, true])
+            {
+                DatasetScanCounters counters = new DatasetScanCounters();
+                List<KeyRow> read = await ReadAsync(dataset, paths, descending, bySequence, counters);
+                string label = $"({string.Join(", ", paths)}) {(descending ? "downward" : "upward")}";
+                Assert.Equal(all.Count, read.Count);
+                Assert.True(counters.Cursors <= (descending ? 2 * 3 : 3) + 2, $"{label}: {counters.Cursors} objects open at once of {objects}");
+                for (int i = 1; i < read.Count; i++)
+                {
+                    (string? before, string? after) = (read[i - 1].Service, read[i].Service);
+                    int order = before is null ? (after is null ? 0 : 1) : after is null ? -1 : string.CompareOrdinal(before, after);
+                    order = order != 0 || paths.Length == 1 ? order : read[i - 1].Sequence.CompareTo(read[i].Sequence);
+                    Assert.True(
+                        descending ? (before is null ? after is null : after is null || order >= 0) : order <= 0,
+                        $"{label}: goes back at row {i}");
+                }
+            }
+        }
+
+        DatasetPlan plan = await dataset.ScanBuilder().InKeyOrder(nameof(KeyRow.Service)).ExplainAsync(Ct);
+        Assert.True(plan.Cursors <= 3 * 2, $"the plan holds {plan.Cursors} cursors of {objects} objects");
+    }
+
+    /// <summary>
     /// <paramref name="appends"/> appends of <paramref name="rows"/> rows over three days and 300 services, one in twenty
     /// null, merged every second append, then consolidated; no object keeps a sorted run.
     /// </summary>
