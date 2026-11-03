@@ -96,9 +96,13 @@ internal static class DatasetLayoutVerifier
             else if (index.Components != plan.Prefix)
             {
                 problems.Add(Invariant($"'{entry.Key}': its sparse index holds {index.Components} components of the key, the layout indexes {plan.Prefix} (I3)"));
+                index.Dispose();
                 index = null;
             }
         }
+
+        // Given back once the object's rows are checked against it.
+        using GranuleKeys? read = index;
 
         byte[]? first = null;
         byte[] previous = [];
@@ -175,7 +179,7 @@ internal static class DatasetLayoutVerifier
         }
 
         granuleKeys.Dispose();
-        if (index is not null && (index.Rows != rows || !index.LastKey.AsSpan().SequenceEqual(lastPrefix)))
+        if (index is not null && (index.Rows != rows || !index.LastKey.SequenceEqual(lastPrefix)))
         {
             problems.Add(Invariant($"'{entry.Key}': its sparse index holds {index.Rows} rows and another last key, the object {rows} (I3)"));
         }

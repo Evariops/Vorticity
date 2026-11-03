@@ -47,7 +47,7 @@ public sealed partial class DatasetKeyPruningTests
             Expr.And(Ge(nameof(Row.At), Micros(Start.AddHours(10))), Lt(nameof(Row.At), Micros(Start.AddHours(11)))));
         DatasetSchema schema = dataset.Snapshot.Schema;
         PositionedObject held = await dataset.ScanBuilder().ObjectsAsync(Ct).SingleAsync(Ct);
-        GranuleKeys index = (await dataset.KeyIndexAsync(held.Entry, held.Entry.Contents!, Ct))!;
+        using GranuleKeys index = (await dataset.KeyIndexAsync(held.Entry, held.Entry.Contents!, Ct))!;
         List<(int First, int End)> first = KeyPruning.Of(schema, filter)!.Granules(index, default);
         Assert.InRange(first.Count, 1, index.Granules - 1);
 

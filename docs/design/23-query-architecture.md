@@ -267,11 +267,13 @@ prefix of two, read every object's index for no granule refuted, 0.9 s of proces
 It costs at most ~16 bytes a granule: ~52 KB for an object of 1 GiB, ~8 MB a day and ~3.3 GB over 13 months of the
 reference table *(computed)*.
 
-In memory, an index read keeps its records as written plus a key whole every sixteen granules, which a bisection
-compares before it decodes the keys of one run. That is the bytes above and a sixteenth of a decoded key a granule, where
-whole keys took some 80 bytes a granule in an index of 3 300 granules *(measured, `--micro keyindex`)*. A handle holds
-the indexes it reads within `DatasetOptions.KeyIndexCacheBytes`, 64 MiB by default, the least recently used let go
-first, as ClickHouse bounds the primary index it holds.
+No index stays in memory past the search that reads it, where ClickHouse keeps its primary index resident. Each search
+reads its object's index again, from the open's tail, the process's segment cache or the session's disk cache, which
+keeps the index's regions as it keeps every region an object declares with a checksum, and gives it back. A search
+decodes the pages' first keys, which the table gives, then checks and decodes only the pages its bounds reach, keeping
+the key of every sixteenth granule whole while it runs. In an index of 3 300 granules, taking the index and giving it
+back costs some 0.3 µs, and a page reached some 1 µs more: an equality on the head, 1.6 µs an object, where an index
+held in memory took 0.7 *(measured, `--micro keyindex --rounds 20`, the code warm)*.
 
 ### 5.3 Reading a granule, not a chunk
 
@@ -654,7 +656,7 @@ Where the code stops short of this design, measured or known:
 | 11 | No compatibility with earlier dataset formats during the beta | the new layout is not a variant of the old one |
 | 12 | Predicates evaluated in the encoded domain, at the core | filters on measures cost a fraction of decoding them |
 | 13 | Index objects per consolidated partition | lookups over long windows cost one request per partition, not per object |
-| 14 | The sort key as ClickHouse's primary key: intervals of its leading components found by bisection, its order served under a partition, its indexes held within a handle's budget | pruning in a few dozen key comparisons an object, a read in key order that opens an object of each partition, and resident indexes bounded as ClickHouse bounds its primary index |
+| 14 | The sort key as ClickHouse's primary key: intervals of its leading components found by bisection, its order served under a partition, its indexes read again by each search from the caches | pruning in a few dozen key comparisons an object, a read in key order that opens an object of each partition, and no index held in memory past its search, for about a microsecond an object |
 | — | Objects of 1 GiB at most by default | smaller merges and one write fewer a row; the requests this adds to lookups are absorbed by decision 13 |
 
 Alternatives weighed and set aside:

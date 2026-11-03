@@ -42,7 +42,6 @@ public sealed class VortexDataset : IAsyncDisposable
     private readonly DatasetOptions _options;
     private readonly ObjectCache _objects;
     private readonly PageCache _pageCache;
-    private readonly KeyIndexCache _keyIndexes;
     private DatasetSnapshot _snapshot;
     private Exception? _inlineFailure;
 
@@ -63,7 +62,6 @@ public sealed class VortexDataset : IAsyncDisposable
         _options = options;
         _objects = new ObjectCache(store, options.MaxOpenObjects, options.Session);
         _pageCache = new PageCache(options.PageCacheBytes);
-        _keyIndexes = new KeyIndexCache(options.KeyIndexCacheBytes);
         _snapshot = new DatasetSnapshot(commit, PagesOf(version, commit), _objects, knownAt, Costs);
     }
 
@@ -3875,11 +3873,11 @@ public sealed class VortexDataset : IAsyncDisposable
     }
 
     /// <summary>
-    /// The sparse index of the object <paramref name="entry"/> names, every page in hand, kept on its table of contents: its
-    /// table, then its pages in one request, some fifty kilobytes for an object of a gibibyte; none once they are held. Read
-    /// through <paramref name="opened"/>, the object's open, whose tail serves what it holds; with no open of the object
-    /// otherwise. Null when the object keeps none, or what was read does not decode. The handle holds the indexes it reads
-    /// within <see cref="DatasetOptions.KeyIndexCacheBytes"/>, the least recently used let go first.
+    /// The sparse index of the object <paramref name="entry"/> names, for one search, which disposes it: its table, then its
+    /// pages in one request, some fifty kilobytes for an object of a gibibyte. Read through <paramref name="opened"/>, the
+    /// object's open, whose tail serves what it holds; with no open of the object otherwise. Nothing of it is kept past
+    /// its dispose: its bytes stay where an index's regions stay, in the session's segment cache and disk cache. Null
+    /// when the object keeps none, or what was read does not decode.
     /// </summary>
     internal async ValueTask<Indexes.GranuleKeys?> KeyIndexAsync(
         ObjectEntry entry, Indexes.ObjectContents contents, CancellationToken cancellationToken, ISegmentReader? opened = null)
@@ -3889,80 +3887,69 @@ public sealed class VortexDataset : IAsyncDisposable
             return null;
         }
 
-        if (contents.Keys is { HoldsEvery: true } held)
-        {
-            _keyIndexes.Touch(held);
-            return held;
-        }
-
-        Indexes.GranuleKeys? read;
         if (opened is not null)
         {
-            read = await KeysThroughAsync(opened, contents, table, cancellationToken).ConfigureAwait(false);
-        }
-        else
-        {
-            ISegmentReader source = await OpenFooterlessAsync(entry, contents, cancellationToken).ConfigureAwait(false);
-            await using (source.ConfigureAwait(false))
-            {
-                read = await KeysThroughAsync(Footerless(source, entry, contents), contents, table, cancellationToken).ConfigureAwait(false);
-            }
+            return await KeysThroughAsync(opened, contents, table, cancellationToken).ConfigureAwait(false);
         }
 
-        if (read is { HoldsEvery: true })
+        ISegmentReader source = await OpenFooterlessAsync(entry, contents, cancellationToken).ConfigureAwait(false);
+        await using (source.ConfigureAwait(false))
         {
-            _keyIndexes.Admit(contents, read);
+            return await KeysThroughAsync(Footerless(source, entry, contents), contents, table, cancellationToken).ConfigureAwait(false);
         }
-
-        return read;
     }
 
-    /// <summary>The sparse indexes the handle holds in hand, within <see cref="DatasetOptions.KeyIndexCacheBytes"/>.</summary>
-    internal KeyIndexCache KeyIndexes => _keyIndexes;
+    /// <summary>
+    /// The sparse index of the object whose open is <paramref name="opened"/>, read through it for one walk or search, which
+    /// disposes it; null when the object keeps none, or what was read does not decode.
+    /// </summary>
+    internal static ValueTask<Indexes.GranuleKeys?> KeyIndexThroughAsync(
+        ISegmentReader opened, Indexes.ObjectContents contents, CancellationToken cancellationToken) =>
+        contents.KeyIndex is { } table ? KeysThroughAsync(opened, contents, table, cancellationToken) : default;
 
-    /// <summary><see cref="KeyIndexAsync"/>'s reads through <paramref name="reader"/>: the table of <paramref name="contents"/>'s sparse index, unless held, then its pages.</summary>
+    /// <summary>
+    /// <see cref="KeyIndexAsync"/>'s reads through <paramref name="reader"/>: the table of <paramref name="contents"/>'s
+    /// sparse index, checked against its checksum, then its pages, which a search checks a page at a time as it reaches them.
+    /// </summary>
     private static async ValueTask<Indexes.GranuleKeys?> KeysThroughAsync(
         ISegmentReader reader, Indexes.ObjectContents contents, Indexes.IndexSegment table, CancellationToken cancellationToken)
     {
-        Indexes.GranuleKeys? keys = contents.Keys;
-        if (keys is null)
+        Buffers.SegmentOwner? bytes = await reader.ReadAsync(SpecOf(table), cancellationToken).ConfigureAwait(false);
+        Indexes.GranuleKeys? keys = null;
+        try
         {
-            using Buffers.SegmentOwner bytes = await reader.ReadAsync(SpecOf(table), cancellationToken).ConfigureAwait(false);
-            if (!table.Holds(bytes.Buffer.Span) || Indexes.GranuleKeys.From(bytes.Buffer.Span) is not { } read)
+            if (!table.Holds(bytes.Buffer.Span) || Indexes.GranuleKeys.Over(bytes) is not { } read)
             {
                 return null;
             }
 
-            keys = contents.KeepKeys(read);
-        }
-
-        if (keys.HoldsEvery)
-        {
-            return keys;
-        }
-
-        if (contents.KeyPages is not { } pages)
-        {
-            return null;
-        }
-
-        using Buffers.SegmentOwner held = await reader.ReadAsync(SpecOf(pages), cancellationToken).ConfigureAwait(false);
-        ReadOnlySpan<byte> all = held.Buffer.Span;
-        if (!pages.Holds(all))
-        {
-            return null;
-        }
-
-        for (int page = 0; page < keys.Pages; page++)
-        {
-            (long offset, int length, ulong _) = keys.PageAt(page);
-            if (!keys.HasPage(page) && (offset + length > all.Length || !keys.TakePage(page, all.Slice((int)offset, length))))
+            keys = read;
+            bytes = null;
+            if (keys.WantsPages)
             {
-                return null;
-            }
-        }
+                if (contents.KeyPages is not { } pages)
+                {
+                    return null;
+                }
 
-        return keys;
+                bytes = await reader.ReadAsync(SpecOf(pages), cancellationToken).ConfigureAwait(false);
+                if (!keys.TakePages(bytes))
+                {
+                    return null;
+                }
+
+                bytes = null;
+            }
+
+            Indexes.GranuleKeys whole = keys;
+            keys = null;
+            return whole;
+        }
+        finally
+        {
+            bytes?.Dispose();
+            keys?.Dispose();
+        }
 
         static Serialization.Schemas.SegmentSpec SpecOf(Indexes.IndexSegment region) =>
             new Serialization.Schemas.SegmentSpec(region.Offset, region.Length, region.AlignmentExponent, 0, 0);

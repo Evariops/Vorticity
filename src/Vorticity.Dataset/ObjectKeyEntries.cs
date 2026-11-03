@@ -40,8 +40,8 @@ internal sealed class ObjectKeyEntries : ISortedEntries
 
     /// <summary>
     /// The entries of <paramref name="file"/>, whose rows are in the order of the tuple of <paramref name="paths"/>, as the
-    /// object names them, nulls last; <paramref name="index"/> its sparse index with every page in hand, or null to bisect
-    /// its granules by reading them.
+    /// object names them, nulls last; <paramref name="index"/> its sparse index, which the entries own and give back when
+    /// disposed, or null to bisect its granules by reading them.
     /// </summary>
     internal ObjectKeyEntries(VortexFile file, string[] paths, GranuleKeys? index)
     {
@@ -49,6 +49,11 @@ internal sealed class ObjectKeyEntries : ISortedEntries
         _paths = paths;
         _key = SortKey.OfColumns(file.DType, paths, descending: false);
         _index = index is { Rows: var rows } && rows == file.RowCount ? index : null;
+        if (_index is null)
+        {
+            index?.Dispose();
+        }
+
         _granuleRows = _index?.GranuleRows ?? DefaultGranuleRows;
         _rows = file.RowCount;
         RowSortField[] fields = new RowSortField[paths.Length];
@@ -112,6 +117,7 @@ internal sealed class ObjectKeyEntries : ISortedEntries
         _loadedStart = -1;
         _loadedRows = 0;
         _reader.Dispose();
+        _index?.Dispose();
         return ValueTask.CompletedTask;
     }
 

@@ -642,7 +642,7 @@ internal sealed partial class DatasetScanSource
             return NoneKept;
         }
 
-        if (await planner.KeptGranulesAsync(held, pruning, first, read: true, cancellationToken).ConfigureAwait(false) is not ({ } ranges, { } keys))
+        if (await planner.KeptGranulesAsync(held, pruning, first, read: true, cancellationToken).ConfigureAwait(false) is not ({ } ranges, var keys))
         {
             return null;
         }

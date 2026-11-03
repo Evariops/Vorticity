@@ -103,13 +103,13 @@ The layout is ClickHouse's MergeTree key under other names:
 | `ORDER BY`, the sorting key | `SortKey` |
 | `PRIMARY KEY`, a prefix of it | `IndexedPrefix` |
 | `primary.idx`, a key a granule | each object's sparse index, the first key of each granule |
-| the primary index in memory | `DatasetOptions.KeyIndexCacheBytes`, 64 MiB by default |
+| the primary index in memory | none: each search reads its object's index from the caches, and gives it back |
 
 The key serves four things.
 * **Pruning.** A filter's equalities, sets and null checks on the leading components, then a range on the next, are
   intervals of the key. A bisection finds their granules in each object's index: an equality on the service costs
-  under a microsecond and some twenty key comparisons in an object of 3 300 granules. A filter on a later component
-  alone is judged on ranges of granules, as ClickHouse's exclusion search.
+  some twenty key comparisons and 1.6 µs in an object of 3 300 granules, the index read from the caches included. A
+  filter on a later component alone is judged on ranges of granules, as ClickHouse's exclusion search.
 * **Order.** Every object's rows lie in the order of the columns the key orders: a column as it is, and a function
   followed by its column. `(Service, Bucket(Sequence, 1000), Sequence)` orders by the service then the sequence. A read
   in that order, `OrderBy` on the first such column or `InKeyOrder` on several, bounds each object by its keys and holds
@@ -119,9 +119,9 @@ The key serves four things.
 * **The key cursor.** `DatasetKeyCursor` walks those columns over every object, an object of each partition open at a
   time.
 
-The handle holds the indexes it reads within `KeyIndexCacheBytes`, the least recently used let go first and read again
-when a question needs them. An index holds the key of each granule's first row, coded against the one before, with a
-key whole every sixteen granules.
+No index stays in memory past the search that reads it: each search reads its object's index again, from the object's
+open, the process's segment cache or the session's disk cache (`SynopsisCache`), and gives it back. An index holds the
+key of each granule's first row, coded against the one before; a search decodes only the pages its bounds reach.
 
 What the key does not do:
 * It keeps no uniqueness: rows of one key all stay, and nothing replaces an older row, as ClickHouse's replacing merges do.

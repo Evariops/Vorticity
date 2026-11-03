@@ -51,22 +51,19 @@ public sealed partial class GranuleKeysTests
             }
 
             (byte[] table, byte[] pages) = GranuleKeys.Build(granuleRows, rows, 2, keys, last, pageEntries);
-            GranuleKeys? index = GranuleKeys.From(table);
+            using GranuleKeys? index = GranuleKeys.From(table);
             if (index is null || index.Granules != granules || index.GranuleRows != granuleRows || index.Rows != rows
-                || !index.LastKey.AsSpan().SequenceEqual(last) || index.Components != 2)
+                || !index.LastKey.SequenceEqual(last) || index.Components != 2)
             {
                 failures.Add($"trial {trial}: the table does not read back");
                 continue;
             }
 
             paged += index.Pages > 1 ? 1 : 0;
-            for (int page = 0; page < index.Pages; page++)
+            if (index.WantsPages != (index.Pages > 1) || (index.WantsPages && !index.TakePages(pages)))
             {
-                (long offset, int length, ulong _) = index.PageAt(page);
-                if (!index.HasPage(page) && !index.TakePage(page, pages.AsSpan((int)offset, length)))
-                {
-                    failures.Add($"trial {trial}: page {page} refused");
-                }
+                failures.Add($"trial {trial}: the pages refused");
+                continue;
             }
 
             // In order, a record each from the key before; backward, each from its run's whole key.
@@ -100,15 +97,26 @@ public sealed partial class GranuleKeysTests
                 }
             }
 
+            // A page altered by a bit is refused when a search first reaches it; the pages before it still read.
             if (index.Pages > 1)
             {
-                GranuleKeys bad = GranuleKeys.From(table)!;
-                (long offset, int length, ulong _) = bad.PageAt(1);
-                byte[] copy = pages.AsSpan((int)offset, length).ToArray();
-                copy[copy.Length / 2] ^= 1;
-                if (bad.TakePage(1, copy))
+                using GranuleKeys bad = GranuleKeys.From(table)!;
+                (int offset, int length, ulong _) = bad.PageAt(1);
+                byte[] copy = (byte[])pages.Clone();
+                copy[offset + (length / 2)] ^= 1;
+                GranuleKeys.KeyReader badReader = default;
+                try
                 {
-                    failures.Add($"trial {trial}: a page altered by a bit was taken");
+                    if (!bad.TakePages(copy) || !badReader.Key(bad, 0).SequenceEqual(keys[0]))
+                    {
+                        failures.Add($"trial {trial}: the pages before an altered one do not read");
+                    }
+
+                    Assert.Throws<VortexFormatException>(() => badReader.Key(bad, index.PageEntries));
+                }
+                finally
+                {
+                    badReader.Dispose();
                 }
             }
         }
@@ -179,6 +187,7 @@ public sealed partial class GranuleKeysTests
                 continue;
             }
 
+            using GranuleKeys read = keys;
             indexed++;
             List<byte[]> rowKeys = [];
             await using (ObjectLease lease = await dataset.RentAsync(entry, Ct))
@@ -208,9 +217,9 @@ public sealed partial class GranuleKeysTests
 
             reader.Dispose();
             byte[] lastKey = rowKeys[^1][..sortKey.PrefixLength(rowKeys[^1], prefix)];
-            if (rowKeys.Count != keys.Rows || keys.Components != prefix || !keys.LastKey.AsSpan().SequenceEqual(lastKey))
+            if (rowKeys.Count != keys.Rows || keys.Components != prefix || !keys.LastKey.SequenceEqual(lastKey))
             {
-                failures.Add($"{entry.Key}: {keys.Rows} rows of {rowKeys.Count}, {keys.Components} components of {prefix}, the last key {(keys.LastKey.AsSpan().SequenceEqual(lastKey) ? "equal" : "other")}");
+                failures.Add($"{entry.Key}: {keys.Rows} rows of {rowKeys.Count}, {keys.Components} components of {prefix}, the last key {(keys.LastKey.SequenceEqual(lastKey) ? "equal" : "other")}");
             }
         }
 

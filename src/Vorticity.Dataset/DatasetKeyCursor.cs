@@ -1385,17 +1385,30 @@ internal sealed partial class DatasetKeyCursor : IKeyWalker
             paths = named;
         }
 
+        // On a tuple of the columns the rows run in, a seek bisects the object's granules by its sparse index rather than by
+        // their rows: read through its open for the walk of the object, and given back with its cursor.
+        Indexes.GranuleKeys? index = _key.InRowOrder && _key.IsComposite && !slot.Lease.IsCopy && slot.Entry.Contents is { KeyIndex: not null } contents
+            ? await VortexDataset.KeyIndexThroughAsync(slot.Lease.File, contents, cancellationToken).ConfigureAwait(false)
+            : null;
+
         // Every object is written in the layout key's order with null keys last, an append's as a merge's, so on that
         // key an entry's rank is its row and a deleted row's rank needs no read.
-        slot.Cursor = await _key.TryOpenAsync(
-                slot.Lease.File, paths, _indexes, slot.Entry.Deletions, ranksAreRows: _bounded || _key.InRowOrder, cancellationToken,
-                slot.Entry.Contents?.Keys is { HoldsEvery: true } index ? index : null)
-            .ConfigureAwait(false)
-            ?? throw new VortexUnsupportedException(
-                slot.Entry.Key,
-                ComponentKind.Index,
-                $"The object has no source of keys on '{string.Join(", ", _key.Paths)}': no run its policy asked for, and the " +
-                "column is not one its rows are sorted by, so a key-ordered walk would leave its rows out. Index it.");
+        try
+        {
+            slot.Cursor = await _key.TryOpenAsync(
+                    slot.Lease.File, paths, _indexes, slot.Entry.Deletions, ranksAreRows: _bounded || _key.InRowOrder, cancellationToken, index)
+                .ConfigureAwait(false)
+                ?? throw new VortexUnsupportedException(
+                    slot.Entry.Key,
+                    ComponentKind.Index,
+                    $"The object has no source of keys on '{string.Join(", ", _key.Paths)}': no run its policy asked for, and the " +
+                    "column is not one its rows are sorted by, so a key-ordered walk would leave its rows out. Index it.");
+            index = null;
+        }
+        finally
+        {
+            index?.Dispose();
+        }
         Cursors++;
         return slot.Cursor;
     }

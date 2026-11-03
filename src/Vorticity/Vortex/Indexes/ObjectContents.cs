@@ -56,21 +56,6 @@ internal sealed class ObjectContents(
     /// <summary>The region of the pages of the file's sparse index; null when its table keeps its one page.</summary>
     internal IndexSegment? KeyPages { get; init; }
 
-    // The file's sparse index once a read of it loaded its table, whose pages it then keeps as reads take them; null before.
-    private GranuleKeys? _keys;
-
-    /// <summary>The file's sparse index, once a read loaded its table (<see cref="KeepKeys"/>); null before.</summary>
-    internal GranuleKeys? Keys => System.Threading.Volatile.Read(ref _keys);
-
-    /// <summary>Keeps <paramref name="keys"/>, read and checked, as the file's sparse index; the first kept stays.</summary>
-    internal GranuleKeys KeepKeys(GranuleKeys keys) => System.Threading.Interlocked.CompareExchange(ref _keys, keys, null) ?? keys;
-
-    /// <summary>
-    /// Forgets <paramref name="keys"/> when it is the file's sparse index kept, which a handle's budget let go: the next read
-    /// reads it again, and a search that holds it finishes with it.
-    /// </summary>
-    internal void ForgetKeys(GranuleKeys keys) => System.Threading.Interlocked.CompareExchange(ref _keys, null, keys);
-
     /// <summary>Each top-level column's chunk directory, the regions of its index entry.</summary>
     internal IReadOnlyList<IndexSegment> ChunkDirectories { get; } = chunkDirectories;
 

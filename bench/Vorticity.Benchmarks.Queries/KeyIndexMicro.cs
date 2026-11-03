@@ -12,8 +12,9 @@ namespace Vorticity.Benchmarks.Queries;
 /// <summary>
 /// The search of one object's sparse index alone, in memory (<c>--micro keyindex</c>): an index of 3 300 granules, an
 /// object of a gibibyte, under the key <c>(Service, Hour(At), Host)</c> of 600 services, searched for a service, a service
-/// and an hour, and a host, which bounds no leading component. A pruning a question, searching 64 objects; the
-/// time, the boxes judged, the keys compared and the bytes allocated a search, and the bytes the index holds a granule.
+/// and an hour, and a host, which bounds no leading component. A pruning a question, searching 64 objects, each index
+/// taken over its bytes as a read hands them, searched and given back, as a question does; the time, the boxes judged, the
+/// keys compared and the bytes allocated an object, and the bytes an index holds besides those read of it.
 /// </summary>
 internal static class KeyIndexMicro
 {
@@ -67,17 +68,42 @@ internal static class KeyIndexMicro
             ("host", Eq(nameof(KeyIndexRow.Host), Text("host-0042"))),
         ];
 
-        // The same index read again for each object a question searches: a pruning searches each copy once, as it does
-        // each object of its question, and keeps what it found of each.
-        GranuleKeys[] objects = new GranuleKeys[Objects];
-        for (int i = 0; i < objects.Length; i++)
+        // The same bytes read again for each object a question searches: a pruning searches each object once, its index taken
+        // over its bytes and given back.
+        long held;
+        using (GranuleKeys whole = Index(table, pages))
         {
-            objects[i] = Index(table, pages);
+            whole.DecodeAll();
+            held = whole.HeldBytes;
         }
 
-        GranuleKeys index = objects[0];
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
-            $"keyindex: {Granules:N0} granules, {index.ResidentBytes:N0} bytes held, {(double)index.ResidentBytes / Granules:0.0} a granule"));
+            $"keyindex: {Granules:N0} granules, {table.Length + pages.Length:N0} bytes read, {(double)(table.Length + pages.Length) / Granules:0.0} a granule; {held:N0} bytes held besides, every page reached"));
+
+        // What an index costs past its search: taken over its bytes and given back, then with one page reached.
+        byte[] middle = keys[Granules / 2];
+        double taken = double.MaxValue;
+        double reached = double.MaxValue;
+        for (int round = 0; round < Math.Max(1, rounds); round++)
+        {
+            long started = Stopwatch.GetTimestamp();
+            for (int i = 0; i < Searches; i++)
+            {
+                Index(table, pages).Dispose();
+            }
+
+            taken = Math.Min(taken, Stopwatch.GetElapsedTime(started).TotalMicroseconds / Searches);
+            started = Stopwatch.GetTimestamp();
+            for (int i = 0; i < Searches; i++)
+            {
+                using GranuleKeys index = Index(table, pages);
+                index.FirstAtOrPast(middle);
+            }
+
+            reached = Math.Min(reached, Stopwatch.GetElapsedTime(started).TotalMicroseconds / Searches);
+        }
+
+        Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"an index taken and given back: {taken:0.00} µs; with a bound found in it, one page reached: {reached:0.00} µs"));
         Console.WriteLine($"{"filter",-22} {"µs/search",10} {"judged",8} {"compared",9} {"bytes",8} {"ranges",7}");
         foreach ((string name, VortexExpr filter) in filters)
         {
@@ -98,9 +124,10 @@ internal static class KeyIndexMicro
                 long started = Stopwatch.GetTimestamp();
                 foreach (KeyPruning pruning in prunings)
                 {
-                    foreach (GranuleKeys searched in objects)
+                    for (int i = 0; i < Objects; i++)
                     {
-                        ranges = pruning.Granules(searched, default).Count;
+                        using GranuleKeys searched = Index(table, pages);
+                        ranges = pruning.Granules((UInt128)i, searched, default).Count;
                     }
                 }
 
@@ -123,9 +150,10 @@ internal static class KeyIndexMicro
                 for (int i = 0; i < Searches / Objects; i++)
                 {
                     KeyPruning pruning = KeyPruning.Of(schema, filter)!;
-                    foreach (GranuleKeys searched in objects)
+                    for (int o = 0; o < Objects; o++)
                     {
-                        pruning.Granules(searched, default);
+                        using GranuleKeys searched = Index(table, pages);
+                        pruning.Granules((UInt128)o, searched, default);
                     }
                 }
 
@@ -139,11 +167,14 @@ internal static class KeyIndexMicro
         return 0;
     }
 
-    /// <summary>The sparse indexes of the objects of the dataset at <paramref name="directory"/>, read and weighed.</summary>
+    /// <summary>
+    /// The sparse indexes of the objects of the dataset at <paramref name="directory"/>, read and weighed: the bytes read of
+    /// them, those an index holds besides once every page is reached, and those its keys take decoded whole.
+    /// </summary>
     private static async Task<int> HeldAsync(string directory)
     {
         await using FileObjectStore files = new FileObjectStore(directory);
-        await using VortexDataset dataset = await VortexDataset.OpenAsync(files, new DatasetOptions { KeyIndexCacheBytes = 0 });
+        await using VortexDataset dataset = await VortexDataset.OpenAsync(files, new DatasetOptions());
         long objects = 0;
         long granules = 0;
         long onDisk = 0;
@@ -157,12 +188,12 @@ internal static class KeyIndexMicro
                 continue;
             }
 
+            using GranuleKeys read = keys;
             objects++;
             granules += keys.Granules;
             onDisk += table.Length + (contents.KeyPages?.Length ?? 0);
-            held += keys.ResidentBytes;
 
-            // What the keys took decoded whole, as the index held them before: each key and where it ends.
+            // What the keys take decoded whole: each key and where it ends.
             GranuleKeys.KeyReader reader = default;
             for (int granule = 0; granule < keys.Granules; granule++)
             {
@@ -170,6 +201,7 @@ internal static class KeyIndexMicro
             }
 
             reader.Dispose();
+            held += keys.HeldBytes;
         }
 
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
@@ -177,17 +209,13 @@ internal static class KeyIndexMicro
         return 0;
     }
 
-    /// <summary>The index of <paramref name="table"/> and <paramref name="pages"/>, every page in hand.</summary>
+    /// <summary>The index of <paramref name="table"/> and <paramref name="pages"/>, as a read hands them.</summary>
     private static GranuleKeys Index(byte[] table, byte[] pages)
     {
         GranuleKeys index = GranuleKeys.From(table) ?? throw new InvalidOperationException("The table does not decode.");
-        for (int page = 0; page < index.Pages; page++)
+        if (index.WantsPages && !index.TakePages(pages))
         {
-            (long offset, int length, ulong _) = index.PageAt(page);
-            if (!index.HasPage(page) && !index.TakePage(page, pages.AsSpan((int)offset, length)))
-            {
-                throw new InvalidOperationException($"Page {page} does not decode.");
-            }
+            throw new InvalidOperationException("The pages do not hold the table's.");
         }
 
         return index;

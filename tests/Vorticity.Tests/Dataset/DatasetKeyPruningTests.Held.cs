@@ -1,11 +1,12 @@
-// The key's pruning over the sparse indexes a handle holds: an index in hand is searched only where it may refute a granule,
-// as one still to read is.
+// The key's pruning over the sparse indexes a question reads: an index is searched only where it may refute a granule, and
+// none is kept past the search that read it, its bytes staying in the session's caches.
 using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 using Vorticity.Dataset;
 using Vorticity.Expressions;
+using Vorticity.Indexes;
 using Vorticity.IO;
 using Xunit;
 
@@ -14,12 +15,11 @@ namespace Vorticity.Tests.Dataset;
 public sealed partial class DatasetKeyPruningTests
 {
     /// <summary>
-    /// Every object's sparse index in hand, as a question on a service leaves them: a window on the hour, past the indexed
-    /// prefix, searches none of them, where it searched every one, for no granule refuted; the service still searches those it
-    /// may refute a granule of. Both return the rows LINQ keeps.
+    /// A window on the hour, past the indexed prefix, searches no object's sparse index, for no granule it could refute; the
+    /// service searches each object's once, its ranges asked again found without a read. Both return the rows LINQ keeps.
     /// </summary>
     [Fact]
-    public async Task AnIndexInHandIsSearchedOnlyWhereItMayRefuteAGranule()
+    public async Task AnIndexIsSearchedOnlyWhereItMayRefuteAGranule()
     {
         Random random = new Random(63);
         await using MemoryObjectStore store = new MemoryObjectStore();
@@ -57,11 +57,11 @@ public sealed partial class DatasetKeyPruningTests
         await foreach (PositionedObject held in dataset.ScanBuilder().ObjectsAsync(Ct))
         {
             Assert.True(builder.ReadsKeyIndex(held), $"'{held.Entry.Key}': its index is not worth reading");
-            Assert.NotNull(await dataset.KeyIndexAsync(held.Entry, held.Entry.Contents!, Ct));
-            Assert.True(held.Entry.Contents!.Keys is { HoldsEvery: true });
             ReadOnlyMemory<byte> first = VortexDataset.OrderOf(held.TreeKey);
             Assert.Null(await builder.KeptGranulesAsync(held, byWindow, first, read: true, Ct));
-            Assert.NotNull(await builder.KeptGranulesAsync(held, byService, first, read: true, Ct));
+            (List<(int First, int End)> Ranges, GranuleGrid Grid)? kept = await builder.KeptGranulesAsync(held, byService, first, read: true, Ct);
+            Assert.NotNull(kept);
+            Assert.Equal(kept.Value.Ranges, (await builder.KeptGranulesAsync(held, byService, first, read: false, Ct))!.Value.Ranges);
             objects++;
         }
 
@@ -73,59 +73,93 @@ public sealed partial class DatasetKeyPruningTests
     }
 
     /// <summary>
-    /// A handle whose budget of key indexes holds about two of its objects' indexes: questions on each service in turn read
-    /// every object's index, hold no more than the budget, let the oldest go, and return the rows LINQ keeps, those let go
-    /// read again. Every index read stayed on its object's entry before.
+    /// Objects whose sparse index lies past the tail an open reads, in a session with a disk cache and no segment cache: the
+    /// first read of each index asks the store; a second read on the handle, and one on a handle opened afterwards, ask it
+    /// nothing, the disk serving the table and the pages, and give the same keys. Nothing of an index stays in memory past
+    /// its read: a new question's pruning has kept nothing of any object.
     /// </summary>
     [Fact]
-    public async Task TheIndexesAHandleHoldsStayWithinItsBudget()
+    public async Task AnIndexIsReadAgainFromTheDiskCacheNotKeptInMemory()
     {
-        Random random = new Random(70);
-        await using MemoryObjectStore store = new MemoryObjectStore();
+        string directory = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "vorticity-key-index-cache-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            await IndexesFromTheDiskAsync(directory);
+        }
+        finally
+        {
+            if (System.IO.Directory.Exists(directory))
+            {
+                System.IO.Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    private static async Task IndexesFromTheDiskAsync(string directory)
+    {
+        await using MemoryObjectStore inner = new MemoryObjectStore();
+        await using CountingObjectStore store = new CountingObjectStore(inner);
+        await using VortexSession session = VortexSession.Create(options =>
+        {
+            options.SegmentCache = new SegmentCache(0);
+            options.SynopsisCache = new SynopsisCache(directory, 64 << 20);
+        });
         DatasetOptions options = new DatasetOptions
         {
+            Session = session,
             Layout = new DatasetLayout
             {
-                SortKey = [LayoutValue.Column(nameof(Row.Service)), LayoutValue.Column(nameof(Row.At)).Truncate(CalendarUnit.Hour)],
-                IndexedPrefix = 1,
+                SortKey = [LayoutValue.Column(nameof(Row.Service)), LayoutValue.Column(nameof(Row.Sequence))],
             },
             ContentsObjectBytes = 0,
-            CostProfile = CostProfile.Remote,
-            ChunkBytes = 64 << 10,
-            Write = new VortexWriteOptions { BlockRows = 1_024 },
+            Write = new VortexWriteOptions { BlockRows = 64 },
         };
-        List<Row> all = [];
-        long indexBytes = 0;
+
+        // Granules of 64 rows, each its own service of a long name: an index of some 3 000 keys of 50 bytes, past the tail.
+        Row[] all = [.. Enumerable.Range(0, 3_000 * 64).Select(static i =>
+            new Row(0, $"service-with-a-rather-long-name-{i / 64:D8}", Start, i, 0))];
         await using (VortexDataset writing = await VortexDataset.CreateAsync(store, Row.Schema, options, Ct))
         {
-            for (int a = 0; a < 6; a++)
-            {
-                Row[] rows = [.. Enumerable.Range(0, 100_000).Select(i =>
-                    new Row(0, $"svc-{random.Next(0, 3):D2}", Start.AddTicks((long)(random.NextDouble() * TimeSpan.TicksPerDay) / 10 * 10), all.Count + i, random.NextDouble()))];
-                all.AddRange(rows);
-                await using ObjectDraft draft = writing.StartObject();
-                await draft.Writer.WriteAsync<Row>(rows, Ct);
-                await writing.AppendAsync(draft, Ct);
-            }
-
-            await foreach (PositionedObject held in writing.ScanBuilder().ObjectsAsync(Ct))
-            {
-                indexBytes = Math.Max(indexBytes, (await writing.KeyIndexAsync(held.Entry, held.Entry.Contents!, Ct))!.ResidentBytes);
-            }
+            await using ObjectDraft draft = writing.StartObject();
+            await draft.Writer.WriteAsync<Row>(all, Ct);
+            await writing.AppendAsync(draft, Ct);
         }
 
-        await using VortexDataset dataset = await VortexDataset.OpenAsync(store, new DatasetOptions { KeyIndexCacheBytes = (2 * indexBytes) + 1 }, Ct);
-        for (int round = 0; round < 2; round++)
+        byte[]? keysRead = null;
+        for (int handle = 0; handle < 2; handle++)
         {
-            for (int s = 0; s < 3; s++)
+            await using VortexDataset dataset = await VortexDataset.OpenAsync(store, options, Ct);
+            List<PositionedObject> objects = [.. await dataset.ScanBuilder().ObjectsAsync(Ct).ToListAsync(Ct)];
+            PositionedObject held = Assert.Single(objects);
+            ObjectContents contents = held.Entry.Contents!;
+            Assert.False(PathCosts.InOpen(held.Entry, contents.KeyIndex!.Value), "the index lies in the tail an open reads");
+            for (int read = 0; read < 2; read++)
             {
-                string service = $"svc-{s:D2}";
-                Assert.Equal(all.Count(row => row.Service == service), await dataset.ScanBuilder().Where(Eq(nameof(Row.Service), FilterLiteral.From(service))).CountAsync(Ct));
-                Assert.True(dataset.KeyIndexes.Size <= dataset.KeyIndexes.Capacity, $"{dataset.KeyIndexes.Size} bytes of indexes held over {dataset.KeyIndexes.Capacity}");
+                store.Reset();
+                using GranuleKeys keys = (await dataset.KeyIndexAsync(held.Entry, contents, Ct))!;
+                byte[] decoded = [.. Enumerable.Range(0, keys.Granules).SelectMany(granule =>
+                {
+                    GranuleKeys.KeyReader reader = default;
+                    byte[] key = reader.Key(keys, granule).ToArray();
+                    reader.Dispose();
+                    return key;
+                })];
+                if (keysRead is null)
+                {
+                    Assert.True(store.Requests > 0, "the first read asked the store nothing");
+                    keysRead = decoded;
+                }
+                else
+                {
+                    Assert.True(store.Requests == 0, $"read {read} of handle {handle} asked the store {store.Requests} times");
+                    Assert.Equal(keysRead, decoded);
+                }
             }
-        }
 
-        Assert.True(dataset.KeyIndexes.Count is > 0 and <= 2, $"{dataset.KeyIndexes.Count} indexes held");
-        Assert.True(dataset.KeyIndexes.Evictions > 0, "no index let go");
+            // A question's pruning keeps the ranges it found for that question alone.
+            KeyPruning pruning = KeyPruning.Of(dataset.Snapshot.Schema, Eq(nameof(Row.Service), FilterLiteral.From("service-with-a-rather-long-name-00000042")))!;
+            Assert.False(pruning.TryKept(held.Entry.Uid, default, out _, out _));
+            Assert.Equal(64, await dataset.ScanBuilder().Where(Eq(nameof(Row.Service), FilterLiteral.From("service-with-a-rather-long-name-00000042"))).CountAsync(Ct));
+        }
     }
 }

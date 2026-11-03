@@ -124,15 +124,6 @@ public sealed record DatasetOptions
     public long PageCacheBytes { get; init; } = 32L << 20;
 
     /// <summary>
-    /// The bytes of objects' sparse key indexes the handle keeps in hand from one question to the next, least recently used
-    /// first out, as ClickHouse keeps its primary index; 64 MiB by default, and 0 keeps none past the question that read
-    /// it. An index holds the key of each granule's first row, some 25 bytes a granule where neighbouring granules share
-    /// most of their key: 64 MiB hold the indexes of some 2.7 million granules, 22 billion rows of 8 192.
-    /// </summary>
-    /// <remarks>An index let go is read again, a request or two, by the next question that bounds the key.</remarks>
-    public long KeyIndexCacheBytes { get; init; } = 64L << 20;
-
-    /// <summary>
     /// The most bytes a commit that takes level 0 past its ceiling compacts before it returns; 0, the
     /// default, compacts nothing inline. Past the ceiling, level 0 is merged into the level above when
     /// the job reads no more than this, so a writer with no process to spare holds the read bound

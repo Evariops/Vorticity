@@ -165,24 +165,39 @@ internal static partial class DatasetCompactor
         // The partition leads every key, before the indexed prefix the indexes hold: the cuts are led by it.
         byte[] partition = schema.Partitioned ? PartitionOf(schema, job.Inputs[0]) : [];
         GranuleKeys?[] indexes = new GranuleKeys?[job.Inputs.Count];
-        int granules = 0;
-        for (int i = 0; i < indexes.Length; i++)
+        try
         {
-            CompactionInput input = job.Inputs[i];
-            if (schema.Partitioned && !VortexDataset.OrderOf(input.Key).Span.StartsWith(partition))
+            int granules = 0;
+            for (int i = 0; i < indexes.Length; i++)
             {
-                return null;
+                CompactionInput input = job.Inputs[i];
+                if (schema.Partitioned && !VortexDataset.OrderOf(input.Key).Span.StartsWith(partition))
+                {
+                    return null;
+                }
+
+                if (input.Entry.Contents is { KeyIndex: not null } contents
+                    && await dataset.KeyIndexAsync(input.Entry, contents, cancellationToken).ConfigureAwait(false) is { } keys)
+                {
+                    indexes[i] = keys;
+                    granules += keys.Granules;
+                }
             }
 
-            if (input.Entry.Contents is { KeyIndex: not null } contents
-                && await dataset.KeyIndexAsync(input.Entry, contents, cancellationToken).ConfigureAwait(false) is { Granules: > 0 } keys)
+            return granules > 0 ? Cut(job, indexes, granules, most, partition) : null;
+        }
+        catch (VortexFormatException)
+        {
+            // A page of an input's index that does not hold the keys its table names: the job runs as one range.
+            return null;
+        }
+        finally
+        {
+            foreach (GranuleKeys? keys in indexes)
             {
-                indexes[i] = keys;
-                granules += keys.Granules;
+                keys?.Dispose();
             }
         }
-
-        return granules > 0 ? Cut(job, indexes, granules, most, partition) : null;
     }
 
     /// <summary>The partition <paramref name="input"/>'s rows hold, row-encoded: what leads its tree key.</summary>
@@ -306,7 +321,7 @@ internal static partial class DatasetCompactor
     private static long StartFrom(GranuleKeys keys, ReadOnlySpan<byte> cut)
     {
         int granule = keys.FirstAtOrPast(cut);
-        return granule == keys.Granules && keys.LastKey.AsSpan().SequenceCompareTo(cut) < 0
+        return granule == keys.Granules && keys.LastKey.SequenceCompareTo(cut) < 0
             ? keys.Rows
             : (long)Math.Max(granule - 1, 0) * keys.GranuleRows;
     }

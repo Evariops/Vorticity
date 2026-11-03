@@ -37,7 +37,7 @@ public sealed partial class DatasetKeyPruningTests
             }
         }
 
-        GranuleKeys index = Index(schema, keys, [FilterLiteral.From("svc-05"), Micros(Start.AddHours(23))]);
+        using GranuleKeys index = Index(schema, keys, [FilterLiteral.From("svc-05"), Micros(Start.AddHours(23))]);
         DateTime ten = Start.AddHours(10);
         KeyPruning pruning = KeyPruning.Of(schema, Expr.And(Ge(nameof(Row.At), Micros(ten)), Lt(nameof(Row.At), Micros(ten.AddHours(1)))))!;
         List<(int First, int End)> kept = pruning.Granules(index, default);
@@ -45,7 +45,7 @@ public sealed partial class DatasetKeyPruningTests
         Assert.NotEmpty(kept);
         Assert.True(pruning.Judgments > kept.Count, $"{pruning.Judgments} boxes judged for {kept.Count} ranges kept");
         long keyBytes = keys.Sum(key => (long)Encode(schema, key).Length);
-        Assert.True(index.ResidentBytes > 0 && index.ResidentBytes < keyBytes, $"{index.ResidentBytes} bytes held for {keyBytes} bytes of keys");
+        Assert.True(index.HeldBytes > 0 && index.HeldBytes < keyBytes, $"{index.HeldBytes} bytes held for {keyBytes} bytes of keys");
     }
 
     /// <summary>
@@ -58,7 +58,7 @@ public sealed partial class DatasetKeyPruningTests
     {
         DatasetSchema schema = await SchemaAsync(KeyLayout);
         List<KeyRow> rows = KeyRows(new Random(64), 4_000);
-        GranuleKeys index = Index(schema, rows, granuleRows: 8);
+        using GranuleKeys index = Index(schema, rows, granuleRows: 8);
         DateTime ten = Start.AddHours(10);
         (string Label, VortexExpr Filter, Func<KeyRow, bool> Keep)[] questions =
         [
@@ -97,7 +97,7 @@ public sealed partial class DatasetKeyPruningTests
         DatasetSchema schema = await SchemaAsync(KeyLayout);
         Random random = new Random(65);
         List<KeyRow> rows = KeyRows(random, 3_000);
-        GranuleKeys index = Index(schema, rows, granuleRows: 4, pageEntries: 8);
+        using GranuleKeys index = Index(schema, rows, granuleRows: 4, pageEntries: 8);
         for (int question = 0; question < 400; question++)
         {
             (string label, VortexExpr filter, Func<KeyRow, bool> keep) = RandomFilter(random, rows);
@@ -239,18 +239,14 @@ public sealed partial class DatasetKeyPruningTests
 
     /// <summary>
     /// The sparse index of an object of granules of <paramref name="granuleRows"/> rows whose keys are <paramref name="keys"/>,
-    /// ascending, and whose last row's key is <paramref name="last"/>, every page in hand.
+    /// ascending, and whose last row's key is <paramref name="last"/>, its pages taken.
     /// </summary>
     private static GranuleKeys Index(DatasetSchema schema, List<FilterLiteral[]> keys, FilterLiteral[] last, int granuleRows = 8, int pageEntries = 16)
     {
         List<byte[]> encoded = [.. keys.Select(key => Encode(schema, key))];
         (byte[] table, byte[] pages) = GranuleKeys.Build(granuleRows, (long)keys.Count * granuleRows, last.Length, encoded, Encode(schema, last), pageEntries);
         GranuleKeys index = GranuleKeys.From(table) ?? throw new InvalidOperationException("The table does not decode.");
-        for (int page = 0; page < index.Pages; page++)
-        {
-            (long offset, int length, ulong _) = index.PageAt(page);
-            Assert.True(index.HasPage(page) || index.TakePage(page, pages.AsSpan((int)offset, length)));
-        }
+        Assert.True(!index.WantsPages || index.TakePages(pages));
 
         return index;
     }

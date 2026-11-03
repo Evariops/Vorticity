@@ -236,7 +236,8 @@ internal sealed class DatasetKey
     /// the entries of the rows <paramref name="deletions"/> names: no step lands on one and no rank
     /// counts one. With <paramref name="ranksAreRows"/> the file's rows are in this key's order, null
     /// keys last, and the ranks follow from the rows alone; otherwise the deleted rows' keys are read
-    /// when the source needs them.
+    /// when the source needs them. <paramref name="index"/>, the object's sparse index, is the
+    /// cursor's from then on, given back with it.
     /// </summary>
     public async ValueTask<KeyCursor?> TryOpenAsync(
         VortexFile file, IReadOnlyList<string> paths, bool indexes, DeletionVector deletions, bool ranksAreRows, CancellationToken cancellationToken,
@@ -248,6 +249,9 @@ internal sealed class DatasetKey
             KeySource tuples = new SortedColumnWalker(new ObjectKeyEntries(file, [.. paths], index));
             return new KeyCursor(deletions.IsEmpty ? tuples : new ExcludingKeySource(tuples, deletions, 0));
         }
+
+        // Only the walk of a tuple in row order seeks by the index.
+        index?.Dispose();
 
         try
         {

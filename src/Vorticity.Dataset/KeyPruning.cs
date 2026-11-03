@@ -235,39 +235,66 @@ internal sealed class KeyPruning
     }
 
     /// <summary>
-    /// The granules of an object's sparse index that may hold a row the filter keeps, in ranges <c>[first, end)</c>, ascending;
-    /// every page in hand. <paramref name="partition"/> is the object's partition, row-encoded as it leads its tree key, which
-    /// the index leaves out; empty for a dataset without one.
+    /// The granules of the object <paramref name="uid"/> whose sparse index is <paramref name="keys"/> that may hold a row the
+    /// filter keeps, in ranges <c>[first, end)</c>, ascending, kept for the pruning's later asks (<see cref="TryKept"/>).
+    /// <paramref name="partition"/> is the object's partition, row-encoded as it leads its tree key, which the index leaves
+    /// out; empty for a dataset without one.
     /// </summary>
     /// <remarks>
     /// Found once an object a question: a question at 32 lanes asks them of an object for each of its parts, and searched the
     /// whole index each time, a list of summaries made at each node, 23 MB a question of the services under 5xx over the last
-    /// quarter of an hour (2026-11-02).
+    /// quarter of an hour (2026-11-02). The index itself is not kept: its parts ask <see cref="TryKept"/> before they read it.
     /// </remarks>
-    internal List<(int First, int End)> Granules(GranuleKeys keys, ReadOnlySpan<byte> partition)
+    internal List<(int First, int End)> Granules(UInt128 uid, GranuleKeys keys, ReadOnlySpan<byte> partition)
     {
-        // Made at the first object asked, a pruning that asks none holding nothing; the dictionary its own lock.
-        Dictionary<GranuleKeys, (byte[] Partition, (int First, int End)[] Ranges)> known = Volatile.Read(ref _kept)
-            ?? Interlocked.CompareExchange(ref _kept, new(ReferenceEqualityComparer.Instance), null) ?? _kept!;
-        lock (known)
-        {
-            if (known.TryGetValue(keys, out (byte[] Partition, (int First, int End)[] Ranges) found) && partition.SequenceEqual(found.Partition))
-            {
-                return [.. found.Ranges];
-            }
-        }
-
         List<(int First, int End)> kept = Search(keys, partition);
+        Dictionary<UInt128, (byte[] Partition, (int First, int End)[] Ranges, GranuleGrid Grid)> known = Known();
         lock (known)
         {
-            known[keys] = (partition.ToArray(), [.. kept]);
+            known[uid] = (partition.ToArray(), [.. kept], keys.Grid);
         }
 
         return kept;
     }
 
-    // The granules each object's index keeps, by the index, with the partition they were searched under.
-    private Dictionary<GranuleKeys, (byte[] Partition, (int First, int End)[] Ranges)>? _kept;
+    /// <summary>
+    /// The granules of the object <paramref name="uid"/> a search of this pruning kept under <paramref name="partition"/>, a
+    /// list of the caller's, and the object's granules; false when none did.
+    /// </summary>
+    internal bool TryKept(UInt128 uid, ReadOnlySpan<byte> partition, out List<(int First, int End)> ranges, out GranuleGrid grid)
+    {
+        if (Volatile.Read(ref _kept) is { } known)
+        {
+            lock (known)
+            {
+                if (known.TryGetValue(uid, out (byte[] Partition, (int First, int End)[] Ranges, GranuleGrid Grid) found)
+                    && partition.SequenceEqual(found.Partition))
+                {
+                    ranges = [.. found.Ranges];
+                    grid = found.Grid;
+                    return true;
+                }
+            }
+        }
+
+        ranges = [];
+        grid = default;
+        return false;
+    }
+
+    /// <summary>
+    /// The granules of <paramref name="keys"/> that may hold a row the filter keeps, searched now and kept for no later ask:
+    /// for a reader of an index that no object names, the tests' and the benches'.
+    /// </summary>
+    internal List<(int First, int End)> Granules(GranuleKeys keys, ReadOnlySpan<byte> partition) => Search(keys, partition);
+
+    // Made at the first object kept, a pruning that keeps none holding nothing; the dictionary its own lock.
+    private Dictionary<UInt128, (byte[] Partition, (int First, int End)[] Ranges, GranuleGrid Grid)> Known() =>
+        Volatile.Read(ref _kept) ?? Interlocked.CompareExchange(ref _kept, [], null) ?? _kept!;
+
+    // The granules each object's index keeps, by the object's uid, with the partition they were searched under and the
+    // object's granules.
+    private Dictionary<UInt128, (byte[] Partition, (int First, int End)[] Ranges, GranuleGrid Grid)>? _kept;
 
     /// <summary>The searches of an object's index this pruning made, which an object asked again does not repeat.</summary>
     internal int Searches => _searches;
