@@ -369,7 +369,7 @@ internal sealed partial class DatasetScanBuilder
     {
         if (_filterColumns is null)
         {
-            string? leading = _version.Schema.KeyColumns is { Count: > 0 } key ? key[0] : null;
+            string? leading = _version.Schema.ObjectOrder?.Paths[0];
             List<string> columns = [];
             foreach (string path in FilterPaths())
             {

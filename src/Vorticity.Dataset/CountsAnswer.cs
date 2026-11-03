@@ -157,7 +157,7 @@ internal sealed class CountsAnswer
         ExcludedValue? exclusion = null;
         if (filter is not null)
         {
-            int? leading = version.Schema.KeyColumns is [{ } first, ..] ? Top(Expr.Field(first), schema) : null;
+            int? leading = version.Schema.ObjectOrder is { Paths: [{ } first, ..] } ? Top(Expr.Field(first), schema) : null;
             bool keyedElsewhere = false;
             foreach (FieldExpr key in request.Keys)
             {

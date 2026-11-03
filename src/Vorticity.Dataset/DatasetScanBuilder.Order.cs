@@ -255,26 +255,12 @@ internal sealed partial class DatasetScanBuilder
     }
 
     /// <summary>
-    /// Whether the columns lead the dataset's key components as they are (<see cref="DatasetSchema.KeyColumns"/>), in whose
-    /// order every object's rows lie, nulls last: an object is then read in its own order, with no index.
+    /// Whether the columns lead those whose order every object's rows lie in, nulls last (<see cref="DatasetSchema.ObjectOrder"/>),
+    /// or the tree's, whose partition each object holds one value of (<see cref="DatasetSchema.TreeOrder"/>): an object is
+    /// then read in its own order, with no index.
     /// </summary>
-    private bool InObjectOrder(string[] paths)
-    {
-        if (_version.Schema.KeyColumns is not { } key || paths.Length > key.Count)
-        {
-            return false;
-        }
-
-        for (int i = 0; i < paths.Length; i++)
-        {
-            if (!string.Equals(paths[i], key[i], StringComparison.Ordinal))
-            {
-                return false;
-            }
-        }
-
-        return true;
-    }
+    private bool InObjectOrder(string[] paths) =>
+        _version.Schema.ObjectOrder?.Leads(paths) == true || _version.Schema.TreeOrder?.Leads(paths) == true;
 
     /// <summary><paramref name="mask"/> with the key's columns <paramref name="paths"/> read too when <paramref name="withKey"/> asks.</summary>
     private FieldMask? Keyed(FieldMask? mask, string[] paths, bool withKey)

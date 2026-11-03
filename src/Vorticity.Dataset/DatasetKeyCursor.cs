@@ -163,7 +163,7 @@ internal sealed partial class DatasetKeyCursor : IKeyWalker
     {
         DatasetKey? key = version.Schema.Key;
         bool keyed = key is { IsComposite: false } && string.Equals(key.Paths[0], path, StringComparison.Ordinal);
-        bool leading = version.Schema.KeyColumns is { Count: > 0 } columns && string.Equals(columns[0], path, StringComparison.Ordinal);
+        bool leading = version.Schema.ObjectOrder is { } order && string.Equals(order.Paths[0], path, StringComparison.Ordinal);
         DatasetKey walked = keyed ? key!
             : leading ? DatasetKey.OfLayout([path], version.Schema.DType)!
             : DatasetKey.For([path], version.Schema.DType)!;

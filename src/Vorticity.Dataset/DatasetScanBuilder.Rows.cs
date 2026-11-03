@@ -898,7 +898,7 @@ internal sealed partial class DatasetScanBuilder
         {
             // The key's first column as it is, which a partition may lead, under the version this scan reads.
             SummaryPruner pruner = new SummaryPruner(filter);
-            string? leading = _version.Schema.KeyColumns is [{ } first, ..] ? first : null;
+            string? leading = _version.Schema.ObjectOrder?.Paths[0];
             bool alone = leading is not null && pruner.ReadsColumns;
             foreach (string path in pruner.Paths)
             {
