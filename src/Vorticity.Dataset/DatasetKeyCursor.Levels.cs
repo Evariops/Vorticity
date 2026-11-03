@@ -30,9 +30,16 @@ internal sealed partial class DatasetKeyCursor
         private byte[] _next = [];
         private int _nextLength;
 
-        internal LevelWalk(DatasetKeyCursor owner, int number, DatasetTree tree)
+        // Where its bound ends: the key's values the walk orders by, past the partition.
+        private int _boundEnd;
+
+        // The partition a walk of one partition keeps to, as it leads the tree's keys; empty for a level's whole walk.
+        private readonly byte[] _partition;
+
+        internal LevelWalk(DatasetKeyCursor owner, int number, DatasetTree tree, byte[]? partition = null)
         {
             _owner = owner;
+            _partition = partition ?? [];
             _path = new Frame[tree.Depth];
             Number = number;
             Disjoint = owner._version.Levels.IsDisjoint(number);
@@ -46,14 +53,20 @@ internal sealed partial class DatasetKeyCursor
         /// </summary>
         internal bool Disjoint { get; }
 
-        /// <summary>Whether an object lies past the place.</summary>
-        internal bool HasNext => _nextLength > 0;
+        /// <summary>Whether an object lies past the place: of the walk's partition, for a walk of one.</summary>
+        internal bool HasNext => _nextLength > 0 && NextKey.StartsWith(_partition);
+
+        /// <summary>Whether the object past the place lies in a partition before the walk's.</summary>
+        internal bool BeforePartition => _nextLength > 0 && _partition.Length > 0 && NextKey.SequenceCompareTo(_partition) < 0;
 
         /// <summary>The tree key of the object just past the place; empty when none is, or before the first seek.</summary>
         internal ReadOnlySpan<byte> NextKey => _next.AsSpan(0, _nextLength);
 
-        /// <summary>The bound of the object just past the place, its tree key without the uid; empty when none is.</summary>
-        internal ReadOnlySpan<byte> NextBound => _next.AsSpan(0, Math.Max(_nextLength - VortexDataset.UidBytes, 0));
+        /// <summary>
+        /// The bound of the object just past the place: its tree key's values the walk orders by, past the partition and
+        /// without the uid; empty when none is.
+        /// </summary>
+        internal ReadOnlySpan<byte> NextBound => _nextLength == 0 ? default : _next.AsSpan(_partition.Length, _boundEnd - _partition.Length);
 
         /// <summary>Whether an object lies before the place.</summary>
         internal bool HasPrevious
@@ -222,6 +235,7 @@ internal sealed partial class DatasetKeyCursor
 
                     key.CopyTo(_next);
                     _nextLength = key.Length;
+                    _boundEnd = _partition.Length + _owner.BoundLength(_next.AsSpan(_partition.Length, Math.Max(_nextLength - VortexDataset.UidBytes - _partition.Length, 0)));
                     return;
                 }
             }

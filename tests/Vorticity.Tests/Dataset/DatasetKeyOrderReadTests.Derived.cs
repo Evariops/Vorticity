@@ -7,6 +7,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 using Vorticity.Dataset;
+using Vorticity.Keys;
 using Xunit;
 
 namespace Vorticity.Tests.Dataset;
@@ -54,6 +55,65 @@ public sealed partial class DatasetKeyOrderReadTests
                     descending ? (before is null ? after is null : after is null || order >= 0) : order <= 0,
                     $"a read by the service then the sequence {(descending ? "downward" : "upward")} goes back at row {i}");
             }
+        }
+    }
+
+    /// <summary>
+    /// The key cursor over <c>(Service, Bucket(Sequence, 1000), Sequence)</c> partitioned by day walks the service then the
+    /// sequence, every row once in order; a seek of the service's walk alone opens an object of each partition, the
+    /// partitions walked side by side, and lands on LINQ's first service at or past it. It refused the dataset, and the
+    /// service's walk opened every object.
+    /// </summary>
+    [Fact]
+    public async Task TheKeyCursorWalksTheColumnsAComputedKeyOrdersUnderAPartition()
+    {
+        Random random = new Random(69);
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, KeyRow.Schema, new DatasetOptions
+        {
+            Layout = new DatasetLayout
+            {
+                Partition = LayoutValue.Column(nameof(KeyRow.Day)),
+                SortKey = [LayoutValue.Column(nameof(KeyRow.Service)), LayoutValue.Column(nameof(KeyRow.Sequence)).Bucket(1_000), LayoutValue.Column(nameof(KeyRow.Sequence))],
+                ObjectBytes = 32 << 10,
+                MergeFanout = 4,
+                CalmAfter = null,
+            },
+            ContentsObjectBytes = 0,
+        }, Ct);
+        List<KeyRow> all = await AppendAsync(dataset, random, appends: 6, rows: 10_000);
+        int objects = 0;
+        await foreach (PositionedObject held in dataset.ScanBuilder().ObjectsAsync(Ct))
+        {
+            objects++;
+        }
+
+        await using (DatasetKeyCursor cursor = await DatasetKeyCursor.OpenAsync(dataset, Ct))
+        {
+            long entries = 0;
+            byte[] previous = [];
+            for (bool more = await cursor.SeekFirstAsync(Ct); more; more = await cursor.NextAsync(Ct))
+            {
+                byte[] key = cursor.KeyBytes.ToArray();
+                Assert.True(previous.AsSpan().SequenceCompareTo(key) <= 0, $"the cursor goes back at entry {entries}");
+                previous = key;
+                entries++;
+            }
+
+            Assert.Equal(all.Count, entries);
+        }
+
+        List<string> services = [.. all.Where(static row => row.Service is not null).Select(static row => row.Service!).Distinct().Order(StringComparer.Ordinal)];
+        long levelZero = dataset.Snapshot.Levels[0].Entries;
+        for (int probe = 0; probe < 20; probe++)
+        {
+            string sought = $"svc-{random.Next(0, 320):D3}";
+            await using DatasetKeyCursor walk = await DatasetKeyCursor.OpenAsync(dataset.Snapshot, nameof(KeyRow.Service), distinct: false, indexes: true, Ct);
+            bool found = await walk.SeekAsync(Vorticity.Expressions.FilterLiteral.From(sought), SeekMode.AtOrAfter, Ct);
+            string? want = services.FirstOrDefault(service => string.CompareOrdinal(service, sought) >= 0);
+            Assert.Equal(want is not null, found);
+            Assert.True(want is null || System.Text.Encoding.UTF8.GetString(walk.Key.BytesValue) == want, $"a seek of {sought} lands elsewhere than {want}");
+            Assert.True(walk.Cursors <= (2 * 3) + levelZero, $"a seek of {sought} opened {walk.Cursors} objects of {objects}");
         }
     }
 

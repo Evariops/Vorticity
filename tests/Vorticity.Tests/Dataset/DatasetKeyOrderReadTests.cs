@@ -23,9 +23,9 @@ public sealed partial class DatasetKeyOrderReadTests
     /// <summary>
     /// Six appends of 10 000 rows keyed by a service and a status, one in twenty of each null, merged every second append,
     /// partitioned by day and consolidated or not: no object keeps a sorted run; a read by the service and a read by the
-    /// whole key, each both ways, return every row in order, nulls last; unpartitioned, the composite cursor walks every
-    /// row in order and its seeks land on LINQ's first key at or past theirs; a walk of the service gives its non-null
-    /// values in order.
+    /// whole key, each both ways, return every row in order, nulls last; the composite cursor walks every row in order, an
+    /// object of each partition opened for its first rows, and its seeks land on LINQ's first key at or past theirs; a walk of
+    /// the service gives its non-null values in order.
     /// </summary>
     [Theory]
     [InlineData(false)]
@@ -121,8 +121,21 @@ public sealed partial class DatasetKeyOrderReadTests
         }
 
         // The composite key's cursor: every row once, in order, and seeks that land on LINQ's first key at or past.
-        if (!partitioned)
+        // Under a partition it refused the dataset, which has no sort key of its own.
         {
+            // The first rows, consolidated under a partition: an object of each of the three days, and those of level 0.
+            await using (DatasetKeyCursor head = await DatasetKeyCursor.OpenAsync(dataset, Ct))
+            {
+                Assert.True(await head.SeekFirstAsync(Ct));
+                for (int step = 0; step < 20; step++)
+                {
+                    Assert.True(await head.NextAsync(Ct));
+                }
+
+                long levelZero = dataset.Snapshot.Levels[0].Entries;
+                Assert.True(!partitioned || head.Cursors <= 3 + levelZero, $"{head.Cursors} objects opened for the first rows, {levelZero} of level 0");
+            }
+
             await using DatasetKeyCursor cursor = await DatasetKeyCursor.OpenAsync(dataset, Ct);
             long entries = 0;
             byte[] previous = [];
@@ -135,7 +148,7 @@ public sealed partial class DatasetKeyOrderReadTests
             }
 
             Assert.Equal(all.Count, entries);
-            DatasetKey composite = dataset.Snapshot.Schema.Key!;
+            DatasetKey composite = dataset.Snapshot.Schema.Key ?? DatasetKey.OfLayout([nameof(KeyRow.Service), nameof(KeyRow.Status)], dataset.Snapshot.Schema.DType)!;
             for (int probe = 0; probe < 60; probe++)
             {
                 string service = $"svc-{random.Next(0, 300):D3}";

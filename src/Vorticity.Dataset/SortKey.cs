@@ -160,11 +160,23 @@ internal sealed class SortKey
     /// The bytes the first <paramref name="components"/> values of the row-encoded key <paramref name="key"/> take; -1
     /// when one is a struct or a list whose width its bytes do not tell.
     /// </summary>
-    internal int PrefixLength(ReadOnlySpan<byte> key, int components)
+    internal int PrefixLength(ReadOnlySpan<byte> key, int components) => PrefixLength(key, components, from: 0);
+
+    /// <summary>
+    /// The bytes the first <paramref name="components"/> values of <paramref name="key"/> take, a row-encoded key of this
+    /// key's values from position <paramref name="from"/> on: past a partition, say; -1 when one is a struct or a list
+    /// whose width its bytes do not tell, or the key ends first.
+    /// </summary>
+    internal int PrefixLength(ReadOnlySpan<byte> key, int components, int from)
     {
         int at = 0;
-        for (int i = 0; i < components; i++)
+        for (int i = from; i < from + components && i < _widths.Length; i++)
         {
+            if (at >= key.Length)
+            {
+                return -1;
+            }
+
             int length = RowEncoder.ValueLength(key[at..], _widths[i]);
             if (length < 0)
             {
