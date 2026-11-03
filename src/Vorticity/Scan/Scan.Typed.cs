@@ -103,6 +103,112 @@ public sealed partial class Scan<TRecord>
         return Where(record => column(record).In(set));
     }
 
+    /// <summary>
+    /// Keeps the rows whose values of two columns are, together, one of the tuples <paramref name="values"/> gives, a
+    /// semi-join on a tuple, as SQL's <c>(a, b) IN (SELECT x, y …)</c>: the first question read now, each tuple once, a tuple
+    /// holding a null left out; the set a filter of this scan (<see cref="SymTuples"/>), which the columns' sets of values
+    /// prune by and its rows are judged by.
+    /// </summary>
+    /// <typeparam name="T1">The first column's type.</typeparam>
+    /// <typeparam name="T2">The second column's type.</typeparam>
+    /// <param name="columns">The columns the tuples are looked for in: <c>r =&gt; (r.Service, r.Host)</c>.</param>
+    /// <param name="values">The first question: a projection of two values a row, <c>other.Select(r =&gt; (r.Service, r.Host))</c>.</param>
+    /// <param name="maxValues">The distinct tuples taken at most.</param>
+    /// <param name="cancellationToken">Cancels the first question.</param>
+    /// <returns>This scan, the first question read; with no tuple, a scan that keeps no row and reads none.</returns>
+    /// <exception cref="InvalidOperationException">The first question gives more than <paramref name="maxValues"/> distinct tuples.</exception>
+    /// <exception cref="ArgumentException">The first question projects another number of columns, or a column is no column of the scan.</exception>
+    public async ValueTask<Scan<TRecord>> WhereInAsync<T1, T2>(
+        Func<Probe<TRecord>, (Sym<T1>, Sym<T2>)> columns, Projection values, int maxValues = SemiJoinValues, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(columns);
+        ArgumentNullException.ThrowIfNull(values);
+        ArgumentOutOfRangeException.ThrowIfNegative(maxValues);
+        HashSet<(T1, T2)> distinct = [];
+        await foreach ((T1, T2) tuple in values.TuplesAsync<T1, T2>(cancellationToken).ConfigureAwait(false))
+        {
+            if (tuple.Item1 is not null && tuple.Item2 is not null && distinct.Add(tuple) && distinct.Count > maxValues)
+            {
+                throw TooManyTuples(maxValues);
+            }
+        }
+
+        (T1, T2)[] set = [.. distinct];
+        return Where(record => columns(record).In(set));
+    }
+
+    /// <summary>
+    /// Keeps the rows whose values of three columns are, together, one of the tuples <paramref name="values"/> gives, a
+    /// semi-join on a tuple (<see cref="WhereInAsync{T1, T2}(Func{Probe{TRecord}, ValueTuple{Sym{T1}, Sym{T2}}}, Projection, int, CancellationToken)"/>).
+    /// </summary>
+    /// <typeparam name="T1">The first column's type.</typeparam>
+    /// <typeparam name="T2">The second column's type.</typeparam>
+    /// <typeparam name="T3">The third column's type.</typeparam>
+    /// <param name="columns">The columns the tuples are looked for in.</param>
+    /// <param name="values">The first question: a projection of three values a row.</param>
+    /// <param name="maxValues">The distinct tuples taken at most.</param>
+    /// <param name="cancellationToken">Cancels the first question.</param>
+    /// <returns>This scan, the first question read; with no tuple, a scan that keeps no row and reads none.</returns>
+    /// <exception cref="InvalidOperationException">The first question gives more than <paramref name="maxValues"/> distinct tuples.</exception>
+    /// <exception cref="ArgumentException">The first question projects another number of columns, or a column is no column of the scan.</exception>
+    public async ValueTask<Scan<TRecord>> WhereInAsync<T1, T2, T3>(
+        Func<Probe<TRecord>, (Sym<T1>, Sym<T2>, Sym<T3>)> columns, Projection values, int maxValues = SemiJoinValues, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(columns);
+        ArgumentNullException.ThrowIfNull(values);
+        ArgumentOutOfRangeException.ThrowIfNegative(maxValues);
+        HashSet<(T1, T2, T3)> distinct = [];
+        await foreach ((T1, T2, T3) tuple in values.TuplesAsync<T1, T2, T3>(cancellationToken).ConfigureAwait(false))
+        {
+            if (tuple.Item1 is not null && tuple.Item2 is not null && tuple.Item3 is not null && distinct.Add(tuple) && distinct.Count > maxValues)
+            {
+                throw TooManyTuples(maxValues);
+            }
+        }
+
+        (T1, T2, T3)[] set = [.. distinct];
+        return Where(record => columns(record).In(set));
+    }
+
+    /// <summary>
+    /// Keeps the rows whose values of four columns are, together, one of the tuples <paramref name="values"/> gives, a
+    /// semi-join on a tuple (<see cref="WhereInAsync{T1, T2}(Func{Probe{TRecord}, ValueTuple{Sym{T1}, Sym{T2}}}, Projection, int, CancellationToken)"/>).
+    /// </summary>
+    /// <typeparam name="T1">The first column's type.</typeparam>
+    /// <typeparam name="T2">The second column's type.</typeparam>
+    /// <typeparam name="T3">The third column's type.</typeparam>
+    /// <typeparam name="T4">The fourth column's type.</typeparam>
+    /// <param name="columns">The columns the tuples are looked for in.</param>
+    /// <param name="values">The first question: a projection of four values a row.</param>
+    /// <param name="maxValues">The distinct tuples taken at most.</param>
+    /// <param name="cancellationToken">Cancels the first question.</param>
+    /// <returns>This scan, the first question read; with no tuple, a scan that keeps no row and reads none.</returns>
+    /// <exception cref="InvalidOperationException">The first question gives more than <paramref name="maxValues"/> distinct tuples.</exception>
+    /// <exception cref="ArgumentException">The first question projects another number of columns, or a column is no column of the scan.</exception>
+    public async ValueTask<Scan<TRecord>> WhereInAsync<T1, T2, T3, T4>(
+        Func<Probe<TRecord>, (Sym<T1>, Sym<T2>, Sym<T3>, Sym<T4>)> columns, Projection values, int maxValues = SemiJoinValues,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(columns);
+        ArgumentNullException.ThrowIfNull(values);
+        ArgumentOutOfRangeException.ThrowIfNegative(maxValues);
+        HashSet<(T1, T2, T3, T4)> distinct = [];
+        await foreach ((T1, T2, T3, T4) tuple in values.TuplesAsync<T1, T2, T3, T4>(cancellationToken).ConfigureAwait(false))
+        {
+            if (tuple.Item1 is not null && tuple.Item2 is not null && tuple.Item3 is not null && tuple.Item4 is not null
+                && distinct.Add(tuple) && distinct.Count > maxValues)
+            {
+                throw TooManyTuples(maxValues);
+            }
+        }
+
+        (T1, T2, T3, T4)[] set = [.. distinct];
+        return Where(record => columns(record).In(set));
+    }
+
+    private static InvalidOperationException TooManyTuples(int maxValues) =>
+        new InvalidOperationException($"The first question of a semi-join gives more than {maxValues:N0} tuples: filter it further, or take more of them.");
+
     /// <summary>Scans the rows of <paramref name="range"/> only.</summary>
     /// <param name="range">The rows, in file coordinates; intersected with the file.</param>
     /// <returns>This scan.</returns>

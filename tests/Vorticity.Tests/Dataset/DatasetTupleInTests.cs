@@ -85,6 +85,45 @@ public sealed partial class DatasetTupleInTests
         }
     }
 
+    /// <summary>
+    /// The typed tuple, <c>(r.Service, r.Code).In(pairs)</c>, keeps the rows LINQ keeps, nulls and absent pairs among the
+    /// pairs; a semi-join on two and three columns, its first question the calls of the highest scores, keeps the rows
+    /// whose tuple that question gives; more tuples than asked are refused, and a first question of another width too.
+    /// </summary>
+    [Fact]
+    public async Task ATypedTupleAndASemiJoinKeepTheRowsLinqKeeps()
+    {
+        Random random = new Random(43);
+        (VortexDataset dataset, List<Call> all) = await DatasetAsync(random, keyed: false);
+        await using (dataset)
+        {
+            (string?, int?)[] pairs = [.. all.Take(40).Select(static call => (call.Service, call.Code)), ("svc-zz", 200), (null, 404), ("svc-01", null)];
+            HashSet<(string, int)> held = [.. pairs.Where(static pair => pair.Item1 is not null && pair.Item2 is not null).Select(static pair => (pair.Item1!, pair.Item2!.Value))];
+            Assert.Equal(
+                all.Count(call => call.Service is { } service && call.Code is { } code && held.Contains((service, code))),
+                await dataset.Scan<Call>().Where(r => (r.Service, r.Code).In(pairs)).ToRecordsAsync(Ct).CountAsync(Ct));
+            Assert.Equal(0, await dataset.Scan<Call>().Where(r => (r.Service, r.Code).In(("svc-zz", 1))).ToRecordsAsync(Ct).CountAsync(Ct));
+
+            Scan<Call> pairsOfTheBest = await dataset.Scan<Call>().WhereInAsync(
+                r => (r.Service, r.Code), dataset.Scan<Call>().Where(r => r.Score >= 9.5).Select(r => (r.Service, r.Code)), cancellationToken: Ct);
+            HashSet<(string, int)> best = [.. all.Where(static call => call.Score >= 9.5 && call.Service is not null && call.Code is not null).Select(static call => (call.Service!, call.Code!.Value))];
+            Assert.Equal(
+                all.Count(call => call.Service is { } service && call.Code is { } code && best.Contains((service, code))),
+                await pairsOfTheBest.ToRecordsAsync(Ct).CountAsync(Ct));
+
+            Scan<Call> triples = await dataset.Scan<Call>().WhereInAsync(
+                r => (r.Service, r.Code, r.Sequence), dataset.Scan<Call>().Where(r => r.Score >= 9.5).Select(r => (r.Service, r.Code, r.Sequence)), cancellationToken: Ct);
+            Assert.Equal(
+                all.Count(static call => call.Score >= 9.5 && call.Service is not null && call.Code is not null),
+                await triples.ToRecordsAsync(Ct).CountAsync(Ct));
+
+            await Assert.ThrowsAsync<InvalidOperationException>(async () => await dataset.Scan<Call>().WhereInAsync(
+                r => (r.Service, r.Code), dataset.Scan<Call>().Select(r => (r.Service, r.Code)), maxValues: 10, cancellationToken: Ct));
+            await Assert.ThrowsAsync<ArgumentException>(async () => await dataset.Scan<Call>().WhereInAsync(
+                r => (r.Service, r.Code), dataset.Scan<Call>().Select(r => (r.Service, r.Code, r.Sequence)), cancellationToken: Ct));
+        }
+    }
+
     /// <summary>The calls of six appends, each sorted by the service and the code when <paramref name="keyed"/>.</summary>
     private static async Task<(VortexDataset Dataset, List<Call> All)> DatasetAsync(Random random, bool keyed)
     {
