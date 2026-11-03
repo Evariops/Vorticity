@@ -12,6 +12,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Dataset;
 using Vorticity.Expressions;
+using Vorticity.Indexes;
 using Xunit;
 
 namespace Vorticity.Tests.Dataset;
@@ -62,11 +63,13 @@ public sealed partial class DatasetTupleInTests
     /// or three columns of five types, a third of their tuples absent and some holding a null, half negated, some with
     /// another conjunct; each counts the rows LINQ keeps.
     /// </summary>
-    [Fact]
-    public async Task ATupleKeepsTheRowsLinqKeeps()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ATupleKeepsTheRowsLinqKeeps(bool keyed)
     {
         Random random = new Random(41);
-        (VortexDataset dataset, List<Call> all) = await DatasetAsync(random, keyed: false);
+        (VortexDataset dataset, List<Call> all) = await DatasetAsync(random, keyed);
         await using (dataset)
         {
             List<string> failures = [];
@@ -124,6 +127,69 @@ public sealed partial class DatasetTupleInTests
         }
     }
 
+    /// <summary>
+    /// Under the key <c>(Service, Code, Sequence)</c>, tuples of the leading columns are the intervals of each object's sparse
+    /// index: 300 triples, past the 256 values a product of the columns' sets takes, then pairs of a service and a code.
+    /// Each search is exact, judges no box and compares a few keys an interval; every granule a kept row lies in is kept,
+    /// and the scan counts the rows LINQ keeps.
+    /// </summary>
+    [Fact]
+    public async Task TuplesOfTheKeysLeadingColumnsAreFoundByBisection()
+    {
+        Random random = new Random(47);
+        (VortexDataset dataset, List<Call> all) = await DatasetAsync(random, keyed: true);
+        await using (dataset)
+        {
+            List<Call> named = [.. all.Where(static call => call.Service is not null && call.Code is not null)];
+            List<Call> triples = [.. named.OrderBy(_ => random.Next()).Take(300)];
+            HashSet<long> sequences = [.. triples.Select(static call => call.Sequence)];
+            List<(string, int)> pairs = [.. named.Select(static call => (call.Service!, call.Code!.Value)).Distinct().OrderBy(_ => random.Next()).Take(60), ("svc-zz", 200)];
+            HashSet<(string, int)> held = [.. pairs];
+            (string Text, Func<Call, bool> Keep)[] questions =
+            [
+                ("(Service, Code, Sequence) in (" + string.Join(", ", triples.Select(static call => $"('{call.Service}', {call.Code}, {call.Sequence})")) + ")",
+                    call => sequences.Contains(call.Sequence) && call.Service is not null && call.Code is not null),
+                ("(Code, Service) in (" + string.Join(", ", pairs.Select(static pair => $"({pair.Item2}, '{pair.Item1}')")) + ")",
+                    call => call.Service is { } service && call.Code is { } code && held.Contains((service, code))),
+            ];
+
+            DatasetSchema schema = dataset.Snapshot.Schema;
+            foreach ((string text, Func<Call, bool> keep) in questions)
+            {
+                KeyPruning pruning = KeyPruning.Of(schema, ExprText.Parse(text))!;
+                int objects = 0;
+                int log = 0;
+                await foreach (PositionedObject held2 in dataset.ScanBuilder().ObjectsAsync(Ct))
+                {
+                    objects++;
+                    using GranuleKeys keys = (await dataset.KeyIndexAsync(held2.Entry, held2.Entry.Contents!, Ct))!;
+                    log = Math.Max(log, (int)Math.Ceiling(Math.Log2(((keys.Granules + GranuleKeys.RestartEvery - 1) / GranuleKeys.RestartEvery) + 1)));
+                    List<(int First, int End)> kept = pruning.Granules(held2.Entry.Uid, keys, default);
+                    List<Call> rows;
+                    await using (ObjectLease lease = await dataset.RentAsync(held2.Entry, Ct))
+                    {
+                        rows = await lease.File.Scan<Call>().ToRecordsAsync(Ct).ToListAsync(Ct);
+                    }
+
+                    for (int row = 0; row < rows.Count; row++)
+                    {
+                        int granule = row / keys.GranuleRows;
+                        Assert.True(!keep(rows[row]) || kept.Exists(range => granule >= range.First && granule < range.End), $"row {row} of a kept tuple lies in granule {granule}, left out");
+                    }
+                }
+
+                Assert.Equal(0, pruning.Judgments);
+                Assert.True(pruning.Intervals.Exact, "the intervals are not exact");
+                int intervals = pruning.Intervals.Count;
+                Assert.True(intervals > 0);
+                Assert.True(pruning.Comparisons <= objects * intervals * 2 * ((2 * log) + 2 + GranuleKeys.RestartEvery), $"{pruning.Comparisons} keys compared for {intervals} intervals over {objects} objects");
+                Assert.Equal(all.Count(keep), await dataset.Scan().Where(VortexExpr.Parse(text)).CountAsync(Ct));
+            }
+
+            Assert.Equal(300, KeyPruning.Of(schema, ExprText.Parse(questions[0].Text))!.Intervals.Count);
+        }
+    }
+
     /// <summary>The calls of six appends, each sorted by the service and the code when <paramref name="keyed"/>.</summary>
     private static async Task<(VortexDataset Dataset, List<Call> All)> DatasetAsync(Random random, bool keyed)
     {
@@ -133,7 +199,7 @@ public sealed partial class DatasetTupleInTests
             Layout = keyed
                 ? new DatasetLayout { SortKey = [LayoutValue.Column(nameof(Call.Service)), LayoutValue.Column(nameof(Call.Code)), LayoutValue.Column(nameof(Call.Sequence))] }
                 : null,
-            Write = new VortexWriteOptions { BlockRows = 1_024 },
+            Write = new VortexWriteOptions { BlockRows = keyed ? 64 : 1_024 },
         }, Ct);
         List<Call> all = [];
         for (int append = 0; append < 6; append++)

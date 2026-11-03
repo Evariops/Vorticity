@@ -35,6 +35,9 @@ internal sealed class KeyIntervals
     /// <summary>The most intervals the sets of the leading components make, their values multiplied; past it, fewer components bound them.</summary>
     internal const int MostIntervals = 256;
 
+    /// <summary>The most intervals a set of tuples makes, each its own: a search costs some twenty comparisons each.</summary>
+    internal const int MostTuples = 65_536;
+
     /// <summary>The intervals of a filter that bounds no leading component: the exclusion search alone.</summary>
     internal static readonly KeyIntervals Unbounded = new KeyIntervals([], [], lowStrict: false, highStrict: false, exact: false, bounded: false);
 
@@ -139,8 +142,16 @@ internal sealed class KeyIntervals
         List<string> read = [];
         bool residual = false;
         HashSet<string> usedColumns = new HashSet<string>(StringComparer.Ordinal);
+        List<TupleInExpr> tupleSets = [];
         foreach (VortexExpr conjunct in conjuncts)
         {
+            // Tuples bound the leading components together, past what their columns' sets do; no box judges them.
+            if (conjunct is TupleInExpr tuples)
+            {
+                tupleSets.Add(tuples);
+                continue;
+            }
+
             read.Clear();
             conjunct.CollectFields(read);
             bool reads = false;
@@ -204,6 +215,28 @@ internal sealed class KeyIntervals
             points++;
         }
 
+        // A set of tuples of the leading components' columns bounds them together: its tuples are the points, where it
+        // bounds more components than the product of the columns' sets does.
+        List<byte[]>? tupled = null;
+        foreach (TupleInExpr tuples in tupleSets)
+        {
+            int covered = Covered(tuples, names);
+            if (covered > points && TuplePrefixes(tuples, covered, indexed, names, tree, skip, bounds) is { } prefixesOfTuples)
+            {
+                (tupled, points) = (prefixesOfTuples, covered);
+            }
+        }
+
+        if (tupled is not null)
+        {
+            if (tupled.Count == 0 || (points < indexed.Length && bounds[points] is { Failed: false, IsEmpty: true }))
+            {
+                return new KeyIntervals([], [], false, false, exact: true, bounded: true);
+            }
+
+            ranged = points < indexed.Length && bounds[points] is { Failed: false, Points: null } next && (next.Low is not null || next.High is not null);
+        }
+
         int used = points + (ranged ? 1 : 0);
         if (used == 0)
         {
@@ -218,8 +251,8 @@ internal sealed class KeyIntervals
         }
 
         // The intervals: the values' tuples in order, the encodings ordering as the values do, each with the range after it.
-        List<byte[]> prefixes = [[]];
-        for (int position = 0; position < points; position++)
+        List<byte[]> prefixes = tupled ?? [[]];
+        for (int position = 0; position < points && tupled is null; position++)
         {
             List<byte[]> longer = new List<byte[]>(prefixes.Count * bounds[position].Points!.Count);
             foreach (byte[] prefix in prefixes)
@@ -256,6 +289,70 @@ internal sealed class KeyIntervals
 
         return new KeyIntervals(
             [.. bytes], ends, range is { Low: not null, LowStrict: true }, range is { High: not null, HighStrict: true }, exact, bounded: true);
+    }
+
+    /// <summary>The leading components whose columns are all among the columns of <paramref name="tuples"/>.</summary>
+    private static int Covered(TupleInExpr tuples, string?[] names)
+    {
+        int covered = 0;
+        while (covered < names.Length && names[covered] is { } name && Array.Exists(tuples.Fields, field => field is ColumnFieldExpr && string.Equals(field.Path, name, StringComparison.Ordinal)))
+        {
+            covered++;
+        }
+
+        return covered;
+    }
+
+    /// <summary>
+    /// Each tuple of <paramref name="tuples"/> as the key of its first <paramref name="covered"/> components, row-encoded and
+    /// each through its component's function, ascending and distinct; a tuple the other conjuncts' bounds refute leaves.
+    /// Null when a value does not encode as its component, or past <see cref="MostTuples"/>: the columns' sets bound then.
+    /// </summary>
+    private static List<byte[]>? TuplePrefixes(
+        TupleInExpr tuples, int covered, LayoutColumn?[] indexed, string?[] names, SortKey tree, int skip, Bounds?[] bounds)
+    {
+        int[] columns = new int[covered];
+        for (int position = 0; position < covered; position++)
+        {
+            columns[position] = Array.FindIndex(tuples.Fields, field => string.Equals(field.Path, names[position], StringComparison.Ordinal));
+        }
+
+        List<byte[]> prefixes = new List<byte[]>(tuples.Count);
+        List<byte> prefix = [];
+        for (int t = 0; t < tuples.Count; t++)
+        {
+            ReadOnlySpan<FilterLiteral> values = tuples.Tuple(t);
+            prefix.Clear();
+            bool kept = true;
+            for (int position = 0; position < covered && kept; position++)
+            {
+                if (Bounds.Encode(values[columns[position]], indexed[position]!, tree.TypeAt(skip + position)) is not { } encoded)
+                {
+                    return null;
+                }
+
+                kept = bounds[position] is not { Failed: false } bound || bound.Holds(encoded);
+                prefix.AddRange(encoded);
+            }
+
+            if (kept)
+            {
+                prefixes.Add([.. prefix]);
+            }
+        }
+
+        prefixes.Sort(static (left, right) => left.AsSpan().SequenceCompareTo(right));
+        int distinct = 0;
+        for (int i = 0; i < prefixes.Count; i++)
+        {
+            if (distinct == 0 || !prefixes[i].AsSpan().SequenceEqual(prefixes[distinct - 1]))
+            {
+                prefixes[distinct++] = prefixes[i];
+            }
+        }
+
+        prefixes.RemoveRange(distinct, prefixes.Count - distinct);
+        return prefixes.Count <= MostTuples ? prefixes : null;
     }
 
     /// <summary>
@@ -401,6 +498,12 @@ internal sealed class KeyIntervals
             return true;
         }
 
+        /// <summary>Whether <paramref name="value"/>, encoded as the component, is one the conjuncts allow.</summary>
+        internal bool Holds(byte[] value) =>
+            (Points is not { } points || points.Exists(known => Order(known, value) == 0))
+            && !(Low is { } low && Order(value, low) is var above && (above < 0 || (above == 0 && LowStrict)))
+            && !(High is { } high && Order(value, high) is var below && (below > 0 || (below == 0 && HighStrict)));
+
         /// <summary>The values allowed kept to those the range holds, the range then said by them.</summary>
         private void Filter()
         {
@@ -418,7 +521,7 @@ internal sealed class KeyIntervals
         /// <paramref name="value"/> row-encoded as the component's, through its function; null for a value its type does not
         /// take, a float's, whose order its encoding does not keep for zero's sign, or one past its storage.
         /// </summary>
-        private static byte[]? Encode(FilterLiteral value, LayoutColumn component, DType type)
+        internal static byte[]? Encode(FilterLiteral value, LayoutColumn component, DType type)
         {
             if (value.Kind != FilterLiteralKind.Null && component.Function is { } function)
             {
