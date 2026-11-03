@@ -6,6 +6,7 @@ using System.Threading.Tasks;
 using Vorticity.Dataset;
 using Vorticity.Expressions;
 using Vorticity.Indexes;
+using Vorticity.RowEncoding;
 using Vorticity.Types;
 
 namespace Vorticity.Benchmarks.Queries;
@@ -59,7 +60,6 @@ internal static class KeyIndexMicro
             keys.Add(key.Encode([Text($"svc-{service:D4}"), Micros(Start.AddHours(within * 4)), Text($"host-{(within * 7) % 100:D4}")]));
         }
 
-        (byte[] table, byte[] pages) = GranuleKeys.Build(8_192, (long)Granules * 8_192, 3, keys, keys[^1]);
         DateTime eight = Start.AddHours(8);
         (string Name, VortexExpr Filter)[] filters =
         [
@@ -69,6 +69,24 @@ internal static class KeyIndexMicro
             ("host", Eq(nameof(KeyIndexRow.Host), Text("host-0042"))),
         ];
 
+        // The keys as the row encoding writes them, then with their texts unpadded, as the writer keeps them.
+        List<byte[]> unpadded = keys.ConvertAll(row => UnpaddedKeys.Narrow(row, key.Widths));
+        foreach ((string name, List<byte[]> coded, KeyCoding coding) in (ReadOnlySpan<(string, List<byte[]>, KeyCoding)>)[("row-encoded", keys, KeyCoding.Rows), ("unpadded", unpadded, KeyCoding.UnpaddedTexts)])
+        {
+            (byte[] table, byte[] pages) = GranuleKeys.Build(8_192, (long)Granules * 8_192, 3, coded, coded[^1], coding: coding);
+            Console.WriteLine($"-- keys {name}");
+            Measure(schema, filters, table, pages, coded[Granules / 2], rounds);
+        }
+
+        return 0;
+    }
+
+    /// <summary>
+    /// The bytes of the index of <paramref name="table"/> and <paramref name="pages"/>, what taking and giving it back costs,
+    /// and the search of each of <paramref name="filters"/> over 64 copies a question.
+    /// </summary>
+    private static void Measure(DatasetSchema schema, (string Name, VortexExpr Filter)[] filters, byte[] table, byte[] pages, byte[] middle, int rounds)
+    {
         // The same bytes read again for each object a question searches: a pruning searches each object once, its index taken
         // over its bytes and given back.
         long held;
@@ -82,7 +100,6 @@ internal static class KeyIndexMicro
             $"keyindex: {Granules:N0} granules, {table.Length + pages.Length:N0} bytes read, {(double)(table.Length + pages.Length) / Granules:0.0} a granule; {held:N0} bytes held besides, every page reached"));
 
         // What an index costs past its search: taken over its bytes and given back, then with one page reached.
-        byte[] middle = keys[Granules / 2];
         double taken = double.MaxValue;
         double reached = double.MaxValue;
         for (int round = 0; round < Math.Max(1, rounds); round++)
@@ -164,30 +181,28 @@ internal static class KeyIndexMicro
                 }
             }
         }
-
-        return 0;
     }
 
     /// <summary>
-    /// The sparse indexes of the objects of the dataset at <paramref name="directory"/>, read and weighed: the bytes read of
-    /// them, those an index holds besides once every page is reached, and those its keys take decoded whole. Then what its
-    /// records would take with each text unpadded: the blocks of 32 bytes the row encoding pads a text to, with the byte
-    /// after each, as an escaping code that keeps the order writes it instead, a zero byte doubled and two bytes to end it;
-    /// the keys coded forward again, page by page.
+    /// The sparse indexes of the objects of the dataset at <paramref name="directory"/>, read and weighed: how many code their
+    /// keys unpadded, the bytes read of them, those an index holds besides once every page is reached, and those its keys
+    /// take decoded whole. Then what its records take in either coding, row-encoded and unpadded, each object's keys coded
+    /// the other way and coded forward again, page by page.
     /// </summary>
     private static async Task<int> HeldAsync(string directory)
     {
         await using FileObjectStore files = new FileObjectStore(directory);
         await using VortexDataset dataset = await VortexDataset.OpenAsync(files, new DatasetOptions());
         long objects = 0;
+        long unpaddedObjects = 0;
         long granules = 0;
         long onDisk = 0;
         long held = 0;
         long whole = 0;
         long records = 0;
-        long escapedRecords = 0;
+        long unpaddedRecords = 0;
         long keyBytes = 0;
-        long escapedKeyBytes = 0;
+        long unpaddedKeyBytes = 0;
         await foreach (PositionedObject positioned in dataset.WalkAsync(null, 0, long.MaxValue, null, default))
         {
             if (positioned.Entry.Contents is not { KeyIndex: { } table } contents
@@ -198,26 +213,28 @@ internal static class KeyIndexMicro
 
             using GranuleKeys read = keys;
             objects++;
+            unpaddedObjects += keys.Coding == KeyCoding.UnpaddedTexts ? 1 : 0;
             granules += keys.Granules;
             onDisk += table.Length + (contents.KeyPages?.Length ?? 0);
-            Vorticity.Dataset.SortKey shape = Vorticity.Dataset.SortKey.Of(dataset.Snapshot.Schema.Layout!, partition: false, keys.Components);
+            int[] widths = Vorticity.Dataset.SortKey.Of(dataset.Snapshot.Schema.Layout!, partition: false, keys.Components).Widths.ToArray();
 
-            // What the keys take decoded whole: each key and where it ends; and each record, as written and unpadded.
+            // What the keys take decoded whole: each key and where it ends; and each record, row-encoded and unpadded.
             GranuleKeys.KeyReader reader = default;
             byte[] previous = [];
-            byte[] previousEscaped = [];
+            byte[] previousUnpadded = [];
             for (int granule = 0; granule < keys.Granules; granule++)
             {
                 byte[] key = reader.Key(keys, granule).ToArray();
-                byte[] escaped = Unpadded(shape, key);
+                byte[] rows = keys.Coding == KeyCoding.Rows ? key : UnpaddedKeys.Widen(key, widths);
+                byte[] unpadded = keys.Coding == KeyCoding.Rows ? UnpaddedKeys.Narrow(key, widths) : key;
                 whole += key.Length + sizeof(int);
-                keyBytes += key.Length;
-                escapedKeyBytes += escaped.Length;
+                keyBytes += rows.Length;
+                unpaddedKeyBytes += unpadded.Length;
                 bool first = granule % keys.PageEntries == 0;
-                records += RecordBytes(first ? key : previous, key);
-                escapedRecords += RecordBytes(first ? escaped : previousEscaped, escaped);
-                previous = key;
-                previousEscaped = escaped;
+                records += RecordBytes(first ? rows : previous, rows);
+                unpaddedRecords += RecordBytes(first ? unpadded : previousUnpadded, unpadded);
+                previous = rows;
+                previousUnpadded = unpadded;
             }
 
             reader.Dispose();
@@ -226,9 +243,9 @@ internal static class KeyIndexMicro
 
         double per = Math.Max(granules, 1);
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
-            $"keyindex {directory}: {objects:N0} objects, {granules:N0} granules, {onDisk / per:0.0} bytes a granule on disk, {held / per:0.0} held, {whole / per:0.0} decoded whole"));
+            $"keyindex {directory}: {objects:N0} objects, {unpaddedObjects:N0} of keys unpadded, {granules:N0} granules, {onDisk / per:0.0} bytes a granule on disk, {held / per:0.0} held, {whole / per:0.0} decoded whole"));
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
-            $"  texts unpadded: records {records / per:0.0} -> {escapedRecords / per:0.0} bytes a granule ({100.0 * (records - escapedRecords) / Math.Max(records, 1):0.0} % less); keys {keyBytes / per:0.0} -> {escapedKeyBytes / per:0.0} bytes ({100.0 * (keyBytes - escapedKeyBytes) / Math.Max(keyBytes, 1):0.0} % less)"));
+            $"  records row-encoded {records / per:0.0}, unpadded {unpaddedRecords / per:0.0} bytes a granule ({100.0 * (records - unpaddedRecords) / Math.Max(records, 1):0.0} % less); keys {keyBytes / per:0.0} and {unpaddedKeyBytes / per:0.0} bytes ({100.0 * (keyBytes - unpaddedKeyBytes) / Math.Max(keyBytes, 1):0.0} % less)"));
         return 0;
     }
 
@@ -240,54 +257,6 @@ internal static class KeyIndexMicro
     }
 
     private static int VarintBytes(int value) => value < 0x80 ? 1 : value < 0x4000 ? 2 : value < 0x200000 ? 3 : 5;
-
-    /// <summary>
-    /// <paramref name="key"/> with each text component's blocks written unpadded: its leading byte, its bytes with a zero
-    /// doubled as zero then 0xFF, then two zero bytes, which orders as the blocks do. Other components as they are.
-    /// </summary>
-    private static byte[] Unpadded(Vorticity.Dataset.SortKey shape, byte[] key)
-    {
-        const int Block = 32;
-        List<byte> into = new List<byte>(key.Length);
-        int start = 0;
-        for (int component = 0; component < shape.Count && start < key.Length; component++)
-        {
-            int end = shape.PrefixLength(key, component + 1);
-            DType type = shape.TypeAt(component);
-            DType storage = type.Kind == DTypeKind.Extension ? type.StorageType : type;
-            if (storage.Kind is not (DTypeKind.Utf8 or DTypeKind.Binary) || key[start] != 0x02)
-            {
-                for (int i = start; i < end; i++)
-                {
-                    into.Add(key[i]);
-                }
-
-                start = end;
-                continue;
-            }
-
-            into.Add(key[start]);
-            for (int at = start + 1; at < end; at += Block + 1)
-            {
-                byte marker = key[at + Block];
-                int length = marker == 0xFF ? Block : marker;
-                for (int i = at; i < at + length; i++)
-                {
-                    into.Add(key[i]);
-                    if (key[i] == 0)
-                    {
-                        into.Add(0xFF);
-                    }
-                }
-            }
-
-            into.Add(0);
-            into.Add(0);
-            start = end;
-        }
-
-        return [.. into];
-    }
 
     /// <summary>The index of <paramref name="table"/> and <paramref name="pages"/>, as a read hands them.</summary>
     private static GranuleKeys Index(byte[] table, byte[] pages)
