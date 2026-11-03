@@ -33,13 +33,16 @@ internal sealed partial class DatasetKeyCursor
         // Where its bound ends: the key's values the walk orders by, past the partition.
         private int _boundEnd;
 
-        // The partition a walk of one partition keeps to, as it leads the tree's keys; empty for a level's whole walk.
+        // The partition a walk of one partition keeps to, as it leads the tree's keys, and the tree key of its first object;
+        // empty for a level's whole walk.
         private readonly byte[] _partition;
+        private readonly byte[] _floor;
 
-        internal LevelWalk(DatasetKeyCursor owner, int number, DatasetTree tree, byte[]? partition = null)
+        internal LevelWalk(DatasetKeyCursor owner, int number, DatasetTree tree, byte[]? partition = null, byte[]? floor = null)
         {
             _owner = owner;
             _partition = partition ?? [];
+            _floor = floor ?? [];
             _path = new Frame[tree.Depth];
             Number = number;
             Disjoint = owner._version.Levels.IsDisjoint(number);
@@ -68,11 +71,19 @@ internal sealed partial class DatasetKeyCursor
         /// </summary>
         internal ReadOnlySpan<byte> NextBound => _nextLength == 0 ? default : _next.AsSpan(_partition.Length, _boundEnd - _partition.Length);
 
-        /// <summary>Whether an object lies before the place.</summary>
+        /// <summary>
+        /// Whether an object lies before the place: of the walk's partition, for a walk of one, which it is unless the object
+        /// past the place is the partition's first, or one before it.
+        /// </summary>
         internal bool HasPrevious
         {
             get
             {
+                if (_partition.Length > 0 && _nextLength > 0 && TreePage.Compare(NextKey, _floor) <= 0)
+                {
+                    return false;
+                }
+
                 for (int height = _deepest; height >= 0; height--)
                 {
                     if (_path[height].At > 0)

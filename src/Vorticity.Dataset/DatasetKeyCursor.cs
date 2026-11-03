@@ -73,8 +73,8 @@ internal sealed partial class DatasetKeyCursor : IKeyWalker
     private Slot? _current;
     private bool _disposed;
 
-    // Under a partition, the tree's keys lead with it: a walk up keeps to each level's partitions one by one, a walk of each
-    // in the order of the key, and a walk down, whose limits a partition's next object does not give, opens every object.
+    // Under a partition, the tree's keys lead with it: a bounded walk keeps to each level's partitions one by one, a walk
+    // of each in the order of the key, which knows its partition's first object for a walk down.
     private readonly bool _partitioned;
 
     // Whether the key holds fewer values than the tree's keys past the partition: an object's bound is the leading part of
@@ -99,12 +99,6 @@ internal sealed partial class DatasetKeyCursor : IKeyWalker
             _levels[level] = new LevelWalk(this, level, version.Levels[level]);
         }
     }
-
-    /// <summary>
-    /// Whether the walk bounds the objects it opens by their tree keys: on a key the tree's keys lead with past the
-    /// partition, and under a partition upward alone.
-    /// </summary>
-    private bool Bounded => _bounded && (!_partitioned || _direction > 0);
 
     /// <summary>
     /// The bytes of <paramref name="key"/>, a tree key past its partition without its uid, that bound an object of it: the
@@ -177,8 +171,8 @@ internal sealed partial class DatasetKeyCursor : IKeyWalker
     /// <remarks>
     /// The key walked is the columns every object's rows lie in the order of (<see cref="DatasetSchema.ObjectOrder"/>): the
     /// sort key's own under a partition, the service then the sequence under <c>(Service, Bucket(Sequence), Sequence)</c>.
-    /// Under a partition, a walk up keeps to each partition of each level and opens an object of each partition, as a walk
-    /// with none opens an object of each level; a walk down opens every object.
+    /// Under a partition, a walk keeps to each partition of each level, either way, and opens an object of each partition,
+    /// as a walk with none opens an object of each level.
     /// </remarks>
     /// <exception cref="InvalidOperationException">The dataset declares no sort key, or one whose first component orders no column.</exception>
     public static ValueTask<DatasetKeyCursor> OpenAsync(
@@ -404,7 +398,7 @@ internal sealed partial class DatasetKeyCursor : IKeyWalker
         ObjectDisposedException.ThrowIf(_disposed, this);
         await BeginAsync(1, Anchor.First, null, inclusive: true, cancellationToken).ConfigureAwait(false);
         long held = 0;
-        for (LevelWalk? level = Waiting(); level is not null && (held <= rank || !Bounded); level = Waiting())
+        for (LevelWalk? level = Waiting(); level is not null && (held <= rank || !_bounded); level = Waiting())
         {
             held += await JoinAsync(level, cancellationToken).ConfigureAwait(false);
         }
@@ -845,7 +839,7 @@ internal sealed partial class DatasetKeyCursor : IKeyWalker
     }
 
     /// <summary>The encoded minimum of the object past the place of <paramref name="level"/>; empty off the sort key, where none is known.</summary>
-    private ReadOnlySpan<byte> Bound(LevelWalk level) => Bounded ? level.NextBound : default;
+    private ReadOnlySpan<byte> Bound(LevelWalk level) => _bounded ? level.NextBound : default;
 
     /// <summary>
     /// One step of the merge in the heap's direction: the object that was chosen moves on, the
@@ -988,19 +982,16 @@ internal sealed partial class DatasetKeyCursor : IKeyWalker
         _anchor = anchor;
         _walks.Clear();
 
-        // Under a partition the tree's keys lead with it, which a key's encoding seeks none of; a walk down then opens
-        // every object, and a walk up walks each partition of each level.
-        if (_partitioned)
+        // Under a partition the tree's keys lead with it, which a key's encoding seeks none of: a bounded walk walks each
+        // partition of each level, and another opens every object.
+        if (_partitioned && !_bounded)
         {
-            if (direction < 0 || !_bounded)
-            {
-                sought = null;
-            }
+            sought = null;
         }
         else if (direction < 0 && inclusive && _truncated && sought is not null)
         {
             // A key's encoding is a prefix of the tree keys that hold it, which compare above it: past them all.
-            sought = Successor(sought) ?? null;
+            sought = Successor(sought);
         }
 
         foreach (LevelWalk level in _levels)
@@ -1010,9 +1001,9 @@ internal sealed partial class DatasetKeyCursor : IKeyWalker
                 continue;
             }
 
-            if (_partitioned && _bounded && direction > 0)
+            if (_partitioned && _bounded)
             {
-                await PartitionsAsync(level, root, sought, cancellationToken).ConfigureAwait(false);
+                await PartitionsAsync(level, root, direction, sought, inclusive, cancellationToken).ConfigureAwait(false);
                 continue;
             }
 
@@ -1041,12 +1032,15 @@ internal sealed partial class DatasetKeyCursor : IKeyWalker
     }
 
     /// <summary>
-    /// Walks of each partition of <paramref name="level"/> upward, added to the walk's, each placed where the objects of
-    /// its partition that may hold an entry at or past <paramref name="sought"/> start, all of them when there is none:
-    /// within a partition the level's objects come in the order of the key. The partitions are found one after the other,
-    /// each by a seek past the one before.
+    /// Walks of each partition of <paramref name="level"/>, added to the walk's: within a partition the level's objects come
+    /// in the order of the key. Walking up, each is placed where the objects of its partition that may hold an entry at or
+    /// past <paramref name="sought"/> start; walking down, past those whose bound lies at or below it, or below it unless
+    /// <paramref name="inclusive"/>; at its partition's first or past its last when there is none. The partitions are
+    /// found one after the other, each by a seek past the one before, and each walk knows its partition's first object,
+    /// which ends a walk down.
     /// </summary>
-    private async ValueTask PartitionsAsync(LevelWalk level, ParsedPage root, byte[]? sought, CancellationToken cancellationToken)
+    private async ValueTask PartitionsAsync(
+        LevelWalk level, ParsedPage root, int direction, byte[]? sought, bool inclusive, CancellationToken cancellationToken)
     {
         SortKey tree = _version.Schema.Tree!;
         DatasetTree levelTree = _version.Levels[level.Number];
@@ -1062,8 +1056,24 @@ internal sealed partial class DatasetKeyCursor : IKeyWalker
             }
 
             byte[] partition = first[..length].ToArray();
-            LevelWalk walk = new LevelWalk(this, level.Number, levelTree, partition);
-            if (sought is not null && walk.Disjoint)
+            byte[]? past = Successor(partition);
+            LevelWalk walk = new LevelWalk(this, level.Number, levelTree, partition, first.ToArray());
+            if (direction < 0)
+            {
+                if (sought is not null)
+                {
+                    await walk.SeekAsync(root, [.. partition, .. sought], inclusive, before: false, cancellationToken).ConfigureAwait(false);
+                }
+                else if (past is not null)
+                {
+                    await walk.SeekAsync(root, past, inclusive: false, before: false, cancellationToken).ConfigureAwait(false);
+                }
+                else
+                {
+                    walk.End(root);
+                }
+            }
+            else if (sought is not null && walk.Disjoint)
             {
                 // Before the last object of the partition whose bound is at or below the key, or at the partition's first.
                 await walk.SeekAsync(root, [.. partition, .. sought], inclusive: true, before: true, cancellationToken).ConfigureAwait(false);
@@ -1078,7 +1088,7 @@ internal sealed partial class DatasetKeyCursor : IKeyWalker
             }
 
             _walks.Add(walk);
-            if (Successor(partition) is not { } past)
+            if (past is null)
             {
                 break;
             }
@@ -1117,7 +1127,7 @@ internal sealed partial class DatasetKeyCursor : IKeyWalker
         while (true)
         {
             LevelWalk? level = Waiting();
-            if (level is null || (Bounded && _live > 0 && !MayHoldNext(level)))
+            if (level is null || (_bounded && _live > 0 && !MayHoldNext(level)))
             {
                 break;
             }
@@ -1181,7 +1191,7 @@ internal sealed partial class DatasetKeyCursor : IKeyWalker
     /// <summary>Whether the next object of <paramref name="left"/> comes before that of <paramref name="right"/> walking up.</summary>
     private bool Before(LevelWalk left, LevelWalk right)
     {
-        if (_partitioned && Bounded)
+        if (_partitioned && _bounded)
         {
             int order = left.NextBound.SequenceCompareTo(right.NextBound);
             if (order != 0)
@@ -1228,7 +1238,7 @@ internal sealed partial class DatasetKeyCursor : IKeyWalker
     /// of the next one to open, strictly from above: the levels above 0 are key-disjoint. Nothing
     /// bounds them in level 0 or a late level, past a level's last object, and off the sort key.
     /// </summary>
-    private bool HasLimit(LevelWalk level) => Bounded && level.Disjoint && level.HasNext;
+    private bool HasLimit(LevelWalk level) => _bounded && level.Disjoint && level.HasNext;
 
     /// <summary>Whether level <paramref name="left"/>'s next object has a higher limit than level <paramref name="right"/>'s.</summary>
     private bool Higher(LevelWalk left, LevelWalk right) =>

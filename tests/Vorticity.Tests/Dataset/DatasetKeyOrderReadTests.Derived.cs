@@ -101,10 +101,46 @@ public sealed partial class DatasetKeyOrderReadTests
             }
 
             Assert.Equal(all.Count, entries);
+
+            // Downward from the last, every row once in reverse.
+            entries = 0;
+            previous = [];
+            for (bool more = await cursor.SeekLastAsync(Ct); more; more = await cursor.PreviousAsync(Ct))
+            {
+                byte[] key = cursor.KeyBytes.ToArray();
+                Assert.True(entries == 0 || previous.AsSpan().SequenceCompareTo(key) >= 0, $"the cursor goes up at entry {entries} downward");
+                previous = key;
+                entries++;
+            }
+
+            Assert.Equal(all.Count, entries);
         }
 
         List<string> services = [.. all.Where(static row => row.Service is not null).Select(static row => row.Service!).Distinct().Order(StringComparer.Ordinal)];
         long levelZero = dataset.Snapshot.Levels[0].Entries;
+
+        // The last services, downward: an object of each partition, and the one whose null services come last.
+        await using (DatasetKeyCursor tail = await DatasetKeyCursor.OpenAsync(dataset.Snapshot, nameof(KeyRow.Service), distinct: false, indexes: true, Ct))
+        {
+            Assert.True(await tail.SeekLastAsync(Ct));
+            for (int step = 0; step < 20; step++)
+            {
+                Assert.True(await tail.PreviousAsync(Ct));
+            }
+
+            Assert.True(tail.Cursors <= (2 * 3) + levelZero, $"the last services opened {tail.Cursors} objects of {objects}");
+        }
+
+        for (int probe = 0; probe < 20; probe++)
+        {
+            string sought = $"svc-{random.Next(0, 320):D3}";
+            await using DatasetKeyCursor walk = await DatasetKeyCursor.OpenAsync(dataset.Snapshot, nameof(KeyRow.Service), distinct: false, indexes: true, Ct);
+            bool found = await walk.SeekAsync(Vorticity.Expressions.FilterLiteral.From(sought), SeekMode.AtOrBefore, Ct);
+            string? want = services.LastOrDefault(service => string.CompareOrdinal(service, sought) <= 0);
+            Assert.Equal(want is not null, found);
+            Assert.True(want is null || System.Text.Encoding.UTF8.GetString(walk.Key.BytesValue) == want, $"a seek at or before {sought} lands elsewhere than {want}");
+            Assert.True(walk.Cursors <= (2 * 3) + levelZero, $"a seek at or before {sought} opened {walk.Cursors} objects of {objects}");
+        }
         for (int probe = 0; probe < 20; probe++)
         {
             string sought = $"svc-{random.Next(0, 320):D3}";
