@@ -79,6 +79,24 @@ internal sealed class GranuleKeys
     /// <summary>Whether page <paramref name="page"/>'s keys are in hand.</summary>
     internal bool HasPage(int page) => System.Threading.Volatile.Read(ref _keys[page]) is not null;
 
+    /// <summary>
+    /// The bytes the index holds in memory: each page's first key, the last key, and the keys of the pages in hand with
+    /// where each ends.
+    /// </summary>
+    internal long ResidentBytes
+    {
+        get
+        {
+            long bytes = LastKey.Length;
+            for (int page = 0; page < _keys.Length; page++)
+            {
+                bytes += _pageKeys[page].Length + (System.Threading.Volatile.Read(ref _keys[page])?.Bytes ?? 0);
+            }
+
+            return bytes;
+        }
+    }
+
     /// <summary>Whether every page's keys are in hand, so that any granule's key is.</summary>
     internal bool HoldsEvery
     {
@@ -339,6 +357,9 @@ internal sealed class GranuleKeys
     /// <summary>The keys of a page, read: their bytes end to end, and where each ends.</summary>
     private sealed class PageKeys(byte[] keys, int[] ends)
     {
+        /// <summary>The bytes the page's keys and their ends take.</summary>
+        internal long Bytes => keys.Length + ((long)ends.Length * sizeof(int));
+
         internal ReadOnlySpan<byte> At(int entry)
         {
             int start = entry == 0 ? 0 : ends[entry - 1];

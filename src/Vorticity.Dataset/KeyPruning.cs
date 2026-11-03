@@ -273,6 +273,11 @@ internal sealed class KeyPruning
 
     private int _searches;
 
+    /// <summary>The boxes the searches of objects' indexes judged: entries of the exclusion search, pages or granules.</summary>
+    internal int Judgments => _judgments;
+
+    private int _judgments;
+
     private List<(int First, int End)> Search(GranuleKeys keys, ReadOnlySpan<byte> partition)
     {
         Interlocked.Increment(ref _searches);
@@ -282,18 +287,22 @@ internal sealed class KeyPruning
             return kept;
         }
 
+        int judged = 0;
+
         // The pages first: a page runs from its first key to the next page's, the last one to the object's last key. One list
         // of summaries serves every node of the search, and each text or binary the keys hold is read once.
         List<ColumnSummary> box = new List<ColumnSummary>(_tree.Count + 1);
         Dictionary<byte[], FilterLiteral> values = new Dictionary<byte[], FilterLiteral>(ByteKeys.Instance);
         List<(int First, int End)> pages = [];
-        Search(keys, partition, 0, keys.Pages, granules: false, pages, box, values);
+        Search(keys, partition, 0, keys.Pages, granules: false, pages, box, values, ref judged);
         foreach ((int firstPage, int endPage) in pages)
         {
             int from = firstPage * keys.PageEntries;
             int to = (int)Math.Min((long)endPage * keys.PageEntries, keys.Granules);
-            Search(keys, partition, from, to, granules: true, kept, box, values);
+            Search(keys, partition, from, to, granules: true, kept, box, values, ref judged);
         }
+
+        Interlocked.Add(ref _judgments, judged);
 
         // Neighbouring ranges as one; none when the object's box meets the filter's and no granule's does.
         if (kept.Count == 0)
@@ -324,13 +333,14 @@ internal sealed class KeyPruning
     /// </summary>
     private void Search(
         GranuleKeys keys, ReadOnlySpan<byte> partition, int from, int to, bool granules, List<(int First, int End)> kept, List<ColumnSummary> box,
-        Dictionary<byte[], FilterLiteral> values)
+        Dictionary<byte[], FilterLiteral> values, ref int judged)
     {
         if (from >= to)
         {
             return;
         }
 
+        judged++;
         if (!Judge(EntryKey(keys, from, granules), NextKey(keys, to, granules), _skip, partition, box, values))
         {
             return;
@@ -345,7 +355,7 @@ internal sealed class KeyPruning
         int step = Math.Max(1, (to - from + Fanout - 1) / Fanout);
         for (int at = from; at < to; at += step)
         {
-            Search(keys, partition, at, Math.Min(at + step, to), granules, kept, box, values);
+            Search(keys, partition, at, Math.Min(at + step, to), granules, kept, box, values, ref judged);
         }
     }
 
