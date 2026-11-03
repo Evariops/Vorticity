@@ -105,6 +105,13 @@ maps a range of its source to a range of its value, which is all pruning needs.
 The **indexed prefix**, the first components of the key, is what the sparse key index keeps
 ([section 5.2](#52-the-sparse-key-index)). The components after it still order the rows, at no cost to the index.
 
+The key is ClickHouse's: `ORDER BY` is the sort key, `PRIMARY KEY` the indexed prefix, `primary.idx` each object's
+sparse index. It orders the columns it reads as they are, and a function followed by its own column orders that
+column: rows by `(f(c), c)` lie by `c`, the function non-decreasing. A read in the order of those columns bounds each
+object by its keys in the tree. Under a partition it holds open an object of each partition, the merge reading the
+partitions side by side; the key cursor walks each partition of each level the same way. Like ClickHouse's key, it
+enforces no uniqueness.
+
 The library builds no composite structure of its own: its indexes and metadata are per column or per path. The sort key
 is the one composite structure, and the application declares it.
 
@@ -259,6 +266,12 @@ prefix of two, read every object's index for no granule refuted, 0.9 s of proces
 
 It costs at most ~16 bytes a granule: ~52 KB for an object of 1 GiB, ~8 MB a day and ~3.3 GB over 13 months of the
 reference table *(computed)*.
+
+In memory, an index read keeps its records as written plus a key whole every sixteen granules, which a bisection
+compares before it decodes the keys of one run. That is the bytes above and a sixteenth of a decoded key a granule, where
+whole keys took some 80 bytes a granule in an index of 3 300 granules *(measured, `--micro keyindex`)*. A handle holds
+the indexes it reads within `DatasetOptions.KeyIndexCacheBytes`, 64 MiB by default, the least recently used let go
+first, as ClickHouse bounds the primary index it holds.
 
 ### 5.3 Reading a granule, not a chunk
 
@@ -641,6 +654,7 @@ Where the code stops short of this design, measured or known:
 | 11 | No compatibility with earlier dataset formats during the beta | the new layout is not a variant of the old one |
 | 12 | Predicates evaluated in the encoded domain, at the core | filters on measures cost a fraction of decoding them |
 | 13 | Index objects per consolidated partition | lookups over long windows cost one request per partition, not per object |
+| 14 | The sort key as ClickHouse's primary key: intervals of its leading components found by bisection, its order served under a partition, its indexes held within a handle's budget | pruning in a few dozen key comparisons an object, a read in key order that opens an object of each partition, and resident indexes bounded as ClickHouse bounds its primary index |
 | — | Objects of 1 GiB at most by default | smaller merges and one write fewer a row; the requests this adds to lookups are absorbed by decision 13 |
 
 Alternatives weighed and set aside:

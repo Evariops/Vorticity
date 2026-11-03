@@ -93,6 +93,41 @@ in the key, the last fifteen minutes of a service lie mixed with the rest of the
 cuts, where `LayoutValue.Column("At").Bucket(TimeSpan.FromMinutes(15))` keeps them in granules of their own. A
 question by the hour still takes its groups from the quarters' runs, each quarter falling in one hour.
 
+## The key, as ClickHouse's primary key
+
+The layout is ClickHouse's MergeTree key under other names:
+
+| ClickHouse | here |
+|---|---|
+| `PARTITION BY` | `Partition` |
+| `ORDER BY`, the sorting key | `SortKey` |
+| `PRIMARY KEY`, a prefix of it | `IndexedPrefix` |
+| `primary.idx`, a key a granule | each object's sparse index, the first key of each granule |
+| the primary index in memory | `DatasetOptions.KeyIndexCacheBytes`, 64 MiB by default |
+
+The key serves four things.
+* **Pruning.** A filter's equalities, sets and null checks on the leading components, then a range on the next, are
+  intervals of the key. A bisection finds their granules in each object's index: an equality on the service costs
+  under a microsecond and some twenty key comparisons in an object of 3 300 granules. A filter on a later component
+  alone is judged on ranges of granules, as ClickHouse's exclusion search.
+* **Order.** Every object's rows lie in the order of the columns the key orders: a column as it is, and a function
+  followed by its column. `(Service, Bucket(Sequence, 1000), Sequence)` orders by the service then the sequence. A read
+  in that order, `OrderBy` on the first such column or `InKeyOrder` on several, bounds each object by its keys and holds
+  open an object of each partition; under a take it stops once the rows are out.
+* **Groups in order.** A group by that first column under a take streams its groups, each final once a greater key is
+  read, partitioned or not.
+* **The key cursor.** `DatasetKeyCursor` walks those columns over every object, an object of each partition open at a
+  time.
+
+The handle holds the indexes it reads within `KeyIndexCacheBytes`, the least recently used let go first and read again
+when a question needs them. An index holds the key of each granule's first row, coded against the one before, with a
+key whole every sixteen granules.
+
+What the key does not do:
+* It keeps no uniqueness: rows of one key all stay, and nothing replaces an older row, as ClickHouse's replacing merges do.
+* It has no second order. A projection's order is an index's work here ([indexes.md](indexes.md)).
+* A variant path or a float's bucket ends the columns the key orders: a read past it in key order needs a sorted run.
+
 ## How the objects are organized
 
 Appends land as small sorted objects. Within each partition, objects of one size class merge: when a partition holds
