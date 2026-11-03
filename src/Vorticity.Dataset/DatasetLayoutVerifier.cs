@@ -85,6 +85,7 @@ internal static class DatasetLayoutVerifier
 
         // I3: the sparse index of the key's prefix, read first, so that each granule's first key is met as its row passes.
         GranuleKeys? index = null;
+        GranuleKeys.KeyReader granuleKeys = default;
         if (indexed is not null && contents is not null)
         {
             index = await dataset.KeyIndexAsync(entry, contents, cancellationToken).ConfigureAwait(false);
@@ -152,7 +153,7 @@ internal static class DatasetLayoutVerifier
                         {
                             ReadOnlySpan<byte> full = keyed.Row(i);
                             ReadOnlySpan<byte> prefix = full[..indexed!.PrefixLength(full, plan.Prefix)];
-                            if (!unindexed && rows % index!.GranuleRows == 0 && (rows / index.GranuleRows >= index.Granules || !index.Key((int)(rows / index.GranuleRows)).SequenceEqual(prefix)))
+                            if (!unindexed && rows % index!.GranuleRows == 0 && (rows / index.GranuleRows >= index.Granules || !granuleKeys.Key(index, (int)(rows / index.GranuleRows)).SequenceEqual(prefix)))
                             {
                                 problems.Add(Invariant($"'{entry.Key}': its sparse index's key of granule {rows / index.GranuleRows} is not the key of the granule's first row (I3)"));
                                 unindexed = true;
@@ -173,6 +174,7 @@ internal static class DatasetLayoutVerifier
             return null;
         }
 
+        granuleKeys.Dispose();
         if (index is not null && (index.Rows != rows || !index.LastKey.AsSpan().SequenceEqual(lastPrefix)))
         {
             problems.Add(Invariant($"'{entry.Key}': its sparse index holds {index.Rows} rows and another last key, the object {rows} (I3)"));

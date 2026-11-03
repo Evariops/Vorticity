@@ -19,7 +19,7 @@ public sealed partial class DatasetKeyPruningTests
 {
     /// <summary>
     /// A window on the hour under <c>(Service, Hour)</c> bounds the second component alone: the search judges boxes, as many
-    /// as it counts, and the index it searched holds every key it was built from.
+    /// as it counts, and the index it searched holds fewer bytes than its keys, coded forward but a key of each run of 16.
     /// </summary>
     [Fact]
     public async Task ASearchCountsTheBoxesItJudgesAndTheIndexTheBytesItHolds()
@@ -45,7 +45,7 @@ public sealed partial class DatasetKeyPruningTests
         Assert.NotEmpty(kept);
         Assert.True(pruning.Judgments > kept.Count, $"{pruning.Judgments} boxes judged for {kept.Count} ranges kept");
         long keyBytes = keys.Sum(key => (long)Encode(schema, key).Length);
-        Assert.True(index.ResidentBytes >= keyBytes, $"{index.ResidentBytes} bytes held for {keyBytes} bytes of keys");
+        Assert.True(index.ResidentBytes > 0 && index.ResidentBytes < keyBytes, $"{index.ResidentBytes} bytes held for {keyBytes} bytes of keys");
     }
 
     /// <summary>
@@ -71,7 +71,8 @@ public sealed partial class DatasetKeyPruningTests
                 row => row.Service == "svc-05" && row.At >= ten && row.At < ten.AddHours(2)),
         ];
 
-        int log = (int)Math.Ceiling(Math.Log2(index.Granules + 1));
+        // Each bound bisects the runs of 16 by their whole keys, then reads the keys of one run.
+        int log = (int)Math.Ceiling(Math.Log2(((index.Granules + GranuleKeys.RestartEvery - 1) / GranuleKeys.RestartEvery) + 1));
         foreach ((string label, VortexExpr filter, Func<KeyRow, bool> keep) in questions)
         {
             KeyPruning pruning = KeyPruning.Of(schema, filter)!;
@@ -79,7 +80,7 @@ public sealed partial class DatasetKeyPruningTests
             Assert.Equal(0, pruning.Judgments);
             Assert.True(pruning.Intervals.Exact, $"{label}: the intervals are not exact");
             int intervals = pruning.Intervals.Count;
-            Assert.True(pruning.Comparisons <= intervals * ((3 * log) + 4), $"{label}: {pruning.Comparisons} keys compared for {intervals} interval(s) over {index.Granules} granules");
+            Assert.True(pruning.Comparisons <= intervals * 2 * ((2 * log) + 2 + GranuleKeys.RestartEvery), $"{label}: {pruning.Comparisons} keys compared for {intervals} interval(s) over {index.Granules} granules");
             AssertKept(rows, index, kept, keep, label);
         }
     }

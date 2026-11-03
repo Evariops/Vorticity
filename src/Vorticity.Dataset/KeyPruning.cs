@@ -1,4 +1,5 @@
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.Threading;
 using Vorticity.Buffers;
@@ -347,7 +348,7 @@ internal sealed class KeyPruning
         if (within is null)
         {
             within = [];
-            Search(keys, partition, 0, keys.Pages, granules: false, within, box, values, ref judged);
+            Search(keys, partition, 0, keys.Pages, granules: false, within, box, values, ref judged, default);
             for (int i = 0; i < within.Count; i++)
             {
                 (int firstPage, int endPage) = within[i];
@@ -355,9 +356,23 @@ internal sealed class KeyPruning
             }
         }
 
+        // A range's keys decoded once, one record each, and its boxes judged over them, in rented buffers: the search reads
+        // them in any order, each from its run's whole key otherwise.
         foreach ((int from, int to) in Merge(within))
         {
-            Search(keys, partition, from, to, granules: true, kept, box, values, ref judged);
+            int last = Math.Min(to + 1, keys.Granules);
+            byte[] decoded = ArrayPool<byte>.Shared.Rent((last - from) * Math.Max(keys.Longest(from, last), 1));
+            int[] ends = ArrayPool<int>.Shared.Rent(last - from);
+            try
+            {
+                keys.Decode(from, last, decoded, ends);
+                Search(keys, partition, from, to, granules: true, kept, box, values, ref judged, new RangeKeys(from, decoded, ends));
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(decoded);
+                ArrayPool<int>.Shared.Return(ends);
+            }
         }
 
         Interlocked.Add(ref _judgments, judged);
@@ -395,7 +410,7 @@ internal sealed class KeyPruning
     /// </summary>
     private void Search(
         GranuleKeys keys, ReadOnlySpan<byte> partition, int from, int to, bool granules, List<(int First, int End)> kept, List<ColumnSummary> box,
-        Dictionary<byte[], FilterLiteral> values, ref int judged)
+        Dictionary<byte[], FilterLiteral> values, ref int judged, in RangeKeys range)
     {
         if (from >= to)
         {
@@ -403,7 +418,7 @@ internal sealed class KeyPruning
         }
 
         judged++;
-        if (!Judge(EntryKey(keys, from, granules), NextKey(keys, to, granules), _skip, partition, box, values))
+        if (!Judge(EntryKey(keys, from, granules, in range), NextKey(keys, to, granules, in range), _skip, partition, box, values))
         {
             return;
         }
@@ -417,18 +432,32 @@ internal sealed class KeyPruning
         int step = Math.Max(1, (to - from + Fanout - 1) / Fanout);
         for (int at = from; at < to; at += step)
         {
-            Search(keys, partition, at, Math.Min(at + step, to), granules, kept, box, values, ref judged);
+            Search(keys, partition, at, Math.Min(at + step, to), granules, kept, box, values, ref judged, in range);
+        }
+    }
+
+    /// <summary>The keys of a range of granules from <paramref name="from"/>, decoded end to end, with where each ends.</summary>
+    private readonly struct RangeKeys(int from, byte[] keys, int[] ends)
+    {
+        internal ReadOnlySpan<byte> this[int granule]
+        {
+            get
+            {
+                int at = granule - from;
+                int start = at == 0 ? 0 : ends[at - 1];
+                return keys.AsSpan(start, ends[at] - start);
+            }
         }
     }
 
     /// <summary>The key of entry <paramref name="entry"/>: a granule's, or a page's first.</summary>
-    private static ReadOnlySpan<byte> EntryKey(GranuleKeys keys, int entry, bool granules) =>
-        granules ? keys.Key(entry) : keys.PageKey(entry);
+    private static ReadOnlySpan<byte> EntryKey(GranuleKeys keys, int entry, bool granules, in RangeKeys range) =>
+        granules ? range[entry] : keys.PageKey(entry);
 
     /// <summary>The key entry <paramref name="entry"/> − 1 runs to: entry <paramref name="entry"/>'s, or the last key past the last.</summary>
-    private static ReadOnlySpan<byte> NextKey(GranuleKeys keys, int entry, bool granules) =>
+    private static ReadOnlySpan<byte> NextKey(GranuleKeys keys, int entry, bool granules, in RangeKeys range) =>
         granules
-            ? entry == keys.Granules ? keys.LastKey : keys.Key(entry)
+            ? entry == keys.Granules ? keys.LastKey : range[entry]
             : entry == keys.Pages ? keys.LastKey : keys.PageKey(entry);
 
     /// <summary>

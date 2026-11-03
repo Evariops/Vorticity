@@ -69,13 +69,25 @@ public sealed partial class GranuleKeysTests
                 }
             }
 
+            // In order, a record each from the key before; backward, each from its run's whole key.
+            GranuleKeys.KeyReader reader = default;
             for (int granule = 0; granule < granules; granule++)
             {
-                if (!index.Key(granule).SequenceEqual(keys[granule]))
+                if (!reader.Key(index, granule).SequenceEqual(keys[granule]))
                 {
                     failures.Add($"trial {trial}: the key of granule {granule}");
                 }
             }
+
+            for (int granule = granules - 1; granule >= 0; granule--)
+            {
+                if (!reader.Key(index, granule).SequenceEqual(keys[granule]))
+                {
+                    failures.Add($"trial {trial}: the key of granule {granule}, read backward");
+                }
+            }
+
+            reader.Dispose();
 
             for (int probe = 0; probe < 40; probe++)
             {
@@ -184,15 +196,17 @@ public sealed partial class GranuleKeysTests
                 }
             }
 
+            GranuleKeys.KeyReader reader = default;
             for (int row = 0; row < rowKeys.Count; row += keys.GranuleRows)
             {
                 granules++;
-                if (!keys.Key(row / keys.GranuleRows).SequenceEqual(rowKeys[row].AsSpan(0, sortKey.PrefixLength(rowKeys[row], prefix))))
+                if (!reader.Key(keys, row / keys.GranuleRows).SequenceEqual(rowKeys[row].AsSpan(0, sortKey.PrefixLength(rowKeys[row], prefix))))
                 {
                     failures.Add($"{entry.Key}: the key of granule {row / keys.GranuleRows}");
                 }
             }
 
+            reader.Dispose();
             byte[] lastKey = rowKeys[^1][..sortKey.PrefixLength(rowKeys[^1], prefix)];
             if (rowKeys.Count != keys.Rows || keys.Components != prefix || !keys.LastKey.AsSpan().SequenceEqual(lastKey))
             {

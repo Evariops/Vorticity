@@ -200,6 +200,14 @@ internal static partial class DatasetCompactor
     {
         // Every granule, an input's place and the granule's packed in a long, sorted by key.
         long[] order = ArrayPool<long>.Shared.Rent(granules);
+
+        // Each index's keys decoded once for the sort, which compares them in any order.
+        GranuleKeys.DecodedKeys?[] decoded = new GranuleKeys.DecodedKeys?[indexes.Length];
+        for (int i = 0; i < indexes.Length; i++)
+        {
+            decoded[i] = indexes[i]?.DecodeAll();
+        }
+
         List<byte[]> cuts = new List<byte[]>(most - 1);
         try
         {
@@ -220,7 +228,7 @@ internal static partial class DatasetCompactor
                 total += WeightOf(job, indexes, i) * keys.Granules;
             }
 
-            Array.Sort(order, 0, granules, new ByGranuleKey(indexes));
+            Array.Sort(order, 0, granules, new ByGranuleKey(decoded));
 
             // A cut goes before the first granule whose key follows the one before, once the granules before weigh another
             // share of the whole: shares passed at once over a run of one key make one cut, and one range fewer.
@@ -229,11 +237,11 @@ internal static partial class DatasetCompactor
             for (int k = 0; k < granules && shares < most - 1; k++)
             {
                 int input = (int)(order[k] >> 32);
-                ReadOnlySpan<byte> key = indexes[input]!.Key((int)order[k]);
+                ReadOnlySpan<byte> key = decoded[input]![(int)order[k]];
                 if (k > 0 && total > 0)
                 {
                     int reached = (int)Math.Min(most - 1, before * most / total);
-                    if (reached > shares && key.SequenceCompareTo(indexes[(int)(order[k - 1] >> 32)]!.Key((int)order[k - 1])) > 0)
+                    if (reached > shares && key.SequenceCompareTo(decoded[(int)(order[k - 1] >> 32)]![(int)order[k - 1]]) > 0)
                     {
                         byte[] cut = new byte[partition.Length + key.Length];
                         partition.CopyTo(cut, 0);
@@ -308,11 +316,11 @@ internal static partial class DatasetCompactor
         Math.Min((long)keys.FirstAtOrPast(cut) * keys.GranuleRows, keys.Rows);
 
     /// <summary>Granules of several indexes, an index's place and a granule's packed in a long, by key, then by place.</summary>
-    private sealed class ByGranuleKey(GranuleKeys?[] indexes) : IComparer<long>
+    private sealed class ByGranuleKey(GranuleKeys.DecodedKeys?[] indexes) : IComparer<long>
     {
         public int Compare(long left, long right)
         {
-            int order = indexes[(int)(left >> 32)]!.Key((int)left).SequenceCompareTo(indexes[(int)(right >> 32)]!.Key((int)right));
+            int order = indexes[(int)(left >> 32)]![(int)left].SequenceCompareTo(indexes[(int)(right >> 32)]![(int)right]);
             return order != 0 ? order : left.CompareTo(right);
         }
     }

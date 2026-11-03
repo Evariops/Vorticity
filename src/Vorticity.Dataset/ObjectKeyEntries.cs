@@ -26,6 +26,9 @@ internal sealed class ObjectKeyEntries : ISortedEntries
     private readonly string[] _paths;
     private readonly SortKey _key;
     private readonly GranuleKeys? _index;
+
+    // The reader of its index's keys, whose buffer the entries give back when disposed.
+    private GranuleKeys.KeyReader _reader;
     private readonly int _granuleRows;
     private readonly long _rows;
 
@@ -108,6 +111,7 @@ internal sealed class ObjectKeyEntries : ISortedEntries
     {
         _loadedStart = -1;
         _loadedRows = 0;
+        _reader.Dispose();
         return ValueTask.CompletedTask;
     }
 
@@ -156,7 +160,7 @@ internal sealed class ObjectKeyEntries : ISortedEntries
     {
         if (_index is { } index)
         {
-            ReadOnlySpan<byte> first = index.Key(granule);
+            ReadOnlySpan<byte> first = _reader.Key(index, granule);
             if (!key.AsSpan().StartsWith(first))
             {
                 return first.SequenceCompareTo(key) > 0;
