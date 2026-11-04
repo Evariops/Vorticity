@@ -29,9 +29,6 @@ internal sealed class ChunkKeys : IDisposable
     /// <summary>The pairs, in ingest order.</summary>
     internal List<(int Key, long Position)> Log => _log;
 
-    /// <summary>Bytes the table holds, for the budget and the report.</summary>
-    internal long Bytes => _heapUsed + ((long)_keys.Count * 8) + ((long)_log.Count * 16);
-
     /// <summary>A key's bytes.</summary>
     /// <param name="key">The id.</param>
     internal ReadOnlySpan<byte> KeyBytes(int key)

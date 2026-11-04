@@ -36,7 +36,7 @@ A `VortexSession` holds what would otherwise be process-wide state, so a host de
 | option | default | what it governs |
 |---|---|---|
 | `MemoryPool` | `AlignedMemoryPool.Shared` | every batch and builder buffer, and the segments read by a source of yours. The file sources of the library read into `AlignedMemoryPool.Shared` |
-| `SegmentCache` | none | segments kept across scans, one budget for every file of the session whose reads do I/O |
+| `SegmentCache` | the process's, `SegmentCache.Shared`: a sixteenth of the memory the process may use, 1 GiB at most; none for a session with a `Keyring` | segments kept across scans, one budget for every file of the sessions that share it whose reads do I/O. A cache of 0 bytes keeps none |
 | `MaxConcurrentReads` | 128 | reads in flight across every scan of every file of the session whose reads do I/O |
 | `MaxDegreeOfParallelism` | 1 | how many chunks a scan decodes and aggregates at once, and how many threads a writer uses |
 | `IndexCacheBytes` | 64 MiB | decoded index runs kept per open file |
@@ -146,6 +146,29 @@ is about twice as fast at four threads, and two and a half times for the filtere
 hands batches to your loop gains little: it still delivers them one at a time and in file order
 (which the sample checks at degree 4), and most of its cost here is walking 123 blocks. Measure on
 your own files. Timings vary from run to run on a busy machine, so read the ratios.
+
+## Many questions at once
+
+A process answers as many questions at once as it has cores. Past its physical cores, extra clients
+add little: what hyperthreading gives two threads that share a core. One process is as good as two:
+the questions share its caches, which a second process would fill again.
+
+Measured with the paths bench's throughput run (`--qps`), on a 16-core processor with 32 logical
+cores. Each question ran at one lane over two hours of spans and logs, its segments in a 4 GiB cache:
+
+| clients | short questions, q/s | cores busy | mixed questions, q/s | cores busy |
+|---|---|---|---|---|
+| 8 | 337 | 8.4 | 8.9 | 6.3 |
+| 16 | 531 | 16.5 | 16.7 | 13.8 |
+| 24 | 561 | 24.3 | 21.2 | 21.9 |
+| 32 | 561 | 30.0 | 22.9 | 27.0 |
+
+The short questions take 0.2 to 60 ms each, answered from the cache with no request to the store.
+The mixed ones add full scans of 3 to 4 seconds. Two processes of 16 clients each answered 537 short
+questions a second together, on the same 30 cores as one process of 32 clients, which answered 548.
+The limit is the cores, not the process. Over a 10 Gb/s link, the mixed questions stop at 14.7 a
+second from 16 clients on, the link full at about 1 GB/s. Size the clients of a process to its
+physical cores, or to its link when its questions read the store.
 
 ## Prefetch
 

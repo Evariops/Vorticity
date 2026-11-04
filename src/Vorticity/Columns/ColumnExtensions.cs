@@ -1,10 +1,8 @@
 using System;
 using System.Numerics;
 using System.Runtime.CompilerServices;
-using System.Runtime.InteropServices;
 using Vorticity.Arrays;
 using Vorticity.Types;
-using Vorticity.Types.Numerics;
 
 namespace Vorticity;
 

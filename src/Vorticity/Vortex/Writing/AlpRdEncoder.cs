@@ -5,6 +5,7 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
 using System.Runtime.Intrinsics.X86;
+using Vorticity.Aggregating;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Arrays.Decoders.Compressed;
@@ -229,12 +230,12 @@ internal sealed class AlpRdPlan
         _right = [];
         if (codes.Length > 0)
         {
-            ArrayPool<ushort>.Shared.Return(codes);
+            WorkArrays.Return(codes);
         }
 
         if (right.Length > 0)
         {
-            ArrayPool<byte>.Shared.Return(right);
+            WorkArrays.Return(right);
         }
     }
 
@@ -260,12 +261,12 @@ internal sealed class AlpRdPlan
         ExceptionCount = 0;
         if (rows.Length > 0)
         {
-            ArrayPool<int>.Shared.Return(rows);
+            WorkArrays.Return(rows);
         }
 
         if (values.Length > 0)
         {
-            ArrayPool<byte>.Shared.Return(values);
+            WorkArrays.Return(values);
         }
     }
 
@@ -280,10 +281,10 @@ internal sealed class AlpRdPlan
         int dictionaryLength = cut.Length;
         int rightBitWidth = cut.RightBitWidth;
 
-        ushort[] codes = ArrayPool<ushort>.Shared.Rent(rows);
-        byte[] right = ArrayPool<byte>.Shared.Rent(rows * width);
-        int[] exceptionRows = ArrayPool<int>.Shared.Rent(Math.Max(rows / 64, 16));
-        ushort[] exceptionPatterns = ArrayPool<ushort>.Shared.Rent(exceptionRows.Length);
+        ushort[] codes = WorkArrays.Rent<ushort>(rows);
+        byte[] right = WorkArrays.Rent<byte>(rows * width);
+        int[] exceptionRows = WorkArrays.Rent<int>(Math.Max(rows / 64, 16));
+        ushort[] exceptionPatterns = WorkArrays.Rent<ushort>(exceptionRows.Length);
         bool kept = false;
         try
         {
@@ -308,8 +309,8 @@ internal sealed class AlpRdPlan
             // The exceptions are copied out of their growing rentals into rentals of their own
             // size, so that a plan holds what it has until it is written; their high bits go out
             // as the little-endian u16 the patch values are.
-            int[] keptRows = exceptions == 0 ? [] : ArrayPool<int>.Shared.Rent(exceptions);
-            byte[] keptValues = exceptions == 0 ? [] : ArrayPool<byte>.Shared.Rent(exceptions * sizeof(ushort));
+            int[] keptRows = exceptions == 0 ? [] : WorkArrays.Rent<int>(exceptions);
+            byte[] keptValues = exceptions == 0 ? [] : WorkArrays.Rent<byte>(exceptions * sizeof(ushort));
             exceptionRows.AsSpan(0, exceptions).CopyTo(keptRows);
             MemoryMarshal.AsBytes(exceptionPatterns.AsSpan(0, exceptions)).CopyTo(keptValues);
             if (!BitConverter.IsLittleEndian)
@@ -325,12 +326,12 @@ internal sealed class AlpRdPlan
         }
         finally
         {
-            ArrayPool<int>.Shared.Return(exceptionRows);
-            ArrayPool<ushort>.Shared.Return(exceptionPatterns);
+            WorkArrays.Return(exceptionRows);
+            WorkArrays.Return(exceptionPatterns);
             if (!kept)
             {
-                ArrayPool<ushort>.Shared.Return(codes);
-                ArrayPool<byte>.Shared.Return(right);
+                WorkArrays.Return(codes);
+                WorkArrays.Return(right);
             }
         }
     }
@@ -485,9 +486,9 @@ internal sealed class AlpRdPlan
     /// <summary>Doubles a rental, keeping its first <paramref name="used"/> entries.</summary>
     private static void Grow<T>(ref T[] rental, int used)
     {
-        T[] grown = ArrayPool<T>.Shared.Rent(rental.Length * 2);
+        T[] grown = WorkArrays.Rent<T>(rental.Length * 2);
         rental.AsSpan(0, used).CopyTo(grown);
-        ArrayPool<T>.Shared.Return(rental);
+        WorkArrays.Return(rental);
         rental = grown;
     }
 
@@ -500,9 +501,9 @@ internal sealed class AlpRdPlan
         where TBits : unmanaged, IBinaryInteger<TBits>, IUnsignedNumber<TBits>
     {
         int bits = Unsafe.SizeOf<TBits>() * 8;
-        ushort[] sample = ArrayPool<ushort>.Shared.Rent(Math.Min(rows, MaxSample));
-        ushort[] groupPatterns = ArrayPool<ushort>.Shared.Rent(Math.Min(rows, MaxSample));
-        uint[] groupCounts = ArrayPool<uint>.Shared.Rent(Math.Min(rows, MaxSample));
+        ushort[] sample = WorkArrays.Rent<ushort>(Math.Min(rows, MaxSample));
+        ushort[] groupPatterns = WorkArrays.Rent<ushort>(Math.Min(rows, MaxSample));
+        uint[] groupCounts = WorkArrays.Rent<uint>(Math.Min(rows, MaxSample));
         try
         {
             int count = Sample(values, mask, rows, bits, sample);
@@ -544,9 +545,9 @@ internal sealed class AlpRdPlan
         }
         finally
         {
-            ArrayPool<ushort>.Shared.Return(sample);
-            ArrayPool<ushort>.Shared.Return(groupPatterns);
-            ArrayPool<uint>.Shared.Return(groupCounts);
+            WorkArrays.Return(sample);
+            WorkArrays.Return(groupPatterns);
+            WorkArrays.Return(groupCounts);
         }
     }
 

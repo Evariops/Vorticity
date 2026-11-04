@@ -13,7 +13,7 @@ if (maxCelsius is double max)
     scan.Where(r => r.Celsius <= max);
 }
 
-ScanPlan plan = await scan.ExplainAsync();
+ScanPlan plan = await scan.ExplainAsync(analyze: true);
 long rows = 0;
 int earliest = int.MaxValue;
 await foreach (var (day, _, _) in scan)
@@ -88,6 +88,7 @@ explains why it is built this way.
 | `v.Pages.Contains(7)` | a list holds a value |
 | `v.Origin.Country.In("FR", "BE")` | a field of a nested record |
 | `r.High > r.Low`, on a record with two such columns | two columns of the same type |
+| `(r.City, r.Day).In(visits)` | a tuple of two to four columns, as SQL's `(city, day) IN (…)` |
 
 And here is what does not compile, in the compiler's own words:
 
@@ -96,6 +97,35 @@ r.Day >= "900"            CS0019: Operator '>=' cannot be applied to operands of
 r.Day % 2 == 0            CS0619: 'Sym<int>.operator %(Sym<int>, int)' is obsolete: 'Vortex does not push arithmetic down. Compute it on the columns after the scan.'
 Math.Abs(r.Celsius) > 1   CS1503: Argument 1: cannot convert from 'Vorticity.Sym<double?>' to 'decimal'
 r.City.Length > 3         CS1061: 'Sym<string>' does not contain a definition for 'Length'
+```
+
+## Tuples of columns
+
+`(r.City, r.Day).In(visits)` keeps the rows whose values of the two columns are, together, one of the pairs:
+
+```csharp
+(string, int)[] visits = [("Paris", 900), ("Lyon", 912)];
+Scan<Reading> scan = file.Scan<Reading>().Where(r => (r.City, r.Day).In(visits));
+```
+
+A tuple takes two to four of the scan's columns, each a column or a field of a record, never a function of one. A
+pair that holds a null, or a value its column cannot hold, matches no row. A row with a null is unknown where a pair
+holds its other value, and false otherwise, as the `or` of the pairs' equalities would be.
+
+The filter carries, beside the pairs, each column's set of their values: `City in ('Paris', 'Lyon') and Day in (900,
+912)`. The zone maps, the indexes and a dataset's partitions prune by those sets, as they prune any set. Each row
+left is then looked up among the pairs, which the scan hashes once. A dataset whose sort key leads with the columns
+finds each pair's granules by a bisection of every object's sparse index ([dataset-layout.md](dataset-layout.md)).
+
+The text grammar writes the same filter `(City, Day) in (('Paris', 900), ('Lyon', 912))`.
+
+A semi-join, `WhereInAsync`, reads a first question now and keeps the rows that hold one of its values. It takes a
+tuple too, the first question projecting as many columns:
+
+```csharp
+Scan<Reading> hot = await file.Scan<Reading>().WhereInAsync(
+    r => (r.City, r.Day),
+    other.Scan<Reading>().Where(r => r.Celsius > 30).Select(r => (r.City, r.Day)));
 ```
 
 ## What happens, in order
@@ -139,14 +169,18 @@ predicate. Write the rows in the order of the column you filter on, or at least 
 
 ## Before and after
 
-`ExplainAsync` reads the statistics and zone maps, plus at most the few segments of a sorted column it
-searches, and returns a `ScanPlan`: the live blocks, the segments and bytes they need, and one
-`PruningStep` per structure consulted, with what it pruned and what consulting it cost. `Metrics`,
-read after the sink, says what the scan actually did. Above, the plan counts 15 segments and
-217 052 bytes, including the 8 172 bytes of zone maps it consulted. The scan that followed read the
-other 12 segments, 208 880 bytes. The file keeps the zone maps a plan or a scan has read, and the
+`ExplainAsync(analyze: true)` reads the statistics and zone maps, plus at most the few segments of a sorted
+column it searches, and returns a `ScanPlan`: the live blocks, the segments and bytes they need, and one
+`PruningStep` per structure consulted, with what it pruned and what consulting it cost. Its `Logical`
+says the question in words, what it asks and never how: here `rows of a file, reading Day, City,
+Celsius, where …; exact, synopses`. An aggregation's says its aggregates, its keys and what follows on
+its groups, and a walk of keys its column (`KeyPlan.Logical`). `Metrics`, read after the sink, says
+what the scan actually did. Above, the plan counts 15 segments and 217 052 bytes, including the
+8 172 bytes of zone maps it consulted. The scan that followed read the other 12 segments,
+208 880 bytes. The file keeps the zone maps a plan or a scan has read, and the
 scan reads each segment once, however many live blocks share it
-([statistics-and-pruning.md](statistics-and-pruning.md)).
+([statistics-and-pruning.md](statistics-and-pruning.md)). `ExplainAsync()`, without the analysis, reads
+nothing: from the footer alone, every block its statistics do not rule out counts as live.
 
 The cheapest questions need no scan at all. `CountAsync` and `AnyAsync` answer from the structures
 whenever they are enough, and `file.MayMatch<Reading>(r => r.Day >= 5000)` compares the predicate

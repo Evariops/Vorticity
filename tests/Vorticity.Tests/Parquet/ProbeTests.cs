@@ -3,7 +3,6 @@ using System.Buffers.Binary;
 using System.IO;
 using System.Text;
 using Vorticity.Parquet.Metadata;
-using Vorticity.Parquet.Schema;
 using Xunit;
 
 namespace Vorticity.Tests.Parquet;

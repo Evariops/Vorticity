@@ -5,7 +5,6 @@
     <RootNamespace>Vorticity.Samples</RootNamespace>
     <AssemblyName>vortex-samples</AssemblyName>
     <Description>The programs the user guide quotes: one per case, compiled by the build.</Description>
-    <InvariantGlobalization>true</InvariantGlobalization>
   </PropertyGroup>
 
   <ItemGroup>

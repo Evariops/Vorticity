@@ -1,10 +1,8 @@
 using System;
-using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Numerics;
-using System.Text;
+using System.Runtime.InteropServices;
 using Vorticity.Expressions;
-using Vorticity.Types.Numerics;
 
 namespace Vorticity;
 
@@ -13,7 +11,7 @@ internal static class SymLowering
 {
     internal const string NoArithmetic = "Vortex does not push arithmetic down. Compute it on the columns after the scan.";
 
-    /// <summary>Where a value falls among a column's stored values; see <see cref="Place"/>.</summary>
+    /// <summary>Where a value falls among a column's stored values; see <see cref="Place{T}(ColumnSym, ClrShape, T)"/>.</summary>
     /// <param name="Floor">The stored value at or below it, when <paramref name="Beyond"/> is 0.</param>
     /// <param name="Exact">Whether it is that value.</param>
     /// <param name="Beyond">1 above every value the column can store, -1 below every one, 0 among them.</param>
@@ -74,13 +72,20 @@ internal static class SymLowering
     /// whether it is that value. A time or an instant finer than the column's unit falls between
     /// two, and one past what the column's integers reach falls beyond them all.
     /// </summary>
-    internal static Placement Place<T>(ColumnSym column, ClrShape shape, T value)
+    internal static Placement Place<T>(ColumnSym column, ClrShape shape, T value) =>
+        Place(column.Type, column.Extensions, column.Field.Path, shape, value);
+
+    /// <summary>
+    /// <see cref="Place{T}(ColumnSym, ClrShape, T)"/> among the values a column of <paramref name="type"/>, named
+    /// <paramref name="path"/>, stores: for a caller that names the column rather than binds it.
+    /// </summary>
+    internal static Placement Place<T>(VortexType type, VortexExtensionRegistry? extensions, string path, ClrShape shape, T value)
     {
         object boxed = value!;
         return shape.Kind is ClrKind.TimeOnly or ClrKind.DateTime or ClrKind.DateTimeOffset
-            && column.Type.ExtensionId is ExtensionIds.Time or ExtensionIds.Timestamp
-            ? PlaceInstant(column.Type, shape.Kind, boxed)
-            : new Placement(Literal(column, shape, value), true, 0);
+            && type.ExtensionId is ExtensionIds.Time or ExtensionIds.Timestamp
+            ? PlaceInstant(type, shape.Kind, boxed)
+            : new Placement(Literal(type, extensions, path, shape, value), true, 0);
     }
 
     private static Placement PlaceInstant(VortexType type, ClrKind kind, object boxed)
@@ -120,34 +125,56 @@ internal static class SymLowering
 
     internal static Predicate In<T>(ColumnSym column, ReadOnlySpan<T> values)
     {
-        ClrShape shape = ClrShape.For<T>.Value;
         List<FilterLiteral> literals = new List<FilterLiteral>(values.Length);
         foreach (T value in values)
         {
-            if (value is null)
+            if (TryExact(column, value, out FilterLiteral exact))
             {
-                continue;
-            }
-
-            if (IsDecimal(shape.Kind))
-            {
-                if (TryExactDecimal(column, value, out FilterLiteral exact))
-                {
-                    literals.Add(exact);
-                }
-
-                continue;
-            }
-
-            // A value the column cannot store matches no row, so it leaves the list.
-            Placement at = Place(column, shape, value);
-            if (at.Exact && at.Beyond == 0)
-            {
-                literals.Add(at.Floor);
+                literals.Add(exact);
             }
         }
 
         return literals.Count == 0 ? Predicate.None : new Predicate(Expr.In(column.Field, [.. literals]));
+    }
+
+    /// <summary>
+    /// The literal of <paramref name="value"/> in the storage units of <paramref name="column"/>, exactly; false for a null,
+    /// or a value the column cannot store, which no row equals and which leaves a set.
+    /// </summary>
+    internal static bool TryExact<T>(ColumnSym column, T value, out FilterLiteral literal)
+    {
+        literal = default;
+        if (value is null)
+        {
+            return false;
+        }
+
+        ClrShape shape = ClrShape.For<T>.Value;
+        if (IsDecimal(shape.Kind))
+        {
+            return TryExactDecimal(column, value, out literal);
+        }
+
+        Placement at = Place(column, shape, value);
+        literal = at.Floor;
+        return at.Exact && at.Beyond == 0;
+    }
+
+    /// <summary>
+    /// The rows whose values of <paramref name="columns"/> are one of the tuples <paramref name="values"/> holds end to end,
+    /// each value placed in its column by <see cref="TryExact{T}"/>: none, when no tuple is left.
+    /// </summary>
+    /// <exception cref="ArgumentException">A column is not one of the scan's own: a function of one, a path in a variant.</exception>
+    internal static Predicate Tuples(ReadOnlySpan<ColumnSym> columns, List<FilterLiteral> values)
+    {
+        FieldExpr[] fields = new FieldExpr[columns.Length];
+        for (int column = 0; column < fields.Length; column++)
+        {
+            fields[column] = columns[column].Field as ColumnFieldExpr
+                ?? throw new ArgumentException($"Element {column + 1} of the tuple, '{columns[column].Field.Path}', is not a column: a tuple holds columns.", nameof(columns));
+        }
+
+        return values.Count == 0 ? Predicate.None : new Predicate(TupleInExpr.Of(fields, CollectionsMarshal.AsSpan(values)));
     }
 
     internal static Predicate StringMatch(ColumnSym column, StringMatchOp op, string text, char escape = '\\')
@@ -162,6 +189,7 @@ internal static class SymLowering
         {
             StringMatchOp.StartsWith => Expr.StartsWith(column.Field, FilterLiteral.From(text)),
             StringMatchOp.Contains => Expr.Contains(column.Field, FilterLiteral.From(text)),
+            StringMatchOp.Token => Expr.HasToken(column.Field, FilterLiteral.From(text)),
             _ => Expr.Like(column.Field, FilterLiteral.From(text), (byte)escape),
         });
     }
@@ -180,11 +208,17 @@ internal static class SymLowering
     }
 
     /// <summary>The literal of <paramref name="value"/> in the storage units of <paramref name="column"/>.</summary>
-    internal static FilterLiteral Literal<T>(ColumnSym column, ClrShape shape, T value)
+    internal static FilterLiteral Literal<T>(ColumnSym column, ClrShape shape, T value) =>
+        Literal(column.Type, column.Extensions, column.Field.Path, shape, value);
+
+    /// <summary>
+    /// The literal of <paramref name="value"/> in the storage units of a column of <paramref name="type"/>, named
+    /// <paramref name="path"/>: for a caller that names the column rather than binds it.
+    /// </summary>
+    internal static FilterLiteral Literal<T>(VortexType type, VortexExtensionRegistry? extensions, string path, ClrShape shape, T value)
     {
         object boxed = value!;
-        VortexType type = column.Type;
-        if (type.Kind == VortexTypeKind.Extension && column.Extensions is { } extensions
+        if (type.Kind == VortexTypeKind.Extension && extensions is not null
             && extensions.TryGet(type.ExtensionId!, out ExtensionRegistration registration)
             && registration.ClrType == boxed.GetType())
         {
@@ -225,7 +259,7 @@ internal static class SymLowering
                 Placement at = PlaceInstant(type, shape.Kind, boxed);
                 return at.Exact && at.Beyond == 0
                     ? at.Floor
-                    : throw new VortexSchemaException($"{boxed} is not a value of '{column.Field.Path}', of {type}: its unit holds no such instant.");
+                    : throw new VortexSchemaException($"{boxed} is not a value of '{path}', of {type}: its unit holds no such instant.");
             }
             case ClrKind.Guid:
             {
@@ -236,7 +270,7 @@ internal static class SymLowering
 
             default:
                 throw new VortexUnsupportedException(
-                    ClrFit.Name(typeof(T)), ComponentKind.Feature, $"'{column.Field.Path}' cannot be compared with a {ClrFit.Name(typeof(T))}; a list is filtered by Contains.");
+                    ClrFit.Name(typeof(T)), ComponentKind.Feature, $"'{path}' cannot be compared with a {ClrFit.Name(typeof(T))}; a list is filtered by Contains.");
         }
     }
 

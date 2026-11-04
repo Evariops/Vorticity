@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.Text;
 using Vorticity.Expressions;
-using Vorticity.File;
 using Vorticity.Scanning;
 
 namespace Vorticity.Dataset;
@@ -27,20 +26,6 @@ internal sealed class ObjectSummaries : IEquatable<ObjectSummaries>
 
     /// <summary>The summarised columns, in path order.</summary>
     public IReadOnlyList<ColumnSummary> Columns => _columns;
-
-    /// <summary>
-    /// The summaries of an open file's columns, reading no data segment: the declared
-    /// <paramref name="paths"/>, or the first <paramref name="limit"/> columns when none is given.
-    /// </summary>
-    public static ObjectSummaries Of(
-        VortexFile file, IReadOnlyList<string>? paths = null, int limit = ColumnSummary.DefaultLimit)
-    {
-        ArgumentNullException.ThrowIfNull(file);
-        IReadOnlyList<ColumnSummary> summaries = paths is null
-            ? ColumnSummaries.Of(file, limit)
-            : ColumnSummaries.Of(file, paths);
-        return From(summaries);
-    }
 
     /// <summary>
     /// The summaries of a list of columns, in any order, sorted into the canonical order. A column
@@ -523,7 +508,7 @@ internal sealed class ObjectSummaries : IEquatable<ObjectSummaries>
         _ => 0,
     };
 
-    private static int LiteralBytes(FilterLiteral literal) => literal.Kind switch
+    internal static int LiteralBytes(FilterLiteral literal) => literal.Kind switch
     {
         FilterLiteralKind.Bytes => 1 + TreePage.VarintBytes((ulong)literal.BytesValue.Length)
             + literal.BytesValue.Length,
@@ -532,7 +517,7 @@ internal sealed class ObjectSummaries : IEquatable<ObjectSummaries>
         _ => 1 + sizeof(ulong),
     };
 
-    private static Span<byte> WriteLiteral(Span<byte> destination, FilterLiteral literal)
+    internal static Span<byte> WriteLiteral(Span<byte> destination, FilterLiteral literal)
     {
         destination[0] = (byte)literal.Kind;
         destination = destination[1..];
@@ -561,7 +546,7 @@ internal sealed class ObjectSummaries : IEquatable<ObjectSummaries>
         _ => 0,
     };
 
-    private static FilterLiteral ReadLiteral(ReadOnlySpan<byte> value, ref int at)
+    internal static FilterLiteral ReadLiteral(ReadOnlySpan<byte> value, ref int at)
     {
         if (at >= value.Length)
         {

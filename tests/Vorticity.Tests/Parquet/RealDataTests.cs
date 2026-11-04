@@ -77,7 +77,7 @@ public sealed partial class RealDataTests : IDisposable
         long rows;
         await using (ParquetFile file = await ParquetFile.OpenAsync(path, Ct))
         {
-            Assert.Equal(nameof(KeySourceKind.InMemory), (await file.Scan<Trip>().OrderBy(t => t.tpep_pickup_datetime).ExplainAsync(Ct)).Order!.Source);
+            Assert.Equal(nameof(KeySourceKind.InMemory), (await file.Scan<Trip>().OrderBy(t => t.tpep_pickup_datetime).ExplainAsync(analyze: true, Ct)).Order!.Source);
             (rows, sorted) = await DigestAsync(file.Scan<Trip>().OrderBy(t => t.tpep_pickup_datetime).ToBatchesAsync(Ct));
             await using ParquetFileWriter writer = VortexSession.Default.CreateParquetWriter<Trip>(_path, new ParquetWriteOptions
             {
@@ -99,7 +99,7 @@ public sealed partial class RealDataTests : IDisposable
         await using ParquetFile rewritten = await ParquetFile.OpenAsync(_path, Ct);
         Assert.Empty(await rewritten.VerifyAsync(Ct));
         Assert.All(rewritten.Metadata.RowGroups, group => Assert.Equal([new ParquetSortingColumn("tpep_pickup_datetime")], group.SortingColumns));
-        Assert.Equal(nameof(KeySourceKind.SortedColumn), (await rewritten.Scan<Trip>().OrderBy(t => t.tpep_pickup_datetime).ExplainAsync(Ct)).Order!.Source);
+        Assert.Equal(nameof(KeySourceKind.SortedColumn), (await rewritten.Scan<Trip>().OrderBy(t => t.tpep_pickup_datetime).ExplainAsync(analyze: true, Ct)).Order!.Source);
         Assert.Equal((rows, sorted), await DigestAsync(rewritten.Scan<Trip>().OrderBy(t => t.tpep_pickup_datetime).ToBatchesAsync(Ct)));
         Assert.Equal((rows, sorted), await DigestAsync(rewritten.Scan().ToBatchesAsync(Ct)));
     }

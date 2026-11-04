@@ -24,9 +24,6 @@ internal sealed class ColumnIndex
         NullCounts = nullCounts;
     }
 
-    /// <summary>The pages.</summary>
-    internal int Count => NullPages.Length;
-
     /// <summary>Per page, whether it holds no value: its bounds are then empty and mean nothing.</summary>
     internal bool[] NullPages { get; }
 

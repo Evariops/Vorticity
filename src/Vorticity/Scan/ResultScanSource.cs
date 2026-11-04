@@ -25,7 +25,8 @@ internal abstract class ResultQuery
     internal abstract IAsyncEnumerator<RecordBatch> Batches(CancellationToken cancellationToken);
 
     /// <summary>The plan of the query's scan.</summary>
-    internal abstract ValueTask<ScanPlan> ExplainAsync(CancellationToken cancellationToken);
+    /// <summary>What running the query will do, reading the structures it would consult with <paramref name="analyze"/>.</summary>
+    internal abstract ValueTask<ScanPlan> ExplainAsync(bool analyze, CancellationToken cancellationToken);
 
     /// <summary>The same query, its result's columns named and typed by the members of a record, in order.</summary>
     /// <param name="record">The record's schema.</param>
@@ -73,7 +74,7 @@ internal sealed class ResultScanSource : StreamScanSource
 
     private protected override string Kind => "result";
 
-    internal override ValueTask<ScanPlan> ExplainAsync(ScanSpec spec, CancellationToken cancellationToken) => _query.ExplainAsync(cancellationToken);
+    public override ValueTask<ScanPlan> ExplainAsync(ScanSpec spec, bool analyze, CancellationToken cancellationToken) => _query.ExplainAsync(analyze, cancellationToken);
 
     /// <summary>The result's batches, every column of every row: the query delivers them as it runs.</summary>
     private protected override IAsyncEnumerator<RecordBatch> Stream(ScanSpec spec, int[]? columns, ScanCounters metrics, CancellationToken cancellationToken) =>

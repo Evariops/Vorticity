@@ -5,7 +5,6 @@
 // because at this volume the runner's own per-case reporting is the localization mechanism: a
 // failure names the file in the test id before its message names the column and the row.
 using System;
-using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Conformance.Corpus;
 using Xunit;

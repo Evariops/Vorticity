@@ -204,8 +204,6 @@ internal sealed class CompositeKeys : GroupKeys
         }
     }
 
-    internal override int[] Order(bool sorted) => Identity(Count);
-
     internal override Func<int, T> Reader<T>(int component)
     {
         ColumnShape shape = _parts[component];

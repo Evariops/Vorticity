@@ -33,8 +33,6 @@ internal sealed class SourceReader : ISegmentReader
         _pool = pool;
     }
 
-    internal ISegmentSource Source => _source;
-
     public ValueTask<long> GetLengthAsync(CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();

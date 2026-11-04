@@ -88,9 +88,6 @@ internal sealed class JoinedKeys : GroupKeys
         }
     }
 
-    internal override int[] Order(bool sorted) =>
-        sorted ? throw new NotSupportedException("The parts of a merge are read in their order, not their keys'.") : Identity(Count);
-
     internal override bool Assign(CanonicalArena arena, ReadOnlySpan<int> nodes, int rows, ReadOnlySpan<ulong> selection, int[] rowGroups, GroupRanges ranges) =>
         throw JoinedParts.Read();
 

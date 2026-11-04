@@ -49,9 +49,6 @@ public sealed class VortexExtensionRegistry
     {
     }
 
-    /// <summary>An empty registry, frozen.</summary>
-    internal static VortexExtensionRegistry Empty { get; } = CreateFrozen();
-
     /// <summary>Makes <typeparamref name="TExtension"/> readable and writable in this session.</summary>
     /// <typeparam name="TExtension">The extension type.</typeparam>
     /// <exception cref="InvalidOperationException">The session is already created, or another type registered the same id.</exception>
@@ -113,36 +110,12 @@ public sealed class VortexExtensionRegistry
         return table.TryGetValue(id, out registration!);
     }
 
-    internal bool TryGet<TExtension>(out ExtensionRegistration registration)
-    {
-        FrozenDictionary<string, ExtensionRegistration> table = _frozen ?? FrozenDictionary<string, ExtensionRegistration>.Empty;
-        foreach (ExtensionRegistration candidate in table.Values)
-        {
-            if (candidate.ClrType == typeof(TExtension))
-            {
-                registration = candidate;
-                return true;
-            }
-        }
-
-        registration = null!;
-        return false;
-    }
-
-    private static VortexExtensionRegistry CreateFrozen()
-    {
-        VortexExtensionRegistry registry = new VortexExtensionRegistry();
-        registry.Freeze();
-        return registry;
-    }
 }
 
 /// <summary>What the engine knows of one registered extension.</summary>
 internal abstract class ExtensionRegistration
 {
     internal abstract Type ClrType { get; }
-
-    internal abstract string Id { get; }
 
     internal abstract VortexType StorageType { get; }
 
@@ -157,8 +130,6 @@ internal sealed class ExtensionRegistration<TExtension> : ExtensionRegistration
     where TExtension : IVortexExtension<TExtension>
 {
     internal override Type ClrType => typeof(TExtension);
-
-    internal override string Id => TExtension.Id;
 
     internal override VortexType StorageType => TExtension.StorageType;
 

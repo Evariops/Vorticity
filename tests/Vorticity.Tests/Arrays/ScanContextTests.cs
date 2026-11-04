@@ -6,7 +6,6 @@
 // every branch that does not dispatch, the bitmap collapse itself, and the fact that a node whose
 // encoding this build cannot decode fails at USE with a named component.
 using System;
-using Vorticity;
 using Vorticity.Arrays;
 using Vorticity.Buffers;
 using Vorticity.Serialization.Schemas;

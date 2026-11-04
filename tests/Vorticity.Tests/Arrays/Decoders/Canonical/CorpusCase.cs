@@ -15,7 +15,6 @@ using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Buffers;
-using Vorticity.File;
 using Vorticity.Serialization.Schemas;
 using Vorticity.Types;
 

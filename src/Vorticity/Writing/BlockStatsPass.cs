@@ -91,7 +91,7 @@ internal static class BlockStatsPass
                     }
                     else
                     {
-                        Element(node.DType.PType, element, ref stats);
+                        Element(node.DType.PType, element, valid, ref stats);
                     }
                 }
 
@@ -619,7 +619,6 @@ internal static class BlockStatsPass
             }
 
             step = delta;
-            known = true;
             last = head;
             i++;
             if (!Progression(values, start + i, start + count, last, step))
@@ -1864,8 +1863,8 @@ internal static class BlockStatsPass
         return valid;
     }
 
-    /// <summary>Bounds a block by the single element a constant column repeats.</summary>
-    private static void Element(PType ptype, ReadOnlySpan<byte> element, ref BlockStats stats)
+    /// <summary>Bounds a block by the single element a constant column repeats on its <paramref name="valid"/> valid rows.</summary>
+    private static void Element(PType ptype, ReadOnlySpan<byte> element, int valid, ref BlockStats stats)
     {
         if (ptype.IsFloat())
         {
@@ -1873,6 +1872,10 @@ internal static class BlockStatsPass
             if (!double.IsNaN(value))
             {
                 stats.MergeFloat(value, value);
+            }
+            else
+            {
+                stats.NanCount += valid;
             }
 
             return;
@@ -2318,8 +2321,8 @@ internal static class BlockStatsPass
         where T : unmanaged, IBinaryInteger<T>, ISignedNumber<T>, IMinMaxValue<T>
     {
         ReadOnlySpan<T> values = MemoryMarshal.Cast<byte, T>(bytes).Slice(start, count);
-        T min = T.MaxValue;
-        T max = T.MinValue;
+        T min;
+        T max;
         Order(values, in mask, start, ref stats);
 
         // The bounds loop holds two compares per value and nothing else, which is the shape the JIT
@@ -2849,8 +2852,8 @@ internal static class BlockStatsPass
         where T : unmanaged, IBinaryInteger<T>, IUnsignedNumber<T>, IMinMaxValue<T>
     {
         ReadOnlySpan<T> values = MemoryMarshal.Cast<byte, T>(bytes).Slice(start, count);
-        T min = T.MaxValue;
-        T max = T.MinValue;
+        T min;
+        T max;
         Order(values, in mask, start, ref stats);
 
         // Same discipline as the signed loop: bounds alone in the hot loop, widths in a second walk
@@ -2906,16 +2909,18 @@ internal static class BlockStatsPass
         T min = T.PositiveInfinity;
         T max = T.NegativeInfinity;
         bool any = false;
+        long nans = 0;
         Order(values, in mask, start, ref stats);
 
         if (mask.AllValid)
         {
-            int i = FloatLanes(values, ref min, ref max, ref any);
+            int i = FloatLanes(values, ref min, ref max, ref any, ref nans);
             for (; i < values.Length; i++)
             {
                 T value = values[i];
                 if (T.IsNaN(value))
                 {
+                    nans++;
                     continue;
                 }
 
@@ -2936,6 +2941,7 @@ internal static class BlockStatsPass
                 T value = values[i];
                 if (T.IsNaN(value))
                 {
+                    nans++;
                     continue;
                 }
 
@@ -2945,6 +2951,7 @@ internal static class BlockStatsPass
             }
         }
 
+        stats.NanCount += nans;
         if (any)
         {
             stats.MergeFloat(double.CreateTruncating(min), double.CreateTruncating(max));
@@ -2954,15 +2961,17 @@ internal static class BlockStatsPass
     /// <summary>
     /// The bounds of an all-valid float range, a register at a time: a NaN lane is replaced by the
     /// neutral element -- +∞ for the minimum, -∞ for the maximum -- before `Min` and `Max`, which
-    /// then follow <c>Math.Min</c>'s rule on the two zeros.
+    /// then follow <c>Math.Min</c>'s rule on the two zeros. The NaN lanes are counted into
+    /// <paramref name="nans"/>.
     /// </summary>
     /// <returns>Where the scalar tail starts.</returns>
     /// <remarks>
     /// Two accumulators per extreme, as <see cref="Bounds{T}"/> has, for its reason: the loop is
     /// latency-bound. Whether any lane held a number is an OR of the self-equality masks, reduced
-    /// once at the end.
+    /// once at the end; the NaN lanes are the self-equality masks' clear lanes, subtracted per register
+    /// from a count of every lane.
     /// </remarks>
-    private static int FloatLanes<T>(ReadOnlySpan<T> values, ref T min, ref T max, ref bool any)
+    private static int FloatLanes<T>(ReadOnlySpan<T> values, ref T min, ref T max, ref bool any, ref long nans)
         where T : unmanaged, IFloatingPointIeee754<T>
     {
         int lanes = Vector128<T>.IsSupported ? Vector128<T>.Count : 0;
@@ -2981,6 +2990,7 @@ internal static class BlockStatsPass
         Vector128<T> numbers = Vector128<T>.Zero;
         int step = lanes * 2;
         int i = 0;
+        long real = 0;
         for (; i + step <= values.Length; i += step)
         {
             Vector128<T> a = Vector128.LoadUnsafe(ref head, (nuint)i);
@@ -2988,12 +2998,14 @@ internal static class BlockStatsPass
             Vector128<T> realA = Vector128.Equals(a, a);
             Vector128<T> realB = Vector128.Equals(b, b);
             numbers |= realA | realB;
+            real += BitOperations.PopCount(realA.ExtractMostSignificantBits()) + BitOperations.PopCount(realB.ExtractMostSignificantBits());
             lowA = Vector128.Min(lowA, Vector128.ConditionalSelect(realA, a, positive));
             lowB = Vector128.Min(lowB, Vector128.ConditionalSelect(realB, b, positive));
             highA = Vector128.Max(highA, Vector128.ConditionalSelect(realA, a, negative));
             highB = Vector128.Max(highB, Vector128.ConditionalSelect(realB, b, negative));
         }
 
+        nans += i - real;
         if (numbers == Vector128<T>.Zero)
         {
             return i;
@@ -3035,6 +3047,7 @@ internal static class BlockStatsPass
             float value = (float)values[i];
             if (float.IsNaN(value))
             {
+                stats.NanCount++;
                 continue;
             }
 

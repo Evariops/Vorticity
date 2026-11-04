@@ -103,6 +103,12 @@ internal sealed record IndexEntry(
 
     /// <summary>The class the path's values are read as, one entry per class; null for an entry on a column.</summary>
     internal Types.Variants.PathClass? VariantClass { get; init; }
+
+    /// <summary>
+    /// The bytes the index wrote, every region its runs name, a Bloom filter's tree whole, as its writer counted them; 0 where
+    /// they are its runs' payloads alone, or unknown. Not in the directory: the table of contents says it.
+    /// </summary>
+    internal long WrittenBytes { get; init; }
 }
 
 /// <summary>
@@ -243,7 +249,7 @@ internal sealed record IndexDirectory(
     /// <see cref="ToBytes()"/>, noting in <paramref name="located"/>, when it is given, where the message of each entry of a
     /// locating index lies in the bytes (<see cref="IndexKinds.Locates"/>): what a table of contents names, so that a lookup
     /// reads the entries on its columns alone (<see cref="TryParseEntry"/>), where the whole directory of a day's object held
-    /// every chunk of its synopsis tables.
+    /// every chunk of the synopsis tables it carried then.
     /// </summary>
     /// <param name="located">Where each such entry's message lies: its start in the bytes, and its length.</param>
     /// <returns>The segment's bytes, the same with or without <paramref name="located"/>.</returns>
@@ -798,8 +804,8 @@ internal sealed record IndexDirectory(
     }
 
     /// <summary>
-    /// The column <c>TryParse</c> asks its predicate of for an entry on the root itself, a table of a synopsis or a slice's
-    /// chunks: a reader that asks only of some columns says whether it wants them too.
+    /// The column <c>TryParse</c> asks its predicate of for an entry on the root itself, a table of a synopsis or the
+    /// chunks' directory: a reader that asks only of some columns says whether it wants them too.
     /// </summary>
     internal const uint RootColumn = uint.MaxValue;
 

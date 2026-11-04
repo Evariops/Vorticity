@@ -16,9 +16,13 @@ internal sealed class VortexReadOptions
     private readonly int _maxDecompressedSize = (int)VortexLimits.DefaultMaxDecompressedBytes;
     private readonly long _maxBatchDecompressedSize = long.MaxValue;
     private readonly long _indexCacheBytes = DefaultIndexCacheBytes;
+    private readonly long _variantSliceBytes = DefaultVariantSliceBytes;
 
     /// <summary>The default of <see cref="IndexCacheBytes"/>: 64 MiB.</summary>
     public const long DefaultIndexCacheBytes = 64L << 20;
+
+    /// <summary>The default of <see cref="VariantSliceBytes"/>: 32 MiB, what sixteen columns' windows hold.</summary>
+    public const long DefaultVariantSliceBytes = 32L << 20;
 
     /// <summary>The defaults: 256 MiB decompression ceiling, no statistics verification.</summary>
     public static VortexReadOptions Default { get; } = new VortexReadOptions();
@@ -71,6 +75,22 @@ internal sealed class VortexReadOptions
         {
             ArgumentOutOfRangeException.ThrowIfNegative(value);
             _indexCacheBytes = value;
+        }
+    }
+
+    /// <summary>
+    /// The bytes, about, that a variant shredded into many columns is read in at once: its rows are rebuilt a slice at a
+    /// time, as many rows as this holds of its shredded columns, whole blocks of 1 024 rows, one block at least. Default
+    /// <see cref="DefaultVariantSliceBytes"/>.
+    /// </summary>
+    /// <exception cref="ArgumentOutOfRangeException">The value is not positive.</exception>
+    public long VariantSliceBytes
+    {
+        get => _variantSliceBytes;
+        init
+        {
+            ArgumentOutOfRangeException.ThrowIfNegativeOrZero(value);
+            _variantSliceBytes = value;
         }
     }
 

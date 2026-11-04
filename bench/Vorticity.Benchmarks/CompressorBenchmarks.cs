@@ -25,13 +25,10 @@
 using System;
 using System.Collections.Generic;
 using System.Threading;
-using System.Threading.Tasks;
 
 using BenchmarkDotNet.Attributes;
 
 using Vorticity.Arrays;
-using Vorticity.Columns;
-using Vorticity.File;
 using Vorticity.Scanning;
 using Vorticity.Types;
 using Vorticity.Writing;

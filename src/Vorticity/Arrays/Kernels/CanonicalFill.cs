@@ -54,9 +54,17 @@ internal static class CanonicalFill
     /// encoding, which another reader may not take as a constant.
     /// </summary>
     /// <param name="dtype">The dtype.</param>
-    internal static bool CanBuild(DType dtype) => CanBuild(dtype, depth: 1);
+    internal static bool CanBuild(DType dtype) => CanBuild(dtype, depth: 1, variants: false);
 
-    private static bool CanBuild(DType dtype, int depth)
+    /// <summary>
+    /// Whether <see cref="BuildZeroed(ArrayDecodeContext, DType, int, Validity)"/> builds a column of <paramref name="dtype"/>:
+    /// every dtype <see cref="CanBuild(DType)"/> takes, and a variant, as the batch a reader hands on for rows it kept none of, which
+    /// no writer writes.
+    /// </summary>
+    /// <param name="dtype">The dtype.</param>
+    internal static bool Builds(DType dtype) => CanBuild(dtype, depth: 1, variants: true);
+
+    private static bool CanBuild(DType dtype, int depth, bool variants)
     {
         if (depth > VortexLimits.MaxDTypeDepth)
         {
@@ -72,15 +80,19 @@ internal static class CanonicalFill
             case DTypeKind.Utf8:
             case DTypeKind.Binary:
                 return true;
+            case DTypeKind.Variant:
+                return variants;
             case DTypeKind.List:
             case DTypeKind.FixedSizeList:
-                return CanBuild(dtype.ElementType, depth + 1);
+                return CanBuild(dtype.ElementType, depth + 1, variants);
             case DTypeKind.Extension:
-                return CanBuild(dtype.StorageType, depth + 1);
+                return CanBuild(dtype.StorageType, depth + 1, variants);
+            case DTypeKind.Map:
+                return CanBuild(dtype.KeyType, depth + 1, variants) && CanBuild(dtype.ValueType, depth + 1, variants);
             case DTypeKind.Struct:
                 for (int i = 0; i < dtype.FieldCount; i++)
                 {
-                    if (!CanBuild(dtype.GetField(i), depth + 1))
+                    if (!CanBuild(dtype.GetField(i), depth + 1, variants))
                     {
                         return false;
                     }
@@ -183,6 +195,22 @@ internal static class CanonicalFill
                 DType storage = dtype.StorageType;
                 int child = BuildZeroed(arena, context, storage, length, validity, depth + 1);
                 return arena.AddExtension(dtype, length, child);
+            }
+
+            case DTypeKind.Map:
+            {
+                // A list view of {key, value} entries that keeps the map dtype, as a read delivers it (MapDecoder), every
+                // row empty. The entries' struct is composed in the decode's arena, never in the file's.
+                DTypeArena types = context?.Types ?? new DTypeArena();
+                Span<int> names = [types.InternName("key"u8), types.InternName("value"u8)];
+                DType[] fields = [DTypeImport.Into(types, dtype.KeyType), DTypeImport.Into(types, dtype.ValueType)];
+                DType entries = types.Struct(names, fields, Nullability.NonNullable);
+                int elements = BuildZeroed(arena, context, entries, 0, Validity.NonNullable, depth + 1);
+                int bytes = ArrayDecodeContext.CheckedMultiply(length, 8, "map offsets");
+                return arena.AddListView(
+                    dtype, length, validity, elements,
+                    Allocate(arena, context, bytes, Align), PType.U64,
+                    Allocate(arena, context, bytes, Align), PType.U64);
             }
 
             default:

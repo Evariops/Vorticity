@@ -123,17 +123,4 @@ internal static class AggregateRegistry
         boundLength = (uint)value;
         return true;
     }
-
-    /// <summary>The canonical UTF-8 id of an aggregate, or an empty span for <see cref="AggregateId.Unknown"/>.</summary>
-    /// <param name="aggregate">The aggregate.</param>
-    public static ReadOnlySpan<byte> IdUtf8(AggregateId aggregate) => aggregate switch
-    {
-        AggregateId.Min => IdMin,
-        AggregateId.Max => IdMax,
-        AggregateId.BoundedMin => IdBoundedMin,
-        AggregateId.BoundedMax => IdBoundedMax,
-        AggregateId.NanCount => IdNanCount,
-        AggregateId.NullCount => IdNullCount,
-        _ => default,
-    };
 }

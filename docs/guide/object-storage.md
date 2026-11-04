@@ -113,12 +113,25 @@ Dispose every file opened through the session before the session itself.
 | operation | requests |
 |---|---|
 | open a file at a location | 1 on Amazon S3: the last 64 KiB and the object's length in one answer. 2 on Azure, which reads no suffix, and elsewhere until a test against the service proves that it answers one: the object's metadata, then the tail |
-| a batch of a scan | the batch's segments coalesced into ranges of up to 16 MiB, issued together |
+| a batch of a scan | the batch's segments coalesced into ranges of up to 8 MiB, across gaps of up to 256 KiB, issued together: the gap is what a request is worth on the store's link, its cost profile |
 | open an object of a dataset | 1, its length known from the dataset's entry |
 | write a file up to 32 MiB | 1, sent at completion |
 | write a larger file | 1 to start an upload, its parts of 16 MiB sent in parallel as they fill, 1 to complete it |
 | commit a dataset's object | at the commit, from the dataset's buffer where it lies: 1 put up to 32 MiB, past it 1 request to start an upload, its parts in parallel and 1 to complete it. A data object carries no condition, which its fresh uid makes needless |
 | a dataset's vacuum | the listing's pages, a head only for an object old enough to go when an S3 bucket is under Object Lock (Azure's and Cloud Storage's listings say the locks), a request per 1 000 deletes on S3, per 256 on Azure and per 100 on Cloud Storage, where each delete is billed as a request |
+
+A store's cost profile (`CostProfile`) says what a request and a byte cost on its link: a remote
+store's by default, 30 ms a round trip among 128 in flight over 1.25 GB/s, a request worth some
+293 KB. A dataset prices its paths by it before reading anything, and a store reached over another
+link than its kind's says so through the dataset's options:
+
+```csharp
+DatasetOptions options = new DatasetOptions
+{
+    // A MinIO on the same rack: 2 ms a round trip, 64 in flight, 2.5 GB/s, a request worth some 78 KB.
+    CostProfile = new CostProfile { Store = new CostTier(TimeSpan.FromMilliseconds(2), 64, 2.5e9) },
+};
+```
 
 A read lands in the block the scan decodes from, with no copy but the one TLS makes, and allocates a
 constant, about 3 KB, whatever its size. A file opened at a location keeps the ETag of its first answer
@@ -144,6 +157,24 @@ A service that throttles, `SlowDown` on S3, `ServerBusy` on Azure, a 429 elsewhe
 requests the store sends at once, once per episode: the requests in flight when it halved do not
 halve it again. Once the service has been calm for 10 seconds, each success gives one back, up to
 `StoreTransportOptions.MaxConnections`.
+
+Every store of the process also draws from one budget of requests, `RequestBudget.Process`: 256 in
+flight and 2 000 a second by default, every store and every session together, so that many questions
+and jobs at once stay under what a service sustains on a prefix, at least 5 500 reads a second on S3.
+A throttle halves the rate of the store whose service sent it, under the budget, once per episode, and
+empties that store's bucket, so that the requests sent again wait for their turns; once the service has
+been calm for a second, the store's rate grows back by a sixteenth of the budget's a second. The other
+stores of the process, whose services may not be the one that throttles, keep their pace. A store can be
+given a budget of its own:
+
+```csharp
+RequestBudget budget = new RequestBudget(maxInFlight: 64, requestsPerSecond: 500);
+StoreTransportOptions transport = new StoreTransportOptions { RequestBudget = budget };
+```
+
+Under a service that throttles past 150 reads a second, eight readers under a budget of 1 600 read
+every one of their 400 reads in about 3 seconds, the store's rate ending within twice the service's
+(`RequestBudgetTests`).
 
 ## The stores
 

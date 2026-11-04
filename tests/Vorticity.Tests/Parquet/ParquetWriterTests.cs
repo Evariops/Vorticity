@@ -8,13 +8,9 @@ using System.Linq;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
-using ManagedCompressions.Zstd;
 using Vorticity.Columns;
 using Vorticity.Parquet;
-using Vorticity.Parquet.Codecs;
-using Vorticity.Parquet.Encodings;
 using Vorticity.Parquet.Metadata;
-using Vorticity.Parquet.Schema;
 using Xunit;
 
 namespace Vorticity.Tests.Parquet;

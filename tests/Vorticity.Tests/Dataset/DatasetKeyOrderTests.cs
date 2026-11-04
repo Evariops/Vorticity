@@ -21,9 +21,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Buffers;
-using Vorticity.Columns;
 using Vorticity.Dataset;
-using Vorticity.Diagnostics;
 using Vorticity.Expressions;
 using Vorticity.Indexes;
 using Vorticity.IO;
@@ -342,7 +340,7 @@ public sealed class DatasetKeyOrderTests
             Nullability.NonNullable);
 
         await using MemoryObjectStore store = new MemoryObjectStore();
-        DatasetOptions clustered = Unclustered() with { ClusteringKey = ["f"] };
+        DatasetOptions clustered = Unclustered() with { Layout = new DatasetLayout { SortKey = [LayoutValue.Column("f")] } };
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, clustered, ct);
 
         double negativeNaN = BitConverter.Int64BitsToDouble(unchecked((long)0xFFF8_0000_0000_0000UL));
@@ -438,10 +436,10 @@ public sealed class DatasetKeyOrderTests
     }
 
     [Fact]
-    public async Task AnObjectWithNoSourceForTheKeyIsRefusedWhenTheMergeReachesIt()
+    public async Task AFileOfShuffledKeysIsRefusedWhenItIsImported()
     {
-        // An imported file with shuffled keys and no run: leaving its rows out would be a wrong
-        // answer, so the key-ordered read refuses, as the core refuses such a file.
+        // Every object of a keyed dataset holds its rows in the key's order, which a key-ordered read and every merge take
+        // it to: a file of shuffled keys is refused when it is imported, with what to do instead, and nothing is committed.
         CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
@@ -463,12 +461,12 @@ public sealed class DatasetKeyOrderTests
         string key = CommitKey.ForData("unindexed");
         await store.PutIfAbsentAsync(key, stream.ToArray(), ct);
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered(), ct);
-        await dataset.ImportAsync(key, ct);
-
-        await Assert.ThrowsAsync<VortexUnsupportedException>(async () => await RowsAsync(dataset.ScanBuilder().InKeyOrder("key")));
-
-        // The scan in the tree's order is unaffected: it reads objects, not keys.
-        Assert.Equal(PerObject, await dataset.Scan().CountAsync(ct));
+        ulong created = dataset.Version;
+        ArgumentException refused = await Assert.ThrowsAsync<ArgumentException>(async () => await dataset.ImportAsync(key, ct));
+        Assert.Contains(key, refused.Message, StringComparison.Ordinal);
+        Assert.Contains("sorted by the dataset's key", refused.Message, StringComparison.Ordinal);
+        Assert.Equal(created, dataset.Version);
+        Assert.Equal(0, await dataset.Scan().CountAsync(ct));
     }
 
     /// <summary>
@@ -599,13 +597,15 @@ public sealed class DatasetKeyOrderTests
         [types.Primitive(PType.I64, Nullability.NonNullable), types.Primitive(PType.F64, Nullability.NonNullable)],
         Nullability.NonNullable);
 
-    private static DatasetOptions Clustered() => Unclustered() with { ClusteringKey = ["key"] };
+    private static DatasetOptions Clustered() => Unclustered() with { Layout = new DatasetLayout { SortKey = [LayoutValue.Column("key")] } };
 
     private static DatasetOptions Unclustered() => new DatasetOptions
     {
         Seed = 0x0DE2_5EED,
 
-        // Small blocks, so that an object is several batches and a compaction's target is reached.
+        // Small blocks, so that an object is several batches and a compaction's target is reached; every
+        // column chunked with the object, so that the sizes the levels are judged by are those its blocks make.
+        ChunkBytes = 0,
         Write = new VortexWriteOptions { RowBlockSize = 64, DataBlockTargetBytes = 512 },
     };
 

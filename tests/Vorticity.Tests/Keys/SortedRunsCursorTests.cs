@@ -25,7 +25,6 @@ using Vorticity.Scanning;
 using Vorticity.Serialization.Schemas;
 using Vorticity.Tests.Scan;
 using Vorticity.Types;
-using Vorticity.Writing;
 using Xunit;
 
 namespace Vorticity.Tests.Keys;
@@ -399,15 +398,17 @@ public sealed class SortedRunsCursorTests
         Assert.True(SameExtreme(decodedMin, min), $"min {Describe(min)} against {Describe(decodedMin)}");
         Assert.True(SameExtreme(decodedMax, max), $"max {Describe(max)} against {Describe(decodedMax)}");
 
-        // The scan delivers exactly the proven rows, with the index and without; with it, a batch's
-        // worth of rows or fewer is a take, which decodes no more than the pruned scan does.
+        // The scan delivers exactly the proven rows, with the index and without. With it, a batch's
+        // worth of rows or fewer is a take, which decodes the blocks of the rows it takes, no more;
+        // more rows are read as without it, where a comparison its packed values answer decodes the
+        // rows it keeps alone (spec N, 1).
         ScanCounters indexed = new ScanCounters();
         ScanCounters unindexed = new ScanCounters();
         List<long> on = await RowsOf(file.ScanBuilder().Where(filter).WithMetrics(indexed));
         List<long> off = await RowsOf(file.ScanBuilder().Where(filter).WithIndexes(false).WithMetrics(unindexed));
         Assert.True(
-            indexed.ValuesDecoded <= unindexed.ValuesDecoded,
-            $"{indexed.ValuesDecoded} values decoded with the index, {unindexed.ValuesDecoded} without");
+            indexed.ValuesDecoded <= Math.Max(unindexed.ValuesDecoded, (long)oracle.Count * (Block + 1)),
+            $"{indexed.ValuesDecoded} values decoded with the index for {oracle.Count} rows, {unindexed.ValuesDecoded} without");
         List<long> expected = oracle.ConvertAll(e => e.Row);
         expected.Sort();
         Assert.Equal(expected, off);
@@ -427,7 +428,7 @@ public sealed class SortedRunsCursorTests
         (_, VortexExpr filter, Func<FilterLiteral, bool> matches) = Parse("i64 >= 2400");
         List<Entry> oracle = Oracle("i64").FindAll(e => matches(e.Key));
 
-        ScanExplanation plan = await file.ScanBuilder().Where(filter).ExplainAsync(ct);
+        ScanExplanation plan = await file.ScanBuilder().Where(filter).ExplainAsync(analyze: true, ct);
         Assert.NotNull(plan.Count);
         Assert.True(plan.Count.ExactCover);
         Assert.Equal(oracle.Count, plan.Count.ExactCount);
@@ -436,11 +437,11 @@ public sealed class SortedRunsCursorTests
         Assert.Null(plan.Order);
 
         // Without the index, no cover; a take narrows it off too.
-        ScanExplanation off = await file.ScanBuilder().Where(filter).WithIndexes(false).ExplainAsync(ct);
+        ScanExplanation off = await file.ScanBuilder().Where(filter).WithIndexes(false).ExplainAsync(analyze: true, ct);
         Assert.False(off.Count!.ExactCover);
         Assert.Equal(0, off.RowsSelectedByIndex);
 
-        ScanExplanation ordered = await file.ScanBuilder().Where(filter).InKeyOrder("i64", descending: true).ExplainAsync(ct);
+        ScanExplanation ordered = await file.ScanBuilder().Where(filter).InKeyOrder("i64", descending: true).ExplainAsync(analyze: true, ct);
         OrderExplanation order = Assert.IsType<OrderExplanation>(ordered.Order);
         Assert.Equal(KeySourceKind.SortedRuns, order.Source);
         Assert.Equal(oracle.Count, order.EntriesInRange);
@@ -463,7 +464,7 @@ public sealed class SortedRunsCursorTests
 
         Assert.Equal(runsWithKeys, order.RunsInRange);
 
-        ScanExplanation nothing = await file.ScanBuilder().InKeyOrder("i64").WithIndexes(false).ExplainAsync(ct);
+        ScanExplanation nothing = await file.ScanBuilder().InKeyOrder("i64").WithIndexes(false).ExplainAsync(analyze: true, ct);
         Assert.Equal(KeySourceKind.None, nothing.Order!.Source);
     }
 

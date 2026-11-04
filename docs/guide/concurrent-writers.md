@@ -72,9 +72,6 @@ same objects ([dataset-maintenance.md](dataset-maintenance.md#in-the-background)
 
 * Forget a source only once no writer can take it again. A writer that did would start it from 0,
   and count its entries a second time.
-* A dataset whose commits count offsets is written in commit format 3, which a library that predates
-  them refuses to open. It would otherwise rebuild the headers without the offsets and forget them at
-  its first commit. A dataset that counts no source stays readable by it.
 * The rows of a commit that ended `AlreadyThere` or in a conflict are in the store and in no version.
   Vacuum removes them after the retention window, like any object no version references.
 * The offsets are the application's numbers, any that grow with the entries: a sequence number, a log

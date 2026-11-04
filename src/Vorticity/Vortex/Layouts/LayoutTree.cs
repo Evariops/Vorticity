@@ -8,7 +8,6 @@ using System.Threading;
 
 using Vorticity.Arrays;
 using Vorticity.Arrays.Metadata;
-using Vorticity.File;
 using Vorticity.Serialization.Schemas;
 using Vorticity.Types;
 
@@ -168,9 +167,6 @@ internal sealed class LayoutTree
     /// <exception cref="InvalidOperationException">The tree was parsed detached from a file.</exception>
     public VortexFile File => _source as VortexFile ?? DetachedFile();
 
-    /// <summary><see langword="true"/> when this tree is backed by an open file.</summary>
-    public bool HasFile => _source is VortexFile;
-
     /// <summary>How many nodes the flattened tree holds; the columns not yet parsed are parsed to count them.</summary>
     public int NodeCount
     {
@@ -261,6 +257,23 @@ internal sealed class LayoutTree
         }
 
         return 0;
+    }
+
+    /// <summary>The bytes of every segment under <paramref name="node"/>, as <paramref name="segments"/> lays them out.</summary>
+    internal static long BytesUnder(LayoutNode node, ReadOnlySpan<SegmentSpec> segments)
+    {
+        long bytes = 0;
+        foreach (uint segment in node.Segments)
+        {
+            bytes += segments[(int)segment].Length;
+        }
+
+        for (int c = 0; c < node.ChildCount; c++)
+        {
+            bytes += BytesUnder(node.GetChild(c), segments);
+        }
+
+        return bytes;
     }
 
     /// <summary>Whether child <paramref name="slot"/> of a struct root was parsed: for the tests of what a walk parses.</summary>
@@ -1012,9 +1025,6 @@ internal readonly struct LayoutNode
 
     /// <summary>The resolved layout encoding, or <see cref="LayoutEncodingId.Unknown"/>.</summary>
     public LayoutEncodingId Encoding => _tree.RecordRef(_index).Encoding;
-
-    /// <summary>The raw <c>u16</c> index into the footer's <c>layout_specs</c>.</summary>
-    public ushort EncodingSpecIndex => _tree.RecordRef(_index).EncodingSpecIndex;
 
     /// <summary>The id text, for <see cref="VortexUnsupportedException"/>. Allocates.</summary>
     public string EncodingIdText => _tree.EncodingIdText(_tree.RecordRef(_index).EncodingSpecIndex);

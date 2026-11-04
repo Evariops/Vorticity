@@ -124,6 +124,9 @@ internal static class ToolPaths
             case InExpr membership:
                 return Membership(membership, Column(schema, membership.Field));
 
+            case TupleInExpr tuples:
+                return Tuples(schema, tuples);
+
             case TypedInExpr typed:
                 // Typed values, bound as the typed scan binds its own: each placed against the
                 // column, without the text a set of any size would otherwise be written in.
@@ -231,7 +234,47 @@ internal static class ToolPaths
 
         return literals.Count == 0
             ? Expr.And(new NullCheckExpr(membership.Field, isNull: true), new NullCheckExpr(membership.Field, isNull: false))
-            : Expr.In(membership.Field, [.. literals]);
+            : new InExpr(membership.Field, [.. literals]) { Projects = membership.Projects };
+    }
+
+    /// <summary>
+    /// <paramref name="tuples"/> with each value placed against its column, as a set's values are: a tuple holding a value its
+    /// column cannot hold matches no row, and leaves.
+    /// </summary>
+    private static TupleInExpr Tuples(VortexSchema schema, TupleInExpr tuples)
+    {
+        VortexType[] types = new VortexType[tuples.Arity];
+        for (int column = 0; column < types.Length; column++)
+        {
+            types[column] = Column(schema, tuples.Fields[column]);
+        }
+
+        List<FilterLiteral> kept = new List<FilterLiteral>(tuples.Values.Length);
+        FilterLiteral[] placed = new FilterLiteral[tuples.Arity];
+        for (int t = 0; t < tuples.Count; t++)
+        {
+            ReadOnlySpan<FilterLiteral> values = tuples.Tuple(t);
+            bool holds = true;
+            for (int column = 0; column < values.Length && holds; column++)
+            {
+                if (values[column].Kind != FilterLiteralKind.Null
+                    && Compare(tuples.Fields[column], types[column], ComparisonOp.Equal, values[column]) is ComparisonExpr { Op: ComparisonOp.Equal } equal)
+                {
+                    placed[column] = equal.Value;
+                }
+                else
+                {
+                    holds = false;
+                }
+            }
+
+            if (holds)
+            {
+                kept.AddRange(placed);
+            }
+        }
+
+        return new TupleInExpr(tuples.Fields, [.. kept]);
     }
 
     /// <summary>Refuses a value of <typeparamref name="T"/> for a column that does not take one, as a hole of an interpolated filter is refused.</summary>

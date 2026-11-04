@@ -6,7 +6,6 @@
 // take distinct jobs from one plan, and that the pace is the rate it was given.
 using System;
 using System.Collections.Concurrent;
-using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -206,7 +205,7 @@ public sealed class DatasetCompactionLoopTests
     private static DatasetOptions Options() => new DatasetOptions
     {
         Seed = 0x100_9ED,
-        ClusteringKey = ["Key"],
+        Layout = new DatasetLayout { SortKey = [LayoutValue.Column("Key")] },
         RetentionWindow = TimeSpan.FromHours(1),
         Write = new VortexWriteOptions { RowBlockSize = 64, DataBlockTargetBytes = 2 << 10 },
     };

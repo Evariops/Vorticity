@@ -24,7 +24,6 @@ using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Buffers;
-using Vorticity.Columns;
 using Vorticity.Indexes;
 using Vorticity.Tests.Scan;
 using Vorticity.Types;

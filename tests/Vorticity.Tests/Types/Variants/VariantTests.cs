@@ -7,9 +7,7 @@ using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
-using Vorticity.Tests.Scan;
 using Vorticity.Types.Variants;
-using Vorticity.Writing;
 using Xunit;
 
 namespace Vorticity.Tests.Types.Variants;
@@ -17,6 +15,59 @@ namespace Vorticity.Tests.Types.Variants;
 public sealed partial class VariantTests
 {
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
+
+    /// <summary>
+    /// An object of scalars, as a record's attributes are, is written in its two arrays alone, the same bytes as an
+    /// object of the same fields written the general way: keys in any order and of any script, values of every kind,
+    /// up to the 64 fields that path sorts in place, past which the general way writes it; a key twice is refused.
+    /// </summary>
+    [Fact]
+    public void AnObjectOfScalarsIsTheSameBytesWrittenInItsTwoArrays()
+    {
+        Random random = new Random(11);
+        Variant[] kinds = [Variant.Null, Variant.From(true), Variant.From(7L), Variant.From(70_000L), Variant.From(5_000_000_000L), Variant.From(2.5), Variant.From("short"), Variant.From(new string('x', 300)), Variant.From(-1L)];
+        string[] names = ["route", "status", "ünïcode", "日本", "a", "b", "z", "http.route", "", "k"];
+        foreach (int count in new[] { 1, 2, 5, 17, 64, 65 })
+        {
+            for (int round = 0; round < 20; round++)
+            {
+                List<(string Key, Variant Value)> fields = [];
+                HashSet<string> used = [];
+                while (fields.Count < count)
+                {
+                    string key = random.Next(3) == 0 ? names[random.Next(names.Length)] : $"key-{random.Next(1_000)}";
+                    if (used.Add(key))
+                    {
+                        fields.Add((key, kinds[random.Next(kinds.Length)]));
+                    }
+                }
+
+                Variant direct = Variant.Object(fields.ToArray());
+                Variant general = Variant.Object(fields.Select(static field => new KeyValuePair<string, Variant>(field.Key, field.Value)));
+                Assert.True(direct.MetadataSpan.SequenceEqual(general.MetadataSpan), $"{count} fields: the dictionaries differ");
+                Assert.True(direct.ValueSpan.SequenceEqual(general.ValueSpan), $"{count} fields: the values differ");
+            }
+        }
+
+        Assert.Throws<ArgumentException>(() => Variant.Object(("a", Variant.From(1L)), ("b", Variant.Null), ("a", Variant.From(2L))));
+        Assert.Throws<ArgumentException>(() => Variant.Object((null!, Variant.From(1L))));
+    }
+
+    /// <summary>An object of scalars allocates its dictionary and its value, and nothing besides.</summary>
+    [Fact]
+    public void AnObjectOfScalarsAllocatesItsTwoArraysAlone()
+    {
+        (string Key, Variant Value)[] fields = [("status", Variant.From(200L)), ("route", Variant.From("/api/v1/orders")), ("ok", Variant.From(true)), ("duration", Variant.From(12.5))];
+        Variant warm = Variant.Object(fields);
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        Variant built = Variant.Object(fields);
+        long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+        long arrays = (2 * 24L) + Pad(built.MetadataSpan.Length) + Pad(built.ValueSpan.Length);
+        Assert.Equal(warm, built);
+        Assert.True(allocated <= arrays, $"{allocated} bytes allocated for arrays of {built.MetadataSpan.Length} and {built.ValueSpan.Length} bytes");
+
+        static long Pad(int bytes) => (bytes + 7) & ~7L;
+    }
 
     [Fact]
     public void TheDefaultIsTheVariantNull()

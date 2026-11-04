@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
-using Vorticity.Columns;
 using Vorticity.Dataset;
 using Vorticity.Expressions;
 using Vorticity.IO;
@@ -400,8 +399,6 @@ public sealed class DatasetDeletionVectorTests
 
         (ulong _, CommitObject? latest) = await DatasetCommitter.LatestAsync(store, ct);
         Assert.Equal(TimeSpan.FromHours(2), latest!.Header.ErasureDelay);
-        Assert.True(latest.Header.Features.HasFlag(DatasetFeatures.ErasureDelay));
-        Assert.Equal(CommitFormat.WithFeatures, CommitFormat.For(latest.Header));
         await using VortexDataset reopened = await VortexDataset.OpenAsync(store, Options(clustered: true, marking: true), ct);
         Assert.Equal(TimeSpan.FromHours(2), reopened.Options.ErasureDelay);
 
@@ -770,7 +767,7 @@ public sealed class DatasetDeletionVectorTests
     private static DatasetOptions Options(bool clustered, bool marking) => new DatasetOptions
     {
         Seed = 0xDE1_E7ED,
-        ClusteringKey = clustered ? ["Key"] : null,
+        Layout = clustered ? new DatasetLayout { SortKey = [LayoutValue.Column("Key")] } : null,
         Write = new VortexWriteOptions
         {
             RowBlockSize = 64,
@@ -813,11 +810,10 @@ public sealed class DatasetDeletionVectorTests
         DatasetOptions options = new DatasetOptions
         {
             Seed = 0xDE1_E7ED,
-            ClusteringKey = ["Key"],
+            Layout = new DatasetLayout { SortKey = [LayoutValue.Column("Key")] },
             Write = new VortexWriteOptions { RowBlockSize = 64, DataBlockTargetBytes = 2 << 10 },
             MarkedObjectBytes = marking ? 0 : long.MaxValue,
             MarkedShare = 1,
-            AcceptsNullableKey = true,
         };
         VortexDataset dataset = await VortexDataset.CreateAsync(store, NullableKeyRow.Schema, options, ct);
         for (int part = 0; part < 3; part++)

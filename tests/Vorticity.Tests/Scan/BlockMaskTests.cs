@@ -6,12 +6,10 @@
 // `ZonePruningTests` proves for splits is inherited by the mask rather than re-proven. And that
 // pruning goes through the mask at all: a pruner whose every block is dead reads no split.
 using System;
-using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Compute;
 using Vorticity.Expressions;
-using Vorticity.File;
 using Vorticity.Layouts;
 using Vorticity.Scanning;
 using Xunit;
