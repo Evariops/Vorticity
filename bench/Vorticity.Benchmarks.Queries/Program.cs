@@ -128,6 +128,15 @@ Dictionary<string, (string Help, Func<Task<int>> Run)> micros = new Dictionary<s
             (int)Option(args, "--budget", 100), (int)Option(args, "--views", 200), (int)Option(args, "--seed", 31))),
     ["hashedend"] = ("what the end of a file's hashed postings holds with no bound on its rows (HashedEndMicro.cs)", () =>
         HashedEndMicro.Run(Text(args, "--store") ?? BenchStores.Of("hashedend"), Option(args, "--rows", 10_000_000))),
+    ["variantpaths"] = ("--store DIR: the attributes' paths of a source's hour of log records against a count of the same rows, cold and warm (VariantPathsMicro.cs)", () => VariantPathsMicro.Run(
+        Text(args, "--store") ?? throw new ArgumentException("--store names the dataset of log records."),
+        Text(args, "--service") ?? "web-00",
+        Option(args, "--hour", 1),
+        degrees,
+        rounds,
+        Option(args, "--latency-ms", 5))),
+    ["appenddirectory"] = ("what an append's path directory costs, log records appended with it and without (AppendDirectoryMicro.cs)", () => AppendDirectoryMicro.Run(
+        Option(args, "--rows", 1_048_576), (int)Option(args, "--part", 65_536), rounds, (int)Option(args, "--write-degree", Math.Max(1, Environment.ProcessorCount / 2)))),
     ["logwrite"] = ("what building the client's log records costs, as an ingestion builds them (LogWriteMicro.cs)", () => LogWriteMicro.Run(
         Text(args, "--store") ?? BenchStores.Of("logwrite"),
         Option(args, "--hours", 2),
