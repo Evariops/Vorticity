@@ -3778,16 +3778,12 @@ public sealed class VortexDataset : IAsyncDisposable
         WithPathDirectoryAsync(entry, field, static (region, _) => Indexes.VariantDirectory.From(region), (object?)null, cancellationToken);
 
     /// <summary>
-    /// Adds to <paramref name="tally"/> what the path directory of variant column <paramref name="field"/> of the object
-    /// <paramref name="entry"/> names says of the groups of its rows <paramref name="judge"/> keeps, read with no open of the
-    /// object, as <see cref="ReadPathDirectoryAsync"/> reads it: false, with nothing added, when the entry names none, it does
-    /// not decode, or <paramref name="exact"/> refuses it (<see cref="PathTally.AddDirectory"/>).
+    /// The path directory of variant column <paramref name="field"/> of the object <paramref name="entry"/> names, opened
+    /// (<see cref="Indexes.VariantDirectory.Open"/>) and read with no open of the object, as
+    /// <see cref="ReadPathDirectoryAsync"/> reads it; null when the entry names none, or it does not decode.
     /// </summary>
-    internal async ValueTask<bool> TallyPathDirectoryAsync(
-        ObjectEntry entry, int field, PathTally tally, IGroupJudge judge, bool exact, CancellationToken cancellationToken) =>
-        await WithPathDirectoryAsync(
-            entry, field, static (region, asked) => asked.Tally.AddDirectory(region, asked.Judge, asked.Exact), (Tally: tally, Judge: judge, Exact: exact), cancellationToken)
-            .ConfigureAwait(false);
+    internal ValueTask<Indexes.VariantDirectory.DirectoryBody?> OpenPathDirectoryAsync(ObjectEntry entry, int field, CancellationToken cancellationToken) =>
+        WithPathDirectoryAsync(entry, field, static (region, _) => Indexes.VariantDirectory.Open(region), (object?)null, cancellationToken);
 
     /// <summary>What a span of the bytes of a region gives.</summary>
     private delegate TResult RegionReader<TState, TResult>(ReadOnlySpan<byte> region, TState state);

@@ -1856,6 +1856,22 @@ Vorticity:     method bool op_Inequality(PathsOptions, PathsOptions)
 Vorticity:     method int GetHashCode()
 Vorticity:     method string ToString()
 Vorticity:     property bool Exact { get; init; }
+Vorticity: sealed class Vorticity.PathsReading : IEquatable<PathsReading>
+Vorticity:     ctor PathsReading(int, int, int, long, int, long)
+Vorticity:     method PathsReading <Clone>$()
+Vorticity:     method bool Equals(PathsReading)
+Vorticity:     method bool Equals(object)
+Vorticity:     method bool op_Equality(PathsReading, PathsReading)
+Vorticity:     method bool op_Inequality(PathsReading, PathsReading)
+Vorticity:     method int GetHashCode()
+Vorticity:     method string ToString()
+Vorticity:     method void Deconstruct(out int, out int, out int, out long, out int, out long)
+Vorticity:     property int Censuses { get; init; }
+Vorticity:     property int Directories { get; init; }
+Vorticity:     property int EdgeGranules { get; init; }
+Vorticity:     property int Unopened { get; init; }
+Vorticity:     property long CensusRows { get; init; }
+Vorticity:     property long EdgeRows { get; init; }
 Vorticity: sealed class Vorticity.PlanCost : IEquatable<PlanCost>
 Vorticity:     ctor PlanCost(long, long, double, TimeSpan)
 Vorticity:     method PlanCost <Clone>$()
@@ -2470,6 +2486,7 @@ Vorticity:     field byte value__
 Vorticity: sealed class Vorticity.VariantPaths : IReadOnlyList<VariantPath>
 Vorticity:     method IEnumerator<VariantPath> GetEnumerator()
 Vorticity:     method string ToString()
+Vorticity:     property PathsReading Reading { get; }
 Vorticity:     property VariantPath Item[int] { get; }
 Vorticity:     property bool Complete { get; }
 Vorticity:     property bool Exact { get; }

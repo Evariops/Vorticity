@@ -138,6 +138,9 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
     /// </summary>
     internal Indexes.VariantKeyReads? VariantKeys { get; set; }
 
+    /// <summary>Whether shredded variant columns are handed back as their shredding holds them (<see cref="ScanContext.VariantsApart"/>). Set before the scan starts.</summary>
+    internal bool VariantsApart { get; set; }
+
     /// <summary>
     /// The columns the scan's consumer reads through functions alone whose zones give a split their values, the columns then
     /// not read; null for none. Set before the scan starts.
@@ -156,6 +159,11 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
         if (VariantKeys is { } keys)
         {
             enumerator.VariantKeys = keys;
+        }
+
+        if (VariantsApart)
+        {
+            enumerator.VariantsApart = true;
         }
 
         if (ZoneKeys is { } zoned)
@@ -584,6 +592,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         ScanContext first = _lanes[0]!.Context;
         Lane lane = NewLane(first.File, first.LiveBlocks, first.Metrics, first.KeepEncodings);
         lane.Context.VariantKeys = first.VariantKeys;
+        lane.Context.VariantsApart = first.VariantsApart;
         lane.Context.ZoneKeys = first.ZoneKeys;
         lane.Context.Granules = _granules is { } geometry
             ? new Indexes.GranulePlans(geometry, first.File, _take, _live, Scanned, lane.Context.GranuleScratch)
@@ -617,6 +626,21 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
                     lane.Context.Granules = value is null
                         ? null
                         : new Indexes.GranulePlans(value, lane.Context.File, _take, _live, Scanned, lane.Context.GranuleScratch);
+                }
+            }
+        }
+    }
+
+    /// <summary>Tells the lanes to hand shredded variant columns back as their shredding holds them.</summary>
+    internal bool VariantsApart
+    {
+        set
+        {
+            foreach (Lane? lane in _lanes)
+            {
+                if (lane is not null)
+                {
+                    lane.Context.VariantsApart = value;
                 }
             }
         }

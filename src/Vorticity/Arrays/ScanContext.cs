@@ -520,6 +520,13 @@ internal sealed class ScanContext : IDisposable
     internal Indexes.VariantKeyReads? VariantKeys { get; set; }
 
     /// <summary>
+    /// Whether a shredded variant column is handed back as its shredding holds it, the standard's group of its storage and its
+    /// typed columns, rather than put back together: a census of its paths reads it so (<see cref="Types.Variants.ApartCensus"/>).
+    /// Per scan like <see cref="Metrics"/>.
+    /// </summary>
+    internal bool VariantsApart { get; set; }
+
+    /// <summary>
     /// The columns the scan's consumer reads through functions alone, which a split whose zones give their values takes
     /// from them, per scan like <see cref="Metrics"/>; null for none (<see cref="Scanning.ZoneKeyReads"/>).
     /// </summary>
@@ -1757,6 +1764,7 @@ internal sealed class ScanContext : IDisposable
         VariantKeys = null;
         ZoneKeys = null;
         Granules = null;
+        VariantsApart = false;
         Along?.Clear();
         if (_memory is { } memory)
         {

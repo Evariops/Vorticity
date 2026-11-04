@@ -812,15 +812,79 @@ internal sealed class VariantDirectory
         }
     }
 
-    /// <summary>A visitor that takes nothing: a walk with it says whether a body decodes.</summary>
+    /// <summary>A visitor that takes nothing but the head: a walk with it says whether a body decodes, and what its head holds.</summary>
     private struct Decodes : IDirectoryVisitor
     {
+        internal long Rows;
+        internal long GroupRows;
+        internal bool Partial;
+
         public void Head(long rows, long groupRows, bool partial)
         {
+            Rows = rows;
+            GroupRows = groupRows;
+            Partial = partial;
         }
 
         public void Entry(in DirectoryEntry entry)
         {
+        }
+    }
+
+    /// <summary>
+    /// The body a directory region <paramref name="bytes"/> holds, decompressed into a rented buffer and known to decode, its
+    /// head read: what a question judges the groups of its object's rows by before it walks the entries
+    /// (<see cref="DirectoryBody.Visit"/>); null when it does not decode.
+    /// </summary>
+    internal static DirectoryBody? Open(ReadOnlySpan<byte> bytes)
+    {
+        if (ZstdRegion.Rent(bytes, Version, out int length) is not { } body)
+        {
+            return null;
+        }
+
+        Decodes decodes = default;
+        if (!VisitBody(body.AsSpan(0, length), ref decodes))
+        {
+            System.Buffers.ArrayPool<byte>.Shared.Return(body);
+            return null;
+        }
+
+        return new DirectoryBody(body, length, decodes.Rows, decodes.GroupRows, decodes.Partial);
+    }
+
+    /// <summary>
+    /// A directory's body, decompressed and known to decode (<see cref="Open"/>): its head, and its entries walked as they lie,
+    /// as often as asked, until it is disposed and its buffer given back.
+    /// </summary>
+    internal sealed class DirectoryBody(byte[] body, int length, long rows, long groupRows, bool partial) : IDisposable
+    {
+        private byte[]? _body = body;
+
+        /// <summary>The object's rows.</summary>
+        internal long Rows { get; } = rows;
+
+        /// <summary>The rows of a group the entries name; 0 for none.</summary>
+        internal long GroupRows { get; } = groupRows;
+
+        /// <summary>Whether the directory left paths out.</summary>
+        internal bool Partial { get; } = partial;
+
+        /// <summary>Hands <paramref name="visitor"/> the head, then each entry as it lies.</summary>
+        internal void Visit<TVisitor>(ref TVisitor visitor)
+            where TVisitor : IDirectoryVisitor
+        {
+            ObjectDisposedException.ThrowIf(_body is null, this);
+            VisitBody(_body.AsSpan(0, length), ref visitor);
+        }
+
+        public void Dispose()
+        {
+            if (_body is { } held)
+            {
+                _body = null;
+                System.Buffers.ArrayPool<byte>.Shared.Return(held);
+            }
         }
     }
 
@@ -964,17 +1028,15 @@ internal sealed class VariantDirectory
     }
 
     /// <summary>
-    /// Adds to <paramref name="tally"/> what the directory of the variant column at top-level field <paramref name="field"/> of
-    /// <paramref name="file"/> says of the groups of its rows <paramref name="judge"/> keeps (<see cref="PathTally.AddDirectory"/>),
-    /// its read counted to <paramref name="metrics"/>: false, with nothing added, when the file holds none that decodes, or
-    /// <paramref name="exact"/> refuses the one it holds.
+    /// The directory of the variant column at top-level field <paramref name="field"/> of <paramref name="file"/>, opened
+    /// (<see cref="Open"/>), its read counted to <paramref name="metrics"/>; null when the file holds none that decodes.
     /// </summary>
-    internal static async ValueTask<bool> TallyAsync(
-        VortexFile file, int field, PathTally tally, IGroupJudge judge, bool exact, Scanning.ScanCounters? metrics, CancellationToken cancellationToken)
+    internal static async ValueTask<DirectoryBody?> OpenAsync(
+        VortexFile file, int field, Scanning.ScanCounters? metrics, CancellationToken cancellationToken)
     {
         if (await RegionAsync(file, field, cancellationToken).ConfigureAwait(false) is not { } region)
         {
-            return false;
+            return null;
         }
 
         using Vorticity.IO.SegmentRequestSet requests = new Vorticity.IO.SegmentRequestSet(1);
@@ -982,7 +1044,7 @@ internal sealed class VariantDirectory
         await file.Segments.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
         Scanning.ScanCounters.Note(metrics, 1, region.Length);
         ReadOnlySpan<byte> bytes = requests.GetBuffer(slot).Span;
-        return region.Holds(bytes) && tally.AddDirectory(bytes, judge, exact);
+        return region.Holds(bytes) ? Open(bytes) : null;
     }
 
     /// <summary>The region of the directory of the variant column at top-level field <paramref name="field"/> of <paramref name="file"/>; null for none.</summary>

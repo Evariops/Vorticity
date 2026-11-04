@@ -47,9 +47,9 @@ public enum VariantPathClass : byte
 /// <param name="Class">The class of the values.</param>
 /// <param name="Rows">The rows that hold one; estimated from the granules that hold the path when <paramref name="Exact"/> is false.</param>
 /// <param name="Exact">
-/// Whether <paramref name="Rows"/> is exact. An estimate is that of granules the scan keeps in part: some kept row holds the
-/// path, or a row of the same granule the scan leaves out does, the one place where a path may be listed that no kept row
-/// holds.
+/// Whether <paramref name="Rows"/> is exact. An estimate is that of a path the granules the scan leaves out hold too, its
+/// values spread over its granules; or, where the scan keeps more granules in part than it reads again, of a path such a
+/// granule holds, which a row of it the scan leaves out may hold alone.
 /// </param>
 public readonly record struct VariantPath(IReadOnlyList<string> Keys, VariantPathClass Class, long Rows, bool Exact)
 {
@@ -77,19 +77,22 @@ public readonly record struct VariantPath(IReadOnlyList<string> Keys, VariantPat
 /// of their keys and then of their class.
 /// </summary>
 /// <remarks>
-/// A path a kept row holds is listed unless <see cref="Complete"/> says otherwise. Counts come from what each object of the
-/// scan keeps: exact where it keeps every row of the granules a path lies in, estimated where it keeps a part of them, at
-/// the resolution of a granule.
+/// A path a kept row holds is listed unless <see cref="Complete"/> says otherwise, and a path no kept row holds is not: the
+/// granules the scan keeps in part, the edges of a window, are read again and their kept rows counted. Where it keeps most
+/// granules in part, a filter on a column the rows are not sorted by, they are not, and a path their other rows hold may be
+/// listed, estimated. Counts come from each object's path directory: exact unless a path lies in granules the scan leaves
+/// out too, estimated then from the granules it lies in.
 /// </remarks>
 public sealed class VariantPaths : IReadOnlyList<VariantPath>
 {
     private readonly VariantPath[] _paths;
 
-    internal VariantPaths(string column, VariantPath[] paths, bool complete)
+    internal VariantPaths(string column, VariantPath[] paths, bool complete, PathsReading reading)
     {
         Column = column;
         _paths = paths;
         Complete = complete;
+        Reading = reading;
         Exact = Array.TrueForAll(paths, path => path.Exact);
     }
 
@@ -105,6 +108,9 @@ public sealed class VariantPaths : IReadOnlyList<VariantPath>
     /// <summary>Whether every count is exact, and so no path is listed that no kept row holds.</summary>
     public bool Exact { get; }
 
+    /// <summary>What the question read to answer, every column it asked together.</summary>
+    public PathsReading Reading { get; }
+
     /// <inheritdoc/>
     public int Count => _paths.Length;
 
@@ -119,6 +125,20 @@ public sealed class VariantPaths : IReadOnlyList<VariantPath>
     /// <inheritdoc/>
     public override string ToString() => $"{_paths.Length} paths of {Column}{(Complete ? string.Empty : ", some left out")}{(Exact ? string.Empty : ", estimated")}";
 }
+
+/// <summary>
+/// What a question for the paths of variant columns read to answer: the path directories that answered, those of a dataset
+/// read from its table of contents without opening their object among them; the granules the scan keeps in part whose rows
+/// were read again and counted, so that no path is listed that no kept row holds; and the objects or files whose kept rows
+/// were counted, where no directory answered or every count is asked exact.
+/// </summary>
+/// <param name="Directories">The path directories that answered for a column of an object or a file.</param>
+/// <param name="Unopened">Of them, those read with no open of their object.</param>
+/// <param name="EdgeGranules">The granules kept in part whose rows were read again.</param>
+/// <param name="EdgeRows">Their rows.</param>
+/// <param name="Censuses">The objects or files whose kept rows were counted.</param>
+/// <param name="CensusRows">The rows those counted.</param>
+public sealed record PathsReading(int Directories, int Unopened, int EdgeGranules, long EdgeRows, int Censuses, long CensusRows);
 
 /// <summary>How the paths of a variant column are found among the rows a scan keeps.</summary>
 public sealed record PathsOptions

@@ -3,6 +3,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Scanning;
 using Vorticity.Types;
+using Vorticity.Types.Variants;
 
 namespace Vorticity.Dataset;
 
@@ -68,8 +69,10 @@ internal sealed partial class DatasetScanBuilder
 
     /// <summary>
     /// Tallies from their path directories, read without opening the object, the columns of <paramref name="left"/> an object
-    /// the count settles answers for: every row of its part kept, its deleted rows aside. Those it answers for leave
-    /// <paramref name="left"/>; whether none is left.
+    /// the count settles answers for: every row of its part kept, its deleted rows aside. A directory whose groups the part
+    /// cuts, or holds deleted rows of, few enough to read again (<see cref="Types.Variants.GroupVerdicts.EdgesWorthCounting"/>),
+    /// answers when the object is opened, its rows there counted, so that it lists no path no kept row holds. Those it answers
+    /// for leave <paramref name="left"/>; whether none is left.
     /// </summary>
     private async ValueTask<bool> SettledAsync(PositionedObject held, PathsQuestion question, List<PathColumn> left, CancellationToken cancellationToken)
     {
@@ -92,9 +95,29 @@ internal sealed partial class DatasetScanBuilder
         {
             Expressions.FieldExpr column = left[c].Field;
             int field = column.SegmentsUtf8.Length == 1 ? schema.IndexOfField(column.SegmentsUtf8[0]) : -1;
-            if (field >= 0 && schema.GetField(field).Kind == DTypeKind.Variant
-                && await _dataset.TallyPathDirectoryAsync(entry, field, left[c].Tally, judge, question.Exact, cancellationToken).ConfigureAwait(false))
+            if (field < 0 || schema.GetField(field).Kind != DTypeKind.Variant)
             {
+                continue;
+            }
+
+            using Indexes.VariantDirectory.DirectoryBody? body = await _dataset.OpenPathDirectoryAsync(entry, field, cancellationToken).ConfigureAwait(false);
+            if (body is null)
+            {
+                continue;
+            }
+
+            PathTally tally = left[c].Tally;
+            tally.Verdicts.Judge(body, judge);
+            if (tally.Verdicts.PartGroups > 0 && tally.Verdicts.Grouped && tally.Verdicts.EdgesWorthCounting)
+            {
+                continue;
+            }
+
+            tally.Verdicts.Share = judge.Share(tally.Verdicts.WholeRows, tally.Verdicts.PartRows);
+            if (tally.AddDirectory(body, edges: null, question.Exact))
+            {
+                question.Reads.Directories++;
+                question.Reads.Unopened++;
                 left.RemoveAt(c);
             }
         }

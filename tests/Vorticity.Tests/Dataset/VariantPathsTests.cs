@@ -73,6 +73,35 @@ public sealed partial class VariantPathsTests
     }
 
     /// <summary>
+    /// A window of the key, over appended objects and over compacted ones: the granules it cuts are read again and their kept
+    /// rows counted, so that every path listed is held by a kept row, every path a kept row holds is listed, and a count said
+    /// exact is exact. Keys that are data, a user's score, leave paths in those granules' other rows that the kept rows lack.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task TheGranulesAWindowCutsAreCountedSoThatItListsOnlyWhatItsRowsHold(bool compacted)
+    {
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await CreateAsync(store);
+        List<Event> rows = await FillAsync(dataset, new Random(23), deletes: false);
+        while (compacted && await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 0 }, Ct) is not null)
+        {
+        }
+
+        foreach ((DateTimeOffset from, DateTimeOffset to) in new[] { (Noon.AddMinutes(10), Noon.AddMinutes(25)), (Noon.AddSeconds(200), Noon.AddSeconds(230)) })
+        {
+            Dictionary<string, long> truth = Truth(rows.Where(r => r.At >= from && r.At < to), r => r.Attributes);
+            VariantPaths found = await dataset.Scan<Event>().Where(r => r.At >= from & r.At < to).PathsAsync(r => r.Attributes, cancellationToken: Ct);
+            Assert.True(found.Complete);
+            Dictionary<string, VariantPath> listed = found.ToDictionary(Key);
+            Assert.Equal(Sorted(truth).Select(path => path.Key), Sorted(listed.ToDictionary(path => path.Key, path => path.Value.Rows)).Select(path => path.Key));
+            Assert.All(found.Where(path => path.Exact), path => Assert.Equal(truth[Key(path)], path.Rows));
+            Assert.True(found.Reading.EdgeGranules > 0 && found.Reading.EdgeRows >= found.Reading.EdgeGranules, $"{found.Reading}");
+        }
+    }
+
+    /// <summary>
     /// Every object compacted, so that each has a directory, and no filter: the answer is the directories', exact, with no
     /// object opened; under a filter on a column, the objects are opened as a count opens them.
     /// </summary>
@@ -89,6 +118,8 @@ public sealed partial class VariantPathsTests
         VariantPaths found = await dataset.Scan<Event>().PathsAsync(r => r.Attributes, cancellationToken: Ct);
         Assert.True(found.Exact && found.Complete);
         Assert.Equal(Sorted(Truth(rows, r => r.Attributes)), Sorted(found.ToDictionary(Key, path => path.Rows)));
+        Assert.Equal(new PathsReading(found.Reading.Directories, found.Reading.Directories, 0, 0, 0, 0), found.Reading);
+        Assert.True(found.Reading.Directories > 1, $"{found.Reading}");
 
         // What the walk opened: nothing, every object's directory read from its table of contents.
         DatasetScanCounters metrics = new DatasetScanCounters();

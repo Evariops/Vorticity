@@ -36,12 +36,17 @@ public sealed partial class VariantPathsFileTests
             Assert.True(all.Exact && all.Complete);
             Assert.Equal(Sorted(Truth(rows, r => r.Attributes)), Sorted(Counts(all)));
 
-            // A range of the sorted column: the granules inside it whole and exact, the two it cuts estimated, nothing missed.
+            // A range of the sorted column: the two granules it cuts read again and counted, so that no path is listed that no kept
+            // row holds, the keys of the minutes on either side of it (m2, m7) among them; a path whose granules all lie in the
+            // range, or are cut by it, exact (m3 to m6); one held all along the file estimated; nothing missed.
             Item[] window = [.. rows.Where(r => r.Minute >= 30 && r.Minute < 70)];
+            Dictionary<string, long> truth = Truth(window, r => r.Attributes);
             VariantPaths cut = await file.Scan<Item>().Where(r => r.Minute >= 30 & r.Minute < 70).PathsAsync(r => r.Attributes, cancellationToken: Ct);
-            AgreeWith(Truth(window, r => r.Attributes), cut);
-            Assert.Contains(cut, p => p.Exact);
+            AgreeWith(truth, cut);
+            Assert.All(cut, p => Assert.True(truth.ContainsKey(Key(p)), $"{Key(p)} is listed and held by no kept row"));
+            Assert.All(["/m3#Integer", "/m4#Integer", "/m5#Integer", "/m6#Integer"], m => Assert.True(cut.Single(p => Key(p) == m).Exact, m));
             Assert.Contains(cut, p => !p.Exact);
+            Assert.Equal((1, 0, 2, 2L * GranuleRows), (cut.Reading.Directories, cut.Reading.Unopened, cut.Reading.EdgeGranules, cut.Reading.EdgeRows));
 
             // A column the file is not sorted by: every granule kept in part, every count estimated, nothing missed; exact on asking.
             Item[] one = [.. rows.Where(r => r.Kind == 2)];
@@ -68,6 +73,7 @@ public sealed partial class VariantPathsFileTests
             VariantPaths found = await file.Scan<Item>().Where(r => r.Kind == 2 | r.Minute < 10).PathsAsync(r => r.Attributes, cancellationToken: Ct);
             Assert.True(found.Exact && found.Complete);
             Assert.Equal(Sorted(Truth(rows.Where(r => r.Kind == 2 || r.Minute < 10), r => r.Attributes)), Sorted(Counts(found)));
+            Assert.Equal(new PathsReading(0, 0, 0, 0, 1, rows.Count(r => r.Kind == 2 || r.Minute < 10)), found.Reading);
 
             // A nested variant column has no directory of its own: its kept rows are counted.
             VariantPaths nested = await file.Scan<Item>().Where(r => r.Minute >= 50).PathsAsync(r => r.Inner.Payload, cancellationToken: Ct);
