@@ -36,8 +36,8 @@ use vortex::extension::datetime::TemporalMetadata;
 use vortex::extension::datetime::Time;
 use vortex::extension::datetime::TimeUnit;
 use vortex::extension::datetime::Timestamp;
-use vortex::extension::uuid::Uuid;
-use vortex::extension::uuid::UuidMetadata;
+use vortex::encodings::uuid::Uuid;
+use vortex::encodings::uuid::UuidMetadata;
 use vortex::scalar::DecimalValue;
 use vortex::scalar::Scalar;
 

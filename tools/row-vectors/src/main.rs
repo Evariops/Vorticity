@@ -404,7 +404,7 @@ fn collect_row_bytes(array: &ListViewArray) -> Vec<Vec<u8>> {
     let mut ctx = array_session().create_execution_ctx();
     (0..array.len())
         .map(|i| {
-            let slice = array.list_elements_at(i).unwrap();
+            let slice = array.list_elements_at(i, &mut ctx).unwrap();
             let p = slice.execute::<PrimitiveArray>(&mut ctx).unwrap();
             p.as_slice::<u8>().to_vec()
         })

@@ -338,7 +338,7 @@ fn read(array: &ArrayRef) -> VortexResult<u64> {
     if let Some(lists) = array.as_opt::<ListView>() {
         let offsets = lists.offsets();
         let sizes = lists.sizes();
-        let mut sum = read(offsets)?.wrapping_add(read(sizes)?).wrapping_add(validity(array)?);
+        let sum = read(offsets)?.wrapping_add(read(sizes)?).wrapping_add(validity(array)?);
 
         // The elements the rows name, the widths chosen once, outside the loop over the rows, as
         // our side's `Elements` is generic over them.
@@ -617,8 +617,8 @@ pub unsafe extern "C" fn vxbench_scan_projected_canonical(
         drive(session, |session| async move {
             let file = open(&session, &path)?;
             let projection = select([field.as_str()], root())
-                .optimize_recursive(file.dtype())
-                .and_then(|expr| expr.bind(file.dtype()))?;
+                .bind(file.dtype())
+                .and_then(|expr| expr.optimize_recursive())?;
             total(decoded(scan(&file)?.with_projection(projection), &session)?).await
         })
     })
@@ -812,8 +812,8 @@ pub unsafe extern "C" fn vxbench_scan_filtered(
                 lt(get_item(field.as_str(), root()), lit(lo + width)),
             );
             let filter = predicate
-                .optimize_recursive(file.dtype())
-                .and_then(|expr| expr.bind(file.dtype()))?;
+                .bind(file.dtype())
+                .and_then(|expr| expr.optimize_recursive())?;
             total(decoded(scan(&file)?.with_filter(filter), &session)?).await
         })
     })
@@ -848,11 +848,11 @@ pub unsafe extern "C" fn vxbench_count_filtered(
                 lt(get_item(field.as_str(), root()), lit(lo + width)),
             );
             let filter = predicate
-                .optimize_recursive(file.dtype())
-                .and_then(|expr| expr.bind(file.dtype()))?;
+                .bind(file.dtype())
+                .and_then(|expr| expr.optimize_recursive())?;
             let nothing = select(Vec::<&str>::new(), root())
-                .optimize_recursive(file.dtype())
-                .and_then(|expr| expr.bind(file.dtype()))?;
+                .bind(file.dtype())
+                .and_then(|expr| expr.optimize_recursive())?;
             let stream = file
                 .scan()?
                 .with_filter(filter)
@@ -944,8 +944,8 @@ where
             };
             let predicate = build(column);
             let filter = predicate
-                .optimize_recursive(file.dtype())
-                .and_then(|expr| expr.bind(file.dtype()))?;
+                .bind(file.dtype())
+                .and_then(|expr| expr.optimize_recursive())?;
             total(decoded(scan(&file)?.with_filter(filter), &session)?).await
         })
     })

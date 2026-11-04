@@ -40,8 +40,8 @@ fn main() -> anyhow::Result<()> {
         // 2. Scanning without the patched column succeeds. This is the half that locks in lazy
         //    component resolution: a reader that resolves every declared id up front fails here.
         let projection = select(["strs"], root())
-            .optimize_recursive(file.dtype())?
-            .bind(file.dtype())?;
+            .bind(file.dtype())?
+            .optimize_recursive()?;
         let projected = file
             .scan()?
             .with_projection(projection)
@@ -56,8 +56,8 @@ fn main() -> anyhow::Result<()> {
 
         // 3. Scanning WITH the patched column fails, and the message names the unknown id.
         let projection = select(["ints"], root())
-            .optimize_recursive(file.dtype())?
-            .bind(file.dtype())?;
+            .bind(file.dtype())?
+            .optimize_recursive()?;
         let result = async {
             file.scan()?
                 .with_projection(projection)

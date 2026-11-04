@@ -13,13 +13,11 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
 
-use vortex::array::ArrayId;
 use vortex::array::ArrayRef;
 use vortex::array::IntoArray;
 use vortex::array::arrays::ChunkedArray;
 use vortex::array::arrays::PrimitiveArray;
 use vortex::array::arrays::StructArray;
-use vortex::array::session::ArraySessionExt;
 use vortex::array::validity::Validity;
 use vortex::array::arrays::BoolArray;
 use vortex::buffer::BitBuffer;
@@ -29,8 +27,6 @@ use vortex::compressor::BtrBlocksCompressorBuilder;
 use vortex::dtype::DType;
 use vortex::dtype::Nullability;
 use vortex::dtype::PType;
-use vortex::editions::ComponentKind;
-use vortex::editions::EditionSessionExt;
 use vortex::editions::EditionId;
 use vortex::error::VortexResult;
 use vortex::error::vortex_err;
@@ -51,7 +47,6 @@ use vortex::layout::layouts::table::TableStrategy;
 use vortex::layout::layouts::zoned::Zoned;
 use vortex::scalar::Scalar;
 use vortex::session::VortexSession;
-use vortex::utils::aliases::hash_set::HashSet;
 
 use crate::encodings;
 use crate::manifest::FileRecord;
@@ -92,11 +87,13 @@ pub enum StrategyKind {
     Verbatim,
     /// No compression and no zone maps, but still struct-split: only canonical encodings.
     Canonical,
-    /// The default pipeline minus `ZonedStrategy`.
+    /// The default pipeline minus `ZonedStrategy`: the compressor the session's enabled editions
+    /// allow (`BtrBlocksCompressorBuilder::from_session`), as the default pipeline's is.
     NoZoneMaps,
-    /// No zone maps, plus the compressor restricted to the session's enabled editions. Required
-    /// for pre-`core2026.08.0` editions: passing `with_strategy` opts out of the writer's own
-    /// `retain_allowed_encodings`, so it has to be reapplied by hand.
+    /// No zone maps, the compressor restricted to the session's enabled editions. Since 0.90 that
+    /// is what `NoZoneMaps` does too: `from_session` restricts the schemes by itself, where 0.86.1
+    /// needed `retain_allowed_encodings` reapplied by hand once `with_strategy` was passed. Kept
+    /// apart because the pre-`core2026.08.0` entries name it.
     EditionSafe,
 }
 
@@ -185,11 +182,11 @@ fn table_strategy(compressing: Arc<dyn LayoutStrategy>) -> Arc<dyn LayoutStrateg
     Arc::new(TableStrategy::new(Arc::new(validity), compressing))
 }
 
-fn no_zonemap_strategy() -> Arc<dyn LayoutStrategy> {
+fn no_zonemap_strategy(session: &VortexSession) -> Arc<dyn LayoutStrategy> {
     let chunked = ChunkedLayoutStrategy::new(flat());
     table_strategy(Arc::new(CompressingStrategy::new(
         chunked,
-        BtrBlocksCompressorBuilder::default().build(),
+        BtrBlocksCompressorBuilder::from_session(session).build(),
     )))
 }
 
@@ -201,30 +198,6 @@ fn canonical_strategy() -> Arc<dyn LayoutStrategy> {
     )))
 }
 
-/// The in-memory array encodings the session's enabled editions permit, resolved exactly as
-/// `vortex_file::writer::new_array_context` does: enabled ids are *serialized* ids, while
-/// `retain_allowed_encodings` wants *plugin* ids.
-fn allowed_encodings(session: &VortexSession) -> HashSet<ArrayId> {
-    let arrays = session.arrays();
-    session
-        .enabled_component_ids(ComponentKind::Array)
-        .iter()
-        .filter_map(|serialized_id| arrays.registry().get(serialized_id))
-        .map(|plugin| plugin.id())
-        .collect()
-}
-
-fn edition_safe_strategy(session: &VortexSession) -> Arc<dyn LayoutStrategy> {
-    let allowed = allowed_encodings(session);
-    let chunked = ChunkedLayoutStrategy::new(flat());
-    table_strategy(Arc::new(CompressingStrategy::new(
-        chunked,
-        BtrBlocksCompressorBuilder::default()
-            .retain_allowed_encodings(&allowed)
-            .build(),
-    )))
-}
-
 pub fn build_options(session: &VortexSession, spec: &WriteSpec) -> VortexWriteOptions {
     let mut opts = session.write_options();
 
@@ -232,26 +205,22 @@ pub fn build_options(session: &VortexSession, spec: &WriteSpec) -> VortexWriteOp
         StrategyKind::Default => {}
         StrategyKind::RowBlock(rows) => {
             opts = opts.with_strategy(
-                WriteStrategyBuilder::default()
+                // `from_session` compresses with the schemes the session's enabled editions
+                // allow, so a strictly increasing column does not elect `fastlanes.delta`, which
+                // belongs to no core edition and would be rejected at serialization time.
+                WriteStrategyBuilder::from_session(session)
                     .with_row_block_size(*rows)
                     // Required, not decorative: the 1 MiB coalescing target would merge the
                     // blocks straight back into one (API-NOTES.md).
                     .with_data_block_target_bytes(None)
-                    // Passing `with_strategy` opts out of the writer's own
-                    // `retain_allowed_encodings`, so it has to be reapplied by hand — otherwise a
-                    // strictly increasing column elects `fastlanes.delta`, which belongs to no
-                    // core edition, and the write is rejected at serialization time.
-                    .with_btrblocks_builder(
-                        BtrBlocksCompressorBuilder::default()
-                            .retain_allowed_encodings(&allowed_encodings(session)),
-                    )
                     .build(),
             );
         }
         StrategyKind::Verbatim => opts = opts.with_strategy(verbatim_strategy()),
         StrategyKind::Canonical => opts = opts.with_strategy(canonical_strategy()),
-        StrategyKind::NoZoneMaps => opts = opts.with_strategy(no_zonemap_strategy()),
-        StrategyKind::EditionSafe => opts = opts.with_strategy(edition_safe_strategy(session)),
+        StrategyKind::NoZoneMaps | StrategyKind::EditionSafe => {
+            opts = opts.with_strategy(no_zonemap_strategy(session));
+        }
     }
 
     if !spec.file_statistics {
@@ -1651,8 +1620,8 @@ fn edition_table(edition_index: usize, rows: usize) -> VortexResult<ArrayRef> {
     // core2026.08.3 adds the vortex.uuid dtype (and the two variant arrays).
     if edition_index >= 6 {
         let uuid = DType::Extension(
-            vortex::dtype::extension::ExtDType::<vortex::extension::uuid::Uuid>::try_new(
-                vortex::extension::uuid::UuidMetadata::default(),
+            vortex::dtype::extension::ExtDType::<vortex::encodings::uuid::Uuid>::try_new(
+                vortex::encodings::uuid::UuidMetadata::default(),
                 DType::FixedSizeList(Arc::new(DType::Primitive(PType::U8, nn)), 16, nn),
             )?
             .erased(),

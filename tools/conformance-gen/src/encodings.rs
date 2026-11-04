@@ -54,6 +54,7 @@ use vortex::encodings::bytebool::ByteBool;
 use vortex::encodings::datetime_parts::DateTimeParts;
 use vortex::encodings::decimal_byte_parts::DecimalByteParts;
 use vortex::encodings::fastlanes::BitPacked;
+use vortex::encodings::fastlanes::BitWidths;
 use vortex::encodings::fastlanes::Delta;
 use vortex::encodings::fastlanes::delta_compress;
 use vortex::encodings::fastlanes::FoR;
@@ -68,6 +69,7 @@ use vortex::encodings::zigzag::zigzag_encode;
 use vortex::encodings::zstd::Zstd;
 use vortex::encodings::zstd::ZstdBuffers;
 use vortex::error::VortexResult;
+use vortex::error::vortex_bail;
 use vortex::extension::datetime::TimeUnit;
 use vortex::extension::datetime::Timestamp;
 use vortex::scalar::Scalar;
@@ -248,7 +250,8 @@ fn b_listview(_: &VortexSession, rows: usize) -> VortexResult<ArrayRef> {
     })
 }
 
-fn b_list(_: &VortexSession, rows: usize) -> VortexResult<ArrayRef> {
+fn b_list(session: &VortexSession, rows: usize) -> VortexResult<ArrayRef> {
+    let mut ctx = session.create_execution_ctx();
     // The Arrow-compatible offsets form, which no builder produces.
     let mut offsets: Vec<i32> = Vec::with_capacity(rows + 1);
     let mut elements: Vec<i32> = Vec::new();
@@ -261,7 +264,7 @@ fn b_list(_: &VortexSession, rows: usize) -> VortexResult<ArrayRef> {
     }
     let offsets = PrimitiveArray::new(Buffer::from(offsets), Validity::NonNullable).into_array();
     let elements = PrimitiveArray::new(Buffer::from(elements), Validity::NonNullable).into_array();
-    Ok(ListArray::try_new(elements, offsets, Validity::NonNullable)?.into_array())
+    Ok(ListArray::try_new(elements, offsets, Validity::NonNullable, &mut ctx)?.into_array())
 }
 
 fn b_fixed_size_list(_: &VortexSession, rows: usize) -> VortexResult<ArrayRef> {
@@ -431,7 +434,8 @@ fn b_constant(_: &VortexSession, rows: usize) -> VortexResult<ArrayRef> {
     Ok(ConstantArray::new(Scalar::primitive(7i64, NN), rows).into_array())
 }
 
-fn b_masked(_: &VortexSession, rows: usize) -> VortexResult<ArrayRef> {
+fn b_masked(session: &VortexSession, rows: usize) -> VortexResult<ArrayRef> {
+    let mut ctx = session.create_execution_ctx();
     let values: Buffer<i32> = (0..rows as i32).collect();
     let child = PrimitiveArray::new(values, Validity::NonNullable).into_array();
     let validity = BoolArray::new(
@@ -439,7 +443,7 @@ fn b_masked(_: &VortexSession, rows: usize) -> VortexResult<ArrayRef> {
         Validity::NonNullable,
     )
     .into_array();
-    Ok(MaskedArray::try_new(child, Validity::Array(validity))?.into_array())
+    Ok(MaskedArray::try_new(child, Validity::Array(validity), &mut ctx)?.into_array())
 }
 
 // -------------------------------------------------------------------------------------------
@@ -488,7 +492,8 @@ fn b_dict(_: &VortexSession, rows: usize) -> VortexResult<ArrayRef> {
     Ok(DictArray::try_new(codes, values)?.into_array())
 }
 
-fn b_sparse(_: &VortexSession, rows: usize) -> VortexResult<ArrayRef> {
+fn b_sparse(session: &VortexSession, rows: usize) -> VortexResult<ArrayRef> {
+    let mut ctx = session.create_execution_ctx();
     // One patch every 64 rows over a constant fill: the shape `vortex.sparse` exists for.
     let indices: Buffer<u64> = (0..(rows / 64) as u64).map(|i| i * 64).collect();
     let values: Buffer<i32> = (0..(rows / 64) as i32).map(|i| 1_000 + i).collect();
@@ -497,6 +502,7 @@ fn b_sparse(_: &VortexSession, rows: usize) -> VortexResult<ArrayRef> {
         PrimitiveArray::new(values, Validity::NonNullable).into_array(),
         rows,
         Scalar::primitive(0i32, NN),
+        &mut ctx,
     )?
     .into_array())
 }
@@ -1171,7 +1177,7 @@ fn b_fastlanes_delta(session: &VortexSession, rows: usize) -> VortexResult<Array
     let parray = PrimitiveArray::new(values, Validity::NonNullable);
     let (bases, deltas) = delta_compress(&parray, &mut ctx)?;
     Ok(
-        Delta::try_new(bases.into_array(), deltas.into_array(), 0, rows)?
+        Delta::try_new(bases.into_array(), deltas.into_array(), Validity::NonNullable, 0, rows)?
             .into_array(),
     )
 }
@@ -1314,6 +1320,7 @@ fn b_alp_patched_no_chunk_offsets(
         PrimitiveArray::new(indices, Validity::NonNullable).into_array(),
         PrimitiveArray::new(patch_values, Validity::NonNullable).into_array(),
         None,
+        &mut ctx,
     )?;
     Ok(ALP::new(encoded, exponents, Some(patches)).into_array())
 }
@@ -1341,13 +1348,18 @@ fn b_bitpacked_patched_no_chunk_offsets(
         PrimitiveArray::new(indices, Validity::NonNullable).into_array(),
         PrimitiveArray::new(patch_values, Validity::NonNullable).into_array(),
         None,
+        &mut ctx,
     )?;
+    // Encoded at one width, so the parts carry a single one: per-block widths are bitpacked.v2's.
+    let BitWidths::Global(bit_width) = parts.bit_widths else {
+        vortex_bail!("bit-packed at one width, yet the parts carry per-block widths");
+    };
     Ok(BitPacked::try_new(
         parts.packed,
         PType::U32,
         Validity::NonNullable,
         Some(patches),
-        parts.bit_width,
+        bit_width,
         rows,
         parts.offset,
     )?
@@ -1360,12 +1372,13 @@ fn b_bitpacked_patched_no_chunk_offsets(
 /// corpus collapsed to `vortex.constant`. The shape "nullable array whose values buffer is real
 /// and whose validity child is entirely zero" therefore appeared in no file, and a reader with a
 /// bug in the `null_count == len` short-circuit was not caught.
-fn b_masked_all_invalid(_: &VortexSession, rows: usize) -> VortexResult<ArrayRef> {
+fn b_masked_all_invalid(session: &VortexSession, rows: usize) -> VortexResult<ArrayRef> {
+    let mut ctx = session.create_execution_ctx();
     let values: Buffer<i32> = (0..rows as i32).collect();
     let child = PrimitiveArray::new(values, Validity::NonNullable).into_array();
     let validity =
         BoolArray::new(BitBuffer::collect_bool(rows, |_| false), Validity::NonNullable).into_array();
-    Ok(MaskedArray::try_new(child, Validity::Array(validity))?.into_array())
+    Ok(MaskedArray::try_new(child, Validity::Array(validity), &mut ctx)?.into_array())
 }
 
 /// A `vortex.chunked` array of exactly one chunk.
@@ -1405,10 +1418,11 @@ fn b_chunked_empty_chunks(_: &VortexSession, rows: usize) -> VortexResult<ArrayR
 
 /// Its mirror: an explicit **all-true** validity array, which is the shape a reader may wrongly
 /// optimize away to "no validity" and then report the wrong nullability for.
-fn b_masked_all_valid(_: &VortexSession, rows: usize) -> VortexResult<ArrayRef> {
+fn b_masked_all_valid(session: &VortexSession, rows: usize) -> VortexResult<ArrayRef> {
+    let mut ctx = session.create_execution_ctx();
     let values: Buffer<i32> = (0..rows as i32).collect();
     let child = PrimitiveArray::new(values, Validity::NonNullable).into_array();
     let validity =
         BoolArray::new(BitBuffer::collect_bool(rows, |_| true), Validity::NonNullable).into_array();
-    Ok(MaskedArray::try_new(child, Validity::Array(validity))?.into_array())
+    Ok(MaskedArray::try_new(child, Validity::Array(validity), &mut ctx)?.into_array())
 }

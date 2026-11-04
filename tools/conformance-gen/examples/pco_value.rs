@@ -19,8 +19,6 @@ use vortex::compressor::BtrBlocksCompressorBuilder;
 use vortex::encodings::pco::Pco;
 use vortex::error::VortexResult;
 use vortex::session::VortexSession;
-use vortex_btrblocks::SchemeExt;
-use vortex_btrblocks::schemes::integer::DeltaScheme;
 
 const ROWS: usize = 65_536;
 
@@ -95,10 +93,10 @@ fn main() -> VortexResult<()> {
         ("random_i64", Column::I64((0..n).map(|i| mix(i) as i64).collect())),
     ];
 
-    // `fastlanes.delta` belongs to no edition, so a file writer's compressor never has it: it is
-    // left out of both, as the edition filter would.
-    let default = BtrBlocksCompressorBuilder::default().exclude_schemes([DeltaScheme::default().id()]).build();
-    let compact = BtrBlocksCompressorBuilder::default().with_compact().exclude_schemes([DeltaScheme::default().id()]).build();
+    // A file writer's compressor: the session's schemes under its enabled editions, which leave
+    // out `fastlanes.delta`, a member of no edition.
+    let default = BtrBlocksCompressorBuilder::from_session(&session).build();
+    let compact = BtrBlocksCompressorBuilder::from_session(&session).with_compact().build();
     println!("{:<14} {:>9} {:>9} {:<22} {:>9} {:<22} {:>9} {:>7}", "column", "plain", "default", "", "compact", "", "pco", "c/d");
     for (name, column) in &columns {
         column.dump(&dir, name)?;
