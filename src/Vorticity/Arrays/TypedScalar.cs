@@ -70,9 +70,6 @@ internal readonly ref struct TypedScalar
         }
     }
 
-    /// <summary>The untyped handle, for a caller that wants to keep the value in a store.</summary>
-    public ScalarValue Value => _value;
-
     /// <summary>The boolean payload.</summary>
     /// <exception cref="VortexFormatException">The value is null or is not a boolean.</exception>
     public bool AsBool

@@ -491,7 +491,7 @@ internal struct WideKeyTable<TValue>
     /// <summary>
     /// The 32 bits a key is homed by and its slot keeps: as <see cref="KeyTable{TValue}"/> homes a key wider
     /// than a word, its two words folded, mixed under the seed once there is one, a short text's by
-    /// rapidhash (<see cref="TextWord.Home"/>).
+    /// rapidhash (<see cref="TextWord.HomePrepared"/>).
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static uint HashOf(TValue key, ulong seed) => HashOf(key, seed, Prepared(seed));

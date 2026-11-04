@@ -185,6 +185,22 @@ it. So an `OrderByDescending` with `Take(10)` reads ten rows whatever the number
 first and last rows of a day share one read. A chosen row's column is a result: a `Where` or an
 `OrderBy` after the group by can compare it, but an aggregate cannot read it.
 
+A chosen row's column can be of any type, a list or a variant as well as a number or a text:
+
+```csharp
+.Select(g => (g.Key, g.First().Frames, g.MaxBy(r => r.At).Attributes))
+.As<LatestStack>()
+
+[VortexRecord]
+public partial record struct LatestStack(string Service, ReadOnlyMemory<string> Frames, Variant? Attributes);
+```
+
+A list or a variant is kept as the row it is: copied from the read into a store of its column's type, then into
+the result, without becoming a .NET value on the way, so a list of a thousand elements costs bytes, not objects,
+until the record reads it. It is read through a record, `As<TRecord>()` or `AggregateAsync<TResult>(…)`, since it
+is a column of the result rather than one value. A `Where` after the group by can test it, `IsNull` say; an
+`OrderBy` cannot, a list and a variant having no order.
+
 ## Buckets of time and of numbers
 
 ```csharp
@@ -454,6 +470,15 @@ sum or an aggregator of your own. A partial whose keys or measures are not the q
 be told apart, so the question on each node is yours to keep the same. To keep the version the same,
 open the dataset at the version the coordinator cut (`VortexDataset.OpenAsync(store, version)`).
 
+`Merge` also takes the partials as an `IAsyncEnumerable<AggregationPartial>`. The merge then folds each
+partial as it arrives, while the other parts still run. An exception the sequence throws ends the
+merge with that exception.
+
+The library stops at the bytes. Your application decides which nodes run the parts, how the bytes
+travel and who may send them, how long to wait for a part, and where to run it again when a node
+fails, with the network stack and the security it already has. A part reads immutable objects, so it
+can run again on any node.
+
 ## Exact, estimated or progressive, and at what cost
 
 Every way of asking gives the exact answer in the end, or says it does not. Which one to take depends on
@@ -471,7 +496,7 @@ The price is the time the exact answer's reads take cold on an object store, at 
 1.25 GB/s, a request worth 293 KB of transfer. It says nothing of a warm cache, which answers faster,
 and a single file's source cannot say. It counts what each object's path reads, the columns the
 question filters by included, and bounds it: on 182 questions over every column of a dataset, in the
-order of arrival and clustered, a cold read took at most an eighth more bytes than the price, and much
+order of arrival and sorted by service, a cold read took at most an eighth more bytes than the price, and much
 less where an index of values or the blocks narrowed it.
 
 ## Estimates first, then the exact answer

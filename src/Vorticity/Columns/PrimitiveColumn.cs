@@ -18,7 +18,7 @@ namespace Vorticity.Columns;
 /// are <see cref="int"/> and <see cref="uint"/>, and a half-precision column is read as
 /// <see cref="Half"/> rather than widened. Nullability is not carried by the type: a nullable
 /// column has the same element type, its null rows hold an unspecified value, and the caller tells
-/// them apart with <see cref="IsValid"/>.
+/// them apart by the node's validity.
 /// <see cref="Values"/> is borrowed from the owning <see cref="RecordBatch"/> and is invalid once
 /// that batch is disposed.
 /// </remarks>
@@ -39,11 +39,6 @@ internal readonly ref struct PrimitiveColumn<T>
 
     /// <summary>The column's physical type.</summary>
     public PType PType => _batch.Node(_node).PType;
-
-    /// <summary>Whether row <paramref name="index"/> is not null.</summary>
-    /// <param name="index">0-based row index, below <see cref="Length"/>.</param>
-    /// <exception cref="ArgumentOutOfRangeException"><paramref name="index"/> is out of range.</exception>
-    public bool IsValid(int index) => ColumnCore.IsValid(_batch, _node, index);
 
     /// <summary>
     /// The values, zero-copy: exactly <see cref="Length"/> elements. Null rows occupy their slot

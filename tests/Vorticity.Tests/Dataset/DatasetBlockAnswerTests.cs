@@ -29,7 +29,7 @@ public sealed partial class DatasetBlockAnswerTests : IClassFixture<DatasetBlock
     [
         "5xx by service", "5xx by service and hour", "count by service and status", "measures by service",
         "count by route, one service", "measures by service and hour", "count by host", "measures by service under 5xx",
-        "count by status, a latency window", "count by service, two statuses",
+        "count by status, a latency window", "count by service, two statuses", "5xx by route and hour",
     ];
 
     public static TheoryData<string> Questions() => [.. Named];
@@ -60,22 +60,26 @@ public sealed partial class DatasetBlockAnswerTests : IClassFixture<DatasetBlock
 
     /// <summary>
     /// Errors by service, each service a run of blocks and the status listed in each: the blocks answer it from the
-    /// statistics of the service and the status alone, a quarter of the bytes the rows of both columns take or less. By
-    /// the hour as well, the blocks whose instants fall in one hour answer, and the others, some fifty minutes each here,
-    /// are read as rows: never more than the rows take.
+    /// statistics of the service and the status alone. By the hour as well, the blocks whose instants fall in one hour
+    /// answer, and the others are read as rows: never more than the rows take. Granules do not end where a run does: an
+    /// object that holds two services, and each hour of a service in the hourly layout, some three granules here, keeps a
+    /// granule of two runs, read as rows with its object's tail, which leaves the blocks a quarter to three fifths of the
+    /// rows' bytes at this scale. The objects, of some 70,000 rows, are priced by their bytes alone.
     /// </summary>
     [Theory]
-    [InlineData("5xx by service", 4, false)]
-    [InlineData("5xx by service and hour", 1, false)]
-    [InlineData("5xx by service and hour", 4, true)]
-    [InlineData("measures by service and hour", 4, true)]
-    public async Task ErrorsByServiceReadTheirBlocksStatistics(string question, int fewer, bool hourly)
+    [InlineData("5xx by service", false)]
+    [InlineData("5xx by service and hour", false)]
+    [InlineData("5xx by service and hour", true)]
+    [InlineData("measures by service and hour", true)]
+    public async Task ErrorsByServiceReadTheirBlocksStatistics(string question, bool hourly)
     {
-        await using CountingObjectStore store = new CountingObjectStore(hourly ? _fixture.Hourly : _fixture.Store);
+        MemoryObjectStore shared = hourly ? _fixture.Hourly : _fixture.Store;
+        await ForgetLearnedAsync(shared);
+        await using CountingObjectStore store = new CountingObjectStore(shared);
         long rowBytes;
         long blockBytes;
         await using (VortexSession session = VortexSession.Create(_ => { }))
-        await using (VortexDataset dataset = await VortexDataset.OpenAsync(store, new DatasetOptions { Session = session }, Ct))
+        await using (VortexDataset dataset = await VortexDataset.OpenAsync(store, new DatasetOptions { Session = session, CostProfile = Vorticity.IO.CostProfile.Memory }, Ct))
         {
             store.Reset();
             await AskAsync(dataset, question, synopses: false);
@@ -83,7 +87,7 @@ public sealed partial class DatasetBlockAnswerTests : IClassFixture<DatasetBlock
         }
 
         await using (VortexSession session = VortexSession.Create(_ => { }))
-        await using (VortexDataset dataset = await VortexDataset.OpenAsync(store, new DatasetOptions { Session = session }, Ct))
+        await using (VortexDataset dataset = await VortexDataset.OpenAsync(store, new DatasetOptions { Session = session, CostProfile = Vorticity.IO.CostProfile.Memory }, Ct))
         {
             store.Reset();
             await AskAsync(dataset, question, synopses: true);
@@ -91,15 +95,34 @@ public sealed partial class DatasetBlockAnswerTests : IClassFixture<DatasetBlock
         }
 
         Console.WriteLine($"BLOCK ANSWER {question}{(hourly ? ", blocks ending at each hour" : string.Empty)}: {blockBytes:N0} bytes through the blocks, {rowBytes:N0} through the rows");
-        Assert.True(blockBytes * fewer < rowBytes, $"{question}: {blockBytes} bytes through the blocks, {rowBytes} through the rows");
+        Assert.True(blockBytes < rowBytes, $"{question}: {blockBytes} bytes through the blocks, {rowBytes} through the rows");
 
         // The plan says so object by object: the blocks' path, its requests and bytes, and the rows' it was weighed against.
-        await using VortexDataset explained = await VortexDataset.OpenAsync(store, new DatasetOptions(), Ct);
-        ScanPlan plan = await Ask(explained, question, synopses: true).ExplainAsync(Ct);
-        StatesStep[] blocks = [.. plan.States.Where(step => step.Read == "blocks")];
+        await ForgetLearnedAsync(shared);
+        await using VortexDataset explained = await VortexDataset.OpenAsync(store, new DatasetOptions { CostProfile = Vorticity.IO.CostProfile.Memory }, Ct);
+        ScanPlan plan = await Ask(explained, question, synopses: true).ExplainAsync(analyze: true, Ct);
+        UnitStep[] blocks = [.. plan.Units.Where(step => step.Alternative == "granules")];
         Console.WriteLine($"BLOCK PLAN {question}: {blocks.Length} objects, {blocks.FirstOrDefault()?.Detail}");
         Assert.NotEmpty(blocks);
-        Assert.All(blocks, step => Assert.True(step.Count >= 1, step.Detail));
+        Assert.All(blocks, step => Assert.True(step.Requests >= 1, step.Detail));
+    }
+
+    /// <summary>
+    /// Drops the partials questions learned into <paramref name="store"/>, which a question then answers from in place of
+    /// the synopses its objects keep: a measure of those reads none.
+    /// </summary>
+    internal static async Task ForgetLearnedAsync(MemoryObjectStore store)
+    {
+        List<string> learned = [];
+        await foreach (Vorticity.IO.ObjectListing listed in store.ListAsync("learned/", null, Ct))
+        {
+            learned.Add(listed.Key);
+        }
+
+        if (learned.Count > 0)
+        {
+            await store.DeleteAsync(learned, Ct);
+        }
     }
 
     /// <summary>
@@ -200,15 +223,20 @@ public sealed partial class DatasetBlockAnswerTests : IClassFixture<DatasetBlock
             "measures by service under 5xx" => scan.Where(c => c.Status >= 500).GroupBy(c => c.Service).Select(g => (g.Key, g.Count(), g.Average(c => c.Latency))),
             "count by status, a latency window" => scan.Where(c => c.Latency >= 100 && c.Latency < 200).GroupBy(c => c.Status).Select(g => (g.Key, g.Count())),
             "count by service, two statuses" => scan.Where(c => c.Status.In(500, 503)).GroupBy(c => c.Service).Select(g => (g.Key, g.Count())),
+            "5xx by route and hour" => scan.Where(c => c.Status >= 500).GroupBy(c => (c.Route, c.At.Truncate(CalendarUnit.Hour)))
+                .Select(g => (g.Key.Route, g.Key.Item2, g.Count())),
+            "5xx by route and hour, the last instant" => scan.Where(c => c.Status >= 500).GroupBy(c => (c.Route, c.At.Truncate(CalendarUnit.Hour)))
+                .Select(g => (g.Key.Route, g.Key.Item2, g.Count(), g.Max(c => c.At))),
             _ => throw new ArgumentException($"No question named '{question}'.", nameof(question)),
         };
     }
 
     /// <summary>
     /// Four services, each 150 000 calls over two hours from noon, from three hosts of its own, on six routes, keyed by the
-    /// service then the instant, appended in parts and compacted into objects of 4 MiB: each service a run of blocks of
-    /// some 65 000 rows, about fifty minutes each. The same calls again in a dataset whose clustering declares a block
-    /// value, the instant's hour, the application's choice: its blocks end at each hour too.
+    /// service then the instant, appended in parts and compacted into objects of some 70 000 rows, each keeping its
+    /// synopses whatever its size: each service a run of blocks over two or three objects. The same calls again in a
+    /// dataset whose key holds the instant's hour between the service and the instant, the prefix its objects index, the
+    /// application's choice: its blocks end at each hour too.
     /// </summary>
     public sealed class Fixture : IAsyncLifetime
     {
@@ -219,8 +247,17 @@ public sealed partial class DatasetBlockAnswerTests : IClassFixture<DatasetBlock
         public async ValueTask InitializeAsync()
         {
             List<Call> rows = Draw();
-            await FillAsync(Store, rows, new ClusteringOptions { ObjectBytes = 4 << 20 });
-            await FillAsync(Hourly, rows, new ClusteringOptions { ObjectBytes = 4 << 20, BlockValue = ClusteringValue.Truncate(CalendarUnit.Hour) });
+            await FillAsync(Store, rows, new DatasetLayout
+            {
+                SortKey = [LayoutValue.Column(nameof(Call.Service)), LayoutValue.Column(nameof(Call.At))], IndexedPrefix = 1,
+                ObjectBytes = 4 << 20,
+            });
+            await FillAsync(Hourly, rows, new DatasetLayout
+            {
+                SortKey = [LayoutValue.Column(nameof(Call.Service)), LayoutValue.Column(nameof(Call.At)).Truncate(CalendarUnit.Hour), LayoutValue.Column(nameof(Call.At))],
+                IndexedPrefix = 2,
+                ObjectBytes = 4 << 20,
+            });
         }
 
         private static List<Call> Draw()
@@ -246,13 +283,13 @@ public sealed partial class DatasetBlockAnswerTests : IClassFixture<DatasetBlock
             return rows;
         }
 
-        private static async Task FillAsync(MemoryObjectStore store, List<Call> rows, ClusteringOptions clustering)
+        private static async Task FillAsync(MemoryObjectStore store, List<Call> rows, DatasetLayout layout)
         {
             DatasetOptions options = new DatasetOptions
             {
-                ClusteringKey = [nameof(Call.Service), nameof(Call.At)],
-                Clustering = clustering,
+                Layout = layout,
                 ContentsObjectBytes = 1,
+                SheetObjectBytes = 0,
             };
             await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Call.Schema, options, Ct);
             for (int from = 0; from < rows.Count; from += 100_000)

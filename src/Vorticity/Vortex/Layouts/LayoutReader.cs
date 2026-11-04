@@ -101,17 +101,6 @@ internal abstract class LayoutReader
         return (int)rows;
     }
 
-    /// <summary>Registers segment <paramref name="which"/> of <paramref name="node"/>.</summary>
-    /// <param name="node">The node owning the segment id.</param>
-    /// <param name="which">Index into <see cref="LayoutNode.Segments"/>.</param>
-    /// <param name="segments">The request set.</param>
-    /// <returns>The slot the set assigned.</returns>
-    protected static int RegisterSegment(in LayoutNode node, int which, SegmentRequestSet segments)
-    {
-        ArgumentNullException.ThrowIfNull(segments);
-        return segments.Add(SpecOf(in node, which));
-    }
-
     /// <summary>
     /// Registers segment <paramref name="which"/> of <paramref name="node"/>, of which the decode is
     /// expected to touch <paramref name="share"/> of the bytes, and no more than

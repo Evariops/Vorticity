@@ -53,6 +53,41 @@ public sealed class SparseDecoderTests
         Assert.Equal([0, -5, -5, 0, -5, 0], ForDecoderTests.ReadInt32(node));
     }
 
+    /// <summary>
+    /// The patches' values judged in their own encoding, a constant here, rather than decoded (the query path plan, P1): the
+    /// rows a comparison keeps are the decoded column's, and the evaluation adds to the arena the patches' indices and the
+    /// fill alone, no decoded value, where judging them decoded added the values too.
+    /// </summary>
+    [Fact]
+    public void ThePatchValuesAreJudgedInTheirEncoding()
+    {
+        ScalarStore store = new();
+        TestNode root = new TestNode("vortex.sparse")
+            .WithMetadata(TestMetadata.Sparse(PatchesMetadata.Create(3, 0, PType.U32)))
+            .WithBuffer(0)
+            .WithChild(new TestNode("vortex.primitive").WithBuffer(1))
+            .WithChild(new TestNode("vortex.constant").WithBuffer(2));
+
+        using DecodeHarness harness = DecodeHarness.Load(
+            root,
+            TestMetadata.Scalar(store.Int64(0)),
+            TestBuffers.UInt32(1, 2, 4),
+            TestMetadata.Scalar(store.Int64(-5)));
+
+        DType i32 = harness.Types.Primitive(PType.I32, Nullability.NonNullable);
+        ArrayNode sparse = harness.Scan.Nodes.Root;
+        ulong[] truth = new ulong[1];
+        ulong[] known = new ulong[1];
+        Vorticity.Compute.PredicateBits bits = new Vorticity.Compute.PredicateBits(truth, known, 6);
+        int before = harness.Scan.Canonical.NodeCount;
+        bool answered = ArrayDecoderTable.Require(harness.Scan, sparse.Encoding, sparse.EncodingSpecIndex).TryEvaluate(
+            harness.Scan.Decode, in sparse, i32, 6, Vorticity.Compute.EncodedPredicate.Compare(Vorticity.Expressions.ComparisonOp.Equal, Vorticity.Expressions.FilterLiteral.From(-5L)), ref bits);
+
+        Assert.True(answered);
+        Assert.Equal(0b010110UL, truth[0] & 0b111111UL);
+        Assert.Equal(2, harness.Scan.Canonical.NodeCount - before);
+    }
+
     [Fact]
     public void ThePatchOffsetShiftsEveryIndex()
     {

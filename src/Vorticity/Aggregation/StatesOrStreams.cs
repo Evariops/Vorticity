@@ -6,7 +6,7 @@ namespace Vorticity.Aggregating;
 
 /// <summary>
 /// The groups of a query whose source keeps states of some of its rows: once the source has said whether a
-/// part of its rows would come as states (<see cref="ScanSource.TakesStatesAsync"/>), the groups of a
+/// part of its rows would come as states (<see cref="IStatesCapability.TakesStatesAsync"/>), the groups of a
 /// blocking pass that takes them; otherwise those of the pass the query takes without them, as they close
 /// on a key that streams.
 /// </summary>
@@ -20,11 +20,9 @@ internal sealed class StatesOrStreams(AggregationQuery query, StateRequest state
     {
         if (_groups is null)
         {
-            // A source that learns the partials of a question's family takes its states to learn them, or to answer from them.
-            ScanSpec spec = await query.Host.AlignedSpecAsync(query.Plan, query.RowFilter, cancellationToken).ConfigureAwait(false);
+            ScanSpec spec = await query.Host.AlignedSpecAsync(query.Plan, query.RowFilter, cancellationToken, query.Operators).ConfigureAwait(false);
             ScanSource source = query.Host.Source;
-            spec = spec with { Family = source.LearnsPartials && spec.Options.UseSynopses ? LearnedFamily.Of(query.Plan, spec.Filter, source) : null };
-            bool taken = await source.TakesStatesAsync(spec, states, cancellationToken).ConfigureAwait(false);
+            bool taken = source.States is { } kept && await kept.TakesStatesAsync(spec, states, cancellationToken).ConfigureAwait(false);
             _groups = taken ? new GroupBatches(query, cancellationToken) : query.Streamed(cancellationToken);
         }
 

@@ -270,9 +270,8 @@ internal sealed class ZoneTable
                 Inside(new SignedAbove(value), new SignedBelow(value), words, scope);
                 break;
             default:
-                // Not equal rules out only a zone every value of which is the constant, which the
-                // zone-by-zone question does not claim either.
-                words.Fill(ulong.MaxValue);
+                // Not equal rules out only a zone every value of which is the constant.
+                Outside(new SignedEqual(value), words, scope);
                 break;
         }
     }
@@ -297,7 +296,7 @@ internal sealed class ZoneTable
                 Inside(new UnsignedAbove(value), new UnsignedBelow(value), words, scope);
                 break;
             default:
-                words.Fill(ulong.MaxValue);
+                Outside(new UnsignedEqual(value), words, scope);
                 break;
         }
     }
@@ -327,7 +326,7 @@ internal sealed class ZoneTable
                 Inside(new FloatAbove(value), new FloatBelow(value), words, scope);
                 break;
             default:
-                words.Fill(ulong.MaxValue);
+                Outside(new FloatEqual(value), words, scope);
                 break;
         }
     }
@@ -385,6 +384,35 @@ internal sealed class ZoneTable
         }
     }
 
+    /// <summary>
+    /// A zone may hold <c>x != v</c> unless every value it holds is the constant: exact bounds, both <paramref name="equal"/>'s,
+    /// over the words <paramref name="scope"/> asks alone. A zone that may hold a NaN, which != holds for, is added back
+    /// with the others (<see cref="TryMayMatch"/>).
+    /// </summary>
+    private void Outside<TEqual>(TEqual equal, Span<ulong> words, ReadOnlySpan<ulong> scope)
+        where TEqual : struct, IBoundTest
+    {
+        int zones = _min.Length;
+        for (int w = 0; w < words.Length; w++)
+        {
+            if (!scope.IsEmpty && scope[w] == 0)
+            {
+                words[w] = 0;
+                continue;
+            }
+
+            int start = w << 6;
+            int end = Math.Min(start + 64, zones);
+            ulong only = 0;
+            for (int zone = start; zone < end; zone++)
+            {
+                only |= (ulong)Unsafe.BitCast<bool, byte>(equal.Holds(_min[zone]) & equal.Holds(_max[zone])) << (zone - start);
+            }
+
+            words[w] = ~(only & Word(_hasMin, w) & Word(_hasMax, w) & Word(_exact, w));
+        }
+    }
+
     /// <summary>The bits of word <paramref name="index"/> past the table's zones, which no bound describes.</summary>
     private ulong Beyond(int index)
     {
@@ -426,6 +454,21 @@ internal sealed class ZoneTable
     private interface IBoundTest
     {
         bool Holds(ulong bound);
+    }
+
+    private readonly struct SignedEqual(long value) : IBoundTest
+    {
+        public bool Holds(ulong bound) => unchecked((long)bound) == value;
+    }
+
+    private readonly struct UnsignedEqual(ulong value) : IBoundTest
+    {
+        public bool Holds(ulong bound) => bound == value;
+    }
+
+    private readonly struct FloatEqual(double value) : IBoundTest
+    {
+        public bool Holds(ulong bound) => BitConverter.UInt64BitsToDouble(bound) == value;
     }
 
     private readonly struct SignedAbove(long value) : IBoundTest

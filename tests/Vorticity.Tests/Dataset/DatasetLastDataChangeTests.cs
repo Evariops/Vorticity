@@ -30,7 +30,7 @@ public sealed class DatasetLastDataChangeTests
         DatasetOptions options = new DatasetOptions
         {
             Seed = 0x1A57_DA7A,
-            ClusteringKey = ["Key"],
+            Layout = new DatasetLayout { SortKey = [LayoutValue.Column("Key")] },
             MarkedObjectBytes = 0,
             MarkedShare = 1,
             Write = new VortexWriteOptions { RowBlockSize = 64 },
@@ -89,7 +89,7 @@ public sealed class DatasetLastDataChangeTests
         CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         await using MemoryObjectStore store = new MemoryObjectStore();
-        DatasetOptions options = new DatasetOptions { Seed = 0x1A57_DA7A, ClusteringKey = ["Key"] };
+        DatasetOptions options = new DatasetOptions { Seed = 0x1A57_DA7A, Layout = new DatasetLayout { SortKey = [LayoutValue.Column("Key")] } };
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, ChangeRow.Schema, options, ct);
         await AppendAsync(dataset, 0, ct);
 

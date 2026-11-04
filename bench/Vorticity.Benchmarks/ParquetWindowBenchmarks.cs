@@ -47,7 +47,12 @@ public class ParquetWindowBenchmarks
         writer.WriteAsync(builder, CancellationToken.None).AsTask().GetAwaiter().GetResult();
         writer.CompleteAsync(CancellationToken.None).AsTask().GetAwaiter().GetResult();
         writer.DisposeAsync().AsTask().GetAwaiter().GetResult();
-        _session = VortexSession.Create(options => options.MapFiles = false);
+        // Every window read from the file, as Parquet's are: no segment kept across rounds.
+        _session = VortexSession.Create(options =>
+        {
+            options.MapFiles = false;
+            options.SegmentCache = new SegmentCache(0);
+        });
         Console.WriteLine($"// groups of {GroupRows} rows: {new FileInfo(_path).Length:N0} bytes");
     }
 

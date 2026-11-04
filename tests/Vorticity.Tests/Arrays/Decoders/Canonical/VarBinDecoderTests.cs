@@ -160,6 +160,89 @@ public sealed class VarBinDecoderTests
         }
     }
 
+    /// <summary>
+    /// A range of the rows reads a range of the offsets and of the validity, each row as the whole reads it: a null row an
+    /// empty view, the others cut from the whole heap.
+    /// </summary>
+    [Fact]
+    public void VarBinDecodesARangeAsTheWholeSliced()
+    {
+        string[] values = ["abcdefghijkl", "abcdefghijklm", string.Empty, "z", "a value past the inline twelve", "x"];
+        int[] ends = new int[values.Length + 1];
+        for (int i = 0; i < values.Length; i++)
+        {
+            ends[i + 1] = ends[i] + Encoding.UTF8.GetByteCount(values[i]);
+        }
+
+        using DecodeHarness h = new DecodeHarness();
+        BlobBuilder b = new BlobBuilder();
+        int heapBuffer = b.AddBuffer(Encoding.UTF8.GetBytes(string.Concat(values)));
+        int offsetsBuffer = b.AddBuffer(Offsets32(ends));
+
+        // Row 2 is null.
+        int bits = b.AddBuffer([0b0011_1011]);
+        BlobNode node = new BlobNode("vortex.varbin")
+            .WithMetadata(TestMetadata.VarBin(PType.I32))
+            .WithBuffers(heapBuffer)
+            .WithChildren(
+                new BlobNode("vortex.primitive").WithBuffers(offsetsBuffer),
+                new BlobNode("vortex.bool").WithMetadata(TestMetadata.Bool(0)).WithBuffers(bits));
+        DType utf8 = h.Types.Utf8(Nullability.Nullable);
+        int whole = h.Decode(b, node, utf8, values.Length);
+        ArrayNode root = h.Scan.Nodes.Root;
+        Assert.True(h.Scan.Decode.DecodesRange(in root));
+
+        foreach ((int start, int count) in new[] { (0, 6), (1, 3), (2, 1), (3, 3), (5, 1) })
+        {
+            int range = h.Scan.Decode.DecodeRootRange(in root, utf8, values.Length, start, count, keepEncoding: false);
+            Assert.Equal(count, h.Node(range).Length);
+            for (int row = 0; row < count; row++)
+            {
+                Assert.Equal(
+                    h.Node(whole).Views.Span.Slice((start + row) * 16, 16).SequenceEqual(new byte[16]),
+                    h.Node(range).Views.Span.Slice(row * 16, 16).SequenceEqual(new byte[16]));
+                if (start + row != 2)
+                {
+                    Assert.Equal(values[start + row], ValueAt(h.Scan, range, row));
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// A range checks the offsets it reads and no others: one that decreases outside the range is not read, inside it is
+    /// refused, as a decode of the whole refuses it.
+    /// </summary>
+    [Fact]
+    public void VarBinChecksTheOffsetsARangeReads()
+    {
+        using DecodeHarness h = new DecodeHarness();
+        BlobBuilder b = new BlobBuilder();
+        BlobNode node = VarBin(b, Encoding.UTF8.GetBytes("abcdef"), Offsets32(0, 2, 4, 3, 6), PType.I32);
+        DType utf8 = h.Types.Utf8(Nullability.NonNullable);
+        Assert.Throws<VortexFormatException>(() => h.Decode(b, node, utf8, 4));
+        ArrayNode root = h.Scan.Nodes.Root;
+
+        int first = h.Scan.Decode.DecodeRootRange(in root, utf8, 4, 0, 2, keepEncoding: false);
+        Assert.Equal("ab", ValueAt(h.Scan, first, 0));
+        Assert.Equal("cd", ValueAt(h.Scan, first, 1));
+        int last = h.Scan.Decode.DecodeRootRange(in root, utf8, 4, 3, 1, keepEncoding: false);
+        Assert.Equal("def", ValueAt(h.Scan, last, 0));
+
+        // The node is a ref struct, which a lambda cannot take.
+        bool refused = false;
+        try
+        {
+            h.Scan.Decode.DecodeRootRange(in root, utf8, 4, 2, 1, keepEncoding: false);
+        }
+        catch (VortexFormatException)
+        {
+            refused = true;
+        }
+
+        Assert.True(refused);
+    }
+
     [Fact]
     public void VarBinRejectsTheWrongChildCount()
     {

@@ -2,6 +2,7 @@ using System;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Numerics;
+using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Arrays.Metadata;
 using Vorticity.Types;
 
@@ -60,22 +61,10 @@ internal readonly ref struct Patches
     /// <summary>How many patches there are. Always at least one.</summary>
     public int Count => _count;
 
-    /// <summary>The length of the array being patched.</summary>
-    public int ArrayLength => _arrayLength;
-
-    /// <summary>The row offset the stored indices are relative to.</summary>
-    public int Offset => _offset;
-
-    /// <summary>The canonical node holding the patch values.</summary>
-    public int ValuesNodeIndex => _valuesNodeIndex;
-
-    /// <summary>Whether the descriptor declared a chunk-offsets child.</summary>
-    public bool HasChunkOffsets => _hasChunkOffsets;
-
     /// <summary>
     /// The position patch <paramref name="i"/> occupies in the parent array:
     /// <c>indices[i] - Offset</c>, validated at construction to lie in
-    /// <c>[0, <see cref="ArrayLength"/>)</c>.
+    /// <c>[0, the parent array's length)</c>.
     /// </summary>
     /// <param name="i">A patch, in <c>[0, <see cref="Count"/>)</c>.</param>
     /// <exception cref="VortexFormatException"><paramref name="i"/> is out of range.</exception>
@@ -94,7 +83,7 @@ internal readonly ref struct Patches
     /// </summary>
     /// <param name="values">The patch values, one per patch, at <paramref name="width"/> bytes.</param>
     /// <param name="width">Bytes per value.</param>
-    /// <param name="destination">The array being patched, <see cref="ArrayLength"/> rows.</param>
+    /// <param name="destination">The array being patched, every row of the parent array.</param>
     /// <remarks>
     /// The index type and the value width are properties of the node, so both are resolved once
     /// here rather than per patch: otherwise every patch pays `ReadUnsigned`'s switch and a
@@ -173,6 +162,95 @@ internal readonly ref struct Patches
             // the last one is inside the array; the caller passes only the patches of its rows, so
             // every position here is in [0, rows).
             target[(int)(Widen(indices[i]) - offset)] = source[i];
+        }
+    }
+
+    /// <summary>
+    /// Sets each patch's verdict (<see cref="Compute.Trilean"/>, one a patch in <paramref name="states"/>) at its row in
+    /// <paramref name="bits"/>, which already holds <paramref name="fill"/>'s, the fill's: the index type resolved once.
+    /// </summary>
+    /// <remarks>
+    /// Under a fill that selects no row and patches that are all known, the common case of a sparse column whose fill is
+    /// null, a patch only sets its truth, and its known bit under a null fill: a word or two a patch with no branch. Any
+    /// other mix sets each state as a row's.
+    /// </remarks>
+    public readonly void Judge(ReadOnlySpan<byte> states, byte fill, ref Compute.PredicateBits bits)
+    {
+        states = states[.._count];
+        if (fill != Compute.Trilean.True && !states.Contains(Compute.Trilean.Unknown))
+        {
+            bool known = fill == Compute.Trilean.Unknown;
+            switch (_indicesPType)
+            {
+                case PType.U8:
+                    Mark<byte>(states, known, bits.Truth, bits.Known);
+                    break;
+                case PType.U16:
+                    Mark<ushort>(states, known, bits.Truth, bits.Known);
+                    break;
+                case PType.U32:
+                    Mark<uint>(states, known, bits.Truth, bits.Known);
+                    break;
+                default:
+                    Mark<ulong>(states, known, bits.Truth, bits.Known);
+                    break;
+            }
+
+            return;
+        }
+
+        switch (_indicesPType)
+        {
+            case PType.U8:
+                Set<byte>(states, ref bits);
+                break;
+            case PType.U16:
+                Set<ushort>(states, ref bits);
+                break;
+            case PType.U32:
+                Set<uint>(states, ref bits);
+                break;
+            default:
+                Set<ulong>(states, ref bits);
+                break;
+        }
+    }
+
+    /// <summary>The patches' truths, and their known bits where <paramref name="known"/>, over a fill that selects none.</summary>
+    private readonly void Mark<TIndex>(ReadOnlySpan<byte> states, bool known, Span<ulong> truth, Span<ulong> knownBits)
+        where TIndex : unmanaged
+    {
+        ReadOnlySpan<TIndex> indices = MemoryMarshal.Cast<byte, TIndex>(_indices)[..states.Length];
+        ulong offset = (ulong)_offset;
+        if (known)
+        {
+            for (int i = 0; i < indices.Length; i++)
+            {
+                int position = (int)(Widen(indices[i]) - offset);
+                ulong bit = 1UL << (position & 63);
+                truth[position >> 6] |= states[i] == Compute.Trilean.True ? bit : 0;
+                knownBits[position >> 6] |= bit;
+            }
+
+            return;
+        }
+
+        for (int i = 0; i < indices.Length; i++)
+        {
+            int position = (int)(Widen(indices[i]) - offset);
+            truth[position >> 6] |= states[i] == Compute.Trilean.True ? 1UL << (position & 63) : 0;
+        }
+    }
+
+    /// <summary>Each patch's state as its row's, any fill and any state.</summary>
+    private readonly void Set<TIndex>(ReadOnlySpan<byte> states, ref Compute.PredicateBits bits)
+        where TIndex : unmanaged
+    {
+        ReadOnlySpan<TIndex> indices = MemoryMarshal.Cast<byte, TIndex>(_indices)[..states.Length];
+        ulong offset = (ulong)_offset;
+        for (int i = 0; i < indices.Length; i++)
+        {
+            bits.SetState((int)(Widen(indices[i]) - offset), states[i]);
         }
     }
 
@@ -355,6 +433,72 @@ internal readonly ref struct Patches
     }
 
     /// <summary>
+    /// The patch set of <paramref name="node"/>, validated, and its values: the indices at child <paramref name="first"/>,
+    /// the values next at <paramref name="valuesType"/>, then the per-chunk offsets when declared, each decoded once for
+    /// every read of the node when <paramref name="retained"/>, for this read alone otherwise.
+    /// </summary>
+    /// <remarks>
+    /// The validation is the full decode's whatever reads the patches - a malformed patch set must be refused whether
+    /// or not a take or a range happens to skip the row it corrupts. The per-chunk offsets are read, validated and then
+    /// deliberately unused: a range's first patch is found by a binary search over the indices, which they would only
+    /// shorten.
+    /// </remarks>
+    /// <returns>The patch values, one a patch at the width of <paramref name="valuesType"/>.</returns>
+    /// <exception cref="VortexFormatException">A child does not decode to its shape, or a value is null.</exception>
+    internal static ReadOnlySpan<byte> Read(
+        ArrayDecodeContext context, in ArrayNode node, int first, DType valuesType, scoped in PatchesMetadata metadata,
+        int length, bool retained, string encodingId, out Patches patches)
+    {
+        int patchCount = ArrayDecodeContext.CheckedLength(metadata.Length, encodingId, "patch count");
+        DType indicesType = context.Types.Primitive(metadata.IndicesPType, Nullability.NonNullable);
+        int indicesIndex = retained
+            ? context.DecodeWholeChild(in node, first, indicesType, patchCount)
+            : context.DecodeChild(in node, first, indicesType, patchCount);
+        int valuesIndex = retained
+            ? context.DecodeWholeChild(in node, first + 1, valuesType, patchCount)
+            : context.DecodeChild(in node, first + 1, valuesType, patchCount);
+
+        if (metadata.HasChunkOffsets)
+        {
+            int chunkOffsetsLength = ArrayDecodeContext.CheckedLength(metadata.ChunkOffsetsLength, encodingId, "patch chunk_offsets_len");
+            DType chunkOffsetsType = context.Types.Primitive(metadata.ChunkOffsetsPType, Nullability.NonNullable);
+            int chunkOffsets = retained
+                ? context.DecodeWholeChild(in node, first + 2, chunkOffsetsType, chunkOffsetsLength)
+                : context.DecodeChild(in node, first + 2, chunkOffsetsType, chunkOffsetsLength);
+            CompressedValues.RequireIndexChild(
+                context, chunkOffsets, metadata.ChunkOffsetsPType, chunkOffsetsLength, encodingId, "patch_chunk_offsets");
+        }
+
+        bool walked = context.IsNodeChecked(in node);
+        patches = Create(context, in metadata, length, indicesIndex, valuesIndex, encodingId, walked);
+        if (!walked)
+        {
+            context.MarkNodeChecked(in node);
+        }
+
+        // A span is read, so a constant child is expanded into one rather than refused.
+        CanonicalNode values = context.Canonical.GetNode(CanonicalSupport.ExpandIfConstant(context, valuesIndex));
+        if (values.Kind != CanonicalKind.Primitive)
+        {
+            CompressedThrow.ChildKind(encodingId, "patch_values", values.Kind, "a Primitive");
+        }
+
+        if (values.PType != valuesType.PType)
+        {
+            CompressedThrow.Format(
+                $"{encodingId}'s patch values decoded as {values.PType.Name()}; " +
+                $"{valuesType.PType.Name()} was required.");
+        }
+
+        if (!values.Validity.IsAllValid)
+        {
+            CompressedThrow.Format($"{encodingId} patch values must not contain nulls.");
+        }
+
+        return values.Values.Span;
+    }
+
+    /// <summary>
     /// Validates a decoded patch set. <paramref name="indicesNodeIndex"/> and
     /// <paramref name="valuesNodeIndex"/> are the already-decoded children.
     /// </summary>
@@ -362,7 +506,10 @@ internal readonly ref struct Patches
     /// <param name="metadata">The descriptor read out of the encoding's own metadata.</param>
     /// <param name="arrayLength">The parent array's row count.</param>
     /// <param name="indicesNodeIndex">The decoded <c>patch_indices</c> child.</param>
-    /// <param name="valuesNodeIndex">The decoded <c>patch_values</c> child.</param>
+    /// <param name="valuesNodeIndex">
+    /// The decoded <c>patch_values</c> child; -1 for values judged in their encoding, which only <see cref="Judge"/> may then
+    /// be asked of.
+    /// </param>
     /// <param name="encodingId">The encoding asking, for the error messages.</param>
     /// <param name="indicesAlreadyChecked">
     /// <see langword="true"/> when this scan has already walked these indices and found them
@@ -379,7 +526,7 @@ internal readonly ref struct Patches
     /// </remarks>
     public static Patches Create(
         ArrayDecodeContext ctx,
-        in PatchesMetadata metadata,
+        scoped in PatchesMetadata metadata,
         int arrayLength,
         int indicesNodeIndex,
         int valuesNodeIndex,
@@ -416,10 +563,11 @@ internal readonly ref struct Patches
         ReadOnlySpan<byte> indices = CompressedValues.RequireIndexChild(
             ctx, indicesNodeIndex, indicesPType, count, encodingId, "patch_indices");
 
-        CanonicalNode values = ctx.Canonical.GetNode(valuesNodeIndex);
-        if (values.Length != count)
+        // Values judged in their encoding rather than decoded (-1) leave the patches their indices alone: the encoding that
+        // answered was asked of as many rows.
+        if (valuesNodeIndex >= 0 && ctx.Canonical.GetNode(valuesNodeIndex).Length is int values && values != count)
         {
-            CompressedThrow.ChildLength(encodingId, "patch_values", values.Length, count);
+            CompressedThrow.ChildLength(encodingId, "patch_values", values, count);
         }
 
         // Sorted first, then the two ends. Once the sequence is known to ascend, the endpoints

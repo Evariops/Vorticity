@@ -67,29 +67,43 @@ internal sealed class ForDecoder : ArrayDecoder
         return Core(context, in node, dtype, length, wanted, selective: true, start: 0, count: wanted.Length);
     }
 
+    /// <inheritdoc/>
+    public override bool EvaluatesWithoutFullDecode => true;
+
+    /// <summary>A predicate on the values is the question it asks of their integers.</summary>
+    /// <inheritdoc/>
+    public override bool TryEvaluate(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, Compute.EncodedPredicate predicate,
+        ref Compute.PredicateBits bits)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        PType ptype = CompressedValues.RequireIntegerPrimitive(dtype, Id);
+        return Compute.IntegerQuestion.TryOf(predicate, ptype, out Compute.IntegerQuestion question)
+            && TryEvaluateIntegers(context, in node, dtype, length, in question, ref bits);
+    }
+
+    /// <summary>
+    /// Asks the encoded child the question less the reference: a value is its encoded pattern plus the reference,
+    /// wrapping, so a range of values is the range of patterns the reference below it, and a set's members are found
+    /// the reference below theirs. The child, almost always a packing, then tests its patterns as it unpacks them.
+    /// </summary>
+    /// <inheritdoc/>
+    public override bool TryEvaluateIntegers(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, in Compute.IntegerQuestion question,
+        ref Compute.PredicateBits bits)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        ulong reference = Reference(context, in node, dtype, out _);
+        return question.TryShifted(reference, out Compute.IntegerQuestion child)
+            && context.TryEvaluateIntegersChild(in node, 0, dtype, length, in child, ref bits);
+    }
+
     private static int Core(
         ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
         ReadOnlySpan<int> wanted, bool selective, int start, int count)
     {
-
-        ArrayDecodeContext.RequireBufferCount(node.BufferCount, 0, Id);
-        ArrayDecodeContext.RequireChildCount(node.ChildCount, 1, Id);
-
-        PType ptype = CompressedValues.RequireIntegerPrimitive(dtype, Id);
-
-        // The reference is interpreted against the node's own dtype, which is what makes
-        // "the reference has the array's dtype" automatic rather than a separate check.
-        TypedScalar reference = TypedScalarReader.Read(node.Metadata, dtype, context.Scalars, context.Types);
-        if (reference.IsNull)
-        {
-            CompressedThrow.Format("Reference value cannot be null.");
-        }
-
+        ulong referenceBits = Reference(context, in node, dtype, out PType ptype);
         int width = ptype.ByteWidth();
-        Span<byte> referenceBytes = stackalloc byte[8];
-        referenceBytes = referenceBytes[..width];
-        reference.WriteTo(referenceBytes, ptype);
-        ulong referenceBits = ReadBits(referenceBytes);
 
         // The encoded child carries the array's dtype unchanged, including its nullability, and the
         // node has no validity of its own: the child's is the array's. A bit-packed child adds the
@@ -156,6 +170,28 @@ internal sealed class ForDecoder : ArrayDecoder
             context, total, width, Id, out Span<byte> destination);
         IntegerKernels.AddWrapping(child.Values.Span[..total], destination, width, referenceBits);
         return context.Canonical.AddPrimitive(dtype, produced, child.Validity, ptype, output);
+    }
+
+    /// <summary>The node's reference as its pattern, checked against the node's shape and type first.</summary>
+    /// <exception cref="VortexFormatException">The node is not a frame of reference over one child, or its reference is null.</exception>
+    private static ulong Reference(ArrayDecodeContext context, in ArrayNode node, DType dtype, out PType ptype)
+    {
+        ArrayDecodeContext.RequireBufferCount(node.BufferCount, 0, Id);
+        ArrayDecodeContext.RequireChildCount(node.ChildCount, 1, Id);
+        ptype = CompressedValues.RequireIntegerPrimitive(dtype, Id);
+
+        // The reference is interpreted against the node's own dtype, which is what makes
+        // "the reference has the array's dtype" automatic rather than a separate check.
+        TypedScalar reference = TypedScalarReader.Read(node.Metadata, dtype, context.Scalars, context.Types);
+        if (reference.IsNull)
+        {
+            CompressedThrow.Format("Reference value cannot be null.");
+        }
+
+        Span<byte> referenceBytes = stackalloc byte[8];
+        referenceBytes = referenceBytes[..ptype.ByteWidth()];
+        reference.WriteTo(referenceBytes, ptype);
+        return ReadBits(referenceBytes);
     }
 
     private static ulong ReadBits(ReadOnlySpan<byte> value) => value.Length switch

@@ -61,6 +61,41 @@ public sealed partial class DistributionTests
         }
     }
 
+    /// <summary>
+    /// A sketch's bytes merged into an empty sketch, and an empty sketch merged with another, take their arrays from a lane's
+    /// shelf once, in the form their buckets need: for 3 buckets the two sparse arrays of four, for 40 a window, where adding
+    /// the buckets one by one took the sparse arrays again at each doubling, then the window, ten arrays a sketch. The
+    /// buckets are the values'. Every group of the p99 by service and hour over a week of S2's requests, its partials in
+    /// hand, took its arrays so, under the lock of the process's shelf that 32 lanes share.
+    /// </summary>
+    [Fact]
+    public void AnEmptySketchTakesItsArraysOnceFromTheShelf()
+    {
+        foreach (int buckets in (int[])[3, 40])
+        {
+            using QueryMemory memory = new QueryMemory(new QueryMemoryBudget(64 << 20));
+            ArrayShelf shelf = new ArrayShelf(memory);
+            QuantileSketch values = new QuantileSketch(4);
+            values.AddAll<double>([.. Enumerable.Range(0, buckets).Select(static power => Math.Pow(2, power))]);
+            ArrayBufferWriter<byte> bytes = new ArrayBufferWriter<byte>();
+            values.Encode(bytes);
+
+            QuantileSketch read = new QuantileSketch(4, shelf);
+            read.MergeEncoded(bytes.WrittenSpan);
+            long handed = shelf.Handed;
+            QuantileSketch merged = new QuantileSketch(4, shelf);
+            merged.Merge(read);
+            Assert.Equal(values.Buckets(), read.Buckets());
+            Assert.Equal(values.Buckets(), merged.Buckets());
+            Assert.Equal(buckets <= QuantileSketch.SparseLimit ? 2 : 1, handed);
+            Assert.Equal(2 * handed, shelf.Handed);
+
+            read.Release();
+            merged.Release();
+            shelf.LetGo();
+        }
+    }
+
     /// <summary>The bytes of a sketch cut short, or with bytes past its buckets, do not merge.</summary>
     [Fact]
     public void BytesThatHoldNoSketchDoNotMerge()

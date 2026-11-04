@@ -109,7 +109,6 @@ public sealed partial class VortexFileWriter
     {
         ChunkColumns columns = _chunkColumns ??= ChunkColumns.Take(this);
         columns.Prepare(_fieldCount, _arrayEncodings);
-        columns.Flush();
         int count = 0;
         for (int field = 0; field < gathering.Length; field++)
         {
@@ -127,6 +126,7 @@ public sealed partial class VortexFileWriter
 
         try
         {
+            columns.Flush();
             Span<int> items = fan.Items(count);
             int next = 0;
             for (int field = 0; field < gathering.Length; field++)
@@ -454,12 +454,12 @@ public sealed partial class VortexFileWriter
             _rows = rows;
             _firstBlock = firstBlock;
             _blocks = blocks;
-            _flushing = false;
         }
 
         /// <summary>
         /// Readies a flush: the columns given to their gatherings (see <see cref="Gather"/>) write
-        /// what they hold, whatever their targets, and no other column writes anything.
+        /// what they hold, whatever their targets, and no other column writes anything, until the run
+        /// drops what it held (<see cref="Drop"/>).
         /// </summary>
         internal void Flush() => _flushing = true;
 
@@ -579,21 +579,30 @@ public sealed partial class VortexFileWriter
                 }
 
                 // A shredded variant's chunk is its residual and its typed columns, which the
-                // statistics of its rows as they came do not describe.
+                // statistics of its rows as they came do not describe; a column written against an
+                // object dictionary's, its codes.
                 ChunkStats stats = _stats[field];
-                if (writer._shredding?[field] is { } plan)
+                Types.Variants.VariantShredding? plan = writer._shredding?[field];
+                if (plan is null && writer.Codes(field))
+                {
+                    local = writer.Coded(field, lane.Arena, local);
+                    stats = default;
+                }
+
+                lane.Blobs.ColumnLevel = writer.ZstdLevelOf(field);
+                if (plan is not null)
                 {
                     Indexes.ChunkBlockBounds? bounds = writer.BoundsFor(field);
-                    local = VariantShredder.Shred(lane.Arena, new Types.DTypeArena(), local, plan, bounds);
-                    stats = default;
+                    _blobs[field] = VariantShredder.Write(lane.Blobs, lane.Arena, local, plan, bounds, lane.Encodings, writer._compress);
                     if (bounds is not null)
                     {
                         _bounds![field] = bounds;
                     }
                 }
-
-                lane.Blobs.ColumnLevel = writer.ZstdLevelOf(field);
-                _blobs[field] = ArrayBlobWriter.Write(lane.Blobs, lane.Arena, local, lane.Encodings, writer._compress, stats);
+                else
+                {
+                    _blobs[field] = ArrayBlobWriter.Write(lane.Blobs, lane.Arena, local, lane.Encodings, writer._compress, stats);
+                }
                 KeepFresh(field, lane.Encodings);
             }
             finally
@@ -672,8 +681,11 @@ public sealed partial class VortexFileWriter
                 _blobs[field] = default;
             }
 
-            // A failed ingest across leaves counts behind; the next chunk starts from none.
+            // A failed ingest across leaves counts behind; the next chunk starts from none. A flush ends
+            // with its run: left set, the next run, this writer's or the next one's that takes the
+            // columns from the spares, would write none of its chunk's columns.
             _fused = false;
+            _flushing = false;
             Array.Clear(_parts);
         }
     }
@@ -718,14 +730,14 @@ public sealed partial class VortexFileWriter
                 lane._fan = WorkFan.Rent(writer._lanes, writer._budget);
             }
 
-            if (lane._blobs.FrameRows != writer._rowBlock || lane._blobs.SizeFirst != writer._sizeFirst
-                || lane._blobs.ZstdLevel != writer._zstdLevel || lane._blobs.Fan != lane._fan)
+            if (lane._blobs.FrameRows != writer._rowBlock || lane._blobs.GranuleRows != writer.GranuleReadRows
+                || lane._blobs.SizeFirst != writer._sizeFirst || lane._blobs.ZstdLevel != writer._zstdLevel || lane._blobs.Fan != lane._fan)
             {
                 lane._blobs.Dispose();
                 lane._blobs = new ArrayBlobWriter.Workspace
                 {
-                    FrameRows = writer._rowBlock, SizeFirst = writer._sizeFirst, ZstdLevel = writer._zstdLevel,
-                    OwnTypes = true, Fan = lane._fan,
+                    FrameRows = writer._rowBlock, GranuleRows = writer.GranuleReadRows, SizeFirst = writer._sizeFirst,
+                    ZstdLevel = writer._zstdLevel, OwnTypes = true, Fan = lane._fan,
                 };
             }
 

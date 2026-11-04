@@ -103,6 +103,12 @@ internal sealed record IndexEntry(
 
     /// <summary>The class the path's values are read as, one entry per class; null for an entry on a column.</summary>
     internal Types.Variants.PathClass? VariantClass { get; init; }
+
+    /// <summary>
+    /// The bytes the index wrote, every region its runs name, a Bloom filter's tree whole, as its writer counted them; 0 where
+    /// they are its runs' payloads alone, or unknown. Not in the directory: the table of contents says it.
+    /// </summary>
+    internal long WrittenBytes { get; init; }
 }
 
 /// <summary>
@@ -798,8 +804,8 @@ internal sealed record IndexDirectory(
     }
 
     /// <summary>
-    /// The column <c>TryParse</c> asks its predicate of for an entry on the root itself, a table of a synopsis or a slice's
-    /// chunks: a reader that asks only of some columns says whether it wants them too.
+    /// The column <c>TryParse</c> asks its predicate of for an entry on the root itself, a table of a synopsis or the
+    /// chunks' directory: a reader that asks only of some columns says whether it wants them too.
     /// </summary>
     internal const uint RootColumn = uint.MaxValue;
 

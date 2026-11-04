@@ -24,9 +24,8 @@ namespace Vorticity.Dataset;
 internal static class ObjectBound
 {
     /// <summary>
-    /// The most bytes a rewrite writes for each byte it reads. On the lifecycle bench's five scenes, measured when the
-    /// library compacted by periods too (periods of a day and of an hour, with and without late rows, leveled in order and under late
-    /// rows), a job wrote 1.024 bytes a byte at worst, a merge of neighbours 1.016 and a seal 1.000.
+    /// The most bytes a rewrite writes for each byte it reads. On the lifecycle bench's five scenes (leveled in order and under late
+    /// rows, among others), a job wrote 1.024 bytes a byte at worst, a merge of neighbours 1.016 and a seal 1.000.
     /// </summary>
     internal const double OutPerIn = 1.03;
 

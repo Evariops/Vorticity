@@ -30,9 +30,19 @@ internal sealed partial class DatasetKeyCursor
         private byte[] _next = [];
         private int _nextLength;
 
-        internal LevelWalk(DatasetKeyCursor owner, int number, DatasetTree tree)
+        // Where its bound ends: the key's values the walk orders by, past the partition.
+        private int _boundEnd;
+
+        // The partition a walk of one partition keeps to, as it leads the tree's keys, and the tree key of its first object;
+        // empty for a level's whole walk.
+        private readonly byte[] _partition;
+        private readonly byte[] _floor;
+
+        internal LevelWalk(DatasetKeyCursor owner, int number, DatasetTree tree, byte[]? partition = null, byte[]? floor = null)
         {
             _owner = owner;
+            _partition = partition ?? [];
+            _floor = floor ?? [];
             _path = new Frame[tree.Depth];
             Number = number;
             Disjoint = owner._version.Levels.IsDisjoint(number);
@@ -42,25 +52,38 @@ internal sealed partial class DatasetKeyCursor
         internal int Number { get; }
 
         /// <summary>
-        /// Whether the level's objects are key-disjoint, in the order of their keys: every level above
-        /// 0 but the late level of a dataset of periods, whose objects overlap.
+        /// Whether the level's objects are key-disjoint, in the order of their keys: every level above 0.
         /// </summary>
         internal bool Disjoint { get; }
 
-        /// <summary>Whether an object lies past the place.</summary>
-        internal bool HasNext => _nextLength > 0;
+        /// <summary>Whether an object lies past the place: of the walk's partition, for a walk of one.</summary>
+        internal bool HasNext => _nextLength > 0 && NextKey.StartsWith(_partition);
+
+        /// <summary>Whether the object past the place lies in a partition before the walk's.</summary>
+        internal bool BeforePartition => _nextLength > 0 && _partition.Length > 0 && NextKey.SequenceCompareTo(_partition) < 0;
 
         /// <summary>The tree key of the object just past the place; empty when none is, or before the first seek.</summary>
         internal ReadOnlySpan<byte> NextKey => _next.AsSpan(0, _nextLength);
 
-        /// <summary>The bound of the object just past the place, its tree key without the uid; empty when none is.</summary>
-        internal ReadOnlySpan<byte> NextBound => _next.AsSpan(0, Math.Max(_nextLength - VortexDataset.UidBytes, 0));
+        /// <summary>
+        /// The bound of the object just past the place: its tree key's values the walk orders by, past the partition and
+        /// without the uid; empty when none is.
+        /// </summary>
+        internal ReadOnlySpan<byte> NextBound => _nextLength == 0 ? default : _next.AsSpan(_partition.Length, _boundEnd - _partition.Length);
 
-        /// <summary>Whether an object lies before the place.</summary>
+        /// <summary>
+        /// Whether an object lies before the place: of the walk's partition, for a walk of one, which it is unless the object
+        /// past the place is the partition's first, or one before it.
+        /// </summary>
         internal bool HasPrevious
         {
             get
             {
+                if (_partition.Length > 0 && _nextLength > 0 && TreePage.Compare(NextKey, _floor) <= 0)
+                {
+                    return false;
+                }
+
                 for (int height = _deepest; height >= 0; height--)
                 {
                     if (_path[height].At > 0)
@@ -133,7 +156,7 @@ internal sealed partial class DatasetKeyCursor
             Frame leaf = _path[_deepest];
             _path[_deepest].At = leaf.At + 1;
             Moved();
-            return _owner.SlotOf(leaf.Page, leaf.Slots!, leaf.At, Number);
+            return _owner.SlotOf(leaf.Page, leaf.Slots!, leaf.At);
         }
 
         /// <summary>Moves the place before the object just before it, and returns that object's state.</summary>
@@ -164,7 +187,7 @@ internal sealed partial class DatasetKeyCursor
             Frame leaf = _path[_deepest];
             _path[_deepest].At = leaf.At - 1;
             Moved();
-            return _owner.SlotOf(leaf.Page, leaf.Slots!, leaf.At - 1, Number);
+            return _owner.SlotOf(leaf.Page, leaf.Slots!, leaf.At - 1);
         }
 
         /// <summary>
@@ -223,6 +246,7 @@ internal sealed partial class DatasetKeyCursor
 
                     key.CopyTo(_next);
                     _nextLength = key.Length;
+                    _boundEnd = _partition.Length + _owner.BoundLength(_next.AsSpan(_partition.Length, Math.Max(_nextLength - VortexDataset.UidBytes - _partition.Length, 0)));
                     return;
                 }
             }

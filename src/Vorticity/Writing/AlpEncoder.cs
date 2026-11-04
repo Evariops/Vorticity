@@ -5,6 +5,7 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
 using System.Runtime.Intrinsics.X86;
+using Vorticity.Aggregating;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Arrays.Decoders.Compressed;
@@ -99,12 +100,12 @@ internal readonly struct AlpPlan
 
         if (_patchIndices.Length > 0)
         {
-            ArrayPool<int>.Shared.Return(_patchIndices);
+            WorkArrays.Return(_patchIndices);
         }
 
         if (!valuesHanded && _patchValues.Length > 0)
         {
-            ArrayPool<byte>.Shared.Return(_patchValues);
+            WorkArrays.Return(_patchValues);
         }
     }
 
@@ -113,7 +114,7 @@ internal readonly struct AlpPlan
     {
         if (_encoded.Length > 0)
         {
-            ArrayPool<byte>.Shared.Return(_encoded);
+            WorkArrays.Return(_encoded);
         }
     }
 
@@ -167,7 +168,7 @@ internal readonly struct AlpPlan
         // hand the heap a whole copy of it. The rental goes back when the plan is refused here, or
         // when the writer has laid the integers in the arena.
         int encodedLength = rows * sizeof(long);
-        byte[] encodedBytes = ArrayPool<byte>.Shared.Rent(Math.Max(encodedLength, 1));
+        byte[] encodedBytes = WorkArrays.Rent<byte>(Math.Max(encodedLength, 1));
         Span<long> encoded = MemoryMarshal.Cast<byte, long>(encodedBytes.AsSpan(0, encodedLength));
 
         // The patch buffers are rented and sized for the worst case, which is every row a patch. A
@@ -175,8 +176,8 @@ internal readonly struct AlpPlan
         // column built to defeat ALP turns every row into a patch, and the two lists reallocating
         // their way up dominate the write. Rented, so the worst case costs the pool and not the
         // heap.
-        int[] indices = ArrayPool<int>.Shared.Rent(rows);
-        double[] patches = ArrayPool<double>.Shared.Rent(rows);
+        int[] indices = WorkArrays.Rent<int>(rows);
+        double[] patches = WorkArrays.Rent<double>(rows);
         bool kept = false;
         try
         {
@@ -197,11 +198,11 @@ internal readonly struct AlpPlan
         }
         finally
         {
-            ArrayPool<int>.Shared.Return(indices);
-            ArrayPool<double>.Shared.Return(patches);
+            WorkArrays.Return(indices);
+            WorkArrays.Return(patches);
             if (!kept)
             {
-                ArrayPool<byte>.Shared.Return(encodedBytes);
+                WorkArrays.Return(encodedBytes);
             }
         }
     }
@@ -215,10 +216,10 @@ internal readonly struct AlpPlan
         (int e, int f) = BestExponentsSingle(values, mask, rows);
 
         int encodedLength = rows * sizeof(int);
-        byte[] encodedBytes = ArrayPool<byte>.Shared.Rent(Math.Max(encodedLength, 1));
+        byte[] encodedBytes = WorkArrays.Rent<byte>(Math.Max(encodedLength, 1));
         Span<int> encoded = MemoryMarshal.Cast<byte, int>(encodedBytes.AsSpan(0, encodedLength));
-        int[] indices = ArrayPool<int>.Shared.Rent(rows);
-        float[] patches = ArrayPool<float>.Shared.Rent(rows);
+        int[] indices = WorkArrays.Rent<int>(rows);
+        float[] patches = WorkArrays.Rent<float>(rows);
         bool kept = false;
         try
         {
@@ -239,11 +240,11 @@ internal readonly struct AlpPlan
         }
         finally
         {
-            ArrayPool<int>.Shared.Return(indices);
-            ArrayPool<float>.Shared.Return(patches);
+            WorkArrays.Return(indices);
+            WorkArrays.Return(patches);
             if (!kept)
             {
-                ArrayPool<byte>.Shared.Return(encodedBytes);
+                WorkArrays.Return(encodedBytes);
             }
         }
     }
@@ -382,7 +383,7 @@ internal readonly struct AlpPlan
             return [];
         }
 
-        T[] copy = ArrayPool<T>.Shared.Rent(patches.Length);
+        T[] copy = WorkArrays.Rent<T>(patches.Length);
         patches.CopyTo(copy);
         return copy;
     }

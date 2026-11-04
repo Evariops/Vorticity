@@ -28,9 +28,9 @@ public sealed partial class IdentifierPostingsTests
             List<Visit> rows = [];
             await using (VortexDataset dataset = await VortexDataset.CreateAsync(store, Visit.Schema, new DatasetOptions
             {
-                ClusteringKey = [nameof(Visit.At)],
+                Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(Visit.At)).Truncate(CalendarUnit.Hour), SortKey = [LayoutValue.Column(nameof(Visit.At))], Organization = LayoutOrganization.Leveled },
                 ShreddedPaths = declared ? ["Attributes['rare'].AsInt64()"] : null,
-                Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour) }, ContentsObjectBytes = 0, SliceTargetRows = 500,
+                ContentsObjectBytes = 0,
             }, Ct))
             {
                 for (int part = 0; part < 16; part++)
@@ -82,7 +82,7 @@ public sealed partial class IdentifierPostingsTests
             await using MemoryObjectStore store = new MemoryObjectStore();
             await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Visit.Schema, new DatasetOptions
             {
-                ClusteringKey = [nameof(Visit.At)],
+                Layout = new DatasetLayout { SortKey = [LayoutValue.Column(nameof(Visit.At))] },
                 ShreddedPaths = ["Attributes['status'].AsInt64()"],
                 ShredOnAppend = onAppend,
             }, Ct);
@@ -103,6 +103,9 @@ public sealed partial class IdentifierPostingsTests
                 Assert.Equal(
                     rows.Where(r => r.Attributes["status"]?.AsInt64() >= 400).Select(r => r.Attributes["status"]?.AsInt64()).Order(),
                     (await dataset.Scan<Visit>().Where(r => r.Attributes["status"].AsInt64() >= 400).Select(r => r.Attributes["status"].AsInt64()).ToListAsync(Ct)).Order());
+
+                // The copies of the objects shredded are made beside the first question.
+                await dataset.LevelZero.WhenMadeAsync();
                 Assert.Equal(onAppend ? 3 * asked : 0, dataset.LevelZero.AsAppended);
                 Assert.Equal(onAppend ? 0 : 3, dataset.LevelZero.Shredded);
             }
@@ -129,8 +132,7 @@ public sealed partial class IdentifierPostingsTests
         await using MemoryObjectStore store = new MemoryObjectStore();
         DatasetOptions options = new DatasetOptions
         {
-            ClusteringKey = [nameof(Visit.At)],
-            Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour) }, ContentsObjectBytes = 0, SliceTargetRows = 500,
+            Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(Visit.At)).Truncate(CalendarUnit.Hour), SortKey = [LayoutValue.Column(nameof(Visit.At))], Organization = LayoutOrganization.Leveled }, ContentsObjectBytes = 0,
         };
         await using VortexDataset writer = await VortexDataset.CreateAsync(store, Visit.Schema, options, Ct);
         await using VortexDataset compactor = await VortexDataset.OpenAsync(store, options, Ct);
@@ -164,7 +166,6 @@ public sealed partial class IdentifierPostingsTests
         await AppendAsync(0, 9);
         ulong declared = await writer.SetShreddedPathsAsync([Rare], Ct);
         Assert.Equal([Rare], writer.Snapshot.Header.ShreddedPaths);
-        Assert.Equal(DatasetFeatures.ShreddedPaths, writer.Snapshot.Header.Features & DatasetFeatures.ShreddedPaths);
         Assert.Equal(declared, await writer.SetShreddedPathsAsync([Rare], Ct));
         await Assert.ThrowsAsync<InvalidOperationException>(async () => await stale.SetShreddedPathsAsync(["Attributes['route'].AsString()"], Ct));
         Assert.Equal(declared, await stale.SetShreddedPathsAsync([Rare], Ct));
@@ -222,7 +223,7 @@ public sealed partial class IdentifierPostingsTests
         await using MemoryObjectStore store = new MemoryObjectStore();
         ArgumentException refused = await Assert.ThrowsAsync<ArgumentException>(async () => await VortexDataset.CreateAsync(store, Visit.Schema, new DatasetOptions
         {
-            ClusteringKey = [nameof(Visit.At)],
+            Layout = new DatasetLayout { SortKey = [LayoutValue.Column(nameof(Visit.At))] },
             ShreddedPaths = [path],
         }, Ct));
         Assert.Contains("Attributes['status'].AsInt64()", refused.Message, StringComparison.Ordinal);

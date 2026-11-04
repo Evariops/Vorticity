@@ -22,8 +22,9 @@ internal sealed class DatasetSnapshot
     private ParsedPage?[]? _roots;
 
     internal DatasetSnapshot(
-        CommitObject commit, CommitPageSource pages, ObjectCache objects, DateTimeOffset knownAt, DatasetSchema? previous = null)
+        CommitObject commit, CommitPageSource pages, ObjectCache objects, DateTimeOffset knownAt, PathCosts costs, DatasetSchema? previous = null)
     {
+        Costs = costs;
         Commit = commit;
         Header = commit.Header;
         Levels = DatasetLevels.Of(Header);
@@ -32,6 +33,9 @@ internal sealed class DatasetSnapshot
         _objects = objects;
         _knownAt = knownAt.UtcTicks;
     }
+
+    /// <summary>What a path costs an object of the version, at the dataset's cost profile.</summary>
+    internal PathCosts Costs { get; }
 
     /// <summary>The version's commit object, as the handle read it or wrote it.</summary>
     internal CommitObject Commit { get; }
@@ -118,6 +122,22 @@ internal sealed class DatasetSnapshot
 
             yield return new PositionedObject(_objects.Entries.Of(held.Value), firstRow) { Level = level, TreeKey = held.Key };
         }
+    }
+
+    /// <summary>The index of <paramref name="partition"/> the version holds (D13), or null for none.</summary>
+    /// <param name="partition">The partition's value, row-encoded as it leads its objects' tree keys; empty for a dataset without one.</param>
+    /// <param name="cancellationToken">Cancels the reads of the tree.</param>
+    internal async ValueTask<PartitionIndexEntry?> PartitionIndexAsync(ReadOnlyMemory<byte> partition, CancellationToken cancellationToken)
+    {
+        if (Levels.PartitionIndexes.IsEmpty)
+        {
+            return null;
+        }
+
+        byte[] key = PartitionIndexEntry.TreeKeyOf(partition.Span);
+        return await Levels.PartitionIndexes.FindAsync(key, Pages, cancellationToken).ConfigureAwait(false) is { } found
+            ? PartitionIndexEntry.FromBytes(found.Key.Span, found.Value.Span)
+            : null;
     }
 
     /// <summary>

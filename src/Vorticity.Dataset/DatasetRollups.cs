@@ -11,15 +11,16 @@ using Vorticity.Keys;
 namespace Vorticity.Dataset;
 
 /// <summary>
-/// The job that writes rollups (<see cref="RollupEntry"/>): over the deepest level of a dataset with a key, the runs of
-/// consecutive objects, then of rollups, rank by rank, that no rollup the version holds sums yet, each summed from what
-/// its children keep, written to the store and put by a commit that checks it summed what the version holds.
+/// The job that writes rollups (<see cref="RollupEntry"/>): over the deepest level of a dataset with a key or a partition,
+/// the consolidated one under tiers, the runs of consecutive objects, then of rollups, rank by rank, that no rollup the
+/// version holds sums yet, each summed from what its children keep, written to the store and put by a commit that checks it
+/// summed what the version holds.
 /// </summary>
 /// <remarks>
 /// <para>
 /// A run is cut by its items' tree keys, as the pages of a tree are: it ends after an item whose key hashes, under the
-/// dataset's seed and the rank, below 2^64 / N, N the fanout; at rank 1, it also ends where the clustering value changes,
-/// so that a rollup of rank 1 holds one value. A run is a function of the keys alone: an object put or taken away moves the
+/// dataset's seed and the rank, below 2^64 / N, N the fanout; at rank 1, it also ends where the partition changes, so that
+/// a rollup of rank 1 holds one partition, or a part of one. A run is a function of the keys alone: an object put or taken away moves the
 /// end of its own run and no other, and the rollups of the others stay. The last run of a rank, which no end closed yet,
 /// waits.
 /// </para>
@@ -35,13 +36,13 @@ internal static class DatasetRollups
 
     /// <summary>
     /// Writes the rollups the latest version lacks, rank by rank, a commit a rank; the rollups put. None for a dataset with
-    /// no key, by periods, on a sealed store, with a fanout of 0, or with no level past 0. With <paramref name="refreshed"/>,
+    /// no key, on a sealed store, with a fanout of 0, or with no level past 0. With <paramref name="refreshed"/>,
     /// the handle stands on the latest version already, which the first rank reads as it is: a compaction loop's turn.
     /// </summary>
     internal static async ValueTask<int> RollUpAsync(VortexDataset dataset, CancellationToken cancellationToken, bool refreshed = false)
     {
         int fanout = dataset.Options.RollupFanout;
-        if (fanout < 2 || dataset.Snapshot.Schema.Key is null || dataset.Snapshot.Levels.ByPeriods || dataset.Store is SealedObjectStore { Seals: true })
+        if (fanout < 2 || dataset.Snapshot.Schema.RollupKey is null || dataset.Store is SealedObjectStore { Seals: true })
         {
             return 0;
         }
@@ -55,7 +56,7 @@ internal static class DatasetRollups
             }
 
             DatasetSnapshot version = dataset.Snapshot;
-            if (fanout < 2 || version.Schema.Key is not { } key || version.Levels.ByPeriods || dataset.Store is SealedObjectStore { Seals: true }
+            if (fanout < 2 || version.Schema.RollupKey is not { } key || dataset.Store is SealedObjectStore { Seals: true }
                 || Bottom(version.Levels) is not int bottom)
             {
                 return put;
@@ -75,7 +76,7 @@ internal static class DatasetRollups
                 objects.Add(new PositionedObject(ObjectEntry.FromBytes(walked.Entry.Value), walked.FirstRow) { Level = bottom, TreeKey = walked.Entry.Key });
             }
 
-            List<List<Run>> ranks = Ranks(objects, version.Schema.Cut, key, version.Header.Seed, fanout);
+            List<List<Run>> ranks = Ranks(objects, version.Schema.Cut, version.Header.Seed, fanout);
             if (rank > ranks.Count)
             {
                 return put;
@@ -140,11 +141,11 @@ internal static class DatasetRollups
     }
 
     /// <summary>
-    /// The runs of every rank: rank 1 over <paramref name="objects"/>, cut where the clustering value changes and by their
-    /// keys' hashes; rank k + 1 over rank k's runs, by the keys of their first objects. The ranks go up while the one below
-    /// holds two runs or more.
+    /// The runs of every rank: rank 1 over <paramref name="objects"/>, cut where the partition changes, which leads their
+    /// tree keys, and by their keys' hashes; rank k + 1 over rank k's runs, by the keys of their first objects. The ranks go
+    /// up while the one below holds two runs or more.
     /// </summary>
-    private static List<List<Run>> Ranks(List<PositionedObject> objects, ValueCut? values, ClusteringKey key, ulong seed, int fanout)
+    private static List<List<Run>> Ranks(List<PositionedObject> objects, ValueCut? values, ulong seed, int fanout)
     {
         List<List<Run>> ranks = [];
         if (objects.Count == 0)
@@ -152,15 +153,8 @@ internal static class DatasetRollups
             return ranks;
         }
 
-        // Each object's clustering value, which a run of rank 1 holds one of.
-        FilterLiteral?[] images = new FilterLiteral?[objects.Count];
-        for (int i = 0; values is not null && i < images.Length; i++)
-        {
-            images[i] = values.Single(objects[i].Summaries(key));
-        }
-
         List<ReadOnlyMemory<byte>> keys = objects.ConvertAll(static held => held.TreeKey);
-        ranks.Add(Cut(keys, seed, 1, fanout, i => i + 1 < images.Length && !SameValue(images[i], images[i + 1])));
+        ranks.Add(Cut(keys, seed, 1, fanout, i => i + 1 < keys.Count && values is not null && !values.Same(keys[i].Span, keys[i + 1].Span)));
         while (ranks[^1].Count >= 2)
         {
             List<Run> lower = ranks[^1];
@@ -180,7 +174,7 @@ internal static class DatasetRollups
     }
 
     /// <summary>
-    /// The runs of <paramref name="keys"/>, tree keys: each ends after a key whose clustering key, without the uid that ends
+    /// The runs of <paramref name="keys"/>, tree keys: each ends after a key whose sort key, without the uid that ends
     /// it, hashes under the rank's seed below 2^64 / fanout, or where <paramref name="ends"/> says. An object rewritten with
     /// the same rows keeps its run's end.
     /// </summary>
@@ -234,9 +228,6 @@ internal static class DatasetRollups
         return (first, last);
     }
 
-    private static bool SameValue(FilterLiteral? left, FilterLiteral? right) =>
-        left is { } one && right is { } other ? KeyCursor.Compare(one, other) == 0 : left is null && right is null;
-
     /// <summary>The rollups of level <paramref name="level"/> and rank <paramref name="rank"/> the version holds, by the hex of the first tree key each covers.</summary>
     private static async ValueTask<Dictionary<string, RollupEntry>> RollupsAsync(DatasetSnapshot version, int level, int rank, CancellationToken cancellationToken)
     {
@@ -264,7 +255,7 @@ internal static class DatasetRollups
     /// has rows a delete marked, or columns of an earlier schema.
     /// </summary>
     private static async ValueTask<RollupEntry?> FromObjectsAsync(
-        VortexDataset dataset, DatasetSnapshot version, ClusteringKey key, int level, List<PositionedObject> objects, Run run, CancellationToken cancellationToken)
+        VortexDataset dataset, DatasetSnapshot version, DatasetKey key, int level, List<PositionedObject> objects, Run run, CancellationToken cancellationToken)
     {
         RollupBuilder builder = new RollupBuilder(level, 1, key, version.Schema.Cut);
         for (int i = run.First; i < run.First + run.Count; i++)
@@ -295,7 +286,7 @@ internal static class DatasetRollups
     /// objects, its own written; null when one of them has no rollup the version holds.
     /// </summary>
     private static async ValueTask<RollupEntry?> FromRollupsAsync(
-        VortexDataset dataset, DatasetSnapshot version, ClusteringKey key, int level, int rank, List<PositionedObject> objects, List<List<Run>> ranks, Run run,
+        VortexDataset dataset, DatasetSnapshot version, DatasetKey key, int level, int rank, List<PositionedObject> objects, List<List<Run>> ranks, Run run,
         Dictionary<string, RollupEntry> below, CancellationToken cancellationToken)
     {
         RollupBuilder builder = new RollupBuilder(level, rank, key, version.Schema.Cut);

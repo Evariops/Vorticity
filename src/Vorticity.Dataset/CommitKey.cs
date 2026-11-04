@@ -92,4 +92,10 @@ internal static class CommitKey
 
     /// <summary>The key of a rollup's object, of the form <c>rollups/&lt;uid&gt;.vxr</c>, the uid its 32 hex digits.</summary>
     public static string ForRollup(UInt128 uid) => RollupPrefix + uid.ToString("x32", CultureInfo.InvariantCulture) + RollupSuffix;
+
+    /// <summary>
+    /// The prefix of the partials of question families an earlier version learned and kept, and of their texts, which nothing
+    /// reads now and a vacuum deletes.
+    /// </summary>
+    public const string LearnedPrefix = "learned/";
 }

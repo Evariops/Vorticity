@@ -144,7 +144,7 @@ internal sealed class CommitObjectBuilder : IPageSink
 
             byte[] bytes = new byte[length];
             Span<byte> destination = bytes;
-            CommitFormat.WritePreamble(destination, headerLength, CommitFormat.For(header));
+            CommitFormat.WritePreamble(destination, headerLength, CommitFormat.Version);
             headerBytes.CopyTo(destination[CommitFormat.PreambleBytes..]);
 
             int at = (int)pagesStart;

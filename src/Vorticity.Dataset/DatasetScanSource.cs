@@ -15,7 +15,8 @@ namespace Vorticity.Dataset;
 /// scan, its batches count the dataset's rows, and an answer takes the cheapest proof each object
 /// offers: its entry, its statistics, then its blocks.
 /// </summary>
-internal sealed class DatasetScanSource : ScanSource
+internal sealed partial class DatasetScanSource
+    : ScanSource, IRowsCapability, IStatisticsCapability, IKeysCapability, IStatesCapability, ITasksCapability, ICostCapability
 {
     private readonly VortexDataset _dataset;
     private readonly DatasetSnapshot _version;
@@ -26,32 +27,69 @@ internal sealed class DatasetScanSource : ScanSource
         _version = version;
     }
 
+    // The lookup of the partitions' indexes for the filter the question's lanes ask it with, made by the first that asks.
+    private Locates? _locates;
+
+    /// <summary>
+    /// The lookup of the values <paramref name="filter"/> seeks of <paramref name="columns"/> over the version's partition
+    /// indexes (<see cref="PartitionLocates.Of"/>), one for every lane of the question, which asks it with the question's
+    /// filter: each partition's index read once for the question. Each lane's own, QP-2's pods of a route at 32 lanes read
+    /// the same three regions of their partition's index 36 times, 37 MB of the 220 the question read.
+    /// </summary>
+    internal PartitionLocates? LocatesOf(VortexExpr filter, List<int> columns)
+    {
+        if (Volatile.Read(ref _locates) is { } held && ReferenceEquals(held.Filter, filter))
+        {
+            return held.Lookup;
+        }
+
+        Locates made = new Locates(filter, PartitionLocates.Of(_dataset, _version, filter, columns));
+        return Interlocked.CompareExchange(ref _locates, made, null) is { } raced && ReferenceEquals(raced.Filter, filter) ? raced.Lookup : made.Lookup;
+    }
+
+    /// <summary>The lookup of the partitions' indexes made for <see cref="Filter"/>; null where none answers it.</summary>
+    private sealed record Locates(VortexExpr Filter, PartitionLocates? Lookup);
+
+    /// <summary>What the question's scans read of its objects' indexes, for its other scans (<see cref="Indexes.QuestionReads"/>); made at the first.</summary>
+    internal Indexes.QuestionReads Reads => LazyInitializer.EnsureInitialized(ref _reads);
+
+    private Indexes.QuestionReads? _reads;
+
     internal override VortexSchema Schema => _version.Schema.Columns;
 
     internal override VortexSession Session => _dataset.Session;
 
+    internal override LogicalSource Logical => new LogicalSource(LogicalSourceKind.Dataset, _version.Version);
+
+    internal override IRowsCapability Rows => this;
+
+    internal override IStatisticsCapability Statistics => this;
+
+    internal override IKeysCapability Keys => this;
+
+    /// <summary>Its, when its jobs' objects keep counts: those answer some aggregations as states (<see cref="CountsAnswer"/>).</summary>
+    internal override IStatesCapability? States => _version.MayKeepCounts ? this : null;
+
+    internal override ITasksCapability Tasks => this;
+
+    internal override ICostCapability Cost => this;
+
+    /// <summary>The dataset's: its options' profile, or its store's.</summary>
+    public IO.CostProfile Profile => _dataset.Profile;
+
     /// <summary>The rows of every object of the version, deleted ones counted, as its levels hold them: what bounds a table of a key's groups by value.</summary>
-    internal override long RowBound => _version.RowCount;
+    public long RowBound => _version.RowCount;
 
     /// <summary>Its objects are read from its store, a request each.</summary>
-    internal override bool ReadsRoundTrips => true;
+    public bool ReadsRoundTrips => true;
 
-    /// <summary>It settles each object's blocks as it reads it, those no delete marked a row of (<see cref="ScanSpec.Settles"/>).</summary>
-    internal override bool SettlesBlocks => true;
+    /// <summary>It settles each object's blocks as it reads it, those no delete marked a row of (<see cref="StatesAsked.Settles"/>).</summary>
+    public bool SettlesBlocks => true;
 
-    /// <summary>It learns the partials of an aggregation's family from the objects it reads as rows (<see cref="ScanSpec.Family"/>).</summary>
-    internal override bool LearnsPartials => true;
-
-    /// <summary>The version every sink of the scan reads.</summary>
-    internal ulong Version => _version.Version;
-
-    /// <summary>A dataset whose jobs' objects keep counts: those answer some aggregations as states (<see cref="CountsAnswer"/>).</summary>
-    internal override bool KeepsStates => _version.MayKeepCounts;
-
-    internal override async ValueTask<bool> TakesStatesAsync(ScanSpec spec, Aggregating.StateRequest states, CancellationToken cancellationToken) =>
-        KeepsStates && spec.Options.UseSynopses && !spec.MatchesNothing
+    public async ValueTask<bool> TakesStatesAsync(ScanSpec spec, Aggregating.StateRequest states, CancellationToken cancellationToken) =>
+        _version.MayKeepCounts && spec.Options.UseSynopses && !spec.MatchesNothing
         && await _version.KeepsCountsAsync(cancellationToken).ConfigureAwait(false)
-        && (spec.Family is not null || await Builder(spec with { States = states }, null).AnswersAnyAsync(cancellationToken).ConfigureAwait(false));
+        && await Builder(spec with { Answering = (spec.Answering ?? new StatesAsked()) with { States = states } }, null).AnswersAnyAsync(cancellationToken).ConfigureAwait(false);
 
     /// <summary>
     /// The filter grown so that its range on the key's first column covers whole the objects it cuts whose counts would
@@ -59,13 +97,15 @@ internal sealed class DatasetScanSource : ScanSource
     /// such objects moves out to the furthest of their own bounds on the column, compared row-encoded as the key orders the
     /// column, whatever its type. A bound stays where it was when another such object would hold values on both sides of
     /// the new one, which growing on would cut in turn: objects cut by size that share a value of a composite key's first
-    /// column, which a clustering value never leaves. Two walks of the version's entries. Null when the range cuts no such
+    /// column, which a partition value never leaves. Two walks of the version's entries. Null when the range cuts no such
     /// object or stays, the filter bounds no range of the column, or the counts answer no object of the question.
     /// </summary>
-    internal override async ValueTask<(VortexExpr Filter, VortexExpr Window)?> AlignAsync(
+    public async ValueTask<(VortexExpr Filter, VortexExpr Window)?> AlignAsync(
         ScanSpec spec, Aggregating.StateRequest states, CancellationToken cancellationToken)
     {
-        if (!KeepsStates || spec.Filter is not { } filter || _version.Schema.Key is not { } key
+        // The column a window is aligned on: the key's first, or under a partition the column it reads, objects holding one
+        // partition each.
+        if (!_version.MayKeepCounts || spec.Filter is not { } filter || AlignedOn() is not { } key
             || !await _version.KeepsCountsAsync(cancellationToken).ConfigureAwait(false))
         {
             return null;
@@ -83,7 +123,7 @@ internal sealed class DatasetScanSource : ScanSource
         {
             if (conjunct is not ComparisonExpr { Field: ColumnFieldExpr field } comparison
                 || comparison.Op is not (ComparisonOp.Greater or ComparisonOp.GreaterOrEqual or ComparisonOp.Less or ComparisonOp.LessOrEqual)
-                || !string.Equals(field.Path, key.InstantPath, System.StringComparison.Ordinal) || Encoded(key, comparison.Value) is not { } bound)
+                || !string.Equals(field.Path, key.LeadingPath, System.StringComparison.Ordinal) || Encoded(key, comparison.Value) is not { } bound)
             {
                 rest.Add(conjunct);
                 continue;
@@ -121,7 +161,7 @@ internal sealed class DatasetScanSource : ScanSource
         (byte[] Bytes, FilterLiteral Value)? highest = null;
         await foreach (PositionedObject held in WalkAsync(spec, others, Window(range, null, null), cancellationToken).ConfigureAwait(false))
         {
-            if (Bounds(held, key) is not { } of || Above(of.Low.Bytes, high) || Below(of.High.Bytes, low) || answer.FieldOf(held) is null)
+            if (Bounds(held, key, _version.Schema.Key is not null) is not { } of || Above(of.Low.Bytes, high) || Below(of.High.Bytes, low) || answer.FieldOf(held) is null)
             {
                 continue;
             }
@@ -142,7 +182,7 @@ internal sealed class DatasetScanSource : ScanSource
         {
             await foreach (PositionedObject held in WalkAsync(spec, others, Window(range, lowest?.Value, highest?.Value), cancellationToken).ConfigureAwait(false))
             {
-                if (Bounds(held, key) is not { } of || answer.FieldOf(held) is null)
+                if (Bounds(held, key, _version.Schema.Key is not null) is not { } of || answer.FieldOf(held) is null)
                 {
                     continue;
                 }
@@ -208,18 +248,26 @@ internal sealed class DatasetScanSource : ScanSource
     }
 
     /// <summary>
-    /// The least and the greatest value of the key's first column in the object <paramref name="held"/>, each with its bytes
-    /// row-encoded as the key orders the column: by its summaries, its keys bounding a text (<see cref="PositionedObject.Summaries"/>);
-    /// null when they do not bound it, or prove it holds no null.
+    /// The column a window is aligned on, as a key of it alone: the layout key's first column, or the column the partition
+    /// reads when the layout has a partition; null for neither.
     /// </summary>
-    private static ((byte[] Bytes, FilterLiteral Value) Low, (byte[] Bytes, FilterLiteral Value) High)? Bounds(in PositionedObject held, ClusteringKey key) =>
-        held.Summaries(key).TryGet(key.InstantPath, out ColumnSummary column) && column.HasMin && column.HasMax
+    private DatasetKey? AlignedOn() =>
+        _version.Schema.Key ?? (_version.Schema.Cut is { Path: { } path } ? DatasetKey.For([path], _version.Schema.DType) : null);
+
+    /// <summary>
+    /// The least and the greatest value of the aligned column in the object <paramref name="held"/>, each with its bytes
+    /// row-encoded as the key orders the column: by its summaries, its keys bounding a text when the column leads the
+    /// layout's key (<paramref name="ownKey"/>, <see cref="PositionedObject.Summaries(DatasetKey)"/>); null when they do not bound it, or
+    /// prove it holds no null.
+    /// </summary>
+    private static ((byte[] Bytes, FilterLiteral Value) Low, (byte[] Bytes, FilterLiteral Value) High)? Bounds(in PositionedObject held, DatasetKey key, bool ownKey) =>
+        (ownKey ? held.Summaries(key) : held.Entry.Summaries).TryGet(key.LeadingPath, out ColumnSummary column) && column.HasMin && column.HasMax
         && column.HasNullCount && column.NullCount == 0 && Encoded(key, column.Min) is { } low && Encoded(key, column.Max) is { } high
             ? ((low, column.Min), (high, column.Max))
             : null;
 
     /// <summary><paramref name="value"/> row-encoded as the key's first column, as a key of it alone; null for a value the column's type does not take.</summary>
-    private static byte[]? Encoded(ClusteringKey key, FilterLiteral value)
+    private static byte[]? Encoded(DatasetKey key, FilterLiteral value)
     {
         if (value.Kind == FilterLiteralKind.Null)
         {
@@ -236,16 +284,33 @@ internal sealed class DatasetScanSource : ScanSource
         }
     }
 
-    internal override IAsyncEnumerable<RecordBatch> BatchesAsync(ScanSpec spec, ScanCounters metrics) =>
+    public IAsyncEnumerable<RecordBatch> BatchesAsync(ScanSpec spec, ScanCounters metrics) =>
         spec.MatchesNothing ? System.Linq.AsyncEnumerable.Empty<RecordBatch>() : Builder(spec, metrics).ExecuteAsync();
 
-    internal override async ValueTask<long> CountAsync(ScanSpec spec, ScanCounters metrics, CancellationToken cancellationToken) =>
+    /// <summary>A form of the question, answered by the count, the proof of a row, or the extreme the version works out.</summary>
+    public async ValueTask<FormAnswer> AnswerAsync(ScanSpec spec, LogicalShape form, ScanCounters metrics, CancellationToken cancellationToken) => form switch
+    {
+        ExtremeShape extreme => new FormAnswer(0, await ExtremeAsync(spec, extreme.Column, extreme.Min, metrics, cancellationToken).ConfigureAwait(false)),
+        _ when ReferenceEquals(form, LogicalShape.Any) => new FormAnswer(await AnyAsync(spec, metrics, cancellationToken).ConfigureAwait(false) ? 1 : 0, FilterLiteral.Null),
+        _ => new FormAnswer(await CountAsync(spec, metrics, cancellationToken).ConfigureAwait(false), FilterLiteral.Null),
+    };
+
+    private async ValueTask<long> CountAsync(ScanSpec spec, ScanCounters metrics, CancellationToken cancellationToken) =>
         spec.MatchesNothing ? 0L : await Builder(spec, metrics).CountAsync(cancellationToken).ConfigureAwait(false);
 
-    internal override async ValueTask<bool> AnyAsync(ScanSpec spec, ScanCounters metrics, CancellationToken cancellationToken) =>
+    /// <summary>The paths of variant columns among the rows the scan keeps, object by object as a count walks them.</summary>
+    public async ValueTask PathsAsync(ScanSpec spec, PathsQuestion question, ScanCounters metrics, CancellationToken cancellationToken)
+    {
+        if (!spec.MatchesNothing)
+        {
+            await Builder(spec, metrics).TallyPathsAsync(question, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private async ValueTask<bool> AnyAsync(ScanSpec spec, ScanCounters metrics, CancellationToken cancellationToken) =>
         !spec.MatchesNothing && await Builder(spec, metrics).AnyAsync(cancellationToken).ConfigureAwait(false);
 
-    internal override async ValueTask<FilterLiteral> ExtremeAsync(ScanSpec spec, FieldExpr column, bool min, ScanCounters metrics, CancellationToken cancellationToken)
+    private async ValueTask<FilterLiteral> ExtremeAsync(ScanSpec spec, FieldExpr column, bool min, ScanCounters metrics, CancellationToken cancellationToken)
     {
         if (spec.MatchesNothing)
         {
@@ -258,46 +323,50 @@ internal sealed class DatasetScanSource : ScanSource
             : await builder.MaxAsync(column.Path, cancellationToken).ConfigureAwait(false);
     }
 
-    internal override async ValueTask<ScanPlan> ExplainAsync(ScanSpec spec, CancellationToken cancellationToken)
+    public async ValueTask<ScanPlan> ExplainAsync(ScanSpec spec, bool analyze, CancellationToken cancellationToken)
     {
-        ScanPlan plan = await Builder(spec, null).PlanAsync(cancellationToken).ConfigureAwait(false);
+        ScanPlan plan = await Builder(spec, null).PlanAsync(analyze, cancellationToken).ConfigureAwait(false);
         return spec.MatchesNothing ? plan with { MayMatch = false } : plan;
     }
 
-    internal override bool MayMatch(VortexExpr filter) => _version.MayMatch(filter);
-
-    internal override async ValueTask<IKeyWalker> OpenKeysAsync(string path, bool distinct, bool indexes, CancellationToken cancellationToken) =>
+    public async ValueTask<IKeyWalker> OpenKeysAsync(string path, bool distinct, bool indexes, CancellationToken cancellationToken) =>
         await DatasetKeyCursor.OpenAsync(_version, path, distinct, indexes, cancellationToken).ConfigureAwait(false);
 
-    internal override ValueTask<KeyPlan> ExplainKeysAsync(string path, bool distinct, bool indexes, CancellationToken cancellationToken) =>
+    public ValueTask<KeyPlan> ExplainKeysAsync(string path, bool distinct, bool indexes, CancellationToken cancellationToken) =>
         DatasetKeyCursor.ExplainAsync(_version, path, indexes, cancellationToken);
 
     /// <summary>
-    /// On the first column of the clustering key, or a function of it: the key-ordered read opens an
+    /// On the first column of the sort key, or a function of it: the key-ordered read opens an
     /// object once it could hold the next row, so a group of it is final once a greater key is read.
-    /// Not in a dataset of periods, whose objects may order each slice by another column: read in key
-    /// order, such a slice is sorted again, its instants read to order it and its columns read again in
-    /// that order, which made a group by of time over a store 5 ms away 5.6 times slower than the pass
-    /// that holds its groups at one lane, reading 14 times its bytes, and 35 times slower at sixteen. And only when
-    /// <paramref name="stopsEarly"/>, a take or a window stopping the read, which reading in order is for: the read opens
+    /// Only when <paramref name="stopsEarly"/>, a take or a window stopping the read, which reading in order is for: the read opens
     /// the objects one after the other, each through its own key-ordered scan, on one lane, where the pass that holds the
     /// groups reads them on every lane and spills what does not fit. A group by of the hour over objects of an hour each
     /// read on one lane of eight, where the pass read them on four, and at one lane allocated three times what the pass
     /// did, in 1.5 times its time.
     /// </summary>
-    internal override bool OrdersOnAsking(FieldExpr column, bool stopsEarly) =>
-        stopsEarly && !_version.Levels.ByPeriods && _version.Schema.Key is { } key && key.Paths.Count > 0
-        && string.Equals(key.Paths[0], column.Path, System.StringComparison.Ordinal);
+    /// <remarks>
+    /// The first column the tree's keys order, or under a partition the first the objects' own order: a read in its order
+    /// bounds each object by its keys and holds open an object of each partition (<see cref="DatasetSchema.TreeOrder"/>,
+    /// <see cref="DatasetSchema.ObjectOrder"/>). A window of the services by day read every object's services for its
+    /// first rows.
+    /// </remarks>
+    public bool OrdersOnAsking(FieldExpr column, bool stopsEarly) =>
+        stopsEarly
+        && (string.Equals(_version.Schema.TreeOrder?.Paths[0], column.Path, System.StringComparison.Ordinal)
+            || string.Equals(_version.Schema.ObjectOrder?.Paths[0], column.Path, System.StringComparison.Ordinal));
+
+    /// <summary>Any column but the first of the sort key, which the objects lie in the order of (spec G, 2).</summary>
+    public bool ReadsTopLate(FieldExpr column) => !OrdersOnAsking(column, stopsEarly: true);
 
     /// <summary>
     /// The loosest bounds the summaries of the version's root pages in hand give the column, over
     /// every object: a table of a key's groups by value over the objects,
     /// as over a file, with no read of its own.
     /// </summary>
-    internal override Aggregating.KeyBounds? Bounds(Aggregating.ColumnShape key) => _version.Bounds(key.Path);
+    public Aggregating.KeyBounds? Bounds(Aggregating.ColumnShape key) => _version.Bounds(key.Path);
 
     /// <summary>The version's roots read first, as its walk reads them: then in hand.</summary>
-    internal override async ValueTask<Aggregating.KeyBounds?> BoundsAsync(Aggregating.ColumnShape key, CancellationToken cancellationToken)
+    public async ValueTask<Aggregating.KeyBounds?> BoundsAsync(Aggregating.ColumnShape key, CancellationToken cancellationToken)
     {
         await _version.ReadRootsAsync(cancellationToken).ConfigureAwait(false);
         return _version.Bounds(key.Path);
@@ -309,7 +378,7 @@ internal sealed class DatasetScanSource : ScanSource
     /// that a lane on a slow core takes fewer and no lane waits on a large object the others finished
     /// beside.
     /// </summary>
-    internal override async ValueTask<RowRange[]?> PiecesAsync(ScanSpec spec, int degree, CancellationToken cancellationToken)
+    public async ValueTask<RowRange[]?> PiecesAsync(ScanSpec spec, int degree, CancellationToken cancellationToken)
     {
         if (spec.OrderPath is not null || spec.Take is not null)
         {
@@ -319,12 +388,11 @@ internal sealed class DatasetScanSource : ScanSource
         SummaryPruner? pruner = spec.Options.UseStatistics && spec.Filter is { } filter ? new SummaryPruner(Compute.FunctionFieldExpr.Ranges(filter)) : null;
         long from = spec.Rows?.Start ?? 0;
         long to = spec.Rows?.End ?? long.MaxValue;
+        DatasetScanBuilder planner = Builder(spec, null);
         List<(PositionedObject Held, RowRange Rows)> objects = [];
         long total = 0;
-        long low = long.MinValue;
-        long high = long.MaxValue;
-        bool windowed = spec.Filter is { } bounded && _dataset.Key is { } instant && DatasetScanBuilder.Bound(bounded, instant.InstantPath, ref low, ref high);
-        CountsAnswer? answer = spec.States is { } request && spec.Options.UseSynopses
+        KeyPruning? pruning = spec.Options.UseStatistics && spec.Options.UseIndexes ? KeyPruning.Of(_version.Schema, spec.Filter) : null;
+        CountsAnswer? answer = spec.Answering?.States is { } request && spec.Options.UseSynopses
             && await _version.KeepsCountsAsync(cancellationToken).ConfigureAwait(false)
             ? CountsAnswer.Of(request, spec.Filter, _version)
             : null;
@@ -335,7 +403,12 @@ internal sealed class DatasetScanSource : ScanSource
             return null;
         }
 
-        HashSet<long> answered = [];
+        // The objects answered whole, those their granules answer with the rows they leave, and those whose choice waits on
+        // their index, made as each is met.
+        HashSet<long>? answered = null;
+        Dictionary<long, long>? granular = null;
+        HashSet<long>? undecided = null;
+        List<(PositionedObject Held, RowRange Rows, List<RowRange>? Kept, Task<List<RowRange>?>? Reading)> walked = [];
         await foreach (PositionedObject held in _version.WalkAsync(pruner, from, to, null, cancellationToken).ConfigureAwait(false))
         {
             long start = System.Math.Max(from, held.FirstRow);
@@ -346,48 +419,107 @@ internal sealed class DatasetScanSource : ScanSource
             }
 
             // An object its counts answer is read whole, as states: a piece of its own, never cut.
-            if (answer is not null && start == held.FirstRow && end == held.FirstRow + held.Entry.Rows && answer.FieldOf(held) is not null)
+            bool whole = start == held.FirstRow && end == held.FirstRow + held.Entry.Rows;
+            if (whole && answer is not null && answer.FieldOf(held) is not null)
             {
-                objects.Add((held, new RowRange(start, end)));
-                answered.Add(held.FirstRow);
+                walked.Add((held, new RowRange(start, end), null, null));
+                (answered ??= []).Add(held.FirstRow);
                 continue;
             }
 
-            // An object reads the slices its window reaches alone, as its scan does (DatasetScanBuilder.Of): those are the
-            // rows its lanes share, where a day's object cut at its every row left the last 15 minutes, 45 M rows, to two
-            // of its 128 pieces, every other piece reading nothing.
-            if (windowed && held.Entry.Deletions.IsEmpty && held.Entry.Contents is { } sliced
-                && DatasetScanBuilder.WindowRows(sliced.Slices.Slices, low, high) is { } window)
+            // An object one lane's plan answers through its granules' statistics is answered so too, the rows they leave
+            // weighed for its pieces: cut as rows, each piece read all of its own. Its key's index is read first where the
+            // share it keeps could weigh less than its granules.
+            bool deciding = false;
+            if (whole && answer is not null)
             {
-                start = System.Math.Max(start, held.FirstRow + window.Start);
-                end = System.Math.Min(end, held.FirstRow + window.End);
+                await planner.PlacedAsync(held, cancellationToken).ConfigureAwait(false);
+                (AnswerPath path, deciding) = planner.ChosenOnOneLane(held, kept: 1);
+                if (!deciding && path == AnswerPath.Granules)
+                {
+                    walked.Add((held, new RowRange(start, end), null, null));
+                    (granular ??= [])[held.FirstRow] = planner.GranulesLeave(held);
+                    continue;
+                }
             }
 
-            if (end > start)
+            // An object reads the granules the key's pruning keeps alone, by its sparse index: those are the rows its lanes
+            // share, where pieces cut over every row of it would leave most lanes reading nothing. The indexes are asked as
+            // the walk finds their objects and read side by side, a wave of requests, where one awaited at a time cost a
+            // round trip each: fourteen for a time window over seven objects. An object kept whole is marked so, no list
+            // made for it.
+            ValueTask<List<RowRange>?> keeping = KeptAsync(held, pruning, planner, new RowRange(start, end), cancellationToken);
+            walked.Add(keeping.IsCompletedSuccessfully
+                ? (held, new RowRange(start, end), await keeping.ConfigureAwait(false) ?? AllKept, null)
+                : (held, new RowRange(start, end), null, keeping.AsTask()));
+            if (deciding)
             {
-                objects.Add((held, new RowRange(start, end)));
-                total += end - start;
+                (undecided ??= []).Add(held.FirstRow);
+            }
+        }
+
+        foreach ((PositionedObject held, RowRange rows, List<RowRange>? done, Task<List<RowRange>?>? reading) in walked)
+        {
+            if (done is null && reading is null)
+            {
+                // An object answered whole reads no rows; one its granules answer, the rows they leave.
+                objects.Add((held, rows));
+                total += Weight(held, rows);
+                continue;
+            }
+
+            // The read was asked by this walk, above.
+#pragma warning disable VSTHRD003
+            List<RowRange> read = done ?? await reading!.ConfigureAwait(false) ?? AllKept;
+#pragma warning restore VSTHRD003
+            bool whole = ReferenceEquals(read, AllKept);
+
+            // An object its granules may answer, judged once its index said the share of its rows the question would read
+            // otherwise.
+            AnswerPath chosen = undecided?.Contains(held.FirstRow) == true
+                ? planner.ChosenOnOneLane(held, whole ? (double)rows.Length / System.Math.Max(held.Entry.Rows, 1) : Share(held, read)).Path
+                : AnswerPath.Rows;
+            if (chosen == AnswerPath.Granules)
+            {
+                objects.Add((held, rows));
+                (granular ??= [])[held.FirstRow] = planner.GranulesLeave(held);
+                total += Weight(held, rows);
+                continue;
+            }
+
+            if (whole)
+            {
+                objects.Add((held, rows));
+                total += rows.Length;
+                continue;
+            }
+
+            foreach (RowRange range in read)
+            {
+                objects.Add((held, range));
+                total += range.Length;
             }
         }
 
         // An object whose column sheets prove a value the filter asks for absent is no range: the sheets of the objects
         // read side by side, and the ranges' own walks find them read. An object its counts answer reads none: they say
         // which values it holds.
-        if (spec.Options.UseStatistics && spec.Filter is { } asked && SheetPruning.Asks(asked, _version.Schema.DType) && ReadsSheets(objects))
+        if (spec.Options.UseStatistics && spec.Filter is { } asked && SheetPruning.Asks(asked, _version.Schema.DType)
+            && objects.Exists(o => planner.ReadsSheets(o.Held)))
         {
             List<PositionedObject> held = objects.ConvertAll(static o => o.Held);
             List<int> columns = SheetPruning.Columns(asked, _version.Schema.DType);
             List<PositionedObject> kept = await SheetPruning.KeptAsync(
-                _dataset, _version.Schema, held, asked, columns, null, answered.Count == 0 ? null : o => answered.Contains(o.FirstRow), cancellationToken)
+                _dataset, _version.Schema, held, asked, columns, null, o => answered?.Contains(o.FirstRow) != true && planner.ReadsSheets(o), cancellationToken)
                 .ConfigureAwait(false);
             if (kept.Count < held.Count)
             {
                 HashSet<long> starts = [.. kept.ConvertAll(static o => o.FirstRow)];
                 objects.RemoveAll(o => !starts.Contains(o.Held.FirstRow));
                 total = 0;
-                foreach ((PositionedObject _, RowRange rows) in objects)
+                foreach ((PositionedObject each, RowRange rows) in objects)
                 {
-                    total += rows.Length;
+                    total += Weight(each, rows);
                 }
             }
         }
@@ -395,18 +527,27 @@ internal sealed class DatasetScanSource : ScanSource
         // The objects to cut are opened side by side to read where their chunks end; the scan finds
         // them open after. Each cut gives its object back, whatever another one's open did. A lookup of an identifier
         // cuts none: it reads an object's rows by the identifier's index with no open of it, where a cut opens it, and
-        // each piece would look the whole object up again.
+        // each piece would look the whole object up again. An object its granules answer is cut where the rows they leave
+        // weigh two shares or more, into pieces of about a share of those rows, each of which settles the granules it holds,
+        // their statistics read ahead once for all of them; kept whole otherwise, on one lane, which reads its statistics and
+        // the rows they leave, where cut as rows its pieces read all of its rows.
         long share = System.Math.Max(_dataset.Options.LeastPieceRows, total / (degree * 4L));
         bool lookingUp = spec.Options.UseIndexes && DatasetScanBuilder.LookupOf(spec.Filter, _version.Header.Identifiers) is not null;
         Task<RowRange[]>?[] cuts = new Task<RowRange[]>?[objects.Count];
         List<Task> cutting = [];
         for (int o = 0; o < objects.Count; o++)
         {
-            if (objects[o].Rows.Length >= 2 * share && !answered.Contains(objects[o].Held.FirstRow)
-                && !(lookingUp && DatasetScanBuilder.LooksUp(objects[o].Held.Entry, _dataset.Options)))
+            (PositionedObject held, RowRange rows) = objects[o];
+            long weight = Weight(held, rows);
+            if (weight >= 2 * share && answered?.Contains(held.FirstRow) != true && !(lookingUp && planner.LooksUp(held)))
             {
-                cuts[o] = CutAsync(objects[o].Held, objects[o].Rows, share, spec.Projection, cancellationToken);
+                bool settles = granular?.ContainsKey(held.FirstRow) == true;
+                cuts[o] = CutAsync(held, rows, settles ? (long)((double)share * rows.Length / weight) : share, planner.ReadMask, spec.Projection, cancellationToken);
                 cutting.Add(cuts[o]!);
+                if (settles)
+                {
+                    cutting.Add(planner.GranuleStatsAheadAsync(held, cancellationToken));
+                }
             }
         }
 
@@ -425,9 +566,16 @@ internal sealed class DatasetScanSource : ScanSource
         }
 
         return pieces.Count > 1 ? [.. pieces] : null;
+
+        // What a range of an object reads: none of one answered whole, the rows its granules leave of one they answer, its
+        // rows otherwise.
+        long Weight(PositionedObject held, RowRange rows) =>
+            answered?.Contains(held.FirstRow) == true ? 0
+            : granular is not null && granular.TryGetValue(held.FirstRow, out long leave) ? leave
+            : rows.Length;
     }
 
-    internal override async ValueTask<(long Requests, long Bytes)?> CostAsync(ScanSpec spec, CancellationToken cancellationToken)
+    public async ValueTask<(long Requests, long Bytes)?> CostAsync(ScanSpec spec, CancellationToken cancellationToken)
     {
         PathCosts.Cost cost = await Builder(spec, null).CostAsync(cancellationToken).ConfigureAwait(false);
         return (cost.Requests, cost.Bytes);
@@ -435,11 +583,11 @@ internal sealed class DatasetScanSource : ScanSource
 
     /// <summary>
     /// The rows of the pass as each object's ranges an estimate draws from, the objects its filter keeps by their summaries and
-    /// their slices, in the order of their rows: each object cut where the chunks of the columns read end together, as a
+    /// their sparse indexes, in the order of their rows: each object cut where the chunks of the columns read end together, as a
     /// lane's piece is, into ranges of <paramref name="rangeBytes"/> of the narrowest column at least. The objects are opened
     /// side by side; the scans of the ranges find them open.
     /// </summary>
-    internal override async ValueTask<RowRange[][]?> StrataAsync(ScanSpec pass, long rangeBytes, CancellationToken cancellationToken)
+    public async ValueTask<RowRange[][]?> StrataAsync(ScanSpec pass, long rangeBytes, CancellationToken cancellationToken)
     {
         if (pass.MatchesNothing)
         {
@@ -449,30 +597,89 @@ internal sealed class DatasetScanSource : ScanSource
         SummaryPruner? pruner = pass.Options.UseStatistics && pass.Filter is { } filter ? new SummaryPruner(Compute.FunctionFieldExpr.Ranges(filter)) : null;
         long from = pass.Rows?.Start ?? 0;
         long to = pass.Rows?.End ?? long.MaxValue;
-        long low = long.MinValue;
-        long high = long.MaxValue;
-        bool windowed = pass.Filter is { } bounded && _dataset.Key is { } instant && DatasetScanBuilder.Bound(bounded, instant.InstantPath, ref low, ref high);
+        KeyPruning? pruning = pass.Options.UseStatistics && pass.Options.UseIndexes ? KeyPruning.Of(_version.Schema, pass.Filter) : null;
+        DatasetScanBuilder planner = Builder(pass, null);
         List<Task<RowRange[]>> objects = [];
         await foreach (PositionedObject held in _version.WalkAsync(pruner, from, to, null, cancellationToken).ConfigureAwait(false))
         {
             long start = System.Math.Max(from, held.FirstRow);
             long end = System.Math.Min(to, held.FirstRow + held.Entry.Rows);
 
-            // An object reads the slices its window reaches alone, as its scan does.
-            if (windowed && held.Entry.Deletions.IsEmpty && held.Entry.Contents is { } sliced
-                && DatasetScanBuilder.WindowRows(sliced.Slices.Slices, low, high) is { } window)
-            {
-                start = System.Math.Max(start, held.FirstRow + window.Start);
-                end = System.Math.Min(end, held.FirstRow + window.End);
-            }
-
-            if (end > start)
+            // An object reads the granules the key's pruning keeps alone, by its sparse index.
+            if (await KeptAsync(held, pruning, planner, new RowRange(start, end), cancellationToken).ConfigureAwait(false) is not { } ranges)
             {
                 objects.Add(ClustersAsync(held, new RowRange(start, end), pass.Projection, rangeBytes, cancellationToken));
+                continue;
+            }
+
+            foreach (RowRange kept in ranges)
+            {
+                objects.Add(ClustersAsync(held, kept, pass.Projection, rangeBytes, cancellationToken));
             }
         }
 
         return await Task.WhenAll(objects).ConfigureAwait(false);
+    }
+
+    /// <summary>The ranges of an object that keeps none of the rows asked: one list for every such object, never added to.</summary>
+    private static readonly List<RowRange> NoneKept = [];
+
+    /// <summary>The mark of an object a walk keeps whole, the rows it asked: one list, never read nor added to.</summary>
+    private static readonly List<RowRange> AllKept = [];
+
+    /// <summary>
+    /// The parts of <paramref name="rows"/>, rows of the dataset inside an object's, that the key's pruning keeps of it
+    /// (<see cref="KeyPruning"/>): none when the filter refutes its key range, the ranges of the granules it may keep a row of
+    /// by its sparse index when <paramref name="planner"/>'s rule reads it, and the rows whole otherwise, null then, no list
+    /// made, or for an object with marked rows, whose index counts the rows before the marks.
+    /// </summary>
+    private async ValueTask<List<RowRange>?> KeptAsync(PositionedObject held, KeyPruning? pruning, DatasetScanBuilder planner, RowRange rows, CancellationToken cancellationToken)
+    {
+        if (rows.IsEmpty)
+        {
+            return NoneKept;
+        }
+
+        ReadOnlyMemory<byte> first = held.TreeKey.Length > VortexDataset.UidBytes ? VortexDataset.OrderOf(held.TreeKey) : default;
+        if (pruning is null || first.IsEmpty)
+        {
+            return null;
+        }
+
+        if (!pruning.MayHold(first.Span, held.Entry.LastKey.Span))
+        {
+            return NoneKept;
+        }
+
+        if (await planner.KeptGranulesAsync(held, pruning, first, read: true, cancellationToken).ConfigureAwait(false) is not ({ } ranges, var keys))
+        {
+            return null;
+        }
+
+        List<RowRange> kept = [];
+        foreach ((int from, int end) in ranges)
+        {
+            long start = System.Math.Max(rows.Start, held.FirstRow + ((long)from * keys.GranuleRows));
+            long stop = System.Math.Min(rows.End, held.FirstRow + System.Math.Min((long)end * keys.GranuleRows, keys.Rows));
+            if (stop > start)
+            {
+                kept.Add(new RowRange(start, stop));
+            }
+        }
+
+        return kept;
+    }
+
+    /// <summary>The share of the rows of the object <paramref name="held"/> that <paramref name="kept"/>, ranges of the dataset's rows inside it, hold.</summary>
+    private static double Share(in PositionedObject held, List<RowRange> kept)
+    {
+        long rows = 0;
+        foreach (RowRange range in kept)
+        {
+            rows += range.Length;
+        }
+
+        return (double)rows / System.Math.Max(held.Entry.Rows, 1);
     }
 
     /// <summary>The rows <paramref name="rows"/> of an object as an estimate's ranges, between its chunks: a deleted row counts for none.</summary>
@@ -502,44 +709,55 @@ internal sealed class DatasetScanSource : ScanSource
         }
     }
 
-    /// <summary>Whether a scan reads the sheets of one of <paramref name="objects"/> before it (<see cref="SheetPruning.Reads"/>).</summary>
-    private bool ReadsSheets(List<(PositionedObject Held, RowRange Rows)> objects)
-    {
-        foreach ((PositionedObject held, RowRange _) in objects)
-        {
-            if (SheetPruning.Reads(held.Entry, _dataset.Options, _version.Schema))
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
     /// <summary>
     /// The rows <paramref name="rows"/> of an object cut between its chunks, as a file's are, into
     /// ranges of <paramref name="share"/> rows or more: a cut inside a chunk would have both ranges
     /// decode it. A deleted row counts for none, and a chunk of deleted rows alone is in no range.
     /// </summary>
-    private async Task<RowRange[]> CutAsync(PositionedObject held, RowRange rows, long share, FieldMask? projection, CancellationToken cancellationToken)
+    /// <remarks>
+    /// The cuts fall where the chunks of every column the scan reads start together, <paramref name="read"/>, its filter's
+    /// with its projection's: a chunk of a column the filter alone reads, cut, was read by both pieces, 16.0 MB twice of
+    /// the 183.2 the pods of one route read at 32 lanes over S1's spans (QP-2), its routes' chunks of a million rows cut
+    /// where its pods' start. An object's columns' chunks end together at its slices and its groups of rows; where those
+    /// leave fewer than three quarters of the pieces the chunks of the projection (<paramref name="projection"/>) alone
+    /// place, those place them: a filter's chunks of few values hold millions of rows in few bytes, and their starts left
+    /// the 19.2 M rows of an object of the routes under 5xx of a day of S2's logs (T11) six pieces where its projection
+    /// cuts sixteen, twice as long at the S3 profile, to spare 1 MB of a route's pods (QP-2) read twice.
+    /// </remarks>
+    private async Task<RowRange[]> CutAsync(PositionedObject held, RowRange rows, long share, FieldMask read, FieldMask? projection, CancellationToken cancellationToken)
     {
         ObjectLease lease = await _version.RentAsync(held.Entry, cancellationToken).ConfigureAwait(false);
         await using (lease.ConfigureAwait(false))
         {
-            // The projection names the version's columns, where an object of an earlier schema need
-            // not hold them: its chunks are read whole for every column.
-            FieldMask mask = projection is { } named && _version.Schema.ColumnsOf(lease.File.DType, held.Entry.Key) is null ? named : FieldMask.All;
+            // The masks name the version's columns, where an object of an earlier schema need not hold them: its chunks are
+            // read whole for every column.
+            bool own = _version.Schema.ColumnsOf(lease.File.DType, held.Entry.Key) is null;
             DeletionVector deletions = held.Entry.Deletions;
             long lower = rows.Start - held.FirstRow;
             long upper = rows.End - held.FirstRow;
             RowRange physical = deletions.IsEmpty ? new RowRange(lower, upper) : new RowRange(deletions.Physical(lower), deletions.Physical(upper - 1) + 1);
-            long[] starts = SplitPlan.CommonStarts(lease.File.LayoutTree, physical, in mask);
+            FieldMask mask = own ? read : FieldMask.All;
+            List<RowRange> pieces = Cut(SplitPlan.CommonStarts(lease.File.LayoutTree, physical, in mask));
+            if (own && projection is { } named)
+            {
+                List<RowRange> projected = Cut(SplitPlan.CommonStarts(lease.File.LayoutTree, physical, in named));
+                if (pieces.Count * 4 < projected.Count * 3)
+                {
+                    pieces = projected;
+                }
+            }
+
+            return [.. pieces];
+        }
+
+        List<RowRange> Cut(long[] starts)
+        {
             long parts = rows.Length / share;
             List<RowRange> pieces = [];
             long start = rows.Start;
             for (int b = 0; b < starts.Length && pieces.Count < parts - 1; b++)
             {
-                long at = held.FirstRow + deletions.Logical(starts[b]);
+                long at = held.FirstRow + held.Entry.Deletions.Logical(starts[b]);
                 if (at - start >= share && at < rows.End)
                 {
                     pieces.Add(new RowRange(start, at));
@@ -548,7 +766,7 @@ internal sealed class DatasetScanSource : ScanSource
             }
 
             pieces.Add(new RowRange(start, rows.End));
-            return [.. pieces];
+            return pieces;
         }
     }
 
@@ -556,7 +774,7 @@ internal sealed class DatasetScanSource : ScanSource
     internal DatasetScanBuilder Builder(ScanSpec spec, ScanCounters? counters)
     {
         DatasetScanBuilder builder = new DatasetScanBuilder(_dataset, _version)
-            .WithVariantKeys(spec.VariantKeys).WithReadAhead(spec.ReadAhead);
+            .WithVariantKeys(spec.VariantKeys).WithZoneKeys(spec.ZoneKeys).WithReadAhead(spec.ReadAhead).WithShape(spec.Query?.Shape).OfQuestion(this);
         if (spec.Projection is { } mask)
         {
             builder.Project(in mask);
@@ -584,19 +802,14 @@ internal sealed class DatasetScanSource : ScanSource
 
         ScanOptions options = spec.Options;
         builder.WithOptions(options, spec.KeepEncodings, spec.SinkDecodes, spec.PositionsUnread).WithIndexes(options.UseIndexes).WithSummaries(options.UseStatistics);
-        if (spec.States is { } states && options.UseSynopses)
+        if (spec.Answering?.States is { } states && options.UseSynopses)
         {
             builder.WithStates(states);
         }
 
-        if (spec.Settles is { } plan)
+        if (spec.Answering?.Settles is { } plan)
         {
             builder.WithSettles(plan);
-        }
-
-        if (spec.Family is { } family && spec.States is not null && options.UseSynopses)
-        {
-            builder.WithFamily(family, this);
         }
 
         return counters is null ? builder : builder.WithCounters(counters);

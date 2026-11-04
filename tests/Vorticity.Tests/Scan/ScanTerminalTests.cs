@@ -189,7 +189,7 @@ public sealed class ScanTerminalTests
         VortexExpr filter = Filter("banded = 5");
 
         await using VortexFile file = await VortexFile.OpenAsync(Corpus.Path(Zoned), CancellationToken.None);
-        ScanExplanation plan = await file.ScanBuilder().Where(filter).ExplainAsync(ct);
+        ScanExplanation plan = await file.ScanBuilder().Where(filter).ExplainAsync(analyze: true, ct);
         Assert.Equal(1, plan.LiveBlocks);
         long zoneMaps = plan.Pruning[0].SegmentsRead;
 
@@ -197,7 +197,7 @@ public sealed class ScanTerminalTests
         ScanCounters decoded = new ScanCounters();
         Assert.Equal(Block, await file.ScanBuilder().Where(filter).WithMetrics(proven).CountAsync(ct));
         Assert.Equal(Block, await file.ScanBuilder().Where(filter).WithMetrics(decoded)
-            .WithTiers(TerminalTiers.All & ~TerminalTiers.FullBlock).CountAsync(ct));
+            .WithTiers(TerminalTiers.All & ~TerminalTiers.FullBlock & ~TerminalTiers.Encoded).CountAsync(ct));
 
         // The plan read the zone maps, and the open file keeps them: the proof asked the source for
         // nothing at all, where the decode asked for the block's data, and materialized it.
@@ -212,6 +212,61 @@ public sealed class ScanTerminalTests
         Assert.Equal(0, taken.SegmentRequests);
     }
 
+    /// <summary>
+    /// The block of <c>banded = 5</c> counted with the zone maps' proof off: offered to its column's encoding, as a scan's
+    /// batches offer it, the filter is answered over the encoded values, the block read and none of its values decoded,
+    /// where the decode tier decodes them all; the same count. The decode tier counts first: the file's first plan decodes
+    /// its zone table, which a count of the encodings would otherwise show.
+    /// </summary>
+    [Fact]
+    public async Task AFilteredCountItsColumnsEncodingAnswersDecodesNone()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Decoders.EnsureRegistered();
+        VortexExpr filter = Filter("banded = 5");
+
+        await using VortexFile file = await VortexFile.OpenAsync(Corpus.Path(Zoned), CancellationToken.None);
+        ScanCounters decoded = new ScanCounters();
+        ScanCounters encoded = new ScanCounters();
+        Assert.Equal(Block, await file.ScanBuilder().Where(filter).WithMetrics(decoded)
+            .WithTiers(TerminalTiers.All & ~TerminalTiers.FullBlock & ~TerminalTiers.Encoded).CountAsync(ct));
+        Assert.Equal(Block, await file.ScanBuilder().Where(filter).WithMetrics(encoded).WithTiers(TerminalTiers.All & ~TerminalTiers.FullBlock).CountAsync(ct));
+
+        Assert.True(encoded.SegmentRequests > 0);
+        Assert.Equal(0, encoded.ValuesDecoded);
+        Assert.True(decoded.ValuesDecoded >= Block);
+    }
+
+    /// <summary>
+    /// A count filtered on a column of runs, or on a constant text, every block read, the zone maps left out: the runs'
+    /// values judged once and the verdicts spread over their rows, the constant's one value judged once, no row decoded;
+    /// the count the decode tier gives.
+    /// </summary>
+    [Theory]
+    [InlineData(Matrix.Shape.Runs, EncodingHint.RunEnd, "I32")]
+    [InlineData(Matrix.Shape.Constant, EncodingHint.Constant, "Text")]
+    public async Task AFilteredCountOverRunsOrAConstantTextDecodesNone(Matrix.Shape shape, EncodingHint hint, string column)
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Decoders.EnsureRegistered();
+        (string path, _) = await Matrix.TypeEncodingMatrixTests.WrittenAsync(shape, hint);
+        await using VortexFile file = await VortexFile.OpenAsync(path, ct);
+        Matrix.AllTypes first = Matrix.MatrixRows.Shared(shape)[0];
+        VortexExpr filter = column == "Text"
+            ? Expr.Eq(Expr.Field(column), Expr.Literal(FilterLiteral.From(first.Text)))
+            : Expr.Ge(Expr.Field(column), Expr.Literal(FilterLiteral.From((long)first.I32)));
+
+        ScanCounters decoded = new ScanCounters();
+        ScanCounters encoded = new ScanCounters();
+        long expected = await file.ScanBuilder().Where(filter).WithPruning(false).WithMetrics(decoded)
+            .WithTiers(TerminalTiers.All & ~TerminalTiers.Encoded).CountAsync(ct);
+        Assert.Equal(expected, await file.ScanBuilder().Where(filter).WithPruning(false).WithMetrics(encoded).CountAsync(ct));
+
+        Assert.True(expected > 0);
+        Assert.Equal(0, encoded.ValuesDecoded);
+        Assert.True(decoded.ValuesDecoded >= Matrix.MatrixRows.Count, $"{decoded.ValuesDecoded} decoded");
+    }
+
     [Fact]
     public async Task AnEmptyMaskAnswersWithoutADataRead()
     {
@@ -220,7 +275,7 @@ public sealed class ScanTerminalTests
         VortexExpr filter = Filter("monotone < 0");
 
         await using VortexFile file = await VortexFile.OpenAsync(Corpus.Path(Zoned), CancellationToken.None);
-        ScanExplanation plan = await file.ScanBuilder().Where(filter).ExplainAsync(ct);
+        ScanExplanation plan = await file.ScanBuilder().Where(filter).ExplainAsync(analyze: true, ct);
         Assert.Equal(0, plan.LiveBlocks);
 
         ScanCounters metrics = new ScanCounters();
@@ -246,7 +301,7 @@ public sealed class ScanTerminalTests
         await using VortexFile file = await VortexFile.OpenAsync(Corpus.Path(Zoned), CancellationToken.None);
         ScanCounters any = new ScanCounters();
         ScanCounters count = new ScanCounters();
-        TerminalTiers decodeOnly = TerminalTiers.All & ~TerminalTiers.FullBlock;
+        TerminalTiers decodeOnly = TerminalTiers.All & ~TerminalTiers.FullBlock & ~TerminalTiers.Encoded;
         Assert.True(await file.ScanBuilder().Where(filter).WithMetrics(any).WithTiers(decodeOnly).AnyAsync(ct));
         Assert.True(await file.ScanBuilder().Where(filter).WithMetrics(count).WithTiers(decodeOnly).CountAsync(ct) > 0);
 

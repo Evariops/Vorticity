@@ -62,6 +62,34 @@ internal static class ExprText
     {
         switch (expr)
         {
+            case LogicalExpr { IsAnd: true, Right: InExpr { Projects: not null } } projected:
+                // A column's set of a tuple's values, written beside the tuples, which the text reads back.
+                Append(text, projected.Left, parentIsAnd);
+                return;
+            case TupleInExpr tuples:
+                text.Append('(');
+                for (int column = 0; column < tuples.Arity; column++)
+                {
+                    text.Append(column == 0 ? string.Empty : ", ");
+                    AppendField(text, tuples.Fields[column]);
+                }
+
+                text.Append(") in (");
+                for (int t = 0; t < tuples.Count; t++)
+                {
+                    text.Append(t == 0 ? "(" : ", (");
+                    ReadOnlySpan<FilterLiteral> values = tuples.Tuple(t);
+                    for (int column = 0; column < values.Length; column++)
+                    {
+                        text.Append(column == 0 ? string.Empty : ", ");
+                        AppendLiteral(text, values[column]);
+                    }
+
+                    text.Append(')');
+                }
+
+                text.Append(')');
+                return;
             case LogicalExpr logical:
                 bool wrap = parentIsAnd is { } parent && parent != logical.IsAnd;
                 if (wrap)
@@ -141,6 +169,7 @@ internal static class ExprText
                 {
                     StringMatchOp.StartsWith => " starts with ",
                     StringMatchOp.Contains => " contains ",
+                    StringMatchOp.Token => " has token ",
                     _ => " like ",
                 });
                 AppendLiteral(text, match.Pattern);
@@ -211,10 +240,10 @@ internal static class ExprText
             }
         }
 
-        // A value expression shows its functions, which the grammar does not read back.
-        if (field is Compute.FunctionFieldExpr function)
+        // A value expression shows its functions and its table, which the grammar does not read back.
+        if (field is Compute.FunctionFieldExpr or Compute.MappedFieldExpr)
         {
-            text.Append(function.Key, function.Path.Length, function.Key.Length - function.Path.Length);
+            text.Append(field.Key, field.Path.Length, field.Key.Length - field.Path.Length);
         }
     }
 
@@ -361,6 +390,11 @@ internal static class ExprText
             return ParsePredicate(tokens, ref at);
         }
 
+        if (!not && TryParseTuples(tokens, ref at) is { } tuples)
+        {
+            return tuples;
+        }
+
         Token opening = tokens[at++];
         if (nesting == FilterEvaluator.MaxDepth)
         {
@@ -376,6 +410,74 @@ internal static class ExprText
         VortexExpr inner = ParseOr(tokens, ref at, nesting + 1);
         Expect(tokens, ref at, ")");
         return inner;
+    }
+
+    /// <summary>
+    /// <c>(a, b) [not] in ((1, 'x'), (2, 'y'))</c> at <paramref name="at"/>, which moves past it; null, <paramref name="at"/>
+    /// where it was, when the parenthesis opens a group rather than columns followed by <c>in</c>.
+    /// </summary>
+    private static VortexExpr? TryParseTuples(List<Token> tokens, ref int at)
+    {
+        if (at + 1 >= tokens.Count || tokens[at + 1].Kind is not (TokenKind.Name or TokenKind.QuotedName) || IsLiteralWord(tokens[at + 1]))
+        {
+            return null;
+        }
+
+        List<FieldExpr> fields = [];
+        int next = at + 1;
+        try
+        {
+            fields.Add(ParseField(tokens, ref next));
+            while (IsSymbol(tokens, next, ","))
+            {
+                next++;
+                fields.Add(ParseField(tokens, ref next));
+            }
+        }
+        catch (FormatException)
+        {
+            return null;
+        }
+
+        bool negated = IsWord(tokens, next + 1, "not") && IsWord(tokens, next + 2, "in");
+        if (fields.Count < 2 || !IsSymbol(tokens, next, ")") || !(negated || IsWord(tokens, next + 1, "in")))
+        {
+            return null;
+        }
+
+        Token opening = tokens[at];
+        if (fields.Count > TupleInExpr.MostColumns || fields.Exists(static field => field is not ColumnFieldExpr))
+        {
+            throw new FormatException($"A tuple at position {opening.Position} holds 2 to {TupleInExpr.MostColumns} columns, each a column or a field of one.");
+        }
+
+        at = next + (negated ? 3 : 2);
+        Expect(tokens, ref at, "(");
+        List<FilterLiteral> values = [];
+        while (!IsSymbol(tokens, at, ")"))
+        {
+            if (values.Count > 0)
+            {
+                Expect(tokens, ref at, ",");
+            }
+
+            Expect(tokens, ref at, "(");
+            for (int column = 0; column < fields.Count; column++)
+            {
+                if (column > 0)
+                {
+                    Expect(tokens, ref at, ",");
+                }
+
+                values.Add(ParseLiteral(tokens, ref at));
+            }
+
+            Expect(tokens, ref at, ")");
+        }
+
+        Expect(tokens, ref at, ")");
+        VortexExpr tuples = TupleInExpr.Of([.. fields], [.. values]);
+        return negated ? Expr.Not(tuples) : tuples;
     }
 
     private static FormatException TooDeep(int position) =>

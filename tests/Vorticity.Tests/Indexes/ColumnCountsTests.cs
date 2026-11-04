@@ -149,7 +149,7 @@ public sealed class ColumnCountsTests
     }
 
     // The rows of each value spread over the object, in no order: an entry a value, whose sketches hold every one of its
-    // values, as one built from them all.
+    // values, as one built from them all; built again, in the arrays the counts before gave back, the same.
     [Fact]
     public void AnEntryHoldsEveryRowOfItsValueWhateverTheirOrder()
     {
@@ -163,15 +163,18 @@ public sealed class ColumnCountsTests
             }
         }
 
-        (ColumnCounts counts, ColumnSketches? sketches) = Build(rows, ColumnCountsBuilder.EntryLimit);
-        Assert.Equal(5, counts.Entries);
-        for (int e = 0; e < counts.Entries; e++)
+        for (int round = 0; round < 2; round++)
         {
-            long key = BitConverter.ToInt64(counts.Groups.Single(g => e >= g.FirstEntry && e < g.FirstEntry + g.Entries).Value);
-            List<(long At, long Key, long Amount, double Price)> held = [.. rows.Where(r => r.Key == key)];
-            Assert.Equal(held.Count, counts.WordsOf(e)[0]);
-            Assert.Equal(Sketch(held.Select(r => (double)r.Amount)), sketches!.SketchOf(e, 0));
-            Assert.Equal(Sketch(held.Select(r => r.Price)), sketches.SketchOf(e, 1));
+            (ColumnCounts counts, ColumnSketches? sketches) = Build(rows, ColumnCountsBuilder.EntryLimit);
+            Assert.Equal(5, counts.Entries);
+            for (int e = 0; e < counts.Entries; e++)
+            {
+                long key = BitConverter.ToInt64(counts.Groups.Single(g => e >= g.FirstEntry && e < g.FirstEntry + g.Entries).Value);
+                List<(long At, long Key, long Amount, double Price)> held = [.. rows.Where(r => r.Key == key)];
+                Assert.Equal(held.Count, counts.WordsOf(e)[0]);
+                Assert.Equal(Sketch(held.Select(r => (double)r.Amount)), sketches!.SketchOf(e, 0));
+                Assert.Equal(Sketch(held.Select(r => r.Price)), sketches.SketchOf(e, 1));
+            }
         }
     }
 
@@ -401,7 +404,9 @@ public sealed class ColumnCountsTests
         }
 
         counts.Settle();
-        (byte[] bytes, byte[]? sketches) = counts.Finish()!.Value;
+        (byte[] bytes, byte[]? sketches, _, _) = counts.Finish()!.Value;
+        counts.Dispose();
+        sheet.Dispose();
         return (ColumnCounts.From(bytes), sketches is null ? null : ColumnSketches.From(sketches));
     }
 

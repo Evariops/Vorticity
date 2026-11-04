@@ -52,19 +52,72 @@ public sealed partial class QueryPathBudgetTests : IClassFixture<QueryPathBudget
     /// give come with the per-column synopses and the planner. The bytes cold measured again on 2026-10-25, the dataset
     /// cut by the hour of its instant where it took periods of an hour. The allocations of the questions whose filter is evaluated on rows raised on 2026-10-25 by some 0.5 KB, each
     /// in a process of its own: the filter's key, its canonical text hashed, and the lookup of its pages (PredicatePages).
+    /// <para>
+    /// Measured again on 2026-10-27, after the redesign. Cold, an hour's object of 44 KB holds 1.6 KB more, each of its
+    /// columns in one chunk over granules of 8,192 rows where slices of 100 rows cut it: 174,800 bytes over the four where
+    /// 168,519 were. Warm, 2 to 21 % more: among it, the type arena a scan's context makes for the sequence decoder of the
+    /// instants, some 8 KB, and the summaries and walks a plan weighs each object by. The allocations of the paths that
+    /// pass keep their ceilings.
+    /// </para>
+    /// <para>
+    /// The rows of one id take 3 % above what they measured: 79,624 to 80,256 bytes in a process of their own, three runs,
+    /// and 79,624 to 81,568 beside the other classes of `tests/runs-alone.sh`, seven runs on 2026-10-27, two of them past
+    /// the 2 % the others keep.
+    /// </para>
+    /// <para>
+    /// The two by the hour raised by 256 bytes on 2026-10-31: a pass keying a column through a function names it to its
+    /// scans, which take its zones' values where they give one (ZoneKeyReads), some 200 bytes an ask; the zones are kept by
+    /// the file, and a warm ask loads none.
+    /// </para>
+    /// <para>
+    /// Measured again on 2026-11-01, a dictionary's codes priced as they pack: chunks of few values, the status's among
+    /// them, take a dictionary where a bit-packing took more, 169,512 bytes cold over the four hours where 174,800 were. The question under a predicate on the status reads 1.4 KB fewer and allocates 3.6 KB more warm, the
+    /// dictionaries of its chunks asked for the value (the dictionary probe of sorted runs); the counts by route answered
+    /// by the granules of the shredded key allocate 47 KB where the rows took 55.
+    /// </para>
+    /// <para>
+    /// The count by service at eight lanes raised the same day to 2 % above 60,304 bytes: what it measured beside the other
+    /// classes of `tests/runs-alone.sh` once the objects kept their keys' nulls and their variants' marks (59,504 to 59,728
+    /// before), where a process of its own measured the same mean before and after, 59.8 KB an ask over 4,000.
+    /// </para>
+    /// <para>
+    /// The rows of one id raised on 2026-11-02 to 3 % above 81,328 bytes, what they measured in a process of their own, six
+    /// runs from 80,696 to 81,608, the same before and after the tables of contents said what a part of a chunk reads whole;
+    /// beside the other classes of `tests/runs-alone.sh`, 81,608 to 82,192 over eight runs, three of them past 82,125.
+    /// </para>
+    /// <para>
+    /// The count by route on a shredded path raised on 2026-11-02 to 3 % above 47,600 bytes, its mean over seventeen runs
+    /// beside the other classes of `tests/runs-alone.sh`, 46,752 to 48,240, one binary moving between them: 48,240 four times,
+    /// past the 48,217 it had.
+    /// </para>
+    /// <para>
+    /// Every row but one id raised on 2026-11-02 to 53,220 bytes, 1 % above the 52,592 it measured alone: a scan that
+    /// delivers its rows with a selection offers its comparison to the column's encoding as one that compacts does, a plan
+    /// made once a filter, and an encoding that declines, as the ids' does, costs the first scan of a question a decode of
+    /// the column; the spans of a trace read a third faster for it, the pods of a route a tenth.
+    /// </para>
+    /// <para>
+    /// The count by service and hour raised the same day to 44,740 bytes, 1 % above the 44,296 it measured alone, by the
+    /// plan its scans make of their filter.
+    /// </para>
+    /// <para>
+    /// The unaligned window at eight lanes raised the same day to 82,506 bytes, 2 % above the 80,888 the runner measured,
+    /// where this machine measured 80,272 three times out of three: eight lanes on the runner's four cores share their pools
+    /// otherwise than on thirty-two.
+    /// </para>
     /// </summary>
     private static readonly Dictionary<string, Budget> Ceilings = new(StringComparer.Ordinal)
     {
-        ["count by service"] = new(4, 168519, 0, 0, 36144),
-        ["count by service, at eight lanes"] = new(4, 168519, 0, 0, 58240),
-        ["count by service and hour"] = new(4, 168519, 0, 0, 41648),
-        ["by minute, the last hour, under a predicate"] = new(1, 41890, 0, 0, 40964),
-        ["an unaligned window"] = new(3, 126629, 0, 0, 45076),
-        ["an unaligned window, at eight lanes"] = new(3, 126629, 0, 0, 65117),
-        ["every row but one id"] = new(4, 168519, 0, 0, 47998),
-        ["measures by region and hour"] = new(4, 168519, 0, 0, 49328),
-        ["count by route, a shredded path"] = new(4, 168519, 0, 0, 55888),
-        ["the rows of one id"] = new(4, 168519, 0, 0, 81328),
+        ["count by service"] = new(4, 169512, 0, 0, 38516),
+        ["count by service, at eight lanes"] = new(4, 169512, 0, 0, 61510),
+        ["count by service and hour"] = new(4, 169512, 0, 0, 44740),
+        ["by minute, the last hour, under a predicate"] = new(1, 42106, 0, 0, 48446),
+        ["an unaligned window"] = new(3, 127406, 0, 0, 52461),
+        ["an unaligned window, at eight lanes"] = new(3, 127406, 0, 0, 82506),
+        ["every row but one id"] = new(4, 169512, 0, 0, 53220),
+        ["measures by region and hour"] = new(4, 169512, 0, 0, 51950),
+        ["count by route, a shredded path"] = new(4, 169512, 0, 0, 49028),
+        ["the rows of one id"] = new(4, 169512, 0, 0, 83768),
     };
 
     private readonly Fixture _fixture;
@@ -182,9 +235,9 @@ public sealed partial class QueryPathBudgetTests : IClassFixture<QueryPathBudget
         {
             await using VortexDataset dataset = await VortexDataset.CreateAsync(Store, Hit.Schema, new DatasetOptions
             {
-                ClusteringKey = [nameof(Hit.At)],
+                Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(Hit.At)).Truncate(CalendarUnit.Hour), SortKey = [LayoutValue.Column(nameof(Hit.At))], Organization = LayoutOrganization.Leveled },
                 Identifiers = [nameof(Hit.RequestId)],
-                Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour) }, ContentsObjectBytes = 0, SliceTargetRows = 100,
+                ContentsObjectBytes = 0,
                 Write = new VortexWriteOptions { Indexes = IndexPolicy.Auto.WithBudgetPerMille(10_000) },
             });
             Random random = new Random(59);
@@ -214,7 +267,7 @@ public sealed partial class QueryPathBudgetTests : IClassFixture<QueryPathBudget
                 await dataset.AppendAsync(draft);
             }
 
-            while (await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 2 }) is not null)
+            while (await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 2, TargetBytesAtLevelOne = 1L << 30 }) is not null)
             {
             }
         }

@@ -124,7 +124,7 @@ public sealed partial class ObjectBoundTests
     {
         VortexDataset dataset = await VortexDataset.CreateAsync(store, Measured.Schema, new DatasetOptions
         {
-            ClusteringKey = [nameof(Measured.Key)],
+            Layout = new DatasetLayout { SortKey = [LayoutValue.Column(nameof(Measured.Key))] },
             StreamedObjectBytes = StreamedFrom,
             BoundOutPerIn = outPerIn,
         }, ct);

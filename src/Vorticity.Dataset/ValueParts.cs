@@ -7,11 +7,11 @@ using Vorticity.Types;
 namespace Vorticity.Dataset;
 
 /// <summary>
-/// A question's answer over one part of a range of a dataset's clustering key's first column, as
+/// A question's answer over one part of a range of the column a dataset's partition reads, as
 /// <see cref="VortexDataset.AskByValuesAsync{TValue, TAnswer}"/> delivers the parts: the values from <c>From</c> up to,
-/// and not including, <c>To</c>, those of one clustering value, final for them.
+/// and not including, <c>To</c>, those of one partition, final for them.
 /// </summary>
-/// <typeparam name="TValue">The values of the key's first column.</typeparam>
+/// <typeparam name="TValue">The values of the partition's column.</typeparam>
 /// <typeparam name="TAnswer">What the question answers.</typeparam>
 /// <param name="From">The part's first value.</param>
 /// <param name="To">The value past its last.</param>
@@ -27,41 +27,41 @@ public sealed record ValuePart<TValue, TAnswer>(TValue From, TValue To, TAnswer 
 }
 
 /// <summary>
-/// A range of the key's first column cut where the dataset's clustering value changes: the parts a question is asked
-/// over, one by one, so that a page shows the last of them while the rest is read.
+/// A range of the partition's column cut where the dataset's partition changes: the parts a question is asked over, one by
+/// one, so that a page shows the last of them while the rest is read.
 /// </summary>
 internal static class ValueParts
 {
     /// <summary>
     /// The parts of the values from <paramref name="from"/> up to <paramref name="to"/>, the last first when
-    /// <paramref name="descending"/>: the range cut at the starts of the clustering values it crosses, each part's bounds
+    /// <paramref name="descending"/>: the range cut at the starts of the partitions it crosses, each part's bounds
     /// the values it starts and ends at, the range's own at its ends, and the share of the range's stored values the parts
     /// up to it hold.
     /// </summary>
-    /// <exception cref="InvalidOperationException">The dataset declares no clustering value, or one of a column whose next value no function tells.</exception>
+    /// <exception cref="InvalidOperationException">The dataset declares no partition over a column, or one over a column whose next value no function tells.</exception>
     /// <exception cref="ArgumentException">The range holds no value the column stores.</exception>
     internal static IEnumerable<(TValue From, TValue To, double Covered)> Of<TValue>(
         DatasetSchema schema, VortexExtensionRegistry? extensions, TValue from, TValue to, bool descending)
     {
-        if (schema.Cut is not { } cut || schema.Key is not { } key)
+        if (schema.Cut is not { Path: { } path } cut)
         {
             throw new InvalidOperationException(
-                "A range is asked part by part on the values a dataset cuts its objects by, and this dataset declares none (DatasetOptions.Clustering): ask its question over the whole range.");
+                "A range is asked part by part on the values of the column a dataset's partition reads, and this dataset declares no partition over a column (DatasetLayout.Partition): ask its question over the whole range.");
         }
 
         if (cut.Integers is not { } storage)
         {
             throw new InvalidOperationException(
-                $"'{key.InstantPath}' is a column whose next value no function tells, a text's or a float's: a part a value has no end to find.");
+                $"'{path}' is a column whose next value no function tells, a text's or a float's: a part a value has no end to find.");
         }
 
-        VortexType type = VortexTypes.FromDType(key.LeadingType);
+        VortexType type = VortexTypes.FromDType(cut.Column);
         ClrShape shape = ClrShape.Of(typeof(TValue));
-        Int128 low = Least(type, extensions, key.InstantPath, shape, from, storage);
-        Int128 high = Least(type, extensions, key.InstantPath, shape, to, storage);
+        Int128 low = Least(type, extensions, path, shape, from, storage);
+        Int128 high = Least(type, extensions, path, shape, to, storage);
         if (high <= low)
         {
-            throw new ArgumentException($"The range from {from} to {to} holds no value of '{key.InstantPath}'.", nameof(to));
+            throw new ArgumentException($"The range from {from} to {to} holds no value of '{path}'.", nameof(to));
         }
 
         return descending ? Descending(cut, type, storage, from, to, low, high) : Ascending(cut, type, storage, from, to, low, high);

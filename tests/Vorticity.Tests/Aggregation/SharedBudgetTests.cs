@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Aggregating;
@@ -121,6 +122,65 @@ public sealed partial class SharedBudgetTests
             System.IO.File.Delete(big);
             System.IO.File.Delete(small);
         }
+    }
+
+    /// <summary>
+    /// A shelf kept as the process's, a megabyte and a quarter of it for small arrays: a query gives back twice that
+    /// quarter of them, and half goes; once it ends, the next keeps them all, up to the megabyte; idle, the shelf comes back
+    /// to its quarter. Kept to their quarter, the small arrays of a quantile per service and hour over a week at 32 lanes,
+    /// its lanes' sketches and its parts' at once, were made again at every ask, 34 MB of them.
+    /// </summary>
+    [Fact]
+    public void TheProcesssShelfKeepsTheSmallArraysQueriesLatelyGaveBackPastItsQuarter()
+    {
+        const long Budget = 1L << 20;
+        ArrayShelf shelf = ArrayShelf.Governed(Budget);
+        const int Arrays = 64;
+        long bytes = Arrays * 1024L * sizeof(long);
+        Assert.Equal(Budget / 2, bytes);
+        foreach (long[] array in Enumerable.Range(0, Arrays).Select(static _ => new long[1024]))
+        {
+            shelf.Give(array);
+        }
+
+        Assert.Equal(Budget / 4, shelf.Held);
+
+        // The query ends: the next keeps what this one found no room for.
+        shelf.Expect(0);
+        foreach (long[] array in Enumerable.Range(0, Arrays / 2).Select(static _ => new long[1024]))
+        {
+            shelf.Give(array);
+        }
+
+        Assert.Equal(bytes, shelf.Held);
+
+        // Idle: the first tick finds the shelf used since the last, the next two find it idle and bring it back.
+        for (int tick = 0; tick < 3; tick++)
+        {
+            shelf.Tick();
+        }
+
+        Assert.Equal(Budget / 4, shelf.Held);
+    }
+
+    /// <summary>
+    /// A shelf kept as the process's, a quarter of a megabyte for small arrays, given a thousand arrays of a thousand lengths:
+    /// past its budget, each one given lets the oldest go, and the piles it empties leave the order an eviction walks, which
+    /// holds those that keep an array alone. Left in it, every eviction walked past the emptied ones: a quantile within 1 %
+    /// per service and hour (T7), asked after another's sketches filled the shelf, took 2.5 s where it takes 0.25.
+    /// </summary>
+    [Fact]
+    public void AnEvictionWalksOnlyThePilesThatHoldAnArray()
+    {
+        ArrayShelf shelf = ArrayShelf.Governed(1L << 20);
+        for (int length = 1_000; length < 2_000; length++)
+        {
+            shelf.Give(new long[length]);
+        }
+
+        long held = shelf.Held;
+        Assert.InRange(held, 1L << 17, 1L << 18);
+        Assert.InRange(shelf.OrderedSmallPiles, 1, (int)(held / (1_000 * sizeof(long))) + 1);
     }
 
     [Fact]

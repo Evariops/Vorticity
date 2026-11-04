@@ -261,7 +261,7 @@ public sealed class AllocationContractTests
             // What the plan reads is what the sink reads before its first split, the structures
             // its filter consults; the split after the first one begins at the next read.
             source.Clear();
-            await scan().ExplainAsync(TestContext.Current.CancellationToken);
+            await scan().ExplainAsync(analyze: true, TestContext.Current.CancellationToken);
             int second = source.Count + 1;
 
             source.Clear();

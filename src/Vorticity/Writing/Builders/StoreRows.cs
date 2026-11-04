@@ -1,5 +1,8 @@
 using System;
+using System.Buffers;
 using Vorticity.Arrays;
+using Vorticity.Arrays.Decoders.Canonical;
+using Vorticity.Compute;
 using Vorticity.Types;
 using Vorticity.Types.Numerics;
 
@@ -12,7 +15,7 @@ namespace Vorticity.Writing;
 internal static class StoreRows
 {
     /// <summary>Appends every row of <paramref name="node"/> to <paramref name="store"/>, a store of the node's type.</summary>
-    /// <exception cref="NotSupportedException">The node is of a kind a result does not hold: a list, a map.</exception>
+    /// <exception cref="NotSupportedException">The node is of a kind a result does not hold: a map.</exception>
     internal static void Append(ColumnStore store, CanonicalArena arena, int node)
     {
         while (arena.RecordRef(node).Kind == CanonicalKind.Extension)
@@ -90,24 +93,79 @@ internal static class StoreRows
                 return;
             }
 
+            case ListStore list when arena.RecordRef(node).Kind == CanonicalKind.ListView:
+                AppendLists(list, arena, node, rows, valid);
+                return;
+
             case StructStore structure:
             {
-                if (!valid.IsEmpty && ArenaWords.NullCount(arena, node) > 0)
-                {
-                    throw new NotSupportedException("A struct column that holds a null is not gathered into one batch.");
-                }
-
-                CanonicalNode fields = arena.GetNode(node);
+                // Its fields appended whole, a null row's included, whatever they hold there; then its null rows marked.
+                // The node is read again for each field: a field's append may add nodes, which moves the records.
+                int first = structure.Rows;
                 for (int i = 0; i < structure.Children.Length; i++)
                 {
-                    Append(structure.Children[i], arena, fields.GetFieldIndex(i));
+                    Append(structure.Children[i], arena, arena.GetNode(node).GetFieldIndex(i));
                 }
 
+                structure.AppendedWhole(first, rows, valid);
                 return;
             }
 
             default:
                 throw new NotSupportedException($"A column of {store.Type} is not gathered into one batch.");
+        }
+    }
+
+    /// <summary>
+    /// Appends the lists of the list view <paramref name="node"/> to <paramref name="list"/>: the elements of its valid rows,
+    /// in their order, gathered from wherever the view names them into one node and appended whole, then each row closed
+    /// over its count of them; a null row holds none.
+    /// </summary>
+    private static void AppendLists(ListStore list, CanonicalArena arena, int node, int rows, ReadOnlySpan<ulong> valid)
+    {
+        // Everything is read off the node before the gathering appends records: a node read across that append is a
+        // use-after-move. The spans are over buffers, which do not move.
+        // The offsets and sizes are read with their types resolved once, not once a row, as the 64-bit words they become.
+        CanonicalNode view = arena.GetNode(node);
+        int elements = view.ElementsIndex;
+        long[] words = ArrayPool<long>.Shared.Rent(Math.Max(1, 2 * rows));
+        int[] counts = ArrayPool<int>.Shared.Rent(Math.Max(1, rows));
+        int[]? indices = null;
+        try
+        {
+            Span<long> offsets = words.AsSpan(0, rows);
+            Span<long> sizes = words.AsSpan(rows, rows);
+            CanonicalSupport.ReadIntegers(view.Offsets.Span, view.OffsetPType, 0, offsets);
+            CanonicalSupport.ReadIntegers(view.Sizes.Span, view.SizePType, 0, sizes);
+            int total = 0;
+            for (int row = 0; row < rows; row++)
+            {
+                counts[row] = IsValid(valid, row) ? checked((int)sizes[row]) : 0;
+                total = checked(total + counts[row]);
+            }
+
+            indices = ArrayPool<int>.Shared.Rent(Math.Max(1, total));
+            int at = 0;
+            for (int row = 0; row < rows; row++)
+            {
+                int offset = counts[row] == 0 ? 0 : checked((int)offsets[row]);
+                for (int e = 0; e < counts[row]; e++)
+                {
+                    indices[at++] = offset + e;
+                }
+            }
+
+            Append(list.Elements, arena, CanonicalFilter.Apply(arena, elements, indices.AsSpan(0, total)));
+            list.AppendLists(counts.AsSpan(0, rows), valid);
+        }
+        finally
+        {
+            ArrayPool<long>.Shared.Return(words);
+            ArrayPool<int>.Shared.Return(counts);
+            if (indices is not null)
+            {
+                ArrayPool<int>.Shared.Return(indices);
+            }
         }
     }
 

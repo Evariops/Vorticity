@@ -16,7 +16,7 @@ namespace Vorticity.Benchmarks.Queries;
 /// </summary>
 /// <remarks>
 /// <para>
-/// The columns follow each other as real ones do, which is what the runs of a sorted slice are made of: a
+/// The columns follow each other as real ones do, which is what the runs of sorted granules are made of: a
 /// service runs in its home region, four services in five only read, one in ten takes health checks and
 /// probes, sent from one monitoring region each, a status goes with some methods only (201 with a write,
 /// 304 with a read), an endpoint belongs to one service and answers one method, a host serves its service's

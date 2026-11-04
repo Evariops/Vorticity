@@ -29,7 +29,8 @@ build on those two.
 | [18-encryption.md](18-encryption.md) | AES-256-GCM over everything the library stores, files, datasets and scratch, with the platform's cipher, transparent to the API and costing no request to the store |
 | [19-object-storage.md](19-object-storage.md) | files and datasets read and written straight on Amazon S3, Cloudflare R2, OVHcloud, Scaleway, Azure Blob Storage and Google Cloud Storage, with clients written here over the platform's HTTP client, the same API, and every operation's requests counted |
 | [21-variant-columns.md](21-variant-columns.md) | the record of the variant design: attributes whose keys are data stored as the format's shredded variant, chosen per object, where each piece is described, the models compared, the worst cases, the decisions and the alternatives |
-| [22-on-the-fly-and-synopses.md](22-on-the-fly-and-synopses.md) | any question over any columns computed on the fly by the group-by engine, one optional cluster column, and the per-column synopses kept beside the rows for what the rows cannot answer in time |
+| [22-on-the-fly-and-synopses.md](22-on-the-fly-and-synopses.md) | any question over any columns computed on the fly by the group-by engine, over objects sorted by the application's key, and the per-column synopses kept beside the rows for what the rows cannot answer in time |
+| [23-query-architecture.md](23-query-architecture.md) | how datasets answer questions: partitions and sort keys, sorted objects addressable to the granule, execution and predicates on encoded data, an explicit plan with a cost profile, distributed execution, and automatic views on top |
 | [90-registry.md](90-registry.md) | every encoding, layout and dtype: its edition, whether it is read and written, how a take is served |
 | [99-sources.md](99-sources.md) | the primary sources, and how to verify them again |
 

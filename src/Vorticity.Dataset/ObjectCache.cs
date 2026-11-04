@@ -43,9 +43,6 @@ internal sealed class ObjectCache : IAsyncDisposable
     /// <summary>The entries the handle's walks parsed, shared by every version that holds their pages.</summary>
     internal EntryMemo Entries { get; } = new EntryMemo();
 
-    /// <summary>How many objects are open, leased or idle.</summary>
-    internal int Count => _open.Count;
-
     /// <summary>How many open objects a lease holds: none once every read has given its objects back.</summary>
     internal int Leased => _open.Count - _idle.Count;
 
@@ -404,6 +401,13 @@ internal sealed class ObjectLease : IAsyncDisposable
 
     /// <summary>Whether the object was already open, so the lease cost no request.</summary>
     internal bool WasCached { get; }
+
+    /// <summary>
+    /// Whether <see cref="File"/> is a copy of the object written again, the rows in their order but its chunks its own
+    /// (<see cref="LevelZeroMemo"/>), rather than the object as it lies: the regions its entry's table of contents names, its
+    /// marks and its sparse index, lie in the object, not in the copy, which is read whole.
+    /// </summary>
+    internal bool IsCopy { get; init; }
 
     /// <summary>
     /// The fragments left out because their bytes are not what their references say; the file's own

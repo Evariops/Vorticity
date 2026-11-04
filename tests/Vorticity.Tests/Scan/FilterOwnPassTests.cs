@@ -100,9 +100,9 @@ public sealed class FilterOwnPassTests
     }
 
     [Theory]
-    [InlineData("none")]
-    [InlineData("none&")]
-    public async Task ASplitTheFilterKeepsNothingOfDecodesOnlyTheFiltersColumn(string filter)
+    [InlineData("none", false)]
+    [InlineData("none&", true)]
+    public async Task ASplitTheFilterKeepsNothingOfDecodesOnlyTheFiltersColumn(string filter, bool decodesColumn)
     {
         Decoders.EnsureRegistered();
         string path = Write();
@@ -119,10 +119,11 @@ public sealed class FilterOwnPassTests
                 }
             }
 
-            // The filter's column, every row of it, and the zone map it is pruned with, a row a
-            // zone: nothing of the three columns the filter keeps no row of.
+            // The zone map the filter is pruned with, a row a zone, and the filter's column, every row of it, unless its
+            // encoding answers the comparison where it is packed (spec N, 1): nothing of the three columns the filter keeps
+            // no row of.
             Assert.Equal(0, rows);
-            Assert.Equal(Rows + (Rows / 8_192), metrics.ValuesDecoded);
+            Assert.Equal((decodesColumn ? Rows : 0) + (Rows / 8_192), metrics.ValuesDecoded);
         }
         finally
         {
@@ -199,9 +200,9 @@ public sealed class FilterOwnPassTests
 
             Assert.Equal(expected, got);
 
-            // The filter's column once, for its own pass, and its zone map; then each projected
-            // column's chunk once, whole, every batch slicing its run out of it.
-            Assert.Equal(Rows + (Rows / 8_192) + (3L * Rows), metrics.ValuesDecoded);
+            // The filter's zone map, its column compared where it is packed (spec N, 1); then each projected column's chunk
+            // once, whole, every batch slicing its run out of it.
+            Assert.Equal((Rows / 8_192) + (3L * Rows), metrics.ValuesDecoded);
         }
         finally
         {

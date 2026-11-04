@@ -13,17 +13,17 @@ namespace Vorticity.Dataset;
 /// <summary>
 /// Sums the counts of a run into a rollup (<see cref="RollupEntry"/>) and its object, with no row read: at rank 1, the
 /// counts of consecutive objects of a level; past it, the totals and the buckets of consecutive rollups of the rank below.
-/// A column's totals add every child's; its buckets add each clustering value's apart, when the dataset declares one and
+/// A column's totals add every child's; its buckets add each partition value's apart, when the dataset declares one and
 /// the run holds two to <see cref="MaxBuckets"/> of them. A column is kept when every child counts it.
 /// </summary>
 internal sealed class RollupBuilder
 {
-    /// <summary>The most clustering values a rollup keeps apart: past them, its buckets would weigh more than its children's totals.</summary>
+    /// <summary>The most partition values a rollup keeps apart: past them, its buckets would weigh more than its children's totals.</summary>
     internal const int MaxBuckets = 256;
 
     private readonly int _level;
     private readonly int _rank;
-    private readonly ClusteringKey _key;
+    private readonly DatasetKey _key;
     private readonly ValueCut? _values;
     private readonly int _maxBuckets;
     private readonly XxHash128 _fingerprint = new XxHash128();
@@ -36,15 +36,15 @@ internal sealed class RollupBuilder
     private long _objects;
     private long _rows;
 
-    // A child of no clustering value its summaries prove, or a rollup that keeps no buckets: the rollup keeps none.
+    // A child of no partition value its summaries prove, or a rollup that keeps no buckets: the rollup keeps none.
     private bool _unbucketed;
 
     /// <param name="level">The level whose objects the rollup covers.</param>
     /// <param name="rank">Its rank: 1 over objects.</param>
-    /// <param name="key">The dataset's clustering key.</param>
-    /// <param name="values">The dataset's clustering value, or null for none, which keeps no buckets.</param>
-    /// <param name="maxBuckets">The most clustering values kept apart.</param>
-    internal RollupBuilder(int level, int rank, ClusteringKey key, ValueCut? values, int maxBuckets = MaxBuckets)
+    /// <param name="key">The dataset's sort key.</param>
+    /// <param name="values">The dataset's partition value, or null for none, which keeps no buckets.</param>
+    /// <param name="maxBuckets">The most partition values kept apart.</param>
+    internal RollupBuilder(int level, int rank, DatasetKey key, ValueCut? values, int maxBuckets = MaxBuckets)
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(rank, 1);
         _level = level;
@@ -53,9 +53,6 @@ internal sealed class RollupBuilder
         _values = values;
         _maxBuckets = maxBuckets;
     }
-
-    /// <summary>The children added.</summary>
-    internal int Children => _children;
 
     /// <summary>
     /// Adds the object <paramref name="held"/>, the next of the run, with <paramref name="counts"/> the counts of each column
@@ -149,7 +146,7 @@ internal sealed class RollupBuilder
             return null;
         }
 
-        // The clustering values kept apart: one names the rollup's value, which its totals count; two or more, buckets.
+        // The partition values kept apart: one names the rollup's value, which its totals count; two or more, buckets.
         bool bucketed = _values is not null && !_unbucketed && _buckets.Count <= _maxBuckets;
         List<RollupBucket> buckets = [];
         if (bucketed)
@@ -280,13 +277,13 @@ internal sealed class RollupBuilder
         return sums;
     }
 
-    /// <summary>The bucket of an object of clustering value <paramref name="image"/> and summaries <paramref name="summaries"/>.</summary>
+    /// <summary>The bucket of an object of partition value <paramref name="image"/> and summaries <paramref name="summaries"/>.</summary>
     private BucketSums? BucketOf(FilterLiteral image, ObjectSummaries summaries, long rows) =>
-        summaries.TryGet(_key.InstantPath, out ColumnSummary column) && column.HasMin && column.HasMax
+        summaries.TryGet(_key.LeadingPath, out ColumnSummary column) && column.HasMin && column.HasMax
             ? BucketOf(image, column.Min, column.Max, rows)
             : Unbucketed();
 
-    /// <summary>The bucket of clustering value <paramref name="image"/>, its bounds and rows grown by a child's.</summary>
+    /// <summary>The bucket of partition value <paramref name="image"/>, its bounds and rows grown by a child's.</summary>
     private BucketSums BucketOf(FilterLiteral image, FilterLiteral low, FilterLiteral high, long rows)
     {
         // The children come in key order, and so their values: a value is the last bucket's or a new one past it.
@@ -321,7 +318,7 @@ internal sealed class RollupBuilder
         internal int Children { get; set; }
     }
 
-    /// <summary>A clustering value's bounds, rows and counts over the children of that value.</summary>
+    /// <summary>A partition value's bounds, rows and counts over the children of that value.</summary>
     private sealed class BucketSums(FilterLiteral image, FilterLiteral low, FilterLiteral high)
     {
         internal FilterLiteral Image { get; } = image;

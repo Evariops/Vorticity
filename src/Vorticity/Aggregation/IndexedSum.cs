@@ -372,7 +372,7 @@ internal struct IndexedSum : IFloatSumState<IndexedSum>
     /// <param name="taken">The sum of the values taken out.</param>
     /// <param name="topStays">
     /// Whether the caller knows a value of the largest magnitude stays: the least and the greatest of the sum's values
-    /// both remain, as <see cref="WideIndexedSum.TryRemove"/> takes it.
+    /// both remain.
     /// </param>
     internal bool TryTakeOut(in IndexedSum taken, bool topStays = false)
     {

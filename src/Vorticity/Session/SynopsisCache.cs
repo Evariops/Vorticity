@@ -310,9 +310,6 @@ public sealed class SynopsisCache : IDisposable
     /// <summary>Regions whose file did not hold their checksum, dropped.</summary>
     internal long Corrupt => Count(ref _corrupt);
 
-    /// <summary>Regions larger than the capacity, never kept.</summary>
-    internal long Refused => Count(ref _refused);
-
     /// <summary>
     /// Told of each region a reader asks of the cache, held or not, once per ask, in the order asked: the trace a
     /// replay of eviction policies reads (<c>vortex-queries --micro cachetrace</c>). Null, the default, tells nobody.
@@ -832,17 +829,20 @@ public sealed class SynopsisCache : IDisposable
     /// Whether the cache holds the sealed bytes kept under <paramref name="name"/>, without reading them, or, when it
     /// shares a root, another cache of the root does: those it reads, and does not keep again.
     /// </summary>
-    internal bool HoldsSealed(string name)
+    internal bool HoldsSealed(string name) => HoldsSealed(name.AsSpan());
+
+    /// <summary>As <see cref="HoldsSealed(string)"/>, the name as characters a caller made where it liked.</summary>
+    internal bool HoldsSealed(ReadOnlySpan<char> name)
     {
         lock (_gate)
         {
-            if (_entries.ContainsKey(name))
+            if (_entries.GetAlternateLookup<ReadOnlySpan<char>>().ContainsKey(name))
             {
                 return true;
             }
         }
 
-        return _root is not null && PeersHold(name);
+        return _root is not null && PeersHold(name.ToString());
     }
 
     /// <summary>

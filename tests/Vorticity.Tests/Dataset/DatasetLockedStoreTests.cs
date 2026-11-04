@@ -133,7 +133,7 @@ public sealed class DatasetLockedStoreTests
     private static DatasetOptions Options() => new DatasetOptions
     {
         Seed = 0x10_C4ED,
-        ClusteringKey = ["Key"],
+        Layout = new DatasetLayout { SortKey = [LayoutValue.Column("Key")] },
         Write = new VortexWriteOptions { RowBlockSize = 64, DataBlockTargetBytes = 2 << 10 },
     };
 

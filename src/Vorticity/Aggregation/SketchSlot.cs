@@ -53,11 +53,22 @@ internal abstract class SketchSlot<TSketch, TResult> : AggregateSlot<TResult>
     {
     }
 
+    /// <summary>The shelf of the slot's query, which its sketches may take their arrays from; null outside a query's memory.</summary>
+    private protected ArrayShelf? Shelf => _shelf;
+
+    /// <summary>
+    /// A sketch the slot lets go of, its group released or left out: a slot whose sketches took their arrays from its
+    /// shelf gives them back here; one whose answers hold their sketches keeps them.
+    /// </summary>
+    private protected virtual void Released(TSketch sketch)
+    {
+    }
+
     /// <summary>A group's sketch, made at its first value.</summary>
-    private protected TSketch Sketch(int group) => _sketches[group] ??= New();
+    internal TSketch Sketch(int group) => _sketches[group] ??= New();
 
     /// <summary>A group's sketch; null before its first value.</summary>
-    private protected TSketch? Held(int group) => group < _groups ? _sketches[group] : null;
+    internal TSketch? Held(int group) => group < _groups ? _sketches[group] : null;
 
     /// <summary>Counts <paramref name="bytes"/> more that the sketches hold.</summary>
     private protected void Grew(long bytes) => _bytes += bytes;
@@ -144,16 +155,65 @@ internal abstract class SketchSlot<TSketch, TResult> : AggregateSlot<TResult>
         }
     }
 
+    /// <summary>
+    /// A group new to this table takes the other's sketch as it is, where the slot can hold it (<see cref="Adopts"/>), and
+    /// the other forgets it; the others merge. A part of a merge at 32 lanes made each group's sketch anew and merged the
+    /// lane's into it: a quantile per service and hour over a week (T6) made 100 800 sketches and their arrays an ask
+    /// beside the lanes' own.
+    /// </summary>
+    internal override void MoveFrom(AggregateSlot other, ReadOnlySpan<int> from, ReadOnlySpan<int> into)
+    {
+        TSketch?[] theirs = ((SketchSlot<TSketch, TResult>)other)._sketches;
+        for (int i = 0; i < from.Length; i++)
+        {
+            if (theirs[from[i]] is not { } sketch)
+            {
+                continue;
+            }
+
+            if (_sketches[into[i]] is null && Adopts(sketch))
+            {
+                _sketches[into[i]] = sketch;
+                theirs[from[i]] = null;
+                _bytes += sketch.Bytes;
+                continue;
+            }
+
+            TSketch mine = Sketch(into[i]);
+            long before = mine.Bytes;
+            mine.Merge(sketch);
+            _bytes += mine.Bytes - before;
+        }
+    }
+
+    /// <summary>
+    /// Whether the slot takes <paramref name="sketch"/>, another table's, as its own: its arrays given back where its own
+    /// sketches give theirs. None by default.
+    /// </summary>
+    private protected virtual bool Adopts(TSketch sketch) => false;
+
     internal override void Keep(ReadOnlySpan<int> groups)
     {
+        // The kept sketches taken aside, then those left let go, then the kept ones put first.
+        TSketch?[] kept = ArrayPool<TSketch?>.Shared.Rent(groups.Length);
         long bytes = 0;
         for (int i = 0; i < groups.Length; i++)
         {
-            TSketch? kept = _sketches[groups[i]];
-            _sketches[i] = kept;
-            bytes += kept?.Bytes ?? 0;
+            kept[i] = _sketches[groups[i]];
+            _sketches[groups[i]] = null;
+            bytes += kept[i]?.Bytes ?? 0;
         }
 
+        for (int group = 0; group < _groups; group++)
+        {
+            if (_sketches[group] is { } left)
+            {
+                Released(left);
+            }
+        }
+
+        kept.AsSpan(0, groups.Length).CopyTo(_sketches);
+        ArrayPool<TSketch?>.Shared.Return(kept, clearArray: true);
         Array.Clear(_sketches, groups.Length, _groups - groups.Length);
         _groups = groups.Length;
         _bytes = bytes;
@@ -163,6 +223,14 @@ internal abstract class SketchSlot<TSketch, TResult> : AggregateSlot<TResult>
     {
         if (_sketches.Length > 0)
         {
+            for (int group = 0; group < _groups; group++)
+            {
+                if (_sketches[group] is { } sketch)
+                {
+                    Released(sketch);
+                }
+            }
+
             Array.Clear(_sketches);
             _shelf?.Give(_sketches);
             _sketches = [];

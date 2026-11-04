@@ -80,10 +80,17 @@ internal static class ZonePruningPlan
     /// the whole file: a step counts only the blocks it pruned among them, and the mask leaves the
     /// others dead, which no structure asks about.
     /// </param>
+    /// <param name="proofs">
+    /// Whether the zone maps should prove the filter true where they can, a count or a settling
+    /// asking: the Bloom filters of a value a conjunct leaves out are read for the blocks they prove
+    /// it absent from (<see cref="ZonePruner.NoteAbsent"/>), which a scan of rows would read for
+    /// nothing.
+    /// </param>
+    /// <param name="question">What the question the scan belongs to read already, its variant directories kept for its other scans; null for none.</param>
     internal static async ValueTask<PruningPlan> PlanAsync(
         VortexFile file, LayoutTree tree, VortexExpr filter, CancellationToken cancellationToken,
         List<PruningStep>? steps = null, Scanning.ScanCounters? metrics = null, bool indexes = true,
-        BlockMask? scope = null)
+        BlockMask? scope = null, bool proofs = false, Indexes.QuestionReads? question = null)
     {
         long blockRows = Scanning.SplitPlan.NaturalBatchRows(tree);
 
@@ -99,15 +106,20 @@ internal static class ZonePruningPlan
         // are bytes the scan asked its source for, and they go to the same sink the batches feed,
         // so that the sink and the source agree about what was requested.
         Scanning.ScanCounters.Note(metrics, segments, bytes);
+        if (proofs && indexes && zones is not null && blockRows > 0)
+        {
+            await NoteAbsentAsync(file, tree, filter, zones, blockRows, steps, metrics, cancellationToken).ConfigureAwait(false);
+        }
 
         // The path directories first among the indexes: one small read refutes the whole file, or the
-        // slices that hold no path the filter asks for.
+        // groups of its rows that hold no path the filter asks for.
         List<RowRange>? pathRanges = null;
+        bool pathsConsulted = false;
         int pathSegments = 0;
         long pathBytes = 0;
         if (indexes && blockRows > 0 && VariantColumns(filter) is { } variants)
         {
-            (bool refuted, pathRanges, pathSegments, pathBytes) = await RefutedByPathsAsync(file, filter, variants, cancellationToken).ConfigureAwait(false);
+            (bool refuted, pathRanges, pathSegments, pathBytes, pathsConsulted) = await RefutedByPathsAsync(file, filter, variants, cancellationToken, question).ConfigureAwait(false);
             Scanning.ScanCounters.Note(metrics, pathSegments, pathBytes);
             if (refuted)
             {
@@ -126,7 +138,7 @@ internal static class ZonePruningPlan
         Dictionary<string, List<(string Key, Types.Variants.PathClass Class)>>? keysRead = indexes && blockRows > 0 ? KeysRead(filter) : null;
         if (zones is null && blooms is null && locating is null && pathRanges is null && keysRead is null)
         {
-            if (pathSegments > 0)
+            if (pathsConsulted)
             {
                 steps?.Add(new PruningStep("path directory", 0, pathSegments, pathBytes));
             }
@@ -154,7 +166,8 @@ internal static class ZonePruningPlan
             steps?.Add(new PruningStep("zone map", before - Counted(live, scope), segments, bytes));
         }
 
-        if (pathSegments > 0)
+        // Whether a directory answered, not whether one was read: a question keeps the directories its scans read (2026-11-02).
+        if (pathsConsulted)
         {
             before = Counted(live, scope);
             foreach (RowRange range in pathRanges ?? [])
@@ -200,6 +213,66 @@ internal static class ZonePruningPlan
 
         Diagnostics.VortexEventSource.Pruned(live.BlockCount - live.LiveCount, live.BlockCount);
         return new PruningPlan(live, zones, located);
+    }
+
+    /// <summary>
+    /// Notes to <paramref name="zones"/>, for each value a conjunct of <paramref name="filter"/> leaves
+    /// out, <c>x != v</c>, <c>NOT x IN (…)</c> or <c>NOT list_contains(x, v)</c>, the blocks the Bloom
+    /// filters of <c>x</c> prove hold no row of it: the complement of those they keep for the value's
+    /// own predicate.
+    /// </summary>
+    private static async ValueTask NoteAbsentAsync(
+        VortexFile file, LayoutTree tree, VortexExpr filter, ZonePruner zones, long blockRows, List<PruningStep>? steps,
+        Scanning.ScanCounters? metrics, CancellationToken cancellationToken)
+    {
+        List<VortexExpr> conjuncts = [];
+        Conjuncts(filter, conjuncts);
+        foreach (VortexExpr conjunct in conjuncts)
+        {
+            (VortexExpr? excluded, VortexExpr? found, FieldExpr? field) = conjunct switch
+            {
+                ComparisonExpr { Op: ComparisonOp.NotEqual } other when other.Value.Kind != FilterLiteralKind.Null =>
+                    (other, new ComparisonExpr(other.Field, ComparisonOp.Equal, other.Value), other.Field),
+                NotExpr { Operand: InExpr set } => (set, set, set.Field),
+                NotExpr { Operand: ListContainsExpr contains } when contains.Value.Kind != FilterLiteralKind.Null => (contains, contains, contains.Field),
+                _ => ((VortexExpr?)null, (VortexExpr?)null, (FieldExpr?)null),
+            };
+
+            // The filters are read where they weigh less than the column whose blocks they would spare.
+            if (excluded is null || found is null || field is null
+                || await Indexes.BloomPruner.BuildAsync(file, found, blockRows, cancellationToken).ConfigureAwait(false) is not { } blooms
+                || blooms.PayloadBytes >= ColumnBytes(file, tree, field))
+            {
+                continue;
+            }
+
+            BlockMask mayHold = new BlockMask(tree.Root.RowCount, blockRows);
+            await blooms.RefineAsync(file, mayHold, cancellationToken).ConfigureAwait(false);
+            Scanning.ScanCounters.Note(metrics, blooms.Segments, blooms.Bytes);
+            steps?.Add(new PruningStep("bloom filter, a value left out", 0, blooms.Segments, blooms.Bytes));
+            zones.NoteAbsent(excluded, mayHold);
+        }
+
+        // The bytes of the top-level column field reads, all of them, or none known for a file of no struct.
+        static long ColumnBytes(VortexFile file, LayoutTree tree, FieldExpr field)
+        {
+            int dot = field.Path.IndexOf('.', StringComparison.Ordinal);
+            int at = file.DType.Kind == DTypeKind.Struct ? file.DType.IndexOfField(dot < 0 ? field.Path : field.Path[..dot]) : -1;
+            return at >= 0 && at < tree.Root.ChildCount ? LayoutTree.BytesUnder(tree.Root.GetChild(at), file.SegmentSpecs) : 0;
+        }
+
+        static void Conjuncts(VortexExpr expr, List<VortexExpr> into)
+        {
+            if (expr is LogicalExpr { IsAnd: true } and)
+            {
+                Conjuncts(and.Left, into);
+                Conjuncts(and.Right, into);
+            }
+            else
+            {
+                into.Add(expr);
+            }
+        }
     }
 
     /// <summary>
@@ -280,10 +353,10 @@ internal static class ZonePruningPlan
     /// <summary>
     /// Whether the path directories of <paramref name="columns"/> prove that no row of
     /// <paramref name="file"/> matches <paramref name="filter"/>; when they do not, the rows of the runs
-    /// of slices they prove hold none, or null; and the segments and bytes read for them.
+    /// of the groups they prove hold none, or null; and the segments and bytes read for them.
     /// </summary>
-    private static async ValueTask<(bool Refuted, List<RowRange>? Ranges, int Segments, long Bytes)> RefutedByPathsAsync(
-        VortexFile file, VortexExpr filter, List<string> columns, CancellationToken cancellationToken)
+    private static async ValueTask<(bool Refuted, List<RowRange>? Ranges, int Segments, long Bytes, bool Consulted)> RefutedByPathsAsync(
+        VortexFile file, VortexExpr filter, List<string> columns, CancellationToken cancellationToken, Indexes.QuestionReads? question = null)
     {
         Dictionary<string, Indexes.VariantDirectory>? directories = null;
         int segments = 0;
@@ -298,7 +371,7 @@ internal static class ZonePruningPlan
 
             // The directory holds the entries of the filter's paths alone, all its predicates ask of it.
             (Indexes.VariantDirectory? directory, int read, long readBytes) =
-                await Indexes.VariantDirectory.ReadAsync(file, field, PathsOf(filter, column), cancellationToken).ConfigureAwait(false);
+                await Indexes.VariantDirectory.ReadAsync(file, field, PathsOf(filter, column), cancellationToken, question).ConfigureAwait(false);
             segments += read;
             bytes += readBytes;
             if (directory is not null)
@@ -309,51 +382,53 @@ internal static class ZonePruningPlan
 
         if (directories is null)
         {
-            return (false, null, segments, bytes);
+            return (false, null, segments, bytes, false);
         }
 
         if (!Indexes.VariantDirectory.MayMatch(filter, directories))
         {
-            return (true, null, segments, bytes);
+            return (true, null, segments, bytes, true);
         }
 
-        // Slice by slice, when every directory names the file's slices.
-        int slices = -1;
+        // Group by group of rows, when every directory names the same groups of the file's rows.
+        long groupRows = -1;
+        long rows = -1;
         foreach (Indexes.VariantDirectory directory in directories.Values)
         {
-            slices = slices < 0 || slices == directory.SliceCount ? directory.SliceCount : 0;
+            groupRows = groupRows < 0 || groupRows == directory.GroupRows ? directory.GroupRows : 0;
+            rows = directory.Rows;
         }
 
-        if (slices <= 0 || await Indexes.SliceTable.ReadAsync(file, cancellationToken).ConfigureAwait(false) is not { } table
-            || table.Slices.Count != slices)
+        if (groupRows <= 0)
         {
-            return (false, null, segments, bytes);
+            return (false, null, segments, bytes, true);
         }
 
+        int groups = (int)((rows + groupRows - 1) / groupRows);
         List<RowRange>? ranges = null;
         long start = -1;
         long end = -1;
-        for (int slice = 0; slice < slices; slice++)
+        for (int group = 0; group < groups; group++)
         {
-            Indexes.TimeSlice cut = table.Slices[slice];
-            if (Indexes.VariantDirectory.MayMatch(filter, directories, slice))
+            RowRange cut = new RowRange(group * groupRows, Math.Min((group + 1) * groupRows, rows));
+            if (Indexes.VariantDirectory.MayMatch(filter, directories, group))
             {
                 continue;
             }
 
-            // Neighbouring slices refuted make one run, so that a block astride them dies too.
-            if (start >= 0 && end == cut.FirstRow)
+            // Neighbouring groups refuted make one run, so that a block astride them dies too.
+            if (start >= 0 && end == cut.Start)
             {
-                end = cut.FirstRow + cut.Rows;
+                end = cut.End;
                 ranges![^1] = new RowRange(start, end);
                 continue;
             }
 
-            (start, end) = (cut.FirstRow, cut.FirstRow + cut.Rows);
+            (start, end) = (cut.Start, cut.End);
             (ranges ??= []).Add(new RowRange(start, end));
         }
 
-        return (false, ranges, segments, bytes);
+        return (false, ranges, segments, bytes, true);
     }
 
     /// <summary>
@@ -562,30 +637,6 @@ internal static class ZonePruningPlan
     /// <summary>The live blocks of <paramref name="live"/>, among those of <paramref name="scope"/> when there is one.</summary>
     private static int Counted(BlockMask live, BlockMask? scope) =>
         scope is null ? live.LiveCount : live.LiveCountWithin(scope);
-
-    /// <summary>
-    /// The zones of <paramref name="field"/>'s column as a pruner reads them, decoded once for the file,
-    /// their read added to <paramref name="metrics"/>; null when the column has no zone map. What tells a
-    /// group by whether its key lies scattered over its span or in the order of the rows.
-    /// </summary>
-    internal static async ValueTask<ZoneColumn?> ZonesAsync(
-        VortexFile file, FieldExpr field, Scanning.ScanCounters? metrics, CancellationToken cancellationToken)
-    {
-        if (!TryLocate(file.LayoutTree, field, out LayoutNode node, out ZoneMap map))
-        {
-            return null;
-        }
-
-        if (file.DecodedZones(node.Index) is { } decoded)
-        {
-            return decoded;
-        }
-
-        ZoneColumn[] columns = new ZoneColumn[1];
-        (int segments, long bytes) = await SettleAsync(file, [new Candidate(field, node, map)], columns, metrics, cancellationToken).ConfigureAwait(false);
-        Scanning.ScanCounters.Note(metrics, segments, bytes);
-        return columns[0];
-    }
 
     /// <summary>
     /// Decodes the zone maps of every column <paramref name="filter"/> reads.

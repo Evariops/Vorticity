@@ -24,11 +24,6 @@ internal readonly ref struct FixedSizeListColumn
     /// <summary>Rows in this column.</summary>
     public int Length => _batch.Node(_node).Length;
 
-    /// <summary>Whether row <paramref name="index"/> is not null.</summary>
-    /// <param name="index">0-based row index, below <see cref="Length"/>.</param>
-    /// <exception cref="ArgumentOutOfRangeException"><paramref name="index"/> is out of range.</exception>
-    public bool IsValid(int index) => ColumnCore.IsValid(_batch, _node, index);
-
     /// <summary>Elements per row. Zero is legal.</summary>
     public uint Size => _batch.Node(_node).FixedSize;
 

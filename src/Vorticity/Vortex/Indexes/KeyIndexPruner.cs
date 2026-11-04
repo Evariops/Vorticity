@@ -131,7 +131,10 @@ internal sealed class KeyIndexPruner
     /// </summary>
     /// <param name="file">The file's indexes: the open file, or what a read with no open has of it.</param>
     /// <param name="filter">The scan's predicate.</param>
-    /// <param name="blockRows">The scan's block length; an entry at another length is ignored.</param>
+    /// <param name="blockRows">
+    /// The scan's block length; an entry at another length is ignored, but hashed postings placed at units of several
+    /// blocks (spec C, 5), whose places each claim their unit's blocks.
+    /// </param>
     /// <param name="cancellationToken">Cancels the directory read.</param>
     internal static async ValueTask<KeyIndexPruner?> BuildAsync(
         IIndexHost file, VortexExpr filter, long blockRows, CancellationToken cancellationToken)
@@ -162,9 +165,13 @@ internal sealed class KeyIndexPruner
         foreach (IndexEntry entry in directory.Entries)
         {
             int stride = KeyRunOptions.StrideOf(entry.Kind);
-            bool trigrams = entry.Kind == IndexKinds.PostingsNgram3;
+            bool tokens = entry.Kind == IndexKinds.PostingsTokens;
+            bool trigrams = tokens || entry.Kind == IndexKinds.PostingsNgram3;
             bool hashed = entry.Kind == IndexKinds.PostingsHashed;
-            if (stride == 0 || entry.BlockLength != (ulong)blockRows
+            ulong unit = hashed && entry.BlockLength > (ulong)blockRows && entry.BlockLength % (ulong)blockRows == 0
+                ? entry.BlockLength / (ulong)blockRows
+                : 1;
+            if (stride == 0 || entry.BlockLength != (ulong)blockRows * unit || unit > KeyRunOptions.MostUnitBlocks
                 || !TryResolve(file.DType, entry.ColumnPath, out string path, out DType dtype)
                 || !KeyRunOptions.TryParseEntry(entry.Options, out _, out bool fold))
             {
@@ -176,13 +183,13 @@ internal sealed class KeyIndexPruner
                 continue;
             }
 
-            string key = trigrams ? TrigramKey(path) : path;
+            string key = tokens ? TokenKey(path) : trigrams ? TrigramKey(path) : path;
             List<StringMatchExpr>? predicates = null;
             KeyLayout layout;
             DType storage;
             if (trigrams)
             {
-                // The keys a text index holds are trigrams, typed binary.
+                // The keys a text index holds are trigrams or words, typed binary.
                 if (!matches.TryGetValue(path, out predicates))
                 {
                     continue;
@@ -215,7 +222,7 @@ internal sealed class KeyIndexPruner
             foreach (IndexRun run in entry.Runs)
             {
                 if (FenceTable.TryOpen(run, stride, asked.Layout, out FenceTable? table, out _)
-                    && run.EndBlock <= (ulong)blocks)
+                    && run.EndBlock <= ((ulong)blocks + unit - 1) / unit)
                 {
                     runs.Add(new Run(run, table!));
                 }
@@ -225,7 +232,7 @@ internal sealed class KeyIndexPruner
             {
                 columns[key] = new Column(
                     hashed ? Placing.Hashes : entry.Kind == IndexKinds.SortedRuns ? Placing.Rows : Placing.Blocks,
-                    asked, storage, runs, blocks);
+                    asked, storage, runs, blocks, (int)unit);
             }
         }
 
@@ -324,7 +331,8 @@ internal sealed class KeyIndexPruner
 
             foreach (Run run in column.Runs)
             {
-                if (!AnyLive(live, run.Meta) || (scope is not null && !AnyLive(scope, run.Meta)))
+                (ulong first, ulong end) = column.BlocksOf(run.Meta);
+                if (!live.AnyLiveBlocks((long)first, (long)end) || (scope is not null && !scope.AnyLiveBlocks((long)first, (long)end)))
                 {
                     continue;
                 }
@@ -429,9 +437,6 @@ internal sealed class KeyIndexPruner
         return true;
     }
 
-    private static bool AnyLive(BlockMask live, IndexRun run) =>
-        live.AnyLiveBlocks((long)run.FirstBlock, (long)run.EndBlock);
-
     // ------------------------------------------------------------------------------ the proof
 
     /// <summary>
@@ -514,6 +519,15 @@ internal sealed class KeyIndexPruner
     }
 
     private static string TrigramKey(string path) => path + "\0ngram3";
+
+    private static string TokenKey(string path) => path + TokenMark;
+
+    /// <summary>What ends the key of a column's token index, which a column's path never holds.</summary>
+    private const string TokenMark = "\0tokens";
+
+    /// <summary>The literals a text index of <paramref name="key"/> is asked for by <paramref name="match"/>: its words, or its trigrams.</summary>
+    private static List<byte[]> GramsOf(string key, StringMatchExpr match, bool fold) =>
+        key.EndsWith(TokenMark, StringComparison.Ordinal) ? Tokens.Required(match, fold) : Trigrams.Required(match, fold);
 
     private static void CollectEqualities(
         VortexExpr expr,
@@ -706,7 +720,7 @@ internal sealed class KeyIndexPruner
                 }
             }
 
-            Asked built = new Asked(_filter, key, layout, fold, predicates is null ? Equalities[key] : TrigramsOf(predicates, fold), hashed);
+            Asked built = new Asked(_filter, key, layout, fold, predicates is null ? Equalities[key] : GramsOf(key, predicates, fold), hashed);
             lock (_asked)
             {
                 return _asked.TryAdd(id, built) ? built : _asked[id];
@@ -714,16 +728,16 @@ internal sealed class KeyIndexPruner
         }
 
         /// <summary>
-        /// The trigrams the predicates require, folded as the index was, each once: the literals of a
-        /// text index, whose keys are trigrams typed binary.
+        /// The trigrams or the words the predicates require, folded as the index was, each once: the literals of a text
+        /// index, whose keys are trigrams or words typed binary.
         /// </summary>
-        private static List<FilterLiteral> TrigramsOf(List<StringMatchExpr> predicates, bool fold)
+        private static List<FilterLiteral> GramsOf(string key, List<StringMatchExpr> predicates, bool fold)
         {
             List<FilterLiteral> literals = [];
             HashSet<FilterLiteral> seen = [];
             foreach (StringMatchExpr predicate in predicates)
             {
-                foreach (byte[] trigram in Trigrams.Required(predicate, fold))
+                foreach (byte[] trigram in KeyIndexPruner.GramsOf(key, predicate, fold))
                 {
                     FilterLiteral literal = FilterLiteral.From(trigram);
                     if (seen.Add(literal))
@@ -873,12 +887,12 @@ internal sealed class KeyIndexPruner
                     Questions[expr] = (Ask(members.Values), 1);
                     break;
 
-                case StringMatchExpr match when TrigramKey(match.Field.Path) == key:
+                case StringMatchExpr match when TrigramKey(match.Field.Path) == key || TokenKey(match.Field.Path) == key:
                 {
-                    // Absent as soon as one required trigram is: a matching value holds them all.
+                    // Absent as soon as one required trigram or word is: a matching value holds them all.
                     int first = -1;
                     int count = 0;
-                    foreach (byte[] trigram in Trigrams.Required(match, Fold))
+                    foreach (byte[] trigram in GramsOf(key, match, Fold))
                     {
                         int set = Ask(FilterLiteral.From(trigram));
                         first = count++ == 0 ? set : first;
@@ -1002,6 +1016,9 @@ internal sealed class KeyIndexPruner
         private readonly int _blocks;
         private readonly int _words;
 
+        /// <summary>The blocks a place of the runs spans: a unit of hashed postings' (spec C, 5), one otherwise.</summary>
+        private readonly int _unit;
+
         // While a refinement runs: the covered blocks, then each presence set, a bit per block.
         private ulong[]? _bits;
 
@@ -1011,8 +1028,9 @@ internal sealed class KeyIndexPruner
         /// <summary>Whether the runs place each key at its rows, as sorted runs do, rather than at its blocks.</summary>
         internal bool Rows => _rows;
 
-        internal Column(Placing placing, Asked asked, DType storage, List<Run> runs, int blocks)
+        internal Column(Placing placing, Asked asked, DType storage, List<Run> runs, int blocks, int unit = 1)
         {
+            _unit = Math.Max(unit, 1);
             Asked = asked;
             _rows = placing == Placing.Rows;
             _hashes = placing == Placing.Hashes;
@@ -1028,8 +1046,12 @@ internal sealed class KeyIndexPruner
             Runs = runs;
             _blocks = blocks;
             _words = (blocks + 63) >> 6;
-            CoversAll = Covers(runs, blocks);
+            CoversAll = Covers(runs, (blocks + _unit - 1) / _unit);
         }
+
+        /// <summary>The blocks of the file the places of <paramref name="run"/> span, the last unit's cut to the file.</summary>
+        internal (ulong First, ulong End) BlocksOf(IndexRun run) =>
+            (Math.Min(run.FirstBlock * (ulong)_unit, (ulong)_blocks), Math.Min(run.EndBlock * (ulong)_unit, (ulong)_blocks));
 
         /// <summary>Whether the runs place each key at the blocks its hash occurs in, as hashed postings do.</summary>
         internal bool Hashes => _hashes;
@@ -1224,10 +1246,18 @@ internal sealed class KeyIndexPruner
         }
 
         /// <summary>Claims every block of the run: none holds a key but where a lookup finds one.</summary>
-        internal void Cover(IndexRun run) => Fill(Covered, run.FirstBlock, run.EndBlock, true);
+        internal void Cover(IndexRun run)
+        {
+            (ulong first, ulong end) = BlocksOf(run);
+            Fill(Covered, first, end, true);
+        }
 
         /// <summary>Lifts the run's claim: a lookup in it failed.</summary>
-        internal void Uncover(IndexRun run) => Fill(Covered, run.FirstBlock, run.EndBlock, false);
+        internal void Uncover(IndexRun run)
+        {
+            (ulong first, ulong end) = BlocksOf(run);
+            Fill(Covered, first, end, false);
+        }
 
         /// <summary>Takes the bits a refinement fills, no block claimed.</summary>
         internal void Rent()
@@ -1271,9 +1301,14 @@ internal sealed class KeyIndexPruner
 
         private Span<ulong> Set(int set) => _bits.AsSpan((1 + set) * _words, _words);
 
-        /// <summary>Sets or clears the bits of blocks [<paramref name="first"/>, <paramref name="end"/>).</summary>
-        private static void Fill(Span<ulong> bits, ulong first, ulong end, bool value) =>
-            BitmapKernels.FillRange(MemoryMarshal.AsBytes(bits), (int)first, (int)(end - first), value);
+        /// <summary>Sets or clears the bits of blocks [<paramref name="first"/>, <paramref name="end"/>), none when the range is empty.</summary>
+        private static void Fill(Span<ulong> bits, ulong first, ulong end, bool value)
+        {
+            if (end > first)
+            {
+                BitmapKernels.FillRange(MemoryMarshal.AsBytes(bits), (int)first, (int)(end - first), value);
+            }
+        }
 
         /// <summary>
         /// Decodes one segment's arrays and marks, for every literal, the blocks that hold it.
@@ -1452,6 +1487,13 @@ internal sealed class KeyIndexPruner
 
         private void Present(int literal, ulong block)
         {
+            // A place of a unit of blocks claims each of them.
+            if (_unit > 1)
+            {
+                PresentUnit(literal, block);
+                return;
+            }
+
             // The literal's sets are shared by a float's two zeros; a bad block id claims nothing.
             if (block >= (ulong)_blocks)
             {
@@ -1466,6 +1508,24 @@ internal sealed class KeyIndexPruner
             for (int feed = Asked.FirstFeed[literal]; feed >= 0; feed = next[feed])
             {
                 bits[((1 + sets[feed]) * _words) + word] |= bit;
+            }
+        }
+
+        /// <summary>The blocks of unit <paramref name="unit"/>, cut to the file, present in each of the literal's sets.</summary>
+        private void PresentUnit(int literal, ulong unit)
+        {
+            ulong first = unit * (ulong)_unit;
+            if (first >= (ulong)_blocks)
+            {
+                return;
+            }
+
+            ulong end = Math.Min(first + (ulong)_unit, (ulong)_blocks);
+            int[] next = Asked.NextFeed;
+            int[] sets = Asked.FeedSet;
+            for (int feed = Asked.FirstFeed[literal]; feed >= 0; feed = next[feed])
+            {
+                Fill(Set(sets[feed]), first, end, true);
             }
         }
 

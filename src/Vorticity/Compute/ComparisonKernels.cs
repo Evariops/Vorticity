@@ -201,6 +201,9 @@ internal static partial class ComparisonKernels
             case StringMatchOp.Contains:
                 MatchCore<ContainsMatch>(node, mask, needle, escape, destination);
                 return;
+            case StringMatchOp.Token:
+                MatchCore<TokenMatch>(node, mask, needle, escape, destination);
+                return;
             default:
                 MatchLike(node, mask, needle, escape, text, destination);
                 return;
@@ -303,6 +306,7 @@ internal static partial class ComparisonKernels
         {
             StringMatchOp.StartsWith => StartsWithMatch.Holds(value, pattern, escape),
             StringMatchOp.Contains => ContainsMatch.Holds(value, pattern, escape),
+            StringMatchOp.Token => TokenMatch.Holds(value, pattern, escape),
             _ when text => LikeTextMatch.Holds(value, pattern, escape),
             _ => LikeMatch.Holds(value, pattern, escape),
         };
@@ -357,6 +361,12 @@ internal static partial class ComparisonKernels
     {
         public static bool Holds(ReadOnlySpan<byte> value, ReadOnlySpan<byte> pattern, byte escape) =>
             BytePattern.Contains(value, pattern);
+    }
+
+    private readonly struct TokenMatch : IBytesMatch
+    {
+        public static bool Holds(ReadOnlySpan<byte> value, ReadOnlySpan<byte> pattern, byte escape) =>
+            BytePattern.HasToken(value, pattern);
     }
 
     private readonly struct EndsWithMatch : IBytesMatch

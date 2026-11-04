@@ -28,6 +28,9 @@ public enum IndexKind : byte
     /// probes.
     /// </summary>
     HashedPostings,
+
+    /// <summary>Word to blocks, exact: <c>HasToken</c>, and the whole words of <c>Contains</c> and <c>Like</c>.</summary>
+    TokenPostings,
 }
 
 /// <summary>The indexes a writer builds, column by column, within a budget.</summary>
@@ -118,6 +121,19 @@ public sealed class IndexPolicy
     /// <returns>The policy with the index.</returns>
     public IndexPolicy HashedPostings(string column, bool required = false) => With(column, IndexSpec.HashedPostings, required);
 
+    /// <summary>
+    /// Token postings, word to blocks, on <paramref name="column"/>, a text column (spec G, 6): <c>HasToken</c>, and the whole
+    /// words of <c>Contains</c>, <c>StartsWith</c> and <c>Like</c>, read the blocks of their words alone. A word is a maximal
+    /// run of ASCII letters and digits and of non-ASCII characters, its first 64 bytes kept.
+    /// </summary>
+    /// <param name="column">The column path.</param>
+    /// <param name="ignoreCase">Whether the words are folded to ASCII lower case, on both sides: the index then answers a
+    /// search of any case, and the rows are judged as asked.</param>
+    /// <param name="required">Whether the write fails rather than abandon it.</param>
+    /// <returns>The policy with the index.</returns>
+    public IndexPolicy TokenPostings(string column, bool ignoreCase = false, bool required = false) =>
+        With(column, IndexSpec.TokenPostings(ignoreCase), required);
+
     /// <summary>An index of <paramref name="kind"/> on the tuple of <paramref name="columns"/>.</summary>
     /// <param name="columns">The key's columns, in key order; one column is a plain column index.</param>
     /// <param name="kind">The index kind; a key of several columns is served by <see cref="IndexKind.SortedRuns"/>.</param>
@@ -199,6 +215,7 @@ public sealed class IndexPolicy
         IndexKind.NgramPostings => IndexSpec.NgramPostings(),
         IndexKind.SortedRuns => IndexSpec.SortedRuns,
         IndexKind.HashedPostings => IndexSpec.HashedPostings,
+        IndexKind.TokenPostings => IndexSpec.TokenPostings(),
         _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, "Not a defined index kind."),
     };
 }

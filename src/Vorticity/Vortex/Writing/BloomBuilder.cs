@@ -117,8 +117,10 @@ internal sealed class BloomBuilder : IndexBuilder
     /// <summary>Why the file-level filter was dropped, when it was asked for and could not be kept.</summary>
     internal string? FileAbandoned { get; private set; }
 
-    /// <summary>Filter blocks per closed block, in block order: 0 where a block got no filter.</summary>
-    internal List<int> BlockFilterBlocks { get; } = [];
+    // Filter blocks per closed block of the open generation, from its first: 0 where a block got no filter. A generation's
+    // alone, which its close reads: a list of the file's blocks grew with every builder of every object, 37 MB of a
+    // consolidation of four hours of log records.
+    private readonly int[] _generationFilterBlocks = new int[GenerationBlocks];
 
     /// <summary>Every generation closed, with the region of its leaves, in block order.</summary>
     internal List<BloomRun> Runs { get; } = [];
@@ -712,7 +714,7 @@ internal sealed class BloomBuilder : IndexBuilder
         _blockRawStart = _rawBytes;
         if (Abandoned is not null)
         {
-            BlockFilterBlocks.Add(0);
+            NoteFilterBlocks(block, 0);
             return;
         }
 
@@ -732,7 +734,7 @@ internal sealed class BloomBuilder : IndexBuilder
             if (AutoShare > 0 && !Committed && projected * 1000 > _rawBytes * AutoShare)
             {
                 GiveUp(projected, _rawBytes);
-                BlockFilterBlocks.Add(0);
+                NoteFilterBlocks(block, 0);
                 return;
             }
 
@@ -743,7 +745,7 @@ internal sealed class BloomBuilder : IndexBuilder
             _generationBlockWordCount += words;
         }
 
-        BlockFilterBlocks.Add(filterBlocks);
+        NoteFilterBlocks(block, filterBlocks);
         Leaves += filterBlocks > 0 ? 1 : 0;
         if (_policy.Resolutions >= 2)
         {
@@ -777,6 +779,15 @@ internal sealed class BloomBuilder : IndexBuilder
         if (block + 1 - _generationFirst == GenerationBlocks)
         {
             CloseGeneration();
+        }
+    }
+
+    /// <summary>Notes the filter blocks of <paramref name="block"/>, a block of the open generation; nothing past it, the builder given up.</summary>
+    private void NoteFilterBlocks(int block, int filterBlocks)
+    {
+        if ((uint)(block - _generationFirst) < GenerationBlocks)
+        {
+            _generationFilterBlocks[block - _generationFirst] = filterBlocks;
         }
     }
 
@@ -856,13 +867,6 @@ internal sealed class BloomBuilder : IndexBuilder
         _start = block;
         _blocks = block;
         _generationFirst = block;
-
-        // The block-level table is indexed by the file's block; the old blocks' counts are the old
-        // entry's, laid over these zeros when the directory merges the two.
-        for (int i = 0; i < block; i++)
-        {
-            BlockFilterBlocks.Add(0);
-        }
     }
 
     /// <summary>
@@ -943,8 +947,10 @@ internal sealed class BloomBuilder : IndexBuilder
             int[] leafWords = new int[count];
             for (int i = 0; i < count; i++)
             {
-                leafWords[i] = BlockFilterBlocks[first + i] * SplitBlockBloom.WordsPerBlock;
+                leafWords[i] = _generationFilterBlocks[i] * SplitBlockBloom.WordsPerBlock;
             }
+
+            Array.Clear(_generationFilterBlocks);
 
             // The tree takes the generation's union with the node, and starts the next one.
             TreeWriter.CloseGeneration(leafWords, leaves);

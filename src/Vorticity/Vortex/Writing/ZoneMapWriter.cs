@@ -141,6 +141,17 @@ internal static class ZoneMapWriter
                 columns, names, dtypes, ref at, NullCounts(arena, types, zones), Named(types, AggregateId.NullCount, default, name),
                 types.Primitive(PType.U64, Nullability.NonNullable));
 
+            // A float's NaN count, which the bounds leave out, when every zone knows its own: what lets a negated
+            // comparison prune a zone of none.
+            if (IsFloat(column) && !AnyNansUnknown(zones))
+            {
+                RequireAggregate(encodings.Target, "vortex.nan_count");
+                specs.Add("vortex.nan_count"u8, default);
+                Field(
+                    columns, names, dtypes, ref at, NanCounts(arena, types, zones), Named(types, AggregateId.NanCount, default, name),
+                    types.Primitive(PType.U64, Nullability.NonNullable));
+            }
+
             DType dtype = types.Struct(names[..at], ((ReadOnlySpan<DType>)dtypes)[..at], Nullability.NonNullable);
             int root = arena.AddStruct(dtype, zones.Count, Arrays.Validity.NonNullable, columns[..at]);
             blob = ArrayBlobWriter.Write(blobs, arena, root, encodings);
@@ -156,8 +167,8 @@ internal static class ZoneMapWriter
         }
     }
 
-    /// <summary>The most columns a zones struct has: a minimum, a maximum, two bounded extremes and the null count.</summary>
-    private const int MaxFields = 5;
+    /// <summary>The most columns a zones struct has: a minimum, a maximum, two bounded extremes, the null count and the NaN count.</summary>
+    private const int MaxFields = 6;
 
     /// <summary>The dtypes of a zones struct's columns, on the stack: a DType holds its arena, so it cannot be stackalloc'd.</summary>
     [System.Runtime.CompilerServices.InlineArray(MaxFields)]
@@ -246,6 +257,37 @@ internal static class ZoneMapWriter
 
         DType dtype = types.Primitive(PType.U64, Nullability.NonNullable);
         return arena.AddPrimitive(dtype, count, Arrays.Validity.NonNullable, PType.U64, values);
+    }
+
+    private static int NanCounts(CanonicalArena arena, DTypeArena types, IReadOnlyList<BlockStats> zones)
+    {
+        int count = zones.Count;
+        VortexBuffer values = arena.Allocate(count * sizeof(ulong), sizeof(ulong), out Span<byte> bytes);
+        for (int i = 0; i < count; i++)
+        {
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(
+                bytes.Slice(i * sizeof(ulong), sizeof(ulong)), (ulong)zones[i].NanCount);
+        }
+
+        DType dtype = types.Primitive(PType.U64, Nullability.NonNullable);
+        return arena.AddPrimitive(dtype, count, Arrays.Validity.NonNullable, PType.U64, values);
+    }
+
+    /// <summary>Whether a column is a float, or an extension stored as one: what a NaN count is kept for.</summary>
+    private static bool IsFloat(DType column) =>
+        (column.Kind == DTypeKind.Extension ? column.StorageType : column) is { Kind: DTypeKind.Primitive } stored && stored.PType.IsFloat();
+
+    private static bool AnyNansUnknown(IReadOnlyList<BlockStats> zones)
+    {
+        for (int i = 0; i < zones.Count; i++)
+        {
+            if (zones[i].NansUnknown)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static Validity Validity(

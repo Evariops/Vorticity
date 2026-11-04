@@ -81,7 +81,7 @@ internal sealed class ZoneSettling
 
     /// <summary>
     /// The settling of the blocks of a dataset's object <paramref name="file"/> within <paramref name="rows"/>, its own,
-    /// for <paramref name="plan"/>, which a pass names (<see cref="ScanSpec.Settles"/>), or null when none settles: as a
+    /// for <paramref name="plan"/>, which a pass names (<see cref="StatesAsked.Settles"/>), or null when none settles: as a
     /// file's, but for the blocks that hold a row <paramref name="excluded"/> leaves out, a row a delete marked, which
     /// the file's statistics count. The dataset reads the object's other rows itself, so no split crosses a block.
     /// </summary>
@@ -158,7 +158,7 @@ internal sealed class ZoneSettling
         ZonePruningPlan.PruningPlan pruning = filter is null
             ? default
             : await ZonePruningPlan
-                .PlanAsync(file, tree, filter, cancellationToken, steps: null, metrics, indexes)
+                .PlanAsync(file, tree, filter, cancellationToken, steps: null, metrics, indexes, proofs: true)
                 .ConfigureAwait(false);
         BlockMask live = pruning.Live ?? new BlockMask(file.RowCount, blockRows);
         if (live.BlockRows != blockRows || (filter is not null && pruning.Zones is null))
@@ -189,8 +189,7 @@ internal sealed class ZoneSettling
     /// </summary>
     internal ScanSpec Pass(ScanSpec pass) => pass with
     {
-        Pruned = true,
-        Live = Live,
+        Analysis = new ScanAnalysis(Live),
         Options = pass.Options with
         {
             BatchRows = pass.Options.BatchRows > 0 && pass.Options.BatchRows < _blockRows ? pass.Options.BatchRows : (int)_blockRows,
@@ -260,7 +259,7 @@ internal sealed class ZoneSettling
         if (!plan.Grouped || pass.Take is not null || pass.MatchesNothing || !pass.Options.UseStatistics
             || plan.Filters.Filters.Length > 0 || plan.Chosen.Length > 0
             || !Array.Exists(plan.Keys, key => key.Field is FunctionFieldExpr)
-            || Array.Exists(plan.Keys, key => key.Field is VariantFieldExpr))
+            || Array.Exists(plan.Keys, key => key.Field is VariantFieldExpr or MappedFieldExpr))
         {
             return false;
         }
@@ -368,7 +367,7 @@ internal sealed class ZoneSettling
     }
 
     /// <summary>A value of a column through the functions <paramref name="field"/> applies to it, the innermost first.</summary>
-    private static bool TryMap(FieldExpr field, FilterLiteral value, out FilterLiteral mapped)
+    internal static bool TryMap(FieldExpr field, FilterLiteral value, out FilterLiteral mapped)
     {
         if (field is FunctionFieldExpr function)
         {
@@ -381,7 +380,7 @@ internal sealed class ZoneSettling
     }
 
     /// <summary>Whether two bounds are one value, bit for bit: two zeros of two signs are two keys.</summary>
-    private static bool Same(FilterLiteral left, FilterLiteral right) =>
+    internal static bool Same(FilterLiteral left, FilterLiteral right) =>
         left.Kind == right.Kind && left.Kind switch
         {
             FilterLiteralKind.Signed => left.SignedValue == right.SignedValue,

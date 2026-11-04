@@ -161,24 +161,6 @@ internal sealed class ScanContext : IDisposable
         Decode = new ArrayDecodeContext(this);
     }
 
-    /// <summary>The encodings <paramref name="ids"/> name, resolved once, for the detached contexts that read several files written alike.</summary>
-    /// <exception cref="ArgumentNullException">An entry of <paramref name="ids"/> is null.</exception>
-    internal static ArrayEncodingId[] Resolve(IReadOnlyList<string> ids)
-    {
-        ArrayEncodingId[] resolved = ids.Count == 0 ? [] : new ArrayEncodingId[ids.Count];
-        Span<byte> scratch = stackalloc byte[64];
-        for (int i = 0; i < resolved.Length; i++)
-        {
-            string id = ids[i] ?? throw new ArgumentNullException(nameof(ids));
-            int byteCount = Encoding.UTF8.GetByteCount(id);
-            Span<byte> utf8 = byteCount <= scratch.Length ? scratch : new byte[byteCount];
-            int written = Encoding.UTF8.GetBytes(id, utf8);
-            resolved[i] = EncodingRegistry.ResolveArray(utf8[..written]);
-        }
-
-        return resolved;
-    }
-
     /// <summary><see langword="true"/> when this context was built over a <see cref="VortexFile"/>.</summary>
     public bool HasFile => _file is not null;
 
@@ -307,9 +289,13 @@ internal sealed class ScanContext : IDisposable
     /// <see cref="BeginRetainedDecode"/> redirects this property for the duration of that one
     /// decode and <see cref="EndRetainedDecode"/> puts it back. The redirect is never observable
     /// from outside a single <c>LayoutReader.Execute</c> call, and every node the redirected decode
-    /// produces is reachable only through the index that call returns.
+    /// produces is reachable only through the index that call returns. A decode that builds its
+    /// rows a slice at a time redirects it too, at an arena it clears between slices
+    /// (<see cref="BeginSlice"/>), until a retained decode it begins takes it over.
     /// </remarks>
-    public CanonicalArena Canonical => _child?.Arena ?? _building?.Arena ?? _batchCanonical;
+    public CanonicalArena Canonical =>
+        _child?.Arena ??
+        (_memory is { Slicing: true } memory && memory.SliceBuilding == _building ? memory.Slice! : _building?.Arena ?? _batchCanonical);
 
     /// <summary>The batch's own arena, which <see cref="ResetBatch"/> clears.</summary>
     private readonly CanonicalArena _batchCanonical;
@@ -534,6 +520,30 @@ internal sealed class ScanContext : IDisposable
     internal Indexes.VariantKeyReads? VariantKeys { get; set; }
 
     /// <summary>
+    /// Whether a shredded variant column is handed back as its shredding holds it, the standard's group of its storage and its
+    /// typed columns, rather than put back together: a census of its paths reads it so (<see cref="Types.Variants.ApartCensus"/>).
+    /// Per scan like <see cref="Metrics"/>.
+    /// </summary>
+    internal bool VariantsApart { get; set; }
+
+    /// <summary>
+    /// The columns the scan's consumer reads through functions alone, which a split whose zones give their values takes
+    /// from them, per scan like <see cref="Metrics"/>; null for none (<see cref="Scanning.ZoneKeyReads"/>).
+    /// </summary>
+    internal Scanning.ZoneKeyReads? ZoneKeys { get; set; }
+
+    /// <summary>
+    /// What the lane plans of the chunks it reads a part of by their granules (spec C, 2), per lane; null when it reads every
+    /// chunk whole.
+    /// </summary>
+    internal Indexes.GranulePlans? Granules { get; set; }
+
+    /// <summary>What the lane's granule plans work in, kept with the context from one scan to the next.</summary>
+    internal Indexes.GranuleScratch GranuleScratch => _granuleScratch ??= new Indexes.GranuleScratch();
+
+    private Indexes.GranuleScratch? _granuleScratch;
+
+    /// <summary>
     /// The small segments of the splits ahead the batch reads along with its own, which a scan over a source whose read is
     /// a round trip gives the batch; made at the first, and held with the context across the scans it serves.
     /// </summary>
@@ -690,21 +700,18 @@ internal sealed class ScanContext : IDisposable
         internal long Base { get; }
     }
 
-    /// <summary>The pushed comparison, held behind one reference rather than in three fields.</summary>
+    /// <summary>The pushed predicate and the projection's fields, held behind one reference rather than inline.</summary>
     /// <remarks>
-    /// A <see cref="Expressions.FilterLiteral"/> is a wide value and this context is allocated once
-    /// per lane of every scan, filtered or not: inline, the three fields cost thirty-two bytes on
-    /// every scan in the process to serve the few that push. Behind a reference they cost eight,
-    /// and the holder is allocated once for a scan that pushes and reused by each of its splits.
+    /// This context is allocated once per lane of every scan, filtered or not: inline, the fields
+    /// would cost every scan in the process to serve the few that push. Behind a reference they
+    /// cost eight bytes, and the holder is allocated once for a scan that pushes and reused by each
+    /// of its splits; the predicate itself is the scan's, built once.
     /// </remarks>
     private sealed class Pushed
     {
         internal byte[]? Field;
-        internal Expressions.ComparisonOp Op;
-        internal Expressions.FilterLiteral Literal;
-
-        /// <summary>Whether the predicate is <c>StartsWith(Literal)</c> rather than <c>Op</c>.</summary>
-        internal bool Prefix;
+        internal Compute.EncodedPredicate? Predicate;
+        internal Compute.PushedVariantKey? Key;
         internal Layouts.FieldMask Fields;
         internal bool FieldsHonoured;
         internal ulong EncodedFields;
@@ -713,7 +720,7 @@ internal sealed class ScanContext : IDisposable
     private Pushed? _pushed;
 
     /// <summary>
-    /// The comparison this pass may let an encoding answer instead of decoding, or
+    /// The column whose predicate this pass may let an encoding answer instead of decoding, or
     /// <see langword="null"/> when there is none.
     /// </summary>
     /// <remarks>
@@ -724,17 +731,28 @@ internal sealed class ScanContext : IDisposable
     /// </remarks>
     internal ReadOnlySpan<byte> PushedField => _pushed?.Field;
 
-    /// <summary>The comparison of <see cref="PushedField"/>.</summary>
-    internal Expressions.ComparisonOp PushedOp => _pushed!.Op;
-
-    /// <summary>The right-hand side of <see cref="PushedField"/>'s comparison.</summary>
-    internal Expressions.FilterLiteral PushedLiteral => _pushed!.Literal;
+    /// <summary>The predicate on <see cref="PushedField"/>: a comparison, a range, a set or a prefix.</summary>
+    internal Compute.EncodedPredicate? PushedPredicate => _pushed?.Predicate;
 
     /// <summary>
-    /// Whether the pushed predicate is a prefix match, <c>StartsWith(PushedLiteral)</c>, in which
-    /// case <see cref="PushedOp"/> means nothing.
+    /// The key of the variant column <see cref="PushedField"/> names whose typed column the predicate reads, and the class it
+    /// reads it as; null for a predicate on the column itself.
     /// </summary>
-    internal bool PushedPrefix => _pushed!.Prefix;
+    internal Compute.PushedVariantKey? PushedKey => _pushed?.Key;
+
+    /// <summary>Replaces the pushed predicate's variant key and returns what was there, for the driver to restore.</summary>
+    internal Compute.PushedVariantKey? ExchangePushedKey(Compute.PushedVariantKey? key)
+    {
+        if (_pushed is null && key is null)
+        {
+            return null;
+        }
+
+        Pushed held = _pushed ??= new Pushed();
+        Compute.PushedVariantKey? previous = held.Key;
+        held.Key = key;
+        return previous;
+    }
 
     /// <summary>
     /// Whether the reader running right now is inside the column <see cref="PushedField"/> names.
@@ -746,6 +764,13 @@ internal sealed class ScanContext : IDisposable
     /// clears it for that child, or the leaf would answer the predicate over a table of statistics.
     /// </remarks>
     internal bool PredicateAtNode { get; set; }
+
+    /// <summary>
+    /// What the pushed predicate became on the codes of the dictionary layout read last: the file's layout and the node,
+    /// the predicate it came from, and the codes' predicate, or null where the verdicts are spread over the codes one by
+    /// one. Worked out once a context and dictionary from the verdicts on its values, which the scan retains.
+    /// </summary>
+    internal (Layouts.LayoutTree? Tree, int Layout, Compute.EncodedPredicate? Source, Compute.EncodedPredicate? Codes) DictionaryCodes { get; set; }
 
     /// <summary>
     /// Whether an encoding answered <see cref="PushedField"/>'s comparison during this pass.
@@ -815,24 +840,18 @@ internal sealed class ScanContext : IDisposable
     }
 
     /// <summary>
-    /// Replaces the pushed comparison and returns what was there, for the driver to restore.
+    /// Replaces the pushed predicate and returns what was there, for the driver to restore.
     /// </summary>
     /// <param name="field">The field's name, UTF-8, or <see langword="null"/> to clear it.</param>
-    /// <param name="op">The comparison.</param>
-    /// <param name="literal">Its right-hand side.</param>
-    /// <param name="prefix">Whether the predicate is a prefix match on <paramref name="literal"/> instead.</param>
+    /// <param name="predicate">The predicate on it.</param>
     /// <returns>The previous predicate.</returns>
-    internal (byte[]? Field, Expressions.ComparisonOp Op, Expressions.FilterLiteral Literal, bool Prefix)
-        ExchangePushedPredicate(
-            byte[]? field, Expressions.ComparisonOp op, Expressions.FilterLiteral literal, bool prefix)
+    internal (byte[]? Field, Compute.EncodedPredicate? Predicate) ExchangePushedPredicate(
+        byte[]? field, Compute.EncodedPredicate? predicate)
     {
         Pushed held = _pushed ??= new Pushed();
-        (byte[]? Field, Expressions.ComparisonOp Op, Expressions.FilterLiteral Literal, bool Prefix) previous =
-            (held.Field, held.Op, held.Literal, held.Prefix);
+        (byte[]? Field, Compute.EncodedPredicate? Predicate) previous = (held.Field, held.Predicate);
         held.Field = field;
-        held.Op = op;
-        held.Literal = literal;
-        held.Prefix = prefix;
+        held.Predicate = predicate;
         return previous;
     }
 
@@ -949,6 +968,23 @@ internal sealed class ScanContext : IDisposable
     }
 
     /// <summary>
+    /// Makes this context retain into <paramref name="shared"/>, a table it holds a share of, given back as it is disposed:
+    /// the last share disposes the table.
+    /// </summary>
+    /// <param name="shared">The table.</param>
+    internal void HoldShare(RetainedChunks.Shared shared)
+    {
+        ArgumentNullException.ThrowIfNull(shared);
+        if (_retained is not null)
+        {
+            throw new InvalidOperationException("This scan context already retains chunks of its own.");
+        }
+
+        _retained = shared;
+        _ownsRetained = true;
+    }
+
+    /// <summary>
     /// The retention key for a flat layout, which its segment identifies within the file.
     /// </summary>
     /// <param name="segmentId">The segment.</param>
@@ -962,8 +998,9 @@ internal sealed class ScanContext : IDisposable
 
     /// <summary>
     /// What this context remembers of the file's bytes from one batch to the next: the nodes whose
-    /// O(n) validation has already passed, and the blobs it keeps parsed. Null until a reader opens
-    /// a node-check scope or a blob is kept.
+    /// O(n) validation has already passed, and the blobs it keeps parsed; and the arena a decode
+    /// builds a slice of its rows in. Null until a reader opens a node-check scope, a blob is kept or
+    /// a decode slices.
     /// </summary>
     /// <remarks>
     /// One field, and allocated on first use, because the scan paths hold tight allocation
@@ -1156,6 +1193,14 @@ internal sealed class ScanContext : IDisposable
         /// would otherwise walk each of them again at every batch.
         /// </summary>
         internal NodeFacts? More;
+
+        /// <summary>The arena a decode builds a slice of its rows in (<see cref="BeginSlice"/>), made on the first.</summary>
+        internal CanonicalArena? Slice;
+
+        /// <summary>Whether a decode builds a slice of its rows, and the retained decode that was in flight when it began.</summary>
+        internal bool Slicing;
+
+        internal RetainedChunk? SliceBuilding;
     }
 
     /// <summary>
@@ -1553,6 +1598,47 @@ internal sealed class ScanContext : IDisposable
     }
 
     /// <summary>
+    /// Redirects <see cref="Canonical"/> at an arena of this context's own, for a decode that builds
+    /// its rows a slice at a time and throws away, once a slice is written, what it built for it:
+    /// <see cref="NextSlice"/> clears the arena between slices and <see cref="EndSlice"/> ends the
+    /// redirect. A retained decode begun inside it takes the redirect over until it ends, as it does
+    /// from the batch's arena.
+    /// </summary>
+    /// <returns>
+    /// False when a slice is already being built, or a retained child is being decoded, in whose
+    /// arena the decode then builds its rows whole.
+    /// </returns>
+    internal bool BeginSlice()
+    {
+        BatchMemory memory = _memory ??= new BatchMemory();
+        if (memory.Slicing || _child is not null)
+        {
+            return false;
+        }
+
+        memory.Slice ??= new CanonicalArena();
+        memory.SliceBuilding = _building;
+        memory.Slicing = true;
+        return true;
+    }
+
+    /// <summary>Clears the arena of the slice just written, its blocks kept idle for the next slice's.</summary>
+    internal void NextSlice() => _memory!.Slice!.ResetKeepingBlocks();
+
+    /// <summary>
+    /// Ends the redirect <see cref="BeginSlice"/> made, its arena's blocks given back to the pool: the inputs of a merge each
+    /// scan in a context of their own and decode in turn, and blocks each kept for its next decode would be a slice's
+    /// columns for each of them, where the pool keeps them for whichever decodes next.
+    /// </summary>
+    internal void EndSlice()
+    {
+        BatchMemory memory = _memory!;
+        memory.Slicing = false;
+        memory.SliceBuilding = null;
+        memory.Slice!.Reset();
+    }
+
+    /// <summary>
     /// Releases every segment held for the previous batch and resets every arena but those holding
     /// flat layouts' blobs, which the next batch finds parsed when it holds the same bytes.
     /// </summary>
@@ -1656,23 +1742,6 @@ internal sealed class ScanContext : IDisposable
     }
 
     /// <summary>
-    /// As <see cref="RebindDetached(VortexReadOptions)"/>, over the encoding table <paramref name="encodings"/>, resolved
-    /// from <paramref name="ids"/>: a detached context that reads one file's regions after another's, files whose tables
-    /// may differ. The table is copied, and the ids are kept for the messages that name one.
-    /// </summary>
-    internal void RebindDetached(VortexReadOptions options, ReadOnlySpan<ArrayEncodingId> encodings, string[] ids)
-    {
-        RebindDetached(options);
-        if (_arrayEncodings.Length != encodings.Length)
-        {
-            _arrayEncodings = encodings.Length == 0 ? [] : new ArrayEncodingId[encodings.Length];
-        }
-
-        encodings.CopyTo(_arrayEncodings);
-        _arrayEncodingIds = ids;
-    }
-
-    /// <summary>
     /// Undoes everything a scan set on this context, so that a later scan of any file may take it:
     /// the batch, the blocks its batches kept, the retained chunks it owns, the blobs and node
     /// checks it remembered -- facts about one file's bytes -- and every switch the scan set once.
@@ -1693,6 +1762,9 @@ internal sealed class ScanContext : IDisposable
         _building = null;
         _child = null;
         VariantKeys = null;
+        ZoneKeys = null;
+        Granules = null;
+        VariantsApart = false;
         Along?.Clear();
         if (_memory is { } memory)
         {
@@ -1700,13 +1772,15 @@ internal sealed class ScanContext : IDisposable
             memory.Blobs?.Forget();
             memory.RankKey = 0;
             memory.More?.Clear();
+            memory.Slice?.Reset();
+            memory.Slicing = false;
+            memory.SliceBuilding = null;
         }
 
         if (_pushed is { } pushed)
         {
             pushed.Field = null;
-            pushed.Op = default;
-            pushed.Literal = default;
+            pushed.Predicate = null;
             pushed.Fields = Layouts.FieldMask.All;
             pushed.FieldsHonoured = false;
         }
@@ -1729,6 +1803,7 @@ internal sealed class ScanContext : IDisposable
 
         _disposed = true;
         _batchCanonical.Reset();
+        _memory?.Slice?.Reset();
         AbandonRetained();
         if (_ownsRetained)
         {

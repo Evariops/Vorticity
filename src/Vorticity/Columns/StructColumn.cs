@@ -25,15 +25,6 @@ internal readonly ref struct StructColumn
     /// <summary>Rows in this column.</summary>
     public int Length => _batch.Node(_node).Length;
 
-    /// <summary>
-    /// Whether row <paramref name="index"/> of the <em>struct itself</em> is not null. A struct row
-    /// may be null while its fields' own slots hold values; a field's own
-    /// <see cref="VortexColumn.IsValid"/> answers only for that field.
-    /// </summary>
-    /// <param name="index">0-based row index, below <see cref="Length"/>.</param>
-    /// <exception cref="ArgumentOutOfRangeException"><paramref name="index"/> is out of range.</exception>
-    public bool IsValid(int index) => ColumnCore.IsValid(_batch, _node, index);
-
     /// <summary>Number of fields.</summary>
     public int FieldCount => _batch.Node(_node).FieldCount;
 

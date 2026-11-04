@@ -1,4 +1,6 @@
+using System;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Aggregating;
@@ -59,10 +61,19 @@ public sealed class Projection<TResult>
         where TRecord : IVortexRecord<TRecord> =>
         Aggregation.Scan<TRecord>(_query);
 
-    /// <summary>What the scan will read, from statistics, zone maps and indexes, without reading a data segment.</summary>
+    /// <summary>What the scan will read, worked out from what the source holds in memory, reading nothing (spec B, 7).</summary>
+    /// <param name="cancellationToken">Cancels the explanation.</param>
+    /// <returns>The plan.</returns>
+    public ValueTask<ScanPlan> ExplainAsync(CancellationToken cancellationToken = default) => _query.ExplainAsync(analyze: false, cancellationToken);
+
+    /// <summary>
+    /// What the scan will read; with <paramref name="analyze"/>, the structures its read would consult read as it reads them,
+    /// which give what it prunes exactly, and no data segment.
+    /// </summary>
+    /// <param name="analyze">Whether to read the structures the read would consult.</param>
     /// <param name="cancellationToken">Cancels the reads of the structures consulted.</param>
     /// <returns>The plan.</returns>
-    public ValueTask<ScanPlan> ExplainAsync(CancellationToken cancellationToken = default) => _query.ExplainAsync(cancellationToken);
+    public ValueTask<ScanPlan> ExplainAsync(bool analyze, CancellationToken cancellationToken = default) => _query.ExplainAsync(analyze, cancellationToken);
 
     /// <summary>Runs the scan and enumerates the values.</summary>
     /// <param name="cancellationToken">Cancels the scan at a batch boundary, with the token <see cref="WithCancellation"/> gave.</param>
@@ -131,8 +142,114 @@ public sealed class Projection
         where TRecord : IVortexRecord<TRecord> =>
         Aggregation.Scan<TRecord>(_query);
 
-    /// <summary>What the scan will read, from statistics, zone maps and indexes, without reading a data segment.</summary>
+    /// <summary>What the scan will read, worked out from what the source holds in memory, reading nothing (spec B, 7).</summary>
+    /// <param name="cancellationToken">Cancels the explanation.</param>
+    /// <returns>The plan.</returns>
+    public ValueTask<ScanPlan> ExplainAsync(CancellationToken cancellationToken = default) => _query.ExplainAsync(analyze: false, cancellationToken);
+
+    /// <summary>
+    /// What the scan will read; with <paramref name="analyze"/>, the structures its read would consult read as it reads them,
+    /// which give what it prunes exactly, and no data segment.
+    /// </summary>
+    /// <param name="analyze">Whether to read the structures the read would consult.</param>
     /// <param name="cancellationToken">Cancels the reads of the structures consulted.</param>
     /// <returns>The plan.</returns>
-    public ValueTask<ScanPlan> ExplainAsync(CancellationToken cancellationToken = default) => _query.ExplainAsync(cancellationToken);
+    public ValueTask<ScanPlan> ExplainAsync(bool analyze, CancellationToken cancellationToken = default) => _query.ExplainAsync(analyze, cancellationToken);
+
+    /// <summary>The rows as tuples of the projection's two elements, a batch at a time: a semi-join's first question.</summary>
+    /// <exception cref="ArgumentException">The projection holds another number of elements.</exception>
+    internal async IAsyncEnumerable<(T1, T2)> TuplesAsync<T1, T2>([EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        Elements(2);
+        T1[] first = [];
+        T2[] second = [];
+        IAsyncEnumerator<RecordBatch> batches = _query.Batches(cancellationToken);
+        await using (batches.ConfigureAwait(false))
+        {
+            while (await batches.MoveNextAsync().ConfigureAwait(false))
+            {
+                RecordBatch batch = batches.Current;
+                Element(batch, 0, ref first);
+                Element(batch, 1, ref second);
+                for (int row = 0; row < batch.RowCount; row++)
+                {
+                    yield return (first[row], second[row]);
+                }
+            }
+        }
+    }
+
+    /// <summary>The rows as tuples of the projection's three elements, a batch at a time: a semi-join's first question.</summary>
+    /// <exception cref="ArgumentException">The projection holds another number of elements.</exception>
+    internal async IAsyncEnumerable<(T1, T2, T3)> TuplesAsync<T1, T2, T3>([EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        Elements(3);
+        T1[] first = [];
+        T2[] second = [];
+        T3[] third = [];
+        IAsyncEnumerator<RecordBatch> batches = _query.Batches(cancellationToken);
+        await using (batches.ConfigureAwait(false))
+        {
+            while (await batches.MoveNextAsync().ConfigureAwait(false))
+            {
+                RecordBatch batch = batches.Current;
+                Element(batch, 0, ref first);
+                Element(batch, 1, ref second);
+                Element(batch, 2, ref third);
+                for (int row = 0; row < batch.RowCount; row++)
+                {
+                    yield return (first[row], second[row], third[row]);
+                }
+            }
+        }
+    }
+
+    /// <summary>The rows as tuples of the projection's four elements, a batch at a time: a semi-join's first question.</summary>
+    /// <exception cref="ArgumentException">The projection holds another number of elements.</exception>
+    internal async IAsyncEnumerable<(T1, T2, T3, T4)> TuplesAsync<T1, T2, T3, T4>([EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        Elements(4);
+        T1[] first = [];
+        T2[] second = [];
+        T3[] third = [];
+        T4[] fourth = [];
+        IAsyncEnumerator<RecordBatch> batches = _query.Batches(cancellationToken);
+        await using (batches.ConfigureAwait(false))
+        {
+            while (await batches.MoveNextAsync().ConfigureAwait(false))
+            {
+                RecordBatch batch = batches.Current;
+                Element(batch, 0, ref first);
+                Element(batch, 1, ref second);
+                Element(batch, 2, ref third);
+                Element(batch, 3, ref fourth);
+                for (int row = 0; row < batch.RowCount; row++)
+                {
+                    yield return (first[row], second[row], third[row], fourth[row]);
+                }
+            }
+        }
+    }
+
+    /// <exception cref="ArgumentException">The projection holds another number of elements than <paramref name="count"/>.</exception>
+    private void Elements(int count)
+    {
+        if (_query.Schema.Count != count)
+        {
+            throw new ArgumentException($"The first question projects {_query.Schema.Count} columns, the tuple holds {count}.", "values");
+        }
+    }
+
+    /// <summary>Copies the values of element <paramref name="element"/> of <paramref name="batch"/> into <paramref name="values"/>, grown to its rows.</summary>
+    private void Element<T>(RecordBatch batch, int element, ref T[] values)
+    {
+        if (values.Length < batch.RowCount)
+        {
+            values = new T[Math.Max(batch.RowCount, values.Length * 2)];
+        }
+
+        Arrays.CanonicalArena arena = batch.Arena;
+        int column = arena.GetNode(batch.RootIndex).GetFieldIndex(element);
+        ResultValues.Copy(batch, arena, column, _query.Schema[element].Type, _query.Session.Options.Extensions, values, _query.RecordOf(element));
+    }
 }

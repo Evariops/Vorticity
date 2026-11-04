@@ -57,6 +57,10 @@ namespace Vorticity
             _indexes = indexes;
         }
 
+        /// <summary>The walks of <paramref name="source"/>'s keys; a refusal for a source that has none.</summary>
+        private static IKeysCapability KeysOf(ScanSource source) =>
+            source.Keys ?? throw new NotSupportedException("The source walks no column's keys.");
+
         /// <summary>Walks each distinct key once, rows aside: a postings index serves it too.</summary>
         /// <returns>This builder.</returns>
         public KeyCursorBuilder<TKey> Distinct()
@@ -72,15 +76,23 @@ namespace Vorticity
         /// <exception cref="NotSupportedException">A result's column has no key order: a bool or a decimal.</exception>
         public async ValueTask<KeyCursor<TKey>> OpenAsync(CancellationToken cancellationToken = default)
         {
-            IKeyWalker walker = await _source.OpenKeysAsync(_column.Field.Path, _distinct, _indexes, cancellationToken).ConfigureAwait(false);
+            IKeyWalker walker = await KeysOf(_source).OpenKeysAsync(_column.Field.Path, _distinct, _indexes, cancellationToken).ConfigureAwait(false);
             return new KeyCursor<TKey>(walker, _column);
         }
 
         /// <summary>Which key source the cursor would walk, and why the others were refused.</summary>
         /// <param name="cancellationToken">Cancels the reads of the key sources.</param>
         /// <returns>The plan.</returns>
-        public ValueTask<KeyPlan> ExplainAsync(CancellationToken cancellationToken = default) =>
-            _source.ExplainKeysAsync(_column.Field.Path, _distinct, _indexes, cancellationToken);
+        public async ValueTask<KeyPlan> ExplainAsync(CancellationToken cancellationToken = default)
+        {
+            KeyPlan plan = await KeysOf(_source).ExplainKeysAsync(_column.Field.Path, _distinct, _indexes, cancellationToken).ConfigureAwait(false);
+            LogicalQuery query = new LogicalQuery(_source.Logical, _source.Schema, new KeysShape(_column.Field.Path, _distinct))
+            {
+                Options = _indexes ? ScanOptions.Default : ScanOptions.Default with { UseIndexes = false },
+            };
+
+            return plan with { Logical = query.Text };
+        }
     }
 
     /// <summary>

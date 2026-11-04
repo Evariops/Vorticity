@@ -104,7 +104,7 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
 
     /// <summary>
     /// The component of a query's key its groups stream on, or -1: the first the statistics say is
-    /// sorted, or the source reads in its order when asked (<see cref="ScanSource.OrdersOnAsking"/>),
+    /// sorted, or the source reads in its order when asked (<see cref="IRowsCapability.OrdersOnAsking"/>),
     /// and no order but those that start with it, all one way. Descending, the rows are read in the
     /// component's order backwards.
     /// </summary>
@@ -122,7 +122,7 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
         int streaming = -1;
         for (int c = 0; c < keys.Length && streaming < 0; c++)
         {
-            streaming = AggregationEngine.IsSorted(source, keys[c]) || source.OrdersOnAsking(keys[c].Column.Field, StopsEarly(query)) ? c : -1;
+            streaming = AggregationEngine.IsSorted(source, keys[c]) || source.Rows.OrdersOnAsking(keys[c].Column.Field, StopsEarly(query)) ? c : -1;
         }
 
         if (streaming < 0)
@@ -154,7 +154,7 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
         return descending == true && (windowFirst || !bounded || !OrderFree(query.Plan)) ? -1 : streaming;
     }
 
-    /// <summary>Whether a take or a window stops the query's read early: what a source's order asked for is worth most to (<see cref="ScanSource.OrdersOnAsking"/>).</summary>
+    /// <summary>Whether a take or a window stops the query's read early: what a source's order asked for is worth most to (<see cref="IRowsCapability.OrdersOnAsking"/>).</summary>
     internal static bool StopsEarly(AggregationQuery query)
     {
         if (query.Take != long.MaxValue)
@@ -268,6 +268,7 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
                     AggregationPartition open = _partition;
                     overdrawn = range.AbsorbPast(open, ref _numbers);
                     _partition = range;
+                    _outcome?.LetChosen();
                     _outcome = new AggregationOutcome(_query.Plan, range.Slots, range.Keys, []) { Memory = _memory };
                     open.LetGo();
                 }
@@ -330,7 +331,7 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
             _partition!.Settle(_settling, rest);
         }
 
-        _inner = _query.Host.Source.BatchesAsync(pass with { Rows = rest }, _query.Host.Counters).GetAsyncEnumerator(_cancellationToken);
+        _inner = _query.Host.Source.Rows.BatchesAsync(pass with { Rows = rest }, _query.Host.Counters).GetAsyncEnumerator(_cancellationToken);
     }
 
     /// <summary>The end of the rows: every group closes, the null group last, and the plan keeps what the run did.</summary>
@@ -374,7 +375,7 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
         _query.Plan.LastGroups = 0;
         AggregationPlan plan = _query.Plan;
         (ColumnShape[] columns, int[] inputs) = AggregationEngine.Columns(plan, new AggregateSlot?[plan.Aggregates.Length]);
-        ScanSpec spec = await host.AlignedSpecAsync(plan, _query.RowFilter, _cancellationToken).ConfigureAwait(false);
+        ScanSpec spec = await host.AlignedSpecAsync(plan, _query.RowFilter, _cancellationToken, _query.Operators).ConfigureAwait(false);
         ScanSpec pass = AggregationEngine.PassSpec(spec, columns, plan, host.Source.Schema);
         int streaming = _zones is null ? Streaming(_query) : 0;
 
@@ -385,7 +386,7 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
         FieldExpr ordered = plan.Keys[streaming].Column.Field;
         bool descending = Descends(_query);
         bool sorted = AggregationEngine.IsSorted(host.Source, plan.Keys[streaming]);
-        if (!sorted && host.Source.OrdersOnAsking(ordered, StopsEarly(_query)))
+        if (!sorted && host.Source.Rows.OrdersOnAsking(ordered, StopsEarly(_query)))
         {
             pass = pass with { OrderPath = ordered.Path, Descending = descending };
         }
@@ -435,7 +436,7 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
             }
 
             _pass = pass;
-            _inner = host.Source.BatchesAsync(pass, host.Counters).GetAsyncEnumerator(_cancellationToken);
+            _inner = host.Source.Rows.BatchesAsync(pass, host.Counters).GetAsyncEnumerator(_cancellationToken);
             return;
         }
 
@@ -446,7 +447,7 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
             BlockMask? live = await ZonePruningPlan
                 .RefineAsync(file.File, file.File.LayoutTree, FunctionFieldExpr.Ranges(filter), _cancellationToken, steps: null, host.Counters, pass.Options.UseIndexes)
                 .ConfigureAwait(false);
-            pass = pass with { Pruned = true, Live = live };
+            pass = pass with { Analysis = new ScanAnalysis(live) };
         }
 
         _pass = pass;
@@ -688,6 +689,7 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
         _current?.Dispose();
         _store?.Release();
         _arena?.Reset();
+        _outcome?.LetChosen();
         if (_filters is not null)
         {
             foreach (GroupSelection.GroupFilterRun? run in _filters)

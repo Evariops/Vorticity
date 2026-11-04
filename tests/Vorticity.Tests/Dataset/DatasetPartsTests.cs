@@ -98,6 +98,29 @@ public sealed partial class DatasetPartsTests
         Assert.Equal(whole, merged);
     }
 
+    /// <summary>
+    /// Partials that arrive one at a time, in another order, as an application's transport hands them over, merge to the bits
+    /// of the whole question; an error the sequence throws ends the merge with that error.
+    /// </summary>
+    [Fact]
+    public async Task PartialsThatArriveOneAtATimeMergeAsAList()
+    {
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await FilledAsync(store);
+        List<string> whole = await AnswersAsync(Hourly(dataset, null));
+        List<AggregationPartial> partials = [];
+        foreach (RowRange part in await Hourly(dataset, null).PartsAsync(4, Ct))
+        {
+            partials.Add(await Hourly(dataset, part).PartialAsync(Ct));
+        }
+
+        partials.Reverse();
+        Assert.Equal(whole, await AnswersAsync(Hourly(dataset, null).Merge(ArrivingAsync(partials, failAt: null))));
+        InvalidOperationException failed = await Assert.ThrowsAsync<InvalidOperationException>(
+            async () => await AnswersAsync(Hourly(dataset, null).Merge(ArrivingAsync(partials, failAt: 2))));
+        Assert.Equal("part 2 failed", failed.Message);
+    }
+
     /// <summary>A file's question cut at its chunks, each part read through a file of its own, merges as the whole file's answers.</summary>
     [Fact]
     public async Task AFilesQuestionCutAtItsChunksMergesToItsAnswers()
@@ -159,10 +182,25 @@ public sealed partial class DatasetPartsTests
         await Assert.ThrowsAsync<NotSupportedException>(async () => await exact.PartialAsync(Ct));
     }
 
+    /// <summary>The partials one at a time, each after a yield, and the error of part <paramref name="failAt"/> in its place.</summary>
+    private static async IAsyncEnumerable<AggregationPartial> ArrivingAsync(List<AggregationPartial> partials, int? failAt)
+    {
+        for (int p = 0; p < partials.Count; p++)
+        {
+            await Task.Yield();
+            if (p == failAt)
+            {
+                throw new InvalidOperationException($"part {p} failed");
+            }
+
+            yield return partials[p];
+        }
+    }
+
     /// <summary>Six objects of four hours each, appended in the order of their hours.</summary>
     private static async Task<VortexDataset> FilledAsync(MemoryObjectStore store)
     {
-        VortexDataset dataset = await VortexDataset.CreateAsync(store, Request.Schema, new DatasetOptions { ClusteringKey = [nameof(Request.At)] }, Ct);
+        VortexDataset dataset = await VortexDataset.CreateAsync(store, Request.Schema, new DatasetOptions { Layout = new DatasetLayout { SortKey = [LayoutValue.Column(nameof(Request.At))] } }, Ct);
         for (int o = 0; o < Objects; o++)
         {
             await using ObjectDraft draft = dataset.StartObject();

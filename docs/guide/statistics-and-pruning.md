@@ -4,7 +4,7 @@ See what a scan will skip before it runs and what it did afterwards, and learn w
 work.
 
 ```csharp
-ScanPlan plan = await file.Scan<Reading>().Where(r => r.Day >= 900).ExplainAsync();
+ScanPlan plan = await file.Scan<Reading>().Where(r => r.Day >= 900).ExplainAsync(analyze: true);
 Print("Day >= 900", plan);
 
 Scan<Reading> scan = file.Scan<Reading>().Where(r => r.Day >= 900);
@@ -28,8 +28,9 @@ those blocks were never decoded.
 
 ## The plan, before
 
-`ExplainAsync()` reads the file's statistics, its zone maps and its indexes, plus at most the few
-segments of a sorted column it searches, and returns a `ScanPlan`:
+`ExplainAsync(analyze: true)` reads the file's statistics, its zone maps and its indexes, plus at most the
+few segments of a sorted column it searches, and returns a `ScanPlan`; `ExplainAsync()` reads nothing, and
+takes every block the footer's statistics do not rule out as live:
 
 | field | what it says |
 |---|---|

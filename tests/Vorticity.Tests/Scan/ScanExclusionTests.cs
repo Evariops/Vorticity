@@ -59,7 +59,7 @@ public sealed class ScanExclusionTests
         try
         {
             await using VortexFile file = await VortexFile.OpenAsync(path, ct);
-            ScanExplanation plan = await file.ScanBuilder().Where(Filter(name)).ExplainAsync(ct);
+            ScanExplanation plan = await file.ScanBuilder().Where(Filter(name)).ExplainAsync(analyze: true, ct);
             Assert.Equal(name != "noise < 100", plan.Count!.ExactCover);
 
             ExcludedRows excluded = Excluded();

@@ -92,8 +92,23 @@ internal static class DatasetIndexing
 
         bool names = false;
         DatasetSchema schema = dataset.Snapshot.Schema;
+        WritePolicy written = WritePolicy.None.WithDefault(wanted.Default);
         foreach ((string path, IndexSpec spec) in wanted.Columns)
         {
+            // A key of a variant column, Attributes['user.id'].AsString(): the jobs that shred it build its index, under the
+            // path as a plan writes it, which a writer looks the key up by.
+            if (VortexDataset.IdentifierPath(path, schema.DType) is { } key)
+            {
+                if (spec.Kind is not (IndexPolicyKind.Bloom or IndexPolicyKind.HashedPostings))
+                {
+                    throw new ArgumentException($"A key of a variant column takes a Bloom filter or hashed postings, and '{path}' asks {spec.Kind}.", nameof(policy));
+                }
+
+                written = written.For(key.Text, spec);
+                names = true;
+                continue;
+            }
+
             // Refused here rather than left out of every object a writer builds from now on.
             DType column = schema.DType;
             foreach (int field in ToolPaths.Resolve(schema.Columns, path))
@@ -107,7 +122,10 @@ internal static class DatasetIndexing
             }
 
             names |= IndexKinds.Of(spec.Kind) is not null;
+            written = written.For(path, spec);
         }
+
+        wanted = written;
 
         // A default that indexes, such as IndexPolicy.Auto, gives every column a writer meets its index, those
         // schema evolution adds later included; the objects already written take it as compaction rewrites them.
@@ -121,8 +139,8 @@ internal static class DatasetIndexing
             .ConfigureAwait(false);
         int commits = added.Created ? 1 : 0;
 
-        // The fragments are built under the policy's budget and encoder.
-        VortexWriteOptions build = VortexWriteOptions.Default with { Indexes = policy };
+        // The fragments are built under the policy's budget and encoder, hashed postings at the dataset's units.
+        VortexWriteOptions build = VortexWriteOptions.Default with { Indexes = policy, HashedUnitBytes = dataset.HashedUnitBytes };
         HashSet<string> left = new HashSet<string>(StringComparer.Ordinal);
         long indexed = 0;
         long bytes = 0;
@@ -215,6 +233,12 @@ internal static class DatasetIndexing
             WritePolicy missing = WritePolicy.None;
             foreach ((string path, IndexSpec spec) in wanted.Columns)
             {
+                // A key of a variant column takes its index as a job shreds it: no fragment builds one.
+                if (VortexDataset.IdentifierPath(path, dataset.Snapshot.Schema.DType) is not null)
+                {
+                    continue;
+                }
+
                 if ((columns is null ? path : columns.SourcePath(path)) is { } source
                     && IndexKinds.Of(spec.Kind) is { } kind
                     && !Covers(directory, file, source, kind, blockRows))
@@ -255,7 +279,8 @@ internal static class DatasetIndexing
 
     /// <summary>
     /// Whether the object's own indexes and its fragments together hold an index of
-    /// <paramref name="kind"/> on <paramref name="path"/> over every one of its blocks.
+    /// <paramref name="kind"/> on <paramref name="path"/> over every one of its blocks, hashed postings over every unit of
+    /// them their places span (spec C, 5).
     /// </summary>
     private static bool Covers(IndexDirectory? directory, VortexFile file, string path, string kind, long blockRows)
     {
@@ -264,15 +289,17 @@ internal static class DatasetIndexing
             return false;
         }
 
-        ulong blocks = (ulong)((file.RowCount + blockRows - 1) / blockRows);
         foreach (IndexEntry entry in directory.Entries)
         {
-            if (!string.Equals(entry.Kind, kind, StringComparison.Ordinal) || entry.BlockLength != (ulong)blockRows
+            bool units = entry.Kind == IndexKinds.PostingsHashed && entry.BlockLength > (ulong)blockRows && entry.BlockLength % (ulong)blockRows == 0;
+            if (!string.Equals(entry.Kind, kind, StringComparison.Ordinal) || (entry.BlockLength != (ulong)blockRows && !units)
                 || !KeyIndexPruner.TryResolve(file.DType, entry.ColumnPath, out string named, out _)
                 || !string.Equals(named, path, StringComparison.Ordinal))
             {
                 continue;
             }
+
+            ulong blocks = ((ulong)file.RowCount + entry.BlockLength - 1) / entry.BlockLength;
 
             // The runs, from the object and from its fragments, in block order: covered when they
             // leave no block out between the first and the last.

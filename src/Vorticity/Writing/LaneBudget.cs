@@ -14,7 +14,7 @@ namespace Vorticity.Writing;
 /// A write holds a lane while it computes and gives it back while it waits for a write before it, the store or its caller,
 /// so that the degree is cores at work rather than threads asked for: a writer's helpers join a piece only on a lane
 /// <see cref="TryEnter"/> grants, and a piece of a thread that holds one runs on it. The time the lanes were held says how
-/// much of the degree the writes used (<see cref="Held"/>).
+/// much of the degree the writes used.
 /// </para>
 /// <para>
 /// A lane is a count, not a thread: whichever thread holds it computes on it, a thread of the pool for the steps of a
@@ -36,9 +36,6 @@ internal sealed class LaneBudget
 
     /// <summary>The lanes there are.</summary>
     internal int Lanes { get; }
-
-    /// <summary>The time the lanes were held, summed over every lane given back.</summary>
-    internal TimeSpan Held => TimeSpan.FromSeconds(Interlocked.Read(ref _held) / (double)Stopwatch.Frequency);
 
     /// <summary>Waits for a lane, and returns when it was taken, for <see cref="Exit"/>.</summary>
     internal async ValueTask<long> EnterAsync(CancellationToken cancellationToken)

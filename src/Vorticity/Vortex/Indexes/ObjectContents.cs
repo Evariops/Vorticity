@@ -4,14 +4,15 @@ using System.Text;
 using Vorticity.Serialization.Protobuf;
 using Vorticity.Types;
 using Vorticity.Types.Serialization;
+using Vorticity.Types.Variants;
 
 namespace Vorticity.Indexes;
 
 /// <summary>
-/// The table of contents of a sliced file, which a dataset's entry carries so that a reader of a few of its slices, of a
+/// The table of contents of a file, which a dataset's entry carries so that a reader of a few of its rows, of a
 /// key of its variant columns or of a value by its locating indexes needs no open of the file, not even its index
-/// directory: the file's schema and the encodings its array blobs name, its slice table and the region of each column's
-/// chunk directory, its variant columns' path directories, and the regions of its index directory and of the entries
+/// directory: the file's schema and the encodings its array blobs name, its rows, its key's sparse index and the region of
+/// each column's chunk directory, its variant columns' path directories, and the regions of its index directory and of the entries
 /// of its locating indexes.
 /// </summary>
 /// <remarks>
@@ -24,7 +25,7 @@ namespace Vorticity.Indexes;
 /// </remarks>
 /// <param name="schema">The file's schema, a struct of its columns, as <see cref="DTypeFlatBuffers"/> writes it.</param>
 /// <param name="encodings">The array encodings the file's blobs name, by their index.</param>
-/// <param name="slices">The file's slice table.</param>
+/// <param name="rows">The file's rows.</param>
 /// <param name="chunkDirectories">Each top-level column's chunk directory, the regions of its index entry.</param>
 /// <param name="pathDirectories">
 /// Each variant column's path directory, and its region: what a question on a path reads first, before that path's
@@ -33,7 +34,7 @@ namespace Vorticity.Indexes;
 internal sealed class ObjectContents(
     byte[] schema,
     IReadOnlyList<string> encodings,
-    SliceTable slices,
+    long rows,
     IReadOnlyList<IndexSegment> chunkDirectories,
     IReadOnlyList<(int Field, IndexSegment Region)>? pathDirectories = null)
 {
@@ -43,8 +44,17 @@ internal sealed class ObjectContents(
     /// <summary>The array encodings the file's blobs name, by their index.</summary>
     internal IReadOnlyList<string> Encodings { get; } = encodings;
 
-    /// <summary>The file's slice table.</summary>
-    internal SliceTable Slices { get; } = slices;
+    /// <summary>The file's rows.</summary>
+    internal long Rows { get; } = rows;
+
+    /// <summary>
+    /// The region of the table of the file's sparse index (<see cref="GranuleKeys"/>), which names its pages; null for a
+    /// file written without a key.
+    /// </summary>
+    internal IndexSegment? KeyIndex { get; init; }
+
+    /// <summary>The region of the pages of the file's sparse index; null when its table keeps its one page.</summary>
+    internal IndexSegment? KeyPages { get; init; }
 
     /// <summary>Each top-level column's chunk directory, the regions of its index entry.</summary>
     internal IReadOnlyList<IndexSegment> ChunkDirectories { get; } = chunkDirectories;
@@ -96,31 +106,78 @@ internal sealed class ObjectContents(
     internal IndexSegment? SketchesOf(int field) => RegionOf(Sketches, field);
 
     /// <summary>
-    /// The object's blocks (<see cref="BlockTable"/>), on its key's first column, and their region: what a question reads to
-    /// learn the runs of rows of each value of that column. Empty when the object keeps none.
+    /// The statistics of each column over the object's granules (<see cref="Indexes.GranuleStats"/>) and their regions: what a
+    /// question reads to answer a granule from its columns' values without its rows. Empty when the object keeps none.
     /// </summary>
-    internal IReadOnlyList<(int Field, IndexSegment Region)> Blocks { get; init; } = [];
+    internal IReadOnlyList<(int Field, IndexSegment Region)> GranuleStats { get; init; } = [];
 
-    /// <summary>The region of the blocks on column <paramref name="field"/>, or null when the object keeps none on it.</summary>
-    internal IndexSegment? BlocksOf(int field) => RegionOf(Blocks, field);
+    /// <summary>The region of column <paramref name="field"/>'s statistics over the granules, or null when the object keeps none of it.</summary>
+    internal IndexSegment? GranuleStatsOf(int field) => RegionOf(GranuleStats, field);
 
     /// <summary>
-    /// The statistics of each column over the object's blocks (<see cref="ColumnBlocks"/>) and their regions: what a
-    /// question reads to answer a block from its columns' values without its rows. Empty when the object keeps none.
+    /// Each measure's histograms over the object's granules (<see cref="Indexes.GranuleHistograms"/>) and their regions: what a
+    /// quantile reads beside the statistics to answer a granule without its rows. Empty when the object keeps none.
     /// </summary>
-    internal IReadOnlyList<(int Field, IndexSegment Region)> BlockStats { get; init; } = [];
+    internal IReadOnlyList<(int Field, IndexSegment Region)> GranuleHistograms { get; init; } = [];
 
-    /// <summary>The region of column <paramref name="field"/>'s statistics over the blocks, or null when the object keeps none of it.</summary>
-    internal IndexSegment? BlockStatsOf(int field) => RegionOf(BlockStats, field);
+    /// <summary>The region of measure <paramref name="field"/>'s histograms over the granules, or null when the object keeps none of it.</summary>
+    internal IndexSegment? GranuleHistogramsOf(int field) => RegionOf(GranuleHistograms, field);
 
     /// <summary>
-    /// Where each value of each column lives (<see cref="ColumnWhere"/>), and their regions: what a filter on a value reads
-    /// to read the value's rows alone. Empty when the object keeps none.
+    /// Where each value of each column lies, granule by granule (<see cref="ColumnLocate"/>), and their regions: what a filter
+    /// on a value reads to read the granules of its rows alone. Empty when the object keeps none.
     /// </summary>
-    internal IReadOnlyList<(int Field, IndexSegment Region)> Wheres { get; init; } = [];
+    internal IReadOnlyList<(int Field, IndexSegment Region)> Locates { get; init; } = [];
 
-    /// <summary>The region of where column <paramref name="field"/>'s values live, or null when the object keeps none of it.</summary>
-    internal IndexSegment? WhereOf(int field) => RegionOf(Wheres, field);
+    /// <summary>The region of where column <paramref name="field"/>'s values lie, or null when the object keeps none of it.</summary>
+    internal IndexSegment? LocateOf(int field) => RegionOf(Locates, field);
+
+    /// <summary>
+    /// Where each value of each shredded key of a variant column lies, read in its class (spec E, 3.3): the variant column,
+    /// the key, the class and the region. Empty when the object keeps none.
+    /// </summary>
+    internal IReadOnlyList<(int Field, string Key, PathClass Class, IndexSegment Region)> PathLocates { get; init; } = [];
+
+    /// <summary>
+    /// The statistics over the granules of each shredded key read in its class (<see cref="GranuleStats"/>), its values listed
+    /// granule by granule as a column's, the rows that hold none of the class counted as nulls: by the variant column's
+    /// place, the key and the class. Empty when the object keeps none.
+    /// </summary>
+    internal IReadOnlyList<(int Field, string Key, PathClass Class, IndexSegment Region)> PathGranuleStats { get; init; } = [];
+
+    /// <summary>The rows of the granules where each of <see cref="PathGranuleStats"/> holds one value, or nulls alone, by the same places.</summary>
+    internal IReadOnlyList<long> PathSingleRows { get; init; } = [];
+
+    /// <summary>The statistics over the granules of key <paramref name="key"/> of the variant column <paramref name="field"/>, read as <paramref name="class"/>, and the rows of its granules of one value; null for none.</summary>
+    internal (IndexSegment Region, long SingleRows)? PathGranuleStatsOf(int field, string key, PathClass @class)
+    {
+        for (int i = 0; i < PathGranuleStats.Count; i++)
+        {
+            (int column, string named, PathClass held, IndexSegment region) = PathGranuleStats[i];
+            if (column == field && held == @class && string.Equals(named, key, StringComparison.Ordinal))
+            {
+                return (region, i < PathSingleRows.Count ? PathSingleRows[i] : 0);
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>The region of where key <paramref name="key"/> of the variant column <paramref name="field"/>, read as <paramref name="class"/>, lies; null for none.</summary>
+    internal IndexSegment? PathLocateOf(int field, string key, PathClass @class)
+    {
+        // By place rather than through the list's enumerator, which an interface boxes: a plan asks it of every object.
+        for (int i = 0; i < PathLocates.Count; i++)
+        {
+            (int column, string named, PathClass held, IndexSegment region) = PathLocates[i];
+            if (column == field && held == @class && string.Equals(named, key, StringComparison.Ordinal))
+            {
+                return region;
+            }
+        }
+
+        return null;
+    }
 
     /// <summary>
     /// The bytes of each top-level column's data in the object, by the column's place: what reading its rows costs, which a
@@ -135,19 +192,147 @@ internal sealed class ObjectContents(
     internal IReadOnlyList<long> ColumnChunks { get; init; } = [];
 
     /// <summary>
-    /// The rows of the object's blocks (<see cref="Blocks"/>) that hold one value of the key's first column, and of the block
-    /// value its writer declared: those a question grouped by both may answer from their statistics, where a block that holds
+    /// The bytes of each top-level column's chunks that a read of a part of one reads whole, by the column's place: a
+    /// dictionary's values, patches, runs, which every row of the chunk may need. What a read of a few granules pays for each
+    /// chunk it touches, past its granules' share. Empty when the object does not say, whose parts are priced by their share.
+    /// </summary>
+    internal IReadOnlyList<long> ColumnWholeBytes { get; init; } = [];
+
+    /// <summary>
+    /// What each top-level column's values cost the processor (spec B, 2.1), by the column's place: for each encoding class
+    /// its values lie under (<see cref="IO.EncodingClass"/>), the units the class's price counts, values for most, runs for
+    /// run-end, present values for sparse, over the object's rows in 256ths, rounded up. Each column's entries follow their
+    /// count, each <c>units &lt;&lt; 3 | class</c>. Empty when the object does not say.
+    /// </summary>
+    internal uint[] ColumnClasses { get; init; } = [];
+
+    // Where each column's entries of ColumnClasses start, past their count; null until a read asks.
+    private int[]? _classStarts;
+
+    /// <summary>
+    /// Column <paramref name="field"/>'s entries of <see cref="ColumnClasses"/>, each <c>units &lt;&lt; 3 | class</c>, the
+    /// units in 256ths of the object's rows; empty when the object does not say.
+    /// </summary>
+    internal ReadOnlySpan<uint> ClassesOf(int field)
+    {
+        int[] starts = System.Threading.Volatile.Read(ref _classStarts) ?? StartClasses();
+        return field >= 0 && field + 1 < starts.Length
+            ? ColumnClasses.AsSpan(starts[field], starts[field + 1] - starts[field] - 1)
+            : default;
+    }
+
+    /// <summary>Where each column's entries start, and one past the last column's count; a span the entries fall short of ends the walk.</summary>
+    private int[] StartClasses()
+    {
+        List<int> starts = [];
+        int at = 0;
+        while (at < ColumnClasses.Length)
+        {
+            int count = (int)Math.Min(ColumnClasses[at], (uint)(ColumnClasses.Length - at - 1));
+            starts.Add(at + 1);
+            at += count + 1;
+        }
+
+        starts.Add(at + 1);
+        int[] built = [.. starts];
+        System.Threading.Volatile.Write(ref _classStarts, built);
+        return built;
+    }
+
+    /// <summary>
+    /// The rows of the object's granules (<see cref="GranuleStats"/>) that hold one value of the key's indexed prefix: those a
+    /// question grouped by its components may answer from their statistics, where a granule that holds
     /// several reads its rows. -1 when the object does not say.
     /// </summary>
-    internal long PureBlockRows { get; init; } = -1;
+    internal long PureGranuleRows { get; init; } = -1;
+
+    /// <summary>
+    /// The rows of the object's granules whose statistics list each top-level column's values (<see cref="GranuleStats"/>),
+    /// at most <see cref="GranuleStats.ListedValues"/> of them a granule, by the column's place: those whose groups by the
+    /// column, or whose rows of a value of it, the statistics answer. Empty when the object does not say; 0 for a column
+    /// whose statistics list none.
+    /// </summary>
+    internal IReadOnlyList<long> ListedRows { get; init; } = [];
+
+    /// <summary>The rows of the granules whose statistics list column <paramref name="field"/>'s values (<see cref="ListedRows"/>).</summary>
+    internal long ListedRowsOf(int field) => (uint)field < (uint)ListedRows.Count ? ListedRows[field] : 0;
+
+    /// <summary>
+    /// The rows of the object's granules where each top-level column holds one value, or nulls alone, as their statistics list
+    /// them, by the column's place: those where the column does not vary, which a question that crosses it with another
+    /// answers from the other's statistics. Empty when the object does not say; 0 for a column whose statistics list none,
+    /// or that varies in every granule.
+    /// </summary>
+    internal IReadOnlyList<long> SingleRows { get; init; } = [];
+
+    /// <summary>Whether the object says, column by column, the rows of the granules where each holds one value (<see cref="SingleRows"/>).</summary>
+    internal bool CountsSingleRows => SingleRows.Count > 0;
+
+    /// <summary>The rows of the granules where column <paramref name="field"/> holds one value (<see cref="SingleRows"/>).</summary>
+    internal long SingleRowsOf(int field) => (uint)field < (uint)SingleRows.Count ? SingleRows[field] : 0;
+
+    /// <summary>
+    /// The values each component of the sort key that is a function of a column takes in each granule, with their rows
+    /// (<see cref="GranuleKeyRuns"/>), by the component's place in the key, and the rows of the granules where it holds one
+    /// value; and the runs of the whole indexed prefix, at <see cref="GranuleKeyRuns.WholePrefix"/>, with the rows of the
+    /// granules they describe. Empty when the object keeps none.
+    /// </summary>
+    internal IReadOnlyList<(int Component, IndexSegment Region, long SingleRows)> KeyRuns { get; init; } = [];
+
+    /// <summary>The region of the values of the key's component <paramref name="component"/> in each granule, and the rows of its granules of one value; null for none.</summary>
+    internal (IndexSegment Region, long SingleRows)? KeyRunsOf(int component)
+    {
+        foreach ((int held, IndexSegment region, long single) in KeyRuns)
+        {
+            if (held == component)
+            {
+                return (region, single);
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// What each column's counts carry (<see cref="Counts"/>), by its field: the fields of the measures their records hold,
+    /// and whether a budget left values out, counted as one group of the others. Empty when the object does not say.
+    /// </summary>
+    internal IReadOnlyList<(int Field, int[] Measures, bool LeavesOut)> Carried { get; init; } = [];
+
+    /// <summary>What the counts of column <paramref name="field"/> carry (<see cref="Carried"/>); null when the object does not say.</summary>
+    internal (int[] Measures, bool LeavesOut)? CarriedOf(int field)
+    {
+        for (int i = 0; i < Carried.Count; i++)
+        {
+            (int at, int[] measures, bool leavesOut) = Carried[i];
+            if (at == field)
+            {
+                return (measures, leavesOut);
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Each top-level column's geometry (<see cref="ColumnMarks"/>), the regions of its index entry, in column order: what a
+    /// read of a few granules reads before their bytes alone. Empty when the object keeps none, and its chunks read whole.
+    /// </summary>
+    internal IReadOnlyList<IndexSegment> Marks { get; init; } = [];
+
+    /// <summary>
+    /// Each top-level column's object dictionary, by the column's place, null for a column whose chunks hold its values:
+    /// what a read of its chunks gathers their codes through. Empty when no column has one.
+    /// </summary>
+    internal IReadOnlyList<ColumnDictionary?> Dictionaries { get; init; } = [];
 
     private static IndexSegment? RegionOf(IReadOnlyList<(int Field, IndexSegment Region)> regions, int field)
     {
-        foreach ((int column, IndexSegment region) in regions)
+        for (int i = 0; i < regions.Count; i++)
         {
-            if (column == field)
+            if (regions[i].Field == field)
             {
-                return region;
+                return regions[i].Region;
             }
         }
 
@@ -157,7 +342,7 @@ internal sealed class ObjectContents(
     /// <summary>
     /// How the paged columns' chunk directories lie (<see cref="SliceChunks.PagedVersion"/>): each such column names its page
     /// table in <see cref="ChunkDirectories"/>, and the first row of each page, which every paged column shares, says which
-    /// pages a slice's rows lie in, with no read. Null when no column's directory is paged.
+    /// pages a span's rows lie in, with no read. Null when no column's directory is paged.
     /// </summary>
     internal ChunkPaging? Paging { get; init; }
 
@@ -167,7 +352,7 @@ internal sealed class ObjectContents(
     /// reader of these loaded.
     /// </summary>
     internal ObjectContents Naming(IndexSegment directory, IReadOnlyList<LocatingEntry>? locating) =>
-        new ObjectContents(Schema, Encodings, Slices, ChunkDirectories, PathDirectories)
+        new ObjectContents(Schema, Encodings, Rows, ChunkDirectories, PathDirectories)
         {
             DirectoryRegion = directory,
             Locating = locating,
@@ -175,12 +360,25 @@ internal sealed class ObjectContents(
             Sheets = Sheets,
             Counts = Counts,
             Sketches = Sketches,
-            Blocks = Blocks,
-            BlockStats = BlockStats,
-            Wheres = Wheres,
+            GranuleStats = GranuleStats,
+            GranuleHistograms = GranuleHistograms,
+            Locates = Locates,
+            PathLocates = PathLocates,
+            PathGranuleStats = PathGranuleStats,
+            PathSingleRows = PathSingleRows,
             ColumnBytes = ColumnBytes,
             ColumnChunks = ColumnChunks,
-            PureBlockRows = PureBlockRows,
+            ColumnWholeBytes = ColumnWholeBytes,
+            ColumnClasses = ColumnClasses,
+            PureGranuleRows = PureGranuleRows,
+            ListedRows = ListedRows,
+            SingleRows = SingleRows,
+            KeyRuns = KeyRuns,
+            Carried = Carried,
+            Marks = Marks,
+            Dictionaries = Dictionaries,
+            KeyIndex = KeyIndex,
+            KeyPages = KeyPages,
         };
 
     // The page tables of the paged columns a read loaded, by column; null until one is.
@@ -207,7 +405,8 @@ internal sealed class ObjectContents(
     private const int Version = 2;
     private const int TagVersion = 1;
     private const int TagEncoding = 2;
-    private const int TagSlices = 3;
+
+    // 3 held the slice table, retired with it: never reused.
     private const int TagChunkDirectory = 4;
     private const int TagSchema = 9;
     private const int TagPathDirectory = 10;
@@ -220,6 +419,8 @@ internal sealed class ObjectContents(
     private const int TagLocatingColumn = 1;
     private const int TagLocatingKind = 2;
     private const int TagLocatingRegion = 3;
+    private const int TagLocatingKey = 4;
+    private const int TagLocatingBytes = 5;
 
     // The paging of the chunk directories: the entries of a page, the chunks of a paged column, the first row of each page,
     // and the paged columns, the last two as deltas, packed.
@@ -238,14 +439,12 @@ internal sealed class ObjectContents(
     // The sketches of a column's counts: its field and its region, as a path directory's.
     private const int TagSketches = 16;
 
-    // The object's blocks: the field of its key's first column and their region, as a path directory's.
-    private const int TagBlocks = 17;
+    // 17 held the region of the blocks' keys, retired: never reused.
 
-    // A column's statistics over the blocks: its field and its region, as a path directory's.
-    private const int TagBlockStats = 18;
+    // A column's statistics over the granules: its field and its region, as a path directory's.
+    private const int TagGranuleStats = 18;
 
-    // Where a column's values live: its field and its region, as a path directory's.
-    private const int TagWhere = 19;
+    // 19 held where a column's values lived, by the ranges of runs of the key's prefix: retired, never reused.
 
     // The bytes of each top-level column's data, packed, by the column's place.
     private const int TagColumnBytes = 20;
@@ -253,33 +452,68 @@ internal sealed class ObjectContents(
     // The chunks of each top-level column's data, packed, by the column's place.
     private const int TagColumnChunks = 21;
 
-    // The rows of the blocks that hold one value of the key's first column and of the block value.
-    private const int TagPureBlockRows = 22;
+    // The rows of the granules that hold one value of the key's indexed prefix.
+    private const int TagPureGranuleRows = 22;
+
+    // A column's geometry, its region, one a column in column order.
+    private const int TagMarks = 23;
+
+    // A column's object dictionary, a message a column that has one: its field, its segment, its values and codes.
+    private const int TagDictionary = 24;
+
+    // The file's rows.
+    private const int TagRows = 25;
+
+    // The region of the table of the file's sparse index.
+    private const int TagKeyIndex = 26;
+
+    // The region of the pages of the file's sparse index.
+    private const int TagKeyPages = 27;
+
+    // What each top-level column's values cost the processor, packed: a count, then its entries, a column after the other.
+    private const int TagColumnClasses = 28;
+
+    // A measure's histograms over the granules: its field and its region, as a path directory's.
+    private const int TagGranuleHistograms = 29;
+
+    // Where a column's values lie, granule by granule: its field and its region, as a path directory's.
+    private const int TagLocate = 30;
+
+    // Where a shredded key's values lie, read in its class: its variant column's field, its region, its key and its class.
+    private const int TagPathLocate = 31;
+    private const int TagPathLocateKey = 3;
+    private const int TagPathLocateClass = 4;
+
+    // The rows of the granules whose statistics list each top-level column's values, packed, by the column's place.
+    private const int TagListedRows = 32;
+
+    // The rows of the granules where each top-level column holds one value, packed, by the column's place.
+    private const int TagSingleRows = 34;
+
+    // The values a component of the key that is a function of a column takes in each granule: its place, as a directory's
+    // field, its region, and the rows of its granules of one value.
+    private const int TagKeyRuns = 35;
+    private const int TagKeyRunsSingle = 3;
+
+    // The runs of the key's whole indexed prefix in each granule: their region, and the rows of the granules they describe.
+    private const int TagPrefixRuns = 38;
+
+    // The bytes of each top-level column's chunks that a read of a part of one reads whole, packed, by the column's place.
+    private const int TagColumnWholeBytes = 39;
+
+    // The statistics over the granules of a shredded key read in its class, as a path's locate is named; then the rows of the
+    // granules where each holds one value, packed, in their order.
+    private const int TagPathGranuleStats = 36;
+    private const int TagPathSingleRows = 37;
+
+    // What a column's counts carry: its field, the fields of their measures, packed, and whether they leave values out.
+    private const int TagCarried = 33;
+    private const int TagCarriedMeasures = 2;
+    private const int TagCarriedLeavesOut = 3;
 
     /// <summary>The file's schema, read into <paramref name="types"/>; a struct of its columns.</summary>
     /// <exception cref="VortexFormatException">The schema's bytes do not decode.</exception>
     internal DType SchemaIn(DTypeArena types) => DTypeFlatBuffers.Read(Schema, types);
-
-    /// <summary>
-    /// The file's encoding table, resolved the first time a read of its regions asks for it: the table a context
-    /// that decodes them is rebound to, and the ids its messages name.
-    /// </summary>
-    internal (Arrays.ArrayEncodingId[] Resolved, string[] Ids) EncodingTable
-    {
-        get
-        {
-            if (System.Threading.Volatile.Read(ref _encodingTableBox) is { } known)
-            {
-                return known.Value;
-            }
-
-            string[] ids = [.. Encodings];
-            System.Runtime.CompilerServices.StrongBox<(Arrays.ArrayEncodingId[], string[])> resolved = new((Arrays.ScanContext.Resolve(ids), ids));
-            return (System.Threading.Interlocked.CompareExchange(ref _encodingTableBox, resolved, null) ?? resolved).Value;
-        }
-    }
-
-    private System.Runtime.CompilerServices.StrongBox<(Arrays.ArrayEncodingId[], string[])>? _encodingTableBox;
 
     /// <summary>The regions the contents declare with a checksum, by offset and length; null until asked.</summary>
     private IReadOnlyDictionary<(ulong Offset, uint Length), IndexSegment>? _declared;
@@ -327,6 +561,21 @@ internal sealed class ObjectContents(
             Declare(region);
         }
 
+        foreach (IndexSegment region in Marks)
+        {
+            Declare(region);
+        }
+
+        if (KeyIndex is { } keyIndex)
+        {
+            Declare(keyIndex);
+        }
+
+        if (KeyPages is { } keyPages)
+        {
+            Declare(keyPages);
+        }
+
         foreach ((int _, IndexSegment region) in PathDirectories ?? [])
         {
             Declare(region);
@@ -347,17 +596,32 @@ internal sealed class ObjectContents(
             Declare(region);
         }
 
-        foreach ((int _, IndexSegment region) in Blocks)
+        foreach ((int _, IndexSegment region) in GranuleStats)
         {
             Declare(region);
         }
 
-        foreach ((int _, IndexSegment region) in BlockStats)
+        foreach ((int _, IndexSegment region) in GranuleHistograms)
         {
             Declare(region);
         }
 
-        foreach ((int _, IndexSegment region) in Wheres)
+        foreach ((int _, IndexSegment region, long _) in KeyRuns)
+        {
+            Declare(region);
+        }
+
+        foreach ((int _, IndexSegment region) in Locates)
+        {
+            Declare(region);
+        }
+
+        foreach ((int _, string _, PathClass _, IndexSegment region) in PathLocates)
+        {
+            Declare(region);
+        }
+
+        foreach ((int _, string _, PathClass _, IndexSegment region) in PathGranuleStats)
         {
             Declare(region);
         }
@@ -410,10 +674,34 @@ internal sealed class ObjectContents(
                 writer.WriteString(TagEncoding, encoding);
             }
 
-            writer.WriteBytes(TagSlices, Slices.ToBytes());
+            writer.WriteUInt64Always(TagRows, (ulong)Rows);
+            if (KeyIndex is { } keyIndex)
+            {
+                IndexDirectory.WriteSegment(ref writer, TagKeyIndex, keyIndex);
+            }
+
+            if (KeyPages is { } keyPages)
+            {
+                IndexDirectory.WriteSegment(ref writer, TagKeyPages, keyPages);
+            }
+
             foreach (IndexSegment directory in ChunkDirectories)
             {
                 IndexDirectory.WriteSegment(ref writer, TagChunkDirectory, directory);
+            }
+
+            foreach (IndexSegment marks in Marks)
+            {
+                IndexDirectory.WriteSegment(ref writer, TagMarks, marks);
+            }
+
+            for (int field = 0; field < Dictionaries.Count; field++)
+            {
+                if (Dictionaries[field] is { } dictionary)
+                {
+                    using ProtoWriter.MessageScope message = writer.BeginMessage(TagDictionary);
+                    dictionary.Write(ref writer, field);
+                }
             }
 
             writer.WriteBytes(TagSchema, Schema);
@@ -445,25 +733,64 @@ internal sealed class ObjectContents(
                 IndexDirectory.WriteSegment(ref writer, TagDirectoryRegion, region);
             }
 
-            foreach ((int field, IndexSegment region) in Blocks)
+            foreach ((int field, IndexSegment region) in GranuleStats)
             {
-                using ProtoWriter.MessageScope message = writer.BeginMessage(TagBlocks);
+                using ProtoWriter.MessageScope message = writer.BeginMessage(TagGranuleStats);
                 writer.WriteUInt32Always(TagDirectoryField, (uint)field);
                 IndexDirectory.WriteSegment(ref writer, TagDirectoryRegion, region);
             }
 
-            foreach ((int field, IndexSegment region) in BlockStats)
+            foreach ((int field, IndexSegment region) in GranuleHistograms)
             {
-                using ProtoWriter.MessageScope message = writer.BeginMessage(TagBlockStats);
+                using ProtoWriter.MessageScope message = writer.BeginMessage(TagGranuleHistograms);
                 writer.WriteUInt32Always(TagDirectoryField, (uint)field);
                 IndexDirectory.WriteSegment(ref writer, TagDirectoryRegion, region);
             }
 
-            foreach ((int field, IndexSegment region) in Wheres)
+            foreach ((int component, IndexSegment region, long single) in KeyRuns)
             {
-                using ProtoWriter.MessageScope message = writer.BeginMessage(TagWhere);
+                using ProtoWriter.MessageScope message = writer.BeginMessage(component == GranuleKeyRuns.WholePrefix ? TagPrefixRuns : TagKeyRuns);
+                if (component != GranuleKeyRuns.WholePrefix)
+                {
+                    writer.WriteUInt32Always(TagDirectoryField, (uint)component);
+                }
+
+                IndexDirectory.WriteSegment(ref writer, TagDirectoryRegion, region);
+                writer.WriteUInt64Always(TagKeyRunsSingle, (ulong)single);
+            }
+
+            foreach ((int field, IndexSegment region) in Locates)
+            {
+                using ProtoWriter.MessageScope message = writer.BeginMessage(TagLocate);
                 writer.WriteUInt32Always(TagDirectoryField, (uint)field);
                 IndexDirectory.WriteSegment(ref writer, TagDirectoryRegion, region);
+            }
+
+            foreach ((int field, string key, PathClass @class, IndexSegment region) in PathLocates)
+            {
+                using ProtoWriter.MessageScope message = writer.BeginMessage(TagPathLocate);
+                writer.WriteUInt32Always(TagDirectoryField, (uint)field);
+                IndexDirectory.WriteSegment(ref writer, TagDirectoryRegion, region);
+                writer.WriteString(TagPathLocateKey, key);
+                writer.WriteUInt32Always(TagPathLocateClass, (uint)@class);
+            }
+
+            foreach ((int field, string key, PathClass @class, IndexSegment region) in PathGranuleStats)
+            {
+                using ProtoWriter.MessageScope message = writer.BeginMessage(TagPathGranuleStats);
+                writer.WriteUInt32Always(TagDirectoryField, (uint)field);
+                IndexDirectory.WriteSegment(ref writer, TagDirectoryRegion, region);
+                writer.WriteString(TagPathLocateKey, key);
+                writer.WriteUInt32Always(TagPathLocateClass, (uint)@class);
+            }
+
+            if (PathSingleRows.Count > 0)
+            {
+                using ProtoWriter.MessageScope message = writer.BeginMessage(TagPathSingleRows);
+                foreach (long rows in PathSingleRows)
+                {
+                    writer.WriteVarint((ulong)rows);
+                }
             }
 
             if (ColumnBytes.Count > 0)
@@ -484,9 +811,64 @@ internal sealed class ObjectContents(
                 }
             }
 
-            if (PureBlockRows >= 0)
+            if (ColumnWholeBytes.Count > 0)
             {
-                writer.WriteUInt64Always(TagPureBlockRows, (ulong)PureBlockRows);
+                using ProtoWriter.MessageScope message = writer.BeginMessage(TagColumnWholeBytes);
+                foreach (long bytes in ColumnWholeBytes)
+                {
+                    writer.WriteVarint((ulong)bytes);
+                }
+            }
+
+            if (ColumnClasses.Length > 0)
+            {
+                using ProtoWriter.MessageScope message = writer.BeginMessage(TagColumnClasses);
+                foreach (uint entry in ColumnClasses)
+                {
+                    writer.WriteVarint(entry);
+                }
+            }
+
+            if (PureGranuleRows >= 0)
+            {
+                writer.WriteUInt64Always(TagPureGranuleRows, (ulong)PureGranuleRows);
+            }
+
+            if (ListedRows.Count > 0)
+            {
+                using ProtoWriter.MessageScope message = writer.BeginMessage(TagListedRows);
+                foreach (long rows in ListedRows)
+                {
+                    writer.WriteVarint((ulong)rows);
+                }
+            }
+
+            if (SingleRows.Count > 0)
+            {
+                using ProtoWriter.MessageScope message = writer.BeginMessage(TagSingleRows);
+                foreach (long rows in SingleRows)
+                {
+                    writer.WriteVarint((ulong)rows);
+                }
+            }
+
+            foreach ((int field, int[] measures, bool leavesOut) in Carried)
+            {
+                using ProtoWriter.MessageScope message = writer.BeginMessage(TagCarried);
+                writer.WriteUInt32Always(TagDirectoryField, (uint)field);
+                if (measures.Length > 0)
+                {
+                    using ProtoWriter.MessageScope packed = writer.BeginMessage(TagCarriedMeasures);
+                    foreach (int measure in measures)
+                    {
+                        writer.WriteVarint((ulong)measure);
+                    }
+                }
+
+                if (leavesOut)
+                {
+                    writer.WriteUInt32Always(TagCarriedLeavesOut, 1);
+                }
             }
 
             if (DirectoryRegion is { } directoryRegion)
@@ -500,6 +882,15 @@ internal sealed class ObjectContents(
                 writer.WriteUInt32Always(TagLocatingColumn, located.Column);
                 writer.WriteStringAlways(TagLocatingKind, located.Kind);
                 IndexDirectory.WriteSegment(ref writer, TagLocatingRegion, located.Region);
+                if (located.Key is { } key)
+                {
+                    writer.WriteStringAlways(TagLocatingKey, key);
+                }
+
+                if (located.Bytes > 0)
+                {
+                    writer.WriteUInt64Always(TagLocatingBytes, (ulong)located.Bytes);
+                }
             }
 
             if (Paging is { } paging)
@@ -530,18 +921,31 @@ internal sealed class ObjectContents(
             ProtoReader reader = new ProtoReader(bytes.Span);
             ulong version = 0;
             List<string> encodings = [];
-            SliceTable? slices = null;
+            long? rows = null;
+            IndexSegment? keyIndex = null;
+            IndexSegment? keyPages = null;
             List<IndexSegment> directories = [];
             List<(int, IndexSegment)> pathDirectories = [];
             List<(int, IndexSegment)> sheets = [];
             List<(int, IndexSegment)> counts = [];
             List<(int, IndexSegment)> sketches = [];
-            List<(int, IndexSegment)> blocks = [];
-            List<(int, IndexSegment)> blockStats = [];
-            List<(int, IndexSegment)> wheres = [];
+            List<(int, IndexSegment)> granuleStats = [];
+            List<(int, IndexSegment)> granuleHistograms = [];
+            List<(int, IndexSegment)> locates = [];
+            List<(int, string, PathClass, IndexSegment)> pathLocates = [];
             List<long> columnBytes = [];
             List<long> columnChunks = [];
-            long pureBlockRows = -1;
+            long[] columnWholeBytes = [];
+            List<uint> columnClasses = [];
+            long pureGranuleRows = -1;
+            List<long> listedRows = [];
+            List<long> singleRows = [];
+            List<(int, IndexSegment, long)> keyRuns = [];
+            List<(int, string, PathClass, IndexSegment)> pathGranuleStats = [];
+            List<long> pathSingleRows = [];
+            List<(int, int[], bool)> carried = [];
+            List<IndexSegment> marks = [];
+            List<(int Field, ColumnDictionary Dictionary)> dictionaries = [];
             IndexSegment? indexDirectory = null;
             List<LocatingEntry>? locating = null;
             ChunkPaging? paging = null;
@@ -561,11 +965,28 @@ internal sealed class ObjectContents(
                     case (TagEncoding, ProtoWireType.LengthDelimited):
                         encodings.Add(Encoding.UTF8.GetString(reader.ReadLengthDelimited()));
                         break;
-                    case (TagSlices, ProtoWireType.LengthDelimited):
-                        slices = SliceTable.FromBytes(reader.ReadLengthDelimited());
+                    case (TagRows, ProtoWireType.Varint):
+                        rows = checked((long)reader.ReadVarint());
+                        break;
+                    case (TagKeyPages, ProtoWireType.LengthDelimited):
+                        keyPages = IndexDirectory.ReadSegment(reader.ReadMessage());
+                        break;
+                    case (TagKeyIndex, ProtoWireType.LengthDelimited):
+                        keyIndex = IndexDirectory.ReadSegment(reader.ReadMessage());
                         break;
                     case (TagChunkDirectory, ProtoWireType.LengthDelimited):
                         directories.Add(IndexDirectory.ReadSegment(reader.ReadMessage()));
+                        break;
+                    case (TagMarks, ProtoWireType.LengthDelimited):
+                        marks.Add(IndexDirectory.ReadSegment(reader.ReadMessage()));
+                        break;
+                    case (TagDictionary, ProtoWireType.LengthDelimited):
+                        if (ColumnDictionary.Read(reader.ReadMessage()) is not { } column)
+                        {
+                            return null;
+                        }
+
+                        dictionaries.Add(column);
                         break;
                     case (TagSchema, ProtoWireType.LengthDelimited):
                         schema = reader.ReadLengthDelimited().ToArray();
@@ -605,21 +1026,21 @@ internal sealed class ObjectContents(
 
                         sketches.Add(sketched);
                         break;
-                    case (TagBlocks, ProtoWireType.LengthDelimited):
-                        if (Directory(reader.ReadMessage()) is not { } blocked)
-                        {
-                            return null;
-                        }
-
-                        blocks.Add(blocked);
-                        break;
-                    case (TagBlockStats, ProtoWireType.LengthDelimited):
+                    case (TagGranuleStats, ProtoWireType.LengthDelimited):
                         if (Directory(reader.ReadMessage()) is not { } stated)
                         {
                             return null;
                         }
 
-                        blockStats.Add(stated);
+                        granuleStats.Add(stated);
+                        break;
+                    case (TagGranuleHistograms, ProtoWireType.LengthDelimited):
+                        if (Directory(reader.ReadMessage()) is not { } histogrammed)
+                        {
+                            return null;
+                        }
+
+                        granuleHistograms.Add(histogrammed);
                         break;
                     case (TagColumnBytes, ProtoWireType.LengthDelimited):
                         ProtoReader packed = reader.ReadMessage();
@@ -637,16 +1058,97 @@ internal sealed class ObjectContents(
                         }
 
                         break;
-                    case (TagPureBlockRows, ProtoWireType.Varint):
-                        pureBlockRows = checked((long)reader.ReadVarint());
+                    case (TagColumnWholeBytes, ProtoWireType.LengthDelimited):
+                        // Counted first, then read into an array of its size, no list grown entry by entry.
+                        ProtoReader wholes = reader.ReadMessage();
+                        ProtoReader ahead = wholes;
+                        int entries = 0;
+                        for (; !ahead.End; entries++)
+                        {
+                            ahead.ReadVarint();
+                        }
+
+                        columnWholeBytes = new long[entries];
+                        for (int i = 0; i < entries; i++)
+                        {
+                            columnWholeBytes[i] = checked((long)wholes.ReadVarint());
+                        }
+
                         break;
-                    case (TagWhere, ProtoWireType.LengthDelimited):
-                        if (Directory(reader.ReadMessage()) is not { } placed)
+                    case (TagColumnClasses, ProtoWireType.LengthDelimited):
+                        ProtoReader classed = reader.ReadMessage();
+                        while (!classed.End)
+                        {
+                            columnClasses.Add(checked((uint)classed.ReadVarint()));
+                        }
+
+                        break;
+                    case (TagPureGranuleRows, ProtoWireType.Varint):
+                        pureGranuleRows = checked((long)reader.ReadVarint());
+                        break;
+                    case (TagCarried, ProtoWireType.LengthDelimited):
+                        if (CarriedBy(reader.ReadMessage()) is not { } carrying)
                         {
                             return null;
                         }
 
-                        wheres.Add(placed);
+                        carried.Add(carrying);
+                        break;
+                    case (TagListedRows, ProtoWireType.LengthDelimited):
+                        ProtoReader listing = reader.ReadMessage();
+                        while (!listing.End)
+                        {
+                            listedRows.Add(checked((long)listing.ReadVarint()));
+                        }
+
+                        break;
+                    case (TagSingleRows, ProtoWireType.LengthDelimited):
+                        ProtoReader singles = reader.ReadMessage();
+                        while (!singles.End)
+                        {
+                            singleRows.Add(checked((long)singles.ReadVarint()));
+                        }
+
+                        break;
+                    case (TagKeyRuns or TagPrefixRuns, ProtoWireType.LengthDelimited):
+                        if (KeyRunsEntry(reader.ReadMessage(), whole: field == TagPrefixRuns) is not { } runs)
+                        {
+                            return null;
+                        }
+
+                        keyRuns.Add(runs);
+                        break;
+                    case (TagLocate, ProtoWireType.LengthDelimited):
+                        if (Directory(reader.ReadMessage()) is not { } lying)
+                        {
+                            return null;
+                        }
+
+                        locates.Add(lying);
+                        break;
+                    case (TagPathLocate, ProtoWireType.LengthDelimited):
+                        if (PathLocated(reader.ReadMessage()) is not { } pathLying)
+                        {
+                            return null;
+                        }
+
+                        pathLocates.Add(pathLying);
+                        break;
+                    case (TagPathGranuleStats, ProtoWireType.LengthDelimited):
+                        if (PathLocated(reader.ReadMessage()) is not { } pathStated)
+                        {
+                            return null;
+                        }
+
+                        pathGranuleStats.Add(pathStated);
+                        break;
+                    case (TagPathSingleRows, ProtoWireType.LengthDelimited):
+                        ProtoReader pathSingles = reader.ReadMessage();
+                        while (!pathSingles.End)
+                        {
+                            pathSingleRows.Add(checked((long)pathSingles.ReadVarint()));
+                        }
+
                         break;
                     case (TagLocating, ProtoWireType.LengthDelimited):
                         if (Located(reader.ReadMessage()) is not { } located)
@@ -670,26 +1172,41 @@ internal sealed class ObjectContents(
             }
 
             // The entries of a directory lie within it; a paged column's page table, whose length its pages give, is a chunk
-            // directory the contents name, and its pages cover the slices' rows.
-            return version == Version && slices is not null && schema is not null
+            // directory the contents name, and its pages cover the file's rows.
+            // A dictionary names a column the directories name.
+            return version == Version && rows is { } held && schema is not null
+                && dictionaries.TrueForAll(d => d.Field < directories.Count)
                 && (locating is null || (indexDirectory is { } named && locating.TrueForAll(l => l.Region.Offset >= named.Offset
                     && l.Region.Offset + l.Region.Length <= named.Offset + named.Length)))
-                && (paging is null || (slices.Slices.Count > 0 && paging.PageRows[^1] < slices.Rows && Array.TrueForAll(paging.Columns, c =>
+                && (paging is null || (held > 0 && paging.PageRows[^1] < held && Array.TrueForAll(paging.Columns, c =>
                     c < directories.Count && directories[c].Length == SliceChunks.TableBytes(paging.PageRows.Length))))
-                ? new ObjectContents(schema, encodings, slices, directories, pathDirectories)
+                ? new ObjectContents(schema, encodings, held, directories, pathDirectories)
                 {
+                    KeyIndex = keyIndex,
+                    KeyPages = keyPages,
                     DirectoryRegion = indexDirectory,
                     Locating = locating,
                     Paging = paging,
                     Sheets = sheets,
                     Counts = counts,
                     Sketches = sketches,
-                    Blocks = blocks,
-                    BlockStats = blockStats,
-                    Wheres = wheres,
+                    GranuleStats = granuleStats,
+                    GranuleHistograms = granuleHistograms,
+                    Locates = locates,
+                    PathLocates = pathLocates,
+                    PathGranuleStats = pathGranuleStats,
+                    PathSingleRows = pathSingleRows,
                     ColumnBytes = columnBytes,
                     ColumnChunks = columnChunks,
-                    PureBlockRows = pureBlockRows,
+                    ColumnWholeBytes = columnWholeBytes,
+                    ColumnClasses = [.. columnClasses],
+                    PureGranuleRows = pureGranuleRows,
+                    ListedRows = listedRows,
+                    SingleRows = singleRows,
+                    KeyRuns = keyRuns,
+                    Carried = carried,
+                    Marks = marks.Count == directories.Count ? marks : [],
+                    Dictionaries = Placed(dictionaries, directories.Count),
                 }
                 : null;
         }
@@ -697,6 +1214,123 @@ internal sealed class ObjectContents(
         {
             return null;
         }
+    }
+
+    /// <summary>The dictionaries by the place of their column among <paramref name="columns"/>; none when no column has one.</summary>
+    private static ColumnDictionary?[] Placed(List<(int Field, ColumnDictionary Dictionary)> named, int columns)
+    {
+        if (named.Count == 0)
+        {
+            return [];
+        }
+
+        ColumnDictionary?[] placed = new ColumnDictionary?[columns];
+        foreach ((int field, ColumnDictionary dictionary) in named)
+        {
+            placed[field] = dictionary;
+        }
+
+        return placed;
+    }
+
+    /// <summary>A shredded key's index of where its values lie, as its message names it; null when it lacks a part.</summary>
+    /// <summary>What a column's counts carry, as <see cref="TagCarried"/> holds it; null for a message without its field.</summary>
+    private static (int, int[], bool)? CarriedBy(ProtoReader reader)
+    {
+        int? field = null;
+        List<int> measures = [];
+        bool leavesOut = false;
+        while (reader.TryReadTag(out int tag, out ProtoWireType wire))
+        {
+            switch (tag, wire)
+            {
+                case (TagDirectoryField, ProtoWireType.Varint):
+                    field = checked((int)reader.ReadVarint32());
+                    break;
+                case (TagCarriedMeasures, ProtoWireType.LengthDelimited):
+                    ProtoReader packed = reader.ReadMessage();
+                    while (!packed.End)
+                    {
+                        measures.Add(checked((int)packed.ReadVarint32()));
+                    }
+
+                    break;
+                case (TagCarriedLeavesOut, ProtoWireType.Varint):
+                    leavesOut = reader.ReadVarint32() != 0;
+                    break;
+                default:
+                    reader.SkipField(wire);
+                    break;
+            }
+        }
+
+        return field is { } at ? (at, [.. measures], leavesOut) : null;
+    }
+
+    private static (int, string, PathClass, IndexSegment)? PathLocated(ProtoReader reader)
+    {
+        int? field = null;
+        IndexSegment? region = null;
+        string? key = null;
+        uint? @class = null;
+        while (reader.TryReadTag(out int tag, out ProtoWireType wire))
+        {
+            switch (tag, wire)
+            {
+                case (TagDirectoryField, ProtoWireType.Varint):
+                    field = checked((int)reader.ReadVarint32());
+                    break;
+                case (TagDirectoryRegion, ProtoWireType.LengthDelimited):
+                    region = IndexDirectory.ReadSegment(reader.ReadMessage());
+                    break;
+                case (TagPathLocateKey, ProtoWireType.LengthDelimited):
+                    key = System.Text.Encoding.UTF8.GetString(reader.ReadLengthDelimited());
+                    break;
+                case (TagPathLocateClass, ProtoWireType.Varint):
+                    @class = reader.ReadVarint32();
+                    break;
+                default:
+                    reader.SkipField(wire);
+                    break;
+            }
+        }
+
+        return field is { } at && region is { } segment && key is not null && @class is { } held && held <= (uint)PathClass.Other
+            ? (at, key, (PathClass)held, segment)
+            : null;
+    }
+
+    /// <summary>
+    /// A component's values over the granules: its place, its region and the rows of its granules of one value; or, when
+    /// <paramref name="whole"/>, the runs of the whole prefix, at <see cref="GranuleKeyRuns.WholePrefix"/>, with the rows of
+    /// the granules they describe. Null when they do not read.
+    /// </summary>
+    private static (int, IndexSegment, long)? KeyRunsEntry(ProtoReader reader, bool whole)
+    {
+        int component = -1;
+        IndexSegment? region = null;
+        long single = 0;
+        while (reader.TryReadTag(out int tag, out ProtoWireType wire))
+        {
+            switch (tag, wire)
+            {
+                case (TagDirectoryField, ProtoWireType.Varint):
+                    component = checked((int)reader.ReadVarint32());
+                    break;
+                case (TagDirectoryRegion, ProtoWireType.LengthDelimited):
+                    region = IndexDirectory.ReadSegment(reader.ReadMessage());
+                    break;
+                case (TagKeyRunsSingle, ProtoWireType.Varint):
+                    single = checked((long)reader.ReadVarint());
+                    break;
+                default:
+                    reader.SkipField(wire);
+                    break;
+            }
+        }
+
+        return whole && region is { } prefix ? (GranuleKeyRuns.WholePrefix, prefix, single)
+            : component >= 0 && region is { } held ? (component, held, single) : null;
     }
 
     private static (int, IndexSegment)? Directory(ProtoReader reader)
@@ -728,10 +1362,18 @@ internal sealed class ObjectContents(
         uint? column = null;
         string? kind = null;
         IndexSegment? region = null;
+        string? key = null;
+        long bytes = 0;
         while (reader.TryReadTag(out int tag, out ProtoWireType wire))
         {
             switch (tag, wire)
             {
+                case (TagLocatingKey, ProtoWireType.LengthDelimited):
+                    key = Encoding.UTF8.GetString(reader.ReadLengthDelimited());
+                    break;
+                case (TagLocatingBytes, ProtoWireType.Varint):
+                    bytes = checked((long)reader.ReadVarint());
+                    break;
                 case (TagLocatingColumn, ProtoWireType.Varint):
                     column = reader.ReadVarint32();
                     break;
@@ -747,7 +1389,7 @@ internal sealed class ObjectContents(
             }
         }
 
-        return column is { } on && kind is not null && region is { Checksum: not null } segment ? new LocatingEntry(on, kind, segment) : null;
+        return column is { } on && kind is not null && region is { Checksum: not null } segment ? new LocatingEntry(on, kind, segment) { Key = key, Bytes = bytes } : null;
     }
 
     /// <summary>
@@ -879,4 +1521,14 @@ internal sealed record ChunkPaging(int PageEntries, int Count, long[] PageRows, 
 /// <param name="Column">The field of the root the index lies on, the first of its path; <see cref="IndexDirectory.RootColumn"/> for the root.</param>
 /// <param name="Kind">The index's kind.</param>
 /// <param name="Region">Where the entry's message lies in the file, with its checksum.</param>
-internal readonly record struct LocatingEntry(uint Column, string Kind, IndexSegment Region);
+internal readonly record struct LocatingEntry(uint Column, string Kind, IndexSegment Region)
+{
+    /// <summary>The key of the variant column <see cref="Column"/> the index lies on, the first of its path; null for a column, or unknown.</summary>
+    internal string? Key { get; init; }
+
+    /// <summary>
+    /// The bytes of the index's segments, every level of a Bloom filter's tree: what placing a value through it reads at most,
+    /// past its entry; 0 when unknown, an object written before its table of contents said.
+    /// </summary>
+    internal long Bytes { get; init; }
+}

@@ -491,20 +491,6 @@ internal sealed class SpillRun(SpillFile file)
 
         return entries;
     }
-
-    /// <summary>The bytes of sections [<paramref name="first"/>, <paramref name="past"/>) read, into a buffer of the caller's, grown as it must.</summary>
-    internal async ValueTask<int> ReadAsync(int first, int past, SpillBuffer buffer, CancellationToken cancellationToken)
-    {
-        long length = Starts[past] - Starts[first];
-        if (length == 0)
-        {
-            return 0;
-        }
-
-        Memory<byte> into = buffer.Ensure(checked((int)length));
-        await File.ReadAsync(Starts[first], into, cancellationToken).ConfigureAwait(false);
-        return (int)length;
-    }
 }
 
 /// <summary>
@@ -584,9 +570,6 @@ internal sealed class SpillBuffer
     internal void Write<T>(T value)
         where T : unmanaged => MemoryMarshal.Write(Take(Unsafe.SizeOf<T>()), in value);
 
-    internal void Write<T>(ReadOnlySpan<T> values)
-        where T : unmanaged => MemoryMarshal.AsBytes(values).CopyTo(Take(values.Length * Unsafe.SizeOf<T>()));
-
     /// <summary>Bytes after their length, one room taken for both.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal void WriteBytes(ReadOnlySpan<byte> value)
@@ -634,9 +617,6 @@ internal ref struct SpillReader(ReadOnlySpan<byte> bytes) : IWordSource
     /// <summary>The next word, a sketch's as it wrote them.</summary>
     public long NextWord() => Read<long>();
 
-    /// <summary>Whether every byte was read.</summary>
-    internal readonly bool End => _at == _bytes.Length;
-
     internal T Read<T>()
         where T : unmanaged
     {
@@ -674,7 +654,7 @@ internal sealed class RunMerge(
 {
     internal override int Parts => 1 << bits;
 
-    internal override (GroupKeys Keys, AggregateSlot[] Slots) Empty() => (kind.ForSpill(null), AggregationPartition.NewSlots(plan, settled, source));
+    internal (GroupKeys Keys, AggregateSlot[] Slots) Empty() => (kind.ForSpill(null), AggregationPartition.NewSlots(plan, settled, source));
 
     internal override async ValueTask<(GroupKeys Keys, AggregateSlot[] Slots, long Reserved, long Measured)> MergeAsync(int part, CancellationToken cancellationToken)
     {

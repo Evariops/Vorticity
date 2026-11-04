@@ -3,11 +3,10 @@
 // A column of N rows, empty but for its values: `Dense` has a one-byte value on every row, `Tail`
 // has its 20,480 one-byte values in its last rows, as a mostly null column whose values came late,
 // and `Sparse` a 32-byte value on every 256th row. The sampler draws 16 KiB, a random row at a
-// time, taking the first non-empty row from it. `Original` walks there at every draw
-// (`FsstSampleBefore.cs`); `Library` walks while the walk is short and searches a list of the
-// non-empty rows once it is not. Both draw the same sample, which the setup checks.
-using System;
-
+// time, taking the first non-empty row from it. `Library` walks while the walk is short and searches
+// a list of the non-empty rows once it is not; the sampler it replaced walked there at every draw,
+// 3.10 s where it takes 1.05 ms for `Tail` at N = 2^20 (af1e4eb8, the measure against a checkout of
+// the original). `FsstSampleTests` holds the sample to a direct walk's.
 using BenchmarkDotNet.Attributes;
 
 using Vorticity.Writing;
@@ -44,7 +43,7 @@ public class FsstSampleBenchmarks
     private int[] _lengths = [];
     private FsstSymbols.Line[] _into = [];
 
-    /// <summary>Lays the column out and checks both samplers draw the same lines.</summary>
+    /// <summary>Lays the column out.</summary>
     [GlobalSetup]
     public void Setup()
     {
@@ -65,29 +64,6 @@ public class FsstSampleBenchmarks
         }
 
         _into = new FsstSymbols.Line[(1 << 14) + 1];
-        FsstSymbols.Line[] original = new FsstSymbols.Line[_into.Length];
-        FsstSampleBefore.MakeSample(_starts, _lengths, original, out int expected, out _);
-        FsstSymbols.MakeSample(_starts, _lengths, _into, out int drawn, out _);
-        if (drawn != expected)
-        {
-            throw new InvalidOperationException("The samplers drew different samples.");
-        }
-
-        for (int i = 0; i < drawn; i++)
-        {
-            if (_into[i].Start != original[i].Start || _into[i].Length != original[i].Length)
-            {
-                throw new InvalidOperationException("The samplers drew different samples.");
-            }
-        }
-    }
-
-    /// <summary>The sample drawn by walking from every random row to the next non-empty one.</summary>
-    [Benchmark(Baseline = true)]
-    public int Original()
-    {
-        FsstSampleBefore.MakeSample(_starts, _lengths, _into, out int drawn, out _);
-        return drawn;
     }
 
     /// <summary>The sample drawn by the library's sampler.</summary>

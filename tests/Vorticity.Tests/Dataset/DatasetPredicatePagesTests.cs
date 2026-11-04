@@ -44,8 +44,7 @@ public sealed partial class DatasetPredicatePagesTests
         await using CountingObjectStore store = new CountingObjectStore(memory);
         DatasetOptions options = new DatasetOptions
         {
-            ClusteringKey = [nameof(Event.At)],
-            Clustering = new ClusteringOptions { ObjectBytes = 32 << 20 },
+            Layout = new DatasetLayout { SortKey = [LayoutValue.Column(nameof(Event.At))], ObjectBytes = 32 << 20 },
             ContentsObjectBytes = 1,
             ChunkBytes = 64 << 10,
             Write = new VortexWriteOptions { BlockRows = 512, ChunkTargetBytes = 64 << 10 },

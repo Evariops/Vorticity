@@ -56,15 +56,24 @@ public sealed partial class DatasetValueRangeTests
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Event.Schema, ByDay(), Ct);
         await AppendAsync(dataset, [.. Enumerable.Range(0, 48).Select(i => new Event(Midnight.AddHours(i), i))]);
 
+        // An append writes an object a partition, a day's rows each: the first day's goes whole from level 0.
         RowChangeResult result = await dataset.ExpireAsync<Event>(r => r.At < Midnight.AddDays(1), Ct);
-        Assert.Equal(OperationOutcome.AlreadyThere, result.Outcome);
-        Assert.Equal(48, dataset.RowCount);
-
-        // Compacted, the object of each day stands alone, and the first goes.
-        await DrainAsync(dataset);
-        result = await dataset.ExpireAsync<Event>(r => r.At < Midnight.AddDays(1), Ct);
+        Assert.Equal(OperationOutcome.Applied, result.Outcome);
         Assert.Equal(24, result.Rows);
         Assert.Equal(24, dataset.RowCount);
+
+        // A bound inside the second day, whose object straddles it, takes nothing.
+        ulong version = dataset.Version;
+        result = await dataset.ExpireAsync<Event>(r => r.At < Midnight.AddDays(1).AddHours(12), Ct);
+        Assert.Equal(OperationOutcome.AlreadyThere, result.Outcome);
+        Assert.Equal(version, dataset.Version);
+        Assert.Equal(24, dataset.RowCount);
+
+        // Compacted, the day stands alone, and goes past its end.
+        await DrainAsync(dataset);
+        result = await dataset.ExpireAsync<Event>(r => r.At < Midnight.AddDays(2), Ct);
+        Assert.Equal(24, result.Rows);
+        Assert.Equal(0, dataset.RowCount);
     }
 
     [Fact]
@@ -102,7 +111,7 @@ public sealed partial class DatasetValueRangeTests
     {
         await using MemoryObjectStore store = new MemoryObjectStore();
         await using VortexDataset dataset = await VortexDataset.CreateAsync(
-            store, Numbered.Schema, new DatasetOptions { ClusteringKey = [nameof(Numbered.Id)], Clustering = new ClusteringOptions { Value = ClusteringValue.Bucket(1_000) } }, Ct);
+            store, Numbered.Schema, new DatasetOptions { Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(Numbered.Id)).Bucket(1_000), SortKey = [LayoutValue.Column(nameof(Numbered.Id))], Organization = LayoutOrganization.Leveled } }, Ct);
         List<ValuePart<long, long>> parts = await dataset.AskByValuesAsync<long, long>(
             -1_500, 2_500, (lower, upper, ct) => ValueTask.FromResult(upper - lower), cancellationToken: Ct).ToListAsync(Ct);
         Assert.Equal([(2_000L, 2_500L), (1_000L, 2_000L), (0L, 1_000L), (-1_000L, 0L), (-1_500L, -1_000L)], parts.Select(part => (part.From, part.To)));
@@ -110,7 +119,7 @@ public sealed partial class DatasetValueRangeTests
         // The column itself cuts at every value.
         await using MemoryObjectStore other = new MemoryObjectStore();
         await using VortexDataset each = await VortexDataset.CreateAsync(
-            other, Numbered.Schema, new DatasetOptions { ClusteringKey = [nameof(Numbered.Id)], Clustering = new ClusteringOptions { Value = ClusteringValue.Column } }, Ct);
+            other, Numbered.Schema, new DatasetOptions { Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(Numbered.Id)), SortKey = [LayoutValue.Column(nameof(Numbered.Id))], Organization = LayoutOrganization.Leveled } }, Ct);
         List<ValuePart<long, long>> values = await each.AskByValuesAsync<long, long>(
             7, 10, (lower, upper, ct) => ValueTask.FromResult(lower), descending: false, Ct).ToListAsync(Ct);
         Assert.Equal([7L, 8L, 9L], values.Select(part => part.Answer));
@@ -120,12 +129,12 @@ public sealed partial class DatasetValueRangeTests
     public async Task ARangeIsAskedByValuesOnlyOfAValueWhoseNextOneIsKnown()
     {
         await using MemoryObjectStore store = new MemoryObjectStore();
-        await using VortexDataset plain = await VortexDataset.CreateAsync(store, Event.Schema, new DatasetOptions { ClusteringKey = [nameof(Event.At)] }, Ct);
+        await using VortexDataset plain = await VortexDataset.CreateAsync(store, Event.Schema, new DatasetOptions { Layout = new DatasetLayout { SortKey = [LayoutValue.Column(nameof(Event.At))] } }, Ct);
         Assert.Throws<InvalidOperationException>(() => plain.AskByValuesAsync<DateTimeOffset, long>(Midnight, Midnight.AddDays(1), (_, _, _) => ValueTask.FromResult(0L), cancellationToken: Ct));
 
         await using MemoryObjectStore texts = new MemoryObjectStore();
         await using VortexDataset tenants = await VortexDataset.CreateAsync(
-            texts, Tenanted.Schema, new DatasetOptions { ClusteringKey = [nameof(Tenanted.Tenant)], Clustering = new ClusteringOptions { Value = ClusteringValue.Column } }, Ct);
+            texts, Tenanted.Schema, new DatasetOptions { Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(Tenanted.Tenant)), SortKey = [LayoutValue.Column(nameof(Tenanted.Tenant))], Organization = LayoutOrganization.Leveled } }, Ct);
         Assert.Throws<InvalidOperationException>(() => tenants.AskByValuesAsync<string, long>("a", "b", (_, _, _) => ValueTask.FromResult(0L), cancellationToken: Ct));
 
         await using MemoryObjectStore days = new MemoryObjectStore();
@@ -174,8 +183,7 @@ public sealed partial class DatasetValueRangeTests
     private static DatasetOptions ByDay() => new DatasetOptions
     {
         Seed = 0xDA_7E,
-        ClusteringKey = [nameof(Event.At)],
-        Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Day) },
+        Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(Event.At)).Truncate(CalendarUnit.Day), SortKey = [LayoutValue.Column(nameof(Event.At))], Organization = LayoutOrganization.Leveled },
     };
 
     /// <summary>A store that notes every key read.</summary>

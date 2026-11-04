@@ -138,12 +138,12 @@ public sealed class WriteAllocationTests
         // this SHAPE of data cost", which is the question a ratchet can answer. Whether our writer
         // re-elects the same encoding is a different question and `bench/crosscheck.sh` is where
         // it is asked.
-        ("encodings/fastlanes_delta", 7_436),   // 7 352 measured, including the file statistics segment: per file, not per row
-        ("encodings/pco", 7_424),   // 7 304 measured in the suite, where dynamic PGO adds the JIT's instrumentation, 72 bytes that are not the writer's; the read half reads its page sizes in place and keeps the chunk metadata, its ANS tables and the latent states from one decode to the next
+        ("encodings/fastlanes_delta", 7_692),   // 7 352 measured, including the file statistics segment: per file, not per row; 7 608 on 2026-10-27, 256 bytes more: the writer's fields for object dictionaries, chunk geometry and gathered columns, the NaN counts its blocks' statistics keep, and the read back's scan, which holds its granules' geometry and its pushed predicates
+        ("encodings/pco", 7_680),   // 7 560 measured on 2026-10-27, 256 bytes more as fastlanes_delta's above; 7 304 measured in the suite before, where dynamic PGO adds the JIT's instrumentation, 72 bytes that are not the writer's; the read half reads its page sizes in place and keeps the chunk metadata, its ANS tables and the latent states from one decode to the next
         // The read half of this axis decompresses through the scan's `ZstdDecompressor`, so a
         // change on the zstd read path can move this ceiling while the write path stays put.
         ("encodings/zstd", 8_880),   // 8 464 measured, the FSST table its trial trains reused, including the public writer and report and the text column's string bounds, whose two zone-map fields bring the writer's encoding table enough encodings to grow it once more
-        ("encodings/map", 11_588),   // 11 480 measured, including the three nodes the column tree keeps under a map -- the entries, the key, the value -- each with its block lists, its previous row and the map's window cursor: per column, not per row
+        ("encodings/map", 12_076),   // 11 968 measured on 2026-10-27, 488 bytes more as fastlanes_delta's above, the NaN counts kept for each block of the three nodes under the map; 11 480 measured before, including the three nodes the column tree keeps under a map -- the entries, the key, the value -- each with its block lists, its previous row and the map's window cursor: per column, not per row
         ("encodings/variant", 10_336),   // 10 152 measured, including the file statistics segment and the public writer and report: per file, not per row
 
         // THE TWO ALP SHAPES, so that the ALP write path is watched on both of its cases:

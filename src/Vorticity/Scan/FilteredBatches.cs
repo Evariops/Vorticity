@@ -37,11 +37,17 @@ internal sealed class FilteredBatches : IAsyncEnumerable<RecordBatch>
         _rows = rows ?? new RowRange(0, inner.File.RowCount);
     }
 
+    /// <summary>What the question this scan belongs to read already, which its pruning reads the variant directories through; null for none.</summary>
+    internal Indexes.QuestionReads? Question { get; init; }
+
     /// <summary>Whether <see cref="Live"/> is the filter's mask, refined already by the caller, so that no structure is read again.</summary>
     internal bool Refined { get; init; }
 
     /// <summary>The refined mask when <see cref="Refined"/>, or null when no structure prunes anything.</summary>
     internal BlockMask? Live { get; init; }
+
+    /// <summary>The blocks the caller's structures leave, which the pruning starts from (<see cref="ScanBuilder.WithGranuleMask"/>); null for every block.</summary>
+    internal BlockMask? Granted { get; init; }
 
     public IAsyncEnumerator<RecordBatch> GetAsyncEnumerator(
         CancellationToken cancellationToken = default) =>
@@ -94,6 +100,8 @@ internal sealed class FilteredBatches : IAsyncEnumerable<RecordBatch>
         private readonly RowRange _rows;
         private readonly bool _refined;
         private readonly BlockMask? _live;
+        private readonly BlockMask? _granted;
+        private readonly Indexes.QuestionReads? _question;
         private readonly CancellationToken _token;
         private IAsyncEnumerator<RecordBatch>? _inner;
 
@@ -106,6 +114,8 @@ internal sealed class FilteredBatches : IAsyncEnumerable<RecordBatch>
             _rows = owner._rows;
             _refined = owner.Refined;
             _live = owner.Live;
+            _granted = owner.Granted;
+            _question = owner.Question;
             _token = token;
         }
 
@@ -158,13 +168,20 @@ internal sealed class FilteredBatches : IAsyncEnumerable<RecordBatch>
                 // One read of every zone map the filter can use, before the first batch, and one
                 // mask of live blocks refined from it. Both stay in memory for the rest of the
                 // scan; every split asks the mask, never the zone maps.
+                BlockMask? scope = _refined ? null : Scope();
                 ZonePruningPlan.PruningPlan pruning = _refined
                     ? new ZonePruningPlan.PruningPlan(_live, null)
                     : _prune && _filter is not null
                         ? await ZonePruningPlan
-                            .PlanAsync(_source.File, _source.Tree, _filter, _token, steps: null, _source.Metrics, _indexes, Scope())
+                            .PlanAsync(_source.File, _source.Tree, _filter, _token, steps: null, _source.Metrics, _indexes, scope, question: _question)
                             .ConfigureAwait(false)
                         : default;
+
+                // The caller's blocks hold where no structure of the file prunes.
+                if (pruning.Live is null && _granted is not null && scope is not null)
+                {
+                    pruning = new ZonePruningPlan.PruningPlan(scope, pruning.Zones);
+                }
 
                 // An exact index gathers the rows it proved, which a scan delivering whole blocks
                 // does not want.
@@ -193,13 +210,24 @@ internal sealed class FilteredBatches : IAsyncEnumerable<RecordBatch>
         private BlockMask? Scope()
         {
             LayoutTree tree = _source.Tree;
-            if (_rows.Start <= 0 && _rows.End >= tree.Root.RowCount)
+            bool whole = _rows.Start <= 0 && _rows.End >= tree.Root.RowCount;
+            if (whole && _granted is null)
             {
                 return null;
             }
 
             BlockMask scope = new BlockMask(tree.Root.RowCount, SplitPlan.NaturalBatchRows(tree));
-            scope.KeepOnly(_rows);
+            if (!whole)
+            {
+                scope.KeepOnly(_rows);
+            }
+
+            // The blocks the caller's structures leave, within those the rows reach.
+            if (_granted is { } granted && granted.BlockRows == scope.BlockRows && granted.BlockCount == scope.BlockCount)
+            {
+                scope.Keep(granted.Words);
+            }
+
             return scope;
         }
     }

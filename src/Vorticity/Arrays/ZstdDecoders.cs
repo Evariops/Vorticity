@@ -23,7 +23,12 @@ internal static class ZstdDecoders
     /// </summary>
     internal const int MostExpansion = 32_768;
 
-    private const int Capacity = 16;
+    /// <summary>
+    /// The decompressors kept: one a processor, sixteen at least. The questions of a node hold a context or two each, and the
+    /// regions they decode rent one beside: sixteen kept left a warm mix of eight clients making a decompressor anew every
+    /// third question, 160 KB of the large object heap at the least (2026-11-02).
+    /// </summary>
+    internal static readonly int Capacity = System.Math.Max(16, System.Environment.ProcessorCount);
 
     private static readonly ZstdDecompressor?[] Decoders = new ZstdDecompressor?[Capacity];
     private static readonly Lock Gate = new Lock();

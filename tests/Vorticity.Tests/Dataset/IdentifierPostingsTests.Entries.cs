@@ -41,9 +41,9 @@ public sealed partial class IdentifierPostingsTests
             await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Request.Schema, new DatasetOptions
             {
                 Session = session,
-                ClusteringKey = [nameof(Request.At)],
+                Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(Request.At)).Truncate(CalendarUnit.Hour), SortKey = [LayoutValue.Column(nameof(Request.At))], Organization = LayoutOrganization.Leveled },
                 Identifiers = [nameof(Request.RequestId)],
-                Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour) }, ContentsObjectBytes = 0, SliceTargetRows = 500,
+                ContentsObjectBytes = 0,
                 Write = paged ? new VortexWriteOptions { BlockRows = 16, ChunkTargetBytes = 1, ChunkPageEntries = 4 } : VortexWriteOptions.Default,
                 ChunkBytes = paged ? 1 : 1 << 20,
             }, Ct);

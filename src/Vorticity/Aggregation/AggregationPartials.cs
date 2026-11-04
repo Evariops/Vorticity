@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.IO.Pipelines;
+using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
@@ -17,7 +18,7 @@ namespace Vorticity.Aggregating;
 /// <summary>
 /// An aggregation cut into parts, run apart and merged: the parts of its rows (<see cref="PartsAsync"/>), the states of
 /// a part's groups as rows of states (<see cref="ExportAsync"/>), and the question answered from them
-/// (<see cref="Merged"/>), which folds them as it folds a synopsis's states, to the bits the rows would give.
+/// (<see cref="Merged(AggregationQuery, IEnumerable{AggregationPartial})"/>), which folds them as it folds a synopsis's states, to the bits the rows would give.
 /// </summary>
 /// <remarks>
 /// A part's states are those a dataset's counts keep: integer sums exact in 128 bits, float sums
@@ -63,11 +64,11 @@ internal static class AggregationPartials
         Check(query.Plan);
         ScanSource source = query.Host.Source;
         ScanSpec spec = query.Host.Spec(query.RowFilter);
-        RowRange whole = spec.Rows ?? new RowRange(0, source.RowBound >= 0 ? source.RowBound : long.MaxValue);
+        RowRange whole = spec.Rows ?? new RowRange(0, source.Statistics?.RowBound is long bound and >= 0 ? bound : long.MaxValue);
         RowRange[]? pieces = count == 1 || spec.MatchesNothing
             ? null
             : AggregationEngine.Ranges(source, spec, count)
-                ?? (source is FileScanSource ? null : await source.PiecesAsync(spec, count, cancellationToken).ConfigureAwait(false));
+                ?? (source is FileScanSource || source.Tasks is not { } tasks ? null : await tasks.PiecesAsync(spec, count, cancellationToken).ConfigureAwait(false));
         return pieces is null || pieces.Length <= 1 ? [whole] : Gathered(whole, pieces, count);
     }
 
@@ -112,7 +113,7 @@ internal static class AggregationPartials
     internal static async ValueTask<AggregationPartial> ExportAsync(AggregationQuery query, CancellationToken cancellationToken)
     {
         using MemoryStream stream = new MemoryStream();
-        VortexFileWriter writer = query.Session.CreateWriter(PipeWriter.Create(stream, new StreamPipeWriterOptions(leaveOpen: true)), query.Schema);
+        VortexFileWriter writer = query.Session.CreateWriter(PipeWriter.Create(stream, new StreamPipeWriterOptions(leaveOpen: true)), query.Schema, VortexWriteOptions.Partial);
         await using (writer.ConfigureAwait(false))
         {
             IAsyncEnumerator<RecordBatch> groups = query.Groups(cancellationToken);
@@ -137,8 +138,18 @@ internal static class AggregationPartials
     internal static AggregationQuery Merged(AggregationQuery query, IEnumerable<AggregationPartial> partials)
     {
         ArgumentNullException.ThrowIfNull(partials);
+        return Merged(query, ((AggregationPartial[])[.. partials]).ToAsyncEnumerable());
+    }
+
+    /// <summary>
+    /// <paramref name="query"/> answered from <paramref name="partials"/> as they arrive: each one folded when the merge
+    /// reads it, the next awaited, so that the merge goes on while the parts after it are read.
+    /// </summary>
+    internal static AggregationQuery Merged(AggregationQuery query, IAsyncEnumerable<AggregationPartial> partials)
+    {
+        ArgumentNullException.ThrowIfNull(partials);
         Check(query.Plan);
-        PartialsSource source = new PartialsSource(query.Host.Source, [.. partials], query.Partial().Schema);
+        PartialsSource source = new PartialsSource(query.Host.Source, partials, query.Partial().Schema);
         return query.Merged(new PartialsHost(query.Host, source));
     }
 
@@ -345,23 +356,41 @@ internal interface IStateOverlay
 
 /// <summary>
 /// The partials of an aggregation's parts, as the source of its merge: their rows of states, which the pass asks for, a
-/// batch of states each batch of their files, their keys as the functions gave them (<see cref="RecordBatch.OfPartial"/>).
-/// The source has no rows: it answers a count of them from the states, and nothing else but states.
+/// batch of states each batch of their files, their keys as the functions gave them (<see cref="RecordBatch.OfPartial"/>),
+/// each partial read as it arrives. The source has no rows: it answers a count of them from the states, and nothing else
+/// but states.
 /// </summary>
-internal sealed class PartialsSource(ScanSource question, AggregationPartial[] partials, VortexSchema expected) : ScanSource
+/// <param name="question">The question's source, whose columns its plan reads by.</param>
+/// <param name="partials">The partials, read as they arrive.</param>
+/// <param name="expected">The columns of the question's partials.</param>
+internal sealed class PartialsSource(ScanSource question, IAsyncEnumerable<AggregationPartial> partials, VortexSchema expected)
+    : ScanSource, IRowsCapability, IStatisticsCapability, IKeysCapability, IStatesCapability, ICostCapability
 {
     /// <summary>The question's columns, which its plan reads by.</summary>
     internal override VortexSchema Schema => question.Schema;
 
     internal override VortexSession Session => question.Session;
 
-    internal override bool KeepsStates => true;
+    /// <summary>Its question's.</summary>
+    public IO.CostProfile Profile => question.Cost?.Profile ?? IO.CostProfile.Remote;
 
-    internal override ValueTask<bool> TakesStatesAsync(ScanSpec spec, StateRequest states, CancellationToken cancellationToken) =>
+    internal override LogicalSource Logical => question.Logical;
+
+    internal override IRowsCapability Rows => this;
+
+    internal override IStatisticsCapability Statistics => this;
+
+    internal override IKeysCapability Keys => this;
+
+    internal override IStatesCapability States => this;
+
+    internal override ICostCapability Cost => this;
+
+    public ValueTask<bool> TakesStatesAsync(ScanSpec spec, StateRequest states, CancellationToken cancellationToken) =>
         ValueTask.FromResult(true);
 
-    internal override IAsyncEnumerable<RecordBatch> BatchesAsync(ScanSpec spec, ScanCounters metrics) =>
-        spec.States is null
+    public IAsyncEnumerable<RecordBatch> BatchesAsync(ScanSpec spec, ScanCounters metrics) =>
+        spec.Answering?.States is null
             ? throw new InvalidOperationException("A merge of partials reads them as states, which its pass did not ask for.")
             : StatesAsync(metrics);
 
@@ -369,12 +398,12 @@ internal sealed class PartialsSource(ScanSource question, AggregationPartial[] p
     private async IAsyncEnumerable<RecordBatch> StatesAsync(ScanCounters metrics, [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
         long row = 0;
-        foreach (AggregationPartial partial in partials)
+        await foreach (AggregationPartial partial in partials.WithCancellation(cancellationToken).ConfigureAwait(false))
         {
             VortexFile file = await OpenAsync(partial, cancellationToken).ConfigureAwait(false);
             await using (file.ConfigureAwait(false))
             {
-                await foreach (RecordBatch batch in new FileScanSource(file).BatchesAsync(new ScanSpec(), metrics).WithCancellation(cancellationToken).ConfigureAwait(false))
+                await foreach (RecordBatch batch in new FileScanSource(file).Rows.BatchesAsync(new ScanSpec(), metrics).WithCancellation(cancellationToken).ConfigureAwait(false))
                 {
                     yield return Canonical(batch, row);
                     row += batch.RowCount;
@@ -391,7 +420,8 @@ internal sealed class PartialsSource(ScanSource question, AggregationPartial[] p
     {
         CanonicalArena arena = batch.Arena;
         CanonicalNode root = arena.GetNode(batch.RootIndex);
-        int[] columns = new int[root.DType.FieldCount];
+        int count = root.DType.FieldCount;
+        Span<int> columns = count <= 64 ? stackalloc int[count] : new int[count];
         for (int c = 0; c < columns.Length; c++)
         {
             columns[c] = EncodedForms.Canonical(arena, root.GetFieldIndex(c));
@@ -400,7 +430,7 @@ internal sealed class PartialsSource(ScanSource question, AggregationPartial[] p
         return RecordBatch.OfPartial(arena, arena.AddStruct(root.DType, batch.RowCount, Validity.NonNullable, columns), row);
     }
 
-    /// <summary>A partial's file, refused when its columns are not those of this question's partials.</summary>
+    /// <summary>A partial's file; refused when its columns are not those of this question's partials.</summary>
     private async ValueTask<VortexFile> OpenAsync(AggregationPartial partial, CancellationToken cancellationToken)
     {
         VortexFile file = await partial.OpenAsync(Session, cancellationToken).ConfigureAwait(false);
@@ -414,7 +444,15 @@ internal sealed class PartialsSource(ScanSource question, AggregationPartial[] p
     }
 
     /// <summary>The rows the partials' groups count, for a count of rows alone, which the engine asks of a source.</summary>
-    internal override async ValueTask<long> CountAsync(ScanSpec spec, ScanCounters metrics, CancellationToken cancellationToken)
+    /// <summary>A form of the question, answered by the count, the proof of a row, or the extreme the source works out.</summary>
+    public async ValueTask<FormAnswer> AnswerAsync(ScanSpec spec, LogicalShape form, ScanCounters metrics, CancellationToken cancellationToken) => form switch
+    {
+        ExtremeShape extreme => new FormAnswer(0, await ExtremeAsync(spec, extreme.Column, extreme.Min, metrics, cancellationToken).ConfigureAwait(false)),
+        _ when ReferenceEquals(form, LogicalShape.Any) => new FormAnswer(await AnyAsync(spec, metrics, cancellationToken).ConfigureAwait(false) ? 1 : 0, FilterLiteral.Null),
+        _ => new FormAnswer(await CountAsync(spec, metrics, cancellationToken).ConfigureAwait(false), FilterLiteral.Null),
+    };
+
+    private async ValueTask<long> CountAsync(ScanSpec spec, ScanCounters metrics, CancellationToken cancellationToken)
     {
         long rows = 0;
         await foreach (RecordBatch batch in StatesAsync(metrics, cancellationToken).ConfigureAwait(false))
@@ -429,22 +467,20 @@ internal sealed class PartialsSource(ScanSource question, AggregationPartial[] p
         return rows;
     }
 
-    internal override ValueTask<bool> AnyAsync(ScanSpec spec, ScanCounters metrics, CancellationToken cancellationToken) =>
+    private ValueTask<bool> AnyAsync(ScanSpec spec, ScanCounters metrics, CancellationToken cancellationToken) =>
         throw new NotSupportedException("A merge of partials holds states, not rows.");
 
-    internal override ValueTask<FilterLiteral> ExtremeAsync(ScanSpec spec, FieldExpr column, bool min, ScanCounters metrics, CancellationToken cancellationToken) =>
+    private ValueTask<FilterLiteral> ExtremeAsync(ScanSpec spec, FieldExpr column, bool min, ScanCounters metrics, CancellationToken cancellationToken) =>
         throw new NotSupportedException("A merge of partials holds states, not rows.");
 
     /// <summary>A plan of no block: the partials are in memory, and every row of them is read.</summary>
-    internal override ValueTask<ScanPlan> ExplainAsync(ScanSpec spec, CancellationToken cancellationToken) =>
+    public ValueTask<ScanPlan> ExplainAsync(ScanSpec spec, bool analyze, CancellationToken cancellationToken) =>
         ValueTask.FromResult(new ScanPlan(0, 0, 0, 0, 0, MayMatch: true, [], new CountPlan(false, 0, 0, 0, 0), null));
 
-    internal override bool MayMatch(VortexExpr filter) => true;
-
-    internal override ValueTask<IKeyWalker> OpenKeysAsync(string path, bool distinct, bool indexes, CancellationToken cancellationToken) =>
+    public ValueTask<IKeyWalker> OpenKeysAsync(string path, bool distinct, bool indexes, CancellationToken cancellationToken) =>
         throw new NotSupportedException("A merge of partials holds states, not rows.");
 
-    internal override ValueTask<KeyPlan> ExplainKeysAsync(string path, bool distinct, bool indexes, CancellationToken cancellationToken) =>
+    public ValueTask<KeyPlan> ExplainKeysAsync(string path, bool distinct, bool indexes, CancellationToken cancellationToken) =>
         ValueTask.FromResult(new KeyPlan(path, KeySourceKind.None, 0, null, HasRows: false, [new KeySourceRejection(KeySourceKind.InMemory, "a merge of partials holds states, not rows")]));
 }
 
@@ -460,8 +496,6 @@ internal sealed class PartialsHost(AggregationHost question, PartialsSource sour
     internal override ScanSource Source => source;
 
     internal override ScanCounters Counters => _counters;
-
-    internal override ScanMetrics Metrics => ScanMetrics.From(_counters);
 
     internal override ScanSpec Spec()
     {

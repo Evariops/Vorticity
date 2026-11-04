@@ -23,16 +23,17 @@ internal readonly record struct MergeObject(ObjectEntry Entry, ReadOnlyMemory<by
 /// rank, so a run's input is the top and the key that ends its run is the smaller of the top's two
 /// children: a run costs the logarithm of the inputs open rather than passes over all of them.
 /// </summary>
-internal sealed class KeyOrderedMerge : IAsyncDisposable
+internal sealed class KeyOrderedMerge : IAsyncDisposable, IOrderedKeys
 {
     private readonly DatasetSnapshot _version;
     private readonly IAsyncEnumerator<MergeObject> _objects;
     private readonly Func<ObjectLease, ObjectEntry, IAsyncEnumerable<RecordBatch>> _batches;
     private readonly Action<ObjectLease>? _opened;
-    private readonly string[] _paths;
-    private readonly RowSortField[] _fields;
+    private readonly SortKey _key;
     private readonly bool _rankedTies;
     private readonly CancellationToken _cancellationToken;
+    private readonly ReadOnlyMemory<byte> _low;
+    private readonly ReadOnlyMemory<byte> _high;
 
     // The open inputs; past LinearOpen of them, a binary min-heap by current key, then rank.
     private readonly List<MergeInput> _open = [];
@@ -55,28 +56,32 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable
 
     /// <summary>
     /// A merge over <paramref name="objects"/>, which must arrive by ascending bound, and whose
-    /// batches, from <paramref name="batches"/>, must all deliver <paramref name="paths"/> in the same
+    /// batches, from <paramref name="batches"/>, must all deliver the sources of <paramref name="key"/> in its
     /// direction and gathered, a batch holding only the rows it delivers. With
     /// <paramref name="rankedTies"/>, equal keys come in rank order as a read promises; without it
-    /// the emitting input runs through them, which keeps a compaction's runs longest.
+    /// the emitting input runs through them, which keeps a compaction's runs longest. With <paramref name="low"/> or
+    /// <paramref name="high"/>, the merge holds the rows from the one to before the other alone, each a key in the
+    /// merge's encoding that may be a leading part of one: every input skips its rows below the first and ends at the
+    /// second.
     /// </summary>
     internal KeyOrderedMerge(
         DatasetSnapshot version,
         IAsyncEnumerable<MergeObject> objects,
-        IReadOnlyList<string> paths,
-        bool descending,
+        SortKey key,
         bool rankedTies,
         Func<ObjectLease, ObjectEntry, IAsyncEnumerable<RecordBatch>> batches,
         Action<ObjectLease>? opened,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        ReadOnlyMemory<byte> low = default,
+        ReadOnlyMemory<byte> high = default)
     {
+        _low = low;
+        _high = high;
         _version = version;
         _objects = objects.GetAsyncEnumerator(cancellationToken);
         _batches = batches;
         _opened = opened;
-        _paths = [.. paths];
-        _fields = new RowSortField[_paths.Length];
-        Array.Fill(_fields, Field(descending));
+        _key = key;
         _rankedTies = rankedTies;
         _cancellationToken = cancellationToken;
     }
@@ -85,14 +90,8 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable
     /// <exception cref="InvalidOperationException">The merge is not on a run.</exception>
     internal RecordBatch Current => _current ?? throw new InvalidOperationException("The merge is not on a run.");
 
-    /// <summary>The run's first key, row-encoded.</summary>
-    internal ReadOnlySpan<byte> FirstKey => KeyAt(0);
-
-    /// <summary>The run's last key, row-encoded.</summary>
-    internal ReadOnlySpan<byte> LastKey => KeyAt(_count - 1);
-
     /// <summary>The key of the run's row <paramref name="row"/>, row-encoded.</summary>
-    internal ReadOnlySpan<byte> KeyAt(int row)
+    public ReadOnlySpan<byte> KeyAt(int row)
     {
         MergeInput input = Emitting();
         return input.KeyAt(input.Row + row);
@@ -258,7 +257,7 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable
     {
         ObjectLease lease = await _version.RentAsync(next.Entry, _cancellationToken).ConfigureAwait(false);
         _opened?.Invoke(lease);
-        MergeInput input = new MergeInput(lease, next.Entry.Key, next.Rank, next.FirstRow, _paths, _fields);
+        MergeInput input = new MergeInput(lease, next.Entry.Key, next.Rank, next.FirstRow, _key, _low, _high);
         try
         {
             await input.StartAsync(_batches(lease, next.Entry), _cancellationToken).ConfigureAwait(false);
@@ -474,12 +473,20 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable
         return order < 0 || (order == 0 && leftRank < rightRank);
     }
 
-    /// <summary>One input of the merge: an object's batches in key order, and their keys row-encoded.</summary>
+    /// <summary>
+    /// One input of the merge: an object's batches in key order, and their keys row-encoded; under a window, its rows from the
+    /// low bound to before the high one.
+    /// </summary>
     private sealed class MergeInput : IAsyncDisposable
     {
         private readonly ObjectLease _lease;
-        private readonly string[] _paths;
-        private readonly RowSortField[] _fields;
+        private readonly SortKey _key;
+        private readonly ReadOnlyMemory<byte> _high;
+
+        // The low bound until a batch reaches it, past which every row does; the high one once a batch reached it, past
+        // which no row is wanted.
+        private ReadOnlyMemory<byte> _low;
+        private bool _ended;
         private IAsyncEnumerator<RecordBatch>? _batches;
         private RecordBatch? _batch;
         private RowKeys? _keys;
@@ -489,14 +496,15 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable
         // may dispose what it was given, and stepping past it must not read it again.
         private int _rows;
 
-        internal MergeInput(ObjectLease lease, string key, long rank, long firstRow, string[] paths, RowSortField[] fields)
+        internal MergeInput(ObjectLease lease, string key, long rank, long firstRow, SortKey sortKey, ReadOnlyMemory<byte> low, ReadOnlyMemory<byte> high)
         {
             _lease = lease;
+            _low = low;
+            _high = high;
             Object = key;
             Rank = rank;
             FirstRow = firstRow;
-            _paths = paths;
-            _fields = fields;
+            _key = sortKey;
         }
 
         /// <summary>The object's key in the store, for a message.</summary>
@@ -581,6 +589,7 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable
         /// <summary>
         /// Takes the next batch and row-encodes its keys: a key of several columns has no ordering
         /// to compare in place, and the encoding gives one value per row that sorts as the key does.
+        /// Under a window, the batch's rows below its low bound and from its high one on are left out.
         /// </summary>
         private async ValueTask NextAsync()
         {
@@ -589,7 +598,7 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable
             _batch = null;
             _row = 0;
             _rows = 0;
-            while (await _batches!.MoveNextAsync().ConfigureAwait(false))
+            while (!_ended && await _batches!.MoveNextAsync().ConfigureAwait(false))
             {
                 RecordBatch batch = _batches.Current;
                 if (batch.RowCount == 0)
@@ -597,27 +606,55 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable
                     continue;
                 }
 
+                RowKeys keys = _key.Encode(batch);
+                int from = 0;
+                int to = batch.RowCount;
+                if (!_low.IsEmpty)
+                {
+                    from = FirstAtOrPast(keys, 0, to, _low.Span);
+                    if (from < to)
+                    {
+                        _low = default;
+                    }
+                }
+
+                if (!_high.IsEmpty && keys.Row(to - 1).SequenceCompareTo(_high.Span) >= 0)
+                {
+                    to = FirstAtOrPast(keys, from, to, _high.Span);
+                    _ended = true;
+                }
+
+                if (from == to)
+                {
+                    keys.Dispose();
+                    continue;
+                }
+
                 _batch = batch;
-                _rows = batch.RowCount;
-                _keys = RowEncoder.Encode(batch.Arena, Columns(batch, _paths), _fields);
+                _row = from;
+                _rows = to;
+                _keys = keys;
                 return;
             }
         }
 
-        private static int[] Columns(RecordBatch batch, IReadOnlyList<string> paths)
+        /// <summary>The first row from <paramref name="from"/> to <paramref name="to"/> whose key lies at or past <paramref name="bound"/>, by halves.</summary>
+        private static int FirstAtOrPast(RowKeys keys, int from, int to, ReadOnlySpan<byte> bound)
         {
-            int[] columns = new int[paths.Count];
-            for (int i = 0; i < paths.Count; i++)
+            while (from < to)
             {
-                // A key column that is an extension, an instant, is encoded as its storage, as the
-                // runs of the key and its seek keys are.
-                int node = ColumnPath.NodeOf(batch, paths[i]);
-                columns[i] = node >= 0
-                    ? RowEncoder.Storage(batch.Arena, node)
-                    : throw new ArgumentException($"'{paths[i]}' names no column of the batch's schema.", nameof(paths));
+                int middle = from + ((to - from) >> 1);
+                if (keys.Row(middle).SequenceCompareTo(bound) < 0)
+                {
+                    from = middle + 1;
+                }
+                else
+                {
+                    to = middle;
+                }
             }
 
-            return columns;
+            return from;
         }
     }
 }

@@ -97,6 +97,31 @@ public sealed class CompressionTests
         Assert.Equal(ColumnScheme.None, plan.Scheme);
     }
 
+    /// <summary>
+    /// Eight status codes, five in a hundred of them a server error past the width the others pack at: a dictionary's codes
+    /// pack at 3 bits a row, where the bit-packing takes 2 and its patches, the errors' places and values, 12 bytes each.
+    /// The dictionary is chosen, its codes priced as they are written; priced a byte a row, it lost to a bit-packing more
+    /// than twice its size, whose patches a read of a few granules then read whole.
+    /// </summary>
+    [Fact]
+    public void ADictionaryWhoseCodesPackSmallBeatsABitPackingOfManyPatches()
+    {
+        Random random = new Random(61);
+        long[] codes = new long[262_144];
+        for (int i = 0; i < codes.Length; i++)
+        {
+            codes[i] = random.Next(20) == 0 ? 500 + random.Next(4) : 200 + random.Next(4);
+        }
+
+        using ColumnFixture fixture = new ColumnFixture();
+        int node = fixture.Int64Node(codes, Validity.NonNullable);
+
+        ColumnPlan plan = ColumnCompressor.Choose(fixture.Arena, node);
+        Assert.Equal(ColumnScheme.Dict, plan.Scheme);
+        Assert.True(plan.PredictedBytes < codes.Length * 3 / 8 + 1024, $"{plan.PredictedBytes} bytes predicted");
+        plan.Release();
+    }
+
     /// <summary>Sixteen rows over two distinct values of <paramref name="width"/> bytes.</summary>
     private static byte[]?[] TwoDistinct(int width)
     {

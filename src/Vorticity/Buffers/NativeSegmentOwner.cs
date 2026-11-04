@@ -189,6 +189,10 @@ internal sealed class NativeSegmentOwner : SegmentOwner
     protected override void FreeCore()
     {
         AlignedBufferPool? pool = _pool;
+        if (pool is not null)
+        {
+            AlignedBufferPool.Watch?.Released(this);
+        }
 
         // A parked owner keeps both its memory and its finalizer registration: if the pool is
         // later dropped without Trim(), the finalizer is still the backstop that frees it.

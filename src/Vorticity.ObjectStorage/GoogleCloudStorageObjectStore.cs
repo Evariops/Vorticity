@@ -126,9 +126,6 @@ public sealed partial class GoogleCloudStorageObjectStore : IObjectStore, IUploa
         | ObjectStoreCapabilities.CreatesConditionally
         | (_options.ReadsSuffix == true ? ObjectStoreCapabilities.ReadsSuffix : 0);
 
-    /// <summary>The transport, for tests.</summary>
-    internal HttpTransport Transport => _transport;
-
     /// <inheritdoc/>
     public ValueTask<ObjectRead> ReadAsync(string key, long offset, Memory<byte> destination, string? ifToken, CancellationToken cancellationToken)
     {
@@ -404,9 +401,6 @@ public sealed partial class GoogleCloudStorageObjectStore : IObjectStore, IUploa
             ArrayPool<byte>.Shared.Return(bytes);
         }
     }
-
-    /// <summary>The size of part <paramref name="number"/> of an object of <paramref name="length"/> bytes, -1 when unknown.</summary>
-    internal int PartSizeFor(long length, int number = 1) => _limits.PartSizeOf(number, length);
 
     /// <summary>The header that carries a body's checksum, as the options choose it, or null for none.</summary>
     private (string Name, string Value)? ChecksumOf(ReadOnlySequence<byte> body) => _options.Checksum switch

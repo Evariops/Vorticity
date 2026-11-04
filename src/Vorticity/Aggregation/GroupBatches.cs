@@ -52,6 +52,9 @@ internal sealed class AggregationQuery : ResultQuery
     /// <summary>The conjuncts of the filters on groups that name only the key: they filter the rows.</summary>
     internal VortexExpr? RowFilter { get; }
 
+    /// <summary>The question the query asks: an aggregate of its scan's rows by its keys, then its operators on its groups.</summary>
+    internal LogicalQuery? Logical => Host.Spec().Query?.Aggregating(Plan, Operators);
+
     /// <summary>
     /// Whether the query gives its groups' states rather than their answers: a part's (<see cref="Partial"/>), whose columns
     /// are those of rows of states (<see cref="AggregationPartials.Columns"/>), and which the file statistics settle nothing of.
@@ -63,10 +66,6 @@ internal sealed class AggregationQuery : ResultQuery
     /// its columns those of rows of states.
     /// </summary>
     /// <exception cref="NotSupportedException">A state does not answer one of its aggregates whole.</exception>
-    /// <summary>A query of <paramref name="plan"/>'s groups' states by <paramref name="keys"/> over <paramref name="host"/>: a learned family's (<see cref="LearnedFamily"/>).</summary>
-    internal static AggregationQuery StatesOf(AggregationHost host, AggregationPlan plan, ColumnShape[] keys) =>
-        new AggregationQuery(host, plan, [], keys, null, 0, long.MaxValue, null, [], exports: true);
-
     internal AggregationQuery Partial()
     {
         AggregationPartials.Check(Plan);
@@ -226,15 +225,15 @@ internal sealed class AggregationQuery : ResultQuery
     /// order a key streams in, so a pass that takes them delivers its groups once it has run.
     /// </summary>
     private StateRequest? States =>
-        Host.Source.KeepsStates && Host.Spec().Options.UseSynopses
+        Host.Source.States is not null && Host.Spec().Options.UseSynopses
             ? StateRequest.Of(Plan, new AggregateSlot?[Plan.Aggregates.Length], top: null)
             : null;
 
     internal override GroupMetrics? Grouping => Plan.Grouped ? Plan.Metrics() : null;
 
-    internal override async ValueTask<ScanPlan> ExplainAsync(CancellationToken cancellationToken)
+    internal override async ValueTask<ScanPlan> ExplainAsync(bool analyze, CancellationToken cancellationToken)
     {
-        ScanPlan scan = await Host.ExplainAsync(Plan, cancellationToken, RowFilter).ConfigureAwait(false);
+        ScanPlan scan = await Host.ExplainAsync(Plan, analyze, cancellationToken, RowFilter, Operators).ConfigureAwait(false);
         return Plan.Grouped ? scan with { Grouping = GroupPlans.Of(this) } : scan;
     }
 
@@ -305,12 +304,6 @@ internal sealed class GroupBatches : IAsyncEnumerator<RecordBatch>
 
     /// <summary>The current batch, valid until the next <see cref="MoveNextAsync"/>.</summary>
     public RecordBatch Current => _current ?? throw new InvalidOperationException("The stream has no current batch.");
-
-    /// <summary>The result's columns.</summary>
-    internal VortexSchema Schema => _query.Schema;
-
-    /// <summary>The query's run: the merged states and keys, once the first batch has been asked for.</summary>
-    internal AggregationOutcome? Outcome => _outcome;
 
     /// <summary>Moves to the next batch: the first runs the query, the others are built from its groups without an await.</summary>
     /// <returns>Whether there is one.</returns>

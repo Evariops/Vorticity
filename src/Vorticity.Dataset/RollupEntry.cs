@@ -8,10 +8,10 @@ using Vorticity.Serialization.Protobuf;
 namespace Vorticity.Dataset;
 
 /// <summary>
-/// One clustering value a rollup keeps apart (<see cref="RollupEntry.Buckets"/>): the value, the bounds of the key's first
+/// One partition value a rollup keeps apart (<see cref="RollupEntry.Buckets"/>): the value, the bounds of the key's first
 /// column over its objects, and their rows.
 /// </summary>
-/// <param name="Image">The clustering value, the image of the key's first column through the dataset's clustering function.</param>
+/// <param name="Image">The partition value, the image of the key's first column through the dataset's partition function.</param>
 /// <param name="Low">The least value of the key's first column in its objects.</param>
 /// <param name="High">The greatest.</param>
 /// <param name="Rows">Its objects' rows.</param>
@@ -122,7 +122,7 @@ internal sealed record RollupEntry
     /// <summary>The hash of what it sums: each object's tree key and entry, or each rollup's tree key and fingerprint, in their order.</summary>
     public UInt128 Fingerprint { get; init; }
 
-    /// <summary>The clustering values it keeps apart, ascending; one when it covers objects of one value; empty when the dataset declares none.</summary>
+    /// <summary>The partition values it keeps apart, ascending; one when it covers objects of one value; empty when the dataset declares none.</summary>
     public IReadOnlyList<RollupBucket> Buckets { get; init; } = [];
 
     /// <summary>The columns whose counts it keeps, by their place in the schema.</summary>

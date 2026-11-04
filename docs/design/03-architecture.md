@@ -55,8 +55,8 @@ both formats feed. Namespaces do not follow the folders: a type keeps its namesp
 | `Writing`, `Indexes` | what both writers share: the column builders, block statistics, segment sinks, the split-block Bloom filter |
 | `Session`, `Diagnostics` | the session, its pool and cache, the exceptions, limits, meter, activity source and event source |
 
-Alongside it sit `src/Vorticity.Generators`, `.Dataset`, `.ObjectStorage`, `.RowEncoding` and `.Zstd`, then `tests/`
-(unit and property tests, the conformance corpus, the fuzzer, and code that must not compile),
+Alongside it sit `src/Vorticity.Generators`, `.Dataset`, `.ObjectStorage` and `.RowEncoding`, then
+`tests/` (unit and property tests, the conformance corpus, the fuzzer, and code that must not compile),
 `bench/` ([bench/README.md](../../bench/README.md)), `tools/` (`vxdump`, `pqdump`, the Rust corpus generator,
 the Rust benchmark shim, the row-encoding vectors, the test-impact selector), and `samples/`, the
 programs the guide's pages run.

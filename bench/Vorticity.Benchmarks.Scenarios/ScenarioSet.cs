@@ -236,7 +236,7 @@ public static class ScenarioSet
             new Vorticity.IO.MemorySegmentSource(prepared.Bytes), new VortexOpenOptions(), CancellationToken.None);
         ScanExplanation plan = await file.ScanBuilder()
             .Where(Expr.In(Expr.Field(prepared.Column), prepared.Probes))
-            .ExplainAsync(CancellationToken.None);
+            .ExplainAsync(analyze: true, CancellationToken.None);
         return plan.LiveBlocks;
     }
 

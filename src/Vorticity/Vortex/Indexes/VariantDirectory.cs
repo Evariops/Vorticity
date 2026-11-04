@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -39,16 +40,90 @@ internal enum PathPlace : byte
 /// <param name="NaNs">Whether a number was NaN, which no bound counts.</param>
 /// <param name="MinText">The least text cut to the bound, which no text is below; null without text bounds.</param>
 /// <param name="MaxText">A text no text is above; null when there is none, as when the greatest was cut and every byte left was the largest.</param>
-/// <param name="Slices">
-/// The slices of the object the path may hold a value in, a bit each, slice 0 the low bit of byte 0;
-/// null when it may hold one in every slice, or the object has none.
+/// <param name="Groups">
+/// The groups of rows of the object the path may hold a value in, a bit each, group 0 the low bit of byte 0;
+/// null when it may hold one in every group, or the object counts none.
 /// </param>
 internal sealed record PathEntry(
     string[] Path, PathClass Class, long Values, PathPlace Place, long Low, long High, bool NaNs, byte[]? MinText, byte[]? MaxText,
-    byte[]? Slices = null)
+    byte[]? Groups = null)
 {
-    /// <summary>Whether the path may hold a value in slice <paramref name="slice"/>; any slice for -1.</summary>
-    internal bool In(int slice) => slice < 0 || Slices is null || (slice >> 3 < Slices.Length && (Slices[slice >> 3] & (1 << (slice & 7))) != 0);
+    /// <summary>Whether the path may hold a value in group <paramref name="group"/>; any group for -1.</summary>
+    internal bool In(int group) => group < 0 || Groups is null || (group >> 3 < Groups.Length && (Groups[group >> 3] & (1 << (group & 7))) != 0);
+}
+
+/// <summary>What walks a directory's body as it lies (<see cref="VariantDirectory.Visit"/>): its head, then each entry.</summary>
+internal interface IDirectoryVisitor
+{
+    /// <summary>The directory's head, before any entry: the object's rows, the rows of a group its entries name, 0 for none, and whether it is partial.</summary>
+    void Head(long rows, long groupRows, bool partial);
+
+    /// <summary>One entry, whose spans are valid for the call alone.</summary>
+    void Entry(in DirectoryEntry entry);
+}
+
+/// <summary>
+/// One entry of a directory's body as it lies (<see cref="VariantDirectory.Visit"/>): its keys as places in the body, a start
+/// and a length each, in UTF-8; its class, count, place and bounds; and its groups' bits, empty for every group.
+/// </summary>
+internal readonly ref struct DirectoryEntry
+{
+    private readonly ulong _flags;
+
+    internal DirectoryEntry(
+        ReadOnlySpan<byte> body, ReadOnlySpan<int> keys, PathClass @class, long values, PathPlace place, long low, long high, ulong flags,
+        ReadOnlySpan<byte> minText, ReadOnlySpan<byte> maxText, ReadOnlySpan<byte> groups)
+    {
+        Body = body;
+        KeyPlaces = keys;
+        Class = @class;
+        Values = values;
+        Place = place;
+        Low = low;
+        High = high;
+        _flags = flags;
+        MinText = minText;
+        MaxText = maxText;
+        Groups = groups;
+    }
+
+    /// <summary>The body the keys lie in.</summary>
+    internal ReadOnlySpan<byte> Body { get; }
+
+    /// <summary>Where each key lies in <see cref="Body"/>: a start and a length a key.</summary>
+    internal ReadOnlySpan<int> KeyPlaces { get; }
+
+    /// <summary>The keys from the variant's root, none for the root itself.</summary>
+    internal int Depth => KeyPlaces.Length / 2;
+
+    internal PathClass Class { get; }
+
+    internal long Values { get; }
+
+    internal PathPlace Place { get; }
+
+    internal long Low { get; }
+
+    internal long High { get; }
+
+    internal bool NaNs => (_flags & 1) != 0;
+
+    internal bool HasMinText => (_flags & 2) != 0;
+
+    internal bool HasMaxText => (_flags & 4) != 0;
+
+    /// <summary>Whether the entry names the groups it may hold a value in; it may hold one in every group otherwise.</summary>
+    internal bool HasGroups => (_flags & 8) != 0;
+
+    internal ReadOnlySpan<byte> MinText { get; }
+
+    internal ReadOnlySpan<byte> MaxText { get; }
+
+    /// <summary>A bit a group of rows the path may hold a value in, group 0 the low bit of byte 0; empty without <see cref="HasGroups"/>.</summary>
+    internal ReadOnlySpan<byte> Groups { get; }
+
+    /// <summary>Key <paramref name="k"/>, in UTF-8.</summary>
+    internal ReadOnlySpan<byte> Key(int k) => Body.Slice(KeyPlaces[2 * k], KeyPlaces[(2 * k) + 1]);
 }
 
 /// <summary>
@@ -59,24 +134,26 @@ internal sealed record PathEntry(
 /// holding the directory, behind a version byte and the body's length, the body one zstd frame.
 /// </summary>
 /// <remarks>
-/// It is counted from the rows a job parses anyway as it writes an object in key slices, so an append,
+/// It is counted from the rows a job parses anyway as it writes an object, so an append,
 /// which parses nothing, writes none and drops the one it extends.
-/// Each path names the slices it may hold a value in, which a question on it prunes the others by.
+/// Each path names the groups of rows it may hold a value in, each <see cref="GroupRows"/> rows from the object's first,
+/// which a question on it prunes the others by: a dataset's job names granules, the path's presence (spec E, 3.1).
 /// Under the index budget, the paths of the residual held least are left out first, and a directory
 /// that left one out refutes nothing by a path's absence. Like every index it is a hint: a region that
 /// does not decode refutes nothing.
 /// </remarks>
 internal sealed class VariantDirectory
 {
-    private const byte Version = 1;
+    // Version 1 named the slices bounded by keys a path lies in, retired with them; 2 names groups of fixed rows.
+    private const byte Version = 2;
 
     private readonly Dictionary<string, PathEntry[]> _byPath;
 
-    internal VariantDirectory(long rows, IReadOnlyList<PathEntry> entries, int sliceCount = 0, bool partial = false)
+    internal VariantDirectory(long rows, IReadOnlyList<PathEntry> entries, long groupRows = 0, bool partial = false)
     {
         Rows = rows;
         Entries = entries;
-        SliceCount = sliceCount;
+        GroupRows = groupRows;
         Partial = partial;
         Dictionary<string, List<PathEntry>> grouped = new Dictionary<string, List<PathEntry>>(StringComparer.Ordinal);
         foreach (PathEntry entry in entries)
@@ -95,7 +172,13 @@ internal sealed class VariantDirectory
         {
             _byPath[group.Key] = [.. group.Value];
         }
+
+        _byJoined = _byPath.GetAlternateLookup<ReadOnlySpan<char>>();
     }
+
+    // The same paths, looked up by their keys joined into a span, which a question's filter asks once an object and a
+    // predicate: no string made for the asking.
+    private readonly Dictionary<string, PathEntry[]>.AlternateLookup<ReadOnlySpan<char>> _byJoined;
 
     /// <summary>The object's rows.</summary>
     internal long Rows { get; }
@@ -103,8 +186,11 @@ internal sealed class VariantDirectory
     /// <summary>Every path and class, parents before their keys.</summary>
     internal IReadOnlyList<PathEntry> Entries { get; }
 
-    /// <summary>The slices of the object the entries' bits count; 0 when they name none.</summary>
-    internal int SliceCount { get; }
+    /// <summary>The rows of a group the entries' bits count, the last group fewer; 0 when they name none.</summary>
+    internal long GroupRows { get; }
+
+    /// <summary>The groups the entries' bits count; 0 when they name none.</summary>
+    internal int GroupCount => GroupRows <= 0 ? 0 : (int)((Rows + GroupRows - 1) / GroupRows);
 
     /// <summary>Whether the budget left a path out, so that a path's absence proves nothing.</summary>
     internal bool Partial { get; }
@@ -116,21 +202,21 @@ internal sealed class VariantDirectory
     /// <summary>
     /// The directory of what <paramref name="census"/> counted, its paths placed by
     /// <paramref name="shredding"/>, the shredding the object's column was written with, or null, and
-    /// each named the <paramref name="slices"/> of the object it may hold a value in when there are.
+    /// each named the groups of <paramref name="groupRows"/> rows of the object it may hold a value in, when given.
     /// </summary>
-    internal static VariantDirectory From(PathCensus census, VariantShredding? shredding, IReadOnlyList<TimeSlice>? slices = null)
+    internal static VariantDirectory From(PathCensus census, VariantShredding? shredding, long groupRows = 0)
     {
         List<PathEntry> entries = [];
         List<string> path = [];
-        Walk(census.Root, shredding, slices, path, entries);
-        return new VariantDirectory(census.Rows, entries, slices?.Count ?? 0, partial: census.Partial);
+        int groups = groupRows <= 0 ? 0 : (int)((census.Rows + groupRows - 1) / groupRows);
+        Walk(census.Root, shredding, groupRows, groups, path, entries);
+        return new VariantDirectory(census.Rows, entries, groups > 1 ? groupRows : 0, partial: census.Partial);
     }
 
     private static void Walk(
-        PathCensus.PathCount count, VariantShredding? shredding, IReadOnlyList<TimeSlice>? slices, List<string> path, List<PathEntry> entries)
+        PathCensus.PathCount count, VariantShredding? shredding, long groupRows, int groups, List<string> path, List<PathEntry> entries)
     {
         string[] keys = [.. path];
-        byte[]? held = slices is { Count: > 0 } ? SlicesOf(count.Spans, slices) : null;
         for (PathClass @class = PathClass.Null; @class <= PathClass.Other; @class++)
         {
             long values = count.Read(@class);
@@ -140,6 +226,7 @@ internal sealed class VariantDirectory
             }
 
             (long low, long high, bool nans, byte[]? min, byte[]? max) = Bounds(count, @class);
+            byte[]? held = groups > 1 ? GroupsOf(count.SpansOf(@class), groupRows, groups) : null;
             entries.Add(new PathEntry(keys, @class, values, PlaceOf(shredding, @class), low, high, nans, min, max, held));
         }
 
@@ -152,44 +239,40 @@ internal sealed class VariantDirectory
                 ? inner.Keys[at].Field
                 : null;
             path.Add(name);
-            Walk(count.Keys[name], field, slices, path, entries);
+            Walk(count.Keys[name], field, groupRows, groups, path, entries);
             path.RemoveAt(path.Count - 1);
         }
     }
 
     /// <summary>
-    /// A bit for each of <paramref name="slices"/> one of <paramref name="spans"/> reaches into; null when
-    /// every slice is reached, or the spans name no time and so may lie anywhere.
+    /// A bit for each of the <paramref name="groups"/> groups of <paramref name="groupRows"/> rows one of
+    /// <paramref name="spans"/> reaches into; null when every group is reached, or the census kept no spans and the values
+    /// may lie anywhere.
     /// </summary>
-    private static byte[]? SlicesOf(ReadOnlySpan<long> spans, IReadOnlyList<TimeSlice> slices)
+    private static byte[]? GroupsOf(ReadOnlySpan<long> spans, long groupRows, int groups)
     {
         if (spans.IsEmpty)
         {
             return null;
         }
 
-        byte[] bits = new byte[(slices.Count + 7) / 8];
+        byte[] bits = new byte[(groups + 7) / 8];
         int reached = 0;
-        int slice = 0;
         for (int i = 0; i < spans.Length; i += 2)
         {
-            // Spans and slices are both in time order: the first slice that ends past the span's start.
-            while (slice < slices.Count && slices[slice].End <= spans[i])
+            int first = (int)Math.Min(spans[i] / groupRows, groups - 1);
+            int last = (int)Math.Min(spans[i + 1] / groupRows, groups - 1);
+            for (int g = first; g <= last; g++)
             {
-                slice++;
-            }
-
-            for (int s = slice; s < slices.Count && slices[s].Start <= spans[i + 1]; s++)
-            {
-                if ((bits[s >> 3] & (1 << (s & 7))) == 0)
+                if ((bits[g >> 3] & (1 << (g & 7))) == 0)
                 {
-                    bits[s >> 3] |= (byte)(1 << (s & 7));
+                    bits[g >> 3] |= (byte)(1 << (g & 7));
                     reached++;
                 }
             }
         }
 
-        return reached == slices.Count ? null : bits;
+        return reached == groups ? null : bits;
     }
 
     /// <summary>
@@ -233,7 +316,7 @@ internal sealed class VariantDirectory
                 }
             }
 
-            VariantDirectory trimmed = new VariantDirectory(Rows, left, SliceCount, partial: true);
+            VariantDirectory trimmed = new VariantDirectory(Rows, left, GroupRows, partial: true);
             if (kept == 0 || trimmed.ToBytes().Length <= maxBytes)
             {
                 return trimmed;
@@ -317,33 +400,33 @@ internal sealed class VariantDirectory
     /// </summary>
     /// <param name="filter">The scan's predicate.</param>
     /// <param name="directories">The directory of each variant column, by its name; a column without one may match anything.</param>
-    /// <param name="slice">The one slice of the object asked about, by the bits its paths carry; -1 for the whole object.</param>
-    internal static bool MayMatch(VortexExpr filter, IReadOnlyDictionary<string, VariantDirectory> directories, int slice = -1) =>
-        VariantFilters.MayMatch(filter, new FencedJudge(directories, slice));
+    /// <param name="group">The one group of rows of the object asked about, by the bits its paths carry; -1 for the whole object.</param>
+    internal static bool MayMatch(VortexExpr filter, IReadOnlyDictionary<string, VariantDirectory> directories, int group = -1) =>
+        VariantFilters.MayMatch(filter, new FencedJudge(directories, group));
 
     /// <summary>The directories' answer for one fenced predicate.</summary>
-    private readonly struct FencedJudge(IReadOnlyDictionary<string, VariantDirectory> directories, int slice) : IFencedJudge
+    private readonly struct FencedJudge(IReadOnlyDictionary<string, VariantDirectory> directories, int group) : IFencedJudge
     {
-        public bool MayMatch(VortexExpr predicate) => MayMatchFenced(predicate, directories, slice);
+        public bool MayMatch(VortexExpr predicate) => MayMatchFenced(predicate, directories, group);
     }
 
-    private static bool MayMatchFenced(VortexExpr predicate, IReadOnlyDictionary<string, VariantDirectory> directories, int slice)
+    private static bool MayMatchFenced(VortexExpr predicate, IReadOnlyDictionary<string, VariantDirectory> directories, int group)
     {
         switch (predicate)
         {
             case ComparisonExpr { Field: VariantFieldExpr path } comparison:
-                return EntriesOf(path, directories, slice, out ReadOnlySpan<PathEntry> entries, out bool partial) is not { } absent
-                    || MayMatch(path.Read, entries, comparison.Op, comparison.Value, absent, slice, partial);
+                return EntriesOf(path, directories, group, out ReadOnlySpan<PathEntry> entries, out bool partial) is not { } absent
+                    || MayMatch(path.Read, entries, comparison.Op, comparison.Value, absent, group, partial);
             case InExpr { Field: VariantFieldExpr path } membership:
             {
-                if (EntriesOf(path, directories, slice, out ReadOnlySpan<PathEntry> members, out bool trimmed) is not { } lacking)
+                if (EntriesOf(path, directories, group, out ReadOnlySpan<PathEntry> members, out bool trimmed) is not { } lacking)
                 {
                     return true;
                 }
 
                 foreach (FilterLiteral literal in membership.Literals)
                 {
-                    if (MayMatch(path.Read, members, ComparisonOp.Equal, literal, lacking, slice, trimmed))
+                    if (MayMatch(path.Read, members, ComparisonOp.Equal, literal, lacking, group, trimmed))
                     {
                         return true;
                     }
@@ -353,11 +436,11 @@ internal sealed class VariantDirectory
             }
 
             case NullCheckExpr { Field: VariantFieldExpr path, IsNull: false }:
-                return EntriesOf(path, directories, slice, out ReadOnlySpan<PathEntry> held, out bool cut) is not { } none
-                    || (!none && Holds(path.Read, held, slice, cut));
+                return EntriesOf(path, directories, group, out ReadOnlySpan<PathEntry> held, out bool cut) is not { } none
+                    || (!none && Holds(path.Read, held, group, cut));
             case StringMatchExpr { Field: VariantFieldExpr path }:
-                return EntriesOf(path, directories, slice, out ReadOnlySpan<PathEntry> texts, out bool clipped) is not { } empty
-                    || (!empty && Holds(path.Read, texts, slice, clipped));
+                return EntriesOf(path, directories, group, out ReadOnlySpan<PathEntry> texts, out bool clipped) is not { } empty
+                    || (!empty && Holds(path.Read, texts, group, clipped));
             default:
                 return true;
         }
@@ -366,10 +449,10 @@ internal sealed class VariantDirectory
     /// <summary>
     /// The entries of <paramref name="path"/>'s column and keys: null when no directory answers for it,
     /// the path takes an index, or the directory is partial and lacks it; otherwise whether the object,
-    /// or slice <paramref name="slice"/> of it, holds no value at the path at all.
+    /// or group <paramref name="group"/> of it, holds no value at the path at all.
     /// </summary>
     private static bool? EntriesOf(
-        VariantFieldExpr path, IReadOnlyDictionary<string, VariantDirectory> directories, int slice, out ReadOnlySpan<PathEntry> entries, out bool partial)
+        VariantFieldExpr path, IReadOnlyDictionary<string, VariantDirectory> directories, int group, out ReadOnlySpan<PathEntry> entries, out bool partial)
     {
         entries = default;
         partial = false;
@@ -380,18 +463,41 @@ internal sealed class VariantDirectory
 
         partial = directory.Partial;
 
-        string[] keys = new string[path.Steps.Length];
-        for (int i = 0; i < keys.Length; i++)
+        // The keys joined as the directory joins them, on the stack while they fit.
+        int length = 0;
+        foreach (VariantStep step in path.Steps)
         {
-            if (!path.Steps[i].IsKey)
+            if (!step.IsKey)
             {
                 return null;
             }
 
-            keys[i] = path.Steps[i].Key!;
+            length += Digits(step.Key!.Length) + 1 + step.Key.Length;
         }
 
-        entries = directory.Of(keys);
+        char[]? rented = length > 256 ? System.Buffers.ArrayPool<char>.Shared.Rent(length) : null;
+        try
+        {
+            Span<char> joined = rented ?? stackalloc char[256];
+            int at = 0;
+            foreach (VariantStep step in path.Steps)
+            {
+                step.Key!.Length.TryFormat(joined[at..], out int written, provider: CultureInfo.InvariantCulture);
+                at += written;
+                joined[at++] = ':';
+                step.Key.CopyTo(joined[at..]);
+                at += step.Key.Length;
+            }
+
+            entries = directory._byJoined.TryGetValue(joined[..at], out PathEntry[]? found) ? found : [];
+        }
+        finally
+        {
+            if (rented is not null)
+            {
+                System.Buffers.ArrayPool<char>.Shared.Return(rented);
+            }
+        }
         if (entries.IsEmpty)
         {
             return directory.Partial ? null : true;
@@ -399,13 +505,13 @@ internal sealed class VariantDirectory
 
         foreach (PathEntry entry in entries)
         {
-            if (entry.In(slice))
+            if (entry.In(group))
             {
                 return false;
             }
         }
 
-        // A partial directory left some of the path's classes out, whose rows may lie in the slice: it says nothing of their
+        // A partial directory left some of the path's classes out, whose rows may lie in the group: it says nothing of their
         // absence there.
         return directory.Partial ? null : true;
     }
@@ -414,8 +520,8 @@ internal sealed class VariantDirectory
     /// Whether the path holds a value <paramref name="read"/> takes: of its class, or any value for a conversion or a presence.
     /// A <paramref name="partial"/> directory may have left the class out, so it holds one as far as it can tell.
     /// </summary>
-    private static bool Holds(VariantRead read, ReadOnlySpan<PathEntry> entries, int slice, bool partial) =>
-        ClassOf(read) is not { } @class || Find(entries, @class, slice) is not null || partial;
+    private static bool Holds(VariantRead read, ReadOnlySpan<PathEntry> entries, int group, bool partial) =>
+        ClassOf(read) is not { } @class || Find(entries, @class, group) is not null || partial;
 
     /// <summary>
     /// Whether a value at the path may compare to <paramref name="value"/> by <paramref name="op"/> when read by <paramref name="read"/>.
@@ -423,7 +529,7 @@ internal sealed class VariantDirectory
     /// may have left the class's entry out, which then refutes nothing.
     /// </summary>
     private static bool MayMatch(
-        VariantRead read, ReadOnlySpan<PathEntry> entries, ComparisonOp op, FilterLiteral value, bool absent, int slice, bool partial)
+        VariantRead read, ReadOnlySpan<PathEntry> entries, ComparisonOp op, FilterLiteral value, bool absent, int group, bool partial)
     {
         if (read == VariantRead.Has)
         {
@@ -443,7 +549,7 @@ internal sealed class VariantDirectory
             return true;
         }
 
-        return Find(entries, @class, slice) is { } entry ? Within(entry, op, value) : partial;
+        return Find(entries, @class, group) is { } entry ? Within(entry, op, value) : partial;
     }
 
     /// <summary>The class a read of one class takes, or null for a conversion or a presence.</summary>
@@ -457,11 +563,11 @@ internal sealed class VariantDirectory
         _ => null,
     };
 
-    private static PathEntry? Find(ReadOnlySpan<PathEntry> entries, PathClass @class, int slice)
+    private static PathEntry? Find(ReadOnlySpan<PathEntry> entries, PathClass @class, int group)
     {
         foreach (PathEntry entry in entries)
         {
-            if (entry.Class == @class && entry.In(slice))
+            if (entry.Class == @class && entry.In(group))
             {
                 return entry;
             }
@@ -527,45 +633,45 @@ internal sealed class VariantDirectory
     };
 
     /// <summary>The region: behind a version byte and the body's length, the body as one zstd frame.</summary>
-    internal byte[] ToBytes() => ZstdRegion.Encode(Version, Body());
-
-    /// <summary>The rows, then each entry: its keys, class, count, place, bounds and texts.</summary>
-    private byte[] Body()
+    internal byte[] ToBytes()
     {
         ProtoWriter writer = new ProtoWriter();
         try
         {
-            writer.WriteVarint((ulong)Rows);
-            writer.WriteVarint((ulong)SliceCount);
-            writer.WriteVarint(Partial ? 1UL : 0);
-            writer.WriteVarint((ulong)Entries.Count);
-            foreach (PathEntry entry in Entries)
-            {
-                writer.WriteVarint((ulong)entry.Path.Length);
-                foreach (string key in entry.Path)
-                {
-                    byte[] utf8 = Encoding.UTF8.GetBytes(key);
-                    writer.WriteVarint((ulong)utf8.Length);
-                    writer.WriteRawBytes(utf8);
-                }
-
-                writer.WriteVarint((ulong)entry.Class);
-                writer.WriteVarint((ulong)entry.Values);
-                writer.WriteVarint((ulong)entry.Place);
-                writer.WriteVarint(Zigzag(entry.Low));
-                writer.WriteVarint(Zigzag(entry.High));
-                writer.WriteVarint(
-                    (entry.NaNs ? 1UL : 0) | (entry.MinText is null ? 0 : 2UL) | (entry.MaxText is null ? 0 : 4UL) | (entry.Slices is null ? 0 : 8UL));
-                Text(ref writer, entry.MinText);
-                Text(ref writer, entry.MaxText);
-                Text(ref writer, entry.Slices);
-            }
-
-            return writer.WrittenSpan.ToArray();
+            Body(ref writer);
+            return ZstdRegion.Encode(Version, writer.WrittenSpan);
         }
         finally
         {
             writer.Dispose();
+        }
+    }
+
+    /// <summary>The rows, then each entry: its keys, class, count, place, bounds and texts.</summary>
+    private void Body(ref ProtoWriter writer)
+    {
+        writer.WriteVarint((ulong)Rows);
+        writer.WriteVarint((ulong)GroupRows);
+        writer.WriteVarint(Partial ? 1UL : 0);
+        writer.WriteVarint((ulong)Entries.Count);
+        foreach (PathEntry entry in Entries)
+        {
+            writer.WriteVarint((ulong)entry.Path.Length);
+            foreach (string key in entry.Path)
+            {
+                writer.WriteLengthPrefixedUtf8(key);
+            }
+
+            writer.WriteVarint((ulong)entry.Class);
+            writer.WriteVarint((ulong)entry.Values);
+            writer.WriteVarint((ulong)entry.Place);
+            writer.WriteVarint(Zigzag(entry.Low));
+            writer.WriteVarint(Zigzag(entry.High));
+            writer.WriteVarint(
+                (entry.NaNs ? 1UL : 0) | (entry.MinText is null ? 0 : 2UL) | (entry.MaxText is null ? 0 : 4UL) | (entry.Groups is null ? 0 : 8UL));
+            Text(ref writer, entry.MinText);
+            Text(ref writer, entry.MaxText);
+            Text(ref writer, entry.Groups);
         }
 
         static void Text(ref ProtoWriter writer, byte[]? text)
@@ -608,31 +714,70 @@ internal sealed class VariantDirectory
         }
     }
 
+    /// <summary>The groups of <paramref name="groupRows"/> rows of <paramref name="rows"/>; 0 for none.</summary>
+    internal static int Groups(long rows, long groupRows) => groupRows <= 0 ? 0 : (int)((rows + groupRows - 1) / groupRows);
+
     private static VariantDirectory? BodyFrom(ReadOnlySpan<byte> bytes, IReadOnlyList<byte[][]>? wanted)
+    {
+        EntryList list = new EntryList(wanted);
+        return VisitBody(bytes, ref list) ? new VariantDirectory(list.Rows, list.Entries, list.GroupRows, list.Partial) : null;
+    }
+
+    /// <summary>
+    /// Hands <paramref name="visitor"/> the directory a region <paramref name="bytes"/> holds, its head and then each entry as
+    /// it lies, nothing made of one, once the whole region is known to decode; false, with nothing handed, when it does not.
+    /// </summary>
+    internal static bool Visit<TVisitor>(ReadOnlySpan<byte> bytes, ref TVisitor visitor)
+        where TVisitor : IDirectoryVisitor
+    {
+        if (ZstdRegion.Rent(bytes, Version, out int length) is not { } body)
+        {
+            return false;
+        }
+
+        try
+        {
+            // Walked twice, the first time to know it decodes: what a visitor takes it takes whole or not at all.
+            Decodes decodes = default;
+            return VisitBody(body.AsSpan(0, length), ref decodes) && VisitBody(body.AsSpan(0, length), ref visitor);
+        }
+        finally
+        {
+            System.Buffers.ArrayPool<byte>.Shared.Return(body);
+        }
+    }
+
+    /// <summary>
+    /// Walks the body <paramref name="bytes"/>, handing <paramref name="visitor"/> its head and each entry as it lies; false when
+    /// it does not decode, the visitor having seen the entries before the fault.
+    /// </summary>
+    private static bool VisitBody<TVisitor>(ReadOnlySpan<byte> bytes, ref TVisitor visitor)
+        where TVisitor : IDirectoryVisitor
     {
         try
         {
             ProtoReader reader = new ProtoReader(bytes);
             long rows = checked((long)reader.ReadVarint());
-            int slices = checked((int)reader.ReadVarint());
+            long groupRows = checked((long)reader.ReadVarint());
             bool partial = reader.ReadVarint() != 0;
             ulong count = reader.ReadVarint();
             if (count > (ulong)bytes.Length)
             {
-                return null;
+                return false;
             }
 
-            List<PathEntry> entries = new List<PathEntry>(wanted is null ? (int)count : 4);
+            visitor.Head(rows, groupRows, partial);
+            int groupBytes = (Groups(rows, groupRows) + 7) / 8;
             Span<int> stack = stackalloc int[32];
             for (ulong i = 0; i < count; i++)
             {
                 ulong depth = reader.ReadVarint();
                 if (depth > (ulong)bytes.Length)
                 {
-                    return null;
+                    return false;
                 }
 
-                // Where each key lies, a start and a length, compared to the wanted paths before any is made a string.
+                // Where each key lies, a start and a length, which a visitor compares or copies before any is made a string.
                 Span<int> keys = depth <= 16 ? stack[..(2 * (int)depth)] : new int[2 * (int)depth];
                 for (int k = 0; k < (int)depth; k++)
                 {
@@ -651,32 +796,134 @@ internal sealed class VariantDirectory
                 ReadOnlySpan<byte> min = (flags & 2) != 0 ? reader.ReadLengthDelimited() : default;
                 ReadOnlySpan<byte> max = (flags & 4) != 0 ? reader.ReadLengthDelimited() : default;
                 ReadOnlySpan<byte> held = (flags & 8) != 0 ? reader.ReadLengthDelimited() : default;
-                if (@class > (ulong)PathClass.Other || place > (ulong)PathPlace.Value || ((flags & 8) != 0 && held.Length != (slices + 7) / 8))
+                if (@class > (ulong)PathClass.Other || place > (ulong)PathPlace.Value || ((flags & 8) != 0 && held.Length != groupBytes))
                 {
-                    return null;
+                    return false;
                 }
 
-                if (wanted is not null && !Wanted(bytes, keys, wanted))
-                {
-                    continue;
-                }
-
-                string[] path = new string[(int)depth];
-                for (int k = 0; k < path.Length; k++)
-                {
-                    path[k] = Encoding.UTF8.GetString(bytes.Slice(keys[2 * k], keys[(2 * k) + 1]));
-                }
-
-                entries.Add(new PathEntry(
-                    path, (PathClass)@class, values, (PathPlace)place, low, high, (flags & 1) != 0,
-                    (flags & 2) != 0 ? min.ToArray() : null, (flags & 4) != 0 ? max.ToArray() : null, (flags & 8) != 0 ? held.ToArray() : null));
+                visitor.Entry(new DirectoryEntry(bytes, keys, (PathClass)@class, values, (PathPlace)place, low, high, flags, min, max, held));
             }
 
-            return reader.End ? new VariantDirectory(rows, entries, slices, partial) : null;
+            return reader.End;
         }
         catch (Exception malformed) when (malformed is VortexFormatException or OverflowException)
         {
+            return false;
+        }
+    }
+
+    /// <summary>A visitor that takes nothing but the head: a walk with it says whether a body decodes, and what its head holds.</summary>
+    private struct Decodes : IDirectoryVisitor
+    {
+        internal long Rows;
+        internal long GroupRows;
+        internal bool Partial;
+
+        public void Head(long rows, long groupRows, bool partial)
+        {
+            Rows = rows;
+            GroupRows = groupRows;
+            Partial = partial;
+        }
+
+        public void Entry(in DirectoryEntry entry)
+        {
+        }
+    }
+
+    /// <summary>
+    /// The body a directory region <paramref name="bytes"/> holds, decompressed into a rented buffer and known to decode, its
+    /// head read: what a question judges the groups of its object's rows by before it walks the entries
+    /// (<see cref="DirectoryBody.Visit"/>); null when it does not decode.
+    /// </summary>
+    internal static DirectoryBody? Open(ReadOnlySpan<byte> bytes)
+    {
+        if (ZstdRegion.Rent(bytes, Version, out int length) is not { } body)
+        {
             return null;
+        }
+
+        Decodes decodes = default;
+        if (!VisitBody(body.AsSpan(0, length), ref decodes))
+        {
+            System.Buffers.ArrayPool<byte>.Shared.Return(body);
+            return null;
+        }
+
+        return new DirectoryBody(body, length, decodes.Rows, decodes.GroupRows, decodes.Partial);
+    }
+
+    /// <summary>
+    /// A directory's body, decompressed and known to decode (<see cref="Open"/>): its head, and its entries walked as they lie,
+    /// as often as asked, until it is disposed and its buffer given back.
+    /// </summary>
+    internal sealed class DirectoryBody(byte[] body, int length, long rows, long groupRows, bool partial) : IDisposable
+    {
+        private byte[]? _body = body;
+
+        /// <summary>The object's rows.</summary>
+        internal long Rows { get; } = rows;
+
+        /// <summary>The rows of a group the entries name; 0 for none.</summary>
+        internal long GroupRows { get; } = groupRows;
+
+        /// <summary>Whether the directory left paths out.</summary>
+        internal bool Partial { get; } = partial;
+
+        /// <summary>Hands <paramref name="visitor"/> the head, then each entry as it lies.</summary>
+        internal void Visit<TVisitor>(ref TVisitor visitor)
+            where TVisitor : IDirectoryVisitor
+        {
+            ObjectDisposedException.ThrowIf(_body is null, this);
+            VisitBody(_body.AsSpan(0, length), ref visitor);
+        }
+
+        public void Dispose()
+        {
+            if (_body is { } held)
+            {
+                _body = null;
+                System.Buffers.ArrayPool<byte>.Shared.Return(held);
+            }
+        }
+    }
+
+    /// <summary>The entries a body holds made <see cref="PathEntry"/> records: those of the wanted paths, or every one.</summary>
+    private sealed class EntryList(IReadOnlyList<byte[][]>? wanted) : IDirectoryVisitor
+    {
+        internal List<PathEntry> Entries { get; private set; } = [];
+
+        internal long Rows { get; private set; }
+
+        internal long GroupRows { get; private set; }
+
+        internal bool Partial { get; private set; }
+
+        public void Head(long rows, long groupRows, bool partial)
+        {
+            Rows = rows;
+            GroupRows = groupRows;
+            Partial = partial;
+            Entries = new List<PathEntry>(wanted is null ? 16 : 4);
+        }
+
+        public void Entry(in DirectoryEntry entry)
+        {
+            if (wanted is not null && !Wanted(entry.Body, entry.KeyPlaces, wanted))
+            {
+                return;
+            }
+
+            string[] path = new string[entry.Depth];
+            for (int k = 0; k < path.Length; k++)
+            {
+                path[k] = Encoding.UTF8.GetString(entry.Key(k));
+            }
+
+            Entries.Add(new PathEntry(
+                path, entry.Class, entry.Values, entry.Place, entry.Low, entry.High, entry.NaNs,
+                entry.HasMinText ? entry.MinText.ToArray() : null, entry.HasMaxText ? entry.MaxText.ToArray() : null,
+                entry.HasGroups ? entry.Groups.ToArray() : null));
         }
     }
 
@@ -684,8 +931,11 @@ internal sealed class VariantDirectory
     private static bool Wanted(ReadOnlySpan<byte> bytes, ReadOnlySpan<int> keys, IReadOnlyList<byte[][]> wanted)
     {
         int depth = keys.Length / 2;
-        foreach (byte[][] path in wanted)
+
+        // By index: a foreach over the list boxes its enumerator, once for each entry of the directory.
+        for (int w = 0; w < wanted.Count; w++)
         {
+            byte[][] path = wanted[w];
             if (path.Length != depth)
             {
                 continue;
@@ -719,32 +969,115 @@ internal sealed class VariantDirectory
     /// entries those of <paramref name="wanted"/>'s paths alone (<see cref="From(ReadOnlySpan{byte}, IReadOnlyList{byte[][]})"/>),
     /// or every entry for null; null when the file carries none, or one that does not decode.
     /// </summary>
+    /// <param name="file">The file.</param>
+    /// <param name="field">The variant column's top-level field.</param>
+    /// <param name="wanted">The paths whose entries are kept; every path for null.</param>
+    /// <param name="cancellationToken">Cancels the read.</param>
+    /// <param name="question">What the question asking has read already, which keeps this directory for its other scans; null for none.</param>
     internal static async ValueTask<(VariantDirectory? Directory, int Segments, long Bytes)> ReadAsync(
-        VortexFile file, int field, IReadOnlyList<byte[][]>? wanted, CancellationToken cancellationToken)
+        VortexFile file, int field, IReadOnlyList<byte[][]>? wanted, CancellationToken cancellationToken, QuestionReads? question = null)
     {
         ArgumentNullException.ThrowIfNull(file);
-        IndexDirectory? directory = await file.ReadIndexDirectoryAsync(cancellationToken).ConfigureAwait(false);
-        if (directory is null)
+        string? paths = question is null ? null : KeyOf(wanted);
+        if (question is not null && question.TryGetDirectory(file, field, paths!, out VariantDirectory? kept))
+        {
+            return (kept, 0, 0);
+        }
+
+        (VariantDirectory? Directory, int Segments, long Bytes) read = await ReadFromAsync(file, field, wanted, cancellationToken).ConfigureAwait(false);
+        question?.KeepDirectory(file, field, paths!, read.Directory);
+        return read;
+    }
+
+    /// <summary>The paths <paramref name="wanted"/> names, as the key a question keeps their directory under: each key's text, a unit apart, each path a record apart; every path for null.</summary>
+    private static string KeyOf(IReadOnlyList<byte[][]>? wanted)
+    {
+        if (wanted is null)
+        {
+            return "*";
+        }
+
+        StringBuilder key = new StringBuilder();
+        foreach (byte[][] path in wanted)
+        {
+            foreach (byte[] step in path)
+            {
+                key.Append(Encoding.UTF8.GetString(step)).Append('\u001f');
+            }
+
+            key.Append('\u001e');
+        }
+
+        return key.ToString();
+    }
+
+    /// <summary>The directory as <see cref="ReadAsync(VortexFile, int, IReadOnlyList{byte[][]}?, CancellationToken, QuestionReads?)"/> says, read from the file.</summary>
+    private static async ValueTask<(VariantDirectory? Directory, int Segments, long Bytes)> ReadFromAsync(
+        VortexFile file, int field, IReadOnlyList<byte[][]>? wanted, CancellationToken cancellationToken)
+    {
+        if (await RegionAsync(file, field, cancellationToken).ConfigureAwait(false) is not { } region)
         {
             return (null, 0, 0);
         }
 
-        foreach (IndexEntry entry in directory.Entries)
-        {
-            if (entry.Kind != IndexKinds.VariantDirectory || entry.ColumnPath is not [uint column] || column != (uint)field
-                || entry.Runs is not [IndexRun { Payload: [IndexSegment region] }])
-            {
-                continue;
-            }
+        using Vorticity.IO.SegmentRequestSet requests = new Vorticity.IO.SegmentRequestSet(1);
+        int slot = requests.Add(new Vorticity.Serialization.Schemas.SegmentSpec(region.Offset, region.Length, region.AlignmentExponent, 0, 0));
+        await file.Segments.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
+        ReadOnlySpan<byte> bytes = requests.GetBuffer(slot).Span;
+        return (region.Holds(bytes) ? From(bytes, wanted) : null, 1, region.Length);
+    }
 
-            using Vorticity.IO.SegmentRequestSet requests = new Vorticity.IO.SegmentRequestSet(1);
-            int slot = requests.Add(new Vorticity.Serialization.Schemas.SegmentSpec(region.Offset, region.Length, region.AlignmentExponent, 0, 0));
-            await file.Segments.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
-            ReadOnlySpan<byte> bytes = requests.GetBuffer(slot).Span;
-            return (region.Holds(bytes) ? From(bytes, wanted) : null, 1, region.Length);
+    /// <summary>
+    /// The directory of the variant column at top-level field <paramref name="field"/> of <paramref name="file"/>, opened
+    /// (<see cref="Open"/>), its read counted to <paramref name="metrics"/>; null when the file holds none that decodes.
+    /// </summary>
+    internal static async ValueTask<DirectoryBody?> OpenAsync(
+        VortexFile file, int field, Scanning.ScanCounters? metrics, CancellationToken cancellationToken)
+    {
+        if (await RegionAsync(file, field, cancellationToken).ConfigureAwait(false) is not { } region)
+        {
+            return null;
         }
 
-        return (null, 0, 0);
+        using Vorticity.IO.SegmentRequestSet requests = new Vorticity.IO.SegmentRequestSet(1);
+        int slot = requests.Add(new Vorticity.Serialization.Schemas.SegmentSpec(region.Offset, region.Length, region.AlignmentExponent, 0, 0));
+        await file.Segments.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
+        Scanning.ScanCounters.Note(metrics, 1, region.Length);
+        ReadOnlySpan<byte> bytes = requests.GetBuffer(slot).Span;
+        return region.Holds(bytes) ? Open(bytes) : null;
+    }
+
+    /// <summary>The region of the directory of the variant column at top-level field <paramref name="field"/> of <paramref name="file"/>; null for none.</summary>
+    private static async ValueTask<IndexSegment?> RegionAsync(VortexFile file, int field, CancellationToken cancellationToken)
+    {
+        IndexDirectory? directory = await file.ReadIndexDirectoryAsync(cancellationToken).ConfigureAwait(false);
+        if (directory is null)
+        {
+            return null;
+        }
+
+        foreach (IndexEntry entry in directory.Entries)
+        {
+            if (entry.Kind == IndexKinds.VariantDirectory && entry.ColumnPath is [uint column] && column == (uint)field
+                && entry.Runs is [IndexRun { Payload: [IndexSegment region] }])
+            {
+                return region;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>The decimal digits of <paramref name="value"/>, not negative.</summary>
+    private static int Digits(int value)
+    {
+        int digits = 1;
+        for (; value >= 10; value /= 10)
+        {
+            digits++;
+        }
+
+        return digits;
     }
 
     private static string Joined(IReadOnlyList<string> keys)

@@ -65,12 +65,12 @@ internal static class GroupPlans
                 return "the order asked for is not the one the groups would close in";
             }
 
-            if (query.Host.Source.OrdersOnAsking(query.Plan.Keys[k].Column.Field, StreamingGroupBatches.StopsEarly(query)))
+            if (query.Host.Source.Rows.OrdersOnAsking(query.Plan.Keys[k].Column.Field, StreamingGroupBatches.StopsEarly(query)))
             {
                 return "the order asked for is not the one the groups would close in";
             }
 
-            if (query.Host.Source.OrdersOnAsking(query.Plan.Keys[k].Column.Field, stopsEarly: true))
+            if (query.Host.Source.Rows.OrdersOnAsking(query.Plan.Keys[k].Column.Field, stopsEarly: true))
             {
                 return "the source brings the key in its order when asked, on one lane, which no take stops early";
             }

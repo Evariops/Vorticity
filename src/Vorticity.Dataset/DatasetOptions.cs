@@ -1,16 +1,20 @@
 using System;
 using System.Collections.Generic;
+using Vorticity.IO;
 using Vorticity.Scanning;
 
 namespace Vorticity.Dataset;
 
 /// <summary>What a dataset handle needs beyond its store: how it writes, reads and commits.</summary>
 /// <remarks>
-/// The clustering key and the retention are fixed when the dataset is created and carried by every
+/// The layout and the retention are fixed when the dataset is created and carried by every
 /// commit; at an open they come from the dataset and these values are ignored.
 /// </remarks>
 public sealed record DatasetOptions
 {
+    private readonly int _maxPartitionsPerAppend = 100;
+    private readonly long _appendBufferBytes = 256L << 20;
+
     /// <summary>
     /// The session whose pool, cache, bound on reads in flight and parallelism the dataset's scans
     /// use; <see cref="VortexSession.Default"/> unless given.
@@ -21,15 +25,38 @@ public sealed record DatasetOptions
     public VortexWriteOptions Write { get; init; } = VortexWriteOptions.Default;
 
     /// <summary>
-    /// The columns the dataset is ordered by, or null for the order objects arrive in. Declaring one
-    /// orders the objects by the smallest key they hold, gives every object this handle writes a
-    /// sorted run on it so that a lookup inside one object is a seek, and makes compaction keep the
-    /// levels above 0 key-disjoint, so a lookup by key touches a bounded number of objects. The key
-    /// is declared on non-nullable columns: a null has no place in the order the levels are disjoint
-    /// on, and a run on several columns holds no tuple with one. A row whose key is unknown takes a
-    /// value of its own instead, the smallest or the largest its type has.
+    /// How the dataset lays out its rows: the partition no object holds two values of, the key every object is sorted by,
+    /// the prefix of it each object indexes, the size its objects aim at and how its jobs organize them. Null, the
+    /// default, keeps one partition and the order the rows arrive in. Fixed when the dataset is created and carried by
+    /// every commit; a handle opened on an existing dataset follows the dataset's, whatever this says.
     /// </summary>
-    public IReadOnlyList<string>? ClusteringKey { get; init; }
+    public DatasetLayout? Layout { get; init; }
+
+    /// <summary>
+    /// The most partitions one append may touch, past which it is refused before anything is written: each partition it
+    /// touches costs an object at least, and merges after. 100 by default; a load of history raises it.
+    /// </summary>
+    /// <exception cref="ArgumentOutOfRangeException">The bound is under 1.</exception>
+    public int MaxPartitionsPerAppend
+    {
+        get => _maxPartitionsPerAppend;
+        init => _maxPartitionsPerAppend = value >= 1
+            ? value
+            : throw new ArgumentOutOfRangeException(nameof(value), value, "An append touches one partition at least.");
+    }
+
+    /// <summary>
+    /// The bytes an append holds in memory before it sorts the rows of its largest partition and writes them as an
+    /// object, taken from the session's memory budget: 256 MiB by default.
+    /// </summary>
+    /// <exception cref="ArgumentOutOfRangeException">The bytes are not positive.</exception>
+    public long AppendBufferBytes
+    {
+        get => _appendBufferBytes;
+        init => _appendBufferBytes = value > 0
+            ? value
+            : throw new ArgumentOutOfRangeException(nameof(value), value, "An append holds a positive number of bytes.");
+    }
 
     /// <summary>How many times a commit re-applies its changes to a newer version before giving up; 8 by default.</summary>
     public int MaxAttempts { get; init; } = 8;
@@ -57,12 +84,6 @@ public sealed record DatasetOptions
     /// </summary>
     internal long StreamedObjectBytes { get; init; } = ObjectSegmentSink.DefaultStreamedFromBytes;
 
-    /// <summary>
-    /// The bytes of an object's footer from which a scan for an identifier's value finds the object's rows by its index
-    /// rather than open it: a mebibyte, unless a test asks for less. A lookup reads a few kilobytes a column, each column
-    /// asked for apart, where an open reads the footer whole: under a mebibyte the open asks the store for less.
-    /// </summary>
-    internal long LookupFooterBytes { get; init; } = 1 << 20;
 
     /// <summary>
     /// The bytes a rewrite announces to the store for each byte it reads, as the bound of an object it
@@ -71,7 +92,7 @@ public sealed record DatasetOptions
     internal double BoundOutPerIn { get; init; } = ObjectBound.OutPerIn;
 
     /// <summary>The columns an object's entry summarises, or null for the first <see cref="SummaryColumnLimit"/>.</summary>
-    /// <remarks>The summaries are what a scan prunes whole objects by without opening them; the clustering key's columns are always among them.</remarks>
+    /// <remarks>The summaries are what a scan prunes whole objects by without opening them; the sort key's columns are always among them.</remarks>
     public IReadOnlyList<string>? SummaryColumns { get; init; }
 
     /// <summary>How many columns an entry summarises when none are declared; 32 by default.</summary>
@@ -174,6 +195,14 @@ public sealed record DatasetOptions
     internal long LeastPieceRows { get; init; } = 1L << 20;
 
     /// <summary>
+    /// What reading the dataset costs, which its planners price their paths by before reading anything: the store's own
+    /// profile when null, the default (<see cref="IObjectStore.CostProfile"/>). An application that knows its store says so here,
+    /// a store behind a cache or on another link than its kind says. The reads of its objects join their ranges by the store's
+    /// own profile.
+    /// </summary>
+    public CostProfile? CostProfile { get; init; }
+
+    /// <summary>
     /// The encoded bytes each column's chunks of an object aim at: 2^20 by default, about what a request to an object
     /// store carries before its bytes cost more than its round trip, so that a question reading a few columns fetches
     /// segments of that size rather than every column's bytes between them. 0 writes every column chunked with the
@@ -182,36 +211,24 @@ public sealed record DatasetOptions
     internal int ChunkBytes { get; init; } = 1 << 20;
 
     /// <summary>
-    /// The rows after which the chunks of every column of an object end together, at least: 2^22 by default, besides the
-    /// end of each slice. A lane's range of the object is cut where they do, so that no chunk is read by two lanes.
+    /// The rows after which the chunks of every column of an object end together, at least: 2^22 by default. A lane's
+    /// range of the object is cut where they do, so that no chunk is read by two lanes.
     /// </summary>
     internal long GroupRows { get; init; } = 1L << 22;
 
     /// <summary>
-    /// The bytes from which an object's column sheets are read before it, for a filter that asks a column for values
-    /// its sheet may prove absent: 2^20 by default, under which an open reads the object's footer, and often all of it,
-    /// in the request the sheets would take.
+    /// The bytes from which a job's object keeps its column sheets: 2^20 by default, under which an open reads the object's
+    /// footer, and often all of it, in the request the sheets would take. Whether a scan reads them, its rule of
+    /// consultation says, by what they cost against the rows they may spare.
     /// </summary>
     internal long SheetObjectBytes { get; init; } = 1L << 20;
 
     /// <summary>
-    /// The target from which the objects a job of a dataset with a key writes keep a table of contents and slices bounded
-    /// by their keys: 2^20 by default, the bytes under which an open reads an object's footer, and often all of it, in the
-    /// request a read without it would take. A test sets less to slice its small objects.
+    /// The target from which the objects a job of a dataset with a key writes keep a table of contents and the sparse index
+    /// of their keys: 2^20 by default, the bytes under which an open reads an object's footer, and often all of it, in the
+    /// request a read without it would take. A test sets less to index its small objects.
     /// </summary>
     internal long ContentsObjectBytes { get; init; } = 1L << 20;
-
-    /// <summary>
-    /// The rows a slice bounded by keys aims at: <see cref="DefaultSliceTargetRows"/>, past which the next key starts
-    /// another. Each writer's own, since an object's slices are its own; a test sets a few rows.
-    /// </summary>
-    internal long SliceTargetRows { get; init; } = DefaultSliceTargetRows;
-
-    /// <summary>
-    /// The rows a slice aims at by default: three million, a few megabytes a column, so that a read of one slice is one
-    /// request whose bytes the latency of a store does not dwarf.
-    /// </summary>
-    internal const long DefaultSliceTargetRows = 3_000_000;
 
     /// <summary>
     /// The share of an object's rows its marks may reach, as a divisor: past a
@@ -268,19 +285,11 @@ public sealed record DatasetOptions
 
     private readonly TimeSpan? _erasureDelay;
 
-    /// <summary>
-    /// How jobs group the rows into objects: cut where a value of the clustering key's first column changes, at the bytes
-    /// an object aims at, or both; the application chooses the value and the size, and the dataset knows nothing of what
-    /// the values mean. Null, the default, leaves objects at the compaction's sizes. Fixed when the dataset is created and
-    /// carried by every commit; a handle opened on an existing dataset follows the dataset's, whatever this says.
-    /// </summary>
-    public ClusteringOptions? Clustering { get; init; }
-
     private readonly int _rollupFanout = 64;
 
     /// <summary>
     /// The runs a rollup sums (<see cref="VortexDataset.RollUpAsync"/>): about this many consecutive objects of the deepest
-    /// level a rollup of rank 1, cut where the clustering value changes, and about this many rollups of the rank below one
+    /// level a rollup of rank 1, cut where the partition changes, and about this many rollups of the rank below one
     /// of a higher rank, so that a question over a long range of the key reads a rollup where it would read this many
     /// objects' counts, and this many again a rank up. 64 by default; 0 writes none. A setting of the handle that writes
     /// them; a reader takes the rollups whatever their fanout.
@@ -306,6 +315,13 @@ public sealed record DatasetOptions
     public IReadOnlyList<string>? Identifiers { get; init; }
 
     /// <summary>
+    /// What the postings of the <see cref="Identifiers"/> place each value at (spec C, 5): a unit of granules that holds
+    /// about <see cref="ChunkBytes"/> of the identifier's values, the default, or the granule, for a dataset whose questions
+    /// are mostly lookups of one value. A setting of the writer: each object says what its postings place values at.
+    /// </summary>
+    public IdentifierLocation IdentifierLocation { get; init; }
+
+    /// <summary>
     /// Keys of variant columns that every object a job writes keeps in a column of its own, in one class, written as a
     /// filter reads them, <c>Attributes['http.status_code'].AsInt64()</c>: shredded whatever the rows a job counts, so
     /// that a question on the key reads that column rather than parse the variant. A key read as a string, an integer, a double or a boolean (<c>AsString</c>, <c>AsInt64</c>,
@@ -322,6 +338,16 @@ public sealed record DatasetOptions
     /// A setting of the handle, which each writer chooses.
     /// </summary>
     public bool ShredOnAppend { get; init; }
+
+    /// <summary>
+    /// Whether an append writes the path directory of each variant column, as a job does: every path and class its rows
+    /// hold, and the granules each lies in, counted on another lane while the object is written. A question on a path
+    /// then refutes the objects and granules of the last minutes that lack it, and the paths of a window
+    /// (<c>PathsAsync</c>) are read from the directories rather than counted from the rows. True, the default; false
+    /// spares an append that never asks its variants the counting, about 0.4 µs of a processor a row. A setting of
+    /// the handle, which each writer chooses.
+    /// </summary>
+    public bool PathDirectoryOnAppend { get; init; } = true;
 
     /// <summary>
     /// The bytes an object's marks may take: <see cref="MarkedVectorBytes"/>, or a part of the
@@ -371,13 +397,6 @@ public sealed record DatasetOptions
     /// </summary>
     internal IBoundaryRule? Rule { get; init; }
 
-    /// <summary>
-    /// Whether a creation accepts a key of one column that may hold a null, as the library did before
-    /// it refused one. Only the tests of the datasets created then set it: such a dataset still
-    /// opens, reads and writes, and its nulls are read after every other key.
-    /// </summary>
-    internal bool AcceptsNullableKey { get; init; }
-
     /// <summary>What vacuum keeps, as a header records it.</summary>
     internal RetentionSettings Retention => new RetentionSettings(RetainedVersions, (long)RetentionWindow.TotalSeconds);
 
@@ -395,14 +414,14 @@ public sealed record DatasetOptions
             Seed = header.Seed,
             LockedStore = false,
             ErasureDelay = header.ErasureDelay,
-            Clustering = header.Clustering,
+            Layout = header.Layout,
         }
         : this with
         {
             Seed = header.Seed,
             LockedStore = true,
             ErasureDelay = null,
-            Clustering = header.Clustering,
+            Layout = header.Layout,
             MarkedObjectBytes = 0,
             MarkedShare = 1,
             MarkedVectorBytes = header.Chunker.MaxBytes > 0 ? header.Chunker.MaxBytes : ProllyBoundaryRule.DefaultMaxBytes,

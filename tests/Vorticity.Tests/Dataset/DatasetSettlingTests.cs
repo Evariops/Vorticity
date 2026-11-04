@@ -31,7 +31,7 @@ public sealed partial class DatasetSettlingTests
     public async Task ACountByDayDecodesOnlyTheBlocksADeleteOrAMidnightCuts()
     {
         await using MemoryObjectStore store = new MemoryObjectStore();
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Reading.Schema, new DatasetOptions { ClusteringKey = [nameof(Reading.At)] }, Ct);
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Reading.Schema, new DatasetOptions { Layout = new DatasetLayout { SortKey = [LayoutValue.Column(nameof(Reading.At))] } }, Ct);
         List<Reading> rows = await FillAsync(dataset);
         long[] deleted = [12_345, 234_567, 456_789, 678_901, 890_123];
         HashSet<DateTimeOffset> gone = [.. deleted.Select(i => rows[(int)i].At)];
@@ -54,7 +54,7 @@ public sealed partial class DatasetSettlingTests
     public async Task AnObjectNoDeleteTouchedDecodesOnlyTheBlocksAMidnightCuts()
     {
         await using MemoryObjectStore store = new MemoryObjectStore();
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Reading.Schema, new DatasetOptions { ClusteringKey = [nameof(Reading.At)] }, Ct);
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Reading.Schema, new DatasetOptions { Layout = new DatasetLayout { SortKey = [LayoutValue.Column(nameof(Reading.At))] } }, Ct);
         List<Reading> rows = await FillAsync(dataset);
         (List<DayTotal> settled, long decoded) = await AskAsync(dataset, new ScanOptions());
         Assert.Equal(Expected(rows), settled);

@@ -57,8 +57,6 @@ public sealed partial class Scan
 
         internal override ScanCounters Counters => scan._counters;
 
-        internal override ScanMetrics Metrics => scan.Metrics;
-
         internal override ScanSpec Spec() => scan.Spec();
 
         internal override void Begin() => scan.Begin();
