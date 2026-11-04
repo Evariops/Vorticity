@@ -268,6 +268,7 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
                     AggregationPartition open = _partition;
                     overdrawn = range.AbsorbPast(open, ref _numbers);
                     _partition = range;
+                    _outcome?.LetChosen();
                     _outcome = new AggregationOutcome(_query.Plan, range.Slots, range.Keys, []) { Memory = _memory };
                     open.LetGo();
                 }
@@ -688,6 +689,7 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
         _current?.Dispose();
         _store?.Release();
         _arena?.Reset();
+        _outcome?.LetChosen();
         if (_filters is not null)
         {
             foreach (GroupSelection.GroupFilterRun? run in _filters)
