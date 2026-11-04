@@ -111,6 +111,13 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
     internal void Add(RecordBatch batch, int field) => Add(Prepare(batch, field));
 
     /// <summary>
+    /// Counts the rows of the variant column <paramref name="field"/> of <paramref name="batch"/>'s root struct that its
+    /// selection keeps, every row when it has none, after the rows counted before.
+    /// </summary>
+    /// <exception cref="VortexFormatException">A row's value or metadata does not decode.</exception>
+    internal void AddSelected(RecordBatch batch, int field) => Add(Prepare(batch, field), batch.SelectionWords);
+
+    /// <summary>
     /// The variant column <paramref name="field"/> of <paramref name="batch"/>'s root struct made ready to count: its metadata
     /// and its values in canonical form, which may add nodes to the batch's arena; counting them after only reads it, and may
     /// run on another thread while the batch is written.
@@ -124,15 +131,27 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
             arena, column, EncodedForms.Canonical(arena, variant.GetFieldIndex(0)), EncodedForms.Canonical(arena, variant.GetFieldIndex(1)), batch.RowCount);
     }
 
-    /// <summary>Counts every row of a variant column made ready (<see cref="Prepare"/>), after the rows counted before.</summary>
+    /// <summary>Counts every row of a variant column made ready (<see cref="Prepare(RecordBatch, int)"/>), after the rows counted before.</summary>
     /// <exception cref="VortexFormatException">A row's value or metadata does not decode.</exception>
-    internal void Add(in Counting counting)
+    internal void Add(in Counting counting) => Add(in counting, default);
+
+    /// <summary>
+    /// Counts the rows of a variant column made ready (<see cref="Prepare(RecordBatch, int)"/>) that <paramref name="selection"/> keeps, a bit
+    /// a row, every row when it is empty, after the rows counted before.
+    /// </summary>
+    /// <exception cref="VortexFormatException">A row's value or metadata does not decode.</exception>
+    internal void Add(in Counting counting, ReadOnlySpan<ulong> selection)
     {
         Arrays.CanonicalArena arena = counting.Arena;
         Arrays.CanonicalNode metadataNode = arena.GetNode(counting.Metadata);
         Arrays.CanonicalNode valueNode = arena.GetNode(counting.Value);
         for (int row = 0; row < counting.Rows; row++)
         {
+            if (!selection.IsEmpty && ((selection[row >> 6] >> (row & 63)) & 1) == 0)
+            {
+                continue;
+            }
+
             if (!Arrays.ArenaWords.IsValid(arena, counting.Column, row))
             {
                 AddNull();
@@ -145,7 +164,20 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
         }
     }
 
-    /// <summary>A batch's variant column made ready to count (<see cref="Prepare"/>): the arena, the column, its metadata and its values in canonical form, its rows.</summary>
+    /// <summary>
+    /// The variant column at <paramref name="column"/>, a node of <paramref name="arena"/> of <paramref name="rows"/> rows, made
+    /// ready to count, as <see cref="Prepare(RecordBatch, int)"/> makes a batch's top-level one: a nested column too.
+    /// </summary>
+    internal static Counting Prepare(Arrays.CanonicalArena arena, int column, int rows)
+    {
+        column = EncodedForms.Canonical(arena, column);
+        Arrays.CanonicalNode variant = arena.GetNode(column);
+        int metadata = variant.GetFieldIndex(0);
+        int value = arena.GetNode(column).GetFieldIndex(1);
+        return new Counting(arena, column, EncodedForms.Canonical(arena, metadata), EncodedForms.Canonical(arena, value), rows);
+    }
+
+    /// <summary>A batch's variant column made ready to count (<see cref="Prepare(RecordBatch, int)"/>): the arena, the column, its metadata and its values in canonical form, its rows.</summary>
     internal readonly record struct Counting(Arrays.CanonicalArena Arena, int Column, int Metadata, int Value, int Rows);
 
     /// <summary>

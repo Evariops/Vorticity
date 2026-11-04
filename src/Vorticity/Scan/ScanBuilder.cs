@@ -1285,6 +1285,47 @@ internal sealed class ScanBuilder
         string path, System.Threading.CancellationToken cancellationToken = default) =>
         Terminal(Resolved(path)).ExtremeAsync(path, wantMin: false, cancellationToken);
 
+    /// <summary>
+    /// Tallies the paths of those of <paramref name="question"/>'s variant columns the file's path directories answer for,
+    /// among the rows the scan keeps but <paramref name="excluded"/>: a top-level column's directory, for the groups of rows a
+    /// count's plan keeps, where the file holds one the question takes. The columns left, whose kept rows the caller counts
+    /// once for all of them; null for none.
+    /// </summary>
+    internal async System.Threading.Tasks.ValueTask<List<PathColumn>?> TallyDirectoriesAsync(
+        PathsQuestion question, IRowExclusion? excluded, System.Threading.CancellationToken cancellationToken)
+    {
+        List<PathColumn>? left = null;
+        Types.Variants.IGroupJudge? judge = null;
+        foreach (PathColumn column in question.Columns)
+        {
+            int field = _take is null ? TopVariant(column.Field) : -1;
+            if (field >= 0)
+            {
+                judge ??= await Terminal(excluded: excluded).JudgeAsync(counted: !question.Exact, cancellationToken).ConfigureAwait(false);
+                if (await Indexes.VariantDirectory.TallyAsync(_file, field, column.Tally, judge, question.Exact, _metrics, cancellationToken).ConfigureAwait(false))
+                {
+                    continue;
+                }
+            }
+
+            (left ??= []).Add(column);
+        }
+
+        return left;
+    }
+
+    /// <summary>The top-level field of the file that <paramref name="column"/> names, when it is a variant column; -1 otherwise.</summary>
+    private int TopVariant(Expressions.FieldExpr column)
+    {
+        if (column.SegmentsUtf8.Length != 1)
+        {
+            return -1;
+        }
+
+        int field = _file.DType.IndexOfField(column.SegmentsUtf8[0]);
+        return field >= 0 && _file.DType.GetField(field).Kind == DTypeKind.Variant ? field : -1;
+    }
+
     /// <summary>Forces terminal tiers off, for the tests that hold every tier to the decode.</summary>
     /// <param name="tiers">The tiers a terminal may take; <see cref="TerminalTiers.Decode"/> is always taken.</param>
     /// <returns>This builder.</returns>

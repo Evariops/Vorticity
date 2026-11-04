@@ -40,6 +40,14 @@ internal interface IRowsCapability
     ValueTask<FormAnswer> AnswerAsync(ScanSpec spec, LogicalShape form, ScanCounters metrics, CancellationToken cancellationToken);
 
     /// <summary>
+    /// Tallies the paths of <paramref name="question"/>'s variant columns among the rows <paramref name="spec"/> keeps: by
+    /// default a census of the rows a read of them brings, a source of any kind; a file and a dataset answer from the path
+    /// directories of their objects first, as a count would plan them, reading no row where a directory answers.
+    /// </summary>
+    ValueTask PathsAsync(ScanSpec spec, PathsQuestion question, ScanCounters metrics, CancellationToken cancellationToken) =>
+        PathQuestions.CountAsync(BatchesAsync(spec, metrics), question, question.Columns, cancellationToken);
+
+    /// <summary>
     /// What a read of <paramref name="spec"/> will do (spec B, 7): from what the source holds in memory alone, reading
     /// nothing; with <paramref name="analyze"/>, the structures the read would consult read as it reads them, and no data
     /// segment.

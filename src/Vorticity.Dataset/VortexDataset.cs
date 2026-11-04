@@ -12,6 +12,7 @@ using Vorticity.RowEncoding;
 using Vorticity.Scanning;
 using Vorticity.Types;
 using Vorticity.Types.Serialization;
+using Vorticity.Types.Variants;
 
 namespace Vorticity.Dataset;
 
@@ -3767,11 +3768,36 @@ public sealed class VortexDataset : IAsyncDisposable
     /// trip, none once the session's cache holds it. Null when the entry carries no table of contents this
     /// library reads, or the column no directory.
     /// </summary>
-    internal async ValueTask<Indexes.VariantDirectory?> ReadPathDirectoryAsync(ObjectEntry entry, int field, CancellationToken cancellationToken)
+    internal ValueTask<Indexes.VariantDirectory?> ReadPathDirectoryAsync(ObjectEntry entry, int field, CancellationToken cancellationToken) =>
+        WithPathDirectoryAsync(entry, field, static (region, _) => Indexes.VariantDirectory.From(region), (object?)null, cancellationToken);
+
+    /// <summary>
+    /// Adds to <paramref name="tally"/> what the path directory of variant column <paramref name="field"/> of the object
+    /// <paramref name="entry"/> names says of the groups of its rows <paramref name="judge"/> keeps, read with no open of the
+    /// object, as <see cref="ReadPathDirectoryAsync"/> reads it: false, with nothing added, when the entry names none, it does
+    /// not decode, or <paramref name="exact"/> refuses it (<see cref="PathTally.AddDirectory"/>).
+    /// </summary>
+    internal async ValueTask<bool> TallyPathDirectoryAsync(
+        ObjectEntry entry, int field, PathTally tally, IGroupJudge judge, bool exact, CancellationToken cancellationToken) =>
+        await WithPathDirectoryAsync(
+            entry, field, static (region, asked) => asked.Tally.AddDirectory(region, asked.Judge, asked.Exact), (Tally: tally, Judge: judge, Exact: exact), cancellationToken)
+            .ConfigureAwait(false);
+
+    /// <summary>What a span of the bytes of a region gives.</summary>
+    private delegate TResult RegionReader<TState, TResult>(ReadOnlySpan<byte> region, TState state);
+
+    /// <summary>
+    /// What <paramref name="read"/> gives of the path directory of variant column <paramref name="field"/> of the object
+    /// <paramref name="entry"/> names, read with no open of the object: the region its entry's table of contents names, in one
+    /// round trip, none once the session's cache holds it; the default when the entry names none, or its bytes are not the
+    /// region's.
+    /// </summary>
+    private async ValueTask<TResult?> WithPathDirectoryAsync<TState, TResult>(
+        ObjectEntry entry, int field, RegionReader<TState, TResult> read, TState state, CancellationToken cancellationToken)
     {
         if (entry.Contents is not { } contents)
         {
-            return null;
+            return default;
         }
 
         foreach ((int column, Indexes.IndexSegment region) in contents.PathDirectories ?? [])
@@ -3787,11 +3813,11 @@ public sealed class VortexDataset : IAsyncDisposable
                 using Buffers.SegmentOwner bytes = await Footerless(source, entry, contents)
                     .ReadAsync(new Serialization.Schemas.SegmentSpec(region.Offset, region.Length, region.AlignmentExponent, 0, 0), cancellationToken)
                     .ConfigureAwait(false);
-                return region.Holds(bytes.Buffer.Span) ? Indexes.VariantDirectory.From(bytes.Buffer.Span) : null;
+                return region.Holds(bytes.Buffer.Span) ? read(bytes.Buffer.Span, state) : default;
             }
         }
 
-        return null;
+        return default;
     }
 
     /// <summary>

@@ -108,6 +108,16 @@ internal sealed record ExtremeShape(FieldExpr Column, bool Min) : LogicalShape
     public override string ToString() => $"{(Min ? "min" : "max")}({Path})";
 }
 
+/// <summary>The paths of variant columns among the rows, each path and class with the rows that hold it.</summary>
+/// <param name="Columns">The variant columns.</param>
+/// <param name="Exact">Whether every count is exact, the rows a directory would estimate counted.</param>
+internal sealed record PathsShape(string[] Columns, bool Exact) : LogicalShape
+{
+    internal override bool ReadsColumns => false;
+
+    public override string ToString() => $"paths of {string.Join(", ", Columns)}{(Exact ? ", exact" : string.Empty)}";
+}
+
 /// <summary>The keys of a column, in its order: every entry, or each value once.</summary>
 /// <param name="Path">The column.</param>
 /// <param name="Distinct">Whether each value once.</param>

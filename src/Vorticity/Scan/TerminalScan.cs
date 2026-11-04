@@ -104,7 +104,37 @@ internal sealed class TerminalScan
     internal async ValueTask<bool> AnyAsync(CancellationToken cancellationToken) =>
         await RunAsync(stopAtFirst: true, cancellationToken).ConfigureAwait(false) > 0;
 
-    private async ValueTask<long> RunAsync(bool stopAtFirst, CancellationToken cancellationToken)
+    /// <summary>
+    /// What the scan keeps of the file's rows, range by range, as a count plans it and before any data is read: none of a
+    /// range outside its rows or whose blocks the structures prune, every row of one inside them that the zone maps prove the
+    /// filter true on and no row left out of, some of any other; with <paramref name="counted"/>, the rows it keeps counted
+    /// too, a count's work under the same plan, which says what share of the rows of the ranges kept in part are kept.
+    /// </summary>
+    /// <param name="counted">Whether the rows kept are counted.</param>
+    /// <param name="cancellationToken">Cancels the reads.</param>
+    /// <exception cref="InvalidOperationException">The scan takes rows by their places, which no range says.</exception>
+    internal async ValueTask<KeptRows> JudgeAsync(bool counted, CancellationToken cancellationToken)
+    {
+        if (_take is not null)
+        {
+            throw new InvalidOperationException("A scan that takes rows by their places keeps no range of them.");
+        }
+
+        if (_filter is null || _rows.IsEmpty)
+        {
+            return new KeptRows(_rows, null, null, _excluded, filtered: _filter is not null, kept: _filter is null ? null : 0);
+        }
+
+        ZonePruningPlan.PruningPlan pruning = _prune
+            ? await ZonePruningPlan
+                .PlanAsync(_file, _tree, _filter, cancellationToken, steps: null, _metrics, _indexes, proofs: true)
+                .ConfigureAwait(false)
+            : default;
+        long? kept = counted ? await RunAsync(stopAtFirst: false, cancellationToken, pruning).ConfigureAwait(false) : null;
+        return new KeptRows(_rows, pruning.Live, pruning.Zones, _excluded, filtered: true, kept);
+    }
+
+    private async ValueTask<long> RunAsync(bool stopAtFirst, CancellationToken cancellationToken, ZonePruningPlan.PruningPlan? planned = null)
     {
         if (_filter is null)
         {
@@ -124,11 +154,11 @@ internal sealed class TerminalScan
         }
 
         SplitPlan plan = SplitPlan.Compute(_tree, _rows, in _mask, _cap);
-        ZonePruningPlan.PruningPlan pruning = _prune
+        ZonePruningPlan.PruningPlan pruning = planned ?? (_prune
             ? await ZonePruningPlan
                 .PlanAsync(_file, _tree, _filter, cancellationToken, steps: null, _metrics, _indexes, proofs: !stopAtFirst)
                 .ConfigureAwait(false)
-            : default;
+            : default);
         BlockMask? live = pruning.Live;
         ZonePruner? zones = (_tiers & TerminalTiers.FullBlock) != 0 ? pruning.Zones : null;
         _file.AnticipateReads(plan.ShareOf(_file.RowCount, live, _take));
@@ -989,5 +1019,38 @@ internal sealed class TerminalScan
 
         public int Compare((RowRange Split, FilterLiteral Bound) a, (RowRange Split, FilterLiteral Bound) b) =>
             Order(a.Bound, b.Bound, _wantMin);
+    }
+}
+
+/// <summary>
+/// The rows a scan keeps of a file, range by range: those of its own rows that the blocks left live hold, none of a range
+/// whose rows are all left out, and every one where the zone maps prove the filter true and no row is left out.
+/// </summary>
+/// <param name="range">The scan's rows.</param>
+/// <param name="live">The blocks the structures leave live; null for every one.</param>
+/// <param name="zones">What proves the filter true on a range; null for nothing.</param>
+/// <param name="excluded">The rows left out whatever the filter says; null for none.</param>
+/// <param name="filtered">Whether a filter applies, which only a proof says keeps every row of a range.</param>
+/// <param name="kept">The rows the scan keeps, counted; null when they are not, which without a filter are its rows not left out.</param>
+internal sealed class KeptRows(RowRange range, BlockMask? live, ZonePruner? zones, IRowExclusion? excluded, bool filtered, long? kept = null)
+    : Types.Variants.IGroupJudge
+{
+    public (bool Kept, bool Whole, long Held) Judge(RowRange rows)
+    {
+        RowRange held = rows.Intersect(range);
+        long left = excluded is null ? 0 : excluded.ExcludedBefore(held.End) - excluded.ExcludedBefore(held.Start);
+        if (held.IsEmpty || left == held.Length || (live is not null && !live.AnyLive(held)))
+        {
+            return (false, false, 0);
+        }
+
+        bool whole = held.Length == rows.Length && left == 0 && (!filtered || (zones is not null && zones.Verdict(held).IsAllTrue));
+        return (true, whole, held.Length);
+    }
+
+    public double Share(long whole, long partial)
+    {
+        long rows = kept ?? (filtered ? -1 : range.Length - (excluded is null ? 0 : excluded.ExcludedBefore(range.End) - excluded.ExcludedBefore(range.Start)));
+        return partial <= 0 || rows < 0 ? 1 : Math.Clamp((rows - whole) / (double)partial, 0, 1);
     }
 }
