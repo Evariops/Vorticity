@@ -19,10 +19,6 @@ internal static class LayoutsThrow
 
     [MethodImpl(MethodImplOptions.NoInlining)]
     [DoesNotReturn]
-    internal static T Format<T>(string message) => throw new VortexFormatException(message);
-
-    [MethodImpl(MethodImplOptions.NoInlining)]
-    [DoesNotReturn]
     internal static void NodeIndex(int index, int count) =>
         throw new VortexFormatException(
             $"Layout node index {index} is outside [0, {count}) of the layout tree.");

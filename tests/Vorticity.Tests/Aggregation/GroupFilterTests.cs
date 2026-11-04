@@ -56,8 +56,8 @@ public sealed partial class GroupFilterTests
             await using VortexFile file = await VortexFile.OpenAsync(path, Ct);
             Vorticity.Aggregation having = file.Scan<Measure>().GroupBy(r => (r.City, r.Day)).Where(g => g.Key.Day >= 40 & g.Key.City != "Caen").Select(g => (g.Key.City, g.Key.Day, g.Count()));
             Vorticity.Aggregation filtered = file.Scan<Measure>().Where(r => r.Day >= 40 & r.City != "Caen").GroupBy(r => (r.City, r.Day)).Select(g => (g.Key.City, g.Key.Day, g.Count()));
-            ScanPlan pushed = await having.ExplainAsync(Ct);
-            ScanPlan written = await filtered.ExplainAsync(Ct);
+            ScanPlan pushed = await having.ExplainAsync(analyze: true, Ct);
+            ScanPlan written = await filtered.ExplainAsync(analyze: true, Ct);
             Assert.Equal(written.LiveBlocks, pushed.LiveBlocks);
             Assert.True(pushed.LiveBlocks < pushed.Blocks, "the filter on the key pruned nothing");
 

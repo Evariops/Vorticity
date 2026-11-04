@@ -1,7 +1,6 @@
 using System;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
-using Vorticity;
 using Vorticity.Buffers;
 using Xunit;
 

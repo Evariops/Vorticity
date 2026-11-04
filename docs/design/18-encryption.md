@@ -383,7 +383,8 @@ through its keys.
 
 A sealed file is read positionally and never mapped, so it goes through the session's segment cache and
 bound on reads in flight, as a file read with `MapFiles = false` does. The cache then holds plaintext,
-which the session's documentation says, and which a session that keeps no cache avoids. That cache is
+which the session's documentation says: a session with a keyring therefore does not share the
+process's cache, as a session given none does, and keeps segments only in a cache its host gives it. That cache is
 in memory. The synopsis cache on the local disk keeps a sealed object's bytes as the store holds them,
 its trailer and the frames around each region its table of contents declares, and the reader decrypts
 and authenticates them at each read, so the disk holds neither a key nor a plaintext byte

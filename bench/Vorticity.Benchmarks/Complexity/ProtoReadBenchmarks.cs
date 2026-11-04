@@ -1,8 +1,6 @@
 // What reading varint fields costs: `Fields` reads back the message `ProtoMessageBenchmarks.Fields`
 // writes, 4,096 fields whose values take one to three bytes, so that the reader's one-byte path
 // and its longer one both run. Run in a checkout of the original and in the tree.
-using System;
-
 using BenchmarkDotNet.Attributes;
 
 using Vorticity.Serialization.Protobuf;

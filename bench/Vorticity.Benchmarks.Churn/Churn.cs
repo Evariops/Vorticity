@@ -10,7 +10,7 @@ using Vorticity.Dataset;
 
 namespace Vorticity.Bench.Churn;
 
-/// <summary>The rows the dataset holds: a clustering key, and columns of each common kind.</summary>
+/// <summary>The rows the dataset holds: a sort key, and columns of each common kind.</summary>
 [VortexRecord]
 public partial record struct ChurnRow(long Key, long Stamp, double Value, int Group, string Label);
 
@@ -18,8 +18,6 @@ public partial record struct ChurnRow(long Key, long Stamp, double Value, int Gr
 internal static class Churn
 {
     private const int KindCount = 3;
-
-    private static readonly string[] Kinds = ["append", "update", "delete"];
 
     /// <summary>A label per residue, so that writing a row allocates no string.</summary>
     private static readonly string[] Labels = [.. Enumerable.Range(0, 64).Select(i => "label-" + i.ToString(CultureInfo.InvariantCulture))];
@@ -49,9 +47,7 @@ internal static class Churn
     {
         DatasetOptions datasetOptions = new DatasetOptions
         {
-            ClusteringKey = [ChurnRow.ColumnNames.Key],
-            // The clustering key's run takes twelve bytes a row, which the default budget of a tenth of
-            // the data refuses on any row narrower than 120 bytes once an object passes a mebibyte.
+            Layout = new DatasetLayout { SortKey = [LayoutValue.Column(ChurnRow.ColumnNames.Key)] },
             Write = options.IndexBudget > 0
                 ? new VortexWriteOptions { Indexes = IndexPolicy.Auto.WithBudgetPerMille(options.IndexBudget) }
                 : new VortexWriteOptions(),

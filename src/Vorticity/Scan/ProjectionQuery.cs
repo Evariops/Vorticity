@@ -183,8 +183,8 @@ internal sealed class ProjectionQuery : ResultQuery
 
     internal override IAsyncEnumerator<RecordBatch> Batches(CancellationToken cancellationToken) => new ProjectedBatches(this, cancellationToken);
 
-    internal override ValueTask<ScanPlan> ExplainAsync(CancellationToken cancellationToken) =>
-        Host.Source.ExplainAsync(SourceSpec(keepEncodings: true, out _), cancellationToken);
+    internal override ValueTask<ScanPlan> ExplainAsync(bool analyze, CancellationToken cancellationToken) =>
+        Host.Source.PlanAsync(SourceSpec(keepEncodings: true, out _), analyze, cancellationToken);
 
     internal override ResultQuery As(VortexSchema record, Type type)
     {
@@ -234,12 +234,17 @@ internal sealed class ProjectionQuery : ResultQuery
             uses.Add(element.Source.Field);
         }
 
+        FieldMask projection = mask.Build();
+        IReadOnlyDictionary<string, string[]>? variantKeys = Indexes.VariantKeyReads.Of(uses, spec.Filter);
         spec = spec with
         {
-            Projection = mask.Build(),
+            Query = spec.Query is { Shape: RowsShape rowsShape } question
+                ? question with { Reads = projection, VariantKeys = variantKeys, Shape = rowsShape with { Skip = Skip, Take = Take } }
+                : spec.Query,
+            Projection = projection,
             KeepEncodings = keepEncodings,
             Options = spec.Options with { Compact = true },
-            VariantKeys = Indexes.VariantKeyReads.Of(uses, spec.Filter),
+            VariantKeys = variantKeys,
         };
         narrowed = false;
         if ((Skip > 0 || Take != long.MaxValue) && Host.Source is FileScanSource file
@@ -307,7 +312,12 @@ internal sealed class ProjectedBatches : IAsyncEnumerator<RecordBatch>
         {
             _query.Host.Begin();
             _begun = true;
-            _inner = _query.Host.Source.BatchesAsync(_spec, _query.Counters).GetAsyncEnumerator(_cancellationToken);
+            ScanSource source = _query.Host.Source;
+
+            // A window of an order the source reads cheaper late: the places of its rows first, then those rows (spec G, 2).
+            _inner = _spec.OrderPath is { } order && _end != long.MaxValue && source.Rows.ReadsTopLate(new ColumnFieldExpr(order))
+                ? TopRows.BatchesAsync(source, _spec, _end, _query.Counters, _cancellationToken).GetAsyncEnumerator(_cancellationToken)
+                : source.Rows.BatchesAsync(_spec, _query.Counters).GetAsyncEnumerator(_cancellationToken);
         }
 
         // Once the window is served the scan is asked for nothing more: a Take stops the reads.

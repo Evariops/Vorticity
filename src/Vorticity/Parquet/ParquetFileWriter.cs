@@ -7,7 +7,6 @@ using System.IO.Pipelines;
 using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
-using ManagedCompressions.Zstd;
 using Vorticity.Arrays;
 using Vorticity.Parquet.Codecs;
 using Vorticity.Parquet.Metadata;

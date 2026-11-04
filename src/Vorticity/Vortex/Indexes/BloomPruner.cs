@@ -9,7 +9,6 @@ using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Buffers;
 using Vorticity.Compute;
 using Vorticity.Expressions;
-using Vorticity.File;
 using Vorticity.IO;
 using Vorticity.Serialization.Schemas;
 using Vorticity.Types;
@@ -78,16 +77,34 @@ internal sealed class BloomPruner
     /// <summary>The bytes of those segments.</summary>
     internal long Bytes { get; private set; }
 
+    /// <summary>The bytes of every tree it may consult, the most a question reads of them.</summary>
+    internal long PayloadBytes
+    {
+        get
+        {
+            long bytes = 0;
+            foreach (Column column in _columns.Values)
+            {
+                foreach (Tree tree in column.Trees)
+                {
+                    bytes += (long)tree.Run.Payload[0].Length;
+                }
+            }
+
+            return bytes;
+        }
+    }
+
     /// <summary>
     /// The pruner for <paramref name="filter"/>, or <see langword="null"/> when no column it tests
     /// for equality carries a usable Bloom entry.
     /// </summary>
-    /// <param name="file">The open file.</param>
+    /// <param name="file">The file, open or read with no open (<see cref="FooterlessIndexes"/>).</param>
     /// <param name="filter">The scan's predicate.</param>
     /// <param name="blockRows">The scan's block length; an entry at another length is ignored.</param>
     /// <param name="cancellationToken">Cancels the directory read.</param>
     internal static async ValueTask<BloomPruner?> BuildAsync(
-        VortexFile file, VortexExpr filter, long blockRows, CancellationToken cancellationToken)
+        IIndexHost file, VortexExpr filter, long blockRows, CancellationToken cancellationToken)
     {
         // A file without a directory pays nothing, not even the collectors: a filtered scan's
         // allocation ceiling is held to the byte.
@@ -196,12 +213,12 @@ internal sealed class BloomPruner
     }
 
     /// <summary>Refines <paramref name="live"/>, descending the trees a level at a time.</summary>
-    /// <param name="file">The open file.</param>
+    /// <param name="file">The file the pruner was built over.</param>
     /// <param name="live">The mask, which only loses blocks.</param>
     /// <param name="cancellationToken">Cancels the reads.</param>
     /// <param name="rootsOnly">Whether to stop at the roots.</param>
     internal async ValueTask RefineAsync(
-        VortexFile file, BlockMask live, CancellationToken cancellationToken, bool rootsOnly = false)
+        IIndexHost file, BlockMask live, CancellationToken cancellationToken, bool rootsOnly = false)
     {
         int top = await LoadRootsAsync(file, live, cancellationToken).ConfigureAwait(false);
         for (int level = top; level >= 0 && !live.IsEmpty && Asked(); level--)
@@ -241,7 +258,7 @@ internal sealed class BloomPruner
     }
 
     /// <summary>Reads every root over a live block, in one read; returns the deepest root's level.</summary>
-    private async ValueTask<int> LoadRootsAsync(VortexFile file, BlockMask live, CancellationToken cancellationToken)
+    private async ValueTask<int> LoadRootsAsync(IIndexHost file, BlockMask live, CancellationToken cancellationToken)
     {
         using IndexBatches<(Tree Tree, int Slot)> batches = new();
         foreach (Column column in _columns.Values)
@@ -311,7 +328,7 @@ internal sealed class BloomPruner
     /// Reads the children, at <paramref name="level"/>, of every node one level up that still covers
     /// a live block: one region per node, one read for the level.
     /// </summary>
-    private async ValueTask LoadLevelAsync(VortexFile file, BlockMask live, int level, CancellationToken cancellationToken)
+    private async ValueTask LoadLevelAsync(IIndexHost file, BlockMask live, int level, CancellationToken cancellationToken)
     {
         using IndexBatches<(Tree Tree, long Index, BloomNode Parent, int Slot)> batches = new();
         foreach (Column column in _columns.Values)
@@ -378,7 +395,7 @@ internal sealed class BloomPruner
 
     /// <summary>Reads one origin's regions, counting those its source is asked for.</summary>
     private async ValueTask ReadAsync(
-        VortexFile file, int origin, SegmentRequestSet requests, CancellationToken cancellationToken)
+        IIndexHost file, int origin, SegmentRequestSet requests, CancellationToken cancellationToken)
     {
         ISegmentReader reader = file.IndexSourceOf(origin);
         Segments += Scanning.ScanCounters.Unread(requests, reader, out long bytes);

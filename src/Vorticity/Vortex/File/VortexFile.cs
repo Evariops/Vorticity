@@ -1291,7 +1291,20 @@ public sealed partial class VortexFile : IAsyncDisposable
 
         /// <summary>The first of the zone maps scans decode now, each the next's, read and written under the lock of the structures.</summary>
         internal ZoneFlight? Flights;
+
+        /// <summary>What the zones of the columns read through functions give, by ask (<see cref="Scanning.ZoneKeyReads"/>).</summary>
+        internal object? ZoneKeys;
     }
+
+    /// <summary>
+    /// What <see cref="Scanning.ZoneKeyReads"/> keeps of the file for the scans after the first, an array it replaces whole;
+    /// null before any scan asked.
+    /// </summary>
+    internal object? HeldZoneKeys => Volatile.Read(ref _decoded) is { } decoded ? Volatile.Read(ref decoded.ZoneKeys) : null;
+
+    /// <summary>Replaces <see cref="HeldZoneKeys"/> with <paramref name="next"/> when it still is <paramref name="seen"/>.</summary>
+    internal bool ExchangeHeldZoneKeys(object next, object? seen) =>
+        ReferenceEquals(Interlocked.CompareExchange(ref Decoded.ZoneKeys, next, seen), seen);
 
     /// <summary>One decoded zone map: the zoned node it belongs to, and its bounds.</summary>
     private readonly record struct ZoneEntry(int Node, Compute.ZoneColumn Column);

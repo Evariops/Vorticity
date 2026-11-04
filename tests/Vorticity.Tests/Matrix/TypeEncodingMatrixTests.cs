@@ -22,7 +22,6 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
-using Vorticity.Columns;
 using Vorticity.Scanning;
 using Vorticity.Tests.Scan;
 using Vorticity.Tests.Writing;
@@ -485,7 +484,9 @@ public sealed class TypeEncodingMatrixTests
     /// <summary>
     /// Writes the file and its canonical twin where the Rust cross-check reads them, when asked to:
     /// the first rows only, in blocks of 1 024, so that the reference's scalar-by-scalar comparison
-    /// still crosses blocks and chunks without spending minutes on every list of every row.
+    /// still crosses blocks and chunks without spending minutes on every list of every row. The twin
+    /// of a shape is written once, by its canonical case: rewritten by every hint's case, a file just
+    /// written was replaced again and again, which Windows refused now and then at the rename.
     /// </summary>
     private static async Task ExportAsync(Shape shape, EncodingHint hint, CancellationToken ct)
     {
@@ -503,7 +504,11 @@ public sealed class TypeEncodingMatrixTests
         string hinted = Path.Combine(root, hint.ToString(), name);
         Directory.CreateDirectory(Path.GetDirectoryName(reference)!);
         Directory.CreateDirectory(Path.GetDirectoryName(hinted)!);
-        await WriteAsync(reference, head, EncodingHint.Canonical, ct, blockRows: 1_024);
+        if (hint == EncodingHint.Canonical)
+        {
+            await WriteAsync(reference, head, EncodingHint.Canonical, ct, blockRows: 1_024);
+        }
+
         await WriteAsync(hinted, head, hint, ct, blockRows: 1_024);
     }
 

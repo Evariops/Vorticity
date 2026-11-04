@@ -5,7 +5,6 @@ using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Win32.SafeHandles;
-using Vorticity;
 using Vorticity.Buffers;
 using Vorticity.IO;
 using Vorticity.Serialization.Schemas;

@@ -7,7 +7,7 @@ using System.Runtime.Intrinsics;
 namespace Vorticity.Arrays.Decoders.Compressed;
 
 /// <summary>
-/// A prefix as <see cref="FsstDecoder.TryStartsWith"/> matches it against a row's codes: the codes
+/// A prefix as <see cref="FsstDecoder.TryEvaluate"/> matches it against a row's codes: the codes
 /// every row starting with it shares, and the bytes of it past those.
 /// </summary>
 /// <remarks>

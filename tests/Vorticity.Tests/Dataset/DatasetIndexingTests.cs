@@ -19,7 +19,6 @@ using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Buffers;
-using Vorticity.Columns;
 using Vorticity.Dataset;
 using Vorticity.Expressions;
 using Vorticity.File;
@@ -92,15 +91,15 @@ public sealed class DatasetIndexingTests
             }
         }
 
-        // Every object: its own run, and the two fragments' entries beside it, each joined across
-        // its two halves, from origins 1 and 2.
+        // Every object: its own entries, a run each (its sparse index, chunk directory and marks), and the two
+        // fragments' entries beside them, each joined across its two halves, from origins 1 and 2.
         foreach (PositionedObject held in await ObjectsAsync(dataset))
         {
             Assert.Equal(2, held.Entry.Fragments.Count);
             await using ObjectLease lease = await dataset.RentAsync(held.Entry, ct);
             IndexDirectory directory = (await lease.File.ReadIndexDirectoryAsync(ct))!;
             Assert.All(lease.File.IndexFragmentRefusals, Assert.Null);
-            Assert.Equal(3, directory.Entries.Count);
+            Assert.Equal(5, directory.Entries.Count);
             foreach (IndexEntry entry in directory.Entries)
             {
                 int origins = entry.Runs.Count;
@@ -109,7 +108,7 @@ public sealed class DatasetIndexingTests
 
             // And the fragment's filter prunes inside the object: a tag no row holds.
             VortexExpr noTag = Expr.Eq(Expr.Field("tag"), Expr.Literal(FilterLiteral.From(1L)));
-            ScanExplanation plan = await lease.File.ScanBuilder().Where(noTag).ExplainAsync(ct);
+            ScanExplanation plan = await lease.File.ScanBuilder().Where(noTag).ExplainAsync(analyze: true, ct);
             Assert.Equal(0, plan.LiveBlocks);
         }
 
@@ -216,8 +215,9 @@ public sealed class DatasetIndexingTests
         {
             IndexDirectory directory = (await lease.File.ReadIndexDirectoryAsync(ct))!;
             Assert.All(lease.File.IndexFragmentRefusals, Assert.Null);
-            Assert.Equal(3, directory.Entries.Count);
-            Assert.Equal((1, 8, 8), (directory.Entries[0].Runs.Count, directory.Entries[1].Runs.Count, directory.Entries[2].Runs.Count));
+            // The object's own entries, its key's sparse index, its chunks' directory and their marks, a run each; then the
+            // two fragments' entries, their eight parts joined.
+            Assert.Equal([1, 1, 1, 8, 8], directory.Entries.Select(entry => entry.Runs.Count));
         }
 
         Assert.Equal(ordered, await IdsInOrderAsync(dataset));
@@ -571,10 +571,6 @@ public sealed class DatasetIndexingTests
         .SortedRuns("id", required: true)
         .WithBudgetPerMille(100_000);
 
-    /// <summary>A handle whose writes refuse no index for its budget, and build none of their own beyond the key's.</summary>
-    private static DatasetOptions Generous(DatasetOptions options) =>
-        options with { Write = options.Write with { IndexBudgetPerMille = 100_000 } };
-
     /// <summary>Whether the object holds an index of <paramref name="kind"/> on <paramref name="column"/> over all its blocks, in itself or in its fragments.</summary>
     private static async Task<bool> HoldsAsync(VortexDataset dataset, PositionedObject held, string kind, string column)
     {
@@ -690,7 +686,7 @@ public sealed class DatasetIndexingTests
         ],
         Nullability.NonNullable);
 
-    private static DatasetOptions Clustered() => Unclustered() with { ClusteringKey = ["key"] };
+    private static DatasetOptions Clustered() => Unclustered() with { Layout = new DatasetLayout { SortKey = [LayoutValue.Column("key")] } };
 
     private static DatasetOptions Unclustered() => new DatasetOptions
     {

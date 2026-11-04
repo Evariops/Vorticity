@@ -22,9 +22,6 @@ using System.Threading;
 using System.Threading.Tasks;
 
 using BenchmarkDotNet.Attributes;
-
-using Vorticity.Columns;
-using Vorticity.File;
 using Vorticity.Scanning;
 
 namespace Vorticity.Benchmarks;

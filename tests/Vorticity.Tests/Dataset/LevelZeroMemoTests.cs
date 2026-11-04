@@ -7,7 +7,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Dataset;
-using Vorticity.Types.Variants;
+using Vorticity.IO;
 using Xunit;
 
 namespace Vorticity.Tests.Dataset;
@@ -26,13 +26,15 @@ public sealed partial class LevelZeroMemoTests
     public async Task AKeyOfLevelZeroIsParsedOncePerObjectAndNode()
     {
         await using MemoryObjectStore store = new MemoryObjectStore();
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Doc.Schema, new DatasetOptions { ClusteringKey = [nameof(Doc.Id)] }, Ct);
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Doc.Schema, new DatasetOptions { Layout = new DatasetLayout { SortKey = [LayoutValue.Column(nameof(Doc.Id))] } }, Ct);
         List<Doc> rows = await AppendAsync(dataset);
         LevelZeroMemo memo = dataset.LevelZero;
 
+        // The first question parses the objects as they lie, their copies made beside it; the four after read the copies.
         for (int question = 0; question < 5; question++)
         {
             Assert.Equal(Routes(rows), await RoutesAsync(dataset));
+            await dataset.LevelZero.WhenMadeAsync();
         }
 
         Assert.Equal(3, memo.Shredded);
@@ -40,6 +42,7 @@ public sealed partial class LevelZeroMemoTests
         Assert.Equal(3, memo.Held);
 
         Assert.Equal(rows.Select(r => r.Attributes["status"]?.AsInt64()).Order(), (await dataset.Scan<Doc>().Select(r => r.Attributes["status"].AsInt64()).ToListAsync(Ct)).Order());
+        await dataset.LevelZero.WhenMadeAsync();
         Assert.Equal(6, memo.Shredded);
         Assert.Equal(Routes(rows), await RoutesAsync(dataset));
         Assert.Equal(6, memo.Shredded);
@@ -63,11 +66,13 @@ public sealed partial class LevelZeroMemoTests
     {
         await using MemoryObjectStore store = new MemoryObjectStore();
         await using VortexSession session = VortexSession.Create(static options => options.MemoryBudget = new QueryMemoryBudget(1_024));
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Doc.Schema, new DatasetOptions { ClusteringKey = [nameof(Doc.Id)], Session = session }, Ct);
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Doc.Schema, new DatasetOptions { Layout = new DatasetLayout { SortKey = [LayoutValue.Column(nameof(Doc.Id))] }, Session = session }, Ct);
         List<Doc> rows = await AppendAsync(dataset);
 
         Assert.Equal(Routes(rows), await RoutesAsync(dataset));
+        await dataset.LevelZero.WhenMadeAsync();
         Assert.Equal(Routes(rows), await RoutesAsync(dataset));
+        await dataset.LevelZero.WhenMadeAsync();
         Assert.Equal(0, dataset.LevelZero.Held);
         Assert.Equal(6, dataset.LevelZero.Refused);
         Assert.Equal(0, dataset.LevelZero.Shredded);
@@ -75,15 +80,15 @@ public sealed partial class LevelZeroMemoTests
 
     /// <summary>
     /// Three objects of level 0, a question on the rows of the first and one on the rows of the last: while every read of
-    /// the first object is held, the question on the last shreds its own object and answers; the first answers once its
-    /// reads go on. Neither waits on the other.
+    /// the first object is held, the question on the last answers, its object's copy made beside it; the first answers
+    /// once its reads go on. Neither waits on the other, nor on a copy.
     /// </summary>
     [Fact]
     public async Task TwoQuestionsOnTwoObjectsOfLevelZeroWaitForNoOther()
     {
         await using MemoryObjectStore inner = new MemoryObjectStore();
         HoldingStore store = new HoldingStore(inner);
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Doc.Schema, new DatasetOptions { ClusteringKey = [nameof(Doc.Id)] }, Ct);
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Doc.Schema, new DatasetOptions { Layout = new DatasetLayout { SortKey = [LayoutValue.Column(nameof(Doc.Id))] } }, Ct);
         List<Doc> rows = await AppendAsync(dataset);
         await foreach (PositionedObject held in dataset.Snapshot.WalkAsync(null, 0, long.MaxValue, null, Ct))
         {
@@ -108,8 +113,130 @@ public sealed partial class LevelZeroMemoTests
         }
 
         Assert.Equal(Routes([.. rows.Where(r => r.Id < 2_000)]), await first);
+        await dataset.LevelZero.WhenMadeAsync();
         Assert.Equal(2, dataset.LevelZero.Shredded);
     }
+
+    /// <summary>
+    /// An object of level 0 large enough that its granules are read by their marks, a service's call by row and attributes of
+    /// a status and a text: a question on the status, shredded in a copy written again in memory, reads that copy whole. The
+    /// object's marks and sparse index lie in the object, not in the copy, whose chunks are its own; read through it, they
+    /// named bytes past its end, or others than theirs. The answer is LINQ's.
+    /// </summary>
+    [Fact]
+    public async Task ACopyIsReadWithNoneOfTheObjectsRegions()
+    {
+        Random random = new Random(11);
+        Call[] calls = [.. Enumerable.Range(0, 200_000).Select(i => new Call(
+            $"svc-{i * 16 / 200_000:D2}", i, Variant.Object(
+                ("status", Variant.From(random.Next(20) == 0 ? 500 + random.Next(4) : 200 + random.Next(4))),
+                ("text", Variant.From($"call {random.Next(1 << 30)} of a route {random.Next(40)}")))))];
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Call.Schema, new DatasetOptions
+        {
+            Layout = new DatasetLayout { SortKey = [LayoutValue.Column(nameof(Call.Service)), LayoutValue.Column(nameof(Call.Id))], IndexedPrefix = 1 },
+            CostProfile = CostProfile.Memory,
+        }, Ct);
+        await using (ObjectDraft draft = dataset.StartObject())
+        {
+            await draft.Writer.WriteAsync<Call>(calls, Ct);
+            await dataset.AppendAsync(draft, Ct);
+        }
+
+        string[] expected = [.. calls.Where(static c => c.Attributes["status"]?.AsInt64() >= 500).GroupBy(static c => c.Service)
+            .Select(static g => $"{g.Key}:{g.Count()}").Order(StringComparer.Ordinal)];
+        // The first question parses the object as it lies, its copy made beside it; the second reads the copy.
+        for (int asked = 0; asked < 2; asked++)
+        {
+            List<ServiceCount> answers = await dataset.Scan<Call>().Where(c => c.Attributes["status"].AsInt64() >= 500)
+                .GroupBy(c => c.Service).Select(g => (g.Key, g.Count())).As<ServiceCount>().ToRecordsAsync(Ct).ToListAsync(Ct);
+            Assert.Equal(expected, answers.Select(static a => $"{a.Service}:{a.Count}").Order(StringComparer.Ordinal));
+            await dataset.LevelZero.WhenMadeAsync();
+        }
+
+        Assert.Equal(1, dataset.LevelZero.Shredded);
+        Assert.Equal(1, dataset.LevelZero.Served);
+    }
+
+    /// <summary>
+    /// An object of level 0, larger than the tail its open reads, copied for a question on a key of its attributes: its
+    /// keys are counted, then its rows written again, two passes over its rows, over its bytes read once; they read it
+    /// twice through its open before.
+    /// </summary>
+    [Fact]
+    public async Task AnObjectIsReadOnceForItsCopy()
+    {
+        await using MemoryObjectStore memory = new MemoryObjectStore();
+        await using CountingObjectStore store = new CountingObjectStore(memory);
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Doc.Schema, new DatasetOptions { Layout = new DatasetLayout { SortKey = [LayoutValue.Column(nameof(Doc.Id))] } }, Ct);
+        Random random = new Random(13);
+        List<Doc> rows = [.. Enumerable.Range(0, 100_000).Select(i => new Doc(i, Variant.Object(
+            ("route", Variant.From($"/r/{random.Next(7)}/{random.Next(1 << 20)}")), ("status", Variant.From(200 + random.Next(4))))))];
+        await using (ObjectDraft draft = dataset.StartObject())
+        {
+            await draft.Writer.WriteAsync<Doc>([.. rows], Ct);
+            await dataset.AppendAsync(draft, Ct);
+        }
+
+        // A rent alone starts the copy beside it: what the copy reads, once it is made, the rent's open aside.
+        PositionedObject held = await dataset.ScanBuilder().ObjectsAsync(Ct).SingleAsync(Ct);
+        long bytes = held.Entry.Bytes;
+        store.Reset();
+        ObjectLease lease = await dataset.LevelZero.RentAsync(dataset, dataset.Snapshot, held.Entry, new Dictionary<string, string[]> { [nameof(Doc.Attributes)] = ["route"] }, Ct);
+        await lease.DisposeAsync();
+        await dataset.LevelZero.WhenMadeAsync();
+        long read = store.BytesRead;
+        Assert.Equal(1, dataset.LevelZero.Shredded);
+        Assert.Equal(Routes(rows), await RoutesAsync(dataset));
+        Assert.Equal(1, dataset.LevelZero.Served);
+        Console.WriteLine($"LEVEL ZERO COPY: {read} bytes read to copy an object of {bytes}");
+        Assert.True(read < bytes * 3 / 2, $"{read} bytes read to copy an object of {bytes}");
+    }
+
+    /// <summary>
+    /// An object of level 0 whose copy cannot be made, every whole read of it held: the first question on a key of it
+    /// answers all the same, the object parsed as it lies, its copy left to be made beside it; once the reads go on, the
+    /// copy is made, and the next question reads it. A copy made on the question's path kept the question waiting on it.
+    /// </summary>
+    [Fact]
+    public async Task AFirstQuestionWaitsOnNoCopy()
+    {
+        await using MemoryObjectStore inner = new MemoryObjectStore();
+        HoldingStore store = new HoldingStore(inner);
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Doc.Schema, new DatasetOptions { Layout = new DatasetLayout { SortKey = [LayoutValue.Column(nameof(Doc.Id))] } }, Ct);
+        Random random = new Random(17);
+        List<Doc> rows = [.. Enumerable.Range(0, 20_000).Select(i => new Doc(i, Variant.Object(
+            ("route", Variant.From($"/r/{random.Next(7)}/{random.Next(1 << 20)}")), ("status", Variant.From(200 + random.Next(4))))))];
+        await using (ObjectDraft draft = dataset.StartObject())
+        {
+            await draft.Writer.WriteAsync<Doc>([.. rows], Ct);
+            await dataset.AppendAsync(draft, Ct);
+        }
+
+        PositionedObject held = await dataset.ScanBuilder().ObjectsAsync(Ct).SingleAsync(Ct);
+        (store.Holding, store.WholeLength) = (held.Entry.Key, held.Entry.Bytes);
+        try
+        {
+            Assert.Equal(Routes(rows), await RoutesAsync(dataset).WaitAsync(TimeSpan.FromMinutes(1), Ct));
+            await store.Reached.Task.WaitAsync(TimeSpan.FromMinutes(1), Ct);
+            Assert.Equal(0, dataset.LevelZero.Shredded);
+        }
+        finally
+        {
+            store.Release.TrySetResult();
+        }
+
+        await dataset.LevelZero.WhenMadeAsync();
+        Assert.Equal(1, dataset.LevelZero.Shredded);
+        Assert.Equal(Routes(rows), await RoutesAsync(dataset));
+        Assert.Equal(1, dataset.LevelZero.Served);
+    }
+
+    [VortexRecord]
+    public partial record struct Call(string Service, long Id, Variant Attributes);
+
+    [VortexRecord]
+    public partial record struct ServiceCount(string? Service, long Count);
 
     private static async Task<List<Doc>> AppendAsync(VortexDataset dataset)
     {
@@ -142,6 +269,9 @@ public sealed partial class LevelZeroMemoTests
         /// <summary>The key of the object whose reads are held; null holds none.</summary>
         internal string? Holding { get; set; }
 
+        /// <summary>The length of the reads held, the object whole for a copy's; 0 holds every read.</summary>
+        internal long WholeLength { get; set; }
+
         /// <summary>Set once a read of the object is held.</summary>
         internal TaskCompletionSource Reached { get; } = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -150,13 +280,21 @@ public sealed partial class LevelZeroMemoTests
 
         public override async ValueTask<Vorticity.IO.ObjectRead> ReadAsync(string key, long offset, Memory<byte> destination, string? ifToken, CancellationToken cancellationToken)
         {
-            await HoldAsync(key, cancellationToken);
+            if (WholeLength == 0 || (offset == 0 && destination.Length == WholeLength))
+            {
+                await HoldAsync(key, cancellationToken);
+            }
+
             return await Inner.ReadAsync(key, offset, destination, ifToken, cancellationToken);
         }
 
         public override async ValueTask<Vorticity.IO.ObjectRead> ReadTailAsync(string key, Memory<byte> destination, CancellationToken cancellationToken)
         {
-            await HoldAsync(key, cancellationToken);
+            if (WholeLength == 0)
+            {
+                await HoldAsync(key, cancellationToken);
+            }
+
             return await Inner.ReadTailAsync(key, destination, cancellationToken);
         }
 

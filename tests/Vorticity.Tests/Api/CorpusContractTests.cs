@@ -75,7 +75,7 @@ public sealed class CorpusContractTests
 
     private static async Task Compare(string id, Vorticity.Scan scan, List<string> failures)
     {
-        ScanPlan plan = await scan.ExplainAsync(TestContext.Current.CancellationToken);
+        ScanPlan plan = await scan.ExplainAsync(analyze: true, TestContext.Current.CancellationToken);
         await foreach (BatchView batch in scan.WithCancellation(TestContext.Current.CancellationToken))
         {
             GC.KeepAlive(batch.RowCount);

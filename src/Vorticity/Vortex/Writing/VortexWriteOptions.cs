@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.Collections.Immutable;
+using System.Threading;
+using System.Threading.Tasks;
 using Vorticity.Indexes;
 using Vorticity.Writing;
 
@@ -259,6 +261,28 @@ public sealed record VortexWriteOptions
     internal bool SealScratch { get; init; }
 
     /// <summary>
+    /// The tap the hashed postings of a column or a path hand their hashes to, by the column's name or the path's text,
+    /// instead of writing them: an object the index of its partition covers keeps no postings of its identifiers. Null,
+    /// or a null tap, for postings written in the file.
+    /// </summary>
+    internal Func<string, IHashTap?>? HashTaps { get; init; }
+
+    /// <summary>
+    /// What each column's index of where its values lie (<see cref="Indexes.ColumnLocate"/>) is handed to once complete, by
+    /// the column's place, its bytes as the file keeps them: the index of the partition an object fills (spec D, 7). Null for
+    /// none; the file keeps the index all the same.
+    /// </summary>
+    internal Func<int, byte[], CancellationToken, ValueTask>? Located { get; init; }
+
+    /// <summary>
+    /// The bytes of an identifier's values the place of its hashed postings spans (spec C, 5): a value lies at a unit of
+    /// blocks whose rows hold about that many of the column's bytes (<see cref="Indexes.KeyRunOptions.HashedUnitBlocks"/>),
+    /// so that a lookup reads that much of the identifier's column for each unit a value lies in, and its postings need
+    /// fewer bits a place. 0, the default, places a value at its block. A dataset sets it to its chunk bytes.
+    /// </summary>
+    internal long HashedUnitBytes { get; init; }
+
+    /// <summary>
     /// The most rows the file will hold, when the caller knows a bound, 0 otherwise: a compaction knows
     /// its inputs' rows. A writer that sizes its chunks (no <see cref="ChunkTargetBytes"/>) then keeps
     /// them long enough that the footer, a node per chunk and column, stays within half the tables a
@@ -267,10 +291,47 @@ public sealed record VortexWriteOptions
     internal long RowBound { get; init; }
 
     /// <summary>
-    /// Whether the writer will be given the file's time slices, which ride in its index directory: it
-    /// then keeps that directory whatever its policy builds, which may be nothing.
+    /// Whether the writer writes the file's table of contents (<see cref="Indexes.ObjectContents"/>): where each column's
+    /// chunks lie and their geometry, which a reader of a span of rows reads without the footer, and the sparse index of
+    /// its key when one is declared. It then keeps its index directory whatever its policy builds, which may be nothing.
     /// </summary>
-    internal bool CarriesSlices { get; init; }
+    internal bool CarriesContents { get; init; }
+
+    /// <summary>
+    /// The encoded bytes the chunks of each top-level column without a target of its own
+    /// (<see cref="ColumnChunkTargetBytes"/>) aim at, or 0, the default, for every such column chunked with the file: the
+    /// column gathers its rows across the file's chunks until they would encode to that many bytes at the rate its last
+    /// chunk compressed, so that a read of a few columns fetches segments of about that size. A dataset's objects set it.
+    /// </summary>
+    internal int GatheredChunkBytes { get; init; }
+
+    /// <summary>
+    /// The rows after which every column that gathers writes what it holds, or 0 for no bound: the chunks of every column
+    /// end together at least that often, where a reader cuts the rows between lanes without a chunk two of them read.
+    /// A flush ends such a group too.
+    /// </summary>
+    internal long GatheredGroupRows { get; init; }
+
+    /// <summary>
+    /// The bytes from which the file keeps a sheet of each top-level column (<see cref="Indexes.ColumnSheet"/>), which a
+    /// file's table of contents names, counted before its sheets; null, the default, for none. A dataset's sealed
+    /// objects keep them from the size at which its scans read an object's sheets before the object, under which a
+    /// question reads the object in the request its sheets would take.
+    /// </summary>
+    internal long? ColumnSheetBytes { get; init; }
+
+    /// <summary>
+    /// Whether a file that keeps sheets also counts each of its columns over its rows (<see cref="Indexes.ColumnCounts"/>);
+    /// false, the default, for none. A dataset's objects with a table of contents keep them.
+    /// </summary>
+    internal bool Counted { get; init; }
+
+    /// <summary>
+    /// Whether a file that counts its columns also keeps each one's statistics over its granules (<see cref="Indexes.GranuleStats"/>)
+    /// and where each of its values lies, granule by granule (<see cref="Indexes.ColumnLocate"/>); false, the default, for
+    /// none. A dataset's objects written in its key's order keep them.
+    /// </summary>
+    internal bool Granulated { get; init; }
 
     /// <summary>
     /// What each top-level variant column shreds, by its name: its chunks are written as the reference
@@ -286,32 +347,18 @@ public sealed record VortexWriteOptions
     internal IReadOnlyDictionary<string, Indexes.VariantDirectory>? VariantDirectories { get; init; }
 
     /// <summary>
-    /// The top-level columns whose chunks lie together after the rest of the data, the synopsis part,
-    /// each named in the index directory: the object's synopsis columns, which a question that needs
-    /// only them reads without the rest.
+    /// Whether the writer counts the paths of each top-level variant column as it takes the rows, on another lane while it
+    /// encodes them, and writes their directory, a group of rows a block (<see cref="VariantDirectories"/>): what an append
+    /// to a dataset does, which reads its rows nowhere else. A column whose directory is declared is not counted.
     /// </summary>
-    internal IReadOnlyList<string>? SynopsisColumns { get; init; }
+    internal bool CountsPaths { get; init; }
 
     /// <summary>
-    /// The chunks of a page of a sliced file's chunk directories, those that hold more than a page laid in pages
+    /// The chunks of a page of a file's chunk directories, those that hold more than a page laid in pages
     /// (<see cref="global::Vorticity.Indexes.SliceChunks.PagedVersion"/>): <see cref="global::Vorticity.Indexes.SliceChunks.DefaultPageEntries"/>. Lowered by tests,
     /// so that objects of a few chunks lay their directories in pages as a day's do.
     /// </summary>
     internal int ChunkPageEntries { get; init; } = global::Vorticity.Indexes.SliceChunks.DefaultPageEntries;
-
-    /// <summary>
-    /// The bytes of a synopsis table's list of chunks at most for the entry to keep the chunks in its place:
-    /// <see cref="global::Vorticity.Indexes.SynopsisContents.InlineListBytes"/>. Zero by tests, so that small objects list every
-    /// table apart as a day lists its large ones.
-    /// </summary>
-    internal int InlineListBytes { get; init; } = global::Vorticity.Indexes.SynopsisContents.InlineListBytes;
-
-    /// <summary>
-    /// The data under which no synopsis table is given up before the end, every one weighed by the choice against the
-    /// whole data: <see cref="IndexWriter.DefaultEarlyChoiceBytes"/>. Lowered by tests, so that objects of a few rows
-    /// meet the early verdicts that only large ones do otherwise.
-    /// </summary>
-    internal long SynopsisEarlyChoiceBytes { get; init; } = IndexWriter.DefaultEarlyChoiceBytes;
 
     /// <summary>What the chunk runs may hold in memory before they move to <see cref="ScratchDirectory"/>.</summary>
     internal long ScratchMemoryBytes { get; init; } = IndexWriter.DefaultScratchMemoryBytes;
@@ -332,8 +379,8 @@ public sealed record VortexWriteOptions
     /// Whether the budget spares the required indexes when they alone are over it: they keep
     /// their first claim on it and are written, and the report says what they cost, where the
     /// write would otherwise fail. What an index a structure cannot be read without asks for: a
-    /// dataset's run on its clustering key is as large as the column it orders on a narrow table,
-    /// so no object of one is ever big enough to bring it under a share of the data.
+    /// dataset's declared identifiers keep their hashed postings, which a lookup reads in place of
+    /// the object's rows, whatever share of the data they take.
     /// </summary>
     internal bool BudgetSparesRequired { get; init; }
 
@@ -347,6 +394,24 @@ public sealed record VortexWriteOptions
 
     /// <summary>Whether the chooser reads a list's elements from their ingest blocks.</summary>
     internal bool ElementStatistics { get; init; } = true;
+
+    /// <summary>
+    /// Whether the file keeps a zone map of each column over its blocks, which a filter prunes by and an open parses: true
+    /// by default; false for a file always read whole, such as a partial's.
+    /// </summary>
+    internal bool Zones { get; init; } = true;
+
+    /// <summary>
+    /// Whether the sparse index of the key may code its texts unpadded (Indexes.KeyCoding.UnpaddedTexts), which it does when
+    /// that takes fewer bytes: true by default; false keeps the row encoding's keys, for a test that writes both codings.
+    /// </summary>
+    internal bool UnpaddedKeyIndex { get; init; } = true;
+
+    /// <summary>
+    /// What a partial's file is written with (<see cref="AggregationPartial"/>): read whole at each question it serves, it
+    /// keeps no zone map, no statistics and no index, which an open would parse for nothing.
+    /// </summary>
+    internal static VortexWriteOptions Partial { get; } = new VortexWriteOptions { WriteStatistics = false, Zones = false, WritePolicy = WritePolicy.None };
 
     /// <summary>Whether the writer may pick an encoding per column chunk.</summary>
     internal bool Compress
@@ -401,13 +466,6 @@ public sealed record VortexWriteOptions
     {
         ArgumentNullException.ThrowIfNull(indexes);
         return this with { WritePolicy = indexes };
-    }
-
-    /// <summary>These options with a composite-key encoder.</summary>
-    internal VortexWriteOptions WithKeyEncoder(IKeyEncoder keyEncoder)
-    {
-        ArgumentNullException.ThrowIfNull(keyEncoder);
-        return this with { KeyEncoder = keyEncoder };
     }
 
     /// <summary>A copy with the four things an append decides from the file.</summary>

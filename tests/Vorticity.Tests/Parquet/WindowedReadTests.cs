@@ -5,7 +5,6 @@ using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Expressions;
 using Vorticity.Parquet;
-using Vorticity.Parquet.Reading;
 using Xunit;
 
 namespace Vorticity.Tests.Parquet;
@@ -94,7 +93,7 @@ public sealed class WindowedReadTests : IDisposable
     {
         await using VortexSession session = VortexSession.Create(options => options.MapFiles = mapFiles);
         await using ParquetFile file = await ParquetFile.OpenAsync(path, ParquetOpenOptions.Default, session, Ct);
-        ScanPlan plan = await shape(file.Scan()).ExplainAsync(Ct);
+        ScanPlan plan = await shape(file.Scan()).ExplainAsync(analyze: true, Ct);
         Vorticity.Scan scan = shape(file.Scan());
         List<string[]> rows = [];
         await foreach (RecordBatch batch in scan.ToBatchesAsync(Ct))

@@ -84,6 +84,36 @@ internal static class BytePattern
     internal static bool Contains(ReadOnlySpan<byte> value, ReadOnlySpan<byte> pattern) =>
         pattern.IsEmpty || value.IndexOf(pattern) >= 0;
 
+    /// <summary>
+    /// Whether <paramref name="token"/>, one word, is a whole word of <paramref name="value"/>: an occurrence with no
+    /// letter, digit or non-ASCII byte just before it nor just after it (<see cref="Indexes.Tokens"/>).
+    /// </summary>
+    /// <param name="value">The row's bytes.</param>
+    /// <param name="token">The word.</param>
+    internal static bool HasToken(ReadOnlySpan<byte> value, ReadOnlySpan<byte> token)
+    {
+        int from = 0;
+        while (from + token.Length <= value.Length)
+        {
+            int found = value[from..].IndexOf(token);
+            if (found < 0)
+            {
+                return false;
+            }
+
+            int at = from + found;
+            int end = at + token.Length;
+            if ((at == 0 || !Indexes.Tokens.InWord(value[at - 1])) && (end == value.Length || !Indexes.Tokens.InWord(value[end])))
+            {
+                return true;
+            }
+
+            from = at + 1;
+        }
+
+        return false;
+    }
+
     /// <summary>Whether <paramref name="value"/> matches a SQL <c>like</c> pattern.</summary>
     /// <remarks>
     /// The greedy backtrack: walk both, remember where the last <c>%</c> was and how far the value

@@ -1,5 +1,4 @@
 using System;
-using System.Text.Unicode;
 using Vorticity.Arrays.Metadata;
 using Vorticity.Buffers;
 using Vorticity.Types;
@@ -33,7 +32,24 @@ internal sealed class VarBinDecoder : ArrayDecoder
     public override int Decode(ArrayDecodeContext context, in ArrayNode node, DType dtype, int length)
     {
         ArgumentNullException.ThrowIfNull(context);
-        return Core(context, in node, dtype, length, wanted: default, selective: false);
+        return Core(context, in node, dtype, length, wanted: default, selective: false, 0, length);
+    }
+
+    /// <summary>A range reads a range of the offsets, and of the validity when there is one.</summary>
+    public override bool DecodesRange(ArrayDecodeContext context, in ArrayNode node)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        return context.ChildDecodesRange(in node, 0) && context.ValidityDecodesRange(in node, 1);
+    }
+
+    /// <summary>
+    /// The views of the range's rows over the whole heap: the offsets of its rows and the one past them decoded, and only
+    /// those checked. A variant whose shredded field is a plain binary column is read a window at a time through this.
+    /// </summary>
+    public override int DecodeRange(ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, int start, int count)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        return Core(context, in node, dtype, length, wanted: default, selective: false, start, count);
     }
 
     /// <summary>
@@ -60,7 +76,7 @@ internal sealed class VarBinDecoder : ArrayDecoder
         ReadOnlySpan<int> wanted)
     {
         ArgumentNullException.ThrowIfNull(context);
-        return Core(context, in node, dtype, length, wanted, selective: true);
+        return Core(context, in node, dtype, length, wanted, selective: true, 0, length);
     }
 
     /// <inheritdoc/>
@@ -68,8 +84,9 @@ internal sealed class VarBinDecoder : ArrayDecoder
 
     private static int Core(
         ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
-        ReadOnlySpan<int> wanted, bool selective)
+        ReadOnlySpan<int> wanted, bool selective, int start, int count)
     {
+        bool ranged = !selective && (start != 0 || count != length);
         VarBinMetadata metadata = VarBinMetadata.Read(node.Metadata);
         ArrayDecodeContext.RequireBufferCount(node.BufferCount, 1, Id);
         CanonicalSupport.RequireBinaryLike(dtype, Id);
@@ -82,7 +99,9 @@ internal sealed class VarBinDecoder : ArrayDecoder
         DType offsetsDType = context.Types.Primitive(offsetsPType, Nullability.NonNullable);
 
         // Index 1 when present; DecodeValidity rejects any other child count for us.
-        Validity validity = context.DecodeValidity(in node, 1, dtype.Nullability, length);
+        Validity validity = ranged
+            ? context.DecodeValidityRange(in node, 1, dtype.Nullability, length, start, count)
+            : context.DecodeValidity(in node, 1, dtype.Nullability, length);
         if (selective)
         {
             validity = Compute.CanonicalFilter.FilterValidity(context.Canonical, validity, wanted);
@@ -96,9 +115,11 @@ internal sealed class VarBinDecoder : ArrayDecoder
             return sparse;
         }
 
-        int offsetsIndex = context.DecodeChild(in node, 0, offsetsDType, offsetCount);
+        int offsetsIndex = ranged
+            ? context.DecodeChildRange(in node, 0, offsetsDType, offsetCount, start, count + 1)
+            : context.DecodeChild(in node, 0, offsetsDType, offsetCount);
         CanonicalNode offsets = CanonicalSupport.RequirePrimitiveChild(
-            context, offsetsIndex, offsetsPType, offsetCount, Id + " offsets");
+            context, offsetsIndex, offsetsPType, ranged ? count + 1 : offsetCount, Id + " offsets");
         ReadOnlySpan<byte> offsetBytes = offsets.Values.Span;
 
         // "The offsets start at zero, never decrease and stay inside the heap" is a property of the
@@ -106,19 +127,23 @@ internal sealed class VarBinDecoder : ArrayDecoder
         // is remembered per node. Outside a scope that remembers it, `IsNodeChecked` answers false
         // and every read walks the offsets again. A dense read of rows that are all valid checks
         // every offset as it cuts the heap, so it makes no walk of its own, and marks the node once
-        // it has cut it.
+        // it has cut it. A range checks the offsets it read, and leaves the node unmarked.
         bool checksOffsets = !selective && mask.AllValid;
         bool checkedBefore = context.IsNodeChecked(in node);
         if (!checkedBefore)
         {
-            RequireZeroStart(offsetBytes, offsetsPType);
+            if (start == 0)
+            {
+                RequireZeroStart(offsetBytes, offsetsPType);
+            }
+
             if (!checksOffsets)
             {
-                ValidateOffsets(offsetBytes, offsetsPType, length, bytes.Length);
+                ValidateOffsets(offsetBytes, offsetsPType, ranged ? count : length, bytes.Length);
             }
         }
 
-        int produced = selective ? wanted.Length : length;
+        int produced = selective ? wanted.Length : count;
         int viewBytes = ArrayDecodeContext.CheckedMultiply(
             produced, CanonicalSupport.ViewSize, Id + " views");
 
@@ -141,11 +166,11 @@ internal sealed class VarBinDecoder : ArrayDecoder
         else
         {
             ViewKernels.BuildFromOffsets(
-                offsetBytes, offsetsPType, bytes.Span, writable, length,
+                offsetBytes, offsetsPType, bytes.Span, writable, count,
                 dtype.Kind == DTypeKind.Utf8, in mask, Id);
         }
 
-        if (!checkedBefore)
+        if (!checkedBefore && !ranged)
         {
             context.MarkNodeChecked(in node);
         }

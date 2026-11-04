@@ -4,9 +4,9 @@
 // set: indices and values as `vortex.sequence`, which decode to P values each. The node is read in
 // batches of B rows, each a take of every sixteenth row of its window, as a scan with a selection
 // reads a flat node larger than its batch: the batch reset, the blob loaded again, a node-check
-// scope open around the decode. `Original` is the decoder as it was (`SparseDecoderBefore`), which
-// decodes the patch set at every batch; `Library` is the decoder of the library, which decodes it
-// once for the node.
+// scope open around the decode. `Library` is the decoder of the library, which decodes the patch set
+// once for the node; the decoder it replaced decoded it at every batch, 1.5 times what it costs now
+// at 65,536 patches in batches of 8,192 (5ae00e4c, the measure against a checkout of the original).
 using System;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -93,10 +93,6 @@ public class SparsePatchBenchmarks
     /// <summary>Gives the context back.</summary>
     [GlobalCleanup]
     public void Cleanup() => _context.Dispose();
-
-    /// <summary>The patch set decoded at every batch.</summary>
-    [Benchmark(Baseline = true)]
-    public long Original() => ReadNode(SparseDecoderBefore.Instance);
 
     /// <summary>The patch set decoded once for the node.</summary>
     [Benchmark]

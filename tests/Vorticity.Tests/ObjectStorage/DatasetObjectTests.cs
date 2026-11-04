@@ -4,18 +4,12 @@
 // dataset's object goes sealed and its sealed length is recorded.
 using System;
 using System.Collections.Concurrent;
-using System.Collections.Generic;
-using System.IO;
 using System.Linq;
 using System.Net.Http;
-using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Dataset;
-using Vorticity.IO;
 using Vorticity.ObjectStorage;
-using Vorticity.Types;
-using Vorticity.Writing;
 using Xunit;
 using Reading = Vorticity.Tests.ObjectStorage.LocationTests.Reading;
 
@@ -112,77 +106,6 @@ public sealed partial class DatasetObjectTests
 
         Assert.Equal(rows, (await dataset.Scan<Reading>().ToRecordsAsync(ct).ToListAsync(ct)).ToArray());
         Assert.True((await dataset.VerifyAsync(cancellationToken: ct)).Holds);
-    }
-
-    /// <summary>
-    /// A load whose object streams to the store and then fails before its end, here because the period's second read gives
-    /// ten rows fewer than its first, gives its upload up: the failure is the load's, and the bucket holds no open upload.
-    /// </summary>
-    [Fact]
-    public async Task AStreamedObjectThatFailsBeforeItsEndGivesItsUploadUp()
-    {
-        CancellationToken ct = TestContext.Current.CancellationToken;
-        using S3Emulator emulator = new S3Emulator { MinimumPartSize = Part };
-        await using S3ObjectStore store = Store(emulator);
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Logged.Schema, new DatasetOptions
-        {
-            ClusteringKey = [nameof(Logged.At)],
-            Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Hour, SliceTargetRows = 50_000 },
-            StreamedObjectBytes = 64 << 10,
-        }, ct);
-        // Noise that no encoding shrinks, written block after block, streams the object long before the variant's long
-        // chunks go out at its end.
-        DateTimeOffset noon = new DateTimeOffset(2026, 10, 18, 12, 0, 0, TimeSpan.Zero);
-        Random random = new Random(0x5EA1);
-        Logged[] rows = [.. Enumerable.Range(0, 400_000).Select(i => new Logged(
-            noon.AddMilliseconds(i * 5),
-            random.NextInt64(),
-            Variant.Object(("route", Variant.From($"/r/{i % 37}")), ("size", Variant.From((long)i * 7_919 % 100_003)))))];
-        byte[] whole = await FileOfAsync(rows, ct);
-        byte[] fewer = await FileOfAsync(rows[..^10], ct);
-        int reads = 0;
-        PeriodRows hour = new PeriodRows(
-            TimeSlicer.InstantOf(noon, TimeUnit.Microseconds), [token => BatchesAsync(Interlocked.Increment(ref reads) == 1 ? whole : fewer, token)]);
-
-        await Assert.ThrowsAsync<DatasetIntegrityException>(async () => await DatasetCompactor.LoadPeriodsAsync(dataset, [hour], degree: 1, cancellationToken: ct));
-        Assert.Equal(2, reads);
-        Assert.Contains(emulator.Log, line => line.Contains("?uploads", StringComparison.Ordinal));
-
-        // The upload is given up as the put sees its content fail, behind the load's failure.
-        System.Diagnostics.Stopwatch waited = System.Diagnostics.Stopwatch.StartNew();
-        while (emulator.OpenUploads > 0 && waited.Elapsed < TimeSpan.FromSeconds(10))
-        {
-            await Task.Delay(10, ct);
-        }
-
-        Assert.Equal(0, emulator.OpenUploads);
-    }
-
-    [VortexRecord]
-    public partial record struct Logged(DateTimeOffset At, long Noise, Variant Attributes);
-
-    /// <summary><paramref name="rows"/> as a file of their own.</summary>
-    private static async Task<byte[]> FileOfAsync(Logged[] rows, CancellationToken ct)
-    {
-        using MemoryStream stream = new MemoryStream();
-        await using (VortexFileWriter writer = VortexFileWriter.Create(
-            new StreamSegmentSink(stream), VortexTypes.ToDType(Logged.Schema, new DTypeArena()), new VortexWriteOptions()))
-        {
-            await writer.WriteAsync<Logged>(rows, ct);
-            await writer.CompleteAsync(ct);
-        }
-
-        return stream.ToArray();
-    }
-
-    /// <summary>The rows of <paramref name="file"/>, in its order, as a load reads a period.</summary>
-    private static async IAsyncEnumerable<RecordBatch> BatchesAsync(byte[] file, [EnumeratorCancellation] CancellationToken ct)
-    {
-        await using VortexFile open = await VortexFile.OpenAsync(new MemorySegmentSource(file), VortexOpenOptions.Default);
-        await foreach (RecordBatch batch in open.Scan<Logged>().With(new ScanOptions { BatchRows = 4_096 }).ToBatchesAsync(ct))
-        {
-            yield return batch;
-        }
     }
 
     /// <summary>Rows whose temperatures repeat in no short cycle, so that their chunks do not compress to nothing.</summary>

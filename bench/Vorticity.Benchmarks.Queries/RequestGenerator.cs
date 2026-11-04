@@ -16,7 +16,7 @@ namespace Vorticity.Benchmarks.Queries;
 /// </summary>
 /// <remarks>
 /// <para>
-/// The columns follow each other as real ones do, which is what the runs of a sorted slice are made of: a
+/// The columns follow each other as real ones do, which is what the runs of sorted granules are made of: a
 /// service runs in its home region, four services in five only read, one in ten takes health checks and
 /// probes, sent from one monitoring region each, a status goes with some methods only (201 with a write,
 /// 304 with a read), an endpoint belongs to one service and answers one method, a host serves its service's
@@ -180,7 +180,7 @@ internal sealed class RequestGenerator
     }
 
     /// <summary>
-    /// The runs each synopsis column holds in the rows, sorted by the design's order (status, region, method, service,
+    /// The runs each column holds in the rows sorted by the first design's order (status, region, method, service,
     /// version, endpoint, host): the distinct combinations of the first k columns, k from one to seven.
     /// </summary>
     internal static long[] RunsByDepth(IReadOnlyList<GeneratedRequest> rows)
@@ -203,7 +203,7 @@ internal sealed class RequestGenerator
 
     /// <summary>
     /// <c>--micro generator</c>: a minute at the design's rate, 5 × 10⁴ rows a second, and the runs of each
-    /// synopsis column against the design's figures.
+    /// column under the first design's order against its figures.
     /// </summary>
     internal static int Run(int seed)
     {

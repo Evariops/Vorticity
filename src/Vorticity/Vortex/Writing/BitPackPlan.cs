@@ -208,47 +208,6 @@ internal readonly struct BitPackPlan
             best.Exceptions);
     }
 
-    /// <summary>The encoded, unsigned form of one row's raw bits.</summary>
-    /// <param name="bits">The row's value, as the element width's unsigned bits.</param>
-    /// <param name="transform">Which map.</param>
-    /// <param name="reference">The frame of reference, for <see cref="BitPackTransform.Frame"/>.</param>
-    /// <param name="elementBits">8, 16, 32 or 64.</param>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    internal static ulong Encode(
-        ulong bits, BitPackTransform transform, ulong reference, int elementBits) =>
-        transform == BitPackTransform.Frame
-            ? Frame(bits, reference, elementBits)
-            : ZigZag(bits, elementBits);
-
-    /// <summary>
-    /// <c>value - reference</c>, wrapping and masked to the element width.
-    /// </summary>
-    /// <remarks>
-    /// The mask is not cosmetic here, though it is invisible in the packed bytes: the packer
-    /// truncates to the element width anyway, but the histogram does not, and an unmasked
-    /// subtraction that wrapped would report 64 bits for a value that packs into three.
-    /// </remarks>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static ulong Frame(ulong bits, ulong reference, int elementBits) =>
-        unchecked(bits - reference) & BitWords.Mask(elementBits);
-
-    /// <summary>
-    /// <c>(v &lt;&lt; 1) ^ (v &gt;&gt; (bits - 1))</c> with an arithmetic right shift: the sign bit
-    /// becomes the low bit, so -1 encodes as 1 and 1 as 2.
-    /// </summary>
-    /// <remarks>
-    /// Written over the unsigned word rather than over a signed one so that all four element
-    /// widths share it: <c>0 - (bits >> (elementBits - 1))</c> is the arithmetic shift's result,
-    /// all ones or none, without a cast per width.
-    /// </remarks>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static ulong ZigZag(ulong bits, int elementBits)
-    {
-        ulong width = BitWords.Mask(elementBits);
-        ulong sign = 0UL - ((bits >> (elementBits - 1)) & 1);
-        return ((bits << 1) ^ sign) & width;
-    }
-
     /// <summary>
     /// Both width histograms in one walk, with the physical type resolved before the walk starts.
     /// </summary>
@@ -563,7 +522,7 @@ internal readonly struct BitPackPlan
     /// <c>(v &lt;&lt; 1) ^ (v &gt;&gt; (bits - 1))</c> in the element's own arithmetic.
     /// </summary>
     /// <remarks>
-    /// The same map as the 64-bit <see cref="ZigZag(ulong, int)"/>, with the width mask left to
+    /// The same map as a 64-bit zigzag masked to <c>bits</c>, with the width mask left to
     /// <typeparamref name="T"/>: shifting left in <typeparamref name="T"/> drops the bit the mask
     /// would have cleared, and <c>T.Zero - (v >> (bits - 1))</c> is all ones or none for the same
     /// reason the unsigned form's <c>0UL - ...</c> is.

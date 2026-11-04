@@ -3,7 +3,6 @@ using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Buffers;
 using Vorticity.IO;
-using Vorticity.Serialization.Schemas;
 using Xunit;
 using static Vorticity.Tests.IO.IoTestData;
 

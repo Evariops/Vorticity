@@ -3,8 +3,6 @@
 // it only moves them, as a compaction, an index fragment, the purge of deletion marks and a repack
 // do (a rekey is checked with the encrypted dataset's tests). A commit that applies nothing creates
 // no version, and a header written before the field reads as its own version.
-using System;
-using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Threading;
@@ -32,7 +30,7 @@ public sealed class DatasetLastDataChangeTests
         DatasetOptions options = new DatasetOptions
         {
             Seed = 0x1A57_DA7A,
-            ClusteringKey = ["Key"],
+            Layout = new DatasetLayout { SortKey = [LayoutValue.Column("Key")] },
             MarkedObjectBytes = 0,
             MarkedShare = 1,
             Write = new VortexWriteOptions { RowBlockSize = 64 },
@@ -91,7 +89,7 @@ public sealed class DatasetLastDataChangeTests
         CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         await using MemoryObjectStore store = new MemoryObjectStore();
-        DatasetOptions options = new DatasetOptions { Seed = 0x1A57_DA7A, ClusteringKey = ["Key"] };
+        DatasetOptions options = new DatasetOptions { Seed = 0x1A57_DA7A, Layout = new DatasetLayout { SortKey = [LayoutValue.Column("Key")] } };
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, ChangeRow.Schema, options, ct);
         await AppendAsync(dataset, 0, ct);
 

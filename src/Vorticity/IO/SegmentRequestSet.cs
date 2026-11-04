@@ -96,6 +96,18 @@ internal sealed class SegmentRequestSet : IDisposable
     internal Indexes.VariantKeyReads? VariantKeys { get; set; }
 
     /// <summary>
+    /// The columns the split's scan takes from their zones where they give the split's values, whose segments the struct at
+    /// the root then registers none of; null for none.
+    /// </summary>
+    internal Scanning.ZoneKeyReads? ZoneKeys { get; set; }
+
+    /// <summary>
+    /// What the split's lane plans of the chunks it reads a part of, whose flat layouts register the ranges of the part's
+    /// granules rather than their segment (spec C, 2); null for none.
+    /// </summary>
+    internal Indexes.GranulePlans? Granules { get; set; }
+
+    /// <summary>
     /// Registers a segment and returns its slot.
     /// </summary>
     /// <param name="spec">The locator, straight off the wire.</param>

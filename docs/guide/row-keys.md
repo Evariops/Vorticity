@@ -131,9 +131,9 @@ The core library ships no key encoder and does not look for one by reflection, s
 composite key names its encoder in `IndexPolicy.ForKey`. `RowKeyEncoder` is such an encoder. It
 implements `IKeyEncoder`, turns each tuple of the key's columns into one row key, and names its
 layout in `Format`. The writer records that format in the file so a reader can tell which keys it
-may compare. All composite keys in one file share one encoder. A dataset with a clustering key of
-several columns writes each object's sorted run this way. [indexes.md](indexes.md) covers what an
-index costs and when to ask for one.
+may compare. All composite keys in one file share one encoder. A dataset with a sort key of several
+components encodes its keys this way, to sort its rows and to index the first key of each granule.
+[indexes.md](indexes.md) covers what an index costs and when to ask for one.
 
 ## Watch out
 

@@ -1,12 +1,13 @@
 using System;
-using System.Buffers;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
+using Vorticity.Arrays;
 using Vorticity.Compute;
 using Vorticity.Layouts;
 using Vorticity.Scanning;
+using Vorticity.Types;
 using Vorticity.Writing;
 
 namespace Vorticity.Aggregating;
@@ -14,13 +15,23 @@ namespace Vorticity.Aggregating;
 /// <summary>The values of one column of the chosen rows, by group: fetched after the pass, read as results.</summary>
 internal abstract class ChosenValues
 {
+    /// <summary>The groups below which a fetch of some is a few of many: its values at a place of their own.</summary>
+    private const int Sparse = 8;
+
+    // The place of each group fetched, when they are a few of many; null when the group is its place.
+    private Dictionary<int, int>? _places;
+
     /// <summary>
     /// Makes room for the values of <paramref name="groups"/>, the groups a fetch reads, each below
     /// <paramref name="most"/>: arrays their number when they are a few of many, a top-k's or a window's,
     /// found through a map of their numbers; arrays indexed by the group otherwise. The arrays are held
     /// under the result's <paramref name="memory"/> until it is delivered, the ones they replace let go. A fetch's values are the ones read until the next fetch.
     /// </summary>
-    internal abstract void EnsureGroups(ReadOnlySpan<int> groups, int most, QueryMemory? memory);
+    /// <param name="groups">The groups the fetch reads.</param>
+    /// <param name="most">A bound on the groups' numbers.</param>
+    /// <param name="memory">What the values are held under; null for none.</param>
+    /// <param name="session">The session whose pool holds what the values need of it.</param>
+    internal abstract void EnsureGroups(ReadOnlySpan<int> groups, int most, QueryMemory? memory, VortexSession session);
 
     /// <summary>Lets the arrays go, and what they held of <paramref name="memory"/>.</summary>
     internal abstract void Release(QueryMemory? memory);
@@ -33,20 +44,42 @@ internal abstract class ChosenValues
     /// <paramref name="first"/>: the take's row <c>rows[i]</c> goes to group <c>groups[i]</c>.
     /// </summary>
     internal abstract void Read(RecordBatch batch, int node, int first, ReadOnlySpan<int> rows, ReadOnlySpan<int> groups);
+
+    /// <summary>The place of <paramref name="group"/>'s value: the group itself, or its place among a fetch's few groups.</summary>
+    protected int Place(int group) => _places is null ? group : _places[group];
+
+    /// <summary>
+    /// The places a fetch of <paramref name="groups"/>, each below <paramref name="most"/>, needs: their number when they
+    /// are a few of many, each group then at the place of its first mention; <paramref name="most"/> otherwise.
+    /// </summary>
+    protected int Places(ReadOnlySpan<int> groups, int most)
+    {
+        if ((long)groups.Length * Sparse >= most)
+        {
+            _places = null;
+            return most;
+        }
+
+        _places ??= [];
+        _places.Clear();
+        foreach (int group in groups)
+        {
+            _places.TryAdd(group, _places.Count);
+        }
+
+        return _places.Count;
+    }
+
+    /// <summary>Forgets the places of the last fetch.</summary>
+    protected void ForgetPlaces() => _places = null;
 }
 
 /// <summary>The values of a column of chosen rows as <typeparamref name="T"/>, and the groups that have no row.</summary>
 internal sealed class ChosenValues<T>(ChosenColumnNode<T> column) : ChosenValues
 {
-    /// <summary>The groups below which a fetch of some is a few of many: its values at a place of their own.</summary>
-    private const int Sparse = 8;
-
     private T[] _values = [];
     private bool[] _missing = [];
     private T[] _scratch = [];
-
-    // The place of each group fetched, when they are a few of many; null when the group is its place.
-    private Dictionary<int, int>? _places;
 
     /// <summary>The value of <paramref name="group"/>'s chosen row; the default when it has none.</summary>
     internal T At(int group) => _values[Place(group)];
@@ -54,27 +87,9 @@ internal sealed class ChosenValues<T>(ChosenColumnNode<T> column) : ChosenValues
     /// <summary>Whether <paramref name="group"/> has no chosen row: no candidate, or no row its filter keeps.</summary>
     internal bool Missing(int group) => _missing[Place(group)];
 
-    private int Place(int group) => _places is null ? group : _places[group];
-
-    internal override void EnsureGroups(ReadOnlySpan<int> groups, int most, QueryMemory? memory)
+    internal override void EnsureGroups(ReadOnlySpan<int> groups, int most, QueryMemory? memory, VortexSession session)
     {
-        int length = most;
-        if ((long)groups.Length * Sparse < most)
-        {
-            _places ??= [];
-            _places.Clear();
-            foreach (int group in groups)
-            {
-                _places.TryAdd(group, _places.Count);
-            }
-
-            length = _places.Count;
-        }
-        else
-        {
-            _places = null;
-        }
-
+        int length = Places(groups, most);
         if (length > _values.Length)
         {
             // Each value a fetch reads is written, or its group cleared: the arrays come new.
@@ -93,7 +108,7 @@ internal sealed class ChosenValues<T>(ChosenColumnNode<T> column) : ChosenValues
         _values = [];
         _missing = [];
         _scratch = [];
-        _places = null;
+        ForgetPlaces();
     }
 
     internal override void Clear(int group)
@@ -150,6 +165,147 @@ internal sealed class ChosenResultColumn<T>(string name, VortexType type, Chosen
 }
 
 /// <summary>
+/// The rows of a column of chosen rows that holds no single value — a list, a variant, a struct — by group: kept as the
+/// rows they are, each once, in a store of the column's type, and gathered into the result's column; never made .NET
+/// values, so no object is made a value or an element of a list. A fetch's rows are the ones kept until the next fetch.
+/// </summary>
+/// <param name="type">The type of the result's column, nullable where a group may have no row.</param>
+internal sealed class ChosenRows(VortexType type) : ChosenValues
+{
+    private ColumnStore? _store;
+    private CanonicalArena? _arena;
+    private QueryMemory? _memory;
+
+    // The row of the store each place's group chose; -1 for a group without one.
+    private int[] _rows = [];
+
+    // The rows a gather takes: of a fetched batch, or of the store.
+    private int[] _picked = [];
+
+    // The store's row that stands for a group without a row, added once a fetch; -1 until one is asked for.
+    private int _missing = -1;
+
+    // What the store holds of the result's memory.
+    private long _held;
+
+    internal override void EnsureGroups(ReadOnlySpan<int> groups, int most, QueryMemory? memory, VortexSession session)
+    {
+        _memory = memory;
+        int length = Places(groups, most);
+        if (length > _rows.Length)
+        {
+            int capacity = Scratch.Capacity(length, _rows.Length);
+            memory?.Hold((capacity - _rows.Length) * (long)sizeof(int), "fetch of the chosen rows");
+            _rows = new int[capacity];
+        }
+
+        if (_store is null)
+        {
+            VortexSessionOptions options = session.Options;
+            _store = ColumnStores.Create(VortexTypes.ToDType(type.Nullable, new DTypeArena()), options.EnginePool, options.Extensions);
+            _arena = new CanonicalArena(16, options.EnginePool);
+        }
+
+        // Each fetch keeps its own rows: the store emptied, its buffers kept, none of its rows accepted.
+        _store.Truncate(0);
+        _store.Commit();
+        _missing = -1;
+    }
+
+    internal override void Release(QueryMemory? memory)
+    {
+        _store?.Release();
+        _arena?.Reset();
+        _store = null;
+        _arena = null;
+        memory?.LetGo(_held + (_rows.Length * (long)sizeof(int)));
+        _held = 0;
+        _rows = [];
+        _picked = [];
+        _memory = null;
+        ForgetPlaces();
+    }
+
+    internal override void Clear(int group) => _rows[Place(group)] = -1;
+
+    internal override void Read(RecordBatch batch, int node, int first, ReadOnlySpan<int> rows, ReadOnlySpan<int> groups)
+    {
+        Scratch.Grow(ref _picked, groups.Length);
+        for (int i = 0; i < groups.Length; i++)
+        {
+            _picked[i] = rows[i] - first;
+        }
+
+        int start = _store!.Rows;
+        StoreRows.Append(_store, batch.Arena, CanonicalFilter.Apply(batch.Arena, node, _picked.AsSpan(0, groups.Length)));
+        Kept();
+        for (int i = 0; i < groups.Length; i++)
+        {
+            _rows[Place(groups[i])] = start + i;
+        }
+    }
+
+    /// <summary>
+    /// Appends to <paramref name="into"/>, a store of the result's column, the rows <paramref name="groups"/> chose, in
+    /// order: gathered from the store, built once a call over its buffers; a group without a row takes a null row, or the
+    /// type's default where the column holds no null.
+    /// </summary>
+    internal void Append(ColumnStore into, ReadOnlySpan<int> groups, bool nullable)
+    {
+        Scratch.Grow(ref _picked, groups.Length);
+        for (int i = 0; i < groups.Length; i++)
+        {
+            int row = _rows[Place(groups[i])];
+            _picked[i] = row >= 0 ? row : Missing(nullable);
+        }
+
+        _arena!.ResetKeepingBlocks();
+        int root = _store!.Build(_arena, _store.Rows);
+        StoreRows.Append(into, _arena, CanonicalFilter.Apply(_arena, root, _picked.AsSpan(0, groups.Length)));
+    }
+
+    /// <summary>The store's row a group without a row takes, added on the first ask of a fetch.</summary>
+    private int Missing(bool nullable)
+    {
+        if (_missing < 0)
+        {
+            if (nullable)
+            {
+                _store!.AppendNull();
+            }
+            else
+            {
+                _store!.AppendDefault();
+            }
+
+            Kept();
+            _missing = _store.Rows - 1;
+        }
+
+        return _missing;
+    }
+
+    /// <summary>The rows appended accepted, and what the store holds reserved: its buffers, grown by doubling, at most twice its bytes.</summary>
+    private void Kept()
+    {
+        _store!.Commit();
+        long reserved = 2 * _store.CommittedBytes;
+        if (reserved > _held)
+        {
+            _memory?.Hold(reserved - _held, "fetch of the chosen rows");
+            _held = reserved;
+        }
+    }
+}
+
+/// <summary>A column of chosen rows that holds no single value, in a result: the groups' rows gathered from where the fetch kept them.</summary>
+internal sealed class ChosenRowsColumn(string name, VortexType type, IChosenColumn node) : ResultColumn(name, type)
+{
+    internal override void Append(AggregationOutcome outcome, ColumnStore store, ReadOnlySpan<int> groups) =>
+        ((ChosenRows)outcome.ChosenOf(node)).Append(store, groups, Type.IsNullable);
+}
+
+/// <summary>
 /// The late reading of chosen rows: once a pass has kept each group's rows as positions, the rows
 /// of a set of groups are sorted and taken from the source in one take, each row once whatever
 /// number of choices and groups it serves, for the columns read from them alone, which decodes only
@@ -196,7 +352,7 @@ internal static class ChosenFetch
 
         for (int c = 0; c < chosen.Length; c++)
         {
-            outcome.ChosenOf(chosen[c]).EnsureGroups(groups.Span, most, memory);
+            outcome.ChosenOf(chosen[c]).EnsureGroups(groups.Span, most, memory, source.Session);
         }
 
         // Each row a group chose, with the choice and the group it serves; a group without a row
@@ -274,15 +430,15 @@ internal static class ChosenFetch
             KeepEncodings = false,
             SinkDecodes = false,
             PositionsUnread = false,
-            Pruned = false,
-            Live = null,
+            Analysis = null,
+            Answering = null,
             Options = spec.Options with { Compact = true },
         };
 
         // Each batch of the take: for each choice, its rows among the batch's, read into its columns.
         int first = 0;
         int[] read = ofChoice[..^1];
-        await foreach (RecordBatch batch in source.BatchesAsync(take, metrics).WithCancellation(cancellationToken).ConfigureAwait(false))
+        await foreach (RecordBatch batch in source.Rows.BatchesAsync(take, metrics).WithCancellation(cancellationToken).ConfigureAwait(false))
         {
             int rows = batch.RowCount;
             if (first + rows > distinct)

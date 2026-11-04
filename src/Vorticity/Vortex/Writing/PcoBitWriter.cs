@@ -26,9 +26,6 @@ internal sealed class PcoBitWriter : IDisposable
         _buffer = ArrayPool<byte>.Shared.Rent(Math.Max(capacity, 64));
     }
 
-    /// <summary>The bytes written, from the start of the buffer: the buffer's first <see cref="Length"/> bytes once aligned.</summary>
-    internal ReadOnlySpan<byte> Written => _buffer.AsSpan(0, _bytes);
-
     /// <summary>Bytes written; the position of the next section once <see cref="Align"/> has run.</summary>
     internal int Length => _bytes;
 
@@ -77,14 +74,6 @@ internal sealed class PcoBitWriter : IDisposable
         _buffer = [];
         _bytes = 0;
         return buffer;
-    }
-
-    /// <summary>Starts over, the buffer kept.</summary>
-    internal void Reset()
-    {
-        _bytes = 0;
-        _pending = 0;
-        _pendingBits = 0;
     }
 
     /// <inheritdoc/>

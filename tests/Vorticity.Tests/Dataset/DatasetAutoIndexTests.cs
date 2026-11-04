@@ -7,7 +7,6 @@ using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Dataset;
 using Vorticity.Indexes;
-using Vorticity.Tests.Writing;
 using Xunit;
 
 namespace Vorticity.Tests.Dataset;
@@ -22,7 +21,7 @@ public sealed partial class DatasetAutoIndexTests
         await using MemoryObjectStore store = new MemoryObjectStore();
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Before.Schema, new DatasetOptions
         {
-            ClusteringKey = [nameof(Before.Id)],
+            Layout = new DatasetLayout { SortKey = [LayoutValue.Column(nameof(Before.Id))] },
             Write = new VortexWriteOptions { IndexBudgetPerMille = 100_000 },
         }, Ct);
         await using (ObjectDraft draft = dataset.StartObject())

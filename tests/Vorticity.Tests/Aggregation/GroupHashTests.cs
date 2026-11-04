@@ -216,9 +216,9 @@ public sealed class GroupHashTests
     {
         List<byte[]> keys = Crowded();
         ByteKeyTable table = new ByteKeyTable();
-        Assert.Equal(0, table.GetOrAdd(keys[0], out bool added));
+        Assert.Equal(0, table.GetOrAdd(keys[0], out _));
         Assert.Equal(1, table.AddDetached());
-        Assert.Equal(2, table.GetOrAdd([], out added));
+        Assert.Equal(2, table.GetOrAdd([], out bool added));
         Assert.True(added);
         for (int i = 1; i < keys.Count; i++)
         {
