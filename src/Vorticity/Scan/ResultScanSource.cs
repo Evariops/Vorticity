@@ -21,8 +21,11 @@ internal abstract class ResultQuery
     /// <summary>What the query's own scan did, which a result's scan reports as its own.</summary>
     internal abstract ScanCounters Counters { get; }
 
+    // An enumerator is never awaited, so the Async suffix VSTHRD200 asks of what returns one does not apply.
+#pragma warning disable VSTHRD200
     /// <summary>The result's batches; the query runs as they are asked for.</summary>
     internal abstract IAsyncEnumerator<RecordBatch> Batches(CancellationToken cancellationToken);
+#pragma warning restore VSTHRD200
 
     /// <summary>The plan of the query's scan.</summary>
     /// <summary>What running the query will do, reading the structures it would consult with <paramref name="analyze"/>.</summary>

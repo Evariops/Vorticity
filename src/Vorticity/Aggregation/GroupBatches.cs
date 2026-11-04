@@ -204,6 +204,8 @@ internal sealed class AggregationQuery : ResultQuery
     /// <summary>The result's batches: the query runs when the first is asked for.</summary>
     internal override IAsyncEnumerator<RecordBatch> Batches(CancellationToken cancellationToken) => Groups(cancellationToken);
 
+    // An enumerator is never awaited, so the Async suffix VSTHRD200 asks of what returns one does not apply.
+#pragma warning disable VSTHRD200
     /// <summary>
     /// The result's batches: as the groups close, on a key that streams, or one its zones prove final
     /// as the read goes when they nearly sort; once the pass has run, on any other.
@@ -218,6 +220,7 @@ internal sealed class AggregationQuery : ResultQuery
         StreamingGroupBatches.Streaming(this) >= 0 ? new StreamingGroupBatches(this, cancellationToken)
         : ZoneFinality.Candidate(this) ? new ZoneDecidedGroups(this, cancellationToken)
         : new GroupBatches(this, cancellationToken);
+#pragma warning restore VSTHRD200
 
     /// <summary>
     /// What the pass would take as states in place of rows (<see cref="StateRequest"/>), when its source
@@ -755,6 +758,8 @@ internal sealed class ValueEnumerator<T> : IAsyncEnumerator<T>
         _linked = linked;
     }
 
+    // An enumerator is never awaited, so the Async suffix VSTHRD200 asks of what returns one does not apply.
+#pragma warning disable VSTHRD200
     /// <summary>The values of a result of one value, read by <paramref name="query"/>'s owner with the token its caller gave.</summary>
     internal static ValueEnumerator<T> Of(ResultQuery query, CancellationToken own, CancellationToken given)
     {
@@ -764,6 +769,7 @@ internal sealed class ValueEnumerator<T> : IAsyncEnumerator<T>
         CancellationToken token = linked?.Token ?? (given.CanBeCanceled ? given : own);
         return new ValueEnumerator<T>(query, linked, token);
     }
+#pragma warning restore VSTHRD200
 
     public T Current => _values[_index];
 
