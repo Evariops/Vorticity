@@ -5,7 +5,6 @@ using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
-using Vorticity.Compute;
 using Vorticity.Layouts;
 using Vorticity.Scanning;
 using Vorticity.Types;
@@ -107,7 +106,13 @@ internal sealed class DistinctQuery : ResultQuery
 
     internal override IAsyncEnumerator<RecordBatch> Batches(CancellationToken cancellationToken) => new DistinctBatches(this, cancellationToken);
 
-    internal override ValueTask<ScanPlan> ExplainAsync(CancellationToken cancellationToken) => Projection.ExplainAsync(cancellationToken);
+    /// <summary>The projection's plan, and the question: the distinct values of its columns, an aggregate by them alone.</summary>
+    internal override async ValueTask<ScanPlan> ExplainAsync(bool analyze, CancellationToken cancellationToken)
+    {
+        ScanPlan plan = await Projection.ExplainAsync(analyze, cancellationToken).ConfigureAwait(false);
+        ScanSpec spec = Projection.SourceSpec(keepEncodings: true, out _);
+        return spec.Query is { } query ? plan with { Logical = query.Aggregating(Plan, null).Text } : plan;
+    }
 
     internal override ResultQuery As(VortexSchema record, Type type)
     {
@@ -272,7 +277,7 @@ internal sealed class DistinctBatches : IAsyncEnumerator<RecordBatch>
             };
             plan.Watch?.Invoke([_partition]);
             _outcome = new AggregationOutcome(plan, _partition.Slots, _partition.Keys, []);
-            _inner = projection.Host.Source.BatchesAsync(spec, projection.Counters).GetAsyncEnumerator(_cancellationToken);
+            _inner = projection.Host.Source.Rows.BatchesAsync(spec, projection.Counters).GetAsyncEnumerator(_cancellationToken);
         }
 
         // Once the values asked for are met the scan is asked for nothing more.

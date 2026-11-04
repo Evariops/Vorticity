@@ -44,6 +44,10 @@ internal sealed class HttpTransport : IDisposable
     private readonly RetryBudget _budget = new RetryBudget();
     private readonly ConcurrencyLimit _limit;
 
+    // The process's budget, which the stores share, and this store's own rate under it, which its service's throttles halve.
+    private readonly RequestBudget _requests;
+    private readonly RequestBudget _rate;
+
     /// <summary>A transport for one store.</summary>
     /// <param name="options">Its connections, deadlines and retries.</param>
     /// <param name="provider">The provider's name, for the instruments' tags.</param>
@@ -67,16 +71,27 @@ internal sealed class HttpTransport : IDisposable
         _client.DefaultRequestVersion = HttpVersion.Version11;
         _client.DefaultVersionPolicy = HttpVersionPolicy.RequestVersionOrLower;
         _limit = new ConcurrencyLimit(options.MaxConnections, options.TimeProvider);
+        _requests = options.RequestBudget ?? RequestBudget.Process;
+        _rate = RequestBudget.ForStore(_requests.RequestsPerSecond, options.TimeProvider);
     }
-
-    /// <summary>The store's options.</summary>
-    internal StoreTransportOptions Options => _options;
 
     /// <summary>The budget's tokens left, for tests.</summary>
     internal int BudgetLeft => _budget.Tokens;
 
     /// <summary>The requests in flight the store allows now, halved by a throttle.</summary>
     internal int ConcurrencyLimit => _limit.Limit;
+
+    /// <summary>The requests a second the store sends now at most, under the budget's, halved by a throttle.</summary>
+    internal double RequestRate => _rate.CurrentRequestsPerSecond;
+
+    /// <summary>
+    /// A token for a request that its caller's giving up must not cut short, the start of an upload, which its answer
+    /// alone names: cancelled by nothing until <see cref="Outlive"/> gives it the abort's deadline.
+    /// </summary>
+    internal CancellationTokenSource Outliving() => new CancellationTokenSource(Timeout.InfiniteTimeSpan, _options.TimeProvider);
+
+    /// <summary>Gives a token of <see cref="Outliving"/> the abort's deadline from now, its caller having given up.</summary>
+    internal void Outlive(CancellationTokenSource outliving) => outliving.CancelAfter(_options.AbortTimeout);
 
     /// <summary>
     /// Sends a request built by <paramref name="build"/> and hands its answer to
@@ -114,6 +129,20 @@ internal sealed class HttpTransport : IDisposable
             bool notApplied = false;
             await _limit.EnterAsync(cancellationToken).ConfigureAwait(false);
             int episode = _limit.Episode;
+
+            // The store's place and its turn first, then the process's: the budget every store of the process shares.
+            try
+            {
+                await _rate.EnterAsync(cancellationToken).ConfigureAwait(false);
+                await _requests.EnterAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch
+            {
+                _limit.Exit();
+                throw;
+            }
+
+            int budgeted = _rate.Episode;
             long started = Stopwatch.GetTimestamp();
             try
             {
@@ -126,6 +155,7 @@ internal sealed class HttpTransport : IDisposable
                     TResult result = await consume(response, state, cancellationToken).ConfigureAwait(false);
                     _budget.Succeeded();
                     _limit.Succeeded();
+                    _rate.Succeeded();
                     return result;
                 }
 
@@ -137,6 +167,7 @@ internal sealed class HttpTransport : IDisposable
                     // be sent twice goes again, without asking the service what became of it.
                     StoreTelemetry.Throttled();
                     _limit.Throttled(episode);
+                    _rate.Throttled(budgeted);
                     notApplied = true;
                 }
 
@@ -167,6 +198,7 @@ internal sealed class HttpTransport : IDisposable
             finally
             {
                 response?.Dispose();
+                _requests.Exit();
                 _limit.Exit();
             }
 

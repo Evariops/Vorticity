@@ -30,9 +30,9 @@ public sealed partial class IdentifierPostingsTests
         await using MemoryObjectStore store = new MemoryObjectStore();
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Request.Schema, new DatasetOptions
         {
-            ClusteringKey = [nameof(Request.At)],
+            Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(Request.At)).Truncate(CalendarUnit.Hour), SortKey = [LayoutValue.Column(nameof(Request.At))], Organization = LayoutOrganization.Leveled },
             Identifiers = [nameof(Request.RequestId)],
-            Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Hour, SliceTargetRows = 500 },
+            ContentsObjectBytes = 0,
         }, Ct);
         Random random = new Random(19);
         List<Request> appended = [];
@@ -68,7 +68,7 @@ public sealed partial class IdentifierPostingsTests
 
         // What the postings of a sealed hour weigh a row, the id 32 hexadecimal digits: a gap of about 12
         // bits and a block number, here always the hour's one block. A sorted run took 19.3 bytes.
-        await foreach (TreeEntry leaf in dataset.Levels[PeriodLevels.Periods].EnumerateAsync(dataset.Pages, Ct))
+        await foreach (TreeEntry leaf in dataset.AboveLevelZeroAsync(Ct))
         {
             ObjectEntry entry = ObjectEntry.FromBytes(leaf.Value.Span);
             await using ObjectLease lease = await dataset.RentAsync(entry, Ct);
@@ -98,9 +98,9 @@ public sealed partial class IdentifierPostingsTests
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Request.Schema, new DatasetOptions
         {
             Session = session,
-            ClusteringKey = [nameof(Request.At)],
+            Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(Request.At)).Truncate(CalendarUnit.Hour), SortKey = [LayoutValue.Column(nameof(Request.At))], Organization = LayoutOrganization.Leveled },
             Identifiers = [nameof(Request.RequestId)],
-            Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Hour, SliceTargetRows = 500 },
+            ContentsObjectBytes = 0,
         }, Ct);
         Random random = new Random(23);
         List<Request> appended = [];
@@ -119,12 +119,12 @@ public sealed partial class IdentifierPostingsTests
         }
 
         List<ObjectEntry> hours = [];
-        await foreach (TreeEntry leaf in dataset.Levels[PeriodLevels.Periods].EnumerateAsync(dataset.Pages, Ct))
+        await foreach (TreeEntry leaf in dataset.AboveLevelZeroAsync(Ct))
         {
             hours.Add(ObjectEntry.FromBytes(leaf.Value.Span));
         }
 
-        Assert.Equal(2, hours.Count);
+        Assert.Equal(3, hours.Count);
         Request needle = appended[1_234];
         VortexExpr filter = VortexExpr.Parse($"RequestId = '{needle.RequestId}'");
         inner.Latency = TimeSpan.FromMilliseconds(20);
@@ -172,13 +172,18 @@ public sealed partial class IdentifierPostingsTests
         {
             await using MemoryObjectStore inner = new MemoryObjectStore();
             await using CountingObjectStore store = new CountingObjectStore(inner);
-            await using VortexSession session = VortexSession.Create(options => options.SynopsisCache = new SynopsisCache(directory, 64 << 20));
+            // No segment cache, which would answer the warm lookup's blocks too: what the synopsis cache spares alone.
+            await using VortexSession session = VortexSession.Create(options =>
+            {
+                options.SynopsisCache = new SynopsisCache(directory, 64 << 20);
+                options.SegmentCache = new SegmentCache(0);
+            });
             await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Request.Schema, new DatasetOptions
             {
                 Session = session,
-                ClusteringKey = [nameof(Request.At)],
+                Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(Request.At)).Truncate(CalendarUnit.Hour), SortKey = [LayoutValue.Column(nameof(Request.At))], Organization = LayoutOrganization.Leveled },
                 Identifiers = [nameof(Request.RequestId)],
-                Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Hour, SliceTargetRows = 500 },
+                ContentsObjectBytes = 0,
                 Write = paged ? new VortexWriteOptions { Fences = new global::Vorticity.Writing.FenceShape(InlineFences: 1, PageBytes: 512) } : VortexWriteOptions.Default,
             }, Ct);
             // The same two hours and a quarter; in pages, enough rows that a run of an hour's postings takes more
@@ -202,12 +207,12 @@ public sealed partial class IdentifierPostingsTests
             }
 
             List<ObjectEntry> hours = [];
-            await foreach (TreeEntry leaf in dataset.Levels[PeriodLevels.Periods].EnumerateAsync(dataset.Pages, Ct))
+            await foreach (TreeEntry leaf in dataset.AboveLevelZeroAsync(Ct))
             {
                 hours.Add(ObjectEntry.FromBytes(leaf.Value.Span));
             }
 
-            Assert.Equal(2, hours.Count);
+            Assert.Equal(3, hours.Count);
             Request needle = appended[2_345];
             VortexExpr filter = VortexExpr.Parse($"RequestId = '{needle.RequestId}'");
             inner.Latency = TimeSpan.FromMilliseconds(20);
@@ -242,7 +247,7 @@ public sealed partial class IdentifierPostingsTests
             HashSet<string> data = new HashSet<string>(StringComparer.Ordinal);
             foreach (ObjectEntry hour in hours)
             {
-                foreach (IndexSegment region in SynopsisContents.From(hour.Synopsis.Span)!.Declared())
+                foreach (IndexSegment region in ObjectContents.From(hour.TableOfContents.Span)!.Declared())
                 {
                     declared.Add(SynopsisCache.NameOf(hour.Uid, region));
                 }
@@ -255,7 +260,8 @@ public sealed partial class IdentifierPostingsTests
 
                 IndexDirectory index = (await lease.File.ReadIndexDirectoryAsync(Ct))!;
                 IndexEntry postings = index.Entries.Single(e => e.Kind == IndexKinds.PostingsHashed);
-                Assert.Equal(paged, postings.Runs.Any(run => KeyRunOptions.IsPaged(run.OptionBytes)));
+                // A run in pages holds more segments of 16 384 entries than its one fence inline: a full hour's, not the quarter past.
+                Assert.Equal(paged && hour.Rows > 16_384, postings.Runs.Any(run => KeyRunOptions.IsPaged(run.OptionBytes)));
             }
 
             session.Options.SynopsisCache!.Flush();
@@ -286,9 +292,9 @@ public sealed partial class IdentifierPostingsTests
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Visit.Schema, new DatasetOptions
         {
             Session = session,
-            ClusteringKey = [nameof(Visit.At)],
+            Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(Visit.At)).Truncate(CalendarUnit.Hour), SortKey = [LayoutValue.Column(nameof(Visit.At))], Organization = LayoutOrganization.Leveled },
             Identifiers = ["Attributes['user'].AsString()"],
-            Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Hour, SliceTargetRows = 500 },
+            ContentsObjectBytes = 0,
         }, Ct);
         Random random = new Random(31);
         List<string> users = [];
@@ -307,12 +313,13 @@ public sealed partial class IdentifierPostingsTests
             await dataset.AppendAsync(draft, Ct);
         }
 
-        while (await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 2 }, Ct) is not null)
+        // An object an hour, whatever its bytes.
+        while (await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 2, TargetBytesAtLevelOne = 1L << 30 }, Ct) is not null)
         {
         }
 
         List<ObjectEntry> hours = [];
-        await foreach (TreeEntry leaf in dataset.Levels[PeriodLevels.Periods].EnumerateAsync(dataset.Pages, Ct))
+        await foreach (TreeEntry leaf in dataset.AboveLevelZeroAsync(Ct))
         {
             ObjectEntry hour = ObjectEntry.FromBytes(leaf.Value.Span);
             hours.Add(hour);
@@ -321,7 +328,7 @@ public sealed partial class IdentifierPostingsTests
             Assert.Contains(directory.Entries, e => e.Kind == IndexKinds.PostingsHashed && e.VariantPath is ["user"] && e.VariantClass == Vorticity.Types.Variants.PathClass.String);
         }
 
-        Assert.Equal(2, hours.Count);
+        Assert.Equal(3, hours.Count);
         string needle = users[1_234];
         VortexExpr filter = VortexExpr.Parse($"Attributes['user'].AsString() = '{needle}'");
         inner.Latency = TimeSpan.FromMilliseconds(20);
@@ -346,6 +353,173 @@ public sealed partial class IdentifierPostingsTests
         Assert.Equal(1, await dataset.Scan<Visit>().Where(r => r.Attributes["user"].AsString() == needle).CountAsync(Ct));
     }
 
+    /// <summary>
+    /// The records of a user among the attributes, 48 000 visits over three hours and more of five thousand other users, each
+    /// with a body of 300 random bytes, the user's eight in the second hour, the user's id declared an identifier and each
+    /// hour consolidated with the index of its partition: the scan looks the user up through the partitions' indexes, read
+    /// side by side, as it does a column's, and waits on three round trips where it waited on five, the objects' own indexes
+    /// read one after another.
+    /// </summary>
+    [Fact]
+    public async Task TheRecordsOfAUserAmongTheAttributesAreLookedUp()
+    {
+        await using MemoryObjectStore inner = new MemoryObjectStore();
+        await using CountingObjectStore store = new CountingObjectStore(inner);
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Visit.Schema, new DatasetOptions
+        {
+            Layout = new DatasetLayout
+            {
+                Partition = LayoutValue.Column(nameof(Visit.At)).Truncate(CalendarUnit.Hour),
+                SortKey = [LayoutValue.Column(nameof(Visit.At))],
+                ObjectBytes = 256 << 20,
+                MergeFanout = 4,
+                CalmAfter = null,
+            },
+            Identifiers = ["Attributes['user'].AsString()"],
+            ContentsObjectBytes = 0,
+        }, Ct);
+        const string User = "u-needle";
+        Random random = new Random(37);
+        List<Visit> visits = [];
+        for (int part = 0; part < 24; part++)
+        {
+            Visit[] rows = [.. Enumerable.Range(part * 2_000, 2_000).Select(i => new Visit(
+                Noon.AddSeconds(i * 0.25),
+                Variant.Object(("user", Variant.From(i is >= 20_000 and < 20_008 ? User : $"u-{random.Next(5_000)}")), ("body", Variant.From(Body(random))))))];
+            visits.AddRange(rows);
+            await using ObjectDraft draft = dataset.StartObject();
+            await draft.Writer.WriteAsync<Visit>(rows, Ct);
+            await dataset.AppendAsync(draft, Ct);
+        }
+
+        // Each hour's appends consolidated together, with the index of its partition.
+        await dataset.ConsolidateAsync(Ct);
+
+        // A store that answers in 20 ms, so that the reads in flight together count one step, and those one after another one each.
+        inner.Latency = TimeSpan.FromMilliseconds(20);
+        List<Visit> found;
+        try
+        {
+            store.Reset();
+            found = await dataset.Scan<Visit>().Where(r => r.Attributes["user"].AsString() == User).ToRecordsAsync(Ct).ToListAsync(Ct);
+        }
+        finally
+        {
+            inner.Latency = TimeSpan.Zero;
+        }
+
+        Console.Out.Write(FormattableString.Invariant(
+            $"PATH IDENTIFIER RECORDS: {found.Count} visits, {store.CountOf(ObjectOperation.Read)} reads, {store.DependentSteps} dependent steps, {store.BytesRead} bytes.\n"));
+        Assert.Equal(visits[20_000..20_008], found);
+        Assert.InRange(store.DependentSteps, 1, 3);
+
+        static string Body(Random random)
+        {
+            byte[] bytes = new byte[300];
+            random.NextBytes(bytes);
+            return Convert.ToBase64String(bytes);
+        }
+    }
+
+    /// <summary>
+    /// Two hours of 400 000 visits, each hour consolidated with the index of its partition, a user among the attributes
+    /// declared an identifier: a user in one visit of four lies in every unit of each hour's object, which is read as any
+    /// object's rows rather than looked up, its units read as spans of every column one object at a time (a user of a week
+    /// of S2's logs ran past 16 GB so, then took 222 s); a user of three visits is looked up. The rows are the visits'.
+    /// </summary>
+    [Fact]
+    public async Task AUserOfMostUnitsIsReadAsRowsAndARareOneLookedUp()
+    {
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Visit.Schema, new DatasetOptions
+        {
+            Layout = new DatasetLayout
+            {
+                Partition = LayoutValue.Column(nameof(Visit.At)).Truncate(CalendarUnit.Hour),
+                SortKey = [LayoutValue.Column(nameof(Visit.At))],
+                ObjectBytes = 256 << 20,
+                MergeFanout = 4,
+                CalmAfter = null,
+            },
+            Identifiers = ["Attributes['user'].AsString()"],
+            ContentsObjectBytes = 0,
+        }, Ct);
+        Random random = new Random(41);
+        List<string> users = [];
+        for (int part = 0; part < 4; part++)
+        {
+            string[] drawn = [.. Enumerable.Range(part * 200_000, 200_000).Select(i => i % 4 == 0 ? "u-common" : i is 70_001 or 70_002 or 70_003 ? "u-rare" : $"u-{random.Next(50_000)}")];
+            users.AddRange(drawn);
+            Visit[] rows = [.. drawn.Select((user, i) => new Visit(Noon.AddMilliseconds(((part * 200_000) + i) * 9), Variant.Object(("user", Variant.From(user)))))];
+            await using ObjectDraft draft = dataset.StartObject();
+            await draft.Writer.WriteAsync<Visit>(rows, Ct);
+            await dataset.AppendAsync(draft, Ct);
+        }
+
+        await dataset.ConsolidateAsync(Ct);
+        foreach ((string user, bool looked) in new[] { ("u-common", false), ("u-rare", true) })
+        {
+            DatasetScanCounters metrics = new DatasetScanCounters();
+            VortexExpr filter = VortexExpr.Parse($"Attributes['user'].AsString() = '{user}'");
+            long rows = 0;
+            await foreach (RecordBatch batch in dataset.ScanBuilder().Where(filter).WithMetrics(metrics).ExecuteAsync(Ct))
+            {
+                rows += batch.SelectedRows;
+            }
+
+            Assert.Equal(users.Count(u => u == user), rows);
+            Assert.Equal(looked, metrics.ObjectsLookedUp > 0);
+        }
+    }
+
+    /// <summary>
+    /// Forty hours of two appends each, consolidated with the index of their partitions, a user in two visits of each hour:
+    /// the forty objects looked up, thirty-two of them ahead of the one given and the rest as those before are given, every
+    /// visit found in the tree's order.
+    /// </summary>
+    [Fact]
+    public async Task TheObjectsOfALookupPastItsWindowAreFoundInOrder()
+    {
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Visit.Schema, new DatasetOptions
+        {
+            Layout = new DatasetLayout
+            {
+                Partition = LayoutValue.Column(nameof(Visit.At)).Truncate(CalendarUnit.Hour),
+                SortKey = [LayoutValue.Column(nameof(Visit.At))],
+                ObjectBytes = 256 << 20,
+                MergeFanout = 4,
+                CalmAfter = null,
+            },
+            Identifiers = ["Attributes['user'].AsString()"],
+            ContentsObjectBytes = 0,
+        }, Ct);
+        const string User = "u-needle";
+        Random random = new Random(43);
+        List<Visit> sought = [];
+        for (int part = 0; part < 80; part++)
+        {
+            Visit[] rows = [.. Enumerable.Range(part * 500, 500).Select(i => new Visit(
+                Noon.AddSeconds(i * 3.6), Variant.Object(("user", Variant.From(i % 500 == 100 ? User : $"u-{random.Next(5_000)}")))))];
+            sought.Add(rows[100]);
+            await using ObjectDraft draft = dataset.StartObject();
+            await draft.Writer.WriteAsync<Visit>(rows, Ct);
+            await dataset.AppendAsync(draft, Ct);
+        }
+
+        await dataset.ConsolidateAsync(Ct);
+        List<Visit> found = await dataset.Scan<Visit>().Where(r => r.Attributes["user"].AsString() == User).ToRecordsAsync(Ct).ToListAsync(Ct);
+        Assert.Equal(sought, found);
+
+        DatasetScanCounters metrics = new DatasetScanCounters();
+        await foreach (RecordBatch batch in dataset.ScanBuilder().Where(VortexExpr.Parse($"Attributes['user'].AsString() = '{User}'")).WithMetrics(metrics).ExecuteAsync(Ct))
+        {
+            Assert.Equal(2, batch.SelectedRows);
+        }
+
+        Assert.Equal(40, metrics.ObjectsLookedUp);
+    }
+
     [Theory]
     [InlineData("Status")]
     [InlineData("Attributes['user']")]
@@ -357,7 +531,7 @@ public sealed partial class IdentifierPostingsTests
         await using MemoryObjectStore store = new MemoryObjectStore();
         ArgumentException refused = await Assert.ThrowsAsync<ArgumentException>(async () => await VortexDataset.CreateAsync(store, Visit.Schema, new DatasetOptions
         {
-            ClusteringKey = [nameof(Visit.At)],
+            Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(Visit.At)).Truncate(CalendarUnit.Hour), SortKey = [LayoutValue.Column(nameof(Visit.At))] },
             Identifiers = [identifier],
         }, Ct));
         Assert.Contains("Attributes['user'].AsString()", refused.Message, StringComparison.Ordinal);
@@ -396,9 +570,9 @@ public sealed partial class IdentifierPostingsTests
         await using MemoryObjectStore store = new MemoryObjectStore();
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Logged.Schema, new DatasetOptions
         {
-            ClusteringKey = [nameof(Logged.At)],
+            Layout = new DatasetLayout { SortKey = [LayoutValue.Column(nameof(Logged.At))], Organization = LayoutOrganization.Leveled },
             Identifiers = [nameof(Logged.TraceId)],
-            Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Hour, SliceTargetRows = 500 },
+            ContentsObjectBytes = 0,
         }, Ct);
         List<Logged> appended = [];
         for (int part = 0; part < 6; part++)
@@ -444,9 +618,9 @@ public sealed partial class IdentifierPostingsTests
         await using MemoryObjectStore store = new MemoryObjectStore();
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Request.Schema, new DatasetOptions
         {
-            ClusteringKey = [nameof(Request.At)],
+            Layout = new DatasetLayout { SortKey = [LayoutValue.Column(nameof(Request.At))] },
             Identifiers = [nameof(Request.RequestId)],
-            LookupFooterBytes = 0,
+            CostProfile = Vorticity.IO.CostProfile.Memory,
         }, Ct);
         await using (ObjectDraft draft = dataset.StartObject())
         {

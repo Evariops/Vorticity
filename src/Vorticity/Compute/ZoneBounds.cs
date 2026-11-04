@@ -1,4 +1,3 @@
-using System;
 using Vorticity.Expressions;
 
 namespace Vorticity.Compute;

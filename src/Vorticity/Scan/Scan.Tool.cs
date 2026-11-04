@@ -147,7 +147,7 @@ public sealed partial class Scan
     {
         Begin();
         CancellationToken token = cancellationToken.CanBeCanceled ? cancellationToken : _cancellation;
-        return new AsyncEnumerator(this, _source.BatchesAsync(Spec(), _counters).GetAsyncEnumerator(token), Schema, _source.Session);
+        return new AsyncEnumerator(this, _source.Rows.BatchesAsync(Spec(), _counters).GetAsyncEnumerator(token), Schema, _source.Session);
     }
 
     /// <summary>The batches, each owned by the caller, who disposes it.</summary>
@@ -158,7 +158,7 @@ public sealed partial class Scan
         Begin();
         try
         {
-            await foreach (RecordBatch batch in _source.BatchesAsync(Spec(), _counters).WithCancellation(cancellationToken).ConfigureAwait(false))
+            await foreach (RecordBatch batch in _source.Rows.BatchesAsync(Spec(), _counters).WithCancellation(cancellationToken).ConfigureAwait(false))
             {
                 yield return RecordBatch.Own(batch.Arena, batch.RootIndex, batch.StartRow, Schema, _source.Session, batch.SelectionWords, batch.SelectedRows);
             }
@@ -177,7 +177,7 @@ public sealed partial class Scan
         Begin();
         try
         {
-            return await _source.CountAsync(Spec().Reading([]), _counters, cancellationToken).ConfigureAwait(false);
+            return (await _source.Rows.AnswerAsync(Query(LogicalShape.Count).Spec().Reading([]), LogicalShape.Count, _counters, cancellationToken).ConfigureAwait(false)).Rows;
         }
         finally
         {
@@ -193,7 +193,7 @@ public sealed partial class Scan
         Begin();
         try
         {
-            return await _source.AnyAsync(Spec().Reading([]), _counters, cancellationToken).ConfigureAwait(false);
+            return (await _source.Rows.AnswerAsync(Query(LogicalShape.Any).Spec().Reading([]), LogicalShape.Any, _counters, cancellationToken).ConfigureAwait(false)).Rows > 0;
         }
         finally
         {
@@ -201,18 +201,28 @@ public sealed partial class Scan
         }
     }
 
-    /// <summary>What the scan will do, without reading a data segment.</summary>
+    /// <summary>What the scan will do, worked out from what the source holds in memory, reading nothing (spec B, 7).</summary>
+    /// <param name="cancellationToken">Cancels the explanation.</param>
+    /// <returns>The plan.</returns>
+    public ValueTask<ScanPlan> ExplainAsync(CancellationToken cancellationToken = default) => _source.PlanAsync(Spec(), analyze: false, cancellationToken);
+
+    /// <summary>What the scan will do; with <paramref name="analyze"/>, the structures its read would consult read, and no data segment.</summary>
+    /// <param name="analyze">Whether to read the structures the read would consult.</param>
     /// <param name="cancellationToken">Cancels the reads of the structures consulted.</param>
     /// <returns>The plan.</returns>
-    public ValueTask<ScanPlan> ExplainAsync(CancellationToken cancellationToken = default) => _source.ExplainAsync(Spec(), cancellationToken);
+    public ValueTask<ScanPlan> ExplainAsync(bool analyze, CancellationToken cancellationToken = default) => _source.PlanAsync(Spec(), analyze, cancellationToken);
 
-    private ScanSpec Spec() => new ScanSpec
+    /// <summary>The spec the sinks of rows run.</summary>
+    private ScanSpec Spec() => Query(RowsShape.All).Spec();
+
+    /// <summary>The question the scan asks, its answer of <paramref name="shape"/>.</summary>
+    private LogicalQuery Query(LogicalShape shape) => new LogicalQuery(_source.Logical, _source.Schema, shape)
     {
-        Projection = _projection,
+        Reads = _projection,
         Filter = _filter,
-        Rows = _rows,
-        Take = _take,
-        Options = _take is not null && _filter is null ? _options with { Compact = false } : _options,
+        Range = _rows,
+        Positions = _take,
+        Options = _options,
     };
 
     private void Begin()
@@ -262,8 +272,6 @@ public sealed partial class Scan
                 return new BatchView(batch, batch.Arena, batch.RootIndex, _schema, batch.StartRow, batch.SelectionWords, batch.SelectedRows);
             }
         }
-
-        internal VortexSession Session => _session;
 
         /// <summary>Moves to the next batch, releasing the current one.</summary>
         /// <returns>Whether there is one.</returns>

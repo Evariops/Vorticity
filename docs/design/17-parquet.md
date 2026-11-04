@@ -624,8 +624,7 @@ is sorted, and an ordered read is never cut into pieces read side by side.
 - **The other way**, an order backwards on a file sorted forwards, is a sort too: a row group read
   backwards would need its rows reversed, held whole.
 - **A group by** on the column streams, each group out once the scan reads past it: the source
-  says the order comes on asking (`OrdersOnAsking`), which the core asks of a dataset's clustering
-  key.
+  says the order comes on asking (`OrdersOnAsking`), which the core asks of a dataset's sort key.
 - **A declaration** is believed, as statistics are (§8); the verifier holds a row group's rows to
   it. One malformed orders nothing.
 
@@ -645,7 +644,7 @@ hash, allocating 1.5 MB against 340 MB.
 | pages | data pages v2, or v1 when `DataPageVersion.V1` asks for them, rows never split in either; a page is one block of `BlockRows`, 8 192 counted from the file's first row in every column, or a power-of-two fraction of one, down to 1 024 rows, when a block's page would pass `PageBytes`, 1 MiB, each range halved while it passes; below that, a page is cut by bytes and leaves the grid for that column alone. A page the dictionary codes stays whole, its codes far smaller than its values |
 | dictionary | at most one page per column chunk, first, as the standard requires |
 | page index | an `OffsetIndex` for every column chunk; a `ColumnIndex` wherever bounds are defined |
-| statistics | `min_value` and `max_value` with their exactness, `null_count` always, `nan_count` for floats; byte arrays bounded at `StatisticsBoundBytes`, 64 (§3.2 #15); neither the legacy `min` and `max` nor statistics in page headers, which readers of the page index ignore ([PageIndex.md][pi]) |
+| statistics | `min_value` and `max_value` with their exactness, `null_count` always, `nan_count` for floats; byte arrays bounded at `ChunkStatistics.BoundBytes`, 64 (§3.2 #15); neither the legacy `min` and `max` nor statistics in page headers, which readers of the page index ignore ([PageIndex.md][pi]) |
 | column orders | `TYPE_ORDER`; `IEEE_754_TOTAL_ORDER` for FLOAT, DOUBLE and FLOAT16, as the standard recommends |
 | size statistics | the byte arrays' unencoded bytes and the level histograms, per chunk and per page |
 | geospatial statistics | a GEOMETRY's box of every vertex, NaN skipped, and its values' types; a GEOGRAPHY's types, and its box where no value has an edge; neither where a value is not ISO WKB (§3.2 #22, #23). Vertices of little-endian XY points are bounded two coordinates to a vector |

@@ -89,7 +89,7 @@ internal static class Observability
         totals.Clear();
         string location = Demo.Path("observed-dataset");
         await using (Dataset.VortexDataset dataset = await Dataset.VortexDataset.CreateAsync(
-            location, Reading.Schema, new Dataset.DatasetOptions { ClusteringKey = [Reading.ColumnNames.Day] }))
+            location, Reading.Schema, new Dataset.DatasetOptions { Layout = new Dataset.DatasetLayout { SortKey = [Dataset.LayoutValue.Column(Reading.ColumnNames.Day)] } }))
         {
             for (int day = 0; day < 3; day++)
             {

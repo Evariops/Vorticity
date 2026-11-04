@@ -996,9 +996,6 @@ internal sealed class PayloadRunSink : IRunSink
         Open();
     }
 
-    /// <summary>Whether its rows need 64 bits, the run spanning too many for 32.</summary>
-    internal bool WideRows => _wide;
-
     public bool Add(ReadOnlySpan<byte> key, long row)
     {
         AddKey(key);

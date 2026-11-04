@@ -206,8 +206,6 @@ internal ref struct ValueStringWriter
     /// <summary>True once the budget is exhausted; callers stop descending.</summary>
     internal readonly bool IsFull => _length >= _budget;
 
-    internal readonly int Length => _length;
-
     internal void Append(char c)
     {
         if (_length >= _budget)

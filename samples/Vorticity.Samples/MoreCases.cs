@@ -14,6 +14,7 @@ internal static class MoreCases
         samples["limits"] = Limits.RunAsync;
         samples["observability"] = Observability.RunAsync;
         samples["datasets"] = Datasets.RunAsync;
+        samples["dataset-layout"] = DatasetLayoutSample.RunAsync;
         samples["time-windows"] = TimeWindows.RunAsync;
         samples["variants"] = Variants.RunAsync;
         samples["dataset-maintenance"] = DatasetMaintenance.RunAsync;

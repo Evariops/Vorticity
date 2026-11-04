@@ -1,4 +1,3 @@
-using System;
 using System.Collections.Generic;
 using Vorticity.Parquet.Metadata;
 using Vorticity.Parquet.Thrift;

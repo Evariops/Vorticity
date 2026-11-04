@@ -3,8 +3,9 @@
 // One batch of 65,536 rows whose column is a dictionary of V strings, walked range by range as a
 // distinct count or an extreme walks it when a grouping by a sorted or run-end key folds the batch
 // in R ranges. The sink only adds up the lengths it is handed, so what is measured is the walk.
-// `Original` is the walk that cleared and swept a table of the dictionary's size at every range
-// (`BytesWalkBefore.cs`); `Library` is the library's, which pays for the range's rows.
+// `Library` is the library's walk, which pays for the range's rows; the walk it replaced cleared and
+// swept a table of the dictionary's size at every range, 64.0 ms where it takes 202 µs at V = 65,536
+// and R = 4,096 (6f8098cc, the measure against a checkout of the original).
 using System;
 using System.Buffers.Binary;
 using System.Runtime.InteropServices;
@@ -36,9 +37,7 @@ public class DictionaryRangeBenchmarks
     private CanonicalArena _arena = null!;
     private int _node;
     private long _batch;
-    private MaskCache _originalRows;
     private MaskCache _libraryRows;
-    private bool[] _present = [];
     private CodeSet _distinct;
 
     /// <summary>Builds the batch.</summary>
@@ -77,21 +76,6 @@ public class DictionaryRangeBenchmarks
     /// <summary>Gives the arena's blocks back.</summary>
     [GlobalCleanup]
     public void Cleanup() => _arena.Reset();
-
-    /// <summary>The batch walked range by range, a table of the dictionary cleared and swept at each.</summary>
-    [Benchmark(Baseline = true)]
-    public long Original()
-    {
-        BatchInput input = new BatchInput(++_batch, _arena, _node, Rows, default);
-        LengthSink sink = default;
-        int step = Rows / Ranges;
-        for (int r = 0; r < Ranges; r++)
-        {
-            BytesWalkBefore.Range(ref sink, input, r * step, (r + 1) * step, r, ref _originalRows, ref _present);
-        }
-
-        return sink.Total;
-    }
 
     /// <summary>The batch walked range by range by the library.</summary>
     [Benchmark]

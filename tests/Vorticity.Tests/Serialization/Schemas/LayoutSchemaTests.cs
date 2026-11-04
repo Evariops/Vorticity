@@ -1,6 +1,5 @@
 // Round trip and adversarial tests for the format's `table Layout`.
 using System;
-using Vorticity;
 using Vorticity.Serialization.FlatBuffers;
 using Vorticity.Serialization.Schemas;
 using Xunit;

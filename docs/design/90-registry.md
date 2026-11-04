@@ -98,7 +98,7 @@ there.
 | `vortex.struct` | a child per field | `core2025.05.0` | yes |
 | `vortex.zoned` | a zone map for pruning | `core2026.08.0` | yes, one zone per block |
 | `vortex.stats` | the zone map's predecessor | `core2025.05.0` | no, since no Vortex release ever emitted one |
-| `vortex.dict` | a dictionary shared across a child layout | `core2025.05.0` | no (see [determinism and its limit](11-write-strategy.md#7-determinism-and-its-limit)) |
+| `vortex.dict` | a dictionary shared across a child layout | `core2025.05.0` | an [object dictionary](23-query-architecture.md#54-ordered-object-dictionaries) a dataset's writer declares, its values before the column's first chunk; no other (see [determinism and its limit](11-write-strategy.md#7-determinism-and-its-limit)) |
 | `vortex.list` | elements, offsets and validity stored apart | none, experimental upstream | no |
 
 ## 3. Extension dtypes and aggregates
@@ -178,3 +178,55 @@ to, and the first one with `vortex.uuid`. Lower targets are honoured, not approx
 `EditionTargetTests` asserts this on the written file, reading its encoding tables back, rather than at
 the call sites, since a writer that checked itself and then emitted something else would pass a test
 written the other way round.
+
+## 7. Vorticity's own formats
+
+Beside Vortex's components the library writes formats of its own: the dataset's commit objects, and
+the index directory with its regions, which a Vortex reader that does not know them skips. Each
+carries its version, and a reader takes the versions below and no other. An index or a region of
+another version is not read, and the file reads without it, since an index is only a hint; a commit of
+another format is refused, since a dataset read in part would be read wrong. During the beta no
+earlier version is read: a dataset is rebuilt from its rows rather than migrated. A name, a tag or a
+field once retired is never reused.
+
+### 7.1 Commits
+
+| format | where | version | retired |
+|---|---|---|---|
+| commit object, from `VXCOMMIT` to `VXCT` | each version of a dataset ([commits](13-dataset.md#43-commits-are-paths-written-as-one-object)) | 5, and no other: a commit of another format is refused with a message that says whether an earlier or a later release wrote it | formats 1 to 4; header fields 17 (the features of format 4), 19, 21 and 22 (the lateness horizon, length and changes of a dataset written by periods) and 23 (partition columns) |
+| object entry | a leaf of a level's tree | tagged fields 1 to 5: the footer's bytes, when the oldest mark was made, the table of contents, the last key, the counts of the deleted rows | none |
+| table of contents | the entry's tagged field 3 | 2 | version 1, which held the synopsis tables (tags 5 to 8); tag 17, the region of the blocks' keys |
+| counts of the deleted rows | out of line in the commit object that made them, which the entry's field 5 names | 1 | none |
+| fragment bundle, `VXFB` | an object's index fragments, side by side | 1 | none |
+| partition index entry | a leaf of the tree of partition indexes, which the header's field 28 names ([the index of a consolidated partition](13-dataset.md#44-the-index-of-a-consolidated-partition)) | 1 | none |
+| partition index, `vorticity.partition.index.v1`, its pages to `VXPI` | the index of a consolidated partition, an object of the store beside its objects | 4: each entry keeps the bits of its hashes its postings need and ten more, its pages pack gaps and places at their bits | versions 1 to 3, which kept whole hashes coded as varints |
+
+### 7.2 Files
+
+The directory sits under the postscript's metadata key `vorticity.index`, at version 2, checksummed;
+an index fragment kept outside its file is a container (`VXIX`, version 1) of a directory and its
+regions. The file's identity, `vorticity.identity`, is sixteen bytes beside it, and a sealed object
+(`VXSEALED` to `VXSE`, version 1) is described in [the sealed object](18-encryption.md#3-the-sealed-object).
+The kinds of the directory ([10-indexes.md](10-indexes.md)) carry their own versions:
+
+| kind | version of its options or region | retired |
+|---|---|---|
+| `vorticity.bloom.sbbf.v1`, `vorticity.bloom.ngram3.v1` | 2, a filter tree a run | version 1 |
+| `vorticity.dict.probe.v1` | no options of its own | none |
+| `vorticity.postings.blocks.v1`, `vorticity.sorted.runs.v1`, `vorticity.postings.ngram3.v1`, `vorticity.postings.hashed.v1`, `vorticity.postings.tokens.v1` | 1, and 2 for a run laid out in pages | none |
+| `vorticity.key.index.v1` | 1, the first key of each granule, in pages; 2, the same with their texts unpadded where that takes fewer bytes | none |
+| `vorticity.slices.v1` | none | every version: 6, bounded by keys; 4 and 5, bounded by a time; the three before them |
+| `vorticity.slices.chunks.v1` | 1, and 2 for a column laid out in pages | none |
+| `vorticity.marks.v1` | 1, a region a column: each chunk's encoding tree and where each granule starts in its buffers of variable length | none |
+| `vorticity.variant.paths.v1` | 1 | none |
+| `vorticity.variant.directory.v1` | 2, groups of fixed rows, a dataset's granules | version 1, the slices of the key |
+| `vorticity.variant.blocks.v1` | 1 | none |
+| `vorticity.column.sheet.v1` | 1 | none |
+| `vorticity.column.counts.v1` | 2 | version 1, counted by the hours of an instant |
+| `vorticity.column.sketches.v1` | 1 | none |
+| `vorticity.granule.stats.v1` | 2 | none |
+| `vorticity.granule.histograms.v1` | 1 | none |
+| `vorticity.locate.v1` | 1 | none |
+| `vorticity.block.stats.v1` | retired, never read | the whole kind: a column's statistics over runs of the key's prefix, which the granule statistics replace |
+| `vorticity.column.where.v1` | retired, never read | the whole kind: the runs of the key's prefix each value lived in, which `vorticity.locate.v1` replaces |
+| `vorticity.block.table.v1` | retired, never read | the whole kind: each block's rows and keys, which no question read |

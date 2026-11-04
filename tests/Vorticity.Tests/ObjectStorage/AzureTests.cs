@@ -5,7 +5,6 @@ using System.Buffers;
 using System.Collections.Generic;
 using System.IO.Pipelines;
 using System.Linq;
-using System.Net;
 using System.Net.Http;
 using System.Text;
 using System.Threading;
@@ -246,7 +245,7 @@ public sealed class AzureTests
         using AzureEmulator emulator = new AzureEmulator();
         await using AzureBlobObjectStore lake = Store(emulator, threshold: 256 << 10, block: 64 << 10);
         await using VortexSession session = VortexSession.Create(o => o.ObjectStores.Add("az://lake", lake));
-        DatasetOptions options = new DatasetOptions { Session = session, ClusteringKey = ["Day"] };
+        DatasetOptions options = new DatasetOptions { Session = session, Layout = new DatasetLayout { SortKey = [LayoutValue.Column("Day")] } };
         await using (VortexDataset dataset = await VortexDataset.CreateAsync("az://lake/tables/readings", LocationTests.Reading.Schema, options, ct))
         {
             for (int append = 0; append < 3; append++)

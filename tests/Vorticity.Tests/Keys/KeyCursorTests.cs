@@ -21,7 +21,6 @@ using Vorticity.Keys;
 using Vorticity.Scanning;
 using Vorticity.Tests.Scan;
 using Vorticity.Types;
-using Vorticity.Writing;
 using Xunit;
 
 namespace Vorticity.Tests.Keys;

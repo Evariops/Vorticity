@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
 using Vorticity.Buffers;
@@ -53,9 +54,6 @@ internal sealed class ArrayDecodeContext
 
     /// <summary>Read-time policy, copied from the file.</summary>
     public VortexReadOptions Options => _scan.Options;
-
-    /// <summary>Maps a wire <c>u16</c> encoding spec index to a resolved id.</summary>
-    public ReadOnlySpan<ArrayEncodingId> ArrayEncodings => _scan.ArrayEncodings;
 
     /// <summary>
     /// Loads an array blob into <see cref="Nodes"/>, using this scan's encoding table.
@@ -207,6 +205,46 @@ internal sealed class ArrayDecodeContext
         return DecodeNode(in child, childDType, childLength);
     }
 
+    /// <summary>
+    /// Asks child <paramref name="childIndex"/> of <paramref name="node"/> to answer <paramref name="predicate"/> over its
+    /// rows without decoding them, as a parent whose rows are its child's under a label or a transform moves a predicate
+    /// into the child's domain: false when the child's encoding declines.
+    /// </summary>
+    /// <param name="node">The parent node.</param>
+    /// <param name="childIndex">0-based child position.</param>
+    /// <param name="childDType">The child's DType.</param>
+    /// <param name="childLength">The child's row count.</param>
+    /// <param name="predicate">The predicate, in the child's domain.</param>
+    /// <param name="bits">Receives the child's answer.</param>
+    internal bool TryEvaluateChild(
+        in ArrayNode node, int childIndex, DType childDType, int childLength, Compute.EncodedPredicate predicate,
+        ref Compute.PredicateBits bits)
+    {
+        ArrayNode child = node.GetChild(childIndex);
+        ArrayDecoder decoder = ArrayDecoderTable.Require(_scan, child.Encoding, child.EncodingSpecIndex);
+        return decoder.EvaluatesWithoutFullDecode
+            && decoder.TryEvaluate(this, in child, childDType, childLength, predicate, ref bits);
+    }
+
+    /// <summary>
+    /// Asks child <paramref name="childIndex"/> of <paramref name="node"/> to answer <paramref name="question"/>, already
+    /// moved into the child's integer patterns: false when the child's encoding declines.
+    /// </summary>
+    /// <param name="node">The parent node.</param>
+    /// <param name="childIndex">0-based child position.</param>
+    /// <param name="childDType">The child's integer DType.</param>
+    /// <param name="childLength">The child's row count.</param>
+    /// <param name="question">The question on the child's patterns.</param>
+    /// <param name="bits">Receives the child's answer.</param>
+    internal bool TryEvaluateIntegersChild(
+        in ArrayNode node, int childIndex, DType childDType, int childLength, in Compute.IntegerQuestion question,
+        ref Compute.PredicateBits bits)
+    {
+        ArrayNode child = node.GetChild(childIndex);
+        ArrayDecoder decoder = ArrayDecoderTable.Require(_scan, child.Encoding, child.EncodingSpecIndex);
+        return decoder.TryEvaluateIntegers(this, in child, childDType, childLength, in question, ref bits);
+    }
+
     /// <summary>Whether <paramref name="node"/>'s encoding decodes a range of its rows, children included.</summary>
     /// <param name="node">The node.</param>
     internal bool DecodesRange(in ArrayNode node) =>
@@ -283,6 +321,21 @@ internal sealed class ArrayDecodeContext
         return DecodesRange(in child);
     }
 
+    /// <summary>Whether every child of <paramref name="node"/> decodes a range of its rows, a validity child included.</summary>
+    /// <param name="node">The parent node.</param>
+    public bool ChildrenDecodeRange(in ArrayNode node)
+    {
+        for (int i = 0; i < node.ChildCount; i++)
+        {
+            if (!ChildDecodesRange(in node, i))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     /// <summary>
     /// Decodes rows <c>[start, start + count)</c> of child <paramref name="childIndex"/>, which
     /// <see cref="ChildDecodesRange"/> must have answered for.
@@ -300,6 +353,29 @@ internal sealed class ArrayDecodeContext
         ArrayNode child = node.GetChild(childIndex);
         return DecodeNodeRange(in child, childDType, childLength, start, count);
     }
+
+    /// <summary>
+    /// Child <paramref name="childIndex"/>'s rows as <paramref name="rows"/> asks for them: what a parent that decodes its
+    /// whole, a range and a selection through one core asks of each child.
+    /// </summary>
+    /// <param name="node">The parent node.</param>
+    /// <param name="childIndex">0-based child position.</param>
+    /// <param name="childDType">The child's DType.</param>
+    /// <param name="childLength">The child's whole row count.</param>
+    /// <param name="start">The first row of the range, when <paramref name="rows"/> asks for one.</param>
+    /// <param name="count">How many rows the range holds, when <paramref name="rows"/> asks for one.</param>
+    /// <param name="wanted">The rows a selection names, when <paramref name="rows"/> asks for them.</param>
+    /// <param name="rows">Which rows.</param>
+    /// <returns>The child's index in the batch's arena.</returns>
+    internal int DecodeChildRows(
+        in ArrayNode node, int childIndex, DType childDType, int childLength, int start, int count,
+        ReadOnlySpan<int> wanted, ChildRows rows) => rows switch
+    {
+        ChildRows.Whole => DecodeChild(in node, childIndex, childDType, childLength),
+        ChildRows.Range => DecodeChildRange(in node, childIndex, childDType, childLength, start, count),
+        ChildRows.Selected => DecodeChildSelected(in node, childIndex, childDType, childLength, wanted),
+        _ => throw new UnreachableException($"Rows {(byte)rows} is not defined."),
+    };
 
     /// <summary>
     /// Decodes rows <c>[start, start + count)</c> of child <paramref name="childIndex"/> with
@@ -752,8 +828,34 @@ internal sealed class ArrayDecodeContext
                 $"{firstValidityChildIndex + 1} children; this one has {childCount}.");
         }
 
+        return DecodeValidityChildRange(in node, firstValidityChildIndex, length, start, count);
+    }
+
+    /// <summary>
+    /// The validity the child at <paramref name="childIndex"/> gives the rows <paramref name="rows"/> asks for, read as
+    /// <see cref="DecodeValidityChild"/> reads the whole: a parent whose validity child comes before its others reads it so.
+    /// </summary>
+    /// <param name="node">The array node.</param>
+    /// <param name="childIndex">Where the validity child sits.</param>
+    /// <param name="length">The node's whole row count.</param>
+    /// <param name="start">The first row of the range, when <paramref name="rows"/> asks for one.</param>
+    /// <param name="count">How many rows the range holds, when <paramref name="rows"/> asks for one.</param>
+    /// <param name="wanted">The rows a selection names, when <paramref name="rows"/> asks for them.</param>
+    /// <param name="rows">Which rows.</param>
+    /// <returns>Those rows' validity, collapsed.</returns>
+    internal Validity DecodeValidityChildRows(
+        in ArrayNode node, int childIndex, int length, int start, int count, ReadOnlySpan<int> wanted, ChildRows rows) => rows switch
+    {
+        ChildRows.Whole => DecodeValidityChild(in node, childIndex, length),
+        ChildRows.Range => DecodeValidityChildRange(in node, childIndex, length, start, count),
+        ChildRows.Selected => DecodeValidityChildSelected(in node, childIndex, length, wanted),
+        _ => throw new UnreachableException($"Rows {(byte)rows} is not defined."),
+    };
+
+    private Validity DecodeValidityChildRange(in ArrayNode node, int childIndex, int length, int start, int count)
+    {
         DType boolType = Types.Bool(Nullability.NonNullable);
-        int decoded = DecodeChildRange(in node, firstValidityChildIndex, boolType, length, start, count);
+        int decoded = DecodeChildRange(in node, childIndex, boolType, length, start, count);
         CanonicalNode bits = Canonical.GetNode(decoded);
         if (bits.Kind != CanonicalKind.Bool)
         {
@@ -785,10 +887,6 @@ internal sealed class ArrayDecodeContext
     /// <returns>The new node's index.</returns>
     public int NewCanonical(CanonicalKind kind, DType dtype, int length, Validity validity) =>
         Canonical.AddBare(kind, dtype, length, validity);
-
-    /// <summary>The id text of encoding spec <paramref name="specIndex"/>, for an exception message.</summary>
-    /// <param name="specIndex">The wire <c>u16</c> from <c>ArrayNode.encoding</c>.</param>
-    public string GetEncodingIdText(int specIndex) => _scan.GetArrayEncodingIdText(specIndex);
 
     // ---------------------------------------------------------------- shared validation helpers
 
@@ -1027,9 +1125,7 @@ internal sealed class ArrayDecodeContext
     /// <summary>Whether a bit range is all zero, all one, or mixed. O(bits/8), no allocation.</summary>
     internal static ValidityBitmapShape ClassifyValidityBits(ReadOnlySpan<byte> bits, int bitOffset, int length)
     {
-        int start = bitOffset;
         long endExclusive = (long)bitOffset + length;
-        int firstByte = start >> 3;
         int lastByte = (int)((endExclusive - 1) >> 3);
 
         if (lastByte >= bits.Length)
@@ -1040,7 +1136,7 @@ internal sealed class ArrayDecodeContext
         }
 
         Decoders.Canonical.BitmapKernels.Classify(
-            bits, start, length, out bool anySet, out bool anyClear);
+            bits, bitOffset, length, out bool anySet, out bool anyClear);
         return (anySet, anyClear) switch
         {
             (true, true) => ValidityBitmapShape.Mixed,
@@ -1087,6 +1183,19 @@ internal sealed class ArrayDecodeContext
     private static void ThrowMultiply(int a, int b, string what) =>
         throw new VortexFormatException(
             $"{what} would need {(long)a * b} bytes ({a} x {b}), which does not fit a 32-bit length.");
+}
+
+/// <summary>Which rows of its children a decode asks for (<see cref="ArrayDecodeContext.DecodeChildRows"/>).</summary>
+internal enum ChildRows : byte
+{
+    /// <summary>Every row.</summary>
+    Whole,
+
+    /// <summary>A contiguous range.</summary>
+    Range,
+
+    /// <summary>The rows a selection names.</summary>
+    Selected,
 }
 
 /// <summary>The three shapes a validity bitmap can collapse to.</summary>

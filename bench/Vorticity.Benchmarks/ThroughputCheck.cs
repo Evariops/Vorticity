@@ -46,8 +46,6 @@ using System.Threading;
 using System.Threading.Tasks;
 
 using Vorticity;
-using Vorticity.Columns;
-using Vorticity.File;
 using Vorticity.Scanning;
 
 namespace Vorticity.Benchmarks;
@@ -147,6 +145,10 @@ internal static class ThroughputCheck
     private static long TakeStride => Math.Max(1, ReferenceRows / TakeCount);
 
     /// <summary>Runs each recalibration pass in its own process, then prints the table.</summary>
+    /// <param name="only">Family name substrings; empty measures everything.</param>
+    /// <param name="passes">How many passes to measure.</param>
+    /// <param name="rebase">Let a reference rise where the estimator changed, as <c>--rebase</c> does.</param>
+    /// <param name="hold">Print every reference back unchanged and refresh only the dispersion, as <c>--hold</c> does.</param>
     /// <param name="rebaseFrom">
     /// The reference binary the table was set under, or null. When given, every pass is a pair of
     /// processes, one under it and one under the running binary, and each reference moves by what
@@ -1120,6 +1122,7 @@ internal static class ThroughputCheck
 
     /// <summary>Measures every generated file and reports ns/value for both readers.</summary>
     /// <param name="check">Whether to hold each ratio to its ceiling and exit non-zero when over.</param>
+    /// <param name="only">Family name substrings; empty measures everything.</param>
     /// <returns>0 on success, 1 when an encoding is over its ceiling, 2 when the inputs are absent.</returns>
     internal static async Task<int> RunAsync(bool check, string[] only) =>
         await RunAsync(check, only, 0, false, false).ConfigureAwait(false);
@@ -1984,8 +1987,11 @@ internal static class ThroughputCheck
     }
 
     /// <summary>One file measured: both readers, the ratio's interval, and how it was timed.</summary>
+    /// <param name="Ours">Our reader's median time a round.</param>
+    /// <param name="Theirs">Rust's median time a round.</param>
     /// <param name="Ratio">The median per-round ratio, ours over Rust's, and its 95% interval: what the gate holds.</param>
     /// <param name="Speedup">The median per-round speedup, Rust's time over ours: what the page prints.</param>
+    /// <param name="Repeats">Scans per timed round, so that one round clears the timer's noise floor.</param>
     /// <param name="Split">The reference's split the file was timed under, the faster of its two.</param>
     private readonly record struct Measurement(
         double Ours, double Theirs, Interval Ratio, Interval Speedup, int Repeats, long Split);
@@ -2069,8 +2075,6 @@ internal static class ThroughputCheck
         Workload.Write => RustReader.Require(RustReader.Write(path), "write"),
         _ => RustReader.Require(RustReader.ScanCanonical(path), "scan"),
     };
-
-    private static Task<long> ScanAll(string path) => Scenarios.ScanAll(path);
 
     /// <summary>
     /// Batches the scan emits, reported beside the timing because it is what explains it.

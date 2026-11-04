@@ -61,9 +61,22 @@ internal sealed class FlatLayoutReader : LayoutReader
             SegmentSpec spec = SpecOf(in node, 0);
             if (reads.Find(spec.Offset, spec.Length) is { Residual: false } chunk)
             {
-                chunk.Register(segments);
+                chunk.Register(segments, rows, spec.Offset);
                 return;
             }
+
+            // The keys the filter's own pass reads of a chunk the scan reads whole: their ranges beside the segment.
+            if (reads.FilterPass?.Find(spec.Offset, spec.Length) is { Residual: false } keyed)
+            {
+                keyed.Register(segments, rows, spec.Offset);
+            }
+        }
+
+        // A chunk the split reads a part of, whose geometry the scan knows: the ranges of the part's granules, not the
+        // segment (spec C, 2). The chunk is read whole when the part is all of it or most of its bytes.
+        if (segments.Granules is { } granules && granules.TryRegister(SpecOf(in node, 0), node.DType, NodeLength(in node), rows, segments))
+        {
+            return;
         }
 
         // How much of the segment the decode touches: the fields a projection keeps of a struct
@@ -102,6 +115,12 @@ internal sealed class FlatLayoutReader : LayoutReader
 
         int total = NodeLength(in node);
         int length = BatchLength(rows);
+
+        // A chunk read by the granules of a part of it: decoded from them alone.
+        if (context.Granules is { } granules && !node.Bufferless && granules.Find(SpecOf(in node, 0).Offset, rows) is { } plan)
+        {
+            return ExecuteGranules(in node, rows, in fields, context, plan, total, length);
+        }
 
         // A chunk of a variant read through some shredded keys alone, each decoded from its range; one read for keys its
         // shredding does not hold, decoded as any chunk, its variant giving its residual alone.
@@ -161,7 +180,7 @@ internal sealed class FlatLayoutReader : LayoutReader
         if (rows.Start == 0 && length == total)
         {
             ArrayNode wholeRoot = LoadRoot(in node, context);
-            if (context.PredicateAtNode)
+            if (context.PredicateAtNode && context.PushedKey is null)
             {
                 int answered = TryAnswer(in wholeRoot, in node, context, total);
                 if (answered >= 0)
@@ -193,7 +212,7 @@ internal sealed class FlatLayoutReader : LayoutReader
         // answer. It is kept under a key of its own because the same chunk can be wanted both as an
         // answer and as values, and a cache that confused the two would hand a boolean column to a
         // caller that asked for strings.
-        if (context.PredicateAtNode &&
+        if (context.PredicateAtNode && context.PushedKey is null &&
             TryRetainedAnswer(in node, context, key, total, out CanonicalArena states, out int said))
         {
             return CanonicalSlice.SliceAcross(states, context.Canonical, said, (int)rows.Start, length);
@@ -247,6 +266,56 @@ internal sealed class FlatLayoutReader : LayoutReader
     }
 
     /// <summary>
+    /// The batch's rows of a chunk read by the granules of a part of it (spec C, 2.3): the ranges read laid at their places in
+    /// a region of the chunk's buffers, every other byte of which is left as the arena gives it, which no decoder reads (the
+    /// whole suite gave the same answers with them poisoned), the tree loaded over it, and the batch's rows
+    /// decoded from it, or its selection, a FastLanes block of 1 024 at a time where the encoding selects. Nothing that would
+    /// read the rest of the chunk runs: no answer of the whole node, no retention.
+    /// </summary>
+    private static int ExecuteGranules(
+        in LayoutNode node, RowRange rows, in FieldMask fields, ScanContext context, Indexes.GranulePlans.Plan plan, int total, int length)
+    {
+        SegmentSpec spec = SpecOf(in node, 0);
+        SegmentRequestSet segments = context.Segments;
+        VortexBuffer region = context.Canonical.AllocateUninitialized(checked((int)plan.RegionLength), 1 << plan.Alignment, out Span<byte> bytes);
+        // The holes are not cleared: a part of a large chunk cleared every byte before its ranges, some 34 MB a question of a
+        // percentile by service to copy 0.85, a memset of 14.5 % of eight clients' cycles (2026-11-02).
+        foreach ((long start, long end) in plan.Ranges)
+        {
+            int slot = segments.Add(new SegmentSpec(spec.Offset + (ulong)start, checked((uint)(end - start)), 0, 0, 0));
+            segments.GetBuffer(slot).Span[..(int)(end - start)].CopyTo(bytes[(int)start..]);
+        }
+
+        context.Decode.LoadBlob(plan.Tree.Span, region);
+        ArrayNode root = context.Nodes.Root;
+
+        // A pushed comparison asked of the encoding over the batch's rows alone: a needle's first pass, which reads a trace's
+        // identifiers by their granules to place its spans, decoded eight thousand a granule for a comparison their codes
+        // answer, a quarter of the question (2026-11-02).
+        if (context.PredicateAtNode && context.PushedKey is null && AnswerRows(context, rows, length, out int asked, out int answering)
+            && RangeAnswer(in root, in node, context, total, asked, answering) is int answered and >= 0)
+        {
+            return answered;
+        }
+
+        Decoded(context, length);
+        if (context.HasSelection)
+        {
+            if (context.Decode.SelectsWithoutFullDecode(in root, node.DType))
+            {
+                return Push(in root, in node, in fields, context, total);
+            }
+
+            if (context.TryGetSelectionBounds(out int first, out int last))
+            {
+                return Narrowed(DecodedSelection(in root, in node, in fields, context, total, first, last + 1 - first), in fields, context);
+            }
+        }
+
+        return Narrowed(context.Decode.DecodeRootRange(in root, node.DType, total, (int)rows.Start, length, context.KeepEncodings), in fields, context);
+    }
+
+    /// <summary>
     /// A chunk of a variant read through some shredded keys alone: each key decoded from its own range
     /// (<see cref="Indexes.VariantKeyReads"/>), the chunk retained under a key of its own when a batch
     /// takes part of it, then the batch's rows sliced or gathered out of it.
@@ -254,6 +323,30 @@ internal sealed class FlatLayoutReader : LayoutReader
     private static int ExecuteKeys(
         in LayoutNode node, RowRange rows, in FieldMask fields, ScanContext context, Indexes.VariantKeyReads.Chunk chunk, int total, int length)
     {
+        // A predicate on one of the chunk's keys, answered by the key's typed column over the chunk's rows and retained for
+        // its batches as a column's answer is (spec E, 4.2); declined, the keys are decoded below and the filter judged on them.
+        if (context.PredicateAtNode && context.PushedKey is { } wanted
+            && KeyAnswer(in node, rows, context, chunk, wanted, total, length) is int answered and >= 0)
+        {
+            return answered;
+        }
+        // The keys read by the granules of the split's rows (spec E, 4.1): decoded from them alone, the selection gathered
+        // out of them; nothing retained, which would read the rest of the chunk.
+        if (context.Granules is { } granules && chunk.DecodeRange(context, node.DType, node.Segments[0], (int)rows.Start, length, granules) is int ranged and >= 0)
+        {
+            Decoded(context, length);
+            return context.HasSelection ? GatherRebased(context, ranged, (int)rows.Start) : ranged;
+        }
+
+        // A part of the chunk: its keys' rows decoded from their whole ranges, where each key's encoding decodes a range, the
+        // selection gathered out of them (VariantKeyReads.Chunk.DecodeRange); the chunk's whole decode, retained for its other
+        // parts, otherwise.
+        if (length < total && chunk.DecodeRange(context, node.DType, node.Segments[0], (int)rows.Start, length, context.Granules, unplanned: true) is int part and >= 0)
+        {
+            Decoded(context, length);
+            return context.HasSelection ? GatherRebased(context, part, (int)rows.Start) : part;
+        }
+
         if (!context.HasSelection && rows.Start == 0 && length == total)
         {
             Decoded(context, total);
@@ -280,6 +373,55 @@ internal sealed class FlatLayoutReader : LayoutReader
 
         return context.HasSelection
             ? Gather(held, retained, in fields, context, total)
+            : CanonicalSlice.SliceAcross(held, context.Canonical, retained, (int)rows.Start, length);
+    }
+
+    /// <summary>
+    /// Rows <paramref name="rows"/>, or the selection's, of the answer the pushed predicate on key <paramref name="wanted"/> has over the chunk,
+    /// its typed column's encoding asked once for the chunk and the answer retained under a key of its own, as a column's
+    /// answer is (<see cref="TryRetainedAnswer"/>); -1 when the chunk declines.
+    /// </summary>
+    private static int KeyAnswer(
+        in LayoutNode node, RowRange rows, ScanContext context, Indexes.VariantKeyReads.Chunk chunk, Compute.PushedVariantKey wanted,
+        int total, int length)
+    {
+        long answerKey = ~ScanContext.SegmentKey(node.Segments[0]) ^ AnswerKey;
+        if (!context.TryPeekRetained(answerKey, out CanonicalArena held, out int retained))
+        {
+            int words = Compute.PredicateBits.WordsOf(Math.Max(total, 1));
+            ulong[] rented = System.Buffers.ArrayPool<ulong>.Shared.Rent(2 * words);
+            try
+            {
+                Compute.PredicateBits bits = new Compute.PredicateBits(rented.AsSpan(0, words), rented.AsSpan(words, words), total);
+                if (!chunk.TryAnswer(context, wanted.Key, wanted.Read, context.PushedPredicate!, context.Granules, rows, ref bits))
+                {
+                    return -1;
+                }
+
+                if (!context.TryGetRetained(answerKey, out held, out retained))
+                {
+                    held = context.BeginRetainedDecode();
+                    retained = -1;
+                    try
+                    {
+                        retained = Answer(context, ref bits);
+                    }
+                    finally
+                    {
+                        context.EndRetainedDecode(retained);
+                    }
+                }
+            }
+            finally
+            {
+                System.Buffers.ArrayPool<ulong>.Shared.Return(rented);
+            }
+        }
+
+        context.PredicateAnswered = true;
+        FieldMask all = FieldMask.All;
+        return context.HasSelection
+            ? Gather(held, retained, in all, context, total)
             : CanonicalSlice.SliceAcross(held, context.Canonical, retained, (int)rows.Start, length);
     }
 
@@ -548,7 +690,7 @@ internal sealed class FlatLayoutReader : LayoutReader
     /// blocks between them, the one range would decode more rows nobody asked for than a second
     /// range costs.
     /// </summary>
-    private const int ClusterGap = 2 * Arrays.Decoders.Compressed.FastLanes.BlockSize;
+    internal const int ClusterGap = 2 * Arrays.Decoders.Compressed.FastLanes.BlockSize;
 
     /// <summary>
     /// The selection's rows out of the range <c>[from, from + spanned)</c> it spans: that range
@@ -745,7 +887,7 @@ internal sealed class FlatLayoutReader : LayoutReader
         // makes. Answering only on the branch above would answer only for the columns whose data
         // defeats pruning. The answer is for the whole node and the selection is gathered out of
         // it, which is what `Gather` does for values and for the same reason.
-        if (context.PredicateAtNode)
+        if (context.PredicateAtNode && context.PushedKey is null)
         {
             long answerKey = ScanContext.SegmentKey(node.Segments[0]);
             if (TryRetainedAnswer(
@@ -968,11 +1110,12 @@ internal sealed class FlatLayoutReader : LayoutReader
             return false;
         }
 
-        byte[] rented = System.Buffers.ArrayPool<byte>.Shared.Rent(Math.Max(total, 1));
+        ulong[] rented = System.Buffers.ArrayPool<ulong>.Shared.Rent(2 * Compute.PredicateBits.WordsOf(Math.Max(total, 1)));
         try
         {
-            Span<byte> states = rented.AsSpan(0, total);
-            if (!Asked(decoder, in root, node.DType, total, context, states))
+            int words = Compute.PredicateBits.WordsOf(total);
+            Compute.PredicateBits bits = new Compute.PredicateBits(rented.AsSpan(0, words), rented.AsSpan(words, words), total);
+            if (!decoder.TryEvaluate(context.Decode, in root, node.DType, total, context.PushedPredicate!, ref bits))
             {
                 return false;
             }
@@ -987,7 +1130,7 @@ internal sealed class FlatLayoutReader : LayoutReader
                 retained = -1;
                 try
                 {
-                    retained = Answer(context, states, total);
+                    retained = Answer(context, ref bits);
                 }
                 finally
                 {
@@ -1002,23 +1145,16 @@ internal sealed class FlatLayoutReader : LayoutReader
         }
         finally
         {
-            System.Buffers.ArrayPool<byte>.Shared.Return(rented);
+            System.Buffers.ArrayPool<ulong>.Shared.Return(rented);
         }
     }
 
-    /// <summary>Asks the encoding the pushed predicate: the comparison, or the prefix match.</summary>
-    private static bool Asked(
-        ArrayDecoder decoder, in ArrayNode root, Types.DType dtype, int total, ScanContext context, Span<byte> states) =>
-        context.PushedPrefix
-            ? decoder.TryStartsWith(context.Decode, in root, dtype, total, context.PushedLiteral, states)
-            : decoder.TryCompare(context.Decode, in root, dtype, total, context.PushedOp, context.PushedLiteral, states);
-
     /// <summary>
-    /// Offers the pushed comparison to this node's encoding, and turns an answer into the column.
+    /// Offers the pushed predicate to this node's encoding, and turns an answer into the column.
     /// </summary>
     /// <param name="root">The node's parsed array root.</param>
     /// <param name="node">The flat layout node.</param>
-    /// <param name="context">The scan context carrying the comparison.</param>
+    /// <param name="context">The scan context carrying the predicate.</param>
     /// <param name="total">The node's row count.</param>
     /// <returns>The canonical node holding the answer, or -1 when the encoding declined.</returns>
     /// <remarks>
@@ -1038,63 +1174,110 @@ internal sealed class FlatLayoutReader : LayoutReader
             return -1;
         }
 
-        byte[] rented = System.Buffers.ArrayPool<byte>.Shared.Rent(Math.Max(total, 1));
+        ulong[] rented = System.Buffers.ArrayPool<ulong>.Shared.Rent(2 * Compute.PredicateBits.WordsOf(Math.Max(total, 1)));
         try
         {
-            Span<byte> states = rented.AsSpan(0, total);
-            if (!Asked(decoder, in root, node.DType, total, context, states))
+            int words = Compute.PredicateBits.WordsOf(total);
+            Compute.PredicateBits bits = new Compute.PredicateBits(rented.AsSpan(0, words), rented.AsSpan(words, words), total);
+            if (!decoder.TryEvaluate(context.Decode, in root, node.DType, total, context.PushedPredicate!, ref bits))
             {
                 return -1;
             }
 
             context.PredicateAnswered = true;
-            return Answer(context, states, total);
+            return Answer(context, ref bits);
         }
         finally
         {
-            System.Buffers.ArrayPool<byte>.Shared.Return(rented);
+            System.Buffers.ArrayPool<ulong>.Shared.Return(rented);
         }
     }
 
-    /// <summary>Builds the <c>Bool</c> column one run of trilean states means.</summary>
+    /// <summary>The reads by granules whose encoding answered a pushed comparison over their rows, over the process: for a test, run alone.</summary>
+    internal static long RangesAnswered => System.Threading.Interlocked.Read(ref s_rangesAnswered);
+
+    private static long s_rangesAnswered;
+
+    /// <summary>
+    /// The rows a read by granules answers a pushed comparison over: the batch's, or its selection when that is one range;
+    /// false for a selection of several, the rows between which no region holds.
+    /// </summary>
+    private static bool AnswerRows(ScanContext context, RowRange rows, int length, out int start, out int count)
+    {
+        if (!context.HasSelection)
+        {
+            start = (int)rows.Start;
+            count = length;
+            return true;
+        }
+
+        return context.TryGetSelectionRange(out start, out count);
+    }
+
+    /// <summary>
+    /// The encoding's answer to the pushed predicate over rows <c>[start, start + count)</c> of the node alone
+    /// (<see cref="ArrayDecoder.TryEvaluateRange"/>), as <see cref="TryAnswer"/> turns one into the column; -1 when it declined.
+    /// </summary>
+    private static int RangeAnswer(in ArrayNode root, in LayoutNode node, ScanContext context, int total, int start, int count)
+    {
+        ArrayDecoder decoder = ArrayDecoderTable.Require(context, root.Encoding, root.EncodingSpecIndex);
+        if (!decoder.EvaluatesWithoutFullDecode)
+        {
+            return -1;
+        }
+
+        ulong[] rented = System.Buffers.ArrayPool<ulong>.Shared.Rent(2 * Compute.PredicateBits.WordsOf(Math.Max(count, 1)));
+        try
+        {
+            int words = Compute.PredicateBits.WordsOf(count);
+            Compute.PredicateBits bits = new Compute.PredicateBits(rented.AsSpan(0, words), rented.AsSpan(words, words), count);
+            if (!decoder.TryEvaluateRange(context.Decode, in root, node.DType, total, start, count, context.PushedPredicate!, ref bits))
+            {
+                return -1;
+            }
+
+            System.Threading.Interlocked.Increment(ref s_rangesAnswered);
+            context.PredicateAnswered = true;
+            return Answer(context, ref bits);
+        }
+        finally
+        {
+            System.Buffers.ArrayPool<ulong>.Shared.Return(rented);
+        }
+    }
+
+    /// <summary>Builds the <c>Bool</c> column an encoding's answer means: its truth, and its known rows as validity.</summary>
     /// <param name="context">The scan context owning the arena.</param>
-    /// <param name="states">One state per row.</param>
-    /// <param name="total">The row count.</param>
+    /// <param name="bits">The answer.</param>
     /// <returns>The canonical node's index.</returns>
     /// <remarks>
-    /// Two bitmaps out of one byte array, and the second one only when a row is unknown: a
-    /// comparison over a column with no null answers no unknown, and a validity bitmap nobody needs
-    /// is a block rented and cleared for nothing.
+    /// The second bitmap only when a row is unknown: a comparison over a column with no null
+    /// answers no unknown, and a validity bitmap nobody needs is a block allocated for nothing.
     /// </remarks>
-    private static int Answer(ScanContext context, ReadOnlySpan<byte> states, int total)
+    internal static int Answer(ScanContext context, ref Compute.PredicateBits bits)
     {
         Arrays.CanonicalArena arena = context.Canonical;
-        states = states[..total];
-
-        // Whole words, every one written: the first here in case there is no row, the rest by the
-        // kernel, which leaves the bits past the rows clear.
-        int bytes = Math.Max((total + 63) >> 6, 1) * sizeof(ulong);
-        VortexBuffer truth = arena.AllocateUninitialized(bytes, sizeof(ulong), out Span<byte> bits);
-        Span<ulong> truthWords = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, ulong>(bits);
+        int total = bits.Rows;
+        int bytes = Math.Max(bits.Truth.Length, 1) * sizeof(ulong);
+        VortexBuffer truth = arena.AllocateUninitialized(bytes, sizeof(ulong), out Span<byte> truthBytes);
+        Span<ulong> truthWords = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, ulong>(truthBytes);
         truthWords[0] = 0;
-        Compute.Trilean.ToWords(states, Compute.Trilean.True, equal: true, truthWords);
-        bool unknown = states.Contains(Compute.Trilean.Unknown);
+        bits.Truth.CopyTo(truthWords);
 
         Validity validity = Validity.NonNullable;
-        if (unknown)
+        if (bits.Unknown)
         {
-            VortexBuffer known = arena.AllocateUninitialized(bytes, sizeof(ulong), out Span<byte> valid);
-            Span<ulong> knownWords = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, ulong>(valid);
+            VortexBuffer known = arena.AllocateUninitialized(bytes, sizeof(ulong), out Span<byte> knownBytes);
+            Span<ulong> knownWords = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, ulong>(knownBytes);
             knownWords[0] = 0;
-            Compute.Trilean.ToWords(states, Compute.Trilean.Unknown, equal: false, knownWords);
-
+            bits.Known.CopyTo(knownWords);
             validity = Validity.Bitmap(arena.AddBool(
                 context.Types.Bool(Types.Nullability.NonNullable), total, Validity.NonNullable,
                 known, 0));
         }
 
         return arena.AddBool(
-            context.Types.Bool(unknown ? Types.Nullability.Nullable : Types.Nullability.NonNullable),
+            context.Types.Bool(bits.Unknown ? Types.Nullability.Nullable : Types.Nullability.NonNullable),
             total, validity, truth, 0);
     }
 

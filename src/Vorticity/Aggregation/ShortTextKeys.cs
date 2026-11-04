@@ -4,7 +4,6 @@ using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Vorticity.Arrays;
-using Vorticity.Compute;
 using Vorticity.Writing;
 
 namespace Vorticity.Aggregating;
@@ -42,7 +41,8 @@ internal readonly struct TextWord : IEquatable<TextWord>, IComparable<TextWord>
 
     /// <summary>
     /// The 32 bits a key table homes a word by: rapidhash's path for 16 bytes (V3), two products of 128
-    /// bits, under the <paramref name="seed"/> a table takes after a long chain, 0 until then. A short
+    /// bits, under the seed a table takes after a long chain, 0 until then, <paramref name="prepared"/> as
+    /// <see cref="Prepared"/> prepares it. A short
     /// text's low half is its length and its first bytes, the same for many keys, and the table's fold of
     /// two words, made for integers, homed db-benchmark's ids of 12 bytes, 10⁵ of them that differ in their
     /// last digits alone, so badly that a group by took 639 ms where a table of bytes took 191 (one lane).
@@ -60,15 +60,11 @@ internal readonly struct TextWord : IEquatable<TextWord>, IComparable<TextWord>
     /// Sources: github.com/Nicoshev/rapidhash, rapidhash.h, its secrets and its path for 4 to 16 bytes;
     /// github.com/rurban/smhasher, its table of hashes.
     /// </para>
+    /// <para>
+    /// A table's first pass prepares the seed once a batch, where preparing it at every row cost a test and four
+    /// instructions of the constant a row, in the loop the native compiler left it in.
+    /// </para>
     /// </remarks>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    internal static uint Home(ulong low, ulong high, ulong seed) => HomePrepared(low, high, Prepared(seed));
-
-    /// <summary>
-    /// <see cref="Home"/> of a seed already prepared by <see cref="Prepared"/>: a table's first pass prepares
-    /// it once a batch, where preparing it at every row cost a test and four instructions of the constant a
-    /// row, in the loop the native compiler left it in.
-    /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal static uint HomePrepared(ulong low, ulong high, ulong prepared)
     {
@@ -410,7 +406,9 @@ internal sealed class ShortTextKeys : GroupKeys
 
     /// <summary>
     /// The words turned into a table of bytes, for good: every group's key added again in the order of
-    /// the groups, which keeps each its number, the null group's too; the words' arrays given back.
+    /// the groups, which keeps each its number, the null group's too; the words' arrays given back, and
+    /// their block to the process's shelf: dropped, a lane of a question grouped by a long text, the
+    /// pods of a route, grew a block of up to 32 768 words each time and lost it at its first long value.
     /// </summary>
     private void Demote()
     {
@@ -430,7 +428,7 @@ internal sealed class ShortTextKeys : GroupKeys
         words.Release();
         _words = null;
         _bytes = bytes;
-        _block = [];
+        Scratch.Return(ref _block);
         Renumbered();
     }
 
@@ -654,17 +652,6 @@ internal sealed class ShortTextKeys : GroupKeys
         }
     }
 
-    internal override int[] Order(bool sorted)
-    {
-        int[] order = Identity(Count);
-        if (sorted)
-        {
-            Array.Sort(order, new ByKey(this));
-        }
-
-        return order;
-    }
-
     internal override bool Orders(int component) => true;
 
     internal override int CompareKeys(int a, int b, int component) => Compare(this, a, b);
@@ -684,12 +671,6 @@ internal sealed class ShortTextKeys : GroupKeys
         Span<byte> left = stackalloc byte[16];
         Span<byte> right = stackalloc byte[16];
         return KeyOf(a, left).SequenceCompareTo(other.KeyOf(b, right));
-    }
-
-    /// <summary>Groups by their key's bytes, the null group last.</summary>
-    private sealed class ByKey(ShortTextKeys keys) : IComparer<int>
-    {
-        public int Compare(int x, int y) => keys.Compare(keys, x, y);
     }
 
     internal override Func<int, T> Reader<T>(int component)

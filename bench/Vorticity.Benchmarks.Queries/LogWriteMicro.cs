@@ -4,21 +4,22 @@ using System.Globalization;
 using System.IO;
 using System.Threading.Tasks;
 using Vorticity.Dataset;
-using Vorticity.IO;
 
 namespace Vorticity.Benchmarks.Queries;
 
 /// <summary>
 /// What building the client's log records costs (<c>--micro logwrite</c>): <c>--hours</c> hours of them at <c>--rate</c> a
 /// second (<see cref="LogGeneratorV2"/>), built as <c>--micro paths --qp</c> builds them, the way a client's ingestion does:
-/// written in objects of <c>--part-minutes</c> minutes, four hours at once, appended and compacted hour after hour in
-/// periods of a day, each job shredding their attributes. The time, the processors' time, and what each row cost them.
-/// The store and its scratch lie in a directory of their own under <c>--store</c>, removed after.
+/// written in objects of <c>--part-minutes</c> minutes, four hours at once, appended and compacted hour after hour,
+/// partitioned by day, each job shredding their attributes. The time, the processors' time, and what each row cost them.
+/// The store and its scratch lie in a directory of their own under <c>--store</c>, removed after. With <c>--print-jobs</c>,
+/// each job's line and its passes.
 /// </summary>
 internal static class LogWriteMicro
 {
-    internal static async Task<int> Run(string root, int hours, double rate, int partMinutes, int writeDegree, int budget)
+    internal static async Task<int> Run(string root, int hours, double rate, int partMinutes, int writeDegree, int budget, bool printJobs = false)
     {
+        IncrementalBuild.PrintJobs = printJobs;
         string directory = Path.Combine(root, $"logwrite-{Guid.NewGuid():N}");
         string scratch = Path.Combine(directory, "scratch");
         Directory.CreateDirectory(scratch);
@@ -28,8 +29,7 @@ internal static class LogWriteMicro
             DatasetOptions options = new DatasetOptions
             {
                 Session = session,
-                ClusteringKey = [nameof(LogRow.At)],
-                Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Day },
+                Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(LogRow.At)).Truncate(CalendarUnit.Day), SortKey = [LayoutValue.Column(nameof(LogRow.At))], Organization = LayoutOrganization.Leveled },
                 Write = new VortexWriteOptions { Indexes = IndexPolicy.Auto.WithBudgetPerMille(budget), ScratchDirectory = scratch },
             };
 

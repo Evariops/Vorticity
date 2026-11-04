@@ -94,7 +94,7 @@ internal static class TreeBench
     /// <summary>An entry of about 200 bytes, as the tree's sizing assumes.</summary>
     private static TreeEntry Entry(int i) => new TreeEntry(Key(i), Value(i, 0), i + 1);
 
-    /// <summary>A clustering key that sorts with `i`: a tenant, then a position inside it.</summary>
+    /// <summary>A sort key that sorts with `i`: a tenant, then a position inside it.</summary>
     private static ReadOnlyMemory<byte> Key(int i) =>
         Encoding.UTF8.GetBytes(string.Create(CultureInfo.InvariantCulture, $"tenant-{i / 1_000:D5}/{i:D12}"));
 

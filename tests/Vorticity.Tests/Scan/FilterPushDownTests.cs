@@ -20,11 +20,8 @@ using Vorticity.Arrays;
 using Vorticity.Buffers;
 using Vorticity.Columns;
 using Vorticity.Expressions;
-using Vorticity.File;
-using Vorticity.Layouts;
 using Vorticity.Scanning;
 using Vorticity.Types;
-using Vorticity.Writing;
 using Xunit;
 
 namespace Vorticity.Tests.Scan;

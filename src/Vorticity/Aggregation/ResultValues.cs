@@ -14,10 +14,6 @@ namespace Vorticity.Aggregating;
 /// </summary>
 internal static class ResultValues
 {
-    /// <summary>Whether a column holds values of <typeparamref name="T"/>, as a result: a scalar type of the mapping table, or a record.</summary>
-    internal static bool IsColumnType<T>(IVortexRecord? record) =>
-        record is not null || ClrShape.For<T>.Value.Kind is not (ClrKind.Unsupported or ClrKind.List or ClrKind.Extension);
-
     /// <summary>Appends <paramref name="values"/> to <paramref name="store"/>, each converted to the column's storage.</summary>
     /// <param name="store">The column's store, an extension's or a leaf.</param>
     /// <param name="values">The values, one per row.</param>

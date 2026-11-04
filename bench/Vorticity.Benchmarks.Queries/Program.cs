@@ -18,6 +18,7 @@
 //   … -- --switch merge --setting B                                                    one setting alone, for a profile of that side
 //   … -- --fixture spread-random-20000000-core2025.10                                   that fixture written if it is not yet, its path printed
 //   … -- --help                                                                         the micro benches --micro NAME runs, each with what it measures
+//   … -- --micro NAME --native-sites FILE                                               that micro, the native blocks it holds at its peak written by the site that rented them (NativeSites.cs)
 //
 // The files are written once under ~/.cache/vorticity/queries (VORTICITY_QUERIES_CORPUS overrides it).
 using System;
@@ -54,33 +55,25 @@ Dictionary<string, (string Help, Func<Task<int>> Run)> micros = new Dictionary<s
 {
     ["keys"] = ("a key's groups found alone, in memory, with the statistics' bounds and without (KeyMicro.cs)", () => Task.FromResult(KeyMicro.Run(rounds))),
     ["words"] = ("a short text key's groups found alone, in memory (WordMicro.cs)", () => Task.FromResult(WordMicro.Run(rounds))),
+    ["keyindex"] = ("the search of one object's sparse index alone, in memory, by three filters; with --store, the indexes of a dataset weighed (KeyIndexMicro.cs)", () => KeyIndexMicro.Run(rounds, Text(args, "--store"))),
     ["floatsum"] = ("a grouped exact float sum alone, in memory (FloatSumMicro.cs)", () => Task.FromResult(FloatSumMicro.Run(rounds))),
     ["variants"] = ("a variant's path extracted alone, in memory (VariantMicro.cs)", () => Task.FromResult(VariantMicro.Run(rounds))),
     ["sketches"] = ("the grids of a distribution weighed, in buckets and speed (SketchMicro.cs)", () => Task.FromResult(SketchMicro.Run(rounds))),
-    ["synopsistables"] = ("what the synopsis tables cost a job, counted per slice and built (SynopsisTablesMicro.cs)", () => SynopsisTablesMicro.Run(rounds)),
-    ["slicesort"] = ("one time slice sorted as a dataset of periods writes it (SliceSortMicro.cs)", () => SliceSortMicro.Run(rounds, args.Contains("--deep"))),
-    ["load"] = ("the write path of a load of sealed periods at the design's density, a few seconds a round (LoadMicro.cs)", () =>
-    {
-        int periods = Option(args, "--periods", 4);
-        return LoadMicro.Run(
-            Text(args, "--store") ?? BenchStores.Of("load-micro"),
-            periods,
-            Option(args, "--parallel", periods),
-            Option(args, "--minutes", 3),
-            Option(args, "--rate", 50_000),
-            Option(args, "--rounds", 3),
-            Option(args, "--budget", 100),
-            Option(args, "--write-degree", Math.Max(1, Environment.ProcessorCount / 2)),
-            args.Contains("--disk"),
-            Option(args, "--period-hours", 1));
-    }),
+    ["sheets"] = ("what a sheet of each column costs the writer, a column a row, one thread (SheetMicro.cs)", () =>
+        SheetMicro.RunAsync((int)Option(args, "--rows", 3_000_000), rounds)),
+    ["counts"] = ("what each column's counts cost the writer and weigh, a counted column a row, one thread (CountsMicro.cs)", () =>
+        CountsMicro.RunAsync((int)Option(args, "--rows", 3_000_000), Option(args, "--hours", 4), rounds)),
+    ["histograms"] = ("a measure's histograms over the granules weighed at three and six bits of mantissa, against the rows (HistogramsMicro.cs)", () =>
+        HistogramsMicro.RunAsync((int)Option(args, "--rows", 3_000_000), Option(args, "--hours", 4))),
+    ["granules"] = ("what each column's statistics over the granules and its locate cost the writer and weigh, a row and a granule, one thread (GranulesMicro.cs)", () =>
+        GranulesMicro.RunAsync((int)Option(args, "--rows", 3_000_000), Option(args, "--hours", 4), rounds)),
     ["entries"] = ("each object's entry in the tree of the dataset at --store, and what its table of contents holds", async () =>
     {
         await PathsBench.EntriesAsync(Text(args, "--store") ?? throw new ArgumentException("--micro entries reads the dataset at --store."));
         return 0;
     }),
-    ["seal"] = ("what the compaction of a period costs at the design's scale, job by job and pass by pass (SealBench.cs)", () => SealBench.Run(
-        Text(args, "--store") ?? BenchStores.Of("seal"),
+    ["jobs"] = ("what a dataset's jobs cost at the design's scale, job by job and pass by pass (JobsBench.cs)", () => JobsBench.Run(
+        Text(args, "--store") ?? BenchStores.Of("jobs"),
         Option(args, "--minutes", 10),
         Option(args, "--rate", 50_000),
         Option(args, "--part-minutes", 10),
@@ -91,24 +84,16 @@ Dictionary<string, (string Help, Func<Task<int>> Run)> micros = new Dictionary<s
         Option(args, "--hours", 1),
         args.Contains("--day"))),
     ["shredcost"] = ("what shredding a path costs and saves in a file's bytes (ShredCostMicro.cs)", () => ShredCostMicro.Run()),
-    ["chunkshapes"] = ("the keys the chunks of a slice shred, three ways (ChunkShapesMicro.cs)", () =>
-        Task.FromResult(ChunkShapesMicro.Run((int)Option(args, "--rows", 3_000_000), (int)Option(args, "--chunk-rows", 1_000_000)))),
-    ["runsorder"] = ("the order inside a slice by distinct values or by runs added (RunsOrderMicro.cs)", () =>
-        Task.FromResult(RunsOrderMicro.Run((int)Option(args, "--rows", 1_000_000), rounds))),
     ["shredwrite"] = ("what shredding costs a job in time, counted, chosen and written (ShredWriteMicro.cs)", () => ShredWriteMicro.Run(Option(args, "--rows", 1_000_000), rounds)),
-    ["slicebytes"] = ("what sorted slices weigh against the same rows in time order (SliceBytesMicro.cs)", () => SliceBytesMicro.Run(Option(args, "--rows", 1_000_000))),
-    ["sliceorder"] = ("the time order of an object sorted slice by slice (SliceOrderMicro.cs)", () => SliceOrderMicro.Run(rounds, Option(args, "--slice-rows", 500_000))),
-    ["synopsisanswer"] = ("an aggregation over a dataset of periods with its synopses and without (SynopsisAnswerMicro.cs)", () =>
-        SynopsisAnswerMicro.Run(Option(args, "--rows", 2_000_000), rounds)),
     ["sparsecost"] = ("a sparse chunk's bytes and decode time against a dense one's, by the share of nulls (SparseCostMicro.cs)", () =>
         SparseCostMicro.Run(Option(args, "--rows", 1_000_000), rounds)),
+    ["sparsejudge"] = ("what judging a pushed predicate costs a sparse chunk against a dense one, by the share of its values present (SparseJudgeMicro.cs)", () =>
+        SparseJudgeMicro.Run((int)Option(args, "--rows", 2_000_000), rounds)),
     ["splitplan"] = ("--file F: the plan of splits a scan of a file's every row draws before its first read (SplitPlanMicro.cs)", () =>
         SplitPlanMicro.Run(Text(args, "--file") ?? throw new ArgumentException("--micro splitplan needs --file F."), rounds)),
-    ["slicecost"] = ("the price of a row at a window's edge and of a row of a table of slices, the two a slice's target trades (SliceCostMicro.cs)", () =>
-        SliceCostMicro.Run(Option(args, "--rows", 2_000_000), rounds)),
-    ["generator"] = ("a minute of the time-window design's requests, and the runs of each synopsis column against its figures (RequestGenerator.cs)", () =>
+    ["generator"] = ("a minute of the time-window design's requests, and the runs of each column under the first design's order (RequestGenerator.cs)", () =>
         Task.FromResult(RequestGenerator.Run((int)Option(args, "--seed", 17)))),
-    ["questions"] = ("the designs' example questions over generated requests and log records, cold and warm, synopses and rows (QuestionBench.cs)", () =>
+    ["questions"] = ("the designs' example questions over generated requests and log records, cold and warm, by the synopses and by the rows (QuestionBench.cs)", () =>
         QuestionBench.Run(
             (int)Option(args, "--hours", 24), Option(args, "--rate", 20), (int)Option(args, "--latency", 30), rounds, (int)Option(args, "--budget", 100), Text(args, "--only"),
             args.Contains("--sealed"))),
@@ -117,7 +102,7 @@ Dictionary<string, (string Help, Func<Task<int>> Run)> micros = new Dictionary<s
     ["lifecycle"] = ("what a row costs from its append to its last rewrite, and the objects a window finds (LifecycleBench.cs)", () =>
         LifecycleBench.Run(
             (int)Option(args, "--hours", 48), Option(args, "--rate", 20), (int)Option(args, "--writers", 4), (int)Option(args, "--batch", 30),
-            Text(args, "--style") == "leveled", (int)Option(args, "--period-hours", 1), Text(args, "--deletes") == "off" ? 0 : (int)Option(args, "--deletes", 2), (int)Option(args, "--fanout", 0),
+            Text(args, "--partition") ?? "hour", Text(args, "--deletes") == "off" ? 0 : (int)Option(args, "--deletes", 2), (int)Option(args, "--fanout", 0),
             Text(args, "--late") != "off", Text(args, "--neighbours") != "off", (long)Option(args, "--max-object-mib", 0) << 20,
             Text(args, "--pick"), (int)Option(args, "--trace-overlaps", 0))),
     ["qp-dashboard"] = ("the client's questions of a --qp run's TSV against the review's targets, a Markdown table (QpDashboard.cs)", () =>
@@ -143,21 +128,45 @@ Dictionary<string, (string Help, Func<Task<int>> Run)> micros = new Dictionary<s
             (int)Option(args, "--budget", 100), (int)Option(args, "--views", 200), (int)Option(args, "--seed", 31))),
     ["hashedend"] = ("what the end of a file's hashed postings holds with no bound on its rows (HashedEndMicro.cs)", () =>
         HashedEndMicro.Run(Text(args, "--store") ?? BenchStores.Of("hashedend"), Option(args, "--rows", 10_000_000))),
+    ["variantpaths"] = ("--store DIR: the attributes' paths of a source's hour of log records against a count of the same rows, cold and warm (VariantPathsMicro.cs)", () => VariantPathsMicro.Run(
+        Text(args, "--store") ?? throw new ArgumentException("--store names the dataset of log records."),
+        Text(args, "--service") ?? "web-00",
+        Option(args, "--hour", 1),
+        degrees,
+        rounds,
+        Option(args, "--latency-ms", 5))),
+    ["appenddirectory"] = ("what an append's path directory costs, log records appended with it and without (AppendDirectoryMicro.cs)", () => AppendDirectoryMicro.Run(
+        Option(args, "--rows", 1_048_576), (int)Option(args, "--part", 65_536), rounds, (int)Option(args, "--write-degree", Math.Max(1, Environment.ProcessorCount / 2)))),
+    ["censusrate"] = ("what counting the paths of log records costs a row, as an append's writer counts them (CensusRateMicro.cs)", () => CensusRateMicro.Run(
+        Option(args, "--rows", 1_048_576), rounds)),
     ["logwrite"] = ("what building the client's log records costs, as an ingestion builds them (LogWriteMicro.cs)", () => LogWriteMicro.Run(
         Text(args, "--store") ?? BenchStores.Of("logwrite"),
         Option(args, "--hours", 2),
         Option(args, "--rate", 5_000),
         Option(args, "--part-minutes", 10),
         Option(args, "--write-degree", Math.Max(1, Environment.ProcessorCount / 2)),
-        Option(args, "--budget", 100))),
+        Option(args, "--budget", 100),
+        args.Contains("--print-jobs"))),
+    ["layout"] = ("the bytes a row of each column takes, the reference requests in arrival order and sorted by emitter (LayoutMicro.cs)", () =>
+        LayoutMicro.Run(Text(args, "--store") ?? BenchStores.Of("layout"), Option(args, "--minutes", 20), Option(args, "--rate", 5_000))),
+    ["columns"] = ("the battery \"any column\": each column counted by hour, then filtered on a frequent and a rare value and grouped by each other, in arrival order and sorted by service, priced, read and held to the rows; and the frontier on the fly (ColumnBattery.cs)", () =>
+        ColumnBattery.Run(Option(args, "--hours", 4), Option(args, "--rate", 50), Text(args, "--only"), Text(args, "--trace"))),
+    ["peercache"] = ("a question warm from the synopsis cache's own directory, and from another's of the same root (PeerCacheMicro.cs)", () =>
+        PeerCacheMicro.Run(Text(args, "--store") ?? BenchStores.Of("peercache"), (int)Option(args, "--objects", 16), (int)Option(args, "--rows", 200_000), rounds)),
     ["needles"] = ("what a needle's index weighs and what a probe costs, sorted run against a hashed index (NeedleMicro.cs)", () =>
         NeedleMicro.Run((int)Option(args, "--rows", 4_000_000), rounds)),
-    ["paths"] = ("every query path of a dataset of periods at scale, over a store that waits a round trip per request (PathsBench.cs)", () => PathsBench.Run(new PathsBench.Settings
+    ["inputs"] = ("--store DIR: what the inputs of a merge hold while it reads them, 1 to 8 of a dataset's largest objects in lockstep (InputMemoryMicro.cs)", () =>
+        InputMemoryMicro.Run(Text(args, "--store") ?? throw new ArgumentException("--micro inputs needs --store DIR, a dataset's directory."), (int)Option(args, "--objects", 8))),
+    ["consolidation"] = ("--store DIR: what a consolidation holds apart from any other work, hours of log records left in level 0 consolidated on 1 lane and on 8 (ConsolidationMemoryMicro.cs)", () =>
+        ConsolidationMemoryMicro.Run(Text(args, "--store") ?? throw new ArgumentException("--micro consolidation needs --store DIR, a directory of its own."), (int)Option(args, "--hours", 4), Option(args, "--rate", 5_000), (int)Option(args, "--lanes", 0), args.Contains("--again"))),
+    ["shredmemory"] = ("--store DIR: what a job's writer holds while it shreds a variant column, a dataset's largest object written in chunks of a million rows and shorter; --out DIR keeps the files (ShredMemoryMicro.cs)", () =>
+        ShredMemoryMicro.Run(Text(args, "--store") ?? throw new ArgumentException("--micro shredmemory needs --store DIR, a dataset's directory."), (int)Option(args, "--rows", 3_000_000), Text(args, "--out"))),
+    ["census"] = ("--store DIR: what the census of a consolidation holds, the variant column of a dataset's largest objects counted at 1, 4 and 16 lanes (CensusMemoryMicro.cs)", () =>
+        CensusMemoryMicro.Run(Text(args, "--store") ?? throw new ArgumentException("--micro census needs --store DIR, a dataset's directory."), (int)Option(args, "--objects", 12))),
+    ["paths"] = ("every query path of datasets partitioned by hour or by day at scale, over a store that waits a round trip per request (PathsBench.cs)", () => PathsBench.Run(new PathsBench.Settings
     {
         Store = Text(args, "--store") ?? new PathsBench.Settings().Store,
         Design = args.Contains("--design"),
-        Incremental = args.Contains("--incremental"),
-        ParallelPeriods = Option(args, "--parallel-periods", 4),
         Hours = Option(args, "--hours", args.Contains("--design") ? 240 : 24),
         Rate = Option(args, "--rate", args.Contains("--design") ? 50_000 : 1_000),
         ParallelHours = Option(args, "--parallel-hours", 4),
@@ -182,7 +191,13 @@ Dictionary<string, (string Help, Func<Task<int>> Run)> micros = new Dictionary<s
         Rebuild = args.Contains("--rebuild"),
         RandomIds = args.Contains("--random-ids"),
         Qp = args.Contains("--qp"),
+        Study = args.Contains("--study"),
+        Bounded = args.Contains("--bounded"),
+        PrintJobs = args.Contains("--print-jobs"),
+        Sets = Text(args, "--sets")?.Split(','),
         Declared = args.Contains("--declared"),
+        UserIds = args.Contains("--user-ids"),
+        Idiom = args.Contains("--idiom"),
         QpHours = Option(args, "--qp-hours", 30),
         QpRate = Option(args, "--qp-rate", 5_000),
         BuildOnly = args.Contains("--build-only"),
@@ -195,15 +210,19 @@ Dictionary<string, (string Help, Func<Task<int>> Run)> micros = new Dictionary<s
         LoopSeconds = Option(args, "--loop", 0),
         LoopColdSeconds = Option(args, "--loop-cold", 0),
         NoDigest = args.Contains("--no-digest"),
+        NoSynopsisCache = args.Contains("--no-synopsis-cache"),
+        AllocTypes = args.Contains("--alloc-types"),
         MaxReads = Option(args, "--max-reads", 0),
-        SegmentCacheBytes = Option(args, "--segment-cache-mb", 0) * (1L << 20),
+        SegmentCacheBytes = Option(args, "--segment-cache-mb", -1) is int mb and >= 0 ? mb * (1L << 20) : -1,
         KeepHandles = args.Contains("--keep-handles"),
         WarmSeconds = args.Contains("--warm") ? double.Parse(Text(args, "--warm")!, CultureInfo.InvariantCulture) : 3,
         QpsSeconds = args.Contains("--qps") ? double.Parse(Text(args, "--qps")!, CultureInfo.InvariantCulture) : 0,
-        QpsByQuestion = args.Contains("--qps-by-question"),
         OpenObjects = (int)Option(args, "--open-objects", 0),
         Handles = (int)Option(args, "--handles", 1),
         SharedCache = Text(args, "--shared-cache"),
+        QpsProcesses = (int)Option(args, "--qps-processes", 1),
+        QpsPhase = Text(args, "--qps-phase"),
+        Arguments = args,
         QpWrite = Text(args, "--qp-write"),
         Clients = args.Contains("--clients") ? [.. Text(args, "--clients")!.Split(',').Select(c => int.Parse(c, CultureInfo.InvariantCulture))] : [1, Environment.ProcessorCount],
     })),
@@ -224,6 +243,8 @@ if (Text(args, "--micro") is { } micro)
 {
     if (micros.TryGetValue(micro, out (string Help, Func<Task<int>> Run) chosen))
     {
+        // --native-sites FILE: the native blocks the run holds at its peak, by the site that rented them (NativeSites.cs).
+        using NativeSites? sites = Text(args, "--native-sites") is { } path ? NativeSites.Watch(path) : null;
         return await chosen.Run();
     }
 

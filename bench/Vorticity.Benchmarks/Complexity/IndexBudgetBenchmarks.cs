@@ -6,14 +6,12 @@
 // and each payload is taken, placed and weighed against the budget. Run in a checkout of the
 // original and in the tree.
 using System;
-using System.Collections.Generic;
 using System.Threading.Tasks;
 
 using BenchmarkDotNet.Attributes;
 
 using Vorticity.Arrays;
 using Vorticity.Buffers;
-using Vorticity.Columns;
 using Vorticity.Indexes;
 using Vorticity.Types;
 using Vorticity.Writing;

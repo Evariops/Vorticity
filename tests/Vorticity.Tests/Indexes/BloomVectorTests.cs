@@ -147,13 +147,13 @@ public sealed class BloomVectorTests
         builder.CloseBlock();
         await builder.EndOfDataAsync(TestContext.Current.CancellationToken);
 
-        Assert.Equal(blocks, Assert.Single(builder.BlockFilterBlocks));
         PendingPayload payload = Assert.IsType<PendingPayload>(Assert.Single(builder.Runs).Blocks);
 
-        // The payload as the index writer lays it out: a u32 array, the filter's words in order.
+        // The payload as the index writer lays it out: a u32 array, the filter's words in order, its blocks the vector's.
         CanonicalArena laid = new CanonicalArena();
         CanonicalNode array = laid.GetNode(payload.Build(laid, types));
         Assert.Equal(PType.U32, array.PType);
+        Assert.Equal(blocks * SplitBlockBloom.WordsPerBlock, array.Length);
         Assert.Equal(Convert.ToHexString(vector.Filter), Convert.ToHexString(array.Values.Span));
     }
 

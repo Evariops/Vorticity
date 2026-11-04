@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
+using Vorticity.Aggregating;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Buffers;
@@ -74,6 +75,9 @@ internal enum VariantRead : byte
     Has,
 }
 
+/// <summary>The key of a variant column whose typed column a pushed predicate reads, and the class it reads it as.</summary>
+internal sealed record PushedVariantKey(string Key, VariantRead Read);
+
 /// <summary>
 /// A path into a variant column read as a typed column: its keys and indices from the column's
 /// value, and the type class it is read as. Its values are null where the path is absent, the
@@ -137,7 +141,7 @@ internal sealed class VariantFieldExpr : FieldExpr
     /// <summary>
     /// The class a synopsis counts the values this path reads in, when it reads one top-level key of a top-level
     /// column, strictly; null otherwise. <c>AsDouble</c> reads floats too, which the double class leaves out, so a
-    /// path of doubles answers it only in an object that holds no float there (<c>SynopsisPath.Floats</c>).
+    /// path of doubles answers it only in an object that holds no float there.
     /// </summary>
     internal VariantClass? CountedClass =>
         Steps is [{ IsKey: true }] && Column is ColumnFieldExpr && !Column.Path.Contains('.', StringComparison.Ordinal)
@@ -152,6 +156,38 @@ internal sealed class VariantFieldExpr : FieldExpr
             : null;
 
     internal override string Key => $"{Column.Key}{string.Concat(Steps)}.{Read}()";
+
+    /// <summary>What separates the keys of a nested path in the name its indexes take (<see cref="KeyName"/>).</summary>
+    internal const char NestedKeys = '\u001f';
+
+    /// <summary>
+    /// The name the indexes of the shredded path take in a file: its one key, or the keys it steps through joined by
+    /// <see cref="NestedKeys"/>, as <c>http</c> then <c>method</c>; null for a path that steps through a list or a key that
+    /// holds the separator.
+    /// </summary>
+    internal string? KeyName => KeyNameOf(Steps);
+
+    /// <summary>The name <see cref="KeyName"/> gives the keys <paramref name="steps"/> step through; null for an index step or a key holding the separator.</summary>
+    internal static string? KeyNameOf(ReadOnlySpan<VariantStep> steps)
+    {
+        if (steps.IsEmpty)
+        {
+            return null;
+        }
+
+        foreach (VariantStep step in steps)
+        {
+            if (!step.IsKey || step.Key!.Contains(NestedKeys, StringComparison.Ordinal))
+            {
+                return null;
+            }
+        }
+
+        return steps.Length == 1 ? steps[0].Key : string.Join(NestedKeys, Array.ConvertAll(steps.ToArray(), static step => step.Key!));
+    }
+
+    /// <summary>The steps of the keys a name <see cref="KeyName"/> gave joins.</summary>
+    internal static VariantStep[] StepsOf(string name) => Array.ConvertAll(name.Split(NestedKeys), VariantStep.Of);
 
     /// <summary>The type the values are read as.</summary>
     internal static VortexType TypeOf(VariantRead read) => read switch
@@ -353,6 +389,207 @@ internal sealed class VariantFieldExpr : FieldExpr
                 return true;
             default:
                 return false;
+        }
+    }
+
+    /// <summary>
+    /// The values of the paths of <paramref name="reads"/>, each a key of the top-level object of the same variant column read
+    /// in its class, over the column's node <paramref name="node"/>, a node each into <paramref name="into"/>: what
+    /// <see cref="Apply"/> gives each, in two passes whatever their number. The first reads a row's dictionary once, where it
+    /// differs from the row's before, maps its ids to the keys asked by their bytes, and notes each field of the row's object
+    /// a key asks for, where it lies in the row's value; the second writes each path's column from its key's notes alone. A
+    /// path at a time read every row's dictionary again and looked its key up in it: a writer that indexes the hundreds of
+    /// keys a log's attributes shred spent most of its time there.
+    /// </summary>
+    /// <exception cref="VortexFormatException">The node is not a variant's, or a row is malformed.</exception>
+    internal static void ApplyKeys(CanonicalArena arena, int node, KeyReads reads, Span<int> into)
+    {
+        VariantFieldExpr[] paths = reads.Paths;
+        CanonicalNode variant = arena.GetNode(node);
+        if (paths.Length < 2 || variant.Kind != CanonicalKind.Struct || variant.FieldCount != 2)
+        {
+            for (int i = 0; i < paths.Length; i++)
+            {
+                into[i] = paths[i].Apply(arena, node);
+            }
+
+            return;
+        }
+
+        int rows = variant.Length;
+        int valueIndex = EncodedForms.Canonical(arena, variant.GetFieldIndex(1));
+        int metadataIndex = EncodedForms.Canonical(arena, variant.GetFieldIndex(0));
+        CanonicalNode metadata = arena.GetNode(metadataIndex);
+        CanonicalNode values = arena.GetNode(valueIndex);
+        ReadOnlySpan<ulong> valid = ArenaWords.Validity(arena, node);
+        ReadOnlySpan<ulong> valueValid = ArenaWords.Validity(arena, valueIndex);
+        ReadOnlySpan<byte> metadataViews = metadata.Views.Span;
+        ReadOnlySpan<byte> valueViews = values.Views.Span;
+
+        int[] head = reads.Heads;
+        head.AsSpan().Fill(-1);
+        Note[] notes = WorkArrays.Rent<Note>(Math.Max(rows, 16));
+        int[] keyOfId = WorkArrays.Rent<int>(64);
+        int noted = 0;
+        try
+        {
+            ReadOnlySpan<byte> lastMetadata = default;
+            bool resolved = false;
+            int ids = 0;
+            for (int row = 0; row < rows; row++)
+            {
+                if (!Valid(valid, row) || !Valid(valueValid, row))
+                {
+                    continue;
+                }
+
+                ReadOnlySpan<byte> rowMetadata = Bytes(in metadata, metadataViews, row);
+                if (!resolved || !Same(rowMetadata, lastMetadata))
+                {
+                    VariantDictionary dictionary = VariantDictionary.Read(rowMetadata);
+                    ids = dictionary.Count;
+                    if (ids > keyOfId.Length)
+                    {
+                        WorkArrays.Return(keyOfId);
+                        keyOfId = WorkArrays.Rent<int>(ids);
+                    }
+
+                    for (int id = 0; id < ids; id++)
+                    {
+                        keyOfId[id] = reads.Lookup(dictionary[id]);
+                    }
+
+                    lastMetadata = rowMetadata;
+                    resolved = true;
+                }
+
+                ReadOnlySpan<byte> rowValue = Bytes(in values, valueViews, row);
+                if (rowValue.IsEmpty || (rowValue[0] & 0x03) != ParquetVariant.BasicObject)
+                {
+                    continue;
+                }
+
+                VariantNested fields = VariantNested.Read(rowValue);
+                for (int f = 0; f < fields.Count; f++)
+                {
+                    int id = fields.IdAt(f);
+                    if ((uint)id >= (uint)ids || keyOfId[id] is not (>= 0 and int key))
+                    {
+                        continue;
+                    }
+
+                    ReadOnlySpan<byte> field = fields.ValueAt(f);
+                    if (field.IsEmpty)
+                    {
+                        continue;
+                    }
+
+                    if (noted == notes.Length)
+                    {
+                        Note[] grown = WorkArrays.Rent<Note>(notes.Length * 2);
+                        notes.AsSpan(0, noted).CopyTo(grown);
+                        WorkArrays.Return(notes);
+                        notes = grown;
+                    }
+
+                    int offset = (int)Unsafe.ByteOffset(ref MemoryMarshal.GetReference(rowValue), ref MemoryMarshal.GetReference(field));
+                    notes[noted] = new Note(row, offset, field.Length, head[key]);
+                    head[key] = noted++;
+                }
+            }
+
+            for (int i = 0; i < paths.Length; i++)
+            {
+                Output output = new(arena, paths[i].Read, rows);
+                for (int n = head[reads.KeyOf[i]]; n >= 0; n = notes[n].Next)
+                {
+                    Note note = notes[n];
+                    ReadOnlySpan<byte> rowValue = Bytes(in values, valueViews, note.Row);
+                    output.Write(note.Row, rowValue.Slice(note.Offset, note.Length), valueViews, rowValue);
+                }
+
+                into[i] = output.Finish(arena, values);
+            }
+        }
+        finally
+        {
+            WorkArrays.Return(notes);
+            WorkArrays.Return(keyOfId);
+        }
+    }
+
+    /// <summary>A field of a row's object a key asks for: its row, where it lies in the row's value, and the key's note before.</summary>
+    private readonly record struct Note(int Row, int Offset, int Length, int Next);
+
+    /// <summary>
+    /// Paths that each read a key of the top-level object of the same variant column in its class, made ready once for
+    /// <see cref="ApplyKeys"/>: each key once, in a table by its bytes, and the key of each path. Read by one thread at a
+    /// time, whose pass it keeps the last note of each key for.
+    /// </summary>
+    internal sealed class KeyReads
+    {
+        // The keys by their numbers, and their numbers by the hash of their bytes, open addressing.
+        private readonly byte[][] _keys;
+        private readonly int[] _table;
+
+        internal KeyReads(VariantFieldExpr[] paths)
+        {
+            Paths = paths;
+            KeyOf = new int[paths.Length];
+            _keys = new byte[paths.Length][];
+            _table = new int[(int)System.Numerics.BitOperations.RoundUpToPowerOf2((uint)Math.Max(paths.Length * 2, 2))];
+            _table.AsSpan().Fill(-1);
+            int count = 0;
+            for (int i = 0; i < paths.Length; i++)
+            {
+                byte[] key = paths[i].Steps[0].KeyUtf8!;
+                int found = Lookup(key);
+                if (found < 0)
+                {
+                    found = count++;
+                    _keys[found] = key;
+                    Insert(found);
+                }
+
+                KeyOf[i] = found;
+            }
+
+            Heads = new int[count];
+        }
+
+        /// <summary>The paths, in the order <see cref="ApplyKeys"/> reads them into.</summary>
+        internal VariantFieldExpr[] Paths { get; }
+
+        /// <summary>The number of each path's key, the keys numbered in the order they first come.</summary>
+        internal int[] KeyOf { get; }
+
+        /// <summary>For each key, its last note in the pass over a batch, -1 for none.</summary>
+        internal int[] Heads { get; }
+
+        /// <summary>The number of key <paramref name="key"/>, -1 when no path reads it.</summary>
+        internal int Lookup(ReadOnlySpan<byte> key)
+        {
+            int mask = _table.Length - 1;
+            for (int at = (int)System.IO.Hashing.XxHash3.HashToUInt64(key) & mask; ; at = (at + 1) & mask)
+            {
+                int held = _table[at];
+                if (held < 0 || _keys[held].AsSpan().SequenceEqual(key))
+                {
+                    return held;
+                }
+            }
+        }
+
+        private void Insert(int key)
+        {
+            int mask = _table.Length - 1;
+            int at = (int)System.IO.Hashing.XxHash3.HashToUInt64(_keys[key]) & mask;
+            while (_table[at] >= 0)
+            {
+                at = (at + 1) & mask;
+            }
+
+            _table[at] = key;
         }
     }
 

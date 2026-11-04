@@ -47,7 +47,7 @@ public sealed partial class BloomFilterTests : IDisposable
         Scan<Sample> absent = file.Scan<Sample>().Where(s => s.Key == missing);
         Assert.Equal(0, await absent.CountAsync(Ct));
         Assert.True(absent.Metrics.BlocksPruned >= blocks - 1, $"{absent.Metrics.BlocksPruned} of {blocks} pruned");
-        ScanPlan plan = await file.Scan<Sample>().Where(s => s.Key == missing).ExplainAsync(Ct);
+        ScanPlan plan = await file.Scan<Sample>().Where(s => s.Key == missing).ExplainAsync(analyze: true, Ct);
         Assert.Equal(0, plan.Pruning.Single(step => step.Structure == "row group statistics").BlocksPruned);
         Assert.True(plan.Pruning.Single(step => step.Structure == "bloom filter").BlocksPruned >= blocks - 1);
 
@@ -84,7 +84,7 @@ public sealed partial class BloomFilterTests : IDisposable
             Assert.Equal(1, await file.Scan<Sample>().Where(s => s.Mixed == unique).CountAsync(Ct));
         }
 
-        ScanPlan neither = await file.Scan<Sample>().Where(s => s.Mixed == "q").ExplainAsync(Ct);
+        ScanPlan neither = await file.Scan<Sample>().Where(s => s.Mixed == "q").ExplainAsync(analyze: true, Ct);
         Assert.Equal(0, neither.Pruning.Single(step => step.Structure == "row group statistics").BlocksPruned);
         Assert.True(neither.Pruning.Single(step => step.Structure == "bloom filter").BlocksPruned >= blocks - 1);
 
@@ -171,11 +171,11 @@ public sealed partial class BloomFilterTests : IDisposable
         for (int i = 0; i < values.Count; i++)
         {
             string present = values[i];
-            Assert.Equal(1, (await file.Scan().Where(Vorticity.Expressions.Expr.Eq(Vorticity.Expressions.Expr.Field("String"), Vorticity.Expressions.Expr.Literal(Vorticity.Expressions.FilterLiteral.From(present)))).ExplainAsync(Ct)).LiveBlocks);
+            Assert.Equal(1, (await file.Scan().Where(Vorticity.Expressions.Expr.Eq(Vorticity.Expressions.Expr.Field("String"), Vorticity.Expressions.Expr.Literal(Vorticity.Expressions.FilterLiteral.From(present)))).ExplainAsync(analyze: true, Ct)).LiveBlocks);
             if (i < values.Count - 1)
             {
                 VortexExpr absent = Vorticity.Expressions.Expr.Eq(Vorticity.Expressions.Expr.Field("String"), Vorticity.Expressions.Expr.Literal(Vorticity.Expressions.FilterLiteral.From(present + "\0")));
-                ScanPlan plan = await file.Scan().Where(absent).ExplainAsync(Ct);
+                ScanPlan plan = await file.Scan().Where(absent).ExplainAsync(analyze: true, Ct);
                 Assert.Equal(0, plan.Pruning.Single(step => step.Structure == "row group statistics").BlocksPruned);
                 ruledOut += plan.Pruning.Single(step => step.Structure == "bloom filter").BlocksPruned;
                 Assert.Equal(0, await file.Scan().Where(absent).CountAsync(Ct));
@@ -206,7 +206,7 @@ public sealed partial class BloomFilterTests : IDisposable
         await using ParquetFile file = await ParquetFile.OpenAsync(_path, Ct);
         VortexExpr six = Vorticity.Expressions.Expr.Eq(Vorticity.Expressions.Expr.Field("Id"), Vorticity.Expressions.Expr.Literal(Vorticity.Expressions.FilterLiteral.From(6L)));
         Assert.Equal(1, await file.Scan().Where(six).CountAsync(Ct));
-        Assert.Equal(0, (await file.Scan().Where(six).ExplainAsync(Ct)).Pruning.Sum(step => step.BlocksPruned));
+        Assert.Equal(0, (await file.Scan().Where(six).ExplainAsync(analyze: true, Ct)).Pruning.Sum(step => step.BlocksPruned));
     }
 
     [Fact]

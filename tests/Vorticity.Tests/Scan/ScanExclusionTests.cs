@@ -13,12 +13,10 @@ using Vorticity.Arrays;
 using Vorticity.Buffers;
 using Vorticity.Columns;
 using Vorticity.Expressions;
-using Vorticity.File;
 using Vorticity.Indexes;
 using Vorticity.Keys;
 using Vorticity.Scanning;
 using Vorticity.Types;
-using Vorticity.Writing;
 using Xunit;
 
 namespace Vorticity.Tests.Scan;
@@ -61,7 +59,7 @@ public sealed class ScanExclusionTests
         try
         {
             await using VortexFile file = await VortexFile.OpenAsync(path, ct);
-            ScanExplanation plan = await file.ScanBuilder().Where(Filter(name)).ExplainAsync(ct);
+            ScanExplanation plan = await file.ScanBuilder().Where(Filter(name)).ExplainAsync(analyze: true, ct);
             Assert.Equal(name != "noise < 100", plan.Count!.ExactCover);
 
             ExcludedRows excluded = Excluded();

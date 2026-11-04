@@ -41,9 +41,6 @@ internal sealed class SigV4Signer
         _service = service;
     }
 
-    /// <summary>The region requests are signed for.</summary>
-    internal string Region => _region;
-
     /// <summary><paramref name="utc"/> as <c>x-amz-date</c> writes it: <c>yyyyMMddTHHmmssZ</c>.</summary>
     internal static string AmzDate(DateTimeOffset utc)
     {

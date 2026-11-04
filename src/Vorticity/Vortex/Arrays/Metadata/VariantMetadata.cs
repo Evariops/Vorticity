@@ -21,13 +21,6 @@ internal readonly struct VariantMetadata : IEquatable<VariantMetadata>
 {
     private const string MessageName = "VariantMetadata";
 
-    /// <summary>Creates variant metadata.</summary>
-    /// <param name="hasShreddedDType">Whether a shredded dtype, and so a shredded child, is present.</param>
-    public VariantMetadata(bool hasShreddedDType)
-        : this(hasShreddedDType ? [] : null)
-    {
-    }
-
     /// <summary>Creates variant metadata whose shredded child is of the dtype <paramref name="shreddedDType"/> serializes.</summary>
     /// <param name="shreddedDType">The dtype message of the shredded child (tag 1), or null for none.</param>
     public VariantMetadata(byte[]? shreddedDType) => ShreddedDType = shreddedDType;

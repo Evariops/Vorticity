@@ -9,7 +9,7 @@ namespace Vorticity.Types.Variants;
 /// 64-bit column, which the format's equivalence classes compare by their number, and the classes of
 /// one type each.
 /// </summary>
-internal enum VariantClass : byte
+public enum VariantClass : byte
 {
     /// <summary>Integers of 8 to 64 bits, kept as 64-bit integers.</summary>
     Integer,

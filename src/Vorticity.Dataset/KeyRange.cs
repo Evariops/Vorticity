@@ -6,7 +6,7 @@ using Vorticity.Types;
 namespace Vorticity.Dataset;
 
 /// <summary>
-/// A range on the dataset's clustering key, and whether an object lies wholly inside it. A summary
+/// A range on the dataset's sort key, and whether an object lies wholly inside it. A summary
 /// bound is inexact outwards -- a minimum at or below the true one, a maximum at or above it -- so
 /// summary bounds inside the range put every key inside it, provided the key holds no null and its
 /// type has summary bounds that are bounds in the filter's order.
@@ -24,7 +24,7 @@ internal sealed class KeyRange
     private KeyRange(string path) => _path = path;
 
     /// <summary>
-    /// The range <paramref name="filter"/> states on the clustering key -- a null filter is every
+    /// The range <paramref name="filter"/> states on the sort key -- a null filter is every
     /// row -- or null when the entries cannot count it.
     /// </summary>
     internal static KeyRange? Of(VortexDataset dataset, VortexExpr? filter)
@@ -40,7 +40,7 @@ internal sealed class KeyRange
             return range;
         }
 
-        DType dtype = ClusteringKey.Resolve(dataset.DType, key.Paths[0]);
+        DType dtype = DatasetKey.Resolve(dataset.DType, key.Paths[0]);
         bool bounded = dtype.Kind switch
         {
             DTypeKind.Primitive => !dtype.PType.IsFloat(),

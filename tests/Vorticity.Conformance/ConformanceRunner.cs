@@ -15,12 +15,10 @@ using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Buffers;
-using Vorticity.Columns;
 using Vorticity.Conformance.Comparison;
 using Vorticity.Conformance.Corpus;
 using Vorticity.Conformance.Sidecar;
 using Vorticity.Types;
-using Vorticity.File;
 using Vorticity.Scanning;
 
 namespace Vorticity.Conformance;

@@ -6,7 +6,6 @@ using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Compute;
 using Vorticity.Expressions;
-using Vorticity.File;
 using Vorticity.IO;
 using Vorticity.Serialization.Schemas;
 using Vorticity.Types;
@@ -49,6 +48,33 @@ internal sealed class VariantKeyReads
     {
         _chunks = chunks;
         _residual = residual;
+    }
+
+    /// <summary>
+    /// The reads the scan's filter makes in a pass of its own, before the scan reads the rows it kept: the keys the filter
+    /// alone reads of columns the scan reads whole, beside those the scan reads by keys; null when it makes none apart.
+    /// </summary>
+    internal VariantKeyReads? FilterPass { get; private init; }
+
+    /// <summary>
+    /// The reads of a scan that reads <paramref name="columns"/> through their keys and whose filter alone reads
+    /// <paramref name="filtered"/>, columns the scan reads whole, through theirs: the scan's own, and its filter's pass
+    /// reading both (<see cref="FilterPass"/>); null when neither is read by keys.
+    /// </summary>
+    internal static async ValueTask<VariantKeyReads?> LoadAsync(
+        VortexFile file, IReadOnlyDictionary<string, string[]>? columns, IReadOnlyDictionary<string, string[]>? filtered,
+        CancellationToken cancellationToken)
+    {
+        VariantKeyReads? scan = columns is null ? null : await LoadAsync(file, columns, cancellationToken).ConfigureAwait(false);
+        if (filtered is null || await LoadAsync(file, filtered, cancellationToken).ConfigureAwait(false) is not { } alone)
+        {
+            return scan;
+        }
+
+        Chunk[] both = [.. scan?._chunks ?? [], .. alone._chunks];
+        Array.Sort(both, static (left, right) => left.Start.CompareTo(right.Start));
+        VariantKeyReads pass = new VariantKeyReads(both, [.. scan?._residual ?? [], .. alone._residual]);
+        return new VariantKeyReads(scan?._chunks ?? [], scan?._residual ?? []) { FilterPass = pass };
     }
 
     /// <summary>
@@ -158,6 +184,24 @@ internal sealed class VariantKeyReads
             if (Column(map, wanted, types) is { } read)
             {
                 chunks.AddRange(read);
+                long keyed = 0;
+                foreach (Chunk chunk in read)
+                {
+                    keyed += chunk.Rows;
+                }
+
+                // The chunks that shred none of these keys hold them in their residuals alone: read for their residuals,
+                // the keys they shred not put back, where read whole each rebuilt every row's variant. Sought only where
+                // the chunks that shred them leave rows, a column whose every chunk shreds one walking no layout.
+                if (keyed < file.RowCount && Laid(file, field, Shredding(map, wanted)) is { Count: > 0 } others)
+                {
+                    chunks.AddRange(others);
+                    foreach (string key in wanted)
+                    {
+                        residual.Add(System.Text.Encoding.UTF8.GetBytes(key));
+                    }
+                }
+
                 continue;
             }
 
@@ -231,6 +275,52 @@ internal sealed class VariantKeyReads
         }
 
         return false;
+    }
+
+    /// <summary>The first rows of the chunks of <paramref name="map"/> that shred one of <paramref name="wanted"/>.</summary>
+    private static HashSet<long> Shredding(VariantPathMap map, string[] wanted)
+    {
+        HashSet<long> rows = [];
+        for (int i = 0; i < map.Keys.Count; i++)
+        {
+            if (Array.IndexOf(wanted, map.Keys[i]) >= 0)
+            {
+                foreach (PathChunk part in map.Chunks[i])
+                {
+                    rows.Add(part.FirstRow);
+                }
+            }
+        }
+
+        return rows;
+    }
+
+    /// <summary>
+    /// The chunks of the column at top-level field <paramref name="field"/> but those whose first rows <paramref name="apart"/>
+    /// holds, each read for its residual: found by the segment the file's layout lays it in, which the layout tree holds
+    /// read, and of its rows; none when the column is laid out otherwise than in chunks of one segment each.
+    /// </summary>
+    private static List<Chunk> Laid(VortexFile file, int field, HashSet<long> apart)
+    {
+        List<Chunk> chunks = [];
+        try
+        {
+            ReadOnlySpan<SegmentSpec> specs = file.SegmentSpecs;
+            (List<(Layouts.LayoutNode Flat, long Start)> laid, _) = VortexFileWriter.AppendPlan.ColumnChunks(file.LayoutTree, field);
+            foreach ((Layouts.LayoutNode flat, long start) in laid)
+            {
+                if (!apart.Contains(start) && flat.Segments is [uint segment] && segment < (uint)specs.Length)
+                {
+                    chunks.Add(Chunk.ResidualOf(specs[(int)segment].Offset, checked((int)flat.RowCount)));
+                }
+            }
+        }
+        catch (VortexUnsupportedException)
+        {
+            return [];
+        }
+
+        return chunks;
     }
 
     /// <summary>
@@ -419,16 +509,215 @@ internal sealed class VariantKeyReads
         /// <summary>A chunk of <paramref name="rows"/> rows, its first shredded key's range at <paramref name="start"/>, read for its residual.</summary>
         internal static Chunk ResidualOf(ulong start, int rows) => new Chunk(start, rows, [], [], default, default) { Residual = true };
 
-        /// <summary>Registers each key's range.</summary>
-        internal void Register(SegmentRequestSet segments)
+        /// <summary>
+        /// Registers each key's range, or, where the split reads the chunk's live granules apart, the granules of its rows
+        /// <paramref name="rows"/> alone (<see cref="GranulePlans.TryRegisterKey"/>, spec E, 4.1), the chunk of segment offset
+        /// <paramref name="chunk"/> giving the marks of a key's text; every range whole in a chunk
+        /// that kept a key's values of other classes beside its typed column, which a split does not decode apart.
+        /// </summary>
+        internal void Register(SegmentRequestSet segments, RowRange rows, ulong chunk)
         {
+            bool apart = segments.Granules is not null && Typed;
             foreach (Key key in Keys)
             {
-                if (key.Part is { Length: > 0 } part)
+                if (key.Part is { Length: > 0 } part && (!apart || !segments.Granules!.TryRegisterKey(part, key.Shape, rows, segments, chunk)))
                 {
                     segments.Add(Spec(part));
                 }
             }
+        }
+
+        /// <summary>Whether every key the chunk shreds is its typed column alone, with no values of other classes beside it.</summary>
+        private bool Typed => Array.TrueForAll(Keys, static key => key.Part is null || key.Shape.Kind != DTypeKind.Variant);
+
+        /// <summary>
+        /// The answer of <paramref name="predicate"/> on key <paramref name="name"/> read as <paramref name="read"/>, over the
+        /// chunk's rows, by the encoding of the key's typed column, as a column's encoding answers (spec E, 4.2): a row without
+        /// the key unknown, the key reading null there. False when the chunk keeps values of other classes beside the typed
+        /// column, when the typed column is not of the class read, when the split reads the key by its granules
+        /// (<paramref name="plans"/>, over <paramref name="rows"/>), or when the encoding declines.
+        /// </summary>
+        internal bool TryAnswer(
+            ScanContext context, string name, Compute.VariantRead read, Compute.EncodedPredicate predicate, GranulePlans? plans, RowRange rows,
+            ref Compute.PredicateBits bits)
+        {
+            foreach (Key key in Keys)
+            {
+                if (!string.Equals(key.Name, name, StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                if (key.Part is not { } part)
+                {
+                    bits.FillUnknown();
+                    return true;
+                }
+
+                if (key.Shape.Kind == DTypeKind.Variant || !Reads(read, key.Typed) || (plans is not null && part.Length > 0 && plans.Find(part.Offset, rows) is not null))
+                {
+                    return false;
+                }
+
+                Buffers.VortexBuffer segment = part.Length > 0 ? context.Segments.GetBuffer(context.Segments.Add(Spec(part))) : default;
+                context.Decode.LoadBlob(part.Tree, segment);
+                ArrayNode root = context.Nodes.Root;
+                ArrayDecoder decoder = ArrayDecoderTable.Require(context, root.Encoding, root.EncodingSpecIndex);
+                return decoder.EvaluatesWithoutFullDecode && decoder.TryEvaluate(context.Decode, in root, key.Shape, Rows, predicate, ref bits);
+            }
+
+            return false;
+        }
+
+        /// <summary>Whether a typed column of <paramref name="typed"/> holds the values a read as <paramref name="read"/> takes.</summary>
+        private static bool Reads(Compute.VariantRead read, DType typed) => read switch
+        {
+            Compute.VariantRead.AsString => typed.Kind == DTypeKind.Utf8,
+            Compute.VariantRead.AsInt64 => typed.Kind == DTypeKind.Primitive && typed.PType.IsInteger(),
+            _ => false,
+        };
+
+        /// <summary>
+        /// Rows <c>[start, start + count)</c> of the chunk as a variant node of <paramref name="variant"/>'s dtype, each key
+        /// decoded from the granules <paramref name="plans"/> read of it for them, or, read whole, from its range; -1 when no
+        /// key was read by its granules, the chunk's decode, retained for all its splits, then serving. With
+        /// <paramref name="unplanned"/>, a part of a chunk whatever read its keys: each key's rows decoded from its whole
+        /// range, a key that keeps values of other classes beside its typed column too; -1 when a key's encoding decodes no
+        /// range of its rows, which the chunk's whole decode then serves.
+        /// </summary>
+        /// <remarks>
+        /// A question that reads one granule of each chunk decoded the whole of each chunk for it, retained for splits that
+        /// never came: the hosts' 5xx by service read 59 chunks of some 216,000 rows a key, 49 of them at each question,
+        /// 8,192 rows of each, and spent a third of its time expanding their runs (2026-11-02). A key's run ends and values,
+        /// which every range reads whole, are decoded once a chunk for every range (<see cref="ArrayDecodeContext.DecodeWholeChild"/>).
+        /// </remarks>
+        internal int DecodeRange(ScanContext context, DType variant, uint segment, int start, int count, GranulePlans? plans, bool unplanned = false)
+        {
+            RowRange rows = new RowRange(start, start + count);
+            if (!unplanned)
+            {
+                bool planned = false;
+                foreach (Key key in Keys)
+                {
+                    if (key.Part is { Length: > 0 } part)
+                    {
+                        planned |= plans?.Find(part.Offset, rows) is not null;
+                    }
+                }
+
+                if (!planned || !Typed)
+                {
+                    return -1;
+                }
+            }
+
+            CanonicalArena arena = context.Canonical;
+            Span<int> stack = stackalloc int[16];
+            using Scratch<int> groups = new(Keys.Length, stack);
+            int none = -1;
+            for (int k = 0; k < Keys.Length; k++)
+            {
+                Key key = Keys[k];
+                if (key.Part is not { } part)
+                {
+                    int absent = None();
+                    groups.Span[k] = arena.AddStruct(Groups[k], count, Validity.NonNullable, [absent, absent, arena.AddNull(key.Typed, count)]);
+                    continue;
+                }
+
+                Buffers.VortexBuffer region = default;
+                ReadOnlyMemory<byte> tree = part.Tree;
+                GranulePlans.Plan? plan = part.Length > 0 ? plans?.Find(part.Offset, rows) : null;
+                if (plan is not null)
+                {
+                    tree = plan.Tree;
+                    region = Region(context, part, plan);
+                }
+                else if (part.Length > 0)
+                {
+                    region = context.Segments.GetBuffer(context.Segments.Add(Spec(part)));
+                }
+
+                context.Decode.LoadBlob(tree.Span, region);
+                ArrayNode root = context.Nodes.Root;
+
+                // A key read from its whole range, under a scope of its own: the children every range reads whole, a run
+                // end's ends and values, are retained for the scan's other parts of the chunk, which decompressed them again,
+                // a frame in two of a question of the services under 5xx over the last quarter of an hour (2026-11-02). A
+                // key read by its granules decodes from a region of their ranges alone, which no other part shares.
+                uint? scope = plan is null && part.Length > 0 && KeyScope(segment, k) is uint own ? own : null;
+                uint? outer = scope is uint opened ? context.Decode.BeginNodeCheckScope(opened) : null;
+                int metadata;
+                int values;
+                int typed;
+                try
+                {
+                    if (key.Shape.Kind == DTypeKind.Variant)
+                    {
+                        // The key's own variant, a range of its core of the values of other classes and of its typed column.
+                        if (!context.Decode.ChildDecodesRange(in root, 0) || !context.Decode.ChildDecodesRange(in root, 1))
+                        {
+                            return -1;
+                        }
+
+                        int core = context.Decode.DecodeChildRange(in root, 0, key.Shape, Rows, start, count);
+                        CanonicalNode storage = arena.GetNode(core);
+                        metadata = storage.GetFieldIndex(0);
+                        values = storage.GetFieldIndex(1);
+                        typed = context.Decode.DecodeChildRange(in root, 1, key.Typed, Rows, start, count);
+                    }
+                    else
+                    {
+                        if (unplanned && !context.Decode.DecodesRange(in root))
+                        {
+                            return -1;
+                        }
+
+                        metadata = None();
+                        values = metadata;
+                        typed = context.Decode.DecodeRootRange(in root, key.Shape, Rows, start, count, keepEncoding: false);
+                    }
+                }
+                finally
+                {
+                    if (scope is not null)
+                    {
+                        context.Decode.EndNodeCheckScope(outer);
+                    }
+                }
+
+                groups.Span[k] = arena.AddStruct(Groups[k], count, Validity.NonNullable, [metadata, values, typed]);
+            }
+
+            int struct_ = arena.AddStruct(Tree, count, Validity.NonNullable, groups.Span);
+            int nulls = None();
+            return arena.AddStruct(variant, count, variant.IsNullable ? Validity.AllValid : Validity.NonNullable, [nulls, nulls, struct_]);
+
+            int None() => none >= 0 ? none : none = Nulls(arena, Binary, count);
+        }
+
+        /// <summary>
+        /// The check scope of key <paramref name="key"/> of the chunk whose layout segment is <paramref name="segment"/>: a
+        /// chunk's keys share its segment and each decodes its own blob, whose children a scope of the segment alone would
+        /// mix; above every segment number a scope otherwise takes. Null past the numbers it holds.
+        /// </summary>
+        private static uint? KeyScope(uint segment, int key) => segment < (1u << 24) && key < 64 ? (1u << 30) | (segment << 6) | (uint)key : null;
+
+        /// <summary>
+        /// The region of the key's buffers, the ranges <paramref name="plan"/> read laid at their places, every other byte left as the
+        /// arena gives it, which no decoder reads (<see cref="Layouts.FlatLayoutReader"/>'s granules lay theirs alike).
+        /// </summary>
+        private static Buffers.VortexBuffer Region(ScanContext context, PathChunk part, GranulePlans.Plan plan)
+        {
+            SegmentRequestSet segments = context.Segments;
+            Buffers.VortexBuffer region = context.Canonical.AllocateUninitialized(checked((int)plan.RegionLength), 1 << plan.Alignment, out Span<byte> bytes);
+            foreach ((long start, long end) in plan.Ranges)
+            {
+                int slot = segments.Add(new SegmentSpec(part.Offset + (ulong)start, checked((uint)(end - start)), 0, 0, 0));
+                segments.GetBuffer(slot).Span[..(int)(end - start)].CopyTo(bytes[(int)start..]);
+            }
+
+            return region;
         }
 
         /// <summary>

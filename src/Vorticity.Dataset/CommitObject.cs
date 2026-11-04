@@ -79,13 +79,7 @@ internal sealed class CommitObject
             throw new CommitFormatException("These bytes do not start with a commit object's magic.");
         }
 
-        uint format = BinaryPrimitives.ReadUInt32LittleEndian(bytes[8..]);
-        if (format < CommitFormat.OldestRead || format > CommitFormat.Newest)
-        {
-            throw new CommitFormatException(
-                $"This library reads commit formats {CommitFormat.OldestRead} to {CommitFormat.Newest} and the object is format {format}.");
-        }
-
+        CommitFormat.Check(BinaryPrimitives.ReadUInt32LittleEndian(bytes[8..]));
         uint headerLength = BinaryPrimitives.ReadUInt32LittleEndian(bytes[12..]);
         long headerEnd = (long)CommitFormat.PreambleBytes + headerLength;
         if (headerLength > int.MaxValue - CommitFormat.PreambleBytes)

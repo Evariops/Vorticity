@@ -21,15 +21,15 @@ internal static class Datasets
         await using IObjectStore store = new FileObjectStore(Demo.Path("dataset"));
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Reading.Schema, new DatasetOptions
         {
-            ClusteringKey = [Reading.ColumnNames.Day],
+            Layout = new DatasetLayout { SortKey = [LayoutValue.Column(Reading.ColumnNames.Day)] },
         });
-        Console.WriteLine($"created: version {dataset.Version}, {dataset.RowCount} rows, clustered by {string.Join(", ", dataset.ClusteringKey)}");
+        Console.WriteLine($"created: version {dataset.Version}, {dataset.RowCount} rows, sorted by {string.Join(", ", dataset.Layout?.SortKey ?? [])}");
 
         await using (ObjectDraft draft = dataset.StartObject())
         {
             await draft.Writer.WriteAsync<Reading>(Days(0, 50));
             ulong version = await dataset.AppendAsync(draft);
-            Console.WriteLine($"appended {draft.Key}: version {version}, {dataset.RowCount} rows");
+            Console.WriteLine($"appended: version {version}, {dataset.RowCount} rows in {dataset.ObjectCount} object");
         }
 
         await using (ObjectDraft draft = dataset.StartObject())

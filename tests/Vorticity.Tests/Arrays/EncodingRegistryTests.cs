@@ -3,7 +3,6 @@
 // resolves to Unknown WITHOUT throwing.
 using System;
 using System.Text;
-using Vorticity;
 using Vorticity.Arrays;
 using Xunit;
 

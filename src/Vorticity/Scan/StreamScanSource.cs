@@ -8,10 +8,8 @@ using Vorticity.Arrays;
 using Vorticity.Compute;
 using Vorticity.Expressions;
 using Vorticity.Keys;
-using Vorticity.Layouts;
 using Vorticity.Scanning;
 using Vorticity.Types;
-using Vorticity.Writing;
 
 namespace Vorticity;
 
@@ -21,8 +19,16 @@ namespace Vorticity;
 /// it arrives — the filter evaluated on it, the rows kept by their position, compacted or selected,
 /// the columns projected — and an order the batches do not arrive in is a sort of the rows kept.
 /// </summary>
-internal abstract class StreamScanSource : ScanSource
+internal abstract class StreamScanSource : ScanSource, IRowsCapability, IStatisticsCapability, IKeysCapability
 {
+    internal override LogicalSource Logical => new LogicalSource(LogicalSourceKind.Stream);
+
+    internal override IRowsCapability Rows => this;
+
+    internal override IStatisticsCapability Statistics => this;
+
+    internal override IKeysCapability Keys => this;
+
     /// <summary>
     /// The source's batches, every row in its order, each borrowed until the next is asked for: the
     /// root a struct of the schema's columns that <paramref name="columns"/> names, in the schema's
@@ -59,9 +65,22 @@ internal abstract class StreamScanSource : ScanSource
     /// <summary>What the source is, as a refusal names it: "result", "Parquet file".</summary>
     private protected abstract string Kind { get; }
 
-    internal override IAsyncEnumerable<RecordBatch> BatchesAsync(ScanSpec spec, ScanCounters metrics) => new Batches(this, spec, metrics);
+    public IAsyncEnumerable<RecordBatch> BatchesAsync(ScanSpec spec, ScanCounters metrics) => new Batches(this, spec, metrics);
 
-    internal override ValueTask<long> CountAsync(ScanSpec spec, ScanCounters metrics, CancellationToken cancellationToken) =>
+    /// <summary>What a read of <paramref name="spec"/> will do: the stream's own plan, reading the structures it would consult with <paramref name="analyze"/>.</summary>
+    public abstract ValueTask<ScanPlan> ExplainAsync(ScanSpec spec, bool analyze, CancellationToken cancellationToken);
+
+    /// <summary>A form of the question, answered by the count, the proof of a row, or the extreme the source works out.</summary>
+    public async ValueTask<FormAnswer> AnswerAsync(ScanSpec spec, LogicalShape form, ScanCounters metrics, CancellationToken cancellationToken) => form switch
+    {
+        ExtremeShape extreme => new FormAnswer(0, await ExtremeAsync(spec, extreme.Column, extreme.Min, metrics, cancellationToken).ConfigureAwait(false)),
+        _ when ReferenceEquals(form, LogicalShape.Any) => new FormAnswer(await AnyAsync(spec, metrics, cancellationToken).ConfigureAwait(false) ? 1 : 0, FilterLiteral.Null),
+        _ => new FormAnswer(await CountAsync(spec, metrics, cancellationToken).ConfigureAwait(false), FilterLiteral.Null),
+    };
+
+
+
+    private protected virtual ValueTask<long> CountAsync(ScanSpec spec, ScanCounters metrics, CancellationToken cancellationToken) =>
         CountAsync(spec, metrics, part: null, cancellationToken);
 
     /// <summary>The rows <paramref name="spec"/> selects of those the source streams: of <paramref name="part"/> alone, when it is given.</summary>
@@ -76,7 +95,7 @@ internal abstract class StreamScanSource : ScanSource
         return count;
     }
 
-    internal override async ValueTask<bool> AnyAsync(ScanSpec spec, ScanCounters metrics, CancellationToken cancellationToken)
+    private protected virtual async ValueTask<bool> AnyAsync(ScanSpec spec, ScanCounters metrics, CancellationToken cancellationToken)
     {
         await foreach (RecordBatch batch in SelectedAsync(spec, metrics).WithCancellation(cancellationToken).ConfigureAwait(false))
         {
@@ -89,7 +108,7 @@ internal abstract class StreamScanSource : ScanSource
         return false;
     }
 
-    internal override async ValueTask<FilterLiteral> ExtremeAsync(ScanSpec spec, FieldExpr column, bool min, ScanCounters metrics, CancellationToken cancellationToken)
+    private protected virtual async ValueTask<FilterLiteral> ExtremeAsync(ScanSpec spec, FieldExpr column, bool min, ScanCounters metrics, CancellationToken cancellationToken)
     {
         FilterLiteral best = FilterLiteral.Null;
         int[] rows = [];
@@ -124,13 +143,11 @@ internal abstract class StreamScanSource : ScanSource
         return best;
     }
 
-    internal override bool MayMatch(VortexExpr filter) => true;
-
     /// <summary>
     /// The keys of a column, read whole as the source streams and sorted in memory unless they arrive
     /// in order, reserved under the session's memory budget until the cursor is disposed.
     /// </summary>
-    internal override async ValueTask<IKeyWalker> OpenKeysAsync(string path, bool distinct, bool indexes, CancellationToken cancellationToken)
+    public async ValueTask<IKeyWalker> OpenKeysAsync(string path, bool distinct, bool indexes, CancellationToken cancellationToken)
     {
         if (Unordered(path, out FilterLiteralKind kind, out int column) is { } reason)
         {
@@ -151,7 +168,7 @@ internal abstract class StreamScanSource : ScanSource
         }
     }
 
-    internal override ValueTask<KeyPlan> ExplainKeysAsync(string path, bool distinct, bool indexes, CancellationToken cancellationToken) =>
+    public ValueTask<KeyPlan> ExplainKeysAsync(string path, bool distinct, bool indexes, CancellationToken cancellationToken) =>
         new ValueTask<KeyPlan>(Unordered(path, out _, out _) is { } reason
             ? new KeyPlan(path, KeySourceKind.None, 0, null, HasRows: false, [new KeySourceRejection(KeySourceKind.InMemory, reason)])
             : new KeyPlan(path, KeySourceKind.InMemory, 1, null, HasRows: true, []));

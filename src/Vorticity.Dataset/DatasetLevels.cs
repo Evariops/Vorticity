@@ -7,48 +7,46 @@ namespace Vorticity.Dataset;
 /// The trees of one version of a dataset, one per level. Levels hold the lookup bound: at most
 /// eight objects in level 0 and key-disjoint objects in every level above, so a lookup by key
 /// touches at most eight plus the level count. Empty levels keep their place, since a level's
-/// number is its meaning. A dataset compacted by periods keeps one level above 0 whose objects
-/// overlap, its late level (<see cref="PeriodLevels"/>), under a ceiling as level 0 is.
+/// number is its meaning.
 /// </summary>
 internal sealed class DatasetLevels
 {
-    private static readonly DatasetLevels None = new DatasetLevels([], null, byPeriods: false);
-    private static readonly DatasetLevels NoneByPeriods = new DatasetLevels([], null, byPeriods: true);
+    private static readonly DatasetLevels None = new DatasetLevels([], null, DatasetTree.Empty, DatasetTree.Empty);
     private readonly DatasetTree[] _levels;
 
     // Where each level's last job stopped, by level; null while no level records one, which is
     // every version of a dataset compacted by its largest objects.
     private readonly ReadOnlyMemory<byte>[]? _pointers;
 
-    private DatasetLevels(DatasetTree[] levels, ReadOnlyMemory<byte>[]? pointers, bool byPeriods)
+    private DatasetLevels(DatasetTree[] levels, ReadOnlyMemory<byte>[]? pointers, DatasetTree rollups, DatasetTree partitionIndexes)
     {
         _levels = levels;
         _pointers = pointers;
-        ByPeriods = byPeriods;
+        Rollups = rollups;
+        PartitionIndexes = partitionIndexes;
     }
 
     /// <summary>A dataset with nothing in it.</summary>
     public static DatasetLevels Empty => None;
 
-    /// <summary>Whether the dataset is compacted by periods, and so keeps a late level.</summary>
-    public bool ByPeriods { get; }
+    /// <summary>
+    /// The tree of rollups (<see cref="RollupEntry"/>): the counts of runs of a level's objects, summed, by level, rank and
+    /// the first tree key each covers. Empty when the version keeps none; no level, so that no walk of the objects meets it.
+    /// </summary>
+    public DatasetTree Rollups { get; }
 
     /// <summary>
-    /// Whether a level of a dataset with a clustering key holds objects each written in the key's
-    /// order, null keys last: every level above 0, which only a merge on the key writes into, since a
-    /// plan refuses tiered levels for such a dataset. Level 0 holds what appends wrote, in any order,
-    /// and a dataset of periods writes its objects in sorted slices, in the key's order slice by slice
-    /// only. Off the key, a level's objects are in no order of it.
+    /// The tree of partition indexes (<see cref="PartitionIndexEntry"/>): the index object of each consolidated partition,
+    /// by partition, and the objects it covers. Empty when the version keeps none; no level either.
     /// </summary>
-    public bool RowsInKeyOrder(int level) => level > 0 && !ByPeriods;
+    public DatasetTree PartitionIndexes { get; }
 
     /// <summary>
-    /// Whether no two objects of a level overlap on the clustering key, so that its objects follow
-    /// each other in the order of their entries: every level above 0 but a dataset of periods' late
-    /// level, whose sorted objects overlap as level 0's do. A read by key opens at most one object of
-    /// such a level at a time.
+    /// Whether no two objects of a level overlap on the sort key, so that its objects follow
+    /// each other in the order of their entries: every level above 0. A read by key opens at most one
+    /// object of such a level at a time.
     /// </summary>
-    public bool IsDisjoint(int level) => level > 0 && !(ByPeriods && level == PeriodLevels.Late);
+    public bool IsDisjoint(int level) => level > 0;
 
     /// <summary>How many levels the version names; level numbers run from 0 to this minus one.</summary>
     public int Count => _levels.Length;
@@ -94,9 +92,6 @@ internal sealed class DatasetLevels
         }
     }
 
-    /// <summary>Whether every level is empty.</summary>
-    public bool IsEmpty => Entries == 0;
-
     /// <summary>The levels a header names.</summary>
     /// <exception cref="ArgumentNullException"><paramref name="header"/> is null.</exception>
     public static DatasetLevels Of(CommitHeader header)
@@ -111,10 +106,9 @@ internal sealed class DatasetLevels
             }
         }
 
-        bool byPeriods = header.ByPeriods;
         if (highest < 0)
         {
-            return byPeriods ? NoneByPeriods : None;
+            return new DatasetLevels([], null, RollupsOf(header), PartitionIndexesOf(header));
         }
 
         DatasetTree[] trees = new DatasetTree[highest + 1];
@@ -133,7 +127,29 @@ internal sealed class DatasetLevels
             }
         }
 
-        return new DatasetLevels(trees, pointers, byPeriods);
+        return new DatasetLevels(trees, pointers, RollupsOf(header), PartitionIndexesOf(header));
+    }
+
+    /// <summary>The tree of rollups a header names.</summary>
+    private static DatasetTree RollupsOf(CommitHeader header) =>
+        header.Rollups is { Top.Exists: true } rollups ? new DatasetTree(rollups.Top, rollups.Depth, rollups.Entries, rollups.Rows) : DatasetTree.Empty;
+
+    /// <summary>The tree of partition indexes a header names.</summary>
+    private static DatasetTree PartitionIndexesOf(CommitHeader header) =>
+        header.PartitionIndexes is { Top.Exists: true } indexes ? new DatasetTree(indexes.Top, indexes.Depth, indexes.Entries, indexes.Rows) : DatasetTree.Empty;
+
+    /// <summary>These levels with <paramref name="rollups"/> their tree of rollups.</summary>
+    public DatasetLevels WithRollups(DatasetTree rollups)
+    {
+        ArgumentNullException.ThrowIfNull(rollups);
+        return ReferenceEquals(rollups, Rollups) ? this : new DatasetLevels(_levels, _pointers, rollups, PartitionIndexes);
+    }
+
+    /// <summary>These levels with <paramref name="indexes"/> their tree of partition indexes.</summary>
+    public DatasetLevels WithPartitionIndexes(DatasetTree indexes)
+    {
+        ArgumentNullException.ThrowIfNull(indexes);
+        return ReferenceEquals(indexes, PartitionIndexes) ? this : new DatasetLevels(_levels, _pointers, Rollups, indexes);
     }
 
     /// <summary>These levels with one of them replaced.</summary>
@@ -147,7 +163,7 @@ internal sealed class DatasetLevels
         Array.Fill(trees, DatasetTree.Empty);
         _levels.CopyTo(trees, 0);
         trees[level] = tree;
-        return new DatasetLevels(trees, _pointers, ByPeriods);
+        return new DatasetLevels(trees, _pointers, Rollups, PartitionIndexes);
     }
 
     /// <summary>
@@ -170,7 +186,7 @@ internal sealed class DatasetLevels
         ReadOnlyMemory<byte>[] pointers = new ReadOnlyMemory<byte>[Math.Max(_pointers?.Length ?? 0, level + 1)];
         _pointers?.CopyTo(pointers, 0);
         pointers[level] = key;
-        return new DatasetLevels(_levels, pointers, ByPeriods);
+        return new DatasetLevels(_levels, pointers, Rollups, PartitionIndexes);
     }
 
     /// <summary>
