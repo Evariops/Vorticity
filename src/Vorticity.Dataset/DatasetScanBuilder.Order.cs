@@ -23,7 +23,7 @@ internal sealed partial class DatasetScanBuilder
     /// sort key, level 0's objects, a late level's, and one per other level; on any other column
     /// every object, the summaries giving no disjointness to lean on.
     /// </summary>
-    private long CursorBound(long objects, List<long> keptByLevel)
+    private long CursorBound(long objects, List<long> keptByLevel, long partitions)
     {
         if (objects == 0)
         {
@@ -35,29 +35,112 @@ internal sealed partial class DatasetScanBuilder
             return objects > 1 && _options.Prefetch > 0 ? 2 : 1;
         }
 
-        if (!_summaries || !RidesDisjointLevels(paths))
+        if (!_summaries || KeyBounded(paths) is not { } order)
         {
             return objects;
         }
 
-        // Level 0's objects, and a late level's, overlap: each may be open at once.
+        // Level 0's objects, and a late level's, overlap: each may be open at once. A disjoint level holds one open in the
+        // tree's order, and one a partition in the order of the key within it, whose partitions the merge reads side by side;
+        // downward, one more, whose rows of a null first column the read gives last.
+        long each = (ReferenceEquals(order.Order, _version.Schema.TreeOrder) ? 1 : Math.Max(partitions, 1)) * (_descending ? 2 : 1);
         long cursors = keptByLevel.Count > 0 ? keptByLevel[0] : 0;
         for (int level = 1; level < keptByLevel.Count; level++)
         {
-            cursors += _version.Levels.IsDisjoint(level) ? Math.Min(keptByLevel[level], 1) : keptByLevel[level];
+            cursors += _version.Levels.IsDisjoint(level) ? Math.Min(keptByLevel[level], each) : keptByLevel[level];
         }
 
-        return cursors;
+        return Math.Min(cursors, objects);
     }
 
     /// <summary>
-    /// Whether a merge on those columns reads the key-disjoint objects of a level one after another:
-    /// on the sort key, upward by the tree's exact minima, downward by summary maxima that the
-    /// key order respects, which a composite key has none of.
+    /// The order a merge on <paramref name="paths"/> bounds each object by exactly, from its keys in the tree: the tree's
+    /// when the columns lead it (<see cref="DatasetSchema.TreeOrder"/>), the objects' own under a partition otherwise
+    /// (<see cref="DatasetSchema.ObjectOrder"/>), with the values that precede the order's in an object's keys, the
+    /// partition's for the objects' own. Null when the columns lead neither: the summaries bound the objects then.
     /// </summary>
-    private bool RidesDisjointLevels(string[] paths) =>
-        IsSortKey(paths)
-        && (!_descending || (paths.Length == 1 && HasKeyOrderBounds(DatasetKey.Resolve(_version.Schema.DType, paths[0]))));
+    private (ColumnOrder Order, int Skip)? KeyBounded(string[] paths)
+    {
+        DatasetSchema schema = _version.Schema;
+        if (schema.TreeOrder is { } tree && tree.Leads(paths))
+        {
+            return (tree, 0);
+        }
+
+        return schema.ObjectOrder is { } own && own.Leads(paths) ? (own, schema.Partitioned ? 1 : 0) : null;
+    }
+
+    /// <summary>
+    /// The bound of an object on the first <paramref name="count"/> columns of <paramref name="order"/>, its key
+    /// <paramref name="key"/> as the tree encodes it, past its first <paramref name="skip"/> values: the values at the order's
+    /// positions, as a key of those columns encodes them, a slice of the key when they lie side by side. Empty when the key
+    /// does not walk.
+    /// </summary>
+    private ReadOnlyMemory<byte> LowBound(ReadOnlyMemory<byte> key, ColumnOrder order, int skip, int count)
+    {
+        SortKey tree = _version.Schema.Tree!;
+        int last = order.Positions[count - 1] + skip;
+        Span<int> ends = stackalloc int[tree.Count];
+        if (key.IsEmpty || !tree.Ends(key.Span, ends[..(last + 1)]))
+        {
+            return default;
+        }
+
+        static int Start(ReadOnlySpan<int> ends, int position) => position == 0 ? 0 : ends[position - 1];
+        int first = order.Positions[0] + skip;
+        bool adjacent = true;
+        for (int i = 1; i < count && adjacent; i++)
+        {
+            adjacent = order.Positions[i] == order.Positions[i - 1] + 1;
+        }
+
+        if (adjacent)
+        {
+            return key.Slice(Start(ends, first), ends[last] - Start(ends, first));
+        }
+
+        int length = 0;
+        for (int i = 0; i < count; i++)
+        {
+            int position = order.Positions[i] + skip;
+            length += ends[position] - Start(ends, position);
+        }
+
+        byte[] bound = new byte[length];
+        for (int i = 0, at = 0; i < count; i++)
+        {
+            int position = order.Positions[i] + skip;
+            key.Span[Start(ends, position)..ends[position]].CopyTo(bound.AsSpan(at));
+            at += ends[position] - Start(ends, position);
+        }
+
+        return bound;
+    }
+
+    /// <summary>
+    /// The bound of an object on the first <paramref name="count"/> columns of <paramref name="order"/> downward: its last key
+    /// <paramref name="last"/>, as the tree encodes it, past its first <paramref name="skip"/> values, read at the order's
+    /// positions and encoded as <paramref name="merged"/>, the merge's key, orders rows. Empty when the key does not walk, or
+    /// its first column is null: the object's rows then end with those nulls, which a downward read gives last.
+    /// </summary>
+    private ReadOnlyMemory<byte> HighBound(ReadOnlyMemory<byte> last, ColumnOrder order, int skip, int count, SortKey merged)
+    {
+        SortKey tree = _version.Schema.Tree!;
+        Span<int> ends = stackalloc int[tree.Count];
+        if (last.IsEmpty || !tree.Ends(last.Span, ends[..(order.Positions[count - 1] + skip + 1)]))
+        {
+            return default;
+        }
+
+        FilterLiteral[] values = new FilterLiteral[count];
+        for (int i = 0; i < count; i++)
+        {
+            int position = order.Positions[i] + skip;
+            values[i] = RowEncoder.ReadFirstValue(last.Span[(position == 0 ? 0 : ends[position - 1])..], tree.TypeAt(position));
+        }
+
+        return values[0].Kind == FilterLiteralKind.Null ? default : merged.Encode(values);
+    }
 
     /// <summary>The key-ordered read: every kept object's own key-ordered scan, merged.</summary>
     private async IAsyncEnumerable<RecordBatch> MergedAsync(
@@ -68,10 +151,11 @@ internal sealed partial class DatasetScanBuilder
         bool drop = !mask.IsAll && !Array.TrueForAll(paths, path => Covers(mask, _version.Schema.DType, path));
         ScanProjection? kept = null;
         // Read downward in their own order, objects give the reverse of the key's order, the nulls of its first column last.
+        SortKey key = SortKey.OfColumns(_version.Schema.DType, paths, _descending, reversed: InObjectOrder(paths));
         KeyOrderedMerge merge = new KeyOrderedMerge(
             _version,
-            MergeObjectsAsync(paths, cancellationToken),
-            SortKey.OfColumns(_version.Schema.DType, paths, _descending, reversed: InObjectOrder(paths)),
+            MergeObjectsAsync(paths, key, cancellationToken),
+            key,
             rankedTies: true,
             (lease, entry) => OrderedBatchesAsync(lease, entry, paths, drop, cancellationToken),
             lease => RecordOpen(lease),
@@ -114,25 +198,27 @@ internal sealed partial class DatasetScanBuilder
     }
 
     /// <summary>
-    /// The objects the merge reads, in the order of a lower bound on their keys, each with the rank
-    /// its ties go by. On the sort key upward the tree already is that order, and the walk is
-    /// lazy, so a consumer that stops early stops the walk; anywhere else the kept objects are
-    /// collected and sorted by their summaries' bound, without being opened. A composite key is
-    /// bounded upward by its first column, whose encoded minimum prefixes every tuple above it, and
-    /// not downward.
+    /// The objects the merge reads, in the order of a bound on their keys in the merge's, <paramref name="key"/>, each with
+    /// the rank its ties go by. On columns that lead the tree's order upward, the tree already is that order and its keys
+    /// are exact minima: the walk is lazy, so a consumer that stops early stops the walk. On columns that lead the objects'
+    /// own order, the kept objects are collected and sorted without being opened, by their exact minima upward, their tree
+    /// keys past the partition, and their exact maxima downward, their last keys: a read in the key's order under a
+    /// partition holds open an object of each partition, where it held every object. On any other columns they are sorted
+    /// by their summaries' bound on the first one, upward alone for several.
     /// </summary>
     private async IAsyncEnumerable<MergeObject> MergeObjectsAsync(
-        string[] paths, [EnumeratorCancellation] CancellationToken cancellationToken)
+        string[] paths, SortKey key, [EnumeratorCancellation] CancellationToken cancellationToken)
     {
         string path = paths[0];
-        if (!_summaries || (!_descending && IsSortKey(paths)))
+        (ColumnOrder Order, int Skip)? bounded = _summaries ? KeyBounded(paths) : null;
+        if (!_summaries || (!_descending && bounded is { } byTree && ReferenceEquals(byTree.Order, _version.Schema.TreeOrder)))
         {
             // Without summaries there is no bound to lean on: every object is opened before a row
             // goes out, and the lazy merge must answer the same as this eager one.
             long ordinal = 0;
             await foreach (PositionedObject held in WalkAsync(cancellationToken).ConfigureAwait(false))
             {
-                ReadOnlyMemory<byte> bound = _summaries ? VortexDataset.OrderOf(held.TreeKey) : default;
+                ReadOnlyMemory<byte> bound = bounded is { } tree ? LowBound(VortexDataset.OrderOf(held.TreeKey), tree.Order, tree.Skip, paths.Length) : default;
                 yield return new MergeObject(held.Entry, bound, _descending ? -ordinal : ordinal, held.FirstRow);
                 ordinal++;
             }
@@ -146,9 +232,13 @@ internal sealed partial class DatasetScanBuilder
         long position = 0;
         await foreach (PositionedObject held in WalkAsync(cancellationToken).ConfigureAwait(false))
         {
-            ReadOnlyMemory<byte> bound = paths.Length > 1 && _descending
-                ? default
-                : SummaryBound(held.Entry.Summaries, path, dtype, field, _descending);
+            ReadOnlyMemory<byte> bound = bounded is { } exact
+                ? _descending
+                    ? HighBound(held.Entry.LastKey, exact.Order, exact.Skip, paths.Length, key)
+                    : LowBound(VortexDataset.OrderOf(held.TreeKey), exact.Order, exact.Skip, paths.Length)
+                : paths.Length > 1 && _descending
+                    ? default
+                    : SummaryBound(held.Entry.Summaries, path, dtype, field, _descending);
             objects.Add(new MergeObject(held.Entry, bound, _descending ? -position : position, held.FirstRow));
             position++;
         }
@@ -163,10 +253,6 @@ internal sealed partial class DatasetScanBuilder
             yield return held;
         }
     }
-
-    /// <summary>Whether the columns are the dataset's whole sort key, in order.</summary>
-    private bool IsSortKey(string[] paths) =>
-        _version.Schema.Key is { } key && System.Linq.Enumerable.SequenceEqual(key.Paths, paths, StringComparer.Ordinal);
 
     /// <summary>
     /// A summary's bound on a column, encoded as the merge compares keys: its minimum upward, its
@@ -255,26 +341,12 @@ internal sealed partial class DatasetScanBuilder
     }
 
     /// <summary>
-    /// Whether the columns lead the dataset's key components as they are (<see cref="DatasetSchema.KeyColumns"/>), in whose
-    /// order every object's rows lie, nulls last: an object is then read in its own order, with no index.
+    /// Whether the columns lead those whose order every object's rows lie in, nulls last (<see cref="DatasetSchema.ObjectOrder"/>),
+    /// or the tree's, whose partition each object holds one value of (<see cref="DatasetSchema.TreeOrder"/>): an object is
+    /// then read in its own order, with no index.
     /// </summary>
-    private bool InObjectOrder(string[] paths)
-    {
-        if (_version.Schema.KeyColumns is not { } key || paths.Length > key.Count)
-        {
-            return false;
-        }
-
-        for (int i = 0; i < paths.Length; i++)
-        {
-            if (!string.Equals(paths[i], key[i], StringComparison.Ordinal))
-            {
-                return false;
-            }
-        }
-
-        return true;
-    }
+    private bool InObjectOrder(string[] paths) =>
+        _version.Schema.ObjectOrder?.Leads(paths) == true || _version.Schema.TreeOrder?.Leads(paths) == true;
 
     /// <summary><paramref name="mask"/> with the key's columns <paramref name="paths"/> read too when <paramref name="withKey"/> asks.</summary>
     private FieldMask? Keyed(FieldMask? mask, string[] paths, bool withKey)

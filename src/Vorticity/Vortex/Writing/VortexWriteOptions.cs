@@ -395,6 +395,12 @@ public sealed record VortexWriteOptions
     internal bool Zones { get; init; } = true;
 
     /// <summary>
+    /// Whether the sparse index of the key may code its texts unpadded (Indexes.KeyCoding.UnpaddedTexts), which it does when
+    /// that takes fewer bytes: true by default; false keeps the row encoding's keys, for a test that writes both codings.
+    /// </summary>
+    internal bool UnpaddedKeyIndex { get; init; } = true;
+
+    /// <summary>
     /// What a partial's file is written with (<see cref="AggregationPartial"/>): read whole at each question it serves, it
     /// keeps no zone map, no statistics and no index, which an open would parse for nothing.
     /// </summary>

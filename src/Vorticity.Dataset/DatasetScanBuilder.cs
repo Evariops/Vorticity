@@ -369,7 +369,7 @@ internal sealed partial class DatasetScanBuilder
     {
         if (_filterColumns is null)
         {
-            string? leading = _version.Schema.KeyColumns is { Count: > 0 } key ? key[0] : null;
+            string? leading = _version.Schema.ObjectOrder?.Paths[0];
             List<string> columns = [];
             foreach (string path in FilterPaths())
             {
@@ -868,10 +868,10 @@ internal sealed partial class DatasetScanBuilder
                 continue;
             }
 
-            ValueTask<(List<(int First, int End)> Ranges, Indexes.GranuleKeys Keys)?> asked = KeptGranulesAsync(held, pruning, first, read: true, cancellationToken);
+            ValueTask<(List<(int First, int End)> Ranges, Indexes.GranuleGrid Grid)?> asked = KeptGranulesAsync(held, pruning, first, read: true, cancellationToken);
             if (asked.IsCompletedSuccessfully && (ahead is null || ahead.Count == 0))
             {
-                (List<(int First, int End)> Ranges, Indexes.GranuleKeys Keys)? kept = await asked.ConfigureAwait(false);
+                (List<(int First, int End)> Ranges, Indexes.GranuleGrid Grid)? kept = await asked.ConfigureAwait(false);
                 if (Whole(kept) || Narrows(held, kept))
                 {
                     yield return held;
@@ -880,7 +880,7 @@ internal sealed partial class DatasetScanBuilder
 
                 foreach ((int from, int end) in kept!.Value.Ranges)
                 {
-                    yield return ByGranules(held, kept.Value.Keys, from, end);
+                    yield return ByGranules(held, kept.Value.Grid, from, end);
                 }
 
                 continue;
@@ -897,7 +897,7 @@ internal sealed partial class DatasetScanBuilder
 
             // Each read was asked by this walk, a few objects before.
 #pragma warning disable VSTHRD003
-            (List<(int First, int End)> Ranges, Indexes.GranuleKeys Keys)? read = next.Reading is { } reading ? await reading.ConfigureAwait(false) : next.Kept;
+            (List<(int First, int End)> Ranges, Indexes.GranuleGrid Grid)? read = next.Reading is { } reading ? await reading.ConfigureAwait(false) : next.Kept;
 #pragma warning restore VSTHRD003
             if (Whole(read) || Narrows(next.Held, read))
             {
@@ -907,14 +907,14 @@ internal sealed partial class DatasetScanBuilder
 
             foreach ((int from, int end) in read!.Value.Ranges)
             {
-                yield return ByGranules(next.Held, read.Value.Keys, from, end);
+                yield return ByGranules(next.Held, read.Value.Grid, from, end);
             }
         }
 
         while (ahead is not null && ahead.TryDequeue(out Ahead last))
         {
 #pragma warning disable VSTHRD003
-            (List<(int First, int End)> Ranges, Indexes.GranuleKeys Keys)? read = last.Reading is { } reading ? await reading.ConfigureAwait(false) : last.Kept;
+            (List<(int First, int End)> Ranges, Indexes.GranuleGrid Grid)? read = last.Reading is { } reading ? await reading.ConfigureAwait(false) : last.Kept;
 #pragma warning restore VSTHRD003
             if (Whole(read) || Narrows(last.Held, read))
             {
@@ -924,7 +924,7 @@ internal sealed partial class DatasetScanBuilder
 
             foreach ((int from, int end) in read!.Value.Ranges)
             {
-                yield return ByGranules(last.Held, read.Value.Keys, from, end);
+                yield return ByGranules(last.Held, read.Value.Grid, from, end);
             }
         }
     }
@@ -935,16 +935,16 @@ internal sealed partial class DatasetScanBuilder
     /// <summary>An object whose index <see cref="KeyPrunedAsync"/> asked for ahead: what it kept, when in hand, or its read.</summary>
     private readonly record struct Ahead(
         PositionedObject Held,
-        (List<(int First, int End)> Ranges, Indexes.GranuleKeys Keys)? Kept,
-        Task<(List<(int First, int End)> Ranges, Indexes.GranuleKeys Keys)?>? Reading);
+        (List<(int First, int End)> Ranges, Indexes.GranuleGrid Grid)? Kept,
+        Task<(List<(int First, int End)> Ranges, Indexes.GranuleGrid Grid)?>? Reading);
 
     /// <summary>
     /// Whether an object is read whole, <paramref name="kept"/> the ranges of granules its index keeps: none read, or all kept;
     /// the granules and objects pruned counted.
     /// </summary>
-    private bool Whole((List<(int First, int End)> Ranges, Indexes.GranuleKeys Keys)? kept)
+    private bool Whole((List<(int First, int End)> Ranges, Indexes.GranuleGrid Grid)? kept)
     {
-        if (kept is not ({ } ranges, { } keys))
+        if (kept is not ({ } ranges, var keys))
         {
             return true;
         }
@@ -971,9 +971,9 @@ internal sealed partial class DatasetScanBuilder
     /// each, read one after the other: the last quarter of an hour of 600 services under a key they lead was 600 ranges an
     /// object.
     /// </summary>
-    private bool Narrows(in PositionedObject held, (List<(int First, int End)> Ranges, Indexes.GranuleKeys Keys)? kept)
+    private bool Narrows(in PositionedObject held, (List<(int First, int End)> Ranges, Indexes.GranuleGrid Grid)? kept)
     {
-        if (kept is not ({ Count: > 1 } ranges, { } keys) || held.Entry.HasDeletions || _take is not null || _filter is null
+        if (kept is not ({ Count: > 1 } ranges, var keys) || held.Entry.HasDeletions || _take is not null || _filter is null
             || !_version.Schema.Holds(held.Entry))
         {
             return false;
@@ -993,52 +993,75 @@ internal sealed partial class DatasetScanBuilder
     }
 
     /// <summary><paramref name="held"/> read by its granules from <paramref name="from"/> to <paramref name="end"/>.</summary>
-    private static PositionedObject ByGranules(PositionedObject held, Indexes.GranuleKeys keys, int from, int end) => held with
+    private static PositionedObject ByGranules(PositionedObject held, Indexes.GranuleGrid keys, int from, int end) => held with
     {
         Granules = new RowRange((long)from * keys.GranuleRows, Math.Min((long)end * keys.GranuleRows, keys.Rows)),
     };
 
     /// <summary>
     /// The ranges of the granules of the object <paramref name="held"/>, <paramref name="first"/> its first key, that its key's
-    /// sparse index keeps under <paramref name="pruning"/>, with that index; null when the object has rows marked, keeps no
-    /// index, the index can refute none of its granules (<see cref="KeyPruning.IndexMayRefute"/>), its key range keeps
-    /// every granule (<see cref="KeyPruning.HoldsWhole"/>), or reading the index weighs more than it may spare
-    /// (<see cref="ReadsKeyIndex"/>), and, unless <paramref name="read"/>, when the handle does not hold it.
+    /// sparse index keeps under <paramref name="pruning"/>, with the object's granules; null when the object has rows marked,
+    /// keeps no index, the index can refute none of its granules (<see cref="KeyPruning.IndexMayRefute"/>), its key range
+    /// keeps every granule (<see cref="KeyPruning.HoldsWhole"/>), reading the index weighs more than it may spare
+    /// (<see cref="ReadsKeyIndex"/>), or a page of it does not hold the keys its table names; and, unless
+    /// <paramref name="read"/>, when the pruning has not searched it yet.
     /// </summary>
     /// <remarks>
-    /// An index the handle holds is searched on the same terms: one a question on a service left in hand made each question
-    /// on a pod's exceptions after it search every object's index for no granule refuted, 4.6 ms and 2 MB a question where it
-    /// takes 0.17 ms and 63 KB (2026-11-02).
+    /// The index is read for the search and given back: the pruning keeps the ranges for the question, whose other parts ask
+    /// them (<see cref="KeyPruning.TryKept"/>) before they would read the index again, and its bytes stay in the session's
+    /// caches. One kept in hand made each question on a pod's exceptions after one on a service search every object's index
+    /// for no granule refuted, 4.6 ms and 2 MB a question where it takes 0.17 ms and 63 KB (2026-11-02): none is now.
     /// </remarks>
-    internal async ValueTask<(List<(int First, int End)> Ranges, Indexes.GranuleKeys Keys)?> KeptGranulesAsync(
+    internal async ValueTask<(List<(int First, int End)> Ranges, Indexes.GranuleGrid Grid)?> KeptGranulesAsync(
         PositionedObject held, KeyPruning pruning, ReadOnlyMemory<byte> first, bool read, CancellationToken cancellationToken)
     {
-        if (!held.Entry.Deletions.IsEmpty || held.Entry.Contents is not { KeyIndex: { } index } contents
-            || (!read && contents.Keys is not { HoldsEvery: true }) || !ReadsKeyIndex(held)
-            || !pruning.IndexMayRefute(held.Summaries(_version.Schema), held.Entry.PhysicalRows) || pruning.HoldsWhole(first.Span, held.Entry.LastKey.Span)
-            || await KeysAsync(held, contents, index, cancellationToken).ConfigureAwait(false) is not { } keys
-            || keys.Rows != held.Entry.PhysicalRows)
+        if (!held.Entry.Deletions.IsEmpty || held.Entry.Contents is not { KeyIndex: { } index } contents)
         {
             return null;
         }
 
         DatasetSchema schema = _version.Schema;
         int prefix = schema.Partitioned && !first.IsEmpty ? schema.Tree!.PrefixLength(first.Span, 1) : 0;
-        return (pruning.Granules(keys, prefix > 0 ? first.Span[..prefix] : default), keys);
+        ReadOnlyMemory<byte> partition = prefix > 0 ? first[..prefix] : default;
+        if (pruning.TryKept(held.Entry.Uid, partition.Span, out List<(int First, int End)> known, out Indexes.GranuleGrid grid))
+        {
+            return (known, grid);
+        }
+
+        if (!read || !ReadsKeyIndex(held)
+            || !pruning.IndexMayRefute(held.Summaries(schema), held.Entry.PhysicalRows) || pruning.HoldsWhole(first.Span, held.Entry.LastKey.Span)
+            || await KeysAsync(held, contents, index, cancellationToken).ConfigureAwait(false) is not { } keys)
+        {
+            return null;
+        }
+
+        using (keys)
+        {
+            if (keys.Rows != held.Entry.PhysicalRows)
+            {
+                return null;
+            }
+
+            try
+            {
+                return (pruning.Granules(held.Entry.Uid, keys, partition.Span), keys.Grid);
+            }
+            catch (VortexFormatException)
+            {
+                // A page that does not hold the keys its table names: the object is read as if it kept no index.
+                return null;
+            }
+        }
     }
 
     /// <summary>
-    /// The sparse index of the object <paramref name="held"/>: read through its open when it lies in the tail the open reads,
-    /// the object then kept open by the handle's cache for the read of its granules; with no open otherwise.
+    /// The sparse index of the object <paramref name="held"/>, for one search, which disposes it: read through its open when
+    /// it lies in the tail the open reads, the object then kept open by the handle's cache for the read of its granules; with
+    /// no open otherwise.
     /// </summary>
     private async ValueTask<Indexes.GranuleKeys?> KeysAsync(
         PositionedObject held, Indexes.ObjectContents contents, Indexes.IndexSegment index, CancellationToken cancellationToken)
     {
-        if (contents.Keys is { HoldsEvery: true } known)
-        {
-            return known;
-        }
-
         if (!PathCosts.InOpen(held.Entry, index))
         {
             return await _dataset.KeyIndexAsync(held.Entry, contents, cancellationToken).ConfigureAwait(false);

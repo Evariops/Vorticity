@@ -105,6 +105,13 @@ maps a range of its source to a range of its value, which is all pruning needs.
 The **indexed prefix**, the first components of the key, is what the sparse key index keeps
 ([section 5.2](#52-the-sparse-key-index)). The components after it still order the rows, at no cost to the index.
 
+The key is ClickHouse's: `ORDER BY` is the sort key, `PRIMARY KEY` the indexed prefix, `primary.idx` each object's
+sparse index. It orders the columns it reads as they are, and a function followed by its own column orders that
+column: rows by `(f(c), c)` lie by `c`, the function non-decreasing. A read in the order of those columns bounds each
+object by its keys in the tree. Under a partition it holds open an object of each partition, the merge reading the
+partitions side by side; the key cursor walks each partition of each level the same way. Like ClickHouse's key, it
+enforces no uniqueness.
+
 The library builds no composite structure of its own: its indexes and metadata are per column or per path. The sort key
 is the one composite structure, and the application declares it.
 
@@ -233,9 +240,29 @@ in the tree of commits names each structure, so a reader finds any of them witho
 ### 5.2 The sparse key index
 
 For each granule, the indexed prefix of its first row, front-coded against the granule before it, in pages of 128
-granules (`vorticity.key.index.v1`). A reader finds it through the object's entry, without opening the object, and reads
-its pages in one request. A binary search finds the granules of a prefix. A filter on a
-component that is not leading is judged on ranges of granules: when the bounds of a range share their first `j`
+granules (`vorticity.key.index.v1`), its texts and binaries unpadded where that takes fewer bytes
+([10-indexes.md](10-indexes.md)). A reader finds it through the object's entry, without opening the object, and reads
+its pages in one request.
+
+The filter's conjuncts on the leading components give intervals of keys, as ClickHouse's condition on a continuous range
+of the primary key:
+- equalities, sets and null checks on the first `j` components, at most 256 tuples;
+- or a set of tuples of the first `j` components' columns, `(a, b) IN (…)`, a tuple an interval, at most 65 536, where
+  it bounds more components than the product of the columns' sets;
+- then a range on the next component, through the component's function.
+
+A set of tuples is a filter node no pruner judges: its rows are looked up among the tuples, hashed once a scan. The filter
+carries each column's set of the tuples' values beside them, by which zone maps, postings and partitions prune.
+
+A bisection finds each interval's granules. Granule `i` may hold a key of the interval when the next granule's key reaches
+its low bound and its own key does not pass its high one. The later intervals gallop from where the one before landed:
+`V` values over `G` granules cost `O(V log(G/V))` comparisons, and an equality on the head costs some 17 for an object of
+3,300 granules, with no box judged, where the exclusion search judged 37 *(measured, `--micro keyindex`)*. Intervals that
+hold every conjunct a box could judge are the answer. Otherwise, and for a filter that bounds no leading component, the
+exclusion search runs within them.
+
+The exclusion search judges a filter on a
+component that is not leading on ranges of granules: when the bounds of a range share their first `j`
 components, the component after them is bounded by theirs, and the filter is judged on that box; ranges the box refutes
 are skipped, the others split and judged again. An object's index is read only where it may refute a granule: the filter
 bounds a component of the prefix, and the object's summaries do not prove that bound over every row of it. A bound on a
@@ -243,8 +270,17 @@ component past the prefix varies within a granule, and the zone maps judge it: Q
 prefix of two, read every object's index for no granule refuted, 0.9 s of processor and 334 MB allocated a question at
 32 lanes where the rows take 0.4 s and 110 MB without them *(measured)*.
 
-It costs at most ~16 bytes a granule: ~52 KB for an object of 1 GiB, ~8 MB a day and ~3.3 GB over 13 months of the
+It takes 12.6 bytes a granule for the requests of the reference store and 8.2 for its spans, where row-encoded keys
+took 31.9 and 19.4 *(measured)*: ~42 KB for an object of 1 GiB, ~6.6 MB a day and ~2.6 GB over 13 months of the
 reference table *(computed)*.
+
+No index stays in memory past the search that reads it, where ClickHouse keeps its primary index resident. Each search
+reads its object's index again, from the open's tail, the process's segment cache or the session's disk cache, which
+keeps the index's regions as it keeps every region an object declares with a checksum, and gives it back. A search
+decodes the pages' first keys, which the table gives, then checks and decodes only the pages its bounds reach, keeping
+the key of every sixteenth granule whole while it runs. In an index of 3 300 granules, taking the index and giving it
+back costs some 0.3 µs, and a page reached some 1 µs more: an equality on the head, 1.6 µs an object, where an index
+held in memory took 0.7 *(measured, `--micro keyindex --rounds 20`, the code warm)*.
 
 ### 5.3 Reading a granule, not a chunk
 
@@ -435,7 +471,9 @@ the object, the range of granules.
 ### 8.2 Index analysis
 
 Partitions are kept by the filter on their source; objects by the summaries in the tree; granules by the sparse key
-index, the zone maps, presence, locating indexes and postings, consulted cheapest first. A structure is consulted only
+index, the zone maps, presence, locating indexes and postings, consulted cheapest first. In the sparse key index, a
+bisection finds the intervals of the key the leading components' conjuncts bound, and boxes are judged only for what the
+intervals do not hold ([5.2](#52-the-sparse-key-index)). A structure is consulted only
 when it costs less than reading what it could exclude. The sets it returns are combined: `AND` intersects, `OR` unites,
 and `NOT` applies only where a set is exact. The filter is evaluated again on the rows, each structure being a safe
 superset.
@@ -625,6 +663,7 @@ Where the code stops short of this design, measured or known:
 | 11 | No compatibility with earlier dataset formats during the beta | the new layout is not a variant of the old one |
 | 12 | Predicates evaluated in the encoded domain, at the core | filters on measures cost a fraction of decoding them |
 | 13 | Index objects per consolidated partition | lookups over long windows cost one request per partition, not per object |
+| 14 | The sort key as ClickHouse's primary key: intervals of its leading components found by bisection, its order served under a partition, its indexes read again by each search from the caches | pruning in a few dozen key comparisons an object, a read in key order that opens an object of each partition, and no index held in memory past its search, for about a microsecond an object |
 | — | Objects of 1 GiB at most by default | smaller merges and one write fewer a row; the requests this adds to lookups are absorbed by decision 13 |
 
 Alternatives weighed and set aside:

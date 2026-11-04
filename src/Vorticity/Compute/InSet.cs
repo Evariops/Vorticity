@@ -170,7 +170,7 @@ internal sealed class InSet : CandidateSet
     }
 
     /// <summary>The key a candidate is held under, or false when no value of the column can equal it.</summary>
-    private static bool TryKey(FilterLiteral literal, CandidateKind kind, out ulong key)
+    internal static bool TryKey(FilterLiteral literal, CandidateKind kind, out ulong key)
     {
         if (kind == CandidateKind.Float)
         {
@@ -226,7 +226,7 @@ internal sealed class InSet : CandidateSet
     /// zero stays the key of zero alone.
     /// </remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static ulong FloatKey(double value)
+    internal static ulong FloatKey(double value)
     {
         ulong bits = BitConverter.DoubleToUInt64Bits(value);
         return value == 0 ? 0 : bits ^ (bits >> 32);

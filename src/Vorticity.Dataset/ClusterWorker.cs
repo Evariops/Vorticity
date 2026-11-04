@@ -62,8 +62,9 @@ public sealed class ClusterWorker : IAsyncDisposable
 
     /// <summary>
     /// Reads the metadata of the objects this node owns among <paramref name="nodes"/> in <paramref name="version"/> of the
-    /// dataset at <paramref name="location"/>: each one's table of contents is in hand, its sparse index and the marks of its
-    /// columns read into the handle's memo, which the analysis of its parts reads (spec F, 7).
+    /// dataset at <paramref name="location"/>: each one's table of contents is in hand, the marks of its columns read into
+    /// the handle's memo, which the analysis of its parts reads (spec F, 7), and its sparse index read into the session's
+    /// caches, which its searches read it from.
     /// </summary>
     public async ValueTask WarmAsync(string location, ulong version, IReadOnlyList<string> nodes, CancellationToken cancellationToken = default)
     {
@@ -86,7 +87,7 @@ public sealed class ClusterWorker : IAsyncDisposable
                     continue;
                 }
 
-                await dataset.KeyIndexAsync(owned.Entry, contents, cancellationToken).ConfigureAwait(false);
+                (await dataset.KeyIndexAsync(owned.Entry, contents, cancellationToken).ConfigureAwait(false))?.Dispose();
                 await dataset.ReadMarksAsync(owned.Entry, all, cancellationToken).ConfigureAwait(false);
             }
         }

@@ -541,7 +541,7 @@ internal sealed partial class DatasetScanBuilder
 
         // The objects the walk keeps, less those whose keys the filter refutes, as a read of rows passes them over.
         KeyPruning? keys = _summaries && _indexes && _take is null ? KeyPruning.Of(_version.Schema, _filter) : null;
-        Queue<(Planned Unit, Task<(List<(int First, int End)> Ranges, Indexes.GranuleKeys Keys)?> Reading)>? reading = null;
+        Queue<(Planned Unit, Task<(List<(int First, int End)> Ranges, Indexes.GranuleGrid Grid)?> Reading)>? reading = null;
         await foreach (PositionedObject held in _version.WalkAsync(
             Pruner(), _from, _to, read && _considers ? _metrics : null, cancellationToken, rollups is null ? null : rollups.Covers).ConfigureAwait(false))
         {
@@ -568,22 +568,23 @@ internal sealed partial class DatasetScanBuilder
                 units.Add(unit);
 
                 // The share of its rows its key's sparse index keeps, which a read of them takes alone: found when so narrow
-                // a read could beat the choice, through the open an analysis makes anyway, or as the handle holds it. The
+                // a read could beat the choice, through the open an analysis makes anyway; a plan that reads nothing takes
+                // none, the handle keeping no index past the search that read it. The
                 // indexes of the next objects are asked while the walk goes on, as the rows' walk asks them (KeysAhead), the
                 // oldest awaited when as many wait: each awaited in turn cost QP-1 a round trip an object on one lane.
                 if (keys is not null && unit.Weight > _version.Costs.Weight(RowsCost(held, double.Epsilon)))
                 {
-                    ValueTask<(List<(int First, int End)> Ranges, Indexes.GranuleKeys Keys)?> asked = KeptGranulesAsync(held, keys, first, read, cancellationToken);
+                    ValueTask<(List<(int First, int End)> Ranges, Indexes.GranuleGrid Grid)?> asked = KeptGranulesAsync(held, keys, first, read, cancellationToken);
                     if (asked.IsCompletedSuccessfully)
                     {
                         Refine(unit, await asked.ConfigureAwait(false), explain);
                         continue;
                     }
 
-                    (reading ??= new Queue<(Planned, Task<(List<(int First, int End)> Ranges, Indexes.GranuleKeys Keys)?>)>(KeysAhead)).Enqueue((unit, asked.AsTask()));
+                    (reading ??= new Queue<(Planned, Task<(List<(int First, int End)> Ranges, Indexes.GranuleGrid Grid)?>)>(KeysAhead)).Enqueue((unit, asked.AsTask()));
                     if (reading.Count >= KeysAhead)
                     {
-                        (Planned waited, Task<(List<(int First, int End)> Ranges, Indexes.GranuleKeys Keys)?> its) = reading.Dequeue();
+                        (Planned waited, Task<(List<(int First, int End)> Ranges, Indexes.GranuleGrid Grid)?> its) = reading.Dequeue();
 
                         // Each read was asked by this walk, a few objects before.
 #pragma warning disable VSTHRD003
@@ -594,7 +595,7 @@ internal sealed partial class DatasetScanBuilder
             }
         }
 
-        while (reading is not null && reading.TryDequeue(out (Planned Unit, Task<(List<(int First, int End)> Ranges, Indexes.GranuleKeys Keys)?> Reading) last))
+        while (reading is not null && reading.TryDequeue(out (Planned Unit, Task<(List<(int First, int End)> Ranges, Indexes.GranuleGrid Grid)?> Reading) last))
         {
 #pragma warning disable VSTHRD003
             Refine(last.Unit, await last.Reading.ConfigureAwait(false), explain);
@@ -608,9 +609,9 @@ internal sealed partial class DatasetScanBuilder
     /// Chooses <paramref name="unit"/> again with the share of its rows its key's sparse index keeps, as <paramref name="kept"/>
     /// says, when it said one.
     /// </summary>
-    private void Refine(Planned unit, (List<(int First, int End)> Ranges, Indexes.GranuleKeys Keys)? kept, bool explain)
+    private void Refine(Planned unit, (List<(int First, int End)> Ranges, Indexes.GranuleGrid Grid)? kept, bool explain)
     {
-        if (kept is not ({ } ranges, { } keys))
+        if (kept is not ({ } ranges, var keys))
         {
             return;
         }

@@ -85,6 +85,7 @@ internal static class DatasetLayoutVerifier
 
         // I3: the sparse index of the key's prefix, read first, so that each granule's first key is met as its row passes.
         GranuleKeys? index = null;
+        GranuleKeys.KeyReader granuleKeys = default;
         if (indexed is not null && contents is not null)
         {
             index = await dataset.KeyIndexAsync(entry, contents, cancellationToken).ConfigureAwait(false);
@@ -95,9 +96,13 @@ internal static class DatasetLayoutVerifier
             else if (index.Components != plan.Prefix)
             {
                 problems.Add(Invariant($"'{entry.Key}': its sparse index holds {index.Components} components of the key, the layout indexes {plan.Prefix} (I3)"));
+                index.Dispose();
                 index = null;
             }
         }
+
+        // Given back once the object's rows are checked against it.
+        using GranuleKeys? read = index;
 
         byte[]? first = null;
         byte[] previous = [];
@@ -152,7 +157,7 @@ internal static class DatasetLayoutVerifier
                         {
                             ReadOnlySpan<byte> full = keyed.Row(i);
                             ReadOnlySpan<byte> prefix = full[..indexed!.PrefixLength(full, plan.Prefix)];
-                            if (!unindexed && rows % index!.GranuleRows == 0 && (rows / index.GranuleRows >= index.Granules || !index.Key((int)(rows / index.GranuleRows)).SequenceEqual(prefix)))
+                            if (!unindexed && rows % index!.GranuleRows == 0 && (rows / index.GranuleRows >= index.Granules || !granuleKeys.Key(index, (int)(rows / index.GranuleRows)).SequenceEqual(Coded(index, indexed, prefix))))
                             {
                                 problems.Add(Invariant($"'{entry.Key}': its sparse index's key of granule {rows / index.GranuleRows} is not the key of the granule's first row (I3)"));
                                 unindexed = true;
@@ -173,7 +178,8 @@ internal static class DatasetLayoutVerifier
             return null;
         }
 
-        if (index is not null && (index.Rows != rows || !index.LastKey.AsSpan().SequenceEqual(lastPrefix)))
+        granuleKeys.Dispose();
+        if (index is not null && (index.Rows != rows || !index.LastKey.SequenceEqual(Coded(index, indexed!, lastPrefix))))
         {
             problems.Add(Invariant($"'{entry.Key}': its sparse index holds {index.Rows} rows and another last key, the object {rows} (I3)"));
         }
@@ -265,4 +271,14 @@ internal static class DatasetLayoutVerifier
     }
 
     private static string Invariant(FormattableString text) => text.ToString(CultureInfo.InvariantCulture);
+
+    /// <summary>
+    /// <paramref name="key"/>, a row-encoded key of <paramref name="indexed"/>'s components, coded as <paramref name="index"/>
+    /// codes its keys; as it is when its components cannot be coded so, which then holds no key of the index.
+    /// </summary>
+    private static ReadOnlySpan<byte> Coded(GranuleKeys index, SortKey indexed, ReadOnlySpan<byte> key)
+    {
+        ReadOnlySpan<int> widths = indexed.Widths[..Math.Min(index.Components, indexed.Count)];
+        return index.Coding == KeyCoding.Rows || !UnpaddedKeys.Codes(widths) ? key : UnpaddedKeys.Narrow(key, widths);
+    }
 }

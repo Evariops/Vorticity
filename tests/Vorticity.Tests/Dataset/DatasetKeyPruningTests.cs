@@ -192,8 +192,16 @@ public sealed partial class DatasetKeyPruningTests
             ReadOnlySpan<byte> order = VortexDataset.OrderOf(held.TreeKey).Span;
             byte[] partition = order[..schema.Tree!.PrefixLength(order, 1)].ToArray();
             int searches = pruning.Searches;
-            List<(int First, int End)> kept = pruning.Granules(index, partition);
-            Assert.Equal(kept, pruning.Granules(index, partition));
+            List<(int First, int End)> kept;
+            using (index)
+            {
+                Assert.False(pruning.TryKept(held.Entry.Uid, partition, out _, out _));
+                kept = pruning.Granules(held.Entry.Uid, index, partition);
+                Assert.True(pruning.TryKept(held.Entry.Uid, partition, out List<(int First, int End)> again, out GranuleGrid grid));
+                Assert.Equal(kept, again);
+                Assert.Equal(index.Grid, grid);
+            }
+
             Assert.Equal(searches + 1, pruning.Searches);
             HashSet<int> needed = [];
             List<Row> rows;

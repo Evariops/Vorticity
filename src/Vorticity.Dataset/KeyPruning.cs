@@ -1,4 +1,5 @@
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.Threading;
 using Vorticity.Buffers;
@@ -178,7 +179,7 @@ internal sealed class KeyPruning
     /// The name a component's values are judged under: its column's path, or, for a read of a variant's key, its text behind
     /// a character no column's name holds.
     /// </summary>
-    private static string NameOf(LayoutColumn source) => source.Read is { } read ? "\0" + read.Text : source.Value.SourcePath;
+    internal static string NameOf(LayoutColumn source) => source.Read is { } read ? "\0" + read.Text : source.Value.SourcePath;
 
     /// <summary>The name of the component that reads <paramref name="path"/>, the same key in the same class; null for none.</summary>
     private static string? Named(LayoutColumn?[] sources, VariantFieldExpr path)
@@ -234,46 +235,113 @@ internal sealed class KeyPruning
     }
 
     /// <summary>
-    /// The granules of an object's sparse index that may hold a row the filter keeps, in ranges <c>[first, end)</c>, ascending;
-    /// every page in hand. <paramref name="partition"/> is the object's partition, row-encoded as it leads its tree key, which
-    /// the index leaves out; empty for a dataset without one.
+    /// The granules of the object <paramref name="uid"/> whose sparse index is <paramref name="keys"/> that may hold a row the
+    /// filter keeps, in ranges <c>[first, end)</c>, ascending, kept for the pruning's later asks (<see cref="TryKept"/>).
+    /// <paramref name="partition"/> is the object's partition, row-encoded as it leads its tree key, which the index leaves
+    /// out; empty for a dataset without one.
     /// </summary>
     /// <remarks>
     /// Found once an object a question: a question at 32 lanes asks them of an object for each of its parts, and searched the
     /// whole index each time, a list of summaries made at each node, 23 MB a question of the services under 5xx over the last
-    /// quarter of an hour (2026-11-02).
+    /// quarter of an hour (2026-11-02). The index itself is not kept: its parts ask <see cref="TryKept"/> before they read it.
     /// </remarks>
-    internal List<(int First, int End)> Granules(GranuleKeys keys, ReadOnlySpan<byte> partition)
+    internal List<(int First, int End)> Granules(UInt128 uid, GranuleKeys keys, ReadOnlySpan<byte> partition)
     {
-        // Made at the first object asked, a pruning that asks none holding nothing; the dictionary its own lock.
-        Dictionary<GranuleKeys, (byte[] Partition, (int First, int End)[] Ranges)> known = Volatile.Read(ref _kept)
-            ?? Interlocked.CompareExchange(ref _kept, new(ReferenceEqualityComparer.Instance), null) ?? _kept!;
-        lock (known)
-        {
-            if (known.TryGetValue(keys, out (byte[] Partition, (int First, int End)[] Ranges) found) && partition.SequenceEqual(found.Partition))
-            {
-                return [.. found.Ranges];
-            }
-        }
-
         List<(int First, int End)> kept = Search(keys, partition);
+        Dictionary<UInt128, (byte[] Partition, (int First, int End)[] Ranges, GranuleGrid Grid)> known = Known();
         lock (known)
         {
-            known[keys] = (partition.ToArray(), [.. kept]);
+            known[uid] = (partition.ToArray(), [.. kept], keys.Grid);
         }
 
         return kept;
     }
 
-    // The granules each object's index keeps, by the index, with the partition they were searched under.
-    private Dictionary<GranuleKeys, (byte[] Partition, (int First, int End)[] Ranges)>? _kept;
+    /// <summary>
+    /// The granules of the object <paramref name="uid"/> a search of this pruning kept under <paramref name="partition"/>, a
+    /// list of the caller's, and the object's granules; false when none did.
+    /// </summary>
+    internal bool TryKept(UInt128 uid, ReadOnlySpan<byte> partition, out List<(int First, int End)> ranges, out GranuleGrid grid)
+    {
+        if (Volatile.Read(ref _kept) is { } known)
+        {
+            lock (known)
+            {
+                if (known.TryGetValue(uid, out (byte[] Partition, (int First, int End)[] Ranges, GranuleGrid Grid) found)
+                    && partition.SequenceEqual(found.Partition))
+                {
+                    ranges = [.. found.Ranges];
+                    grid = found.Grid;
+                    return true;
+                }
+            }
+        }
+
+        ranges = [];
+        grid = default;
+        return false;
+    }
+
+    /// <summary>
+    /// The granules of <paramref name="keys"/> that may hold a row the filter keeps, searched now and kept for no later ask:
+    /// for a reader of an index that no object names, the tests' and the benches'.
+    /// </summary>
+    internal List<(int First, int End)> Granules(GranuleKeys keys, ReadOnlySpan<byte> partition) => Search(keys, partition);
+
+    // Made at the first object kept, a pruning that keeps none holding nothing; the dictionary its own lock.
+    private Dictionary<UInt128, (byte[] Partition, (int First, int End)[] Ranges, GranuleGrid Grid)> Known() =>
+        Volatile.Read(ref _kept) ?? Interlocked.CompareExchange(ref _kept, [], null) ?? _kept!;
+
+    // The granules each object's index keeps, by the object's uid, with the partition they were searched under and the
+    // object's granules.
+    private Dictionary<UInt128, (byte[] Partition, (int First, int End)[] Ranges, GranuleGrid Grid)>? _kept;
 
     /// <summary>The searches of an object's index this pruning made, which an object asked again does not repeat.</summary>
     internal int Searches => _searches;
 
     private int _searches;
 
-    private List<(int First, int End)> Search(GranuleKeys keys, ReadOnlySpan<byte> partition)
+    /// <summary>The boxes the searches of objects' indexes judged: entries of the exclusion search, pages or granules.</summary>
+    internal int Judgments => _judgments;
+
+    private int _judgments;
+
+    /// <summary>The keys the searches of objects' indexes compared, finding where the filter's key intervals lie.</summary>
+    internal int Comparisons => _comparisons;
+
+    private int _comparisons;
+
+    /// <summary>The intervals of the indexed components' keys the filter bounds, made at the first search (<see cref="KeyIntervals"/>).</summary>
+    internal KeyIntervals Intervals
+    {
+        get
+        {
+            if (Volatile.Read(ref _intervals) is { } known)
+            {
+                return known;
+            }
+
+            string?[] names = new string?[_indexedSources.Length];
+            for (int i = 0; i < names.Length; i++)
+            {
+                names[i] = _indexedSources[i] is { } source ? NameOf(source) : null;
+            }
+
+            string? partition = _skip > 0 && _sources[0] is { } leading ? NameOf(leading) : null;
+            KeyIntervals made = KeyIntervals.Of(_judged, _indexedSources, names, partition, _tree, _skip);
+            return Interlocked.CompareExchange(ref _intervals, made, null) ?? made;
+        }
+    }
+
+    private KeyIntervals? _intervals;
+
+    /// <summary>
+    /// The granules of <paramref name="keys"/> that the exclusion search alone keeps, the intervals unused: what the
+    /// bisection keeps within, which its tests compare it with. Not kept for the question.
+    /// </summary>
+    internal List<(int First, int End)> Excluded(GranuleKeys keys, ReadOnlySpan<byte> partition) => Search(keys, partition, bisect: false);
+
+    private List<(int First, int End)> Search(GranuleKeys keys, ReadOnlySpan<byte> partition, bool bisect = true)
     {
         Interlocked.Increment(ref _searches);
         List<(int First, int End)> kept = [];
@@ -282,20 +350,96 @@ internal sealed class KeyPruning
             return kept;
         }
 
-        // The pages first: a page runs from its first key to the next page's, the last one to the object's last key. One list
-        // of summaries serves every node of the search, and each text or binary the keys hold is read once.
-        List<ColumnSummary> box = new List<ColumnSummary>(_tree.Count + 1);
-        Dictionary<byte[], FilterLiteral> values = new Dictionary<byte[], FilterLiteral>(ByteKeys.Instance);
-        List<(int First, int End)> pages = [];
-        Search(keys, partition, 0, keys.Pages, granules: false, pages, box, values);
-        foreach ((int firstPage, int endPage) in pages)
+        // The intervals the filter bounds first, by bisection: exact, they are the answer; else the boxes are judged within them.
+        KeyIntervals intervals = bisect ? Intervals : KeyIntervals.Unbounded;
+        if (intervals is { Bounded: true, Exact: true })
         {
-            int from = firstPage * keys.PageEntries;
-            int to = (int)Math.Min((long)endPage * keys.PageEntries, keys.Granules);
-            Search(keys, partition, from, to, granules: true, kept, box, values);
+            int compared = 0;
+            intervals.Ranges(keys, kept, ref compared);
+            Interlocked.Add(ref _comparisons, compared);
+            return Merge(kept);
         }
 
-        // Neighbouring ranges as one; none when the object's box meets the filter's and no granule's does.
+        Scratch scratch = Interlocked.Exchange(ref _spare, null) ?? new Scratch(_tree.Count + 1);
+        try
+        {
+            List<(int First, int End)> within = scratch.Within;
+            int judged = 0;
+            if (intervals.Bounded)
+            {
+                int compared = 0;
+                intervals.Ranges(keys, within, ref compared);
+                Interlocked.Add(ref _comparisons, compared);
+            }
+            else
+            {
+                // The pages first: a page runs from its first key to the next page's, the last one to the object's last key.
+                Search(keys, partition, 0, keys.Pages, granules: false, within, scratch, ref judged, default);
+                for (int i = 0; i < within.Count; i++)
+                {
+                    (int firstPage, int endPage) = within[i];
+                    within[i] = (firstPage * keys.PageEntries, (int)Math.Min((long)endPage * keys.PageEntries, keys.Granules));
+                }
+            }
+
+            // A range's keys decoded once, one record each, and its boxes judged over them, in rented buffers: the search reads
+            // them in any order, each from its run's whole key otherwise.
+            foreach ((int from, int to) in Merge(within))
+            {
+                int last = Math.Min(to + 1, keys.Granules);
+                byte[] decoded = ArrayPool<byte>.Shared.Rent((last - from) * Math.Max(keys.Longest(from, last), 1));
+                int[] ends = ArrayPool<int>.Shared.Rent(last - from);
+                try
+                {
+                    keys.Decode(from, last, decoded, ends);
+                    Search(keys, partition, from, to, granules: true, kept, scratch, ref judged, new RangeKeys(from, decoded, ends));
+                }
+                finally
+                {
+                    ArrayPool<byte>.Shared.Return(decoded);
+                    ArrayPool<int>.Shared.Return(ends);
+                }
+            }
+
+            Interlocked.Add(ref _judgments, judged);
+        }
+        finally
+        {
+            scratch.Within.Clear();
+            if (scratch.Values.Count > Scratch.MostValues)
+            {
+                scratch.Values.Clear();
+            }
+
+            Interlocked.CompareExchange(ref _spare, scratch, null);
+        }
+
+        return Merge(kept);
+    }
+
+    // The scratch of a search, kept for the question's next one: a lane that finds it taken makes its own.
+    private Scratch? _spare;
+
+    /// <summary>
+    /// What a search judges its boxes with: one list of summaries for every node, each text or binary its keys hold read
+    /// once a question rather than once an object, and the ranges it searches within. A search of an index by a host,
+    /// past the leading components, made a dictionary of the keys' texts and grew its lists anew, 220 KB an object.
+    /// </summary>
+    private sealed class Scratch(int components)
+    {
+        /// <summary>The most texts the scratch keeps from one search to the next.</summary>
+        internal const int MostValues = 4_096;
+
+        internal List<ColumnSummary> Box { get; } = new List<ColumnSummary>(components);
+
+        internal Dictionary<byte[], FilterLiteral> Values { get; } = new Dictionary<byte[], FilterLiteral>(ByteKeys.Instance);
+
+        internal List<(int First, int End)> Within { get; } = [];
+    }
+
+    /// <summary>Neighbouring ranges of <paramref name="kept"/>, ascending, as one, in place.</summary>
+    private static List<(int First, int End)> Merge(List<(int First, int End)> kept)
+    {
         if (kept.Count == 0)
         {
             return kept;
@@ -323,53 +467,77 @@ internal sealed class KeyPruning
     /// box of its bounds refutes is dropped, one of a single entry kept, any other cut in <see cref="Fanout"/>.
     /// </summary>
     private void Search(
-        GranuleKeys keys, ReadOnlySpan<byte> partition, int from, int to, bool granules, List<(int First, int End)> kept, List<ColumnSummary> box,
-        Dictionary<byte[], FilterLiteral> values)
+        GranuleKeys keys, ReadOnlySpan<byte> partition, int from, int to, bool granules, List<(int First, int End)> kept, Scratch scratch,
+        ref int judged, in RangeKeys range)
     {
         if (from >= to)
         {
             return;
         }
 
-        if (!Judge(EntryKey(keys, from, granules), NextKey(keys, to, granules), _skip, partition, box, values))
+        judged++;
+        if (!Judge(EntryKey(keys, from, granules, in range), NextKey(keys, to, granules, in range), _skip, partition, scratch.Box, scratch.Values, keys.Coding))
         {
             return;
         }
 
         if (to - from == 1)
         {
-            kept.Add((from, to));
+            // A granule next to the last kept lengthens its range: a search that keeps most granules grows no list.
+            if (kept.Count > 0 && kept[^1].End >= from)
+            {
+                kept[^1] = (kept[^1].First, Math.Max(kept[^1].End, to));
+            }
+            else
+            {
+                kept.Add((from, to));
+            }
+
             return;
         }
 
         int step = Math.Max(1, (to - from + Fanout - 1) / Fanout);
         for (int at = from; at < to; at += step)
         {
-            Search(keys, partition, at, Math.Min(at + step, to), granules, kept, box, values);
+            Search(keys, partition, at, Math.Min(at + step, to), granules, kept, scratch, ref judged, in range);
+        }
+    }
+
+    /// <summary>The keys of a range of granules from <paramref name="from"/>, decoded end to end, with where each ends.</summary>
+    private readonly struct RangeKeys(int from, byte[] keys, int[] ends)
+    {
+        internal ReadOnlySpan<byte> this[int granule]
+        {
+            get
+            {
+                int at = granule - from;
+                int start = at == 0 ? 0 : ends[at - 1];
+                return keys.AsSpan(start, ends[at] - start);
+            }
         }
     }
 
     /// <summary>The key of entry <paramref name="entry"/>: a granule's, or a page's first.</summary>
-    private static ReadOnlySpan<byte> EntryKey(GranuleKeys keys, int entry, bool granules) =>
-        granules ? keys.Key(entry) : keys.PageKey(entry);
+    private static ReadOnlySpan<byte> EntryKey(GranuleKeys keys, int entry, bool granules, in RangeKeys range) =>
+        granules ? range[entry] : keys.PageKey(entry);
 
     /// <summary>The key entry <paramref name="entry"/> − 1 runs to: entry <paramref name="entry"/>'s, or the last key past the last.</summary>
-    private static ReadOnlySpan<byte> NextKey(GranuleKeys keys, int entry, bool granules) =>
+    private static ReadOnlySpan<byte> NextKey(GranuleKeys keys, int entry, bool granules, in RangeKeys range) =>
         granules
-            ? entry == keys.Granules ? keys.LastKey : keys.Key(entry)
+            ? entry == keys.Granules ? keys.LastKey : range[entry]
             : entry == keys.Pages ? keys.LastKey : keys.PageKey(entry);
 
     /// <summary>
     /// Whether rows between <paramref name="low"/> and <paramref name="high"/>, keys of the tree's components from position
-    /// <paramref name="from"/> on, both included, may hold a row the filter keeps; <paramref name="partition"/> the value of
-    /// the positions before, which every row holds.
+    /// <paramref name="from"/> on coded as <paramref name="coding"/> says, both included, may hold a row the filter keeps;
+    /// <paramref name="partition"/> the value of the positions before, row-encoded, which every row holds.
     /// </summary>
     private bool Judge(
         ReadOnlySpan<byte> low, ReadOnlySpan<byte> high, int from, ReadOnlySpan<byte> partition, List<ColumnSummary> box,
-        Dictionary<byte[], FilterLiteral>? values = null)
+        Dictionary<byte[], FilterLiteral>? values = null, KeyCoding coding = KeyCoding.Rows)
     {
         box.Clear();
-        Box(low, high, from, partition, nonNull: false, box, values);
+        Box(low, high, from, partition, nonNull: false, box, values, coding);
         return box.Count == 0 || _pruner.MayMatch(Merged(box), 1);
     }
 
@@ -380,11 +548,11 @@ internal sealed class KeyPruning
     /// </summary>
     private List<ColumnSummary> Box(
         ReadOnlySpan<byte> low, ReadOnlySpan<byte> high, int from, ReadOnlySpan<byte> partition, bool nonNull, List<ColumnSummary> box,
-        Dictionary<byte[], FilterLiteral>? values = null)
+        Dictionary<byte[], FilterLiteral>? values = null, KeyCoding coding = KeyCoding.Rows)
     {
         if (from > 0 && !partition.IsEmpty)
         {
-            FilterLiteral value = Value(partition, 0, values);
+            FilterLiteral value = Value(partition, 0, values, KeyCoding.Rows);
             Bound(box, 0, value, value, nonNull);
         }
 
@@ -392,9 +560,9 @@ internal sealed class KeyPruning
         int highAt = 0;
         for (int position = from; position < _tree.Count && lowAt < low.Length && highAt < high.Length; position++)
         {
-            DType type = _tree.TypeAt(position);
-            int lowLength = RowEncoder.ValueLength(low[lowAt..], type);
-            int highLength = RowEncoder.ValueLength(high[highAt..], type);
+            int width = _tree.WidthAt(position);
+            int lowLength = ValueLength(low[lowAt..], width, coding);
+            int highLength = ValueLength(high[highAt..], width, coding);
             if (lowLength <= 0 || highLength <= 0 || lowAt + lowLength > low.Length || highAt + highLength > high.Length)
             {
                 break;
@@ -402,7 +570,7 @@ internal sealed class KeyPruning
 
             ReadOnlySpan<byte> lowValue = low.Slice(lowAt, lowLength);
             ReadOnlySpan<byte> highValue = high.Slice(highAt, highLength);
-            Bound(box, position, Value(lowValue, position, values), Value(highValue, position, values), nonNull);
+            Bound(box, position, Value(lowValue, position, values, coding), Value(highValue, position, values, coding), nonNull);
 
             // Past the first component the two keys part on, the next ones are free.
             if (!lowValue.SequenceEqual(highValue))
@@ -417,28 +585,39 @@ internal sealed class KeyPruning
         return box;
     }
 
+    /// <summary>The bytes the first value of <paramref name="key"/> takes, coded as <paramref name="coding"/> says, a value of the encoded width <paramref name="width"/>.</summary>
+    private static int ValueLength(ReadOnlySpan<byte> key, int width, KeyCoding coding) =>
+        coding == KeyCoding.Rows ? RowEncoder.ValueLength(key, width) : UnpaddedKeys.ValueLength(key, width);
+
     /// <summary>
-    /// The value <paramref name="encoded"/> holds, of the component at <paramref name="position"/>: a text's or a binary's read
-    /// once a search, by its bytes, into <paramref name="values"/> when there are some. Each granule's bounds made their
-    /// values' bytes anew: a search of a service's objects read the same few names thousands of times, a tenth of what the
-    /// questions of a node allocated (2026-11-02).
+    /// The value <paramref name="encoded"/> holds, of the component at <paramref name="position"/>, coded as
+    /// <paramref name="coding"/> says: a text's or a binary's read once a search, by its bytes, into <paramref name="values"/>
+    /// when there are some. Each granule's bounds made their values' bytes anew: a search of a service's objects read the
+    /// same few names thousands of times, a tenth of what the questions of a node allocated (2026-11-02). The two codings of
+    /// a non-empty text never share their bytes, the last one 1 to 32 row-encoded and zero unpadded, and the others alike.
     /// </summary>
-    private FilterLiteral Value(ReadOnlySpan<byte> encoded, int position, Dictionary<byte[], FilterLiteral>? values)
+    private FilterLiteral Value(ReadOnlySpan<byte> encoded, int position, Dictionary<byte[], FilterLiteral>? values, KeyCoding coding)
     {
         if (values is null || _tree.WidthAt(position) != RowEncoder.VariableWidth)
         {
-            return RowEncoder.ReadFirstValue(encoded, _tree.TypeAt(position));
+            return Read(encoded, position, coding);
         }
 
         Dictionary<byte[], FilterLiteral>.AlternateLookup<ReadOnlySpan<byte>> lookup = values.GetAlternateLookup<ReadOnlySpan<byte>>();
         if (!lookup.TryGetValue(encoded, out FilterLiteral value))
         {
-            value = RowEncoder.ReadFirstValue(encoded, _tree.TypeAt(position));
+            value = Read(encoded, position, coding);
             lookup[encoded] = value;
         }
 
         return value;
     }
+
+    /// <summary>The value <paramref name="encoded"/> holds, of the component at <paramref name="position"/>, coded as <paramref name="coding"/> says.</summary>
+    private FilterLiteral Read(ReadOnlySpan<byte> encoded, int position, KeyCoding coding) =>
+        coding == KeyCoding.Rows
+            ? RowEncoder.ReadFirstValue(encoded, _tree.TypeAt(position))
+            : UnpaddedKeys.ReadFirstValue(encoded, _tree.TypeAt(position));
 
     /// <summary>
     /// Adds to <paramref name="box"/> what values from <paramref name="low"/> to <paramref name="high"/> of the component at

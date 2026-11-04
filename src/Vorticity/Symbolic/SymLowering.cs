@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Numerics;
+using System.Runtime.InteropServices;
 using Vorticity.Expressions;
 
 namespace Vorticity;
@@ -124,34 +125,56 @@ internal static class SymLowering
 
     internal static Predicate In<T>(ColumnSym column, ReadOnlySpan<T> values)
     {
-        ClrShape shape = ClrShape.For<T>.Value;
         List<FilterLiteral> literals = new List<FilterLiteral>(values.Length);
         foreach (T value in values)
         {
-            if (value is null)
+            if (TryExact(column, value, out FilterLiteral exact))
             {
-                continue;
-            }
-
-            if (IsDecimal(shape.Kind))
-            {
-                if (TryExactDecimal(column, value, out FilterLiteral exact))
-                {
-                    literals.Add(exact);
-                }
-
-                continue;
-            }
-
-            // A value the column cannot store matches no row, so it leaves the list.
-            Placement at = Place(column, shape, value);
-            if (at.Exact && at.Beyond == 0)
-            {
-                literals.Add(at.Floor);
+                literals.Add(exact);
             }
         }
 
         return literals.Count == 0 ? Predicate.None : new Predicate(Expr.In(column.Field, [.. literals]));
+    }
+
+    /// <summary>
+    /// The literal of <paramref name="value"/> in the storage units of <paramref name="column"/>, exactly; false for a null,
+    /// or a value the column cannot store, which no row equals and which leaves a set.
+    /// </summary>
+    internal static bool TryExact<T>(ColumnSym column, T value, out FilterLiteral literal)
+    {
+        literal = default;
+        if (value is null)
+        {
+            return false;
+        }
+
+        ClrShape shape = ClrShape.For<T>.Value;
+        if (IsDecimal(shape.Kind))
+        {
+            return TryExactDecimal(column, value, out literal);
+        }
+
+        Placement at = Place(column, shape, value);
+        literal = at.Floor;
+        return at.Exact && at.Beyond == 0;
+    }
+
+    /// <summary>
+    /// The rows whose values of <paramref name="columns"/> are one of the tuples <paramref name="values"/> holds end to end,
+    /// each value placed in its column by <see cref="TryExact{T}"/>: none, when no tuple is left.
+    /// </summary>
+    /// <exception cref="ArgumentException">A column is not one of the scan's own: a function of one, a path in a variant.</exception>
+    internal static Predicate Tuples(ReadOnlySpan<ColumnSym> columns, List<FilterLiteral> values)
+    {
+        FieldExpr[] fields = new FieldExpr[columns.Length];
+        for (int column = 0; column < fields.Length; column++)
+        {
+            fields[column] = columns[column].Field as ColumnFieldExpr
+                ?? throw new ArgumentException($"Element {column + 1} of the tuple, '{columns[column].Field.Path}', is not a column: a tuple holds columns.", nameof(columns));
+        }
+
+        return values.Count == 0 ? Predicate.None : new Predicate(TupleInExpr.Of(fields, CollectionsMarshal.AsSpan(values)));
     }
 
     internal static Predicate StringMatch(ColumnSym column, StringMatchOp op, string text, char escape = '\\')

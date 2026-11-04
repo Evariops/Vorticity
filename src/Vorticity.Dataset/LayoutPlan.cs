@@ -152,6 +152,32 @@ internal sealed class LayoutColumn
 }
 
 /// <summary>
+/// The columns rows lie in the order of (<see cref="LayoutPlan.Order"/>): their paths, and where each one's value lies among
+/// the values a key encodes, the partition's first when it leads them.
+/// </summary>
+internal sealed record ColumnOrder(string[] Paths, int[] Positions)
+{
+    /// <summary>Whether <paramref name="paths"/> lead the order, in its order.</summary>
+    internal bool Leads(IReadOnlyList<string> paths)
+    {
+        if (paths.Count == 0 || paths.Count > Paths.Length)
+        {
+            return false;
+        }
+
+        for (int i = 0; i < paths.Count; i++)
+        {
+            if (!string.Equals(paths[i], Paths[i], StringComparison.Ordinal))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+}
+
+/// <summary>
 /// A dataset's layout resolved against its schema (<see cref="DatasetLayout"/>): its partition and the components of its
 /// key, each where its source lies and what it makes, and the prefix and the organization it keeps.
 /// </summary>
@@ -255,6 +281,68 @@ internal sealed class LayoutPlan
     {
         int dot = value.Key is null ? value.SourcePath.IndexOf('.', StringComparison.Ordinal) : -1;
         return dot < 0 ? value.SourcePath : value.SourcePath[..dot];
+    }
+
+    /// <summary>
+    /// The columns whose order the rows lie in, in key order, led by the partition when <paramref name="partition"/> asks:
+    /// what the key's components order, read as columns. A column as it is orders by itself. A run of functions of one
+    /// column followed by the column as it is orders by that column, each function non-decreasing: rows ordered by
+    /// <c>(f(c), c)</c> are ordered by <c>c</c>. A function of a column already ordered orders nothing more. The order
+    /// stops at a variant key's read, a float's bucket, whose order its encoding does not keep for zero's sign, or a
+    /// function not followed by its column. Null for no such column.
+    /// </summary>
+    internal ColumnOrder? Order(bool partition)
+    {
+        List<LayoutColumn> values = [];
+        if (partition && Partition is { } leading)
+        {
+            values.Add(leading);
+        }
+
+        values.AddRange(Components);
+        List<string> paths = [];
+        List<int> positions = [];
+        for (int i = 0; i < values.Count;)
+        {
+            LayoutColumn value = values[i];
+            string path = value.Value.SourcePath;
+            if (value.Read is not null)
+            {
+                break;
+            }
+
+            if (paths.Contains(path))
+            {
+                i++;
+                continue;
+            }
+
+            if (value.IsColumn)
+            {
+                paths.Add(path);
+                positions.Add(i);
+                i++;
+                continue;
+            }
+
+            int next = i;
+            while (next < values.Count && values[next] is { Read: null, Function: { } function } run
+                && !function.Storage.IsFloat() && string.Equals(run.Value.SourcePath, path, StringComparison.Ordinal))
+            {
+                next++;
+            }
+
+            if (next == i || next == values.Count || !values[next].IsColumn || !string.Equals(values[next].Value.SourcePath, path, StringComparison.Ordinal))
+            {
+                break;
+            }
+
+            paths.Add(path);
+            positions.Add(next);
+            i = next + 1;
+        }
+
+        return paths.Count == 0 ? null : new ColumnOrder([.. paths], [.. positions]);
     }
 
     /// <summary>

@@ -1546,6 +1546,16 @@ internal sealed class ScanBuilder
                 return visitor.Visit(check.Field);
             case InExpr membership:
                 return visitor.Visit(membership.Field);
+            case TupleInExpr tuples:
+                foreach (FieldExpr field in tuples.Fields)
+                {
+                    if (!visitor.Visit(field))
+                    {
+                        return false;
+                    }
+                }
+
+                return true;
             case StringMatchExpr match:
                 return visitor.Visit(match.Field);
             case ListContainsExpr contains:

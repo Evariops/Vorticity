@@ -55,8 +55,9 @@ internal sealed class DatasetSchema
         Tree = Layout is { } plan && (plan.Partition is not null || plan.Components.Count > 0)
             ? SortKey.Of(plan, partition: true, plan.Components.Count)
             : null;
-        KeyColumns = Layout?.ColumnPaths();
-        Key = Layout is { Partition: null } && KeyColumns is { } paths ? DatasetKey.OfLayout(paths, DType) : null;
+        ObjectOrder = Layout?.Order(partition: false);
+        TreeOrder = Layout?.Order(partition: true);
+        Key = Layout is { Partition: null } && Layout.ColumnPaths() is { } paths ? DatasetKey.OfLayout(paths, DType) : null;
         Cut = ValueCut.Of(Layout, Tree);
         RollupKey = Key ?? (Cut is { Path: { } partitioned } ? DatasetKey.For([partitioned], DType) : null);
         _hash = DType.IsDefault ? 0 : DType.GetHashCode();
@@ -119,10 +120,19 @@ internal sealed class DatasetSchema
     internal DatasetKey? RollupKey { get; }
 
     /// <summary>
-    /// The columns the layout's key components read as they are, in key order, whose order every object's rows lie in
-    /// within its partition, nulls last; null when a component is computed, or the layout has no key.
+    /// The columns every object's rows lie in the order of, nulls last, as the key's components order them
+    /// (<see cref="LayoutPlan.Order"/>): <c>(Service, Bucket(Sequence), Sequence)</c> orders by the service then the
+    /// sequence. Null when the key's first component orders no column, or the layout has no key.
     /// </summary>
-    internal IReadOnlyList<string>? KeyColumns { get; }
+    internal ColumnOrder? ObjectOrder { get; }
+
+    /// <summary>
+    /// The columns the tree's keys, the partition then the key's components, lie in the order of, and so the objects of a
+    /// level and the rows across them (<see cref="LayoutPlan.Order"/>): the partition's column then the key's under a
+    /// partition by a column, the key's columns under a partition by a function of its first. Null when the partition
+    /// orders no column and leads the key.
+    /// </summary>
+    internal ColumnOrder? TreeOrder { get; }
 
     /// <summary>The partition the dataset's jobs cut their objects by, over the tree's keys; null when it declares none.</summary>
     internal ValueCut? Cut { get; }

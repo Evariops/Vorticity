@@ -26,6 +26,9 @@ internal sealed class ObjectKeyEntries : ISortedEntries
     private readonly string[] _paths;
     private readonly SortKey _key;
     private readonly GranuleKeys? _index;
+
+    // The reader of its index's keys, whose buffer the entries give back when disposed.
+    private GranuleKeys.KeyReader _reader;
     private readonly int _granuleRows;
     private readonly long _rows;
 
@@ -37,8 +40,8 @@ internal sealed class ObjectKeyEntries : ISortedEntries
 
     /// <summary>
     /// The entries of <paramref name="file"/>, whose rows are in the order of the tuple of <paramref name="paths"/>, as the
-    /// object names them, nulls last; <paramref name="index"/> its sparse index with every page in hand, or null to bisect
-    /// its granules by reading them.
+    /// object names them, nulls last; <paramref name="index"/> its sparse index, which the entries own and give back when
+    /// disposed, or null to bisect its granules by reading them.
     /// </summary>
     internal ObjectKeyEntries(VortexFile file, string[] paths, GranuleKeys? index)
     {
@@ -46,6 +49,11 @@ internal sealed class ObjectKeyEntries : ISortedEntries
         _paths = paths;
         _key = SortKey.OfColumns(file.DType, paths, descending: false);
         _index = index is { Rows: var rows } && rows == file.RowCount ? index : null;
+        if (_index is null)
+        {
+            index?.Dispose();
+        }
+
         _granuleRows = _index?.GranuleRows ?? DefaultGranuleRows;
         _rows = file.RowCount;
         RowSortField[] fields = new RowSortField[paths.Length];
@@ -108,6 +116,8 @@ internal sealed class ObjectKeyEntries : ISortedEntries
     {
         _loadedStart = -1;
         _loadedRows = 0;
+        _reader.Dispose();
+        _index?.Dispose();
         return ValueTask.CompletedTask;
     }
 
@@ -123,12 +133,13 @@ internal sealed class ObjectKeyEntries : ISortedEntries
         }
 
         int granules = (int)((_rows + _granuleRows - 1) / _granuleRows);
+        byte[]? coded = Coded(key);
         int low = 0;
         int high = granules;
         while (low < high)
         {
             int middle = low + ((high - low) >> 1);
-            if (await FirstPastAsync(middle, key, strict, cancellationToken).ConfigureAwait(false))
+            if (await FirstPastAsync(middle, key, coded, strict, cancellationToken).ConfigureAwait(false))
             {
                 high = middle;
             }
@@ -149,23 +160,39 @@ internal sealed class ObjectKeyEntries : ISortedEntries
 
     /// <summary>
     /// Whether granule <paramref name="granule"/>'s first tuple lies at or past <paramref name="key"/>, or strictly past it:
-    /// by its key in the sparse index when that decides, a prefix of the tuple that is no prefix of the sought key, and by
-    /// its first row otherwise.
+    /// by its key in the sparse index when that decides, a prefix of the tuple that is no prefix of the sought key
+    /// <paramref name="coded"/> as the index codes it, and by its first row otherwise.
     /// </summary>
-    private async ValueTask<bool> FirstPastAsync(int granule, byte[] key, bool strict, CancellationToken cancellationToken)
+    private async ValueTask<bool> FirstPastAsync(int granule, byte[] key, byte[]? coded, bool strict, CancellationToken cancellationToken)
     {
-        if (_index is { } index)
+        if (_index is { } index && coded is not null)
         {
-            ReadOnlySpan<byte> first = index.Key(granule);
-            if (!key.AsSpan().StartsWith(first))
+            ReadOnlySpan<byte> first = _reader.Key(index, granule);
+            if (!coded.AsSpan().StartsWith(first))
             {
-                return first.SequenceCompareTo(key) > 0;
+                return first.SequenceCompareTo(coded) > 0;
             }
         }
 
         await LoadAsync(granule, cancellationToken).ConfigureAwait(false);
         int order = Loaded(0).SequenceCompareTo(key);
         return strict ? order > 0 : order >= 0;
+    }
+
+    /// <summary>
+    /// <paramref name="key"/> as the sparse index codes its keys, to compare with them: itself for keys row-encoded, its
+    /// leading components unpadded for an index that codes its texts so; null with no index, or one whose components the
+    /// key cannot be coded by.
+    /// </summary>
+    private byte[]? Coded(byte[] key)
+    {
+        if (_index is not { } index)
+        {
+            return null;
+        }
+
+        ReadOnlySpan<int> widths = _key.Widths[..Math.Min(index.Components, _key.Count)];
+        return index.Coding == KeyCoding.Rows ? key : UnpaddedKeys.Codes(widths) ? UnpaddedKeys.Narrow(key, widths) : null;
     }
 
     /// <summary>The first loaded row from <paramref name="from"/> to <paramref name="to"/> whose tuple lies at or past <paramref name="key"/>, or past it.</summary>

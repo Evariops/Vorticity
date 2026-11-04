@@ -1980,6 +1980,9 @@ Vorticity:     method Scan<TRecord> WithCancellation(CancellationToken)
 Vorticity:     method Scan<TRecord>.AsyncEnumerator<TRecord> GetAsyncEnumerator(CancellationToken = default)
 Vorticity:     method ValueTask<Nullable<double>> AverageAsync<T>(Func<Probe<TRecord>, Sym<Nullable<T>>>, CancellationToken = default)
 Vorticity:     method ValueTask<Nullable<double>> AverageAsync<T>(Func<Probe<TRecord>, Sym<T>>, CancellationToken = default)
+Vorticity:     method ValueTask<Scan<TRecord>> WhereInAsync<T1, T2, T3, T4>(Func<Probe<TRecord>, ValueTuple<Sym<T1>, Sym<T2>, Sym<T3>, Sym<T4>>>, Projection, int = default, CancellationToken = default)
+Vorticity:     method ValueTask<Scan<TRecord>> WhereInAsync<T1, T2, T3>(Func<Probe<TRecord>, ValueTuple<Sym<T1>, Sym<T2>, Sym<T3>>>, Projection, int = default, CancellationToken = default)
+Vorticity:     method ValueTask<Scan<TRecord>> WhereInAsync<T1, T2>(Func<Probe<TRecord>, ValueTuple<Sym<T1>, Sym<T2>>>, Projection, int = default, CancellationToken = default)
 Vorticity:     method ValueTask<Scan<TRecord>> WhereInAsync<TKey>(Func<Probe<TRecord>, Sym<TKey>>, Projection<TKey>, int = default, CancellationToken = default)
 Vorticity:     method ValueTask<ScanPlan> ExplainAsync(CancellationToken = default)
 Vorticity:     method ValueTask<ScanPlan> ExplainAsync(bool, CancellationToken = default)
@@ -2255,6 +2258,28 @@ Vorticity:     method Sym<Nullable<Int128>> AsInt128()
 Vorticity:     method Sym<string> Map(IReadOnlyDictionary<long, string>)
 Vorticity: static class Vorticity.SymExtensions.<G>$EAA1A4811C4615E6168DDA7467CFD457.<M>$9CE249A2642403A1F116F7D653B92A9E
 Vorticity:     method void <Extension>$(Sym<Nullable<long>>)
+Vorticity: static class Vorticity.SymTuples
+Vorticity:     method Predicate In<T1, T2, T3, T4>(ValueTuple<Sym<T1>, Sym<T2>, Sym<T3>, Sym<T4>>, IEnumerable<ValueTuple<T1, T2, T3, T4>>)
+Vorticity:     method Predicate In<T1, T2, T3, T4>(ValueTuple<Sym<T1>, Sym<T2>, Sym<T3>, Sym<T4>>, ReadOnlySpan<ValueTuple<T1, T2, T3, T4>>)
+Vorticity:     method Predicate In<T1, T2, T3>(ValueTuple<Sym<T1>, Sym<T2>, Sym<T3>>, IEnumerable<ValueTuple<T1, T2, T3>>)
+Vorticity:     method Predicate In<T1, T2, T3>(ValueTuple<Sym<T1>, Sym<T2>, Sym<T3>>, ReadOnlySpan<ValueTuple<T1, T2, T3>>)
+Vorticity:     method Predicate In<T1, T2>(ValueTuple<Sym<T1>, Sym<T2>>, IEnumerable<ValueTuple<T1, T2>>)
+Vorticity:     method Predicate In<T1, T2>(ValueTuple<Sym<T1>, Sym<T2>>, ReadOnlySpan<ValueTuple<T1, T2>>)
+Vorticity: sealed class Vorticity.SymTuples.<G>$B5CF664565DC05F0C9C0DDB87F74836B<$T0, $T1, $T2, $T3>
+Vorticity:     method Predicate In(IEnumerable<ValueTuple<$T0, $T1, $T2, $T3>>)
+Vorticity:     method Predicate In(ReadOnlySpan<ValueTuple<$T0, $T1, $T2, $T3>>)
+Vorticity: static class Vorticity.SymTuples.<G>$B5CF664565DC05F0C9C0DDB87F74836B<$T0, $T1, $T2, $T3>.<M>$3ACDFC3C1AB104DC9601058CA14CB300<T1, T2, T3, T4>
+Vorticity:     method void <Extension>$(ValueTuple<Sym<T1>, Sym<T2>, Sym<T3>, Sym<T4>>)
+Vorticity: sealed class Vorticity.SymTuples.<G>$D6172828B0CEAEDC0AC6696C13FAB20F<$T0, $T1>
+Vorticity:     method Predicate In(IEnumerable<ValueTuple<$T0, $T1>>)
+Vorticity:     method Predicate In(ReadOnlySpan<ValueTuple<$T0, $T1>>)
+Vorticity: static class Vorticity.SymTuples.<G>$D6172828B0CEAEDC0AC6696C13FAB20F<$T0, $T1>.<M>$61F32F658782E15A33926F2BD04F28FC<T1, T2>
+Vorticity:     method void <Extension>$(ValueTuple<Sym<T1>, Sym<T2>>)
+Vorticity: sealed class Vorticity.SymTuples.<G>$F3AAA5670BEF08CE2D29EB7F3BF29CE9<$T0, $T1, $T2>
+Vorticity:     method Predicate In(IEnumerable<ValueTuple<$T0, $T1, $T2>>)
+Vorticity:     method Predicate In(ReadOnlySpan<ValueTuple<$T0, $T1, $T2>>)
+Vorticity: static class Vorticity.SymTuples.<G>$F3AAA5670BEF08CE2D29EB7F3BF29CE9<$T0, $T1, $T2>.<M>$7DE23B740C9DD69503232D1E5EC0F799<T1, T2, T3>
+Vorticity:     method void <Extension>$(ValueTuple<Sym<T1>, Sym<T2>, Sym<T3>>)
 Vorticity: sealed class Vorticity.SynopsisCache : IDisposable
 Vorticity:     ctor SynopsisCache(string, long)
 Vorticity:     ctor SynopsisCache(string, long, long)

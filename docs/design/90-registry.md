@@ -214,7 +214,7 @@ The kinds of the directory ([10-indexes.md](10-indexes.md)) carry their own vers
 | `vorticity.bloom.sbbf.v1`, `vorticity.bloom.ngram3.v1` | 2, a filter tree a run | version 1 |
 | `vorticity.dict.probe.v1` | no options of its own | none |
 | `vorticity.postings.blocks.v1`, `vorticity.sorted.runs.v1`, `vorticity.postings.ngram3.v1`, `vorticity.postings.hashed.v1`, `vorticity.postings.tokens.v1` | 1, and 2 for a run laid out in pages | none |
-| `vorticity.key.index.v1` | 1, the first key of each granule, in pages | none |
+| `vorticity.key.index.v1` | 1, the first key of each granule, in pages; 2, the same with their texts unpadded where that takes fewer bytes | none |
 | `vorticity.slices.v1` | none | every version: 6, bounded by keys; 4 and 5, bounded by a time; the three before them |
 | `vorticity.slices.chunks.v1` | 1, and 2 for a column laid out in pages | none |
 | `vorticity.marks.v1` | 1, a region a column: each chunk's encoding tree and where each granule starts in its buffers of variable length | none |

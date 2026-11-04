@@ -7,6 +7,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Aggregating;
 using Vorticity.Indexes;
+using Vorticity.RowEncoding;
 using Vorticity.Writing;
 
 namespace Vorticity.Dataset;
@@ -165,24 +166,40 @@ internal static partial class DatasetCompactor
         // The partition leads every key, before the indexed prefix the indexes hold: the cuts are led by it.
         byte[] partition = schema.Partitioned ? PartitionOf(schema, job.Inputs[0]) : [];
         GranuleKeys?[] indexes = new GranuleKeys?[job.Inputs.Count];
-        int granules = 0;
-        for (int i = 0; i < indexes.Length; i++)
+        try
         {
-            CompactionInput input = job.Inputs[i];
-            if (schema.Partitioned && !VortexDataset.OrderOf(input.Key).Span.StartsWith(partition))
+            int granules = 0;
+            for (int i = 0; i < indexes.Length; i++)
             {
-                return null;
+                CompactionInput input = job.Inputs[i];
+                if (schema.Partitioned && !VortexDataset.OrderOf(input.Key).Span.StartsWith(partition))
+                {
+                    return null;
+                }
+
+                if (input.Entry.Contents is { KeyIndex: not null } contents
+                    && await dataset.KeyIndexAsync(input.Entry, contents, cancellationToken).ConfigureAwait(false) is { } keys)
+                {
+                    indexes[i] = keys;
+                    granules += keys.Granules;
+                }
             }
 
-            if (input.Entry.Contents is { KeyIndex: not null } contents
-                && await dataset.KeyIndexAsync(input.Entry, contents, cancellationToken).ConfigureAwait(false) is { Granules: > 0 } keys)
+            int[] widths = schema.Tree is { } tree ? tree.Widths[(schema.Partitioned ? 1 : 0)..].ToArray() : [];
+            return granules > 0 ? Cut(job, indexes, granules, most, partition, widths) : null;
+        }
+        catch (VortexFormatException)
+        {
+            // A page of an input's index that does not hold the keys its table names: the job runs as one range.
+            return null;
+        }
+        finally
+        {
+            foreach (GranuleKeys? keys in indexes)
             {
-                indexes[i] = keys;
-                granules += keys.Granules;
+                keys?.Dispose();
             }
         }
-
-        return granules > 0 ? Cut(job, indexes, granules, most, partition) : null;
     }
 
     /// <summary>The partition <paramref name="input"/>'s rows hold, row-encoded: what leads its tree key.</summary>
@@ -194,12 +211,22 @@ internal static partial class DatasetCompactor
 
     /// <summary>
     /// Up to <paramref name="most"/> ranges of equal weight over the granules of <paramref name="indexes"/>, and the rows of
-    /// each input each reads (<see cref="KeyRangesAsync"/>); null when the granules hold too few keys to cut.
+    /// each input each reads (<see cref="KeyRangesAsync"/>); null when the granules hold too few keys to cut. The cuts are
+    /// row-encoded, as a tree key is; an index that codes its keys otherwise is read and searched in its own coding, by the
+    /// encoded <paramref name="widths"/> of the components past the partition.
     /// </summary>
-    private static KeyRanges? Cut(CompactionJob job, GranuleKeys?[] indexes, int granules, int most, byte[] partition)
+    private static KeyRanges? Cut(CompactionJob job, GranuleKeys?[] indexes, int granules, int most, byte[] partition, int[] widths)
     {
         // Every granule, an input's place and the granule's packed in a long, sorted by key.
         long[] order = ArrayPool<long>.Shared.Rent(granules);
+
+        // Each index's keys decoded once for the sort, which compares them in any order, row-encoded whatever their coding.
+        GranuleKeys.DecodedKeys?[] decoded = new GranuleKeys.DecodedKeys?[indexes.Length];
+        for (int i = 0; i < indexes.Length; i++)
+        {
+            decoded[i] = indexes[i] is { } keys ? RowsOf(keys, Widths(widths, keys)) : null;
+        }
+
         List<byte[]> cuts = new List<byte[]>(most - 1);
         try
         {
@@ -220,7 +247,7 @@ internal static partial class DatasetCompactor
                 total += WeightOf(job, indexes, i) * keys.Granules;
             }
 
-            Array.Sort(order, 0, granules, new ByGranuleKey(indexes));
+            Array.Sort(order, 0, granules, new ByGranuleKey(decoded));
 
             // A cut goes before the first granule whose key follows the one before, once the granules before weigh another
             // share of the whole: shares passed at once over a run of one key make one cut, and one range fewer.
@@ -229,11 +256,11 @@ internal static partial class DatasetCompactor
             for (int k = 0; k < granules && shares < most - 1; k++)
             {
                 int input = (int)(order[k] >> 32);
-                ReadOnlySpan<byte> key = indexes[input]!.Key((int)order[k]);
+                ReadOnlySpan<byte> key = decoded[input]![(int)order[k]];
                 if (k > 0 && total > 0)
                 {
                     int reached = (int)Math.Min(most - 1, before * most / total);
-                    if (reached > shares && key.SequenceCompareTo(indexes[(int)(order[k - 1] >> 32)]!.Key((int)order[k - 1])) > 0)
+                    if (reached > shares && key.SequenceCompareTo(decoded[(int)(order[k - 1] >> 32)]![(int)order[k - 1]]) > 0)
                     {
                         byte[] cut = new byte[partition.Length + key.Length];
                         partition.CopyTo(cut, 0);
@@ -276,15 +303,55 @@ internal static partial class DatasetCompactor
                 continue;
             }
 
+            // The cuts in the index's coding, past the partition its keys leave out.
+            byte[][] coded = new byte[cuts.Count][];
+            for (int cut = 0; cut < coded.Length; cut++)
+            {
+                ReadOnlySpan<byte> past = cuts[cut].AsSpan(partition.Length);
+                coded[cut] = keys.Coding == KeyCoding.Rows ? past.ToArray() : UnpaddedKeys.Narrow(past, Widths(widths, keys));
+            }
+
             for (int range = 0; range < read.Length; range++)
             {
-                long start = range == 0 ? 0 : StartFrom(keys, cuts[range - 1].AsSpan(partition.Length));
-                long end = range == cuts.Count ? keys.Rows : EndBefore(keys, cuts[range].AsSpan(partition.Length));
+                long start = range == 0 ? 0 : StartFrom(keys, coded[range - 1]);
+                long end = range == cuts.Count ? keys.Rows : EndBefore(keys, coded[range]);
                 read[range] = end > start ? new RowRange(start, end) : RowRange.Empty;
             }
         }
 
         return new KeyRanges([.. cuts], rows);
+    }
+
+    /// <summary>The encoded widths of the components <paramref name="keys"/> holds, of <paramref name="widths"/>, those past the partition.</summary>
+    private static ReadOnlySpan<int> Widths(int[] widths, GranuleKeys keys) => widths.AsSpan(0, Math.Min(widths.Length, keys.Components));
+
+    /// <summary>
+    /// Each granule's key of <paramref name="keys"/>, decoded as the row encoding has it: an index whose texts are unpadded
+    /// has them widened, so that the keys of objects of either coding compare.
+    /// </summary>
+    private static GranuleKeys.DecodedKeys RowsOf(GranuleKeys keys, ReadOnlySpan<int> widths)
+    {
+        GranuleKeys.DecodedKeys decoded = keys.DecodeAll();
+        if (keys.Coding == KeyCoding.Rows)
+        {
+            return decoded;
+        }
+
+        int[] ends = new int[keys.Granules];
+        long total = 0;
+        for (int granule = 0; granule < ends.Length; granule++)
+        {
+            total += UnpaddedKeys.WidenedLength(decoded[granule], widths);
+            ends[granule] = checked((int)total);
+        }
+
+        byte[] rows = new byte[total];
+        for (int granule = 0; granule < ends.Length; granule++)
+        {
+            UnpaddedKeys.Widen(decoded[granule], widths, rows.AsSpan(granule == 0 ? 0 : ends[granule - 1]));
+        }
+
+        return new GranuleKeys.DecodedKeys(rows, ends);
     }
 
     /// <summary>What a granule of the job's input <paramref name="input"/> weighs: its bytes over its granules.</summary>
@@ -298,7 +365,7 @@ internal static partial class DatasetCompactor
     private static long StartFrom(GranuleKeys keys, ReadOnlySpan<byte> cut)
     {
         int granule = keys.FirstAtOrPast(cut);
-        return granule == keys.Granules && keys.LastKey.AsSpan().SequenceCompareTo(cut) < 0
+        return granule == keys.Granules && keys.LastKey.SequenceCompareTo(cut) < 0
             ? keys.Rows
             : (long)Math.Max(granule - 1, 0) * keys.GranuleRows;
     }
@@ -308,11 +375,11 @@ internal static partial class DatasetCompactor
         Math.Min((long)keys.FirstAtOrPast(cut) * keys.GranuleRows, keys.Rows);
 
     /// <summary>Granules of several indexes, an index's place and a granule's packed in a long, by key, then by place.</summary>
-    private sealed class ByGranuleKey(GranuleKeys?[] indexes) : IComparer<long>
+    private sealed class ByGranuleKey(GranuleKeys.DecodedKeys?[] indexes) : IComparer<long>
     {
         public int Compare(long left, long right)
         {
-            int order = indexes[(int)(left >> 32)]!.Key((int)left).SequenceCompareTo(indexes[(int)(right >> 32)]!.Key((int)right));
+            int order = indexes[(int)(left >> 32)]![(int)left].SequenceCompareTo(indexes[(int)(right >> 32)]![(int)right]);
             return order != 0 ? order : left.CompareTo(right);
         }
     }

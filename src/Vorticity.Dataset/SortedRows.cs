@@ -262,7 +262,7 @@ internal sealed class SortedRows(SortKey keys, int prefix, int skip = 0)
             byte[] last = Prefixed(_lastKey.AsSpan(0, _lastKeyLength)).ToArray();
             long open = _granuleRows <= 0 ? 0 : _rows % _granuleRows;
             long pure = _pureRows + (open > 0 && last.AsSpan().SequenceEqual(_granuleKeys[^1]) ? open : 0);
-            writer.DeclareKeyIndex(prefix, [.. _granuleKeys], last, pure);
+            writer.DeclareKeyIndex(prefix, [.. _granuleKeys], last, pure, Unpadded(last));
             List<(int Component, byte[] Region, long SingleRows)> declared = [];
             for (int c = 0; c < _runs.Length; c++)
             {
@@ -287,6 +287,28 @@ internal sealed class SortedRows(SortKey keys, int prefix, int skip = 0)
         }
 
         Clear();
+    }
+
+    /// <summary>
+    /// The keys of the granules and <paramref name="last"/> with their texts unpadded (<see cref="UnpaddedKeys"/>), which the
+    /// writer keeps where they take fewer bytes; null when the prefix holds no text or binary, whose keys are the same, or a
+    /// component whose width the encoding does not tell.
+    /// </summary>
+    private (IReadOnlyList<byte[]> Keys, byte[] LastKey)? Unpadded(byte[] last)
+    {
+        ReadOnlySpan<int> widths = keys.Widths[skip..Math.Min(_cut, keys.Count)];
+        if (!widths.Contains(RowEncoder.VariableWidth) || !UnpaddedKeys.Codes(widths))
+        {
+            return null;
+        }
+
+        byte[][] coded = new byte[_granuleKeys.Count][];
+        for (int i = 0; i < coded.Length; i++)
+        {
+            coded[i] = UnpaddedKeys.Narrow(_granuleKeys[i], widths);
+        }
+
+        return (coded, UnpaddedKeys.Narrow(last, widths));
     }
 
     /// <summary>Starts over for the next object, with nothing declared: what an object given up leaves.</summary>

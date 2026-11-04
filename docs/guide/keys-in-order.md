@@ -140,6 +140,20 @@ ordered scan: source SortedColumn, 1 run, 1000000 entries, descending True
 A null key comes last in both directions. An aggregation ignores the order and gives the same answer
 either way, and [aggregates.md](aggregates.md) explains what order a group by returns.
 
+## Over a dataset
+
+A dataset's rows lie in the order of its layout's key within each object ([dataset-layout.md](dataset-layout.md)).
+`OrderBy` on the key's first column, and `DatasetScanBuilder.InKeyOrder` on its leading columns, read each object in its
+own order and merge them. Each object is bounded by its keys, so a read holds open the objects that may hold its next
+rows:
+* without a partition, one of each level;
+* under a partition, one of each partition, which the merge reads side by side.
+
+A computed component orders its column when the column follows it: under `(Service, Bucket(Sequence, 1000), Sequence)`
+the rows run by the service then the sequence, and a read in that order needs no sorted run. `DatasetKeyCursor` walks
+the same columns, a seek opening an object or two of each partition. Downward, the objects whose first column holds
+nulls stay open to the end, since nulls come last both ways.
+
 ## Watch out
 
 * `Keys` takes the whole column. On a scan that already has a `Where` or a `Rows`, it throws
