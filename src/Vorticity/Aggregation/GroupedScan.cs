@@ -565,11 +565,14 @@ public sealed class Aggregation<TResult>
     public ValueTask<ScanPlan> ExplainAsync(bool analyze, CancellationToken cancellationToken = default) =>
         _query.ExplainAsync(analyze, cancellationToken);
 
+    // The name await foreach looks for. An enumerator is never awaited, so the Async suffix VSTHRD200 asks of it does not apply.
+#pragma warning disable VSTHRD200
     /// <summary>Runs the aggregation, then enumerates the groups' results.</summary>
     /// <param name="cancellationToken">Cancels the scan at a batch boundary, with the token <see cref="WithCancellation"/> gave.</param>
     /// <returns>The enumerator.</returns>
     public IAsyncEnumerator<TResult> GetAsyncEnumerator(CancellationToken cancellationToken = default) =>
         ValueEnumerator<TResult>.Of(_query, _cancellationToken, cancellationToken);
+#pragma warning restore VSTHRD200
 
     /// <summary>The results as a stream, for the operators of <c>System.Linq.AsyncEnumerable</c>, which then run on the values delivered.</summary>
     /// <param name="cancellationToken">Cancels the scan at a batch boundary.</param>

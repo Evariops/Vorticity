@@ -150,6 +150,8 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
     /// </summary>
     internal Indexes.GranuleGeometry? Granules { get; set; }
 
+    // An enumerator is never awaited, so the Async suffix VSTHRD200 asks of what returns one does not apply.
+#pragma warning disable VSTHRD200
     /// <summary>The enumerator, its lanes told which chunks of variants they read by keys, and which chunks' geometry they know.</summary>
     private BatchAsyncEnumerator Keyed(BatchAsyncEnumerator enumerator)
     {
@@ -170,6 +172,7 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
 
         return enumerator;
     }
+#pragma warning restore VSTHRD200
 
     /// <summary>Batches decoded ahead of the consumer, on lanes of their own; or, below zero, <see cref="ReadsAhead"/>.</summary>
     internal int Prefetch { get; init; }
@@ -218,6 +221,8 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
     /// </summary>
     private const int TakeWindowPerLane = 3;
 
+    // An enumerator is never awaited, so the Async suffix VSTHRD200 asks of what returns one does not apply.
+#pragma warning disable VSTHRD200
     /// <summary>Starts a scan that reads only the splits <paramref name="live"/> keeps.</summary>
     /// <param name="live">The mask of live blocks the pruning pass refined, or null for every block.</param>
     /// <param name="cancellationToken">Cancels at batch boundaries.</param>
@@ -250,6 +255,7 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
             _file, _tree, _read, _keep, _schema, _plan, Lanes, WindowFor(proven), _filter, proven, live, _metrics,
             cancellationToken, filterProven: true, reverse: _reverse, keepEncodings: KeepEncodings, sinkDecodes: SinkDecodes,
             readAhead: ReadsAhead));
+#pragma warning restore VSTHRD200
 
     /// <summary>Whether the scan already has a take of the caller's.</summary>
     internal bool HasTake => _take is not null;

@@ -29,6 +29,8 @@ internal abstract class StreamScanSource : ScanSource, IRowsCapability, IStatist
 
     internal override IKeysCapability Keys => this;
 
+    // An enumerator is never awaited, so the Async suffix VSTHRD200 asks of what returns one does not apply.
+#pragma warning disable VSTHRD200
     /// <summary>
     /// The source's batches, every row in its order, each borrowed until the next is asked for: the
     /// root a struct of the schema's columns that <paramref name="columns"/> names, in the schema's
@@ -50,6 +52,7 @@ internal abstract class StreamScanSource : ScanSource, IRowsCapability, IStatist
     /// </summary>
     private protected virtual IAsyncEnumerator<RecordBatch> Stream(ScanSpec spec, int[]? columns, ScanCounters metrics, object part, CancellationToken cancellationToken) =>
         Stream(spec, columns, metrics, cancellationToken);
+#pragma warning restore VSTHRD200
 
     /// <summary>Whether <see cref="Stream(ScanSpec, int[], ScanCounters, CancellationToken)"/> delivers the columns it is asked for alone, rather than every column whatever it is asked.</summary>
     private protected virtual bool ReadsColumns => false;
