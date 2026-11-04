@@ -137,6 +137,8 @@ Dictionary<string, (string Help, Func<Task<int>> Run)> micros = new Dictionary<s
         Option(args, "--latency-ms", 5))),
     ["appenddirectory"] = ("what an append's path directory costs, log records appended with it and without (AppendDirectoryMicro.cs)", () => AppendDirectoryMicro.Run(
         Option(args, "--rows", 1_048_576), (int)Option(args, "--part", 65_536), rounds, (int)Option(args, "--write-degree", Math.Max(1, Environment.ProcessorCount / 2)))),
+    ["censusrate"] = ("what counting the paths of log records costs a row, as an append's writer counts them (CensusRateMicro.cs)", () => CensusRateMicro.Run(
+        Option(args, "--rows", 1_048_576), rounds)),
     ["logwrite"] = ("what building the client's log records costs, as an ingestion builds them (LogWriteMicro.cs)", () => LogWriteMicro.Run(
         Text(args, "--store") ?? BenchStores.Of("logwrite"),
         Option(args, "--hours", 2),
