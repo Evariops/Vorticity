@@ -117,7 +117,7 @@ jobs:
   # reading what is staged, cannot see here, and zizmor reads the workflows at its strictest.
   hooks:
     name: secrets and workflow security
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
       # The whole history, so that a pull request's base and every commit after it are here.
