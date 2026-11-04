@@ -29,11 +29,11 @@ public sealed class CensusSpansAllocationTests
         long before = GC.GetAllocatedBytesForCurrentThread();
         PathCensus census = Count();
         long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
-        ReadOnlySpan<long> spans = census.Root.Keys["k"].Spans;
+        ReadOnlySpan<long> spans = census.Root.Keys["k"].SpansOf(PathClass.Integer);
         Assert.Equal(2 * 10_000, spans.Length);
         Assert.Equal(29_998, spans[^1]);
         census.Release();
-        Assert.True(census.Root.Keys["k"].Spans.IsEmpty);
+        Assert.True(census.Root.Keys["k"].SpansOf(PathClass.Integer).IsEmpty);
         Assert.True(allocated <= 16_384, $"{allocated} bytes allocated by a census of 10 000 spans");
 
         PathCensus Count()

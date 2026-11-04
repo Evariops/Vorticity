@@ -229,7 +229,29 @@ public sealed class VariantDirectoryTests
             census.Add(row.Metadata.Span, row.Value.Span);
         }
 
-        Assert.Equal([0L, 99L], census.Root.Keys["all"].Spans.ToArray());
+        Assert.Equal([0L, 99L], census.Root.Keys["all"].SpansOf(PathClass.Integer).ToArray());
+    }
+
+    /// <summary>
+    /// A key sent as a number by the first rows and as text by the last: the directory names, for each class, the groups that
+    /// hold it in that class alone, so that a question on its text refutes the groups of its numbers.
+    /// </summary>
+    [Fact]
+    public void ADirectoryNamesTheGroupsOfAPathInEachClass()
+    {
+        PathCensus census = new PathCensus(groupRows: 25);
+        for (int i = 0; i < 100; i++)
+        {
+            Variant row = Variant.Object(("status", i < 50 ? Variant.From((long)i) : Variant.From("502")));
+            census.Add(row.Metadata.Span, row.Value.Span);
+        }
+
+        VariantDirectory directory = VariantDirectory.From(census, null, 25);
+        PathEntry[] entries = directory.Of(["status"]).ToArray();
+        PathEntry integers = entries.Single(entry => entry.Class == PathClass.Integer);
+        PathEntry texts = entries.Single(entry => entry.Class == PathClass.String);
+        Assert.Equal([true, true, false, false], Enumerable.Range(0, 4).Select(integers.In));
+        Assert.Equal([false, false, true, true], Enumerable.Range(0, 4).Select(texts.In));
     }
 
     /// <summary>

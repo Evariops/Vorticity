@@ -357,10 +357,6 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
         private bool _false;
         private bool _true;
 
-        // The spans of rows the values lie in, a first and a last row each, the last span open.
-        private long[]? _spans;
-        private int _spanCount;
-
         // The text bounds, each cut to the census's bound, in buffers of that length; -1 before a text.
         private byte[]? _minText;
         private byte[]? _maxText;
@@ -404,53 +400,103 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
         /// <summary>The values a question reads as <paramref name="class"/>.</summary>
         internal long Read(PathClass @class) => _read[(int)@class];
 
-        /// <summary>The spans of rows the values lie in, a first and a last row each, in order; empty when the census keeps none.</summary>
-        internal ReadOnlySpan<long> Spans
-        {
-            get
-            {
-                if (_spanCount > 0)
-                {
-                    _spans![(2 * _spanCount) - 1] = _openEnd;
-                }
+        /// <summary>
+        /// The spans of rows the values of <paramref name="class"/> lie in, a first and a last row each, in order; empty when the
+        /// census keeps none. Each class keeps its own, so that a directory names the groups that hold a path in one class:
+        /// a path's spans whatever the class named, for a key of numbers sent as text by a few sources, the groups of every
+        /// source as holding text.
+        /// </summary>
+        internal ReadOnlySpan<long> SpansOf(PathClass @class) =>
+            @class == _spanClass ? _spans.View() : _classSpans is { } others ? others[(int)@class].View() : default;
 
-                return _spans.AsSpan(0, 2 * _spanCount);
+        // The spans of the first class a value at this path was of, held here as most paths hold one class; those of the
+        // others, made when a second class comes.
+        private SpanList _spans;
+        private PathClass _spanClass = NoClass;
+        private SpanList[]? _classSpans;
+        private const PathClass NoClass = (PathClass)byte.MaxValue;
+
+        /// <summary>Notes a value of <paramref name="class"/> at <paramref name="row"/>, in its class's spans.</summary>
+        private void Occur(PathClass @class, long row, long gap)
+        {
+            if (@class == _spanClass)
+            {
+                _spans.Occur(row, gap);
+            }
+            else if (_spanClass == NoClass)
+            {
+                _spanClass = @class;
+                _spans.Occur(row, gap);
+            }
+            else
+            {
+                (_classSpans ??= new SpanList[PathClasses])[(int)@class].Occur(row, gap);
             }
         }
 
-        // The last row of the open span, kept here rather than in the spans: a value within the gap of it touches this count alone.
-        private long _openEnd;
-
-        /// <summary>Notes a value at <paramref name="row"/>, in the open span when it is within <paramref name="gap"/> rows of its end.</summary>
-        private void Occur(long row, long gap)
+        /// <summary>The spans of rows values lie in, the open one's end kept beside them: a value within the gap of it touches the end alone.</summary>
+        private struct SpanList
         {
-            if (_spanCount > 0 && row - _openEnd <= gap)
+            private long[]? _spans;
+            private int _count;
+            private long _openEnd;
+
+            /// <summary>The spans, a first and a last row each.</summary>
+            internal ReadOnlySpan<long> View()
             {
+                if (_count > 0)
+                {
+                    _spans![(2 * _count) - 1] = _openEnd;
+                }
+
+                return _spans.AsSpan(0, 2 * _count);
+            }
+
+            /// <summary>Notes a value at <paramref name="row"/>, in the open span when it is within <paramref name="gap"/> rows of its end.</summary>
+            internal void Occur(long row, long gap)
+            {
+                if (_count > 0 && row - _openEnd <= gap)
+                {
+                    _openEnd = row;
+                    return;
+                }
+
+                int last = (2 * _count) - 1;
+                if (_count > 0)
+                {
+                    _spans![last] = _openEnd;
+                }
+
+                if (_spans is null || last + 2 >= _spans.Length)
+                {
+                    // From the process's shelf, given back when the census is (Release): an object's census keeps spans for
+                    // each of its paths, 3 bytes a row of a build of the client's log records made new.
+                    long[] held = _spans ?? [];
+                    long[] grown = ArrayShelf.Retained.Take<long>(ArrayShelf.Grown(last + 3, held.Length, least: 4), zeroed: false);
+                    held.AsSpan(0, 2 * _count).CopyTo(grown);
+                    ArrayShelf.Retained.Give(held);
+                    _spans = grown;
+                }
+
+                _spans[last + 1] = row;
+                _spans[last + 2] = row;
                 _openEnd = row;
-                return;
+                _count++;
             }
 
-            int last = (2 * _spanCount) - 1;
-            if (_spanCount > 0)
+            /// <summary>No span, the buffer kept.</summary>
+            internal void Clear() => _count = 0;
+
+            /// <summary>The buffer given back to the process's shelf.</summary>
+            internal void Release()
             {
-                _spans![last] = _openEnd;
+                if (_spans is { } spans)
+                {
+                    ArrayShelf.Retained.Give(spans);
+                    _spans = null;
+                    _count = 0;
+                }
             }
-
-            if (_spans is null || last + 2 >= _spans.Length)
-            {
-                // From the process's shelf, given back when the census is (Release): an object's census keeps spans for
-                // each of its paths, 3 bytes a row of a build of the client's log records made new.
-                long[] held = _spans ?? [];
-                long[] grown = ArrayShelf.Retained.Take<long>(ArrayShelf.Grown(last + 3, held.Length, least: 4), zeroed: false);
-                held.AsSpan(0, 2 * _spanCount).CopyTo(grown);
-                ArrayShelf.Retained.Give(held);
-                _spans = grown;
-            }
-
-            _spans[last + 1] = row;
-            _spans[last + 2] = row;
-            _openEnd = row;
-            _spanCount++;
         }
 
         /// <summary>The least and greatest integer; meaningless without one.</summary>
@@ -480,11 +526,14 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
         /// <summary>The spans of this path and of every key below given back to the process's shelf, and kept no more.</summary>
         internal void Release()
         {
-            if (_spans is { } spans)
+            _spans.Release();
+            _spanClass = NoClass;
+            if (_classSpans is { } others)
             {
-                ArrayShelf.Retained.Give(spans);
-                _spans = null;
-                _spanCount = 0;
+                for (int c = 0; c < others.Length; c++)
+                {
+                    others[c].Release();
+                }
             }
 
             if (_keys is { } keys)
@@ -512,7 +561,16 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
             _maxTime = long.MinValue;
             _false = false;
             _true = false;
-            _spanCount = 0;
+            _spans.Clear();
+            _spanClass = NoClass;
+            if (_classSpans is { } held)
+            {
+                for (int c = 0; c < held.Length; c++)
+                {
+                    held[c].Clear();
+                }
+            }
+
             _minTextLength = -1;
             _maxTextLength = -1;
             _maxTextCut = false;
@@ -533,7 +591,7 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
             // At the row being counted, the census's last.
             if (census._gap > 0)
             {
-                Occur(census.Rows - 1, census._gap);
+                Occur(ApartCensus.ClassOf(value), census.Rows - 1, census._gap);
             }
 
             switch (value[0] & 0x03)

@@ -217,7 +217,6 @@ internal sealed class VariantDirectory
         PathCensus.PathCount count, VariantShredding? shredding, long groupRows, int groups, List<string> path, List<PathEntry> entries)
     {
         string[] keys = [.. path];
-        byte[]? held = groups > 1 ? GroupsOf(count.Spans, groupRows, groups) : null;
         for (PathClass @class = PathClass.Null; @class <= PathClass.Other; @class++)
         {
             long values = count.Read(@class);
@@ -227,6 +226,7 @@ internal sealed class VariantDirectory
             }
 
             (long low, long high, bool nans, byte[]? min, byte[]? max) = Bounds(count, @class);
+            byte[]? held = groups > 1 ? GroupsOf(count.SpansOf(@class), groupRows, groups) : null;
             entries.Add(new PathEntry(keys, @class, values, PlaceOf(shredding, @class), low, high, nans, min, max, held));
         }
 
