@@ -470,6 +470,15 @@ sum or an aggregator of your own. A partial whose keys or measures are not the q
 be told apart, so the question on each node is yours to keep the same. To keep the version the same,
 open the dataset at the version the coordinator cut (`VortexDataset.OpenAsync(store, version)`).
 
+`Merge` also takes the partials as an `IAsyncEnumerable<AggregationPartial>`. The merge then folds each
+partial as it arrives, while the other parts still run. An exception the sequence throws ends the
+merge with that exception.
+
+The library stops at the bytes. Your application decides which nodes run the parts, how the bytes
+travel and who may send them, how long to wait for a part, and where to run it again when a node
+fails, with the network stack and the security it already has. A part reads immutable objects, so it
+can run again on any node.
+
 ## Exact, estimated or progressive, and at what cost
 
 Every way of asking gives the exact answer in the end, or says it does not. Which one to take depends on

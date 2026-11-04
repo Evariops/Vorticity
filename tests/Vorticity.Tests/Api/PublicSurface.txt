@@ -3018,58 +3018,6 @@ Vorticity:     property ImmutableArray<int> ChunkRows { get; init; }
 Vorticity:     property WriteBytes Bytes { get; init; }
 Vorticity:     property int BlockRows { get; init; }
 Vorticity:     property long RowCount { get; init; }
-Vorticity.Dataset: sealed class Vorticity.Dataset.ClusterExecutor
-Vorticity.Dataset:     ctor ClusterExecutor(IReadOnlyList<string>, IClusterTransport, ClusterQuestions, ClusterOptions = default)
-Vorticity.Dataset:     method ValueTask WarmAsync(string, ulong, CancellationToken = default)
-Vorticity.Dataset:     method ValueTask<Aggregation<TResult>> RunAsync<TResult>(VortexDataset, string, ReadOnlyMemory<byte> = default, string = default, CancellationToken = default)
-Vorticity.Dataset:     method ValueTask<Aggregation> RunAsync(VortexDataset, string, ReadOnlyMemory<byte> = default, string = default, CancellationToken = default)
-Vorticity.Dataset: sealed class Vorticity.Dataset.ClusterOptions : IEquatable<ClusterOptions>
-Vorticity.Dataset:     ctor ClusterOptions()
-Vorticity.Dataset:     method ClusterOptions <Clone>$()
-Vorticity.Dataset:     method bool Equals(ClusterOptions)
-Vorticity.Dataset:     method bool Equals(object)
-Vorticity.Dataset:     method bool op_Equality(ClusterOptions, ClusterOptions)
-Vorticity.Dataset:     method bool op_Inequality(ClusterOptions, ClusterOptions)
-Vorticity.Dataset:     method int GetHashCode()
-Vorticity.Dataset:     method string ToString()
-Vorticity.Dataset:     property int Retries { get; init; }
-Vorticity.Dataset:     property int TasksPerNode { get; init; }
-Vorticity.Dataset: sealed class Vorticity.Dataset.ClusterPartException : Exception
-Vorticity.Dataset:     ctor ClusterPartException()
-Vorticity.Dataset:     ctor ClusterPartException(string)
-Vorticity.Dataset:     ctor ClusterPartException(string, Exception)
-Vorticity.Dataset:     property string ErrorType { get; init; }
-Vorticity.Dataset:     property string Node { get; init; }
-Vorticity.Dataset: sealed class Vorticity.Dataset.ClusterQuestions
-Vorticity.Dataset:     ctor ClusterQuestions()
-Vorticity.Dataset:     method ClusterQuestions Add(string, Func<VortexDataset, RowRange, ReadOnlyMemory<byte>, Aggregation>)
-Vorticity.Dataset:     method ClusterQuestions Add<TResult>(string, Func<VortexDataset, RowRange, ReadOnlyMemory<byte>, Aggregation<TResult>>)
-Vorticity.Dataset: sealed class Vorticity.Dataset.ClusterTask : IEquatable<ClusterTask>
-Vorticity.Dataset:     ctor ClusterTask(string, ReadOnlyMemory<byte>, string, ulong, RowRange)
-Vorticity.Dataset:     method ClusterTask <Clone>$()
-Vorticity.Dataset:     method bool Equals(ClusterTask)
-Vorticity.Dataset:     method bool Equals(object)
-Vorticity.Dataset:     method bool op_Equality(ClusterTask, ClusterTask)
-Vorticity.Dataset:     method bool op_Inequality(ClusterTask, ClusterTask)
-Vorticity.Dataset:     method int GetHashCode()
-Vorticity.Dataset:     method string ToString()
-Vorticity.Dataset:     method void Deconstruct(out string, out ReadOnlyMemory<byte>, out string, out ulong, out RowRange)
-Vorticity.Dataset:     property ReadOnlyMemory<byte> Arguments { get; init; }
-Vorticity.Dataset:     property RowRange Rows { get; init; }
-Vorticity.Dataset:     property string Location { get; init; }
-Vorticity.Dataset:     property string Question { get; init; }
-Vorticity.Dataset:     property ulong Version { get; init; }
-Vorticity.Dataset: sealed class Vorticity.Dataset.ClusterTransportException : Exception
-Vorticity.Dataset:     ctor ClusterTransportException()
-Vorticity.Dataset:     ctor ClusterTransportException(string)
-Vorticity.Dataset:     ctor ClusterTransportException(string, Exception)
-Vorticity.Dataset: sealed class Vorticity.Dataset.ClusterWorker : IAsyncDisposable
-Vorticity.Dataset:     ctor ClusterWorker(string, ClusterQuestions, DatasetOptions = default)
-Vorticity.Dataset:     ctor ClusterWorker(string, ClusterQuestions, Func<string, ulong, CancellationToken, ValueTask<VortexDataset>>)
-Vorticity.Dataset:     method ValueTask DisposeAsync()
-Vorticity.Dataset:     method ValueTask WarmAsync(string, ulong, IReadOnlyList<string>, CancellationToken = default)
-Vorticity.Dataset:     method ValueTask<AggregationPartial> RunAsync(ClusterTask, CancellationToken = default)
-Vorticity.Dataset:     property string Name { get; }
 Vorticity.Dataset: sealed class Vorticity.Dataset.CompactionJob : IEquatable<CompactionJob>
 Vorticity.Dataset:     method CompactionJob <Clone>$()
 Vorticity.Dataset:     method bool Equals(CompactionJob)
@@ -3263,7 +3211,6 @@ Vorticity.Dataset:     method bool op_Equality(DatasetOptions, DatasetOptions)
 Vorticity.Dataset:     method bool op_Inequality(DatasetOptions, DatasetOptions)
 Vorticity.Dataset:     method int GetHashCode()
 Vorticity.Dataset:     method string ToString()
-Vorticity.Dataset:     property Action<ulong> Moved { get; init; }
 Vorticity.Dataset:     property CostProfile CostProfile { get; init; }
 Vorticity.Dataset:     property DatasetLayout Layout { get; init; }
 Vorticity.Dataset:     property IReadOnlyList<string> Identifiers { get; init; }
@@ -3334,9 +3281,6 @@ Vorticity.Dataset:     property ObjectStoreCapabilities Capabilities { get; }
 Vorticity.Dataset:     property bool Durable { get; init; }
 Vorticity.Dataset:     property int HeldFiles { get; init; }
 Vorticity.Dataset:     property string Root { get; }
-Vorticity.Dataset: interface Vorticity.Dataset.IClusterTransport
-Vorticity.Dataset:     method ValueTask WarmAsync(string, string, ulong, IReadOnlyList<string>, CancellationToken)
-Vorticity.Dataset:     method ValueTask<AggregationPartial> RunAsync(string, ClusterTask, CancellationToken)
 Vorticity.Dataset: enum Vorticity.Dataset.IdentifierLocation
 Vorticity.Dataset:     const IdentifierLocation Chunk = 0
 Vorticity.Dataset:     const IdentifierLocation Granule = 1
@@ -3396,10 +3340,6 @@ Vorticity.Dataset:     method bool op_Equality(LayoutValue, LayoutValue)
 Vorticity.Dataset:     method bool op_Inequality(LayoutValue, LayoutValue)
 Vorticity.Dataset:     method int GetHashCode()
 Vorticity.Dataset:     method string ToString()
-Vorticity.Dataset: sealed class Vorticity.Dataset.LocalClusterTransport : IClusterTransport
-Vorticity.Dataset:     ctor LocalClusterTransport(IEnumerable<ClusterWorker>)
-Vorticity.Dataset:     method ValueTask WarmAsync(string, string, ulong, IReadOnlyList<string>, CancellationToken)
-Vorticity.Dataset:     method ValueTask<AggregationPartial> RunAsync(string, ClusterTask, CancellationToken)
 Vorticity.Dataset: sealed class Vorticity.Dataset.MemoryObjectStore : IObjectStore
 Vorticity.Dataset:     ctor MemoryObjectStore()
 Vorticity.Dataset:     method IAsyncEnumerable<ObjectListing> ListAsync(string, string, CancellationToken)

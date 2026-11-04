@@ -58,10 +58,10 @@ Every mechanism below attacks one term:
 | term | what reduces it |
 |---|---|
 | bytes | the sort key turning columns into runs; reading a granule instead of a chunk; reading a property instead of a row |
-| requests | larger objects where reads are broad; index objects per partition where lookups are narrow; metadata kept warm by its owner |
+| requests | larger objects where reads are broad; index objects per partition where lookups are narrow; metadata kept warm in the session's caches |
 | dependent steps | each structure findable from the tree of commits without opening a data object |
 | values | execution on runs, dictionary codes and constants; predicates evaluated on encoded values |
-| nodes | distributed execution over immutable objects |
+| nodes | a question's parts, run by the application on several nodes and merged to the bit |
 
 ---
 
@@ -77,8 +77,7 @@ Every mechanism below attacks one term:
 | **decode block** | decoding without the rest | 1 024 values, a FastLanes block | the encoding |
 | **chunk** | the file format: one segment per column | about 1 MiB per column | the writer |
 | **request** | the network: one byte range read at once | from a few KiB to 8 MiB | the reader, from the store's cost profile |
-| **task** | parallelism: a part of a question, a range of the dataset's rows | four a node by default | the coordinator |
-| **owner** | the warm metadata and the index analysis of an object | one node per object | rendezvous hashing of the object's identity |
+| **task** | parallelism: a part of a question, a range of the dataset's rows | as many as the application asks | the application, through `PartsAsync` |
 | **property** | what a question reads: a column or a variant path | a stream of the object | the schema, and for a path, the objects that hold it |
 
 ---
@@ -530,24 +529,31 @@ of the operating system.
 
 ---
 
-## 9. Distributed execution
+## 9. Several machines
 
-Nodes are interchangeable: everything lives in the store, objects are immutable, and a node holds only caches.
+Nodes are interchangeable. Everything lives in the store, objects are immutable, and a node holds only caches. Any
+number of processes can answer questions over the same dataset, each one a whole question, with nothing to coordinate
+between them. That is how the number of questions answered a second grows.
 
-- **Owners.** Each object has an owner, chosen by rendezvous hashing of its identity over the nodes present. The owner
-  keeps the object's metadata in memory (sparse index, chunk directory, dictionaries, index pages) and performs its index
-  analysis. An object's identity never changes, so ownership moves only when nodes come and go.
-- **Tasks.** A question, named and the same on every node, is cut into parts, four a node by default, each a range of
-  the dataset's rows sent to the owner of the object of its first row, whose local disk is likely warm. A part a node
-  fails runs again on the object's next owner, twice at most by default.
-- **Exchanges.** Partials stream to the coordinator, which merges them as they arrive. Partials merge to the bit,
-  whatever the split.
-- **Caches.** Owner memory for metadata, local disks for chunks and regions, the store for everything. A handle's
-  `DatasetOptions.Moved` hook names each version that adds objects, and `ClusterExecutor.WarmAsync` has every node read
-  the metadata of the objects it now owns before their first part.
+A question too large for one machine can be cut into parts. The library provides the three steps that need its
+knowledge of the data, and nothing around them:
 
-The interface, the tasks and a local executor of several nodes live in the library; a transport over TCP lives in a
-satellite package (`Vorticity.Cluster.Tcp`), so the library runs no service of its own.
+- **Cutting.** `PartsAsync(n)` cuts a question into at most n ranges of rows, at the dataset's objects and, inside a
+  large object, at its chunks.
+- **Running a part.** The same question over one range (`Rows`) gives its groups' states with `PartialAsync()`, as the
+  bytes of a Vortex file.
+- **Merging.** `Merge` folds the partials, from a list or as they arrive, into the answer of the whole question, to the
+  bit, whatever the cut and the order ([16-queries.md](16-queries.md#58-parts-of-a-question-merged)).
+
+Everything around these steps belongs to the application, which runs the machines. It decides which nodes there are,
+which part goes to which node, how the bytes travel and who may send them, how long to wait for a part, and where to run
+a part again when a node fails. A part reads immutable objects, so it can run again anywhere. Every node builds the same
+question over the same version, which the application ensures with its own code and by opening the version the cut was
+made on.
+
+The library carried a cluster of its own from 2026-10-27 to 2026-11-04: a coordinator, workers, owners chosen by
+rendezvous hashing, and a TCP transport in a satellite package. [Decision 8](#14-decisions-and-the-alternatives-weighed)
+says why it was removed.
 
 ---
 
@@ -585,10 +591,14 @@ objects per consolidated partition. Cold: an object store at 128 requests in fli
 What the table says:
 
 - one second, cold, on one node, holds for whatever reads less than about 1 GB after pruning in fewer than about 30 waves
-  of requests; on ten nodes, up to about 10 GB; beyond that, the views of [section 10](#10-precomputation-in-its-place);
+  of requests; on ten nodes that each run a part, up to about 10 GB; beyond that, the views of
+  [section 10](#10-precomputation-in-its-place);
 - any property costs what a column costs, and a lookup on any repeating value or identifier is located, not scanned;
 - the price of objects of 1 GiB is in broad cold scans of narrow columns, which pay one request per object and column.
-  Distributed execution spreads those requests over nodes.
+  Parts run on several nodes spread those requests over them.
+- The ten-node column supposes an application that runs a question's parts on ten nodes
+  ([section 9](#9-several-machines)). Its last row also supposes that the application shuffles the partials by key,
+  which the library does not do.
 
 Writing costs 3 writes a row once consolidated: about 520 GB written a day for 173 GB of data, about 6 MB/s on average
 *(computed; 2.89 to 2.92 rewrites a row measured on the lifecycle bench, section 4.5)*.
@@ -621,7 +631,7 @@ cross-check with the Rust reader ran once every phase had landed.
 | 4 | the granule end to end: two passes per block, identifier lookups, postings located at the identifier's granules | done, two gaps below |
 | 5 | metadata per granule and locating indexes, combined per granule | done, one gap below |
 | 6 | variant properties as streams | done |
-| 7 | distributed execution | done, exchanges by gathering alone |
+| 7 | distributed execution | built, then removed on 2026-11-04: the application runs a question's parts ([section 9](#9-several-machines)) |
 | 8 | read tactics and automatic views | done; the optional views on demand |
 | 9 | design documents, guide and benchmarks | this document among them |
 
@@ -633,8 +643,6 @@ Where the code stops short of this design, measured or known:
 - **Sparse columns** cost about 10 ns a present value, against 3.2 in the model: half of it decodes the positions and
   the values, which judging the values in their own encoding would spare.
 - **Object dictionaries** are one per object, never one per run of chunks, and leave floats to ALP.
-- **Exchanges** gather partials on the coordinator; shuffles by hash buckets and broadcasts are specified, not built, and
-  an idle node takes no part from another.
 - **Top lists** read late: a top ten under a key that spreads the best over nine granules of 74 decodes those nine and
   one more to find them, then the nine again to take the rows; a projection of the order's column alone could take them
   from the first pass.
@@ -657,7 +665,7 @@ Where the code stops short of this design, measured or known:
 | 5 | Objects addressable to the granule: encoding trees and offsets of variable-length buffers only; ordered object dictionaries, translated by merges | the encodings already know their geometry; a dictionary sorted once serves predicates, ranges, groupings and merges |
 | 6 | Metadata per granule and locating indexes by default, under yield rules | locating a value without visiting every granule, with nothing to declare |
 | 7 | Variant properties as streams, with no budget of columns | any property at the cost of its own bytes |
-| 8 | Distributed execution in the library, its transport in a satellite package | storage and compute decoupled, with no service in the library |
+| 8 | A question's parts and their exact merge in the library, running them on several machines in the application | the library knows how to cut and fold the data, the application knows its machines, its network and who may call them, and the library runs no service |
 | 9 | An explicit plan, capabilities and a cost profile before any new alternative | one place where costs are compared, and a stable boundary between engine and sources |
 | 10 | Precomputation as automatic, exact views | the long windows no layout can serve, with nothing to declare |
 | 11 | No compatibility with earlier dataset formats during the beta | the new layout is not a variant of the old one |
@@ -678,6 +686,7 @@ Alternatives weighed and set aside:
 | a sparse key index stored as dictionary codes | the dictionary would have to be read before the index; front coding already shares prefixes |
 | all columns of a granule stored side by side | one request per looked-up row, but one request per granule for any scan of a column |
 | a precomputed joint table of low-cardinality columns at the heart of the design | it answers the questions it was built for; the sort key gives the same runs to every question |
+| a cluster in the library: a coordinator, workers, owners chosen by rendezvous hashing, a TCP transport | built on 2026-10-27 and removed on 2026-11-04. No known application used it, and one node met every target measured. Membership, placement, deadlines, retries and an authenticated transport are the work of a service, which the application already runs |
 
 ---
 
@@ -695,4 +704,3 @@ Alternatives weighed and set aside:
 | consolidation | rewriting a calm partition into objects disjoint by key |
 | index object | the per-partition object that holds the lookups and metadata of a consolidated partition |
 | run | consecutive rows with one value, encoded and executed as one |
-| owner | the node that keeps an object's metadata warm and analyses its indexes |
