@@ -5,6 +5,7 @@
   ],
   "prHourlyLimit": 0,
   "minimumReleaseAge": "2 days",
+  "timezone": "Europe/Paris",
   "internalChecksFilter": "strict",
   "pre-commit": {
     "enabled": true
@@ -47,6 +48,63 @@
         "vortex-*"
       ],
       "groupName": "vortex"
+    },
+    {
+      "description": "zizmor is pinned twice, by the pre-commit hook and by the workflow that runs it at its strictest: one pull request moves both.",
+      "matchDepNames": [
+        "zizmorcore/zizmor",
+        "zizmorcore/zizmor-pre-commit"
+      ],
+      "groupName": "zizmor"
+    },
+    {
+      "description": "betterleaks is pinned twice, by the pre-commit hook and by the workflow that reads the commits a change brings: one pull request moves both.",
+      "matchDepNames": [
+        "betterleaks/betterleaks",
+        "github.com/betterleaks/betterleaks"
+      ],
+      "groupName": "betterleaks"
+    },
+    {
+      "description": "The workflows' actions, pinned by digest: their minor and patch releases in one pull request, opened on Monday mornings.",
+      "matchManagers": [
+        "github-actions"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "patch",
+        "digest",
+        "pinDigest"
+      ],
+      "groupName": "GitHub Actions",
+      "schedule": [
+        "* 0-5 * * 1"
+      ]
+    },
+    {
+      "description": "The analyzers run at build time only: one pull request a month, on its first morning.",
+      "matchDepNames": [
+        "Microsoft.CodeAnalysis.BannedApiAnalyzers",
+        "Microsoft.VisualStudio.Threading.Analyzers"
+      ],
+      "groupName": "build analyzers",
+      "schedule": [
+        "* 0-5 1 * *"
+      ]
+    },
+    {
+      "description": "Zstandard and LZ4 come from one repository, released together at one version.",
+      "matchDepNames": [
+        "ManagedCompressions.*"
+      ],
+      "groupName": "ManagedCompressions"
+    },
+    {
+      "description": "The compiler API the generator builds against is the oldest compiler it loads into, pinned on purpose: a newer one would raise the compiler every consumer needs.",
+      "matchDepNames": [
+        "Microsoft.CodeAnalysis.CSharp"
+      ],
+      "enabled": false
     }
   ]
 }
