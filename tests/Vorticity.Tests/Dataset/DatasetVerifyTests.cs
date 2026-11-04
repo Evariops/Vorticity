@@ -19,14 +19,11 @@ using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Buffers;
-using Vorticity.Columns;
 using Vorticity.Dataset;
 using Vorticity.Indexes;
 using Vorticity.IO;
-using Vorticity.Scanning;
 using Vorticity.Tests.Scan;
 using Vorticity.Types;
-using Vorticity.Writing;
 using Xunit;
 
 namespace Vorticity.Tests.Dataset;
@@ -298,7 +295,7 @@ public sealed class DatasetVerifyTests
     private static DatasetOptions Options() => new DatasetOptions
     {
         Seed = 0x7E81_F1ED,
-        ClusteringKey = ["key"],
+        Layout = new DatasetLayout { SortKey = [LayoutValue.Column("key")] },
         Rule = new FillBoundaryRule(400),
         Write = new VortexWriteOptions { RowBlockSize = 64, DataBlockTargetBytes = 512 },
     };

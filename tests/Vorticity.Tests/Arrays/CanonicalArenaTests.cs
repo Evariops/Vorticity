@@ -1,7 +1,6 @@
 // The arena is the only place a decoder gets writable memory and the only thing standing between
 // a decoder's arithmetic and a buffer that is one element short.
 using System;
-using Vorticity;
 using Vorticity.Arrays;
 using Vorticity.Buffers;
 using Vorticity.Types;

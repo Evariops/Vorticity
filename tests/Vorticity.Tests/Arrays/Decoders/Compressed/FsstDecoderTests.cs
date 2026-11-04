@@ -7,7 +7,6 @@
 // symmetric misunderstanding pass unnoticed in both directions.
 using System;
 using System.Buffers.Binary;
-using System.Collections.Generic;
 using System.Text;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Compressed;
@@ -69,7 +68,7 @@ public sealed class FsstDecoderTests
         string[] symbols = ["yes"];
         byte[] codes = [0, 0];
 
-        TestNode root = Root(symbols, codes, [3, 0, 3], PType.U32, PType.U32, validityBuffer: 5);
+        TestNode root = Root(PType.U32, PType.U32, validityBuffer: 5);
         using DecodeHarness harness = DecodeHarness.Load(
             root,
             Symbols(symbols),
@@ -220,9 +219,7 @@ public sealed class FsstDecoderTests
         return values;
     }
 
-    private static TestNode Root(
-        string[] symbols, byte[] codes, int[] lengths, PType lengthsPType, PType offsetsPType,
-        int validityBuffer)
+    private static TestNode Root(PType lengthsPType, PType offsetsPType, int validityBuffer)
     {
         TestNode root = new TestNode("vortex.fsst")
             .WithMetadata(TestMetadata.Fsst(lengthsPType, offsetsPType))

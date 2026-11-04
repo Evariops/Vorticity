@@ -14,16 +14,13 @@ using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Buffers;
-using Vorticity.Columns;
 using Vorticity.Expressions;
-using Vorticity.File;
 using Vorticity.Indexes;
 using Vorticity.Keys;
 using Vorticity.RowEncoding;
 using Vorticity.Scanning;
 using Vorticity.Tests.Scan;
 using Vorticity.Types;
-using Vorticity.Writing;
 using Xunit;
 
 namespace Vorticity.Tests.Indexes;
@@ -117,7 +114,7 @@ public sealed class NestedIndexTests
 
         // The index kills every block that does not hold the value: the Bloom filter may keep a
         // false positive, the locating indexes may not; and a ghost is in no index.
-        ScanExplanation plan = await written.File.ScanBuilder().Where(filter).ExplainAsync(ct);
+        ScanExplanation plan = await written.File.ScanBuilder().Where(filter).ExplainAsync(analyze: true, ct);
         if (path == "person.age")
         {
             Assert.InRange(plan.LiveBlocks, holding.Count, holding.Count + 1);
@@ -185,7 +182,7 @@ public sealed class NestedIndexTests
             await using VortexFile file = await VortexFile.OpenAsync(path, ct);
             await AssertWalksAsync(file);
             VortexExpr filter = Expr.Eq(Expr.Field("person.name"), Expr.Literal(FilterLiteral.From("n7")));
-            ScanExplanation plan = await file.ScanBuilder().Where(filter).ExplainAsync(ct);
+            ScanExplanation plan = await file.ScanBuilder().Where(filter).ExplainAsync(analyze: true, ct);
             Assert.Equal(1, plan.LiveBlocks);
         }
         finally

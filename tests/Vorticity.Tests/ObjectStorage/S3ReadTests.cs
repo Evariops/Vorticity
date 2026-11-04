@@ -355,6 +355,10 @@ public sealed class S3ReadTests
             Region = "eu-west-3",
             Credentials = StoreCredentials.AccessKey(S3Emulator.AccessKey, S3Emulator.Secret),
             Handler = handler,
+
+            // A budget no burst of these reads passes: a read that waits for its turn lets its thread run others' work,
+            // whose bytes the thread's count would take for its own.
+            Transport = new StoreTransportOptions { RequestBudget = new RequestBudget(requestsPerSecond: 1e9) },
         });
         string token = LeanHandler.ETag;
         byte[] destination = new byte[1 << 20];

@@ -198,7 +198,7 @@ internal static class KeyRunOptions
     /// <param name="kind">The kind name.</param>
     internal static int StrideOf(string kind) => kind switch
     {
-        IndexKinds.PostingsBlocks or IndexKinds.PostingsNgram3 => PostingsStride,
+        IndexKinds.PostingsBlocks or IndexKinds.PostingsNgram3 or IndexKinds.PostingsTokens => PostingsStride,
         IndexKinds.SortedRuns => SortedStride,
         IndexKinds.PostingsHashed => HashedStride,
         _ => 0,
@@ -230,6 +230,31 @@ internal static class KeyRunOptions
     {
         int bits = entries <= 1 ? 0 : 64 - System.Numerics.BitOperations.LeadingZeroCount(entries - 1);
         return Math.Max(0, 64 - bits - HashedSpareBits);
+    }
+
+    /// <summary>The bytes a value of variable width is taken to hold when hashed postings size their unit: a hex trace id's.</summary>
+    internal const int VariableValueBytes = 32;
+
+    /// <summary>The most blocks a unit of hashed postings spans.</summary>
+    internal const int MostUnitBlocks = 256;
+
+    /// <summary>
+    /// The blocks of <paramref name="blockRows"/> rows a place of hashed postings spans (spec C, 5): a power of two whose rows
+    /// hold about <paramref name="unitBytes"/> of the values' bytes, <paramref name="width"/> each, or
+    /// <see cref="VariableValueBytes"/> for a value of variable width (0), so that a lookup reads about that much of the
+    /// identifier's column for each place a value lies in. One, a block, when <paramref name="unitBytes"/> is 0. What a value
+    /// lies at depends on its column's type alone, so that the places of an identifier mean the same in every object.
+    /// </summary>
+    internal static int HashedUnitBlocks(int width, long unitBytes, long blockRows)
+    {
+        if (unitBytes <= 0 || blockRows <= 0)
+        {
+            return 1;
+        }
+
+        long bytes = width > 0 ? width : VariableValueBytes;
+        long blocks = unitBytes / (bytes * blockRows);
+        return blocks <= 1 ? 1 : (int)Math.Min(1L << (63 - System.Numerics.BitOperations.LeadingZeroCount((ulong)blocks)), MostUnitBlocks);
     }
 
     /// <summary>
@@ -279,13 +304,6 @@ internal static class KeyRunOptions
             writer.Dispose();
         }
     }
-
-    /// <summary>Parses an entry's options.</summary>
-    /// <param name="bytes">The options.</param>
-    /// <param name="segmentEntries">The segment size.</param>
-    /// <returns>Whether they are usable.</returns>
-    internal static bool TryParseEntry(ReadOnlySpan<byte> bytes, out int segmentEntries) =>
-        TryParseEntry(bytes, out segmentEntries, out _, out _);
 
     /// <summary>Parses an entry's options.</summary>
     /// <param name="bytes">The options.</param>

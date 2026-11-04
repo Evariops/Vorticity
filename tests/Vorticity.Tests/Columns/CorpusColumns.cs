@@ -18,8 +18,6 @@ using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Metadata;
 using Vorticity.Buffers;
-using Vorticity.Columns;
-using Vorticity.File;
 using Vorticity.Serialization.Schemas;
 using Vorticity.Types;
 

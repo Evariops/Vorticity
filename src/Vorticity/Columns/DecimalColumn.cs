@@ -31,11 +31,6 @@ internal readonly ref struct DecimalColumn
     /// <summary>Rows in this column.</summary>
     public int Length => _batch.Node(_node).Length;
 
-    /// <summary>Whether row <paramref name="index"/> is not null.</summary>
-    /// <param name="index">0-based row index, below <see cref="Length"/>.</param>
-    /// <exception cref="ArgumentOutOfRangeException"><paramref name="index"/> is out of range.</exception>
-    public bool IsValid(int index) => ColumnCore.IsValid(_batch, _node, index);
-
     /// <summary>The dtype's precision, 1..76.</summary>
     public byte Precision => _batch.Node(_node).Precision;
 

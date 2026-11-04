@@ -34,15 +34,15 @@ public sealed partial class VariantBlockStatsTests
         await using VortexFile file = await OpenAsync(await WriteAsync(Rows()));
         foreach ((long low, long high) in new[] { (1_500L, long.MaxValue), (777L, 777L), (long.MinValue, 99L), (400L, 650L), (5_000L, long.MaxValue) })
         {
-            ScanPlan declared = await file.Scan<Doc>().Where(r => r.Status >= low && r.Status <= high).ExplainAsync(Ct);
-            ScanPlan path = await file.Scan<Doc>().Where(r => r.Attributes["status"].AsInt64() >= low && r.Attributes["status"].AsInt64() <= high).ExplainAsync(Ct);
+            ScanPlan declared = await file.Scan<Doc>().Where(r => r.Status >= low && r.Status <= high).ExplainAsync(analyze: true, Ct);
+            ScanPlan path = await file.Scan<Doc>().Where(r => r.Attributes["status"].AsInt64() >= low && r.Attributes["status"].AsInt64() <= high).ExplainAsync(analyze: true, Ct);
             Assert.Equal((declared.Blocks, declared.LiveBlocks), (path.Blocks, path.LiveBlocks));
             Assert.Equal(
                 await file.Scan<Doc>().Where(r => r.Status >= low && r.Status <= high).CountAsync(Ct),
                 await file.Scan<Doc>().Where(r => r.Attributes["status"].AsInt64() >= low && r.Attributes["status"].AsInt64() <= high).CountAsync(Ct));
         }
 
-        ScanPlan narrow = await file.Scan<Doc>().Where(r => r.Attributes["status"].AsInt64() == 777).ExplainAsync(Ct);
+        ScanPlan narrow = await file.Scan<Doc>().Where(r => r.Attributes["status"].AsInt64() == 777).ExplainAsync(analyze: true, Ct);
         Assert.Equal(1, narrow.LiveBlocks);
         Assert.Equal(19, Assert.Single(narrow.Pruning, step => step.Structure == "path statistics").BlocksPruned);
     }
@@ -63,11 +63,11 @@ public sealed partial class VariantBlockStatsTests
         Assert.Equal(-1, stats.IndexOf("duration", PathClass.Integer));
         Assert.Equal(20, stats.Blocks[stats.IndexOf("status", PathClass.Integer)].Length);
 
-        Assert.Equal(5, (await file.Scan<Doc>().Where(r => r.Attributes["route"].AsString() == "/r/1").ExplainAsync(Ct)).LiveBlocks);
+        Assert.Equal(5, (await file.Scan<Doc>().Where(r => r.Attributes["route"].AsString() == "/r/1").ExplainAsync(analyze: true, Ct)).LiveBlocks);
         Assert.Equal(500, await file.Scan<Doc>().Where(r => r.Attributes["route"].AsString() == "/r/1").CountAsync(Ct));
-        Assert.Equal(10, (await file.Scan<Doc>().Where(r => r.Attributes["flag"].AsBool() == true).ExplainAsync(Ct)).LiveBlocks);
+        Assert.Equal(10, (await file.Scan<Doc>().Where(r => r.Attributes["flag"].AsBool() == true).ExplainAsync(analyze: true, Ct)).LiveBlocks);
         Assert.Equal(1_000, await file.Scan<Doc>().Where(r => r.Attributes["flag"].AsBool() == true).CountAsync(Ct));
-        Assert.Equal(20, (await file.Scan<Doc>().Where(r => r.Attributes["duration"].AsInt64() > 500).ExplainAsync(Ct)).LiveBlocks);
+        Assert.Equal(20, (await file.Scan<Doc>().Where(r => r.Attributes["duration"].AsInt64() > 500).ExplainAsync(analyze: true, Ct)).LiveBlocks);
     }
 
     /// <summary>
@@ -80,7 +80,7 @@ public sealed partial class VariantBlockStatsTests
     {
         Doc[] rows = [.. Enumerable.Range(0, 64_000).Select(i => new Doc(i, i, Variant.Object(("flag", Variant.From(i / 4 % 2 == 0)))))];
         await using VortexFile file = await OpenAsync(await WriteAsync(rows, blockRows: 4));
-        ScanPlan plan = await file.Scan<Doc>().Where(r => r.Attributes["flag"].AsBool() == true).ExplainAsync(Ct);
+        ScanPlan plan = await file.Scan<Doc>().Where(r => r.Attributes["flag"].AsBool() == true).ExplainAsync(analyze: true, Ct);
         Assert.Equal(16_000, plan.Blocks);
         Assert.Equal(8_000, plan.LiveBlocks);
         Assert.Equal(32_000, await file.Scan<Doc>().Where(r => r.Attributes["flag"].AsBool() == true).CountAsync(Ct));

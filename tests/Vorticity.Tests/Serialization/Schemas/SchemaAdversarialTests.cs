@@ -1,7 +1,6 @@
 // Hand-assembled buffers for the rules no builder can violate, plus the degenerate inputs every
 // Root must survive. Nothing but VortexFormatException may ever escape.
 using System;
-using Vorticity;
 using Vorticity.Serialization.FlatBuffers;
 using Vorticity.Serialization.Schemas;
 using Xunit;

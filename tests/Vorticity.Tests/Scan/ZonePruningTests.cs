@@ -7,13 +7,11 @@
 // and fails when pruning drops a row it should have kept. The I/O test compares the segments the
 // two read and fails when pruning drops nothing at all -- the failure mode the equivalence test
 // cannot see, because a pruner that never prunes passes it perfectly.
-using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Columns;
 using Vorticity.Expressions;
-using Vorticity.File;
 using Vorticity.IO;
 using Vorticity.Scanning;
 using Xunit;

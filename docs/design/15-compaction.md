@@ -6,7 +6,8 @@ dataset design, plus what this document describes:
 - one planner, whose jobs run one per `CompactAsync` call, one per turn of a background loop, or in
   the commit that takes level 0 past its ceiling ([three drivers](#2-three-drivers-for-one-job))
 - a plan that descends the trees rather than reading them
-  ([planning](#3-planning-in-the-depth-of-the-tree))
+  ([planning](#3-planning-in-the-depth-of-the-tree)), and a partition's objects merged by size class,
+  then consolidated once it is calm ([tiers and consolidation](#tiers-and-consolidation))
 - purges of marks, and long vectors stored out of line
   ([folding marks](#4-folding-marks-where-no-merge-goes))
 - a profile for a store under a retention lock ([stores that cannot
@@ -23,15 +24,19 @@ refuses such an entry rather than reading it wrong.
 ## 1. What compaction buys, and what it costs
 
 Compaction holds the read bounds of the dataset (see [where the N's
-hide](13-dataset.md#1-where-the-ns-hide-and-the-bound-that-replaces-each)):
+hide](13-dataset.md#1-where-the-ns-hide-and-the-bound-that-replaces-each)), under the organization the
+layout declares ([the invariant](13-dataset.md#52-the-invariant)):
 
-- Level 0 holds at most eight objects, so a lookup touches at most eight objects there, rather than
-  one per append since the last merge.
-- The levels above 0 are key-disjoint, so a lookup touches one object in each of them.
+- Under tiers, the default with a partition, a partition holds at most `k − 1` objects of a size class
+  while it receives rows, and one object a key once it is consolidated, its late rows apart.
+- Under levels, the default for a sort key without a partition, level 0 holds at most eight objects,
+  and the levels above 0 are key-disjoint, so a lookup touches one object in each of them.
 - The marks a delete leaves are folded, so their rows are no longer stepped over and their bytes are
   freed (see [deleting rows](13-dataset.md#12-deleting-and-updating-rows)).
 
-It pays for these in bytes written. A row appended in a small commit moves up through every level,
+Under tiers it pays a rewrite of each row a size class it crosses, and one more at its partition's
+consolidation: two to three times a row ([tiers and consolidation](#tiers-and-consolidation)). Under
+levels it pays more. A row appended in a small commit moves up through every level,
 and each merge rewrites the part of the next level it overlaps. That is about `F / 2` rewrites per
 level at a fan-out `F`, about 5 at the default of 10. A load of gigabytes goes straight to the level
 that holds it and is written once (see [the invariant](13-dataset.md#52-the-invariant)). The levels
@@ -47,7 +52,7 @@ fragments to fold, no larger than what an object written into the level above ta
 current schema, which only a rewrite brings an older object to. Its commit makes the checks a merge's
 makes: the entry is still the one planned, and nothing came into the part of the level above that its
 bounds cover ([three drivers](#2-three-drivers-for-one-job)). With keys that arrive in order, as when
-time leads the clustering key, nothing ever overlaps, and every row is rewritten once, by the merge
+time leads the sort key, nothing ever overlaps, and every row is rewritten once, by the merge
 that takes it out of level 0. Measured on 96 appends of 100 rows over five levels, compaction rewrote
 9 600 rows and 204 408 bytes with the moves and 25 200 rows and 536 584 bytes without, and on the
 churn bench, a thousand appends of 2 000 rows at the tail, 22.0 MiB against 42.8 MiB. With keys that
@@ -71,17 +76,23 @@ object's later move into this level, or this one's move into the object's level,
 rewrite it, and every move after that again. The plan cuts the run at the newest such object and merges
 what is left past it when that still makes `F`. Merges of neighbours belong to the leveled style alone:
 a tiered level grows its objects by concatenating them already, and a merge across another level's
-object would change the order a dataset without a clustering key answers in.
+object would change the order a dataset without a sort key answers in.
 
 Keys in order keep the merges' runs whole as long as each level holds one band of the key space, the
 oldest at the bottom, which the pick of the object a full level gives up decides
 ([the pointer](#the-pointer-and-the-tiered-plan)). On the lifecycle bench, 48 hours of requests in
-order (`vortex-queries --micro lifecycle --style leveled --late off --writers 1 --deletes off`), merges
+order (`vortex-queries --micro lifecycle --partition off --late off --writers 1 --deletes off`), merges
 across other levels' objects rewrote a row 5.9 times, every move into their range reading them again.
-With the bands kept and the merges held to them, a row is rewritten 2.2 times, once out of level 0 and
-1.2 times as its objects grow, every job out of a level above 0 is a move, the dataset holds 108
-objects instead of 139, and its store took 195 bytes a row instead of 332. Without the merges a row is
-written once, and the dataset holds 330 objects.
+With the bands kept and the merges held to them, a row is rewritten 2.78 times, once out of level 0
+and 1.78 times as its objects grow, every job out of a level above 0 is a move, and the dataset ends
+with 51 objects, 47.6 in a window of a day, its store having taken 284 bytes a row. A job's objects
+end at their target, the rows its writer holds counted: an exit of level 0, 168 KB for level 1's
+128 KiB, writes an object of the target and one of the rest, which the merges grow. When an exit wrote
+one object past the target, ten of them passed level 2's target before they made a run, and never
+merged: 1.85 rewrites a row, 152 objects, 110 in a window of a day, 319 bytes a row. Partitioned by
+hour (`--partition hour`), the dataset is tiered instead: 2.92 rewrites a row, 1.94 by the size
+classes and 0.98 by the consolidations, and 26 objects in a window of a day. Without the merges a row
+is written once.
 
 Three costs remain, and this document is about them:
 
@@ -102,12 +113,13 @@ Three costs remain, and this document is about them:
 A job is always the same thing: one plan's inputs read in key order, the outputs written, and one
 `ReplaceObjects` committed. That commit names the entries it read, and is abandoned when one of them
 changed (see [rebase](13-dataset.md#82-rebase-by-re-applying-operations)). A leveled job also names
-the part of the level it writes that its outputs fill, the range of the clustering key its sources
+the part of the level it writes that its outputs fill, the range of the sort key its sources
 span, and the commit looks at that part of the level again: an object there that the job did not read
 abandons it. Another compaction moved that object in after the plan, from another level, and the
 outputs would overlap it. Two jobs that start from the same level always share such an object, but a
 job that empties level 0 into the first level that can hold it and one that pushes an object of
 level 1 into the same level may share none, and only that look keeps the level key-disjoint.
+A tiered job names its partition's objects alone, and the planner gives no two jobs one partition.
 Correctness never depends on who runs the job, so every driver below is safe against every other one
 and against every writer. What they differ in is who waits for the work, and how much of it is wasted.
 
@@ -220,9 +232,8 @@ where the first keeps the band whole for the merges of neighbours at the level's
 make the first object overlap the level above as much as any, and the largest goes, as before: the churn
 bench at random keys takes the same jobs and writes the same bytes either way. The question costs a
 walk of the level above that skips what lies outside the first object's range. Under late rows and
-four writers, where levels interleave anyway, the lifecycle bench rewrites a row 10.2 times under the
-default and 9.8 times under the largest alone, a cost such a dataset avoids with periods
-([a dataset of periods](#a-dataset-of-periods)).
+four writers, where levels interleave anyway, the lifecycle bench rewrites a row 6.9 times without a
+partition, against 2.8 when no row comes late ([late rows under levels](#late-rows-under-levels)).
 
 A tiered job concatenates a run of one level's objects with nothing else between them, and where the
 runs are depends on every level's order. The longest run can only be found by reading every leaf. The
@@ -234,147 +245,154 @@ store for one page, where reading every leaf would ask for 71. A dataset ordered
 level's objects together, a run of level 0 moving up whole and the next landing past it, so the two
 picks take the same runs there, and the round robin is a tiered dataset's default.
 
-### A dataset of periods
+### Tiers and consolidation
 
-A dataset that declares periods is compacted by them (`CompactionStyle.Periods`), which its plan
-picks and no option overrides, since its levels are laid out for them ([the levels of a dataset of
-periods](13-dataset.md#52-the-invariant)). It holds few objects, a few per level and one per sealed
-period, so its plan reads every leaf. Its jobs come in this order:
+A dataset with a partition, or without a sort key, keeps each partition's objects in size classes
+(`LayoutOrganization.Tiered`). Level 0 holds every partition's objects not yet consolidated; the
+partition leads their tree keys, so a partition's objects lie together and a plan reads level 0's
+leaves partition by partition. An object's size class is how many times the fan-out `k` (the layout's
+`MergeFanout`, 8 by default) multiplies its bytes before they pass the layout's object size over `k`:
+class 0 for an object of 128 MiB or more under objects of 1 GiB, one class more for each factor of `k`
+below. When a partition holds `k` objects of one class, a job merges them into one object of the class
+above it, the class of the smallest objects first, since that retires the most objects a byte, and no
+two jobs on one partition. A partition so holds at most `k − 1` objects a class while it receives rows,
+and a row is rewritten once a class it crosses: once, on appends a class below the object size over
+`k²`, in `DatasetTiersTests`' 96 000 rows of small appends merged four at a time.
 
-- Level 0 past its ceiling empties. Each row past the newest instant the fresh levels and the sealed
-  periods hold goes to the first fresh level, where it follows every object, and every other row goes
-  to the late level, so that a late row rewrites neither a fresh object nor a period. The commit checks
-  that nothing came into the first fresh level past that instant meanwhile.
-- A period is sealed once the newest instant the dataset holds is past its end by the lateness
-  horizon, which is how late a row may come behind the newest. The seal reads the period's fresh
-  objects, its late rows and its earlier object if it has one, and writes one object into the periods
-  level, with its time slices ([the slice
-  table](10-indexes.md#44-vorticityslicesv1-the-time-slices-of-a-file)), counted per second as the
-  rows stream past, so that a day costs 1.4 MB of counts rather than its instants. From then on, level
-  0's exit sends that period's rows to the late level, since they lie before the newest fresh instant,
-  so a late row never abandons a seal. Late rows of a sealed period wait in the late level, and when
-  the late level is past its ceiling a second seal folds them into the period's object. Time here is
-  the data's, partition by partition, never a clock's, so a seal is the same whoever plans it and
-  whenever. A partition that receives nothing more keeps its last period in its fresh objects, which
-  answer exactly at a few requests more. A clock would seal a partition behind the others too early,
-  its rows then late, and a seal a caller asks for is the way left should one need it. Rows later than
-  the horizon cost seals: periods of an hour under a tail of rows an hour late seal each hour three
-  times, a row rewritten 5.1 times against 2.7 in order (`vortex-queries --micro lifecycle`), so the
-  horizon is to cover the tail, or the period to outlast it.
-- The late level past level 0's ceiling merges the objects of each period it holds several of into
-  one, in place. When it holds more open periods than its ceiling, only their seals lower it.
-- `F` adjacent objects of one open period in a fresh level merge into one object of the next fresh
-  level, where they follow every object, since only the first fresh level takes new rows. A closed
-  period's objects wait for its seal instead. `F` is the fan-out until the cost model that weighs the
-  objects a question over the recent hours reads against the rewrites per row gives it.
-- `F` adjacent objects of one partition in the periods level, each under an `F`-th of the joined size
-  (`CompactionOptions.JoinedPeriodBytes`, 1 GiB by default), join into one object of that level that
-  spans their periods, the periods between them included. The calendar is the dataset's, weighed on
-  its largest partition, so a partition that takes a hundredth of the rows seals objects a hundred
-  times smaller, an hour each: joined, they come near the size, in tiers as the fresh levels grow, a
-  row rewritten once each time its object grows `F`-fold. An object of an `F`-th of the size or more
-  never joins, so a joined object stays under the size. A join never spans two months of the
-  calendar, so an expiry keeps a joined object's rows at most a month past its cutoff, as it would a
-  partition whose periods last a month; and under an erasure delay a joined object stays what a purge
-  rewrites within half of it, as a period does. A late row of a period a joined object holds waits in
-  the late level as any late row does, and its second seal folds it into the whole object, with the
-  late rows of every period the object spans.
-- Purges and fragments, as for any dataset.
+When a partition has received no row for `CalmAfter`, an hour by default, measured by the dataset's
+clock (`DatasetOptions.TimeProvider`) from the arrival of its newest row, its next job consolidates it:
+its level 0 objects, with the consolidated objects of level 1 they meet, are rewritten into objects
+disjoint by key, each up to the object size, a key never cut, at level 1. Objects already disjoint, as
+a partition whose keys come in order leaves them, are not all rewritten: a run of neighbours each under
+the object size over `k` is merged with what of level 1 lies in its span, so that the partition still
+ends in objects of about the object size, and the others move to level 1 whole when it holds nothing
+in their span. A move past an object of level 1 would leave that object inside its range, which the
+commit refuses ([three drivers](#2-three-drivers-for-one-job)). On the lifecycle bench partitioned by
+hour, keys in order, an hour's eight objects moved whole and a window of a day covered 147 objects;
+merged, it covers 26, for 0.98 rewrites a row more. A consolidation of several objects' worth runs in
+ranges of the key side by side on the session's lanes, each reading of its inputs the granules of its
+range alone, the ranges cut from the inputs' sparse indexes. The calm partitions are taken the earliest arrived first. A consolidation of a
+dataset that declares identifiers writes its partition's index beside its objects
+([the index of a consolidated partition](13-dataset.md#44-the-index-of-a-consolidated-partition)).
+`ConsolidateAsync` consolidates every partition whose level 0 holds an object, calm or not, as after a
+load of history, and `CalmAfter = null` leaves consolidation to it alone. A row is rewritten once more
+by its partition's consolidation: 96 000 rows of `DatasetTiersTests` once by their merges and once by
+the consolidation.
 
-Every job but a join writes an object per period, so that no object spans two, and level 0's exit an
-object per level as well. A joined object spans whole periods of one partition, adjacent in its level.
-A header names the joined objects a dataset holds among its features (`DatasetFeatures.JoinedPeriods`),
-from the commit of the first: a library that does not know them would seal a period one of them holds
-a second time, beside it, and refuses the dataset instead.
+Rows that come late for a consolidated partition land in level 0 as small objects of that partition,
+and wait in its size classes. A calm partition whose level 0 weighs less than an eighth of the
+consolidated objects it meets (`LateShare`) is not consolidated again: its late rows wait for more, so
+that a late row is rewritten some nine times at most there, rather than each late append rewriting
+the consolidated objects it falls among.
 
-A calendar of each partition, weighed on its own rows, was weighed against the joins, and left aside:
-the values of the partition columns are not bounded over a dataset's life, a tenant or a source each,
-and every header, written at each commit, would carry a length and its changes for each, where the
-joins need nothing beyond what the leaves say. A calendar of a partition also cuts in units, a day or
-a month, a size its rows set only within a factor of thirty, and keeps a small partition's month in
-its fresh objects until the month ends.
+A plan reports each partition its level 0 holds (`CompactionPlan.Partitions`): its objects and bytes
+there, what its merges owe (`Lag`, the objects past `k − 1` a class), whether it is calm, whether it
+never becomes calm (`NeverCalm`: more than `2k` objects of class 0 piled, the first of them 48 calm
+periods old, a partition that keeps receiving rows), and whether it holds too little for its objects
+(`TooFine`: calm with fewer bytes than the object size over `k²`, a partition finer than its rows fill).
+A partition that never calms is reported rather than consolidated over and over; one too fine says the
+partition is finer than the rate of its rows, which a coarser partition answers.
 
-Every such object is written in sorted slices. A job of a dataset with a variant column merges its
-inputs twice. The first pass reads the clustering key, the columns that may be synopsis columns and the
-variant columns alone, through a projection of each input, and counts, for each object it will write,
-its rows per second and the distinct values of the columns that may be synopsis columns, from which it
-cuts the object's slices and picks the order inside them: the columns whose values repeat twice on
-average, fewest values first
-([sorted time slices](11-write-strategy.md#9-sorted-time-slices-and-shredded-variants)). The second
-pass gathers each slice as its rows come, in time order, codes each synopsis column's values in the
-order of the values, and sorts the slice by one stable counting sort per column, from the last to the
-first, so that rows of equal values keep their time order without a pass on the instant. The rows are
-gathered once through the permutation and written, and the slice table records the order. A slice of
-a million rows over three synopsis columns sorts in 43 ns a row (`vortex-queries --micro slicesort`),
-its rows copied, coded, sorted and gathered. The object then holds its rows in the key's order slice by
-slice only, and a dataset of periods takes no row's rank for its row above level 0. On a key of the
-instant alone it carries no sorted run on the key: its slice table is the source through which the key
-cursor and every read in key order find its rows, a job's merge of its inputs included, which reads
-each slice once ([sources of order](12-index-reads.md#2-sources-of-order)). A slice is held whole while
-it sorts: a slice past the query memory's grant, sorted in runs and merged, is not done yet.
+What the partition buys is reads that end where its values end. A filter on the partition's column
+that keeps whole values reads whole objects but at its ends. An expiry by such a filter
+(`ExpireAsync(filter)`) drops whole objects, opening none ([deleting
+rows](13-dataset.md#12-deleting-and-updating-rows)). A range asked part by part (`AskByValuesAsync`)
+asks each part of objects of its own ([parts of a range](12-index-reads.md#45-aggregations-of-a-dataset)).
+An object's counts answer a question keyed by a function of the partition's column the object holds
+constant ([the counts](10-indexes.md#49-vorticitycolumncountsv1-a-columns-counts)), and the rollups sum
+the counts of runs of objects ([rollups](#rollups)).
 
-A job of a dataset without a variant column merges its inputs once, each object written as its rows
-come, as a load writes a period: its first slice runs to the end of the unit that holds its 65 536th
-row, those rows' pace choosing the width of its slices and its order judged on that slice, and each
-slice after it is cut at that width as its rows come, a burst finer where the stream meets it
-(`SliceStream`). For rows at a steady pace,
-those are the slices a count of every row cuts once a slice aims at 2²¹ rows or more, three million
-by default: a unit of the width a count chooses then holds more than the rows the order is judged
-from, the widths being sixty times apart at most. A dataset whose slices aim at fewer rows is merged
-twice. A seal knows the rows of its one object from its inputs, which weigh its synopsis tables as
-the first pass's count does; the objects of another job are weighed at the end. On an hour of thirty
-million requests (`vortex-queries --micro seal --ceiling 1`), level 0's exit takes 11.4 s and the seal
-9.3 s in one pass, against 18.3 and 14.0 s in two, and the sealed object is the same to the byte, its
-ten slices and its order included; the process peaks at 9.2 GB against 8.5.
+A job over a schema with a variant column merges its inputs twice. The first pass reads the sort key
+and the variant columns alone, through a projection of each input, and counts the paths of the
+partition's rows, from which it chooses what the objects shred, each column in long chunks of its own,
+with a path map that lets a question read one key alone ([shredded
+variants](11-write-strategy.md#10-shredded-variants)). The second pass writes the objects, each counting
+its paths again as its rows are written, at their granules, for its path directory. On a million rows
+of six to eight attributes, counting and choosing take 256 ns a row, and the shredded write 310 ns a
+row more than the whole one (`vortex-queries --micro shredwrite`). An append shreds nothing, unless the
+dataset asks it to shred the paths it declares (`DatasetOptions.ShredOnAppend`), but counts its paths for its
+own directory, on another lane than its writer's (`DatasetOptions.PathDirectoryOnAppend`).
 
-The first pass also counts the paths of each variant column, value by value, and the object shreds
-those its own rows pay for, each column in long chunks of its own, with a path map that lets a
-question read one key alone ([shredded variants](11-write-strategy.md#9-sorted-time-slices-and-shredded-variants)).
-Counting and choosing take 181 ns a row of six to eight attributes, and the shredded write 310 ns a
-row more than the whole one (`vortex-queries --micro shredwrite`). An append shreds nothing.
+### The memory of a job
 
-The first pass chooses the synopsis columns, those that repeat, and the object's first slice settles
-their order: greedily, each place to the column that adds the fewest runs after those before it,
-measured on a sample of 16 384 of the slice's rows, which puts a column nested in another right after
-it. Once an object has chosen what a variant column shreds, the shape of each row, which shredded keys
-it holds and in which class, and whether anything is left to the residual, is one more candidate, when
-its shapes repeat twice on average in the slice. The rows of each shape then lie together inside each
-run of the columns before it. Coding the shapes takes about 100 ns a row of six to eight attributes,
-on top of the slice's sort.
+A job holds what it reserves in the session's jobs' budget (`VortexSessionOptions.JobMemoryBudget`), half the process's
+limit by default and reserved in the process's budget too, so that the queries have the rest ([the
+governor](16-queries.md#the-governor)). The stores of an append reserve there what they hold, and write their largest
+partition sooner when it is refused. A consolidation's census counts its inputs on as many lanes as the budget holds,
+each reserving a window of an input's rows decoded and a slice of a wide shredding. Its ranges run side by side as many as
+the budget holds, each reserving before it starts what its inputs' batches hold, at sixteen times the bytes a row of its
+inputs is written in; four times the chunks each input holds open, a chunk of each column as its object's contents count
+them, for the segments it reads, a dictionary's values decompressed whole and the children its windows share; and what
+its writer gathers: sixteen times the dataset's chunk bytes for each column at most, the
+least rate a column is taken to encode to, and five times its chunk's target for a variant column it shreds, the values
+gathered, what the shredder takes of them and the column it lays out. The first runs whether it fits or not, as a job in
+one piece does, which reserves what its merge and its writer hold as well, and the others wait for a lane.
+A merge reads its inputs in batches that hold about a million rows together, an input of fifty-eight in batches of
+16 384 rows rather than of a window, each batch decoded on its own, so that what a range holds of its inputs does not
+grow with them. A variant shredded into many columns is read a window and a slice at a time ([shredded
+variants](21-variant-columns.md#5-the-worst-cases)), and written a typed column at a time ([the
+write](11-write-strategy.md#10-shredded-variants)). What memory cannot hold goes to disk: the runs of an object's
+hashed key index and of a partition's postings past their scratch's memory. `CompactionResult.RangesAtOnce`,
+`MemoryReserved` and `ScratchBytes` say how many ranges a job ran at once, what it reserved and what it spilled, and
+`vortex-queries --print-jobs` prints them beside the process's memory over each pass.
 
-A period is a day at creation, and each seal weighs the load of the period it wrote and
-records the length that load calls for, from past the newest instant ([the length of a
-period](13-dataset.md#84-sources-and-offsets)). The header keeps the lengths, so that every writer cuts
-the same. `DatasetPeriodsCompactionTests` runs 300 rounds of
-appends, one row in a hundred late by up to half an hour, deletes now and then, and hours sealed ten
-minutes past their end. After each round it checks that every level but 0 and the late one is
-key-disjoint, that no object spans two periods but a joined one, and that the key cursor and a
-key-ordered scan give back the rows appended and not deleted. A seed runs about 75 exits, 34 fresh
-merges and 7 seals, none abandoned. A schedule of minutes, with late rows and deletes, joins its
-sealed minutes in tiers, 32 joins for 85 to 88 seals, and keeps the same invariants at each round.
+### Late rows under levels
 
-A seal is a compaction for its commit: a delete that marks one of its inputs while it runs abandons
-it, and its outputs are left for vacuum. Carrying the marks over to the period's object instead is
-worth measuring on jobs of minutes over gigabytes, and is not done.
+Under levels, a row that comes after rows of later keys reaches level 0 with its append, and a job that
+merges it into the level below rewrites what its key meets there: a row a few seconds late made almost
+every exit of level 0 read the last object of level 1, and write it whole again. So an exit keeps such
+rows apart. The rows at or before the last key of the objects it meets in its destination lead its
+merge in key order; it writes them back to level 0, reads its sources alone, and those objects stand.
+Level 0 holds overlapping objects anyway, which every question reads by their summaries. The rows stay
+apart while they weigh an eighth of the rows of the objects they meet at most, and while level 0 holds
+fewer such objects than half its ceiling: an exit then takes the objects that came in order alone, once
+they pass the ceiling, and may leave late objects up to that half. An object is late when every key it
+holds lies at or before the greatest key of the levels above 0, which the last object of each level
+gives. Past either bound, an exit takes all of level 0 and merges it with what it meets, as before.
+Level 0 keeps within its ceiling throughout. On 9 600 rows appended 100 at a time, 2 % of them a little
+late, the exits read 7 785 rows of the level below and rewrote 17 100 rows, 1.78 a row, against 13 000,
+1.35 a row, when they all come in order (`DatasetLateRowsTests`).
 
-### Resuming a seal
+### Rollups
 
-A seal of a day at the design's rate reads and writes some 170 GB, and a failure starts it again from
-nothing: its object is one upload, whose writer holds until the end what the end writes, the chunk
-directories, the zone maps, the postings' pages, the synopsis tables' runs, the census of the paths.
-Three ways to lose less were weighed, none built:
+Once no job is due, the background loop sums the counts of the deepest level's objects into rollups
+(`RollUpAsync`): runs of about `DatasetOptions.RollupFanout` consecutive objects, 64 by default, cut
+where the partition changes, a rollup of rank 1 each, then runs of as many rollups a rank up,
+each summed from what its children keep, with no row read. The tree of rollups lies beside the levels,
+and the header carries its root (field 26). A commit that puts or takes away an object takes away
+every rollup whose range holds a key it changes, which a later call sums again.
+
+A question takes a whole rollup, from the highest rank down, when the union of its objects' summaries
+proves the filter and the constant keys as one object's would, and its totals carry what the question
+reads. Otherwise it may take the rollup bucket by bucket, each bucket's summaries the rollup's with the
+key's first column bounded by the bucket's values, when that costs less than the children's counts, a
+request weighed as a mebibyte read. The walk then skips the subtrees a rollup it took covers whole. A
+rollup's counts and sketches give each chunk its first entry and its XXH3, and end their header with
+its own, so that a question on a few values reads the header, then the chunks of those values. Over
+thirty days of 2 000 routes, an object a day, a count of every route reads two rollups and the counts
+of the three objects no rollup covers yet, 7 requests and 324 254 bytes, where the objects' counts take
+a request each (`RollupBudgetTests`).
+
+### Resuming a long job
+
+A job that consolidated a day of the design's rate into one object would read and write some 170 GB;
+its objects of 1 GiB each make that some 160 objects, each a job's part, and a failure
+starts it again from nothing: its object is one upload, whose writer holds until the end what the end
+writes, the chunk directories, the zone maps, the postings' pages, the census of the paths. Three ways
+to lose less were weighed, none built:
 
 | | how | what it takes | what it leaves |
 |---|---|---|---|
-| a checkpointed upload | at the end of a part, the writer saves its state beside the upload's parts, and a seal that fails takes the upload back from there | every builder of the writer able to save and restore itself: its open chunks, its pages in the scratch, its counts, the slice being sorted | gigabytes of state saved at each checkpoint, and a writer twice as hard to change |
-| the hours sealed first | a period's hours sealed one at a time, each an object committed alone, then the day's object assembled from theirs | slices that keep the order and the shredding their hour chose, where the slice table holds one order for the whole object; the day's tables merged from the hours' | the day rewritten whole a second time, unless it is assembled by copying the hours' segments, a format change |
-| a shorter period | the length of a period follows its load already, under the object cap among its constraints (`DatasetOptions.MaxObjectBytes`, no bound by default): a lower cap bounds what a failure costs | nothing new | more objects over a window, a request each |
+| a checkpointed upload | at the end of a part, the writer saves its state beside the upload's parts, and a job that fails takes the upload back from there | every builder of the writer able to save and restore itself: its open chunks, its pages in the scratch, its counts, the granule being written | gigabytes of state saved at each checkpoint, and a writer twice as hard to change |
+| the object built from parts | a partition's rows written as several objects first, each committed alone, then the partition's object assembled from theirs | parts that keep the shredding they chose; the object's tables merged from the parts' | the partition rewritten whole a second time, unless it is assembled by copying the parts' segments, a format change |
+| a smaller object | the size the layout's objects aim at (`DatasetLayout.ObjectBytes`) cuts a partition's rows into objects of that size | nothing new | more objects over a window, a request each |
 
-The third is there today: a dataset whose failed seals cost too much lowers its object cap, and each
-seal at risk is that much smaller. The second is the shape of a seal that resumes, at the price of a
-format change, and waits for a measure of how often seals fail. A delete that marks an input while
-the seal runs is the common reason a seal starts again, and carrying its marks over to the period's
-object answers it without either.
+The third is there today: a dataset whose failed jobs cost too much declares a smaller size, and each
+job at risk is that much smaller. The second is the shape of a job that resumes, at the price of a
+format change, and waits for a measure of how often jobs fail. A delete that marks an input while the
+job runs is the common reason a job starts again: its commit abandons the job and leaves its outputs
+to vacuum. Carrying the delete's marks over to the outputs would answer it without either, and is not
+done.
 
 ## 4. Folding marks where no merge goes
 
@@ -500,7 +518,7 @@ One option switches the whole profile for a locked store:
   bound, since a rewrite would add bytes and free none
 - purges off
 - compaction held to the read bounds only: level 0's ceiling, and key-disjoint levels at a larger
-  fan-out, or tiered compaction without a clustering key, since each merge is paid for the whole term
+  fan-out, or tiers without a sort key, since each merge is paid for the whole term
 - vacuum aware of the retention date
 
 `ObjectHead` carries `RetainUntil` and `LegalHold`, which a store under a lock reports, and vacuum
@@ -542,6 +560,12 @@ or to the application.
    small](#keeping-marked-pages-small)): over a handle that keeps its pages across versions, a header
    leaves out a marked leaf its commit did not write, and a vector past 256 bytes lies in the commit
    object that wrote it.
+7. Tiers and consolidation ([tiers and consolidation](#tiers-and-consolidation)): a partition's size
+   classes merged `k` at a time, the consolidation of a calm partition in key ranges side by side, the
+   late rows held to a share, the census of the variants' paths by partition, and the report of each
+   partition.
+8. Rollups ([rollups](#rollups)): `RollUpAsync`, called by the background loop once no job is due,
+   and a planner that takes whole rollups, or their buckets, where their objects' counts would answer.
 
 Each one is measured the way the churn bench measures the dataset, from the first commit to the
 ten-thousandth (see [how the dataset is tested](13-dataset.md#15-how-it-is-tested)), and keeps every

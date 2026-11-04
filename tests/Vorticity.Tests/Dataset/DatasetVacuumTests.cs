@@ -15,14 +15,11 @@ using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Buffers;
-using Vorticity.Columns;
 using Vorticity.Dataset;
 using Vorticity.Indexes;
 using Vorticity.IO;
-using Vorticity.Scanning;
 using Vorticity.Tests.Scan;
 using Vorticity.Types;
-using Vorticity.Writing;
 using Xunit;
 
 namespace Vorticity.Tests.Dataset;
@@ -373,12 +370,14 @@ public sealed class DatasetVacuumTests
         clock.Advance(TimeSpan.FromHours(2));
 
         // Measured: an append here writes a leaf and the internal pages above it, and the leaf stays
-        // live, so about a third of each body is live -- over the default 0.25. A threshold of 1
-        // names every commit kept by references alone.
-        Assert.Empty((await dataset.VacuumAsync(new VacuumOptions { TimeProvider = clock, DryRun = true }, ct)).Sparse);
+        // live, from a quarter to a half of each body, the later ones' trees deeper: the default 0.25
+        // names a few of them, a threshold of 1 every commit kept by references alone.
+        VacuumResult dry = await dataset.VacuumAsync(new VacuumOptions { TimeProvider = clock, DryRun = true }, ct);
         VacuumResult first = await dataset.VacuumAsync(new VacuumOptions { TimeProvider = clock, RepackBelow = 1.0 }, ct);
         Assert.NotEmpty(first.Sparse);
         Assert.DoesNotContain(dataset.Version, first.Sparse);
+        Assert.All(dry.Sparse, version => Assert.Contains(version, first.Sparse));
+        Assert.True(dry.Sparse.Count < first.Sparse.Count, $"the default names {dry.Sparse.Count} commits, a threshold of 1 {first.Sparse.Count}");
 
         (ulong repacked, OperationOutcome outcome) = await dataset.RepackAsync(first.Sparse, ct);
         Assert.Equal(OperationOutcome.Applied, outcome);
@@ -428,7 +427,7 @@ public sealed class DatasetVacuumTests
     private static DatasetOptions Options() => new DatasetOptions
     {
         Seed = 0x7AC_0017,
-        ClusteringKey = ["key"],
+        Layout = new DatasetLayout { SortKey = [LayoutValue.Column("key")] },
         RetentionWindow = Window,
         Write = new VortexWriteOptions { RowBlockSize = 64, DataBlockTargetBytes = 512 },
     };

@@ -8,6 +8,7 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
 using ManagedCompressions.Zstd;
+using Vorticity.Aggregating;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Arrays.Decoders.Compressed;
@@ -60,19 +61,38 @@ internal static class ArrayBlobWriter
         Workspace blob, CanonicalArena arena, int nodeIndex, EncodingDictionary encodings,
         bool compress = false, ChunkStats stats = default)
     {
-        List<PendingBuffer> buffers = blob.Buffers;
-        FlatBufferBuilder builder = blob.Builder;
-        builder.Clear();
+        blob.Builder.Clear();
         try
         {
-        // The compressed forms are chosen and materialized before the builder starts, because both
-        // of them add canonical nodes to the arena -- the gathered values child -- and a
-        // FlatBuffers table cannot be open while that happens.
-        // A constant is expanded where it is read. The uncompressed path reads rows and nothing
-        // else, so it expands here; the compressed one asks first what the element alone decides.
-        int root = compress
-            ? WriteCompressed(blob, arena, nodeIndex, encodings, stats)
-            : WriteNode(blob, arena, Materialize(arena, nodeIndex), encodings, compress: false, stats);
+            // The compressed forms are chosen and materialized before the builder starts, because both
+            // of them add canonical nodes to the arena -- the gathered values child -- and a
+            // FlatBuffers table cannot be open while that happens.
+            // A constant is expanded where it is read. The uncompressed path reads rows and nothing
+            // else, so it expands here; the compressed one asks first what the element alone decides.
+            int root = compress
+                ? WriteCompressed(blob, arena, nodeIndex, encodings, stats)
+                : WriteNode(blob, arena, Materialize(arena, nodeIndex), encodings, compress: false, stats);
+            return Assemble(blob, root);
+        }
+        finally
+        {
+            // After the copy into the blob and nowhere earlier. A pooled array handed back while the
+            // blob still had to read it would be handed to the next renter and overwritten, and the
+            // file would be wrong in a way no exception reports. In a `finally` so that a throw
+            // between the rent and the copy does not quietly drain the pool either, and so that
+            // the next blob starts from an empty list whatever this one did.
+            blob.Discard();
+        }
+    }
+
+    /// <summary>
+    /// The blob of <paramref name="blob"/>'s node <paramref name="root"/>, its buffers queued: the buffers laid out at
+    /// their alignments, then the FlatBuffer. The caller hands the buffers' rentals back after it, in a <c>finally</c>.
+    /// </summary>
+    internal static BlobLease Assemble(Workspace blob, int root)
+    {
+        List<PendingBuffer> buffers = blob.Buffers;
+        FlatBufferBuilder builder = blob.Builder;
 
         // The Buffer vector records what the layout below will actually write, so the paddings have
         // to be settled before the table that carries them is built.
@@ -109,7 +129,7 @@ internal static class ArrayBlobWriter
         // mean many small writes to a FileStream and a native view that is only memory through a
         // manager.
         int exact = checked((int)total);
-        byte[] bytes = ArrayPool<byte>.Shared.Rent(exact);
+        byte[] bytes = WorkArrays.Rent<byte>(exact);
         long cursor = 0;
         for (int i = 0; i < buffers.Count; i++)
         {
@@ -135,24 +155,6 @@ internal static class ArrayBlobWriter
             bytes.AsSpan((int)(total - sizeof(uint))), (uint)flatBuffer.Length);
 
         return new BlobLease(bytes, exact);
-        }
-        finally
-        {
-            // After the copy into `bytes` and nowhere earlier. A pooled array handed back while the
-            // blob still had to read it would be handed to the next renter and overwritten, and the
-            // file would be wrong in a way no exception reports. In a `finally` so that a throw
-            // between the rent and the copy does not quietly drain the pool either, and so that
-            // the next blob starts from an empty list whatever this one did.
-            foreach (PendingBuffer pending in buffers)
-            {
-                if (pending.Rented && pending.Bytes is byte[] rented)
-                {
-                    ArrayPool<byte>.Shared.Return(rented);
-                }
-            }
-
-            buffers.Clear();
-        }
     }
 
     /// <summary>
@@ -188,6 +190,47 @@ internal static class ArrayBlobWriter
         ChunkStats stats = default,
         Cascade cascade = default)
     {
+        ColumnPlan plan = Plan(blob, arena, ref nodeIndex, encodings, stats, cascade);
+
+        // The bytes the plan actually produced, handed back to the column for its plan memory:
+        // every buffer this node and its subtree appended, against what the chooser priced the plan
+        // at. Buffer bytes rather than the blob's, because the blob is one per root field and a
+        // struct's children are priced one by one; the framing they leave out is the same framing
+        // chunk after chunk, which is all a tolerance needs.
+        //
+        // A dictionary is held to its own layer, not to its subtree: the plan priced codes plus
+        // entries, and the children then take schemes of their own that can shrink them by orders
+        // of magnitude. Judged by the subtree, a dictionary column's prediction would miss on every
+        // chunk, the distinct table would never be trusted to serve, and each chunk would walk for
+        // a dictionary the table had already built. `WriteChosen` reports the layer as built; the
+        // children's bytes are the children's.
+        List<PendingBuffer> buffers = blob.Buffers;
+        int firstBuffer = buffers.Count;
+        written = plan.Scheme;
+        int node = WriteChosen(blob, arena, nodeIndex, in plan, encodings, stats, stats.ValuesOwner ?? cascade.Owner, out long dictionaryLayer);
+        long produced = dictionaryLayer;
+        if (produced < 0)
+        {
+            produced = 0;
+            for (int i = firstBuffer; i < buffers.Count; i++)
+            {
+                produced += buffers[i].Length;
+            }
+        }
+
+        stats.Remember(in plan, produced);
+        return node;
+    }
+
+    /// <summary>
+    /// The plan the compressor makes of node <paramref name="nodeIndex"/>, the one
+    /// <see cref="WriteCompressed(Workspace, CanonicalArena, int, EncodingDictionary, out ColumnScheme, ChunkStats, Cascade)"/>
+    /// writes it under: a constant the plan does not keep whole is materialized first, and <paramref name="nodeIndex"/>
+    /// is then the materialized node.
+    /// </summary>
+    private static ColumnPlan Plan(
+        Workspace blob, CanonicalArena arena, ref int nodeIndex, EncodingDictionary encodings, ChunkStats stats, Cascade cascade)
+    {
         // A constant node is materialized here, before the compressor looks at it. Expanding it
         // lower down -- inside WriteNode -- hides the column from the compressor, and a constant
         // integer column then goes out flat instead of taking the encoding that reduces it to a
@@ -219,34 +262,7 @@ internal static class ArrayBlobWriter
             }
         }
 
-        // The bytes the plan actually produced, handed back to the column for its plan memory:
-        // every buffer this node and its subtree appended, against what the chooser priced the plan
-        // at. Buffer bytes rather than the blob's, because the blob is one per root field and a
-        // struct's children are priced one by one; the framing they leave out is the same framing
-        // chunk after chunk, which is all a tolerance needs.
-        //
-        // A dictionary is held to its own layer, not to its subtree: the plan priced codes plus
-        // entries, and the children then take schemes of their own that can shrink them by orders
-        // of magnitude. Judged by the subtree, a dictionary column's prediction would miss on every
-        // chunk, the distinct table would never be trusted to serve, and each chunk would walk for
-        // a dictionary the table had already built. `WriteChosen` reports the layer as built; the
-        // children's bytes are the children's.
-        List<PendingBuffer> buffers = blob.Buffers;
-        int firstBuffer = buffers.Count;
-        written = plan.Scheme;
-        int node = WriteChosen(blob, arena, nodeIndex, in plan, encodings, stats, stats.ValuesOwner ?? cascade.Owner, out long dictionaryLayer);
-        long produced = dictionaryLayer;
-        if (produced < 0)
-        {
-            produced = 0;
-            for (int i = firstBuffer; i < buffers.Count; i++)
-            {
-                produced += buffers[i].Length;
-            }
-        }
-
-        stats.Remember(in plan, produced);
-        return node;
+        return plan;
     }
 
     /// <summary>
@@ -384,7 +400,13 @@ internal static class ArrayBlobWriter
         // underneath: compressed rather than written flat.
         int values = plan.Table is not null
             ? plan.Table.BuildValues(arena, arena.GetNode(nodeIndex), plan.Entries)
-            : CanonicalFilter.Apply(arena, nodeIndex, plan.Gather);
+            : CanonicalFilter.Apply(arena, nodeIndex, plan.Scheme == ColumnScheme.RunEnd ? plan.RunStarts : plan.EntryRows);
+
+        // The values are gathered: the first rows a walked dictionary rented go back.
+        if (plan.Scheme == ColumnScheme.Dict && plan.GatherRented)
+        {
+            WorkArrays.Return(plan.Gather);
+        }
 
         if (plan.Scheme == ColumnScheme.RunEnd)
         {
@@ -394,7 +416,7 @@ internal static class ArrayBlobWriter
         // Computed over the values child as built and the rows the codes index, with the formula
         // the plan was priced by: the number plan memory compares the prediction to.
         dictionaryLayer = ColumnCompressor.DictionaryLayerBytes(
-            arena, arena.GetNode(values), arena.GetNode(nodeIndex).Length);
+            arena, arena.GetNode(values), arena.GetNode(nodeIndex).Length, encodings.Target);
         return WriteDict(blob, arena, nodeIndex, values, plan, encodings, owner);
     }
 
@@ -456,13 +478,13 @@ internal static class ArrayBlobWriter
         // written so that the blob's `finally` hands them back whatever happens next. The patches
         // are rented at the count the chooser priced and handed back once their buffers hold them.
         int packedBytes = PackedBytes(length, plan.BitWidth);
-        byte[] packed = ArrayPool<byte>.Shared.Rent(packedBytes);
+        byte[] packed = WorkArrays.Rent<byte>(packedBytes);
         Span<ushort> packedBuffer = stackalloc ushort[1];
         packedBuffer[0] = (ushort)Add(blob, new PendingBuffer(packed, packedBytes, Exponent(width), rented: true));
 
         int exceptions = checked((int)plan.Exceptions);
-        int[] patchIndices = exceptions == 0 ? [] : ArrayPool<int>.Shared.Rent(exceptions);
-        ulong[] patchValues = exceptions == 0 ? [] : ArrayPool<ulong>.Shared.Rent(exceptions);
+        int[] patchIndices = exceptions == 0 ? [] : WorkArrays.Rent<int>(exceptions);
+        ulong[] patchValues = exceptions == 0 ? [] : WorkArrays.Rent<ulong>(exceptions);
         Span<int> children = stackalloc int[3];
         int childCount = 0;
         PatchesMetadata patches = default;
@@ -486,8 +508,8 @@ internal static class ArrayBlobWriter
         {
             if (patched)
             {
-                ArrayPool<int>.Shared.Return(patchIndices);
-                ArrayPool<ulong>.Shared.Return(patchValues);
+                WorkArrays.Return(patchIndices);
+                WorkArrays.Return(patchValues);
             }
         }
 
@@ -506,7 +528,7 @@ internal static class ArrayBlobWriter
     private static PendingBuffer LittleEndian(ReadOnlySpan<ulong> values, int width)
     {
         int length = values.Length * width;
-        byte[] bytes = ArrayPool<byte>.Shared.Rent(length);
+        byte[] bytes = WorkArrays.Rent<byte>(length);
         for (int i = 0; i < values.Length; i++)
         {
             Span<byte> destination = bytes.AsSpan(i * width, width);
@@ -550,14 +572,14 @@ internal static class ArrayBlobWriter
         int[] indices = new int[exceptions];
         ulong[] values = new ulong[exceptions];
         int bytes = PackedBytes(node.Length, plan.BitWidth);
-        byte[] packed = ArrayPool<byte>.Shared.Rent(bytes);
+        byte[] packed = WorkArrays.Rent<byte>(bytes);
         try
         {
             Pack(arena, node, plan, node.PType, node.Length, packed.AsSpan(0, bytes), indices, values);
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(packed);
+            WorkArrays.Return(packed);
         }
 
         return (indices, values);
@@ -637,7 +659,7 @@ internal static class ArrayBlobWriter
     /// <remarks>
     /// <para>
     /// In the element's own type throughout, which is the whole point. The transforms are the same
-    /// numbers there: <see cref="BitPackPlan.Encode"/> computes in 64 bits and masks to the element
+    /// numbers there: a plan's transform computed in 64 bits and masked to the element
     /// width, and an element's own subtraction wraps at that width, its zigzag's shifts drop the
     /// same bits. So there is no block of 64-bit words to widen into, compare in and narrow back
     /// out of one value at a time: a u8 column's transform is 64 values a 512-bit vector, not one a
@@ -667,7 +689,7 @@ internal static class ArrayBlobWriter
         T largest = patching ? T.CreateTruncating((1UL << bitWidth) - 1) : T.AllBitsSet;
 
         // One block of the element's own type, rented once for the column.
-        T[] rented = ArrayPool<T>.Shared.Rent(FastLanes.BlockSize);
+        T[] rented = WorkArrays.Rent<T>(FastLanes.BlockSize);
         int found = 0;
         try
         {
@@ -711,7 +733,7 @@ internal static class ArrayBlobWriter
         }
         finally
         {
-            ArrayPool<T>.Shared.Return(rented);
+            WorkArrays.Return(rented);
         }
 
         return found;
@@ -954,9 +976,9 @@ internal static class ArrayBlobWriter
         CanonicalNode node = arena.GetNode(nodeIndex);
         FsstSymbols table = plan.Table;
         int symbolBytes = table.Count * 8;
-        byte[] symbols = ArrayPool<byte>.Shared.Rent(symbolBytes);
+        byte[] symbols = WorkArrays.Rent<byte>(symbolBytes);
         int symbolBuffer = Add(blob, new PendingBuffer(symbols, symbolBytes, Exponent(8), rented: true));
-        byte[] symbolLengths = ArrayPool<byte>.Shared.Rent(table.Count);
+        byte[] symbolLengths = WorkArrays.Rent<byte>(table.Count);
         int lengthBuffer = Add(blob, new PendingBuffer(symbolLengths, table.Count, 0, rented: true));
         for (int i = 0; i < table.Count; i++)
         {
@@ -1372,7 +1394,7 @@ internal static class ArrayBlobWriter
 
         if (buffers == 0)
         {
-            ArrayPool<byte>.Shared.Return(data);
+            WorkArrays.Return(data);
         }
 
         Span<int> children = stackalloc int[1];
@@ -1427,7 +1449,7 @@ internal static class ArrayBlobWriter
         VortexBuffer lengths;
         try
         {
-            byte[] dictionary = ArrayPool<byte>.Shared.Rent(plan.DictionaryBytes);
+            byte[] dictionary = WorkArrays.Rent<byte>(plan.DictionaryBytes);
             plan.Dictionary.CopyTo(dictionary);
             dictionaryBuffer = Add(blob, new PendingBuffer(dictionary, plan.DictionaryBytes, Exponent(8), rented: true));
             dictionaryOffsetsPType = FsstPlan.IndexPType(plan.DictionaryOffsets[tokens]);
@@ -1490,7 +1512,7 @@ internal static class ArrayBlobWriter
         PType indicesPType = FsstPlan.IndexPType(rows - 1);
         int width = indicesPType.ByteWidth();
         VortexBuffer indices = arena.AllocateUninitialized(valid * width, width, out Span<byte> into);
-        int[] positions = ArrayPool<int>.Shared.Rent(Math.Max(valid, 1));
+        int[] positions = WorkArrays.Rent<int>(Math.Max(valid, 1));
         int values;
         try
         {
@@ -1533,7 +1555,7 @@ internal static class ArrayBlobWriter
         }
         finally
         {
-            ArrayPool<int>.Shared.Return(positions);
+            WorkArrays.Return(positions);
         }
 
         Span<int> children = stackalloc int[2];
@@ -1561,7 +1583,7 @@ internal static class ArrayBlobWriter
         ref ProtoWriter writer = ref blob.Metadata();
         ScalarProtobuf.WriteValue(ref writer, value);
         ReadOnlySpan<byte> scalar = writer.WrittenSpan;
-        byte[] bytes = ArrayPool<byte>.Shared.Rent(scalar.Length);
+        byte[] bytes = WorkArrays.Rent<byte>(scalar.Length);
         scalar.CopyTo(bytes);
         return Add(blob, new PendingBuffer(bytes, scalar.Length, alignmentExponent: 0, rented: true));
     }
@@ -1688,15 +1710,25 @@ internal static class ArrayBlobWriter
         int length = arena.GetNode(nodeIndex).Length;
         PType endsPType = IndexPType(length);
 
-        int ends = WriteIndexColumn(
-            blob, arena, nodeIndex, plan.Codes, endsPType, encodings, Cascade.RunEndEnds());
+        // The ends are laid out in the arena and the values gathered there already: the runs the plan rented go back.
+        int ends;
+        try
+        {
+            ends = WriteIndexColumn(
+                blob, arena, nodeIndex, plan.RunEnds, endsPType, encodings, Cascade.RunEndEnds());
+        }
+        finally
+        {
+            plan.ReleaseCodes();
+        }
+
         int valuesNode = WriteCompressed(blob, arena, values, encodings, cascade: Cascade.ValuesChild(owner));
 
         Span<int> children = stackalloc int[2];
         children[0] = ends;
         children[1] = valuesNode;
         return Node(
-            blob, encodings, "vortex.runend"u8, RunEndBytes(blob, endsPType, (ulong)plan.Codes.Length),
+            blob, encodings, "vortex.runend"u8, RunEndBytes(blob, endsPType, (ulong)plan.RunCount),
             children, []);
     }
 
@@ -1725,7 +1757,7 @@ internal static class ArrayBlobWriter
         // chooser handed over goes back to the pool rather than becoming a row vector of garbage.
         if (plan.CodesRented)
         {
-            ArrayPool<int>.Shared.Return(plan.Codes);
+            WorkArrays.Return(plan.Codes);
         }
         int valuesNode = WriteCompressed(blob, arena, values, encodings, cascade: Cascade.ValuesChild(owner));
 
@@ -1875,7 +1907,7 @@ internal static class ArrayBlobWriter
     {
         int width = ptype.ByteWidth();
         int length = values.Length * width;
-        byte[] bytes = ArrayPool<byte>.Shared.Rent(length);
+        byte[] bytes = WorkArrays.Rent<byte>(length);
         Span<ushort> indices = stackalloc ushort[1];
         indices[0] = (ushort)Add(blob, new PendingBuffer(bytes, length, Exponent(width), rented: true));
 
@@ -1989,7 +2021,7 @@ internal static class ArrayBlobWriter
         Span<byte> flat = bytes.Slice(bytes.Length - sizeof(uint) - flatLength, flatLength);
         int budget = VortexLimits.MaxFlatBufferTables;
         FlatBufferTable array = FlatBufferTable.Root(flat, ref budget);
-        int[] seen = ArrayPool<int>.Shared.Rent(64);
+        int[] seen = WorkArrays.Rent<int>(64);
         try
         {
             int count = 0;
@@ -1997,7 +2029,7 @@ internal static class ArrayBlobWriter
         }
         finally
         {
-            ArrayPool<int>.Shared.Return(seen);
+            WorkArrays.Return(seen);
         }
     }
 
@@ -2013,9 +2045,9 @@ internal static class ArrayBlobWriter
 
         if (count == seen.Length)
         {
-            int[] grown = ArrayPool<int>.Shared.Rent(count * 2);
+            int[] grown = WorkArrays.Rent<int>(count * 2);
             seen.AsSpan(0, count).CopyTo(grown);
-            ArrayPool<int>.Shared.Return(seen);
+            WorkArrays.Return(seen);
             seen = grown;
         }
 
@@ -2065,7 +2097,7 @@ internal static class ArrayBlobWriter
             : arena.Decoded(nodeIndex);
 
     /// <remarks>Writes a child that is a column in its own right, compressing it when asked.</remarks>
-    private static int WriteChild(
+    internal static int WriteChild(
         Workspace blob,
         CanonicalArena arena,
         int nodeIndex,
@@ -2201,7 +2233,7 @@ internal static class ArrayBlobWriter
         // offsets stay monotone and the reader never looks at the bytes, because validity already
         // told it not to. The values are then gathered by `ViewHeap`, each view's start in the
         // heap being the row's offset.
-        int[] lengths = ArrayPool<int>.Shared.Rent(Math.Max(rows, 1));
+        int[] lengths = WorkArrays.Rent<int>(Math.Max(rows, 1));
         int[]? offsets = null;
         VortexBuffer offsetBuffer;
         PType offsetsPType;
@@ -2227,21 +2259,21 @@ internal static class ArrayBlobWriter
             // rental queued before the gather so that the blob's `finally` hands it back. The
             // offsets are copied into the arena at their own width and go back at once.
             int heapLength = (int)heapBytes;
-            byte[] heap = ArrayPool<byte>.Shared.Rent(heapLength + ViewHeap.Slack);
+            byte[] heap = WorkArrays.Rent<byte>(heapLength + ViewHeap.Slack);
             heapBuffer = Add(blob, new PendingBuffer(heap, heapLength, 0, rented: true));
             int width = offsetsPType.ByteWidth();
             offsetBuffer = arena.AllocateUninitialized((rows + 1) * width, width, out Span<byte> offsetBytes);
-            offsets = ArrayPool<int>.Shared.Rent(rows + 1);
+            offsets = WorkArrays.Rent<int>(rows + 1);
             ViewHeap.Gather(node, lengths.AsSpan(0, rows), heap, offsets.AsSpan(0, rows));
             offsets[rows] = heapLength;
             WriteIndices(offsets.AsSpan(0, rows + 1), width, offsetBytes);
         }
         finally
         {
-            ArrayPool<int>.Shared.Return(lengths);
+            WorkArrays.Return(lengths);
             if (offsets is not null)
             {
-                ArrayPool<int>.Shared.Return(offsets);
+                WorkArrays.Return(offsets);
             }
         }
 
@@ -2532,10 +2564,22 @@ internal static class ArrayBlobWriter
         Workspace blob, CanonicalArena arena, CanonicalNode node, EncodingDictionary encodings, bool compress)
     {
         CanonicalNode shredded = arena.GetNode(node.Index);
-        int metadata = shredded.GetFieldIndex(0);
-        int residual = shredded.GetFieldIndex(1);
-        int tree = shredded.GetFieldIndex(2);
+        return Shredded(
+            blob, arena, node, encodings, compress, new FieldsOf(arena, node.Index, default),
+            arena.GetNode(shredded.GetFieldIndex(1)).DType.Nullability == Nullability.Nullable,
+            arena.GetNode(shredded.GetFieldIndex(2)).DType);
+    }
 
+    /// <summary>
+    /// Writes a shredded variant of <paramref name="node"/>'s validity whose metadata, residual and tree
+    /// <paramref name="children"/> writes, as children 0, 1 and 2, when the blob comes to each: its residual nullable
+    /// as <paramref name="residualNullable"/> says, its tree of dtype <paramref name="tree"/>.
+    /// </summary>
+    private static int Shredded<TChildren>(
+        Workspace blob, CanonicalArena arena, CanonicalNode node, EncodingDictionary encodings, bool compress,
+        TChildren children, bool residualNullable, DType tree)
+        where TChildren : IChildren
+    {
         // The core storage's children in the reader's order: the rows' validity when they carry one,
         // then the metadata, then the residual.
         Span<int> core = stackalloc int[3];
@@ -2546,18 +2590,17 @@ internal static class ArrayBlobWriter
             core[0] = validity[0];
         }
 
-        core[validityCount] = WriteChild(blob, arena, metadata, encodings, compress);
-        core[validityCount + 1] = WriteChild(blob, arena, residual, encodings, compress);
-        bool residualNullable = arena.GetNode(residual).DType.Nullability == Nullability.Nullable;
-        Span<int> children = stackalloc int[2];
-        children[0] = Node(
+        core[validityCount] = children.Write(blob, 0, encodings, compress);
+        core[validityCount + 1] = children.Write(blob, 1, encodings, compress);
+        Span<int> written = stackalloc int[2];
+        written[0] = Node(
             blob, encodings, "vortex.parquet.variant"u8, ParquetVariantBytes(blob, residualNullable),
             core[..(validityCount + 2)], []);
         bool encodes = blob.EncodesValidity;
         blob.EncodesValidity = compress;
         try
         {
-            children[1] = WriteChild(blob, arena, tree, encodings, compress);
+            written[1] = children.Write(blob, 2, encodings, compress);
         }
         finally
         {
@@ -2565,8 +2608,74 @@ internal static class ArrayBlobWriter
         }
 
         return Node(
-            blob, encodings, "vortex.variant"u8, VariantBytes(blob, DTypeProtobuf.Serialize(arena.GetNode(tree).DType)),
-            children, []);
+            blob, encodings, "vortex.variant"u8, VariantBytes(blob, DTypeProtobuf.Serialize(tree)), written, []);
+    }
+
+    /// <summary>
+    /// What writes the children of a node the caller lays out one at a time, as the blob comes to each, rather than
+    /// all of them in an arena first: a shredded variant's metadata, residual and tree, a struct's fields.
+    /// </summary>
+    internal interface IChildren
+    {
+        /// <summary>Writes child <paramref name="child"/> as <see cref="WriteChild"/> writes a column, and returns its node.</summary>
+        int Write(Workspace blob, int child, EncodingDictionary encodings, bool compress);
+    }
+
+    /// <summary>The children of a node an arena holds, each written as <see cref="WriteChild"/> writes a column.</summary>
+    private readonly struct FieldsOf(CanonicalArena arena, int node, ChunkStats stats) : IChildren
+    {
+        public int Write(Workspace blob, int child, EncodingDictionary encodings, bool compress) =>
+            WriteChild(blob, arena, arena.GetNode(node).GetFieldIndex(child), encodings, compress, stats.Field(child));
+    }
+
+    /// <summary>
+    /// Writes the struct <paramref name="frame"/> of <paramref name="arena"/>, a node of its dtype, length and validity
+    /// that holds no field, as <see cref="WriteChild"/> writes one of <paramref name="fields"/> fields: each field
+    /// written by <paramref name="children"/> when the blob comes to it.
+    /// </summary>
+    internal static int WriteStruct<TChildren>(
+        Workspace blob, CanonicalArena arena, int frame, EncodingDictionary encodings, bool compress, int fields, TChildren children)
+        where TChildren : IChildren =>
+        WritesWhole(blob, arena, frame, encodings, compress, out int whole)
+            ? whole
+            : Fields(blob, arena, arena.GetNode(frame), encodings, compress, fields, children);
+
+    /// <summary>
+    /// Writes the shredded variant <paramref name="frame"/> of <paramref name="arena"/>, a node of its dtype, length and
+    /// validity that holds no field, as <see cref="WriteChild"/> writes one that holds its metadata, residual and tree:
+    /// each written by <paramref name="children"/> when the blob comes to it, the residual nullable as
+    /// <paramref name="residualNullable"/> says, the tree of dtype <paramref name="tree"/>.
+    /// </summary>
+    internal static int WriteShredded<TChildren>(
+        Workspace blob, CanonicalArena arena, int frame, EncodingDictionary encodings, bool compress, bool residualNullable,
+        DType tree, TChildren children)
+        where TChildren : IChildren =>
+        WritesWhole(blob, arena, frame, encodings, compress, out int whole)
+            ? whole
+            : Shredded(blob, arena, arena.GetNode(frame), encodings, compress, children, residualNullable, tree);
+
+    /// <summary>
+    /// Whether the compressor writes <paramref name="frame"/> whole, without its children -- one value, nulls only --
+    /// as it would the node that holds them: <paramref name="written"/> its node then. Uncompressed, a node is written
+    /// with its children.
+    /// </summary>
+    private static bool WritesWhole(
+        Workspace blob, CanonicalArena arena, int frame, EncodingDictionary encodings, bool compress, out int written)
+    {
+        written = -1;
+        if (!compress)
+        {
+            return false;
+        }
+
+        ColumnPlan plan = Plan(blob, arena, ref frame, encodings, default, default);
+        if (plan.Scheme == ColumnScheme.None)
+        {
+            return false;
+        }
+
+        written = WriteChosen(blob, arena, frame, in plan, encodings, default, owner: null, out _);
+        return true;
     }
 
     private static ReadOnlySpan<byte> VariantBytes(Workspace blob, byte[] shreddedDType)
@@ -2588,30 +2697,37 @@ internal static class ArrayBlobWriter
 
     private static int WriteStruct(
         Workspace blob, CanonicalArena arena, CanonicalNode node, EncodingDictionary encodings,
-        bool compress, ChunkStats stats = default)
+        bool compress, ChunkStats stats = default) =>
+        Fields(blob, arena, node, encodings, compress, node.FieldCount, new FieldsOf(arena, node.Index, stats));
+
+    /// <summary>
+    /// Writes a struct of <paramref name="node"/>'s validity whose <paramref name="fields"/> fields
+    /// <paramref name="children"/> writes, when the blob comes to each.
+    /// </summary>
+    private static int Fields<TChildren>(
+        Workspace blob, CanonicalArena arena, CanonicalNode node, EncodingDictionary encodings, bool compress, int fields,
+        TChildren children)
+        where TChildren : IChildren
     {
         // A struct puts its validity first, unlike every other canonical kind; upstream's own
         // child-slot mapping does the same.
-        int fields = node.FieldCount;
         Span<int> stack = stackalloc int[16];
-        using Scratch<int> children = new Scratch<int>(fields + 1, stack);
+        using Scratch<int> written = new Scratch<int>(fields + 1, stack);
         Span<int> validity = stackalloc int[1];
         int validityCount = Validity(blob, arena, node, encodings, validity);
 
         for (int i = 0; i < fields; i++)
         {
-            children.Span[validityCount + i] = WriteChild(
-                blob, arena, arena.GetNode(node.Index).GetFieldIndex(i), encodings, compress,
-                stats.Field(i));
+            written.Span[validityCount + i] = children.Write(blob, i, encodings, compress);
         }
 
         if (validityCount == 1)
         {
-            children.Span[0] = validity[0];
+            written.Span[0] = validity[0];
         }
 
         return Node(
-            blob, encodings, "vortex.struct"u8, default, children.Span[..(fields + validityCount)], []);
+            blob, encodings, "vortex.struct"u8, default, written.Span[..(fields + validityCount)], []);
     }
 
     private static int WriteExtension(
@@ -2879,7 +2995,7 @@ internal static class ArrayBlobWriter
         {
             if (_bytes is not null)
             {
-                ArrayPool<byte>.Shared.Return(_bytes);
+                WorkArrays.Return(_bytes);
             }
         }
     }
@@ -2907,11 +3023,6 @@ internal static class ArrayBlobWriter
         private readonly byte[]? _bytes;
         private readonly VortexBuffer _view;
         private readonly bool _zeros;
-
-        internal PendingBuffer(byte[] bytes, int alignmentExponent)
-            : this(bytes, bytes.Length, alignmentExponent, rented: false)
-        {
-        }
 
         internal PendingBuffer(byte[] bytes, int length, int alignmentExponent, bool rented)
             : this(bytes, offset: 0, length, alignmentExponent, rented)
@@ -2952,6 +3063,9 @@ internal static class ArrayBlobWriter
 
         /// <summary>The pooled array to hand back, or <see langword="null"/> for a view or zeros.</summary>
         internal byte[]? Bytes => _bytes;
+
+        /// <summary>Whether the buffer is a view onto bytes an arena owns.</summary>
+        internal bool IsView => _bytes is null && !_zeros;
 
         /// <summary>Where in <see cref="Bytes"/> the buffer starts.</summary>
         internal int Offset { get; }
@@ -3096,6 +3210,13 @@ internal static class ArrayBlobWriter
         /// </summary>
         internal bool SizeFirst { get; init; }
 
+        /// <summary>
+        /// The rows of the granules a reader reads a part of a chunk by, the writer's block in a file that carries its
+        /// table of contents; 0 for a file read by its chunks alone. Every array the workspace writes answers to them, a
+        /// variant's shredded keys as well as the columns (<see cref="ColumnCompressor"/>).
+        /// </summary>
+        internal int GranuleRows { get; init; }
+
         private ZstdFrames? _frames;
 
         /// <summary>The frame table of a column compressed on <see cref="Fan"/>, rented by the first column that uses it.</summary>
@@ -3145,7 +3266,10 @@ internal static class ArrayBlobWriter
         internal (Workspace Blob, EncodingDictionary Encodings) Measure(VortexEdition target)
         {
             // Never size first: what it measures is the plan every other profile writes.
-            _measure ??= new Workspace { FrameRows = FrameRows, Fan = Fan, OwnTypes = OwnTypes, ZstdLevel = ZstdLevel };
+            _measure ??= new Workspace
+            {
+                FrameRows = FrameRows, GranuleRows = GranuleRows, Fan = Fan, OwnTypes = OwnTypes, ZstdLevel = ZstdLevel,
+            };
             _measure.ColumnLevel = ColumnLevel;
             if (_measureEncodings is null || _measureEncodings.Target != target)
             {
@@ -3155,6 +3279,52 @@ internal static class ArrayBlobWriter
             return (_measure, _measureEncodings);
         }
 
+        private CanonicalArena? _leaves;
+        private VariantShredder.Shredding?[]? _shreddings;
+
+        /// <summary>
+        /// The arena a shredded chunk lays each of its typed columns out in, alone, while the blob writes it, and empties
+        /// before the next (<see cref="VariantShredder"/>).
+        /// </summary>
+        internal CanonicalArena Leaves => _leaves ??= new CanonicalArena();
+
+        /// <summary>
+        /// The nodes of shredding <paramref name="plan"/>, which the workspace keeps from one chunk it shreds to the next
+        /// of the same plan: a few plans, a writer's variant columns, the one made longest ago giving its place.
+        /// </summary>
+        internal VariantShredder.Shredding Shredding(Types.Variants.VariantShredding plan)
+        {
+            VariantShredder.Shredding?[] kept = _shreddings ??= new VariantShredder.Shredding?[4];
+            foreach (VariantShredder.Shredding? shredding in kept)
+            {
+                if (shredding is not null && ReferenceEquals(shredding.Plan, plan))
+                {
+                    return shredding;
+                }
+            }
+
+            kept.AsSpan(0, kept.Length - 1).CopyTo(kept.AsSpan(1));
+            return kept[0] = new VariantShredder.Shredding(plan);
+        }
+
+        /// <summary>
+        /// Copies the buffers queued from <paramref name="first"/> on that view an arena's bytes into rentals of their
+        /// own, for an arena emptied before the blob is assembled: the leaves a shredded chunk writes one at a time.
+        /// </summary>
+        internal void Keep(int first)
+        {
+            for (int i = first; i < _buffers.Count; i++)
+            {
+                PendingBuffer pending = _buffers[i];
+                if (pending.IsView && pending.Length > 0)
+                {
+                    byte[] bytes = WorkArrays.Rent<byte>(pending.Length);
+                    pending.CopyTo(bytes.AsSpan(0, pending.Length));
+                    _buffers[i] = new PendingBuffer(bytes, pending.Length, pending.AlignmentExponent, rented: true);
+                }
+            }
+        }
+
         /// <summary>Drops what a blob queued without writing it: its rentals go back, its builder is cleared.</summary>
         internal void Discard()
         {
@@ -3162,7 +3332,7 @@ internal static class ArrayBlobWriter
             {
                 if (pending.Rented && pending.Bytes is byte[] rented)
                 {
-                    ArrayPool<byte>.Shared.Return(rented);
+                    WorkArrays.Return(rented);
                 }
             }
 
@@ -3197,6 +3367,7 @@ internal static class ArrayBlobWriter
         {
             Builder.Dispose();
             _metadata.Dispose();
+            _leaves?.Reset();
             ReturnCompressors();
             if (_frames is { } frames)
             {

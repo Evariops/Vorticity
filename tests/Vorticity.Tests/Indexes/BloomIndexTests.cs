@@ -15,9 +15,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Buffers;
-using Vorticity.Columns;
 using Vorticity.Expressions;
-using Vorticity.File;
 using Vorticity.Indexes;
 using Vorticity.Scanning;
 using Vorticity.Tests.Scan;
@@ -174,7 +172,7 @@ public sealed class BloomIndexTests
         await using Written written = await Written.CreateAsync(Policy());
         int present = Key(40_000);
 
-        ScanExplanation plan = await written.File.ScanBuilder().Where(Parse($"key = {present}")).ExplainAsync(ct);
+        ScanExplanation plan = await written.File.ScanBuilder().Where(Parse($"key = {present}")).ExplainAsync(analyze: true, ct);
         Assert.Equal(Blocks, plan.Blocks);
         PruningStep zones = Assert.Single(plan.Pruning, step => step.Structure == "zone map");
         PruningStep bloom = Assert.Single(plan.Pruning, step => step.Structure == "bloom filter");
@@ -186,7 +184,7 @@ public sealed class BloomIndexTests
         Assert.Equal(Blocks - bloom.BlocksPruned, plan.LiveBlocks);
         Assert.True(bloom.SegmentsRead > 0);
 
-        ScanExplanation off = await written.File.ScanBuilder().Where(Parse($"key = {present}")).WithIndexes(false).ExplainAsync(ct);
+        ScanExplanation off = await written.File.ScanBuilder().Where(Parse($"key = {present}")).WithIndexes(false).ExplainAsync(analyze: true, ct);
         Assert.Equal(Blocks, off.LiveBlocks);
         Assert.DoesNotContain(off.Pruning, step => step.Structure == "bloom filter");
     }
@@ -197,7 +195,7 @@ public sealed class BloomIndexTests
         CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         await using Written written = await Written.CreateAsync(Policy(), textBounds: false);
-        ScanExplanation plan = await written.File.ScanBuilder().Where(Parse("name = nope")).ExplainAsync(ct);
+        ScanExplanation plan = await written.File.ScanBuilder().Where(Parse("name = nope")).ExplainAsync(analyze: true, ct);
 
         PruningStep bloom = Assert.Single(plan.Pruning, step => step.Structure == "bloom filter");
         Assert.True(plan.LiveBlocks == 0, string.Join("; ", plan.Pruning));
@@ -251,7 +249,7 @@ public sealed class BloomIndexTests
         IndexDirectory directory = Assert.IsType<IndexDirectory>(await written.File.ReadIndexDirectoryAsync(ct));
         Assert.Equal(3, directory.Entries.Count);
 
-        ScanExplanation plan = await written.File.ScanBuilder().Where(Parse($"key = {present}")).ExplainAsync(ct);
+        ScanExplanation plan = await written.File.ScanBuilder().Where(Parse($"key = {present}")).ExplainAsync(analyze: true, ct);
         PruningStep bloom = Assert.Single(plan.Pruning, step => step.Structure == "bloom filter");
 
         // The root; the four generation nodes, one region; then the leaves of each generation still
@@ -294,7 +292,7 @@ public sealed class BloomIndexTests
             VortexExpr filter = Parse($"key = {present}");
             Assert.Equal(Oracle($"key = {present}"), await file.ScanBuilder().Where(filter).CountAsync(ct));
 
-            ScanExplanation plan = await file.ScanBuilder().Where(filter).ExplainAsync(ct);
+            ScanExplanation plan = await file.ScanBuilder().Where(filter).ExplainAsync(analyze: true, ct);
             PruningStep bloom = Assert.Single(plan.Pruning, step => step.Structure == "bloom filter");
             Assert.Equal(0, bloom.BlocksPruned);
         }
@@ -344,7 +342,8 @@ public sealed class BloomIndexTests
         // differ. The bound is the footer's own order of magnitude; anything past it is payload.
         Assert.InRange(refused.Length - none.Length, 0, 1_024);
 
-        // The same question of the indexer, which walks a written file and appends to it.
+        // The same question of the indexer, which walks a written file and appends to it: its footer again behind the first,
+        // a few kilobytes, and no payload.
         string appended = System.IO.Path.Combine(
             System.IO.Path.GetTempPath(), $"vorticity-bloom-{Guid.NewGuid():N}.vortex");
         System.IO.File.Copy(none.Path, appended);
@@ -352,7 +351,7 @@ public sealed class BloomIndexTests
         {
             await VortexFileIndexer.AppendIndexesAsync(
                 appended, Policy(), new VortexWriteOptions { IndexBudgetPerMille = 1 }, TestContext.Current.CancellationToken);
-            Assert.InRange(new System.IO.FileInfo(appended).Length - none.Length, 0, 4_096);
+            Assert.InRange(new System.IO.FileInfo(appended).Length - none.Length, 0, 8_192);
         }
         finally
         {
@@ -446,8 +445,39 @@ public sealed class BloomIndexTests
             await written.File.ScanBuilder().Where(Parse($"key = {present}")).WithMetrics(on).CountAsync(ct),
             await written.File.ScanBuilder().Where(Parse($"key = {present}")).WithMetrics(off).WithIndexes(false).CountAsync(ct));
 
-        // With the filters, a handful of filter segments against a full decode of every block.
-        Assert.True(on.ValuesDecoded < off.ValuesDecoded / 8, $"{on.ValuesDecoded} decoded against {off.ValuesDecoded}");
+        // With the filters, every block but a handful ruled out; without them, none is, every block read and its encoding
+        // answering the comparison.
+        Assert.True(on.BlocksPruned >= Blocks - 2, $"{on.BlocksPruned} blocks of {Blocks} ruled out");
+        Assert.Equal(0, off.BlocksPruned);
+    }
+
+    /// <summary>
+    /// A count that leaves a value out, <c>key != v</c> or <c>NOT key IN (v, w)</c>, takes the rows of every block the
+    /// Bloom filters prove holds none of it from the zone maps (the query path plan, B2): the key holds no null there, so
+    /// every row is counted, and only the block or two the values may lie in is decoded. Without the indexes, every block
+    /// spans the key's range and is decoded.
+    /// </summary>
+    [Fact]
+    public async Task ACountThatLeavesAValueOutCountsTheBlocksTheFiltersProveItAbsentFrom()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Decoders.EnsureRegistered();
+        await using Written written = await Written.CreateAsync(Policy());
+        int present = Key(40_000);
+        int alsoPresent = Key(123);
+        string other = string.Create(CultureInfo.InvariantCulture, $"key != {present}");
+        string set = string.Create(CultureInfo.InvariantCulture, $"key in {present},{alsoPresent}");
+        foreach ((string text, VortexExpr filter, long expected) in ((string, VortexExpr, long)[])[(other, Parse(other), Oracle(other)), ("not " + set, Expr.Not(Parse(set)), Rows - Oracle(set))])
+        {
+            long counted = await written.File.ScanBuilder().Where(filter).CountAsync(ct);
+            Assert.Equal(expected, counted);
+            Assert.Equal(counted, await written.File.ScanBuilder().Where(filter).WithIndexes(false).CountAsync(ct));
+            ScanExplanation proven = await written.File.ScanBuilder().Where(filter).ExplainAsync(analyze: true, ct);
+            ScanExplanation plain = await written.File.ScanBuilder().Where(filter).WithIndexes(false).ExplainAsync(analyze: true, ct);
+            Assert.True(proven.Count!.SplitsProven >= Blocks - 4, $"{text}: {proven.Count.SplitsProven} blocks proven with the filters");
+            Assert.True(proven.Count.SplitsDecoded <= 4, $"{text}: {proven.Count.SplitsDecoded} blocks decoded with the filters");
+            Assert.Equal(0, plain.Count!.SplitsProven);
+        }
     }
 
     // ------------------------------------------------------------------------------ oracle

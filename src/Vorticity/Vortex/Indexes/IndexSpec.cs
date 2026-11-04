@@ -30,6 +30,9 @@ internal enum IndexPolicyKind
 
     /// <summary>Value to blocks through the value's hash.</summary>
     HashedPostings = 7,
+
+    /// <summary>Token to blocks: the words of a text.</summary>
+    TokenPostings = 8,
 }
 
 /// <summary>The index policy of one column.</summary>
@@ -100,9 +103,9 @@ internal readonly struct IndexSpec : IEquatable<IndexSpec>
     /// a suggestion. A required index still counts toward the budget — it has first claim on it, not
     /// immunity from arithmetic — so the optional ones around it are abandoned first; if the required
     /// ones alone are over it, <c>CompleteAsync</c> throws and names them rather than write a file
-    /// without them. A dataset's clustering run is the exception: on a narrow table a run over one
-    /// column is as large as that column, so no object is ever big enough to bring it under the
-    /// budget, and the dataset writes it kept whatever the budget says.
+    /// without them. A dataset's declared identifiers are the exception: their hashed postings are
+    /// what a lookup reads in place of the object's rows, and the dataset writes them kept whatever
+    /// the budget says (<see cref="VortexWriteOptions.BudgetSparesRequired"/>).
     /// </remarks>
     public bool Required { get; }
 
@@ -190,6 +193,12 @@ internal readonly struct IndexSpec : IEquatable<IndexSpec>
     public static IndexSpec NgramPostings(bool caseInsensitive = false) => new IndexSpec(
         IndexPolicyKind.NgramPostings, 0, 0, 0, -1, BloomHash.XxHash3, caseInsensitive);
 
+    /// <summary>Token to blocks, for <c>HasToken</c> and the whole words of <c>Contains</c> and <c>Like</c> (spec G, 6).</summary>
+    /// <param name="caseInsensitive">Whether tokens are ASCII-lower-cased on both sides.</param>
+    /// <returns>The policy.</returns>
+    public static IndexSpec TokenPostings(bool caseInsensitive = false) => new IndexSpec(
+        IndexPolicyKind.TokenPostings, 0, 0, 0, -1, BloomHash.XxHash3, caseInsensitive);
+
     /// <summary>A split-block Bloom filter.</summary>
     /// <param name="falsePositivePpm">
     /// The target false-positive rate as parts per million, in <c>[1, 500 000]</c>. Default 1 %.
@@ -250,7 +259,7 @@ internal readonly struct IndexSpec : IEquatable<IndexSpec>
         int kind, int fppPpm, int resolutions, int maxBlocks, int minDistinct, int hash,
         bool caseInsensitive, int segmentEntries = 0, bool required = false)
     {
-        IndexPolicyKind policy = kind is >= (int)IndexPolicyKind.None and <= (int)IndexPolicyKind.HashedPostings
+        IndexPolicyKind policy = kind is >= (int)IndexPolicyKind.None and <= (int)IndexPolicyKind.TokenPostings
             ? (IndexPolicyKind)kind
             : IndexPolicyKind.None;
         return new IndexSpec(

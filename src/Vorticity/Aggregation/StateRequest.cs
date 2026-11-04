@@ -33,6 +33,9 @@ internal sealed class StateRequest
     /// <summary>What ends the name of a key's column whose own name a column of states could take (<see cref="KeyColumn"/>).</summary>
     private const string KeyMark = "#key";
 
+    /// <summary>The first keys of a partial's batches, by their place among the plan's (<see cref="PartialKey"/>), made once.</summary>
+    private static readonly FieldExpr[] PartialFields = Array.ConvertAll(Numbers.Upto(16).ToArray(), static k => (FieldExpr)new ColumnFieldExpr([PartialKey(k)]));
+
     // The words that end the name of a column of states, after a dot and the name of its measure or key.
     private const string ValuesWord = "values";
     private const string LeastWord = "min";
@@ -54,6 +57,16 @@ internal sealed class StateRequest
     /// none of whose keys is named so keeps the names it always had.
     /// </summary>
     internal static string KeyColumn(string name) => Reserved(name) ? name + KeyMark : name;
+
+    /// <summary>
+    /// The name of key <paramref name="key"/> of a plan in a partial's batches (<see cref="RecordBatch.KeysApplied"/>),
+    /// which carry each key as its functions gave it: no column of states ends so, and no two keys share it, as two keys of
+    /// the same column through other functions would.
+    /// </summary>
+    internal static string PartialKey(int key) => KeyMark + key.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+    /// <summary>The field of key <paramref name="key"/> in a partial's batches (<see cref="PartialKey"/>).</summary>
+    internal static FieldExpr PartialField(int key) => key < PartialFields.Length ? PartialFields[key] : new ColumnFieldExpr([PartialKey(key)]);
 
     /// <summary>
     /// The key <paramref name="key"/> as a batch of states carries it: its column under the name <see cref="KeyColumn"/>
@@ -134,23 +147,6 @@ internal sealed class StateRequest
 
     /// <summary>Per aggregate of the plan, what it is: which of a column's states it reads, its sum or one of its extremes.</summary>
     internal IReadOnlyList<AggregateKind> Kinds { get; }
-
-    /// <summary>Whether an aggregate reads <paramref name="column"/>'s sum (a sum or a mean), its least (a minimum), its greatest (a maximum).</summary>
-    internal (bool Sum, bool Least, bool Greatest) Reads(string column)
-    {
-        (bool sum, bool least, bool greatest) = (false, false, false);
-        for (int i = 0; i < Inputs.Count; i++)
-        {
-            if (string.Equals(Inputs[i], column, System.StringComparison.Ordinal))
-            {
-                sum |= Kinds[i] is AggregateKind.Sum or AggregateKind.Average;
-                least |= Kinds[i] == AggregateKind.Min;
-                greatest |= Kinds[i] == AggregateKind.Max;
-            }
-        }
-
-        return (sum, least, greatest);
-    }
 
     /// <summary>The column of how many values of <paramref name="column"/> a row of states folds.</summary>
     internal static string ValuesOf(string column) => column + "." + ValuesWord;
@@ -292,10 +288,10 @@ internal sealed class StateRequest
     /// <summary>Whether an aggregate of <paramref name="kind"/> folds a column of a batch of states, the values it is keyed by, rather than states.</summary>
     internal static bool FoldsValues(AggregateKind kind) => kind is AggregateKind.CountDistinct or AggregateKind.ApproximateCountDistinct;
 
-    /// <summary>A key a batch of states carries: a top-level column, functions of one, or a path a synopsis counts.</summary>
+    /// <summary>A key a batch of states carries: a top-level column, functions of one, a path a synopsis counts, or a nested key's read as an integer or a text, which the granules' statistics may list.</summary>
     private static bool Keyable(FieldExpr field) => field switch
     {
-        VariantFieldExpr path => path.CountedClass is not null,
+        VariantFieldExpr path => path.CountedClass is not null || (path.KeyName is not null && path.Read is VariantRead.AsInt64 or VariantRead.AsString && Column(path.Column)),
         FunctionFieldExpr function => function.Column is not VariantFieldExpr && Keyable(function.Column),
         _ => Column(field),
     };

@@ -385,7 +385,7 @@ internal static class TestBuffers
         return bytes;
     }
 
-    /// <summary>An LSB-first bitmap of <paramref name="bits"/>.</summary>
+    /// <summary>The little-endian bytes of <paramref name="values"/>.</summary>
     internal static byte[] Double(params double[] values)
     {
         byte[] bytes = new byte[values.Length * sizeof(double)];

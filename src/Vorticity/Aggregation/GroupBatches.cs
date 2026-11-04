@@ -1,5 +1,4 @@
 using System;
-using System.Buffers;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
@@ -34,13 +33,14 @@ internal sealed class AggregationQuery : ResultQuery
 
     private AggregationQuery(
         AggregationHost host, AggregationPlan plan, IResultNode[] nodes, ColumnShape[] keys, (VortexSchema Record, Type Type)? typed, long skip, long take, VortexExpr? rows,
-        GroupOperator[] operators)
+        GroupOperator[] operators, bool exports = false)
     {
         Host = host;
         Plan = plan;
         Nodes = nodes;
         Keys = keys;
         _typed = typed;
+        Exports = exports;
         Columns = NewColumns();
         Skip = skip;
         Take = take;
@@ -51,6 +51,45 @@ internal sealed class AggregationQuery : ResultQuery
 
     /// <summary>The conjuncts of the filters on groups that name only the key: they filter the rows.</summary>
     internal VortexExpr? RowFilter { get; }
+
+    /// <summary>The question the query asks: an aggregate of its scan's rows by its keys, then its operators on its groups.</summary>
+    internal LogicalQuery? Logical => Host.Spec().Query?.Aggregating(Plan, Operators);
+
+    /// <summary>
+    /// Whether the query gives its groups' states rather than their answers: a part's (<see cref="Partial"/>), whose columns
+    /// are those of rows of states (<see cref="AggregationPartials.Columns"/>), and which the file statistics settle nothing of.
+    /// </summary>
+    internal bool Exports { get; }
+
+    /// <summary>
+    /// The same query giving its groups' states, a part's: no operator on its groups nor window, which the merge applies,
+    /// its columns those of rows of states.
+    /// </summary>
+    /// <exception cref="NotSupportedException">A state does not answer one of its aggregates whole.</exception>
+    internal AggregationQuery Partial()
+    {
+        AggregationPartials.Check(Plan);
+        return new AggregationQuery(Host, Plan, Nodes, Keys, null, 0, long.MaxValue, RowFilter, [], exports: true);
+    }
+
+    /// <summary>
+    /// The same query giving its groups' states over <paramref name="host"/>, a range an estimate draws, through a plan of its
+    /// own: the ranges an estimate reads at once each run theirs, and a plan keeps what its last run did.
+    /// </summary>
+    internal AggregationQuery Ranged(AggregationHost host)
+    {
+        SymNode[] results = Array.ConvertAll(Nodes, static node => (SymNode)node);
+        AggregationPlan plan = new AggregationPlan(results, Keys);
+        if (plan.Aggregates.Length != Plan.Aggregates.Length)
+        {
+            throw new InvalidOperationException("A query whose operators read aggregates of their own runs no range of an estimate.");
+        }
+
+        return new AggregationQuery(host, plan, Nodes, Keys, null, 0, long.MaxValue, RowFilter, [], exports: true);
+    }
+
+    /// <summary>The same query over <paramref name="host"/>, a merge of its parts' partials, which applied its filter on the rows.</summary>
+    internal AggregationQuery Merged(PartialsHost host) => new AggregationQuery(host, Plan, Nodes, Keys, _typed, Skip, Take, null, Operators);
 
     /// <summary>
     /// The first operator on groups that reads a column of a chosen row, before which those columns
@@ -143,6 +182,11 @@ internal sealed class AggregationQuery : ResultQuery
     /// </summary>
     internal ResultColumn[] NewColumns()
     {
+        if (Exports)
+        {
+            return AggregationPartials.Columns(Plan, Keys);
+        }
+
         if (_typed is not { } typed)
         {
             return Natural(Nodes, Keys);
@@ -181,15 +225,15 @@ internal sealed class AggregationQuery : ResultQuery
     /// order a key streams in, so a pass that takes them delivers its groups once it has run.
     /// </summary>
     private StateRequest? States =>
-        Host.Source.KeepsStates && Host.Spec().Options.UseSynopses
+        Host.Source.States is not null && Host.Spec().Options.UseSynopses
             ? StateRequest.Of(Plan, new AggregateSlot?[Plan.Aggregates.Length], top: null)
             : null;
 
     internal override GroupMetrics? Grouping => Plan.Grouped ? Plan.Metrics() : null;
 
-    internal override async ValueTask<ScanPlan> ExplainAsync(CancellationToken cancellationToken)
+    internal override async ValueTask<ScanPlan> ExplainAsync(bool analyze, CancellationToken cancellationToken)
     {
-        ScanPlan scan = await Host.ExplainAsync(Plan, cancellationToken, RowFilter).ConfigureAwait(false);
+        ScanPlan scan = await Host.ExplainAsync(Plan, analyze, cancellationToken, RowFilter, Operators).ConfigureAwait(false);
         return Plan.Grouped ? scan with { Grouping = GroupPlans.Of(this) } : scan;
     }
 
@@ -260,12 +304,6 @@ internal sealed class GroupBatches : IAsyncEnumerator<RecordBatch>
 
     /// <summary>The current batch, valid until the next <see cref="MoveNextAsync"/>.</summary>
     public RecordBatch Current => _current ?? throw new InvalidOperationException("The stream has no current batch.");
-
-    /// <summary>The result's columns.</summary>
-    internal VortexSchema Schema => _query.Schema;
-
-    /// <summary>The query's run: the merged states and keys, once the first batch has been asked for.</summary>
-    internal AggregationOutcome? Outcome => _outcome;
 
     /// <summary>Moves to the next batch: the first runs the query, the others are built from its groups without an await.</summary>
     /// <returns>Whether there is one.</returns>
@@ -659,7 +697,7 @@ internal sealed class GroupBatches : IAsyncEnumerator<RecordBatch>
     /// <summary>
     /// The nodes an arena of a result's batches starts with room for: its struct and twice its columns, a column's and
     /// its validity's or its views'. A record is a hundred bytes or so, and sixty-four of them were a sixth of what a
-    /// warm group by answered from the tables allocated; a result of more columns grows its arena once.
+    /// warm group by answered from the synopsis tables of the time allocated; a result of more columns grows its arena once.
     /// </summary>
     internal static int ResultNodes(int columns) => Math.Max(4, 1 + (2 * columns));
 

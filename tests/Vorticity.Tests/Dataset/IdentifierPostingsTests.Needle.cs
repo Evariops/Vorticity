@@ -6,7 +6,6 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 using Vorticity.Dataset;
-using Vorticity.Expressions;
 using Xunit;
 
 namespace Vorticity.Tests.Dataset;
@@ -104,10 +103,12 @@ public sealed partial class IdentifierPostingsTests
     {
         VortexDataset dataset = await VortexDataset.CreateAsync(store, Request.Schema, new DatasetOptions
         {
-            ClusteringKey = [nameof(Request.At)],
+            Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(Request.At)).Truncate(CalendarUnit.Hour), SortKey = [LayoutValue.Column(nameof(Request.At))], Organization = LayoutOrganization.Leveled },
             Identifiers = [nameof(Request.RequestId)],
-            Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Hour, SliceTargetRows = 500 },
-            LookupFooterBytes = 0,
+            ContentsObjectBytes = 0,
+
+            // A request priced at nothing: a lookup, a request a column, weighs less than any footer an open reads.
+            CostProfile = Vorticity.IO.CostProfile.Memory,
         }, Ct);
         Random random = new Random(seed);
         List<Request> appended = [];

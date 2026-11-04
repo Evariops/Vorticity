@@ -5,7 +5,6 @@ using System.Numerics;
 using System.Runtime.InteropServices;
 using Vorticity.Aggregating;
 using Vorticity.Arrays;
-using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Compute;
 using Vorticity.Expressions;
 using Vorticity.Parquet.Metadata;

@@ -669,32 +669,6 @@ internal static partial class FastLanes
         }
     }
 
-    /// <summary>
-    /// Unpacks one value out of a 1024-element block, without touching the other 1023.
-    /// </summary>
-    /// <typeparam name="T">The unsigned element type.</typeparam>
-    /// <param name="packed">Exactly <c>lanes * bitWidth</c> words: one block.</param>
-    /// <param name="bitWidth">Bits per packed value, in <c>(0, sizeof(T) * 8)</c>.</param>
-    /// <param name="index">A logical index in <c>[0, 1024)</c>.</param>
-    /// <returns>The value at that index.</returns>
-    /// <remarks>
-    /// This is what makes `fastlanes.bitpacked` worth specializing for a take, and it is a property
-    /// of the layout rather than a trick: the bit-packing index is invertible in closed form, so a
-    /// logical index maps straight to the (row, lane) pair holding it -- `PackedRowTable` and
-    /// `PackedLaneTable` are that inverse, precomputed -- and from there the same shift and mask
-    /// the bulk kernel uses extracts the one value. No block is unpacked and nothing is allocated.
-    ///
-    /// The two degenerate widths are the caller's to handle: a zero bit width means every value is
-    /// zero, and a bit width equal to the element width means the packed word is the value.
-    /// Neither reaches the arithmetic below.
-    /// </remarks>
-    public static T UnpackOne<T>(ReadOnlySpan<T> packed, int bitWidth, int index)
-        where T : unmanaged, IBinaryInteger<T>, IUnsignedNumber<T>
-    {
-        int elementBits = Unsafe.SizeOf<T>() * 8;
-        return UnpackAt(packed, bitWidth, PackedRowTable(elementBits)[index], PackedLaneTable(elementBits)[index]);
-    }
-
     /// <summary>The value at <c>(row, lane)</c> of one packed block.</summary>
     /// <typeparam name="T">The unsigned element type.</typeparam>
     /// <param name="packed">Exactly <c>lanes * bitWidth</c> words: one block.</param>

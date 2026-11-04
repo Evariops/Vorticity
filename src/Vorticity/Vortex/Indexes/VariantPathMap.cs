@@ -5,7 +5,6 @@ using System.Linq;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
-using Vorticity.File;
 using Vorticity.Serialization.FlatBuffers;
 using Vorticity.Serialization.Protobuf;
 using Vorticity.Serialization.Schemas;
@@ -287,6 +286,12 @@ internal sealed class VariantPathMap
     {
         private readonly List<(int Chunk, PathChunk Entry)>[] _chunks = [.. new object[keys.Count].Select(static _ => new List<(int, PathChunk)>())];
 
+        // One builder for every key's tree of every chunk, cleared between them, and each key's dtype as it was serialized
+        // last, which its next chunks share: made anew for each key of each chunk, a consolidation's builders and dtypes
+        // came to some 25 MB.
+        private readonly FlatBufferBuilder _flat = new FlatBufferBuilder();
+        private readonly (Types.DType DType, byte[] Bytes)?[] _dtypes = new (Types.DType, byte[])?[keys.Count];
+
         /// <summary>The keys, in their order in the column's tree.</summary>
         internal IReadOnlyList<string> Keys => keys;
 
@@ -348,7 +353,8 @@ internal sealed class VariantPathMap
                     continue;
                 }
 
-                using FlatBufferBuilder builder = new FlatBufferBuilder();
+                FlatBufferBuilder builder = _flat;
+                builder.Clear();
                 int root = Copy(builder, node, count == 0 ? 0 : low);
                 BufferSpec[] own = count == 0 ? [] : specs[low..(high + 1)].ToArray();
                 byte alignment = 0;
@@ -370,14 +376,30 @@ internal sealed class VariantPathMap
                 long end = count == 0 ? 0 : starts[high] + specs[high].Length;
                 LastBytes[key] = end - first;
                 _chunks[key].Add((chunk, new PathChunk(
-                    offset + (ulong)first, checked((uint)(end - first)), alignment, 0, 0,
-                    Types.Serialization.DTypeProtobuf.Serialize(treeDType.GetField(field)), bytes)));
+                    offset + (ulong)first, checked((uint)(end - first)), alignment, 0, 0, DTypeBytes(key, treeDType.GetField(field)), bytes)));
             }
         }
 
-        /// <summary>The map of the chunks noted, the column's chunks holding <paramref name="chunkRows"/> rows each, under the file's <paramref name="encodings"/>.</summary>
+        /// <summary>The bytes of <paramref name="dtype"/>, key <paramref name="key"/>'s in a chunk: those of its chunk before when it is the same.</summary>
+        private byte[] DTypeBytes(int key, Types.DType dtype)
+        {
+            if (_dtypes[key] is { } last && last.DType.Equals(dtype))
+            {
+                return last.Bytes;
+            }
+
+            byte[] bytes = Types.Serialization.DTypeProtobuf.Serialize(dtype);
+            _dtypes[key] = (dtype, bytes);
+            return bytes;
+        }
+
+        /// <summary>
+        /// The map of the chunks noted, the column's chunks holding <paramref name="chunkRows"/> rows each, under the file's
+        /// <paramref name="encodings"/>: the builder's last use, which gives its scratch back.
+        /// </summary>
         internal VariantPathMap Build(IReadOnlyList<long> chunkRows, IReadOnlyList<string> encodings)
         {
+            _flat.Dispose();
             long[] firsts = new long[chunkRows.Count + 1];
             for (int chunk = 0; chunk < chunkRows.Count; chunk++)
             {
@@ -409,14 +431,16 @@ internal sealed class VariantPathMap
         /// <summary>Writes <paramref name="node"/>'s subtree again, its buffer indices less <paramref name="low"/>, its statistics left out.</summary>
         private static int Copy(FlatBufferBuilder builder, ArrayNodeView node, int low)
         {
-            int[] children = new int[node.ChildCount];
+            // On the stack but for a wide node: a node's children and buffers made anew came to 11 MB of a consolidation.
+            int count = node.ChildCount;
+            Span<int> children = count <= 32 ? stackalloc int[count] : new int[count];
             for (int i = 0; i < children.Length; i++)
             {
                 children[i] = Copy(builder, node.GetChild(i), low);
             }
 
             ReadOnlySpan<ushort> indices = node.BufferIndices;
-            ushort[] buffers = new ushort[indices.Length];
+            Span<ushort> buffers = indices.Length <= 32 ? stackalloc ushort[indices.Length] : new ushort[indices.Length];
             for (int i = 0; i < buffers.Length; i++)
             {
                 buffers[i] = (ushort)(indices[i] - low);

@@ -337,6 +337,20 @@ internal sealed class ArrayNodeArena
         return ref _stats[index];
     }
 
+    /// <summary>
+    /// The place in the blob's list of buffers of node buffer slot <paramref name="nodeBufferSlot"/>: what a chunk's geometry
+    /// names a buffer by, whether or not the buffers were resolved.
+    /// </summary>
+    internal int GlobalBufferIndex(int nodeBufferSlot)
+    {
+        if ((uint)nodeBufferSlot >= (uint)_nodeBufferIndexCount)
+        {
+            ArraysThrow.BufferIndex(nodeBufferSlot, _nodeBufferIndexCount);
+        }
+
+        return _nodeBufferIndices[nodeBufferSlot];
+    }
+
     internal VortexBuffer ResolveBuffer(int nodeBufferSlot)
     {
         // Both indirections were validated at load, so this is a pair of array reads on the hot

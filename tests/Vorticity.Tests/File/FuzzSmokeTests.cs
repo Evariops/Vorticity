@@ -9,11 +9,9 @@
 //
 // The full campaign lives in tests/Vorticity.Fuzz and is what actually explores.
 using System;
-using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Columns;
-using Vorticity.File;
 using Vorticity.IO;
 using Vorticity.Scanning;
 using Vorticity.Tests.Scan;

@@ -1,54 +1,32 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Text;
 
 namespace Vorticity.Types.Variants;
 
 /// <summary>
-/// The shredding an object's rows pay for, from their census: a path is shredded when the bytes its
-/// occurrences no longer take in the residual pass what its typed column takes over every row of the
-/// chunks that shred it, nulls included, and the fixed cost of the path in each chunk, in the class
-/// most of its values hold. When more paths pay than a chunk's encoding tree may hold, those that save
-/// the most are kept.
+/// The shredding an object's rows take, from their census (spec E, 2): every path whose dominant class the object holds
+/// <see cref="LeastValues"/> values of or more has its typed column, a stream of its own, dense, or sparse where the
+/// compressor finds nine nulls in ten (<c>vortex.sparse</c>); a rarer path stays in the residual, where the path
+/// directory says which granules hold it. When more paths qualify than a chunk's encoding tree may hold, those held most
+/// are kept.
 /// </summary>
 /// <remarks>
 /// <para>
-/// The constants were measured on one chunk of 100 000 rows (<c>vortex-queries --micro shredcost</c>),
-/// a hundred paths held by every row and by the first half of the rows. A shredded path
-/// held by one row adds 154 to 217 bytes to its chunk: its typed column, its validity, their encodings
-/// and its name in the tree's dtype, and 4 to 10 tables to the chunk's encoding tree. An occurrence in
-/// the residual takes, once compressed, 3.6 bytes for an integer, 3.2 for a double, 2.7 for a text and
-/// 0.7 for a boolean; a row of the typed column takes 2.1, 2.0, 1.1 and 0.55, a null row as much as
-/// another, since its slot is written. So an integer path held by every row saves 1.5 bytes an
-/// occurrence, and one held by half the rows costs more than it saves. Provisional: measured on drawn
-/// attributes, to measure again on real mixes, and the null slots drop once rows are sorted by shape.
-/// </para>
-/// <para>
-/// The bytes are the lower bound of what a path saves: a question over a shredded path also reads its
-/// typed column alone, where it would parse the residual of every row.
+/// No saving in bytes decides: a sparse stream of <c>n</c> values takes about <c>6 n</c> bytes, its positions and its
+/// values, where the residual took about <c>3.6 n</c> for integers, and a question on the path then reads its values
+/// alone, where it parsed the residual of every row that holds it. A shredded path adds 154 to 217 bytes to each chunk and
+/// 4 to 10 tables to the chunk's encoding tree (measured on one chunk of 100 000 rows, <c>vortex-queries --micro
+/// shredcost</c>); half the tables a traversal may visit leave about 50 000 paths a chunk.
 /// </para>
 /// </remarks>
 internal static class ShreddingChoice
 {
-    /// <summary>The bytes a shredded path adds to each chunk, its name aside: the upper end of 154 to 217 measured, less the name.</summary>
-    internal const int PathBytes = 200;
+    /// <summary>The values of its dominant class an object holds of a path under which the path stays in the residual.</summary>
+    internal const long LeastValues = 2_048;
 
     /// <summary>The tables a shredded path adds to a chunk's encoding tree: the upper end of 4 to 10 measured.</summary>
     internal const int PathTables = 10;
-
-    /// <summary>The bytes an occurrence takes in the residual, by class: integer, double, text, boolean.</summary>
-    private static readonly double[] ResidualBytes = [3.6, 3.2, 2.7, 0.68];
-
-    /// <summary>The bytes a row of a typed column takes, a null row as much as another, by class.</summary>
-    private static readonly double[] TypedBytes = [2.1, 2.0, 1.1, 0.55];
-
-    /// <summary>The bytes an occurrence of <paramref name="class"/> takes in the residual, compressed.</summary>
-    internal static double ResidualBytesOf(VariantClass @class) => ResidualBytes[(int)@class];
-
-    /// <summary>The bytes shredding <paramref name="occurrences"/> of a class over <paramref name="rows"/> rows saves, before the path's fixed cost.</summary>
-    internal static double Saving(VariantClass @class, long occurrences, long rows) =>
-        (occurrences * ResidualBytes[(int)@class]) - (rows * TypedBytes[(int)@class]);
 
     /// <summary>
     /// The rows of a chunk of a shredded variant column: long chunks of its own, so a day of 4.3 × 10⁹
@@ -62,9 +40,6 @@ internal static class ShreddingChoice
     /// </summary>
     internal const int TableBudget = VortexLimits.MaxFlatBufferTables / 2;
 
-    /// <summary>The chunks a shredded variant column of <paramref name="rows"/> rows is written in.</summary>
-    internal static long ChunksOf(long rows) => Math.Max(1, (rows + ChunkRows - 1) / ChunkRows);
-
     /// <summary>
     /// The chunk target, in bytes, that gives the variant column of <paramref name="census"/>'s rows
     /// chunks of about <see cref="ChunkRows"/> rows.
@@ -76,22 +51,21 @@ internal static class ShreddingChoice
     }
 
     /// <summary>
-    /// The shredding the rows of <paramref name="census"/> pay for, written in chunks of
-    /// <see cref="ChunkRows"/>, or null when no path does.
+    /// The shredding the rows of <paramref name="census"/> take, written in chunks of <see cref="ChunkRows"/>, or null when
+    /// no path qualifies.
     /// </summary>
     /// <param name="census">The rows' paths, counted.</param>
     /// <param name="tableBudget">The tables a chunk's tree may give its paths.</param>
     /// <param name="required">
-    /// First-level keys shredded in their class wherever a row holds one of that class, whatever they
-    /// save, and first to keep: a dataset's identifiers among the attributes, whose index a key in the
-    /// residual could not have.
+    /// First-level keys shredded in their class wherever a row holds one of that class, however few, and first to keep: a
+    /// dataset's identifiers among the attributes, whose index a key in the residual could not have.
     /// </param>
-    internal static VariantShredding? Choose(PathCensus census, int tableBudget = TableBudget, IReadOnlyDictionary<string, VariantClass>? required = null)
+    internal static VariantShredding? Choose(
+        PathCensus census, int tableBudget = TableBudget, IReadOnlyDictionary<string, VariantClass>? required = null)
     {
         ArgumentNullException.ThrowIfNull(census);
-        long chunks = ChunksOf(census.Rows);
         List<Candidate> candidates = [];
-        Collect(census.Root, [], census.Rows, chunks, candidates, required);
+        Collect(census.Root, [], candidates, required);
         if (candidates.Count == 0)
         {
             return null;
@@ -100,9 +74,9 @@ internal static class ShreddingChoice
         int most = Math.Max(1, tableBudget / PathTables);
         if (candidates.Count > most)
         {
-            // The paths that save the most, ties by path, so that two writers of one object choose alike.
-            candidates.Sort(static (left, right) => right.Net != left.Net
-                ? right.Net.CompareTo(left.Net)
+            // The paths held most, ties by path, so that two writers of one object choose alike.
+            candidates.Sort(static (left, right) => right.Held != left.Held
+                ? right.Held.CompareTo(left.Held)
                 : string.CompareOrdinal(string.Join('\0', left.Path), string.Join('\0', right.Path)));
             candidates.RemoveRange(most, candidates.Count - most);
         }
@@ -110,35 +84,35 @@ internal static class ShreddingChoice
         return Build(candidates, 0);
     }
 
-    /// <summary>The paths under <paramref name="node"/> that pay for themselves over the <paramref name="rows"/> rows of <paramref name="chunks"/> chunks.</summary>
+    /// <summary>
+    /// The paths under <paramref name="node"/> that hold <see cref="LeastValues"/> values of their dominant class or more,
+    /// and the first-level keys <paramref name="required"/> names.
+    /// </summary>
     private static void Collect(
-        PathCensus.PathCount node, string[] path, long rows, long chunks, List<Candidate> into, IReadOnlyDictionary<string, VariantClass>? required)
+        PathCensus.PathCount node, string[] path, List<Candidate> into, IReadOnlyDictionary<string, VariantClass>? required)
     {
-        // An identifier's key is shredded in its class wherever a row holds one; a key that holds none of
-        // that class is judged as any other.
+        // A required key is shredded in its class wherever a row holds one; a key that holds none of that class is judged
+        // as any other.
         if (path.Length == 1 && required is not null && required.TryGetValue(path[0], out VariantClass wanted) && node.Of(wanted) > 0)
         {
-            into.Add(new Candidate(path, VariantShredding.Primitive(wanted), double.PositiveInfinity));
+            into.Add(new Candidate(path, VariantShredding.Primitive(wanted), long.MaxValue));
             return;
         }
 
-        long objects = node.Objects;
-        (VariantShredding Shredding, long Count) best = Best(node);
-        if (node.Keys.Count > 0 && objects >= best.Count)
+        (VariantShredding best, long count) = Best(node);
+        if (node.Keys.Count > 0 && node.Objects >= count)
         {
             foreach ((string name, PathCensus.PathCount key) in node.Keys.OrderBy(static key => key.Key, StringComparer.Ordinal))
             {
-                Collect(key, [.. path, name], rows, chunks, into, path.Length == 0 ? required : null);
+                Collect(key, [.. path, name], into, path.Length == 0 ? required : null);
             }
 
             return;
         }
 
-        long nameBytes = path.Length == 0 ? 0 : Encoding.UTF8.GetByteCount(path[^1]);
-        double net = Saving(best.Shredding.Class, best.Count, rows) - ((PathBytes + nameBytes) * (double)chunks);
-        if (best.Count > 0 && net > 0)
+        if (count >= LeastValues)
         {
-            into.Add(new Candidate(path, best.Shredding, net));
+            into.Add(new Candidate(path, best, count));
         }
     }
 
@@ -180,6 +154,6 @@ internal static class ShreddingChoice
         return VariantShredding.Object([.. keys]);
     }
 
-    /// <summary>A path that pays: its keys, what it shreds, and the bytes it saves net of its cost.</summary>
-    private sealed record Candidate(string[] Path, VariantShredding Shredding, double Net);
+    /// <summary>A path that qualifies: its keys, what it shreds, and the values of it the object holds.</summary>
+    private sealed record Candidate(string[] Path, VariantShredding Shredding, long Held);
 }

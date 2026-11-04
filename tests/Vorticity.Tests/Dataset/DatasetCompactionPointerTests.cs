@@ -85,13 +85,13 @@ public sealed class DatasetCompactionPointerTests
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
         await using MemoryObjectStore store = new MemoryObjectStore();
-        await using VortexDataset dataset = await CreateAsync(store, ct);
+        await using VortexDataset dataset = await CreateAsync(store, ct, objectBytes: 2 << 10);
         for (int append = 0; append < 4; append++)
         {
             await AppendAsync(dataset, append, ct, rows: 400);
         }
 
-        // Level 0 into level 1, in objects small enough that level 1 holds several.
+        // Level 0 into level 1, in objects the layout makes small enough that level 1 holds several.
         Assert.NotNull(await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 0, MaxObjectBytes = 2 << 10 }, ct));
         int objects = (int)dataset.Levels[1].Entries;
         Assert.True(objects >= 4, $"level 1 holds {objects} objects");
@@ -165,17 +165,17 @@ public sealed class DatasetCompactionPointerTests
     private static async Task<CommitResult> CommitAsync(IObjectStore store, DatasetOperation operation, CancellationToken ct) =>
         await DatasetCommitter.CommitAsync(store, [operation], new CommitOptions { Seed = Options().Seed }, ct);
 
-    private static DatasetOptions Options() => new DatasetOptions
+    private static DatasetOptions Options(long objectBytes = 1L << 30) => new DatasetOptions
     {
         Seed = 0x9_014_7E2,
-        ClusteringKey = ["Key"],
+        Layout = new DatasetLayout { SortKey = [LayoutValue.Column("Key")], ObjectBytes = objectBytes },
         Write = new VortexWriteOptions { RowBlockSize = 64, DataBlockTargetBytes = 2 << 10 },
     };
 
-    private static async Task<VortexDataset> CreateAsync(IObjectStore store, CancellationToken ct)
+    private static async Task<VortexDataset> CreateAsync(IObjectStore store, CancellationToken ct, long objectBytes = 1L << 30)
     {
         Decoders.EnsureRegistered();
-        return await VortexDataset.CreateAsync(store, ChangeRow.Schema, Options(), ct);
+        return await VortexDataset.CreateAsync(store, ChangeRow.Schema, Options(objectBytes), ct);
     }
 
     /// <summary>Appends <paramref name="rows"/> rows, the <paramref name="append"/>-th thousand of keys.</summary>

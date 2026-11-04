@@ -52,9 +52,6 @@ internal sealed class SealedLayout
 
     internal int FrameSize => Descriptor.FrameSize;
 
-    /// <summary>The header's length, where the first epoch's frames start.</summary>
-    internal int HeaderLength => SealedFormat.HeaderPrefixBytes + Descriptor.Length;
-
     /// <summary>Whether <paramref name="end"/>, the last bytes of an object, ends as a sealed object does.</summary>
     internal static bool EndsSealed(ReadOnlySpan<byte> end) =>
         end.Length >= SealedFormat.TrailerMagic.Length && end[^SealedFormat.TrailerMagic.Length..].SequenceEqual(SealedFormat.TrailerMagic);

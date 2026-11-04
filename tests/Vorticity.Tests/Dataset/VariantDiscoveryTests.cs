@@ -33,8 +33,7 @@ public sealed partial class VariantDiscoveryTests
         await using MemoryObjectStore store = new MemoryObjectStore();
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Event.Schema, new DatasetOptions
         {
-            ClusteringKey = [nameof(Event.At)],
-            Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Hour, SliceTargetRows = 200 },
+            Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(Event.At)).Truncate(CalendarUnit.Hour), SortKey = [LayoutValue.Column(nameof(Event.At))], Organization = LayoutOrganization.Leveled }, ContentsObjectBytes = 0,
         }, Ct);
         Random random = new Random(seed);
         Dictionary<(string, PathClass), long> truth = [];
@@ -78,8 +77,7 @@ public sealed partial class VariantDiscoveryTests
         await using MemoryObjectStore store = new MemoryObjectStore();
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Event.Schema, new DatasetOptions
         {
-            ClusteringKey = [nameof(Event.At)],
-            Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Hour, SliceTargetRows = 500 },
+            Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(Event.At)).Truncate(CalendarUnit.Hour), SortKey = [LayoutValue.Column(nameof(Event.At))], Organization = LayoutOrganization.Leveled }, ContentsObjectBytes = 0,
             Write = new VortexWriteOptions { BlockRows = 100 },
         }, Ct);
         for (int part = 0; part < 16; part++)
@@ -97,7 +95,7 @@ public sealed partial class VariantDiscoveryTests
         }
 
         Assert.Equal(100, await dataset.Scan<Event>().Where(r => r.Attributes.Has("deploy")).CountAsync(Ct));
-        ScanPlan plan = await dataset.Scan<Event>().Where(r => r.Attributes.Has("deploy")).ExplainAsync(Ct);
+        ScanPlan plan = await dataset.Scan<Event>().Where(r => r.Attributes.Has("deploy")).ExplainAsync(analyze: true, Ct);
         PruningStep step = Assert.Single(plan.Pruning, s => s.Structure == "path directory");
 
         // A slice holds about 500 rows, so its blocks and the two it shares with its neighbours.

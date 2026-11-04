@@ -1,7 +1,6 @@
 using System;
 using System.Buffers;
 using System.Buffers.Binary;
-using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
 using Vorticity.Arrays.Decoders.Canonical;
@@ -567,9 +566,6 @@ internal ref struct ValidityWriter
         _bits = bits;
     }
 
-    /// <summary><see langword="true"/> when a per-row bitmap is being built.</summary>
-    public readonly bool IsTracked => _tracked;
-
     /// <summary>
     /// Creates a writer. When <paramref name="tracked"/> is false nothing is allocated and
     /// <see cref="Complete"/> returns the dtype's own validity.
@@ -605,9 +601,6 @@ internal ref struct ValidityWriter
     /// <param name="count">How many.</param>
     public readonly void SetValidRange(int row, int count) =>
         BitmapKernels.SetRange(_bits, row, count);
-
-    /// <summary>Marks every row valid, when the caller has established that in one test.</summary>
-    public readonly void SetAllValid() => BitmapKernels.SetRange(_bits, 0, _length);
 
     /// <summary>The bitmap itself, for a kernel that writes it directly; empty when untracked.</summary>
     internal readonly Span<byte> Bits => _bits;

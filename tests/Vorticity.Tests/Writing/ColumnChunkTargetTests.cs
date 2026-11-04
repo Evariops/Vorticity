@@ -4,15 +4,14 @@ using System;
 using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.IO;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Buffers;
-using Vorticity.Columns;
 using Vorticity.Expressions;
-using Vorticity.File;
 using Vorticity.Layouts;
 using Vorticity.Scanning;
 using Vorticity.Tests.Scan;
@@ -228,6 +227,72 @@ public sealed class ColumnChunkTargetTests
         {
             System.IO.File.Delete(one);
             System.IO.File.Delete(many);
+        }
+    }
+
+    /// <summary>
+    /// Every column gathering to an encoded target, as a dataset's objects do: each column's chunks span whole chunks of
+    /// the file, fewer of them than the file's, and every column's end together at least each group of rows, where a
+    /// reader cuts the rows between lanes; what the file holds reads as the file chunked alike.
+    /// </summary>
+    [Fact]
+    public async Task EveryColumnGathersToItsEncodedTargetAndEndsWithTheGroup()
+    {
+        Decoders.EnsureRegistered();
+        string alike = Temp();
+        string gathered = Temp();
+        try
+        {
+            const long GroupRows = 20_000;
+            await WriteAsync(alike, Small);
+            WriteReport report = await WriteAsync(gathered, Small with { GatheredChunkBytes = 8 << 10, GatheredGroupRows = GroupRows });
+
+            HashSet<long> ends = [];
+            long end = 0;
+            foreach (int rows in report.ChunkRows)
+            {
+                end += rows;
+                ends.Add(end);
+            }
+
+            HashSet<long>? common = null;
+            for (int column = 0; column < 3; column++)
+            {
+                ImmutableArray<int> chunks = report.ChunkRowsOf(column);
+                Assert.True(chunks.Length < report.ChunkRows.Length, $"column {column} has {chunks.Length} chunks against the file's {report.ChunkRows.Length}");
+                HashSet<long> own = [];
+                long at = 0;
+                foreach (int rows in chunks)
+                {
+                    at += rows;
+                    Assert.Contains(at, ends);
+                    own.Add(at);
+                }
+
+                Assert.Equal(Rows, at);
+                common = common is null ? own : [.. common.Intersect(own)];
+            }
+
+            // A group ends once its rows are in, at the end of the file's chunk that completes it.
+            Assert.True(common!.Count >= Rows / GroupRows, $"the columns' chunks end together {common.Count} times");
+            long previous = 0;
+            foreach (long boundary in common.Order())
+            {
+                Assert.True(boundary - previous <= GroupRows + report.ChunkRows.Max(), $"a group of {boundary - previous} rows");
+                previous = boundary;
+            }
+
+            CancellationToken ct = TestContext.Current.CancellationToken;
+            await using VortexFile expected = await VortexFile.OpenAsync(alike, ct);
+            await using VortexFile actual = await VortexFile.OpenAsync(gathered, ct);
+            Assert.Equal(await ReadAsync(expected.ScanBuilder()), await ReadAsync(actual.ScanBuilder()));
+            VortexExpr named = Expr.Eq(Expr.Field("name"), Expr.Literal(FilterLiteral.From("name-00417")));
+            Assert.Equal(await ReadAsync(expected.ScanBuilder().Where(named)), await ReadAsync(actual.ScanBuilder().Where(named)));
+        }
+        finally
+        {
+            System.IO.File.Delete(alike);
+            System.IO.File.Delete(gathered);
         }
     }
 

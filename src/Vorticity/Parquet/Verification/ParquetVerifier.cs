@@ -8,7 +8,6 @@ using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Compute;
 using Vorticity.Expressions;
-using Vorticity.Indexes;
 using Vorticity.IO;
 using Vorticity.Parquet.Geospatial;
 using Vorticity.Parquet.Metadata;
@@ -190,7 +189,7 @@ internal static class ParquetVerifier
             if (!chunk.Hidden && file.Footer.Decryptor is not null && column.MaxRepetitionLevel == 0 && column.Form != LeafForm.Null)
             {
                 ChunkValues encrypted = await ValuesAsync(file, group, column, cancellationToken).ConfigureAwait(false);
-                Statistics(group, column, chunk, footer, encrypted, findings);
+                Statistics(group, column, chunk, encrypted, findings);
                 Geospatial(group, column, chunk, footer, encrypted, findings);
             }
 
@@ -210,7 +209,7 @@ internal static class ParquetVerifier
         }
 
         ChunkValues values = await ValuesAsync(file, group, column, cancellationToken).ConfigureAwait(false);
-        Statistics(group, column, chunk, footer, values, findings);
+        Statistics(group, column, chunk, values, findings);
         Geospatial(group, column, chunk, footer, values, findings);
         await PageIndexAsync(file, group, column, chunk, values, findings, cancellationToken).ConfigureAwait(false);
         await BloomAsync(file, group, column, chunk, values, findings, cancellationToken).ConfigureAwait(false);
@@ -425,7 +424,7 @@ internal static class ParquetVerifier
     }
 
     /// <summary>The chunk's statistics against its values: its null and NaN counts, and its bounds, equal to the extremes where exact and around them otherwise.</summary>
-    private static void Statistics(int group, ParquetColumn column, ColumnChunkMetadata chunk, ParquetFooter footer, ChunkValues values, List<ParquetFinding> findings)
+    private static void Statistics(int group, ParquetColumn column, ColumnChunkMetadata chunk, ChunkValues values, List<ParquetFinding> findings)
     {
         ZoneBounds bounds = ColumnBounds.Of(column, chunk.Statistics, chunk.Source.Span);
         bool decimals = ColumnBounds.IsDecimal(column);

@@ -26,7 +26,6 @@ internal static class SchemaFieldIds
     internal const int PostscriptSegmentLength = 1;
     internal const int PostscriptSegmentAlignmentExponent = 2;
     internal const int PostscriptSegmentCompression = 3;
-    internal const int PostscriptSegmentEncryption = 4;
 
     // table FileStatistics { field_stats; }
     internal const int FileStatisticsFieldStats = 0;

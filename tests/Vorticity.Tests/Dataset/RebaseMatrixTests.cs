@@ -29,7 +29,7 @@ public sealed class RebaseMatrixTests
         Template = new CommitHeader
         {
             Version = 1,
-            ClusteringKey = ["tenant"],
+            Layout = new DatasetLayout { SortKey = [LayoutValue.Column("tenant")] },
             Chunker = new ChunkerSettings(256, 512, 1_024),
         },
     };

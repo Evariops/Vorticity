@@ -1,7 +1,6 @@
 using System;
 using System.Buffers;
 using Vorticity.Arrays;
-using Vorticity.File;
 using Vorticity.IO;
 using Vorticity.Layouts;
 
@@ -64,6 +63,8 @@ internal static class SplitExecution
         LayoutNode root = tree.Root;
         SegmentRequestSet segments = context.Segments;
         segments.VariantKeys = context.VariantKeys;
+        segments.ZoneKeys = context.ZoneKeys;
+        segments.Granules = context.Granules;
         segments.WantedShare = take is null ? Half.One : (Half)Math.Min(1.0, (double)take.CountIn(split) / Math.Max(split.Length, 1));
         try
         {

@@ -1,13 +1,11 @@
 using System;
 using System.Buffers;
-using System.Buffers.Binary;
-using System.Collections.Generic;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Runtime.InteropServices;
+using Vorticity.Aggregating;
 using Vorticity.Arrays;
-using Vorticity.Arrays.Decoders.Compressed;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Editions;
 using Vorticity.Types;
@@ -187,7 +185,7 @@ internal readonly struct ColumnPlan
     /// </remarks>
     internal DistinctTable? Table { get; init; }
 
-    /// <summary>With <see cref="Table"/>, how many codes are the chunk's entries.</summary>
+    /// <summary>How many entries a dictionary has: codes of <see cref="Table"/>, or rows of <see cref="Gather"/>.</summary>
     internal int Entries { get; init; }
 
     /// <summary>How many rows the chunk has: how much of <see cref="Codes"/> is a code.</summary>
@@ -195,6 +193,12 @@ internal readonly struct ColumnPlan
 
     /// <summary>Whether <see cref="Codes"/> came from the pool and the encoder owes it back.</summary>
     internal bool CodesRented { get; init; }
+
+    /// <summary>Whether a dictionary's <see cref="Gather"/> came from the pool, longer than its entries, and the encoder owes it back.</summary>
+    internal bool GatherRented { get; init; }
+
+    /// <summary>A dictionary's first row of each entry, walked for: <see cref="Entries"/> of <see cref="Gather"/>.</summary>
+    internal ReadOnlySpan<int> EntryRows => Gather.AsSpan(0, Math.Min(Entries, Gather.Length));
 
     /// <summary>
     /// The rows to gather as the values child: one per run for <see cref="ColumnScheme.RunEnd"/>,
@@ -209,20 +213,42 @@ internal readonly struct ColumnPlan
     internal int[] Codes { get; }
 
     internal static ColumnPlan Runs(int[] starts, int[] ends) =>
-        new ColumnPlan(ColumnScheme.RunEnd, starts, ends);
-
-    internal static ColumnPlan Dictionary(int[] firstOccurrences, int[] codes) =>
-        new ColumnPlan(ColumnScheme.Dict, firstOccurrences, codes) { Rows = codes.Length };
+        new ColumnPlan(ColumnScheme.RunEnd, starts, ends) { RunCount = ends.Length };
 
     /// <summary>
-    /// The same, over a <paramref name="codes"/> array rented for <paramref name="rows"/> entries
-    /// and longer than them, which the encoder hands back once it has narrowed it into the arena.
+    /// The same, over <paramref name="runs"/> runs of arrays rented longer than them, which go back to the pool once the
+    /// plan is written, or let go (<see cref="ReleaseCodes"/>).
     /// </summary>
-    internal static ColumnPlan RentedDictionary(int[] firstOccurrences, int[] codes, int rows) =>
+    internal static ColumnPlan RentedRuns(int[] starts, int[] ends, int runs) =>
+        new ColumnPlan(ColumnScheme.RunEnd, starts, ends) { RunCount = runs, RunsRented = true };
+
+    /// <summary>For <see cref="ColumnScheme.RunEnd"/>, the runs <see cref="Gather"/> and <see cref="Codes"/> hold.</summary>
+    internal int RunCount { get; init; }
+
+    /// <summary>Whether a run-end plan's <see cref="Gather"/> and <see cref="Codes"/> are rented, longer than its runs.</summary>
+    internal bool RunsRented { get; init; }
+
+    /// <summary>Each run's first row, for a run-end plan.</summary>
+    internal ReadOnlySpan<int> RunStarts => Gather.AsSpan(0, RunCount);
+
+    /// <summary>Each run's exclusive end row, for a run-end plan.</summary>
+    internal ReadOnlySpan<int> RunEnds => Codes.AsSpan(0, RunCount);
+
+    internal static ColumnPlan Dictionary(int[] firstOccurrences, int[] codes) =>
+        new ColumnPlan(ColumnScheme.Dict, firstOccurrences, codes) { Rows = codes.Length, Entries = firstOccurrences.Length };
+
+    /// <summary>
+    /// The same, over arrays rented longer than they are used: <paramref name="firstOccurrences"/> for
+    /// <paramref name="entries"/> entries, which the encoder hands back once it has gathered the values, and
+    /// <paramref name="codes"/> for <paramref name="rows"/> rows, once it has narrowed them into the arena.
+    /// </summary>
+    internal static ColumnPlan RentedDictionary(int[] firstOccurrences, int entries, int[] codes, int rows) =>
         new ColumnPlan(ColumnScheme.Dict, firstOccurrences, codes)
         {
             Rows = rows,
+            Entries = entries,
             CodesRented = true,
+            GatherRented = true,
         };
 
     internal static ColumnPlan ForFsst(FsstPlan plan) =>
@@ -261,12 +287,23 @@ internal readonly struct ColumnPlan
     internal static ColumnPlan ForDateTimeParts(DateTimePartsPlan plan) =>
         new ColumnPlan(ColumnScheme.DateTimeParts, [], []) { DateTimeParts = plan, PredictedBytes = plan.EncodedSize };
 
-    /// <summary>Hands a rented codes array back, for a plan that will not be written.</summary>
+    /// <summary>Hands a rented codes array back, and a run-end plan's rented runs, for a plan written or that will not be.</summary>
     internal void ReleaseCodes()
     {
         if (CodesRented)
         {
-            ArrayPool<int>.Shared.Return(Codes);
+            WorkArrays.Return(Codes);
+        }
+
+        if (GatherRented)
+        {
+            WorkArrays.Return(Gather);
+        }
+
+        if (RunsRented)
+        {
+            WorkArrays.Return(Gather);
+            WorkArrays.Return(Codes);
         }
     }
 
@@ -299,13 +336,13 @@ internal readonly struct ColumnPlan
     {
         ColumnScheme.None => "canonical",
         ColumnScheme.RunEnd =>
-            $"runend runs={Codes.Length} ends={Fingerprint(Codes):x} starts={Fingerprint(Gather):x}",
+            $"runend runs={RunCount} ends={Fingerprint(RunEnds):x} starts={Fingerprint(RunStarts):x}",
         ColumnScheme.Dict when Table is not null =>
             $"dict entries={Entries} rows={Rows} codes={Fingerprint(Table.Codes[..Rows]):x} " +
             $"first={Fingerprint(Table.FirstRows[..Entries]):x}",
         ColumnScheme.Dict =>
-            $"dict entries={Gather.Length} rows={Rows} codes={Fingerprint(Codes.AsSpan(0, Rows)):x} " +
-            $"first={Fingerprint(Gather):x}",
+            $"dict entries={EntryRows.Length} rows={Rows} codes={Fingerprint(Codes.AsSpan(0, Rows)):x} " +
+            $"first={Fingerprint(EntryRows):x}",
         ColumnScheme.BitPacked => Describe(BitPack.GetValueOrDefault()),
         ColumnScheme.Sequence =>
             $"sequence base={Sequence.GetValueOrDefault().BaseBits} step={Sequence.GetValueOrDefault().Step}",
@@ -392,32 +429,109 @@ internal static class ColumnCompressor
             return ColumnPlan.Canonical;
         }
 
-        int[] runStarts = ArrayPool<int>.Shared.Rent(Math.Max(length, 1));
-        int[] runEnds = ArrayPool<int>.Shared.Rent(Math.Max(length, 1));
-        try
-        {
-            int runCount = node.Kind == CanonicalKind.Bool && node.Validity.IsAllValid
-                ? BitmapRuns(node.Bits.Span, node.BitOffset, length, ceiling, runStarts, runEnds)
-                : FixedRuns(in node, length, ceiling, runStarts, runEnds, out int fixedRuns)
-                    ? fixedRuns
-                    : ViewRuns(in node, length, ceiling, runStarts, runEnds, out int viewRuns)
-                        ? viewRuns
+        // Each count stops before it writes a run past the ceiling, so the runs are rented to it, and given to the plan
+        // that wins: a column of a million rows took two arrays of its rows to count, and two more of its runs to keep.
+        int[] runStarts = WorkArrays.Rent<int>(ceiling + 1);
+        int[] runEnds = WorkArrays.Rent<int>(ceiling + 1);
+        int runCount = node.Kind == CanonicalKind.Bool && node.Validity.IsAllValid
+            ? BitmapRuns(node.Bits.Span, node.BitOffset, length, ceiling, runStarts, runEnds)
+            : FixedRuns(in node, length, ceiling, runStarts, runEnds, out int fixedRuns)
+                ? fixedRuns
+                : ViewRuns(in node, length, ceiling, runStarts, runEnds, out int viewRuns)
+                    ? viewRuns
+                    : comparer.Mask.Bits is { IsEmpty: false } bits
+                        ? NullableRuns(in comparer, bits, comparer.Mask.BitOffset, length, ceiling, runStarts, runEnds)
                         : ComparedRuns(in comparer, length, ceiling, runStarts, runEnds);
 
-            if (runCount > ceiling)
+        if (runCount > ceiling)
+        {
+            WorkArrays.Return(runStarts);
+            WorkArrays.Return(runEnds);
+            return ColumnPlan.Canonical;
+        }
+
+        runEnds[runCount - 1] = length;
+        return ColumnPlan.RentedRuns(runStarts, runEnds, runCount);
+    }
+
+    /// <summary>
+    /// <see cref="ComparedRuns"/> over a column whose validity is a bitmap, sixty-four rows at a time: a row starts a run
+    /// where its validity differs from the row before's, as <see cref="BitmapRuns"/> finds it, or where it and the row before
+    /// both hold values and the values differ; a word of nulls after a null holds no boundary and is passed over whole. The
+    /// same runs, in the same order, the same count past the ceiling.
+    /// </summary>
+    /// <remarks>
+    /// A variant's shredded columns are mostly nulls: walked a row at a time through <see cref="RowComparer.Equal"/>, two
+    /// validity reads a row, their search took a fifth of the managed time of a build of the client's log records.
+    /// </remarks>
+    private static int NullableRuns(
+        in RowComparer comparer, ReadOnlySpan<byte> bits, int bitOffset, int length, int ceiling, Span<int> starts, Span<int> ends)
+    {
+        int runCount = 1;
+        starts[0] = 0;
+        int shift = bitOffset & 7;
+        int firstByte = bitOffset >> 3;
+        ulong previous = 0;
+        for (int row = 0; row < length; row += 64)
+        {
+            int take = Math.Min(64, length - row);
+            ulong mask = BitWords.Mask(take);
+            ulong word = BitWords.Load(bits, firstByte + (row >> 3), shift) & mask;
+
+            // Row 0, which has no predecessor, takes its own bit, so that it starts no run of its own.
+            if (row == 0)
             {
-                return ColumnPlan.Canonical;
+                previous = word & 1;
             }
 
-            runEnds[runCount - 1] = length;
-            return ColumnPlan.Runs(
-                runStarts.AsSpan(0, runCount).ToArray(), runEnds.AsSpan(0, runCount).ToArray());
+            ulong before = (word << 1) | previous;
+            ulong diff = (word ^ before) & mask;
+
+            // The rows that hold a value after a row that holds one: a boundary where the values differ.
+            ulong pairs = word & before & mask & (row == 0 ? ~1UL : ulong.MaxValue);
+            while (pairs != 0)
+            {
+                int at = System.Numerics.BitOperations.TrailingZeroCount(pairs);
+                if (!comparer.EqualValues(row + at - 1, row + at))
+                {
+                    diff |= 1UL << at;
+                }
+
+                pairs &= pairs - 1;
+            }
+
+            previous = (word >> (take - 1)) & 1;
+            while (diff != 0)
+            {
+                if (runCount > ceiling)
+                {
+                    return runCount;
+                }
+
+                int at = row + System.Numerics.BitOperations.TrailingZeroCount(diff);
+                ends[runCount - 1] = at;
+                starts[runCount] = at;
+                runCount++;
+                diff &= diff - 1;
+            }
         }
-        finally
-        {
-            ArrayPool<int>.Shared.Return(runStarts);
-            ArrayPool<int>.Shared.Return(runEnds);
-        }
+
+        return runCount;
+    }
+
+    /// <summary>
+    /// The runs of column <paramref name="nodeIndex"/>, its validity a bitmap, as <see cref="NullableRuns"/> finds them, or
+    /// as <see cref="ComparedRuns"/> does when <paramref name="compared"/>, up to <paramref name="starts"/>' length less one:
+    /// for the tests, which hold the two to the same runs.
+    /// </summary>
+    internal static int RunsOf(CanonicalArena arena, int nodeIndex, bool compared, Span<int> starts, Span<int> ends)
+    {
+        RowComparer comparer = new RowComparer(arena, nodeIndex);
+        int length = arena.GetNode(nodeIndex).Length;
+        ValidityMask mask = comparer.Mask;
+        return compared || mask.Bits.IsEmpty
+            ? ComparedRuns(in comparer, length, starts.Length - 1, starts, ends)
+            : NullableRuns(in comparer, mask.Bits, mask.BitOffset, length, starts.Length - 1, starts, ends);
     }
 
     /// <summary>Runs by comparing adjacent rows, abandoning once run-end has already lost.</summary>
@@ -673,6 +787,19 @@ internal static class ColumnCompressor
     /// squeeze the last byte. <see cref="BitPackPlan"/> carries its own for the same reason.
     /// </summary>
     private const int DictionaryOverhead = 512;
+
+    /// <summary>
+    /// What the codes of <paramref name="rows"/> rows into <paramref name="entries"/> entries cost: bit-packed at the
+    /// narrowest width that indexes the entries where <paramref name="packs"/>, as their own cascade writes them at worst;
+    /// at the narrowest integer otherwise. Priced so, a dictionary competes with a bit-packing at the bytes both write:
+    /// eight status codes, five in a hundred past a bit-packing's width, took 3 bits a row as a dictionary where the
+    /// bit-packing and its patches took 6.7, and the codes priced a byte a row lost to it.
+    /// </summary>
+    private static long CodeBytes(long rows, int entries, bool packs) =>
+        packs
+            ? ((rows + Arrays.Decoders.Compressed.FastLanes.BlockSize - 1) / Arrays.Decoders.Compressed.FastLanes.BlockSize)
+                * Arrays.Decoders.Compressed.FastLanes.BytesPerBlockPerBit * Math.Max(1, 64 - BitOperations.LeadingZeroCount((ulong)Math.Max(entries - 1, 0)))
+            : rows * FsstPlan.IndexPType(entries).ByteWidth();
 
     /// <summary>Below this many rows, a column is a candidate only if it is big in bytes.</summary>
     private const int MinimumRows = 64;
@@ -932,7 +1059,7 @@ internal static class ColumnCompressor
             return ColumnPlan.Canonical;
         }
 
-        ColumnPlan sparse = SparseOf(arena, in node, target, in stats, measured);
+        ColumnPlan sparse = SparseOf(in node, target, in stats, measured);
         if (sparse.Scheme != ColumnScheme.None)
         {
             return sparse;
@@ -1076,13 +1203,13 @@ internal static class ColumnCompressor
         if (Allows(target, "vortex.dict") && !cascade.DictionaryIsDead)
         {
             dictionary = chunk.TableServes(length)
-                ? TabledDictionary(node, in chunk, length, budget)
-                : Dictionary(arena, node, comparer, length, budget);
+                ? TabledDictionary(node, in chunk, length, budget, Allows(target, "fastlanes.bitpacked"))
+                : Dictionary(arena, node, comparer, length, budget, Allows(target, "fastlanes.bitpacked"));
         }
         if (dictionary.Scheme != ColumnScheme.None)
         {
             temporal?.Release();
-            return dictionary;
+            return Sliceable(in dictionary, arena, nodeIndex, in node, target, workspace?.GranuleRows ?? 0, plain);
         }
 
         if (temporal is not null)
@@ -1379,7 +1506,7 @@ internal static class ColumnCompressor
     /// than that budget can never win, whatever the rest of the rows hold.
     /// </remarks>
     private static ColumnPlan Dictionary(
-        CanonicalArena arena, CanonicalNode node, in RowComparer comparer, int length, long budget)
+        CanonicalArena arena, CanonicalNode node, in RowComparer comparer, int length, long budget, bool packs)
     {
         int minimumEntry = node.Kind switch
         {
@@ -1399,10 +1526,10 @@ internal static class ColumnCompressor
         // fire, so allocating it would hand every column that considers a dictionary and refuses
         // one a full row vector to throw away.
         int capacity = BucketCount(length);
-        int[] buckets = ArrayPool<int>.Shared.Rent(capacity);
-        int[] chain = ArrayPool<int>.Shared.Rent(Math.Max(length, 1));
-        int[] firstRows = ArrayPool<int>.Shared.Rent(Math.Max(length, 1));
-        int[] codes = ArrayPool<int>.Shared.Rent(Math.Max(length, 1));
+        int[] buckets = WorkArrays.Rent<int>(capacity);
+        int[] chain = WorkArrays.Rent<int>(Math.Max(length, 1));
+        int[] firstRows = WorkArrays.Rent<int>(Math.Max(length, 1));
+        int[] codes = WorkArrays.Rent<int>(Math.Max(length, 1));
         bool kept = false;
         try
         {
@@ -1435,17 +1562,16 @@ internal static class ColumnCompressor
                     buckets[bucket] = code;
 
                     // Give up as soon as the dictionary provably cannot win, against the price the
-                    // plan will actually be charged rather than a weaker stand-in for it. Assuming
-                    // a one-byte code per row holds only while there are at most 256 distinct
-                    // values; past that the codes are wider, and a bound that ignores it walks
-                    // every row of a column whose verdict was settled at the 257th distinct value.
+                    // plan will actually be charged rather than a weaker stand-in for it. The codes'
+                    // width grows with the distinct values, and a bound that ignores it walks every
+                    // row of a column whose verdict was settled at the 257th distinct value.
                     //
                     // It is still a lower bound, so nothing that would have been kept is refused
                     // here and not a byte moves: `distinct` only grows, so the code width only
                     // grows; and `EntriesSize` is at least `distinct * minimumEntry` for every kind
                     // that reaches this line. The final test below is this same expression with the
                     // entries priced exactly.
-                    long codeBytes = (long)length * FsstPlan.IndexPType(distinct).ByteWidth();
+                    long codeBytes = CodeBytes(length, distinct, packs);
                     if (codeBytes + ((long)distinct * minimumEntry) + DictionaryOverhead >= budget)
                     {
                         return ColumnPlan.Canonical;
@@ -1457,31 +1583,30 @@ internal static class ColumnCompressor
 
             // Priced, not assumed: codes at the narrowest width that indexes the entries, plus the
             // entries themselves in whatever form they will actually be written.
-            long encoded = ((long)length * FsstPlan.IndexPType(distinct).ByteWidth())
+            long encoded = CodeBytes(length, distinct, packs)
                 + EntriesSize(arena, node, firstRows.AsSpan(0, distinct));
             if (encoded + DictionaryOverhead >= budget)
             {
                 return ColumnPlan.Canonical;
             }
 
-            // The entries become a real array: there are `distinct` of them, and the writer keeps
-            // them past the point the rentals go back. The codes do not. There is one per row, a
-            // full row vector, and the only thing the writer does with them is narrow them into an
-            // arena buffer, so the rental travels with the plan and is handed back there.
+            // The rentals travel with the plan and are handed back by the writer: the first rows once it has gathered
+            // the values from them, the codes once it has narrowed them into an arena buffer. A copy of the first rows
+            // at their length made a tenth of what a consolidation of log records allocated.
             kept = true;
-            return ColumnPlan.RentedDictionary(firstRows.AsSpan(0, distinct).ToArray(), codes, length)
+            return ColumnPlan.RentedDictionary(firstRows, distinct, codes, length)
                 with { PredictedBytes = encoded };
         }
         finally
         {
             if (!kept)
             {
-                ArrayPool<int>.Shared.Return(codes);
+                WorkArrays.Return(codes);
+                WorkArrays.Return(firstRows);
             }
 
-            ArrayPool<int>.Shared.Return(firstRows);
-            ArrayPool<int>.Shared.Return(chain);
-            ArrayPool<int>.Shared.Return(buckets);
+            WorkArrays.Return(chain);
+            WorkArrays.Return(buckets);
         }
     }
 
@@ -1717,7 +1842,7 @@ internal static class ColumnCompressor
         // positions, when that costs less than the runs the nulls make -- before the run-end rule,
         // which would otherwise take every such chunk as runs, and before a decimal's parts, which
         // would take its nulls into the integers.
-        ColumnPlan sparse = SparseOf(arena, in node, target, in stats, measured);
+        ColumnPlan sparse = SparseOf(in node, target, in stats, measured);
         if (sparse.Scheme != ColumnScheme.None)
         {
             return sparse;
@@ -1773,7 +1898,9 @@ internal static class ColumnCompressor
                 memory.Scheme, arena, nodeIndex, node, target, in stats, cascade, chunk, plain, workspace);
             if (remembered.Scheme == memory.Scheme)
             {
-                return remembered with { FromMemory = true };
+                // A dictionary remembered still answers to the granules a reader reads a part of a chunk by.
+                remembered = remembered with { FromMemory = true };
+                return Sliceable(in remembered, arena, nodeIndex, in node, target, workspace?.GranuleRows ?? 0, plain);
             }
         }
 
@@ -1786,7 +1913,7 @@ internal static class ColumnCompressor
         if (runEndAllowed && !runsCounted)
         {
             walkedRuns = TryRuns(in node, in comparer, length);
-            runs = walkedRuns.Scheme == ColumnScheme.None ? long.MaxValue : walkedRuns.Codes.Length;
+            runs = walkedRuns.Scheme == ColumnScheme.None ? long.MaxValue : walkedRuns.RunCount;
             runEndCost = RunEndCostOf(runs, length, plain);
             if (!runEndCompetes && runEndCost != long.MaxValue)
             {
@@ -1846,10 +1973,12 @@ internal static class ColumnCompressor
         if (Allows(target, "vortex.dict") && !cascade.DictionaryIsDead)
         {
             ColumnPlan dictionary = chunk.TableServes(length)
-                ? TabledDictionary(node, in chunk, length, best)
-                : Dictionary(arena, node, comparer, length, best);
+                ? TabledDictionary(node, in chunk, length, best, Allows(target, "fastlanes.bitpacked"))
+                : Dictionary(arena, node, comparer, length, best, Allows(target, "fastlanes.bitpacked"));
             if (dictionary.Scheme != ColumnScheme.None)
             {
+                // The runs walked when run-end competes, which the dictionary beat, go back to the pool.
+                walkedRuns.ReleaseCodes();
                 temporal?.Release();
                 if (sizeFirst && dictionary.PredictedBytes > 0
                     && SmallestTrial(arena, nodeIndex, node, target, dictionary.PredictedBytes, cascade.IsValuesChild, workspace) is { Scheme: not ColumnScheme.None } smaller)
@@ -1858,7 +1987,7 @@ internal static class ColumnCompressor
                     return smaller with { DisplacedExact = true };
                 }
 
-                return dictionary;
+                return Sliceable(in dictionary, arena, nodeIndex, in node, target, workspace?.GranuleRows ?? 0, plain);
             }
         }
 
@@ -1877,6 +2006,11 @@ internal static class ColumnCompressor
             walkedRuns.ReleaseCodes();
             temporal?.Release();
             return trial with { DisplacedExact = true };
+        }
+
+        if (bestScheme != ColumnScheme.RunEnd)
+        {
+            walkedRuns.ReleaseCodes();
         }
 
         switch (bestScheme)
@@ -1953,7 +2087,7 @@ internal static class ColumnCompressor
     /// doubles and text alike (<c>vortex-queries --micro sparsecost</c>).
     /// </remarks>
     private static ColumnPlan SparseOf(
-        CanonicalArena arena, in CanonicalNode node, VortexEdition target, in BlockStats stats, bool measured,
+        in CanonicalNode node, VortexEdition target, in BlockStats stats, bool measured,
         bool pinned = false)
     {
         int length = node.Length;
@@ -2124,7 +2258,7 @@ internal static class ColumnCompressor
             }
 
             case ColumnScheme.Sparse:
-                return SparseOf(arena, in node, target, in stats, measured: stats.IsPresent && stats.Rows == length, pinned);
+                return SparseOf(in node, target, in stats, measured: stats.IsPresent && stats.Rows == length, pinned);
 
             case ColumnScheme.Pco:
             {
@@ -2197,14 +2331,14 @@ internal static class ColumnCompressor
 
                 if (chunk.TableServes(length))
                 {
-                    return TabledDictionary(node, in chunk, length, plain);
+                    return TabledDictionary(node, in chunk, length, plain, Allows(target, "fastlanes.bitpacked"));
                 }
 
                 // No table runs on a column two bytes wide or narrower, whose worst case no
                 // dictionary beats, though sixteen values of a short take a byte a row. Memory
                 // exists to skip this walk; a caller's pin pays it.
                 return pinned
-                    ? Dictionary(arena, node, new RowComparer(arena, nodeIndex), length, plain)
+                    ? Dictionary(arena, node, new RowComparer(arena, nodeIndex), length, plain, Allows(target, "fastlanes.bitpacked"))
                     : ColumnPlan.Canonical;
 
             default:
@@ -2309,7 +2443,7 @@ internal static class ColumnCompressor
     /// </summary>
     /// <remarks>
     /// The final test is the same expression, on the same numbers. The walk prices
-    /// <c>rows × codeWidth(entries) + EntriesSize(entries)</c> against the budget once it has seen
+    /// <c>CodeBytes(rows, entries) + EntriesSize(entries)</c> against the budget once it has seen
     /// every row; its early abandonment is a lower bound of that test and never fires on a plan the
     /// test would have kept. So the plan here is the plan there, and what changes is that no row is
     /// read to reach it.
@@ -2324,14 +2458,14 @@ internal static class ColumnCompressor
     /// <param name="chunk">The cursor whose table serves this chunk.</param>
     /// <param name="length">The chunk's row count.</param>
     /// <param name="budget">The cheapest plan so far, in bytes.</param>
+    /// <param name="packs">Whether the edition bit-packs the codes (<see cref="CodeBytes"/>).</param>
     private static ColumnPlan TabledDictionary(
-        CanonicalNode node, in ChunkStats chunk, int length, long budget)
+        CanonicalNode node, in ChunkStats chunk, int length, long budget, bool packs)
     {
         DistinctTable table = chunk.Table!;
         (int entries, long heap) = chunk.TableAtClose;
 
-        long encoded = ((long)length * FsstPlan.IndexPType(entries).ByteWidth())
-            + EntriesSizeOf(node, entries, heap);
+        long encoded = CodeBytes(length, entries, packs) + EntriesSizeOf(node, entries, heap);
         if (encoded + DictionaryOverhead >= budget)
         {
             return ColumnPlan.Canonical;
@@ -2350,8 +2484,72 @@ internal static class ColumnCompressor
     }
 
     /// <summary>
-    /// The bytes the dictionary layer was priced at, over what the encoder built: the codes at the
-    /// narrowest width that indexes <paramref name="values"/>, plus the entries in the form
+    /// FSST in place of <paramref name="dictionary"/>, a text column's, in a chunk a reader reads a part of granule by
+    /// granule, <paramref name="granuleRows"/> rows each: when the dictionary's values weigh more than one granule's
+    /// share of it, so that a read of one granule reads more than twice its share, and FSST writes the chunk in no more
+    /// than the dictionary does and one granule's share of it, an eighth at most. The dictionary otherwise, and in a file
+    /// read by its chunks alone.
+    /// </summary>
+    /// <remarks>
+    /// A read of a few granules slices a dictionary's codes but reads its values whole, as every row may name any of them
+    /// (<see cref="Indexes.GranuleBytes"/>), where FSST's bytes lie between its granules' marks. A dictionary of nearly as
+    /// many values as rows saves a chunk read whole a few hundredths, and costs each read of a part its values; a key of
+    /// 150 000 values, its codes 590 KB and its values 517, read 1.52 MB through its granules where its rows read 1.17.
+    /// <para>
+    /// The dictionary's values are priced as FSST writes them, at FSST's ratio to the plain column, ρ = F / P, F its bytes
+    /// and P the plain column's: FSST takes the chunk when F ≤ (C + ρ·V)·(k + 1) / k, C the codes, V the values plain and
+    /// k the chunk's granules, eight at least. Solved for F, F·(k·P − (k + 1)·V) ≤ (k + 1)·C·P is the ceiling its build
+    /// stops at, under its own bar against the plain column; where the left factor is not positive, the values weigh as
+    /// much as the column and any F holds.
+    /// </para>
+    /// </remarks>
+    /// <param name="dictionary">The dictionary chosen, priced.</param>
+    /// <param name="arena">The arena holding the chunk.</param>
+    /// <param name="nodeIndex">The chunk.</param>
+    /// <param name="node">The same chunk, resolved.</param>
+    /// <param name="target">The edition written.</param>
+    /// <param name="granuleRows">The rows of the file's granules; 0 for a file read by its chunks alone.</param>
+    /// <param name="plain">The plain column's bytes.</param>
+    private static ColumnPlan Sliceable(
+        in ColumnPlan dictionary, CanonicalArena arena, int nodeIndex, in CanonicalNode node, VortexEdition target,
+        int granuleRows, long plain)
+    {
+        int length = node.Length;
+        if (dictionary.Scheme != ColumnScheme.Dict || granuleRows <= 0 || length < 2 * granuleRows
+            || node.Kind != CanonicalKind.VarBinView || !Allows(target, "vortex.fsst") || dictionary.PredictedBytes <= 0)
+        {
+            return dictionary;
+        }
+
+        int entries = dictionary.Entries;
+        long codes = CodeBytes(length, entries, Allows(target, "fastlanes.bitpacked"));
+        long values = dictionary.PredictedBytes - codes;
+        long granules = length / granuleRows;
+        if (values * (granules - 1) <= codes)
+        {
+            return dictionary;
+        }
+
+        long k = Math.Max(8, granules);
+        long ceiling = plain * 9 / 10;
+        Int128 factor = (Int128)k * plain - (Int128)(k + 1) * values;
+        if (factor > 0)
+        {
+            ceiling = (long)Int128.Min(ceiling, (Int128)(k + 1) * codes * plain / factor);
+        }
+
+        if (FsstPlan.TryBuild(arena, nodeIndex, ceiling) is not { } fsst)
+        {
+            return dictionary;
+        }
+
+        dictionary.ReleaseCodes();
+        return ColumnPlan.ForFsst(fsst) with { PredictedBytes = fsst.EncodedSize };
+    }
+
+    /// <summary>
+    /// The bytes the dictionary layer was priced at, over what the encoder built: the codes as
+    /// <see cref="CodeBytes"/> prices those that index <paramref name="values"/>, plus the entries in the form
     /// <see cref="EntriesSize(CanonicalArena, CanonicalNode, ReadOnlySpan{int})"/> prices them.
     /// </summary>
     /// <remarks>
@@ -2365,10 +2563,11 @@ internal static class ColumnCompressor
     /// <param name="arena">The arena holding the values child.</param>
     /// <param name="values">The values child as the encoder built it, one row per entry.</param>
     /// <param name="rows">The rows of the column the codes index.</param>
-    internal static long DictionaryLayerBytes(CanonicalArena arena, CanonicalNode values, int rows)
+    /// <param name="target">The edition written, which says whether the codes are bit-packed (<see cref="CodeBytes"/>).</param>
+    internal static long DictionaryLayerBytes(CanonicalArena arena, CanonicalNode values, int rows, VortexEdition target)
     {
         int entries = values.Length;
-        return ((long)rows * FsstPlan.IndexPType(entries).ByteWidth()) + EntriesSize(arena, values, entries);
+        return CodeBytes(rows, entries, Allows(target, "fastlanes.bitpacked")) + EntriesSize(arena, values, entries);
     }
 
     /// <summary>
@@ -2521,11 +2720,15 @@ internal static class ColumnCompressor
                 return false;
             }
 
-            if (!validA)
-            {
-                return true;
-            }
+            return !validA || EqualValues(a, b);
+        }
 
+        /// <summary>The validity of the column's rows.</summary>
+        internal ValidityMask Mask => _mask;
+
+        /// <summary>Whether rows <paramref name="a"/> and <paramref name="b"/>, both valid, hold the same value.</summary>
+        internal bool EqualValues(int a, int b)
+        {
             if (_width == 0)
             {
                 return _node.Kind == CanonicalKind.Bool

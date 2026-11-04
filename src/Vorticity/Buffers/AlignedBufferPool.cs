@@ -267,6 +267,29 @@ internal sealed class AlignedBufferPool : ISweptAfterCollections
     /// </exception>
     public NativeSegmentOwner Rent(int length, int alignment)
     {
+        NativeSegmentOwner owner = RentCore(length, alignment);
+        Watch?.Rented(owner);
+        return owner;
+    }
+
+    /// <summary>
+    /// What is told of each block the pools rent out and of each one its last holder gives back, for a tool that counts
+    /// the native memory held by the site that rented it (<c>vortex-queries --native-sites</c>); null, and nothing is.
+    /// </summary>
+    internal static INativeWatch? Watch;
+
+    /// <summary>A tool told of the blocks the pools rent out and of those given back (<see cref="Watch"/>).</summary>
+    internal interface INativeWatch
+    {
+        /// <summary>Block <paramref name="owner"/> rented out, on the thread that rented it.</summary>
+        void Rented(NativeSegmentOwner owner);
+
+        /// <summary>Block <paramref name="owner"/> given back by its last holder, before the pool parks or frees it.</summary>
+        void Released(NativeSegmentOwner owner);
+    }
+
+    private NativeSegmentOwner RentCore(int length, int alignment)
+    {
         NativeSegmentOwner.CheckLengthAndAlignment(length, alignment);
 
         if (length > MaxPooledLength)

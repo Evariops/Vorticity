@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Compute;
-using Vorticity.File;
 using Vorticity.IO;
 using Vorticity.Parquet.Metadata;
 using Vorticity.Scanning;

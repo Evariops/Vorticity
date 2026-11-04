@@ -8,10 +8,11 @@
 // live block and nothing else.
 //
 // The quantity is the scan's `ScanCounters.ValuesDecoded`, the count `FlatLayoutDecodeCountTests`
-// holds the scan and the take to, and it is exact here too: one block's rows, pruned; the whole chunk,
-// unpruned. Two shapes, because two readers have the branch: a file whose single chunk IS the root
-// (the flat reader sees the mask in file coordinates), and a file of many chunks (the chunked
-// reader translates the mask into a chunk-local selection).
+// holds the scan and the take to, and it is exact here too: the zone maps and the kept rows, pruned; the
+// kept rows alone, unpruned, the comparison answered on the packed values in both. Two shapes, because
+// two readers have the branch: a file whose single chunk IS the root (the flat reader sees the mask in
+// file coordinates), and a file of many chunks (the chunked reader translates the mask into a
+// chunk-local selection).
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -22,11 +23,9 @@ using Vorticity.Buffers;
 using Vorticity.Columns;
 using Vorticity.Compute;
 using Vorticity.Expressions;
-using Vorticity.File;
 using Vorticity.Layouts;
 using Vorticity.Scanning;
 using Vorticity.Types;
-using Vorticity.Writing;
 using Xunit;
 
 namespace Vorticity.Tests.Scan;
@@ -44,19 +43,16 @@ public sealed class BlockPruningDecodeTests
     /// <param name="rowsPerBatch">Rows per batch; a multiple of the block for the many-chunk shape.</param>
     /// <param name="chunkBytes">The writer's byte target per chunk.</param>
     /// <param name="prunedDecodes">
-    /// The values a pruned scan materializes, exactly. Three parts. The zone maps' own rows: the
+    /// The values a pruned scan materializes, exactly. Two parts. The zone maps' own rows: the
     /// zones child of each column is a flat node the same reader decodes whole, one row per block
-    /// -- 98 for 100 000 rows, 96 for 98 304. The live split, which the filter's own pass reads:
-    /// one split of 1 024 rows in both shapes, a chunk of 8 blocks dividing evenly and
-    /// <c>SplitCursor</c> cutting the 100 000-row span on whole blocks, so the band's rows (49 998
-    /// to 50 099) fall in one split, where an even cut of 1 021 rows put them in two and decoded the
-    /// dead half of each. And the band's 100 rows again: the projection keeps the filtered column,
-    /// and its pass reads the kept rows of it, which a live split read through a selection does not
-    /// retain.
+    /// -- 98 for 100 000 rows, 96 for 98 304. And the band's 100 rows: the projection keeps the
+    /// filtered column, and its pass reads the kept rows of it. The live split the filter's own pass
+    /// reads, one split of 1 024 rows in both shapes, is compared where it is bit-packed (spec N, 1)
+    /// and decodes nothing.
     /// </param>
     [Theory]
-    [InlineData(1, 100_000, 1_048_576, 1_024 + 98 + 100)]
-    [InlineData(12, 8_192, 65_536, 1_024 + 96 + 100)]
+    [InlineData(1, 100_000, 1_048_576, 98 + 100)]
+    [InlineData(12, 8_192, 65_536, 96 + 100)]
     public async Task APrunedScanMaterializesOnlyTheLiveBlocks(
         int batches, int rowsPerBatch, long chunkBytes, long prunedDecodes)
     {
@@ -96,10 +92,11 @@ public sealed class BlockPruningDecodeTests
             Assert.NotEmpty(pruned);
             Assert.Equal(unpruned, pruned);
 
-            // EXACT, like the decode-count tests: the live splits and the zone maps, against the
-            // whole chunk(s) once -- 82x and 81x fewer values materialized for the same rows.
+            // EXACT, like the decode-count tests: the zone maps and the band, against the band alone unpruned, whose
+            // comparison its packed values answer (spec N, 1) as they do the pruned scan's live split: the zone maps cost
+            // their rows, and spare the I/O.
             Assert.Equal(prunedDecodes, prunedDecoded);
-            Assert.Equal(rows, unprunedDecoded);
+            Assert.Equal(pruned.Count, unprunedDecoded);
         }
         finally
         {

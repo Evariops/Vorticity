@@ -5,7 +5,6 @@
 // otherwise; and the commit stands whatever befalls that merge. The tests hold it to both halves,
 // the second with a store that refuses to read a data object once the commit is in.
 using System;
-using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -185,7 +184,7 @@ public sealed class DatasetInlineCompactionTests
     private static DatasetOptions Options() => new DatasetOptions
     {
         Seed = 0x1_9_11E,
-        ClusteringKey = ["Key"],
+        Layout = new DatasetLayout { SortKey = [LayoutValue.Column("Key")] },
         Write = new VortexWriteOptions { RowBlockSize = 64, DataBlockTargetBytes = 2 << 10 },
     };
 
