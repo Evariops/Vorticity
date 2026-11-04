@@ -1,7 +1,8 @@
 // A census of a shredded variant's paths taken from its shredding as it lies counts, path by path and class by class, what a
 // census of its rows put back together counts: over random shreddings of random documents, nested objects, lists, values of
 // another class than their key's column, rows that are no object, the variant null and a null column among them; and read
-// for the keys the rows hold alone, a shredded key no row holds left undecoded, it counts the same.
+// for the keys the rows hold alone, a shredded key no row holds left undecoded, it counts the same. A writer that counts its
+// own rows' paths counts them all.
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -72,6 +73,53 @@ public sealed partial class ShreddedVariantWriteTests
         {
             System.IO.File.Delete(path);
         }
+    }
+
+    /// <summary>
+    /// A writer that counts its rows' paths itself, as an append's does, given rows past its last whole block: those reach the
+    /// file as it completes, and are counted too, so that it writes the directory of every row, the one a census of the rows
+    /// in order makes.
+    /// </summary>
+    [Fact]
+    public async Task AWriterCountsThePathsOfTheRowsItCompletesWith()
+    {
+        Doc[] rows = Counted(new Random(9));
+        string path = await CountedAsync(rows, degree: 1);
+        PathCensus census = new PathCensus(new VortexWriteOptions().StringBoundBytes, 1_024);
+        try
+        {
+            foreach (Doc row in rows)
+            {
+                census.Add(row.Attributes.Metadata.Span, row.Attributes.Value.Span);
+            }
+
+            await using VortexFile file = await VortexFile.OpenAsync(path, Ct);
+            (Vorticity.Indexes.VariantDirectory? written, _, _) = await Vorticity.Indexes.VariantDirectory.ReadAsync(
+                file, file.DType.IndexOfField("Attributes"u8), null, Ct);
+            Assert.NotNull(written);
+            Assert.Equal(
+                Convert.ToHexString(Vorticity.Indexes.VariantDirectory.From(census, null, 1_024).ToBytes()), Convert.ToHexString(written.ToBytes()));
+        }
+        finally
+        {
+            census.Release();
+            System.IO.File.Delete(path);
+        }
+    }
+
+    /// <summary>Seventy thousand documents, past the last of their 1,024-row blocks by 368.</summary>
+    private static Doc[] Counted(Random random) =>
+        [.. Enumerable.Range(0, 70_000).Select(i => new Doc(i, Document(random), random.Next(10) == 0 ? null : Document(random)))];
+
+    /// <summary>The rows written in one chunk by a writer that counts their paths itself, at <paramref name="degree"/> lanes.</summary>
+    private static async Task<string> CountedAsync(Doc[] rows, int degree)
+    {
+        string path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"vorticity-counted-{Guid.NewGuid():N}.vortex");
+        VortexWriteOptions options = new VortexWriteOptions { BlockRows = 1_024, ChunkTargetBytes = 1 << 28, CountsPaths = true, CarriesContents = true, DegreeOfParallelism = degree };
+        await using VortexFileWriter writer = VortexSession.Default.CreateWriter<Doc>(path, options);
+        await writer.WriteAsync<Doc>(rows, Ct);
+        await writer.CompleteAsync(Ct);
+        return path;
     }
 
     /// <summary>The keys a document may hold, "missing" not among them, which a shredding may name.</summary>

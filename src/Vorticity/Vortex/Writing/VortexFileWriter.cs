@@ -2665,6 +2665,14 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         if (tailRows > 0)
         {
             RequireMatchingSchema(tailArena!.GetNode(tailRoot).DType);
+
+            // The last rows' paths counted as every call's are: a census that missed them writes no directory, as a builder's
+            // rows past its last whole block left a writer's of seventy thousand rows without one.
+            if (_census is not null && CountPathsAsync(tailArena, tailRoot, tailRows) is { } counting)
+            {
+                await counting.ConfigureAwait(false);
+            }
+
             Ingest(tailArena, tailRoot);
             direct = _pending.Count == 0;
             if (!direct)
