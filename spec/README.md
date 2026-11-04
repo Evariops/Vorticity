@@ -8,11 +8,11 @@ these files, never from documentation prose and never from memory.
 They are Apache-2.0 licensed and remain the copyright of the Vortex contributors — see
 [NOTICE](../NOTICE).
 
-Pinned to tag **`0.86.1`**, matching the vortex pin in
+Pinned to tag **`0.90.0`**, matching the vortex pin in
 [`tools/conformance-gen/Cargo.toml`](../tools/conformance-gen/Cargo.toml). Moving one means moving
 both.
 
-| Vendored path | Upstream path at `0.86.1` | Upstream path on `develop` |
+| Vendored path | Upstream path up to `0.86.1` | Upstream path from `0.90.0`, and on `develop` |
 |---|---|---|
 | `flatbuffers/dtype.fbs` | `vortex-flatbuffers/flatbuffers/vortex-dtype/dtype.fbs` | `vortex-array/flatbuffers/vortex-dtype/dtype.fbs` |
 | `flatbuffers/array.fbs` | `vortex-flatbuffers/flatbuffers/vortex-array/array.fbs` | `vortex-array/flatbuffers/vortex-array/array.fbs` |
@@ -23,7 +23,10 @@ both.
 | `proto/expr.proto` | `vortex-proto/proto/expr.proto` | `vortex-array/proto/expr.proto` |
 
 Upstream relocated these after 0.86.1. The **contents are byte-identical across the move**
-(verified by diffing both refs), so this is a path change and not a format change.
+(verified by diffing both refs), so this is a path change and not a format change. From 0.86.1 to
+0.90.0, the one change is in `proto/expr.proto`, which adds the options of three expressions
+(`uncompressed_size_in_bytes`, `list_contains`, `replace_time_zone`) that this library does not
+read. The flatbuffers schemas and the editions are unchanged.
 `refresh.sh` tries the pinned layout and falls back to the newer one, which is what lets
 `./refresh.sh develop` still work as a drift check.
 
@@ -49,4 +52,6 @@ A change here is a format change. It must be reviewed against
 ([docs/design/04-conformance.md](../docs/design/04-conformance.md) §3), not merged on the grounds that the build
 still passes.
 
-Pinned to tag `0.86.1` (commit `d1fe2dc46d`), the ref `METADATA.md` and `editions/` come from too.
+Pinned to tag `0.90.0` (commit `6c3ef48e57`), the ref `editions/` comes from too. `METADATA.md` was
+derived at `0.86.1` and holds at `0.90.0`: every metadata payload of the corpus regenerated with
+`0.90.0` parses and serializes back byte for byte.

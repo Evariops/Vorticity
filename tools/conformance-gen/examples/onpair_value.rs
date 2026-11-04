@@ -71,8 +71,8 @@ fn main() -> VortexResult<()> {
         ("short codes", column(|i| format!("FR-{:02}-{:04}", 1 + mix(i) % 95, mix(i + 1) % 10_000))),
     ];
 
-    let with = BtrBlocksCompressorBuilder::default().build();
-    let without = BtrBlocksCompressorBuilder::default().exclude_schemes([OnPairScheme.id()]).build();
+    let with = BtrBlocksCompressorBuilder::from_session(&session).build();
+    let without = BtrBlocksCompressorBuilder::from_session(&session).exclude_schemes([OnPairScheme.id()]).build();
     println!("{:<14} {:>10} {:>12} {:<22} {:>12} {:<22} {:>7}", "column", "plain", "with onpair", "", "without", "", "ratio");
     for (name, values) in datasets {
         let array: ArrayRef = VarBinViewArray::from_iter_str(values.iter().map(String::as_str)).into_array();

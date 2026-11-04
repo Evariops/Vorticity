@@ -39,14 +39,8 @@ use parquet_variant_compute::VariantArray as ArrowVariantArray;
 use parquet_variant_compute::json_to_variant;
 use parquet_variant_compute::shred_variant;
 use vortex::VortexSessionDefault;
-use vortex::array::ArrayId;
 use vortex::array::ArrayRef;
-use vortex::array::session::ArraySessionExt;
-use vortex::compressor::BtrBlocksCompressorBuilder;
-use vortex::editions::ComponentKind;
-use vortex::editions::EditionSessionExt;
 use vortex::file::WriteStrategyBuilder;
-use vortex::utils::aliases::hash_set::HashSet;
 use vortex::array::IntoArray;
 use vortex::array::VortexSessionExecute;
 use vortex::array::arrays::ChunkedArray;
@@ -352,14 +346,11 @@ async fn write(session: &VortexSession, chunks: Vec<ArrayRef>, path: &Path, stra
     let table = ChunkedArray::try_new(tables, dtype)?.into_array();
     let sink = FileWrite::create(path, session.handle()).await?;
     let strategy: Arc<dyn LayoutStrategy> = match strategy {
-        Strategy::Default => WriteStrategyBuilder::default()
+        // `from_session` compresses with the schemes the session's editions allow.
+        Strategy::Default => WriteStrategyBuilder::from_session(session)
             // The 1 MiB coalescing target would concatenate the chunks before compressing them,
             // which the reference refuses for chunks shredded differently.
             .with_data_block_target_bytes(None)
-            // A strategy passed by hand opts out of the editions' encodings, so they are put back.
-            .with_btrblocks_builder(
-                BtrBlocksCompressorBuilder::default().retain_allowed_encodings(&allowed_encodings(session)),
-            )
             .build(),
         Strategy::Verbatim => {
             let flat: Arc<dyn LayoutStrategy> = Arc::new(FlatLayoutStrategy::default());
@@ -372,17 +363,6 @@ async fn write(session: &VortexSession, chunks: Vec<ArrayRef>, path: &Path, stra
         .write(sink, table.to_array_stream())
         .await?;
     Ok(())
-}
-
-/// The array encodings the session's editions allow, as the corpus emitter computes them.
-fn allowed_encodings(session: &VortexSession) -> HashSet<ArrayId> {
-    let arrays = session.arrays();
-    session
-        .enabled_component_ids(ComponentKind::Array)
-        .iter()
-        .filter_map(|serialized_id| arrays.registry().get(serialized_id))
-        .map(|plugin| plugin.id())
-        .collect()
 }
 
 /// The rows the reference reads differently from the two files, by its own scalar equality.

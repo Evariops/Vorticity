@@ -11,7 +11,7 @@ Every bound is a constant of the design (a fan-out, a page size, a level count) 
 plus the size of the answer. The write path pays instead, once and amortized, in compaction, and the
 price is stated (see [the price](#54-the-price)).
 
-Some things do not bend. Every data object is a plain Vortex file that a strict Rust 0.86.1 reader
+Some things do not bend. Every data object is a plain Vortex file that a strict Rust 0.90.0 reader
 opens, with this library's structures invisible to it. The core takes no third-party dependency. An
 index is a hint unless it is proven complete (see [indexing after the
 fact](10-indexes.md#7-building-appending-and-indexing-after-the-fact)). No interleaving of readers,
@@ -1105,7 +1105,7 @@ other than by widening a number or making it nullable ([schema evolution](#13-sc
   included, and every change that would lose a value is refused.
 - Tampering: an object replaced at equal size, and a page, a root and a fragment torn at every byte, or
   a fragment of another object. Readers answer exactly, and verification names each one.
-- Rust: compaction outputs are among the files the cross-check hands to Rust 0.86.1.
+- Rust: compaction outputs are among the files the cross-check hands to Rust 0.90.0.
 - The churn bench (`bench/Vorticity.Benchmarks.Churn`): ten million rows, then thirty thousand commits
   of ten rows (appends, updates and deletes at random keys), with compaction drained and vacuum run
   between them. Every cost stays flat, or levels off once the marks have filled: an append takes 0.5

@@ -1,4 +1,4 @@
-// Every golden file, opened: real postscripts and footers written by Vortex 0.86.1, and the
+// Every golden file, opened: real postscripts and footers written by Vortex 0.90.0, and the
 // oracle that can tell the open path it is wrong about a real file.
 //
 // The I/O-count assertion in OpensEveryCorpusFile makes the open's headline promise measurable:

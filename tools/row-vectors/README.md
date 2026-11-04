@@ -8,9 +8,13 @@ against byte for byte.
 
 `vortex-row` is marked `publish = false` upstream. It only lives inside the Vortex monorepo and has
 never been pushed to crates.io, so the exact crates.io pin `conformance-gen` uses cannot reach it. This
-crate takes it as a git dependency pinned to the tag `0.86.1`, and takes every other Vortex crate from
+crate takes it as a git dependency pinned to the tag `0.90.0`, and takes every other Vortex crate from
 the same tag, so that one resolved copy of `vortex-array` serves them all. It is the only git
 dependency in the repository.
+
+The vectors name the row format 0.86.1, as `RowEncoder.VortexVersion` does: vortex-row 0.90.0 writes
+them byte for byte as 0.86.1 did, so the format, and every key written under it, is unchanged. The
+name moves only when a regeneration changes the bytes.
 
 [The row encoding section](../../docs/design/04-conformance.md#7-the-row-encoding) of the conformance
 design explains why it is worth the trouble: being merely order-compatible is not enough, because two

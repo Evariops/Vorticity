@@ -1,5 +1,5 @@
 // Real wire bytes, not our own encoder. types/decimal40_10_nonnull_r1025.vortex is a decimal(40,10)
-// column written by Vortex 0.86.1; its `vortex.decimal` data node is a single uncompressed buffer
+// column written by Vortex 0.90.0; its `vortex.decimal` data node is a single uncompressed buffer
 // of 1025 little-endian two's-complement i256 values (the sidecar's layout line shows
 // vortex.zoned -> data: vortex.flat -> {id: "vortex.decimal", nbuffers: 1} with metadata
 // `values_type = 5`). This test locates that buffer by content and decodes it.

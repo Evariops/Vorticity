@@ -13,13 +13,11 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
 
-use vortex::array::ArrayId;
 use vortex::array::ArrayRef;
 use vortex::array::IntoArray;
 use vortex::array::arrays::ChunkedArray;
 use vortex::array::arrays::PrimitiveArray;
 use vortex::array::arrays::StructArray;
-use vortex::array::session::ArraySessionExt;
 use vortex::array::validity::Validity;
 use vortex::array::arrays::BoolArray;
 use vortex::buffer::BitBuffer;
@@ -29,9 +27,10 @@ use vortex::compressor::BtrBlocksCompressorBuilder;
 use vortex::dtype::DType;
 use vortex::dtype::Nullability;
 use vortex::dtype::PType;
-use vortex::editions::ComponentKind;
-use vortex::editions::EditionSessionExt;
+use vortex::editions::Edition;
+use vortex::editions::EditionDeclaration;
 use vortex::editions::EditionId;
+use vortex::editions::EditionMember;
 use vortex::error::VortexResult;
 use vortex::error::vortex_err;
 use vortex::file::OpenOptionsSessionExt;
@@ -51,7 +50,6 @@ use vortex::layout::layouts::table::TableStrategy;
 use vortex::layout::layouts::zoned::Zoned;
 use vortex::scalar::Scalar;
 use vortex::session::VortexSession;
-use vortex::utils::aliases::hash_set::HashSet;
 
 use crate::encodings;
 use crate::manifest::FileRecord;
@@ -77,6 +75,22 @@ pub const EDITIONS: &[(&str, EditionId)] = &[
 /// The edition a default `VortexSession` targets.
 pub const DEFAULT_EDITION: &str = "core2026.08.3";
 
+/// The name an entry gives to be written under [`LIST_LAYOUT_EDITION`] beside the default core
+/// edition.
+pub const LIST_LAYOUT_EDITION_NAME: &str = "conformance2026.11.0";
+
+/// An edition of this corpus's own family that admits the `vortex.list` layout. No edition of
+/// Vortex 0.90 does, and its default writer lays lists out with that layout only when an enabled
+/// edition admits it, where 0.86.1 took `VORTEX_EXPERIMENTAL_LIST_LAYOUT=1`. Enabled beside core,
+/// it leaves every other id under core's enforcement.
+pub static LIST_LAYOUT_EDITION: EditionDeclaration = EditionDeclaration {
+    edition: Edition {
+        id: EditionId::new("conformance", 2026, 11, 0),
+        min_library_version: Some("0.90.0"),
+    },
+    added: &[EditionMember::layout(&"vortex.list")],
+};
+
 /// How the layout pipeline is assembled for one entry.
 #[derive(Clone, Debug)]
 pub enum StrategyKind {
@@ -92,11 +106,13 @@ pub enum StrategyKind {
     Verbatim,
     /// No compression and no zone maps, but still struct-split: only canonical encodings.
     Canonical,
-    /// The default pipeline minus `ZonedStrategy`.
+    /// The default pipeline minus `ZonedStrategy`: the compressor the session's enabled editions
+    /// allow (`BtrBlocksCompressorBuilder::from_session`), as the default pipeline's is.
     NoZoneMaps,
-    /// No zone maps, plus the compressor restricted to the session's enabled editions. Required
-    /// for pre-`core2026.08.0` editions: passing `with_strategy` opts out of the writer's own
-    /// `retain_allowed_encodings`, so it has to be reapplied by hand.
+    /// No zone maps, the compressor restricted to the session's enabled editions. Since 0.90 that
+    /// is what `NoZoneMaps` does too: `from_session` restricts the schemes by itself, where 0.86.1
+    /// needed `retain_allowed_encodings` reapplied by hand once `with_strategy` was passed. Kept
+    /// apart because the pre-`core2026.08.0` entries name it.
     EditionSafe,
 }
 
@@ -185,11 +201,11 @@ fn table_strategy(compressing: Arc<dyn LayoutStrategy>) -> Arc<dyn LayoutStrateg
     Arc::new(TableStrategy::new(Arc::new(validity), compressing))
 }
 
-fn no_zonemap_strategy() -> Arc<dyn LayoutStrategy> {
+fn no_zonemap_strategy(session: &VortexSession) -> Arc<dyn LayoutStrategy> {
     let chunked = ChunkedLayoutStrategy::new(flat());
     table_strategy(Arc::new(CompressingStrategy::new(
         chunked,
-        BtrBlocksCompressorBuilder::default().build(),
+        BtrBlocksCompressorBuilder::from_session(session).build(),
     )))
 }
 
@@ -201,30 +217,6 @@ fn canonical_strategy() -> Arc<dyn LayoutStrategy> {
     )))
 }
 
-/// The in-memory array encodings the session's enabled editions permit, resolved exactly as
-/// `vortex_file::writer::new_array_context` does: enabled ids are *serialized* ids, while
-/// `retain_allowed_encodings` wants *plugin* ids.
-fn allowed_encodings(session: &VortexSession) -> HashSet<ArrayId> {
-    let arrays = session.arrays();
-    session
-        .enabled_component_ids(ComponentKind::Array)
-        .iter()
-        .filter_map(|serialized_id| arrays.registry().get(serialized_id))
-        .map(|plugin| plugin.id())
-        .collect()
-}
-
-fn edition_safe_strategy(session: &VortexSession) -> Arc<dyn LayoutStrategy> {
-    let allowed = allowed_encodings(session);
-    let chunked = ChunkedLayoutStrategy::new(flat());
-    table_strategy(Arc::new(CompressingStrategy::new(
-        chunked,
-        BtrBlocksCompressorBuilder::default()
-            .retain_allowed_encodings(&allowed)
-            .build(),
-    )))
-}
-
 pub fn build_options(session: &VortexSession, spec: &WriteSpec) -> VortexWriteOptions {
     let mut opts = session.write_options();
 
@@ -232,26 +224,22 @@ pub fn build_options(session: &VortexSession, spec: &WriteSpec) -> VortexWriteOp
         StrategyKind::Default => {}
         StrategyKind::RowBlock(rows) => {
             opts = opts.with_strategy(
-                WriteStrategyBuilder::default()
+                // `from_session` compresses with the schemes the session's enabled editions
+                // allow, so a strictly increasing column does not elect `fastlanes.delta`, which
+                // belongs to no core edition and would be rejected at serialization time.
+                WriteStrategyBuilder::from_session(session)
                     .with_row_block_size(*rows)
                     // Required, not decorative: the 1 MiB coalescing target would merge the
                     // blocks straight back into one (API-NOTES.md).
                     .with_data_block_target_bytes(None)
-                    // Passing `with_strategy` opts out of the writer's own
-                    // `retain_allowed_encodings`, so it has to be reapplied by hand — otherwise a
-                    // strictly increasing column elects `fastlanes.delta`, which belongs to no
-                    // core edition, and the write is rejected at serialization time.
-                    .with_btrblocks_builder(
-                        BtrBlocksCompressorBuilder::default()
-                            .retain_allowed_encodings(&allowed_encodings(session)),
-                    )
                     .build(),
             );
         }
         StrategyKind::Verbatim => opts = opts.with_strategy(verbatim_strategy()),
         StrategyKind::Canonical => opts = opts.with_strategy(canonical_strategy()),
-        StrategyKind::NoZoneMaps => opts = opts.with_strategy(no_zonemap_strategy()),
-        StrategyKind::EditionSafe => opts = opts.with_strategy(edition_safe_strategy(session)),
+        StrategyKind::NoZoneMaps | StrategyKind::EditionSafe => {
+            opts = opts.with_strategy(no_zonemap_strategy(session));
+        }
     }
 
     if !spec.file_statistics {
@@ -1483,7 +1471,7 @@ fn container_entries() -> Vec<Entry> {
     let mut list_layout = entry(
         "containers/experimental_list_layout",
         "D",
-        "VORTEX_EXPERIMENTAL_LIST_LAYOUT=1: lists get their own layout strategy",
+        "an edition admitting vortex.list beside core: lists get their own layout strategy",
         Box::new(|_session, _rng| {
             let elem = Arc::new(DType::Primitive(PType::I32, Nullability::NonNullable));
             let dtype = DType::List(Arc::clone(&elem), Nullability::NonNullable);
@@ -1500,19 +1488,17 @@ fn container_entries() -> Vec<Entry> {
             })?;
             Ok(Build {
                 array: StructArray::try_from_iter([("items", column)])?.into_array(),
-                spec: WriteSpec {
-                    disable_editions: true,
-                    ..WriteSpec::default()
-                },
+                spec: WriteSpec::default(),
             })
         }),
     );
-    list_layout.env = vec![("VORTEX_EXPERIMENTAL_LIST_LAYOUT".into(), "1".into())];
+    list_layout.edition = Some(LIST_LAYOUT_EDITION_NAME);
     list_layout.expected_layout_ids = vec!["vortex.list".into()];
     list_layout.notes.push(
-        "edition enforcement is off: the `vortex.list` LAYOUT id belongs to no core edition \
-         (spec/editions/*.toml lists six layouts and this is not one), so the write is rejected \
-         otherwise. A forward-compatibility fixture, not a conformance target."
+        "the `vortex.list` LAYOUT id belongs to no core edition (spec/editions/*.toml lists six \
+         layouts and this is not one), so the entry enables an edition of the corpus's own family \
+         that admits it, beside core, whose enforcement every other id stays under. A \
+         forward-compatibility fixture, not a conformance target."
             .into(),
     );
     out.push(list_layout);
@@ -1651,8 +1637,8 @@ fn edition_table(edition_index: usize, rows: usize) -> VortexResult<ArrayRef> {
     // core2026.08.3 adds the vortex.uuid dtype (and the two variant arrays).
     if edition_index >= 6 {
         let uuid = DType::Extension(
-            vortex::dtype::extension::ExtDType::<vortex::extension::uuid::Uuid>::try_new(
-                vortex::extension::uuid::UuidMetadata::default(),
+            vortex::dtype::extension::ExtDType::<vortex::encodings::uuid::Uuid>::try_new(
+                vortex::encodings::uuid::UuidMetadata::default(),
                 DType::FixedSizeList(Arc::new(DType::Primitive(PType::U8, nn)), 16, nn),
             )?
             .erased(),

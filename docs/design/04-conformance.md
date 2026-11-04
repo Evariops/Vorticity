@@ -29,9 +29,11 @@ anchored in the Rust reference, in both directions. Tests use xUnit v3 on Micros
 
 ## 3. The golden corpus
 
-`tools/conformance-gen`, a Rust crate pinned to `vortex = "=0.86.1"`, writes the corpus under
+`tools/conformance-gen`, a Rust crate pinned to `vortex = "=0.90.0"`, writes the corpus under
 `tests/Vorticity.Conformance/corpus`: 876 files, deterministic from a fixed seed, across the seven
-core editions from `core2025.05.0` to `core2026.08.3`. The matrix is deliberate:
+core editions from `core2025.05.0` to `core2026.08.3`. It was first written with 0.86.1 and
+regenerated with 0.90.0 to the same array, layout, extension and aggregate ids. The matrix is
+deliberate:
 
 - every dtype × nullability × row counts of 0, 1, 1 023, 1 024, 1 025, 8 191, 8 192 and 8 193,
   because the block edges at 1 024 (FastLanes) and 8 192 (the default block) are where bugs live
@@ -122,15 +124,16 @@ format match ([06-row-encoding.md](06-row-encoding.md)):
 - The bytes are checked against Rust. `tools/row-vectors` encodes generated tables with the reference
   `vortex-row` and records the bytes in `tests/Vorticity.Conformance/row-vectors`, and the tests
   compare every one. `vortex-row` is not published on crates.io, so that crate takes the Vortex
-  repository at tag `0.86.1` as a git dependency, the only one in the repository, and its output is
-  committed. Being order-compatible is not enough, since two encoders can each be consistent and
-  still disagree, which would break any comparison across languages.
+  repository at tag `0.90.0` as a git dependency, the only one in the repository, and its output is
+  committed. The vectors name the row format `0.86.1`, whose bytes `0.90.0` still writes. Being
+  order-compatible is not enough, since two encoders can each be consistent and still disagree,
+  which would break any comparison across languages.
 
 ## 8. Read forever
 
 Files written under the oldest edition must stay readable, and the corpus holds files written under
 each edition from `core2025.05.0` on. The files of the older editions are what catches a reader that
-hard-codes the encodings of the newest edition. They are written by the pinned 0.86.1 generator
+hard-codes the encodings of the newest edition. They are written by the pinned 0.90.0 generator
 restricted to each edition, which gives the same component set as the 0.36.0 floor with a modern
 writer. Files from a 0.36.0 writer itself would need a second, older generator.
 

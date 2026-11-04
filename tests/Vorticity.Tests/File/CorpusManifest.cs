@@ -1,4 +1,4 @@
-// Access to the golden corpus and its manifest. 819 files written by Vortex 0.86.1, each with the
+// Access to the golden corpus and its manifest. 876 files written by Vortex 0.90.0, each with the
 // row count, dtype, postscript size and metadata keys this component must reproduce.
 //
 // The manifest is 1.5 MB of JSON: parsed once, with JsonDocument rather than the serializer, so

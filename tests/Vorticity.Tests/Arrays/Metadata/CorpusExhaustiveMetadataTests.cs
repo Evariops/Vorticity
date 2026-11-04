@@ -2,7 +2,7 @@
 // 819 golden sidecars under tests/Vorticity.Conformance/corpus, for every encoding this component
 // owns. 583 payloads in total, of which the 19 encodings below account for the ones with a codec.
 //
-// Each payload is parsed and then re-serialized, and the bytes must match exactly. Vortex 0.86.1
+// Each payload is parsed and then re-serialized, and the bytes must match exactly. Vortex 0.90.0
 // wrote every one of them, so byte-exactness is a direct statement that this codec agrees with
 // upstream on tag numbers, on field order, and on which fields have implicit versus explicit
 // presence - the three things a plausible-but-wrong transcription gets away with when it is only

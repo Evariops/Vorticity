@@ -2,7 +2,7 @@
 // readers and the scan do this properly; this walks the three layout encodings that get
 // us to real decoded values in much of the corpus - vortex.zoned, vortex.struct and
 // vortex.flat - and refuses everything else. It exists because agreeing with our own fixtures
-// proves nothing: these values were written by Vortex 0.86.1 and the expectations come from the
+// proves nothing: these values were written by Vortex 0.90.0 and the expectations come from the
 // sidecar.
 //
 // Deliberately NOT supported: vortex.chunked (needs concatenation across chunks) and vortex.dict

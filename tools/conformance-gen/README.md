@@ -11,17 +11,24 @@ produced by the Rust reference implementation.
 ## The pinned version, and why it is a pin
 
 ```toml
-vortex = "=0.86.1"
+vortex = "=0.90.0"
 ```
 
 The pin is exact on purpose. It is a conformance decision (see [the golden
 corpus](../../docs/design/04-conformance.md#3-the-golden-corpus)), not a dependency choice: a version
 bump is a corpus regeneration, and the version that produced a corpus is recorded in `manifest.json`
-and in every file record.
+and in every file record. `build.rs` reads it from `Cargo.lock`, so no copy of the pin can drift.
 
 0.86.1 is the release [docs/design/99-sources.md](../../docs/design/99-sources.md) derived the
-specification against. It can target every frozen core edition up to `core2026.08.3`, so the corpus
-reaches every component in scope. It needs rustc 1.95 or later (built here with 1.98.1).
+specification against, and the corpus was first written with it. 0.90.0 regenerated it to the same
+array, layout, extension and aggregate ids. It can target every frozen core edition up to
+`core2026.08.3`, so the corpus reaches every component in scope. It needs rustc 1.95 or later (built
+here with 1.98.1).
+
+The citations in this crate's comments and notes, a crate and release then a path and line such as
+`vortex-file-0.86.1/src/writer.rs:387`, name the source each fact was first verified against. A
+regeneration that keeps the coverage and the determinism is what shows a fact still holds, and a
+citation moves to a newer release when its fact is next revisited.
 
 ## Running
 
@@ -91,7 +98,7 @@ tests/Vorticity.Conformance/
   forged/
     manifest.json        source file, source hash, and the exact byte patch for each fixture
     negative/       2    files no conformant writer can produce
-    legacy/         1    a valid file in a layout 0.86.1 reads but cannot write
+    legacy/         1    a valid file in a layout Vortex reads but cannot write
 ```
 
 ### The type matrix
@@ -214,7 +221,8 @@ The second line is the one that matters: it locks in lazy component resolution, 
 resolves every declared id up front fails it.
 
 `legacy/stats_layout` is the exception, a perfectly valid file in the legacy `vortex.stats` layout,
-which 0.86.1 can read but not write. It closes the one gap the coverage gate reports for the corpus.
+which Vortex, 0.86.1 as 0.90.0, can read but not write. It closes the one gap the coverage gate
+reports for the corpus.
 
 ## The sidecar
 
@@ -346,18 +354,18 @@ and each one is a `SkipRecord` in `manifest.json` with the source reference that
 | gap | why |
 |---|---|
 | `vortex.stats` layout | The vtable exists and readers handle it, but no writer path constructs it. `ZoneMapSchema::LegacyStats` is `pub(crate)`, `ZonedLayout::try_new` only accepts the `AggregateFns` variant, `vortex-layout/src/layouts/zoned/writer.rs` never mentions `LegacyStats`, and `ZonedMetadata::metadata` panics on the legacy schema (`zoned/mod.rs:108`). A real `vortex.stats` file would have to come from an older release, which would break the single-version pin, so the forged `legacy/stats_layout` fixture covers it instead |
-| Zstd-compressed segments | The format reserves per-segment compression, but the 0.86.1 writer hard-codes it off: `PostscriptSegment::write_flatbuffer` passes `_compression: None` (`footer/postscript.rs:251`) and `FileLayout` passes `compression_specs: None` (`footer/file_layout.rs:75`). No public API sets either. `containers/zstd_arrays_in_segments` is the closest reachable variant, compressed at the array level, not the segment level |
-| LZ4-compressed buffer | The same mechanism, and in addition no LZ4 codec is registered anywhere in 0.86.1, with no `lz4` dependency in any `vortex-*` crate |
+| Zstd-compressed segments | The format reserves per-segment compression, but the writer, 0.86.1 as 0.90.0, hard-codes it off: `PostscriptSegment::write_flatbuffer` passes `_compression: None` (`footer/postscript.rs:251`) and `FileLayout` passes `compression_specs: None` (`footer/file_layout.rs:75`). No public API sets either. `containers/zstd_arrays_in_segments` is the closest reachable variant, compressed at the array level, not the segment level |
+| LZ4-compressed buffer | The same mechanism, and in addition no LZ4 codec is registered anywhere in 0.86.1 or 0.90.0, with no `lz4` dependency in any `vortex-*` crate |
 | postscript near the 65527-byte ceiling | The writer's own ceiling is two orders of magnitude lower: four segment locators plus at most `MAX_METADATA_SEGMENTS` (16) entries with keys capped at `MAX_METADATA_KEY_BYTES` (64) (`footer/mod.rs:44,51`), about 1 KiB of key budget. `containers/postscript_max_metadata` is the largest postscript actually achievable |
 | deliberately false min or max | This one has to be forged, and the forged set does not hold it yet: a zone's min and max live inside a compressed, encoded stats array, so inverting one means re-encoding rather than patching bytes |
-| row-encoding golden vectors | Not produced here. `vortex-row` is not published on crates.io, so [tools/row-vectors](../row-vectors/README.md) takes it from the Vortex repository at tag `0.86.1` as a git dependency and writes the vectors (see [the row encoding](../../docs/design/04-conformance.md#7-the-row-encoding)). The `rows/*` skip and its caveat in `manifest.json` predate that crate |
+| row-encoding golden vectors | Not produced here. `vortex-row` is not published on crates.io, so [tools/row-vectors](../row-vectors/README.md) takes it from the Vortex repository at tag `0.90.0` as a git dependency and writes the vectors (see [the row encoding](../../docs/design/04-conformance.md#7-the-row-encoding)). The `rows/*` skip and its caveat in `manifest.json` predate that crate |
 | `vortex.chunked` layout with one chunk | `ChunkedLayoutStrategy::write_stream` collapses a single-child layout into that child, `if child_layouts.len() == 1 { return child }` (`layouts/chunked/writer.rs:86`). The equivalent array shape is in the corpus as `encodings/chunked_one_chunk` |
 | `vortex.chunked` layout with a zero-row chunk | The file writer filters empty chunks out of the write stream before any layout strategy sees them, `.try_filter(\|chunk\| ready(!chunk.is_empty()))` (`vortex-file-0.86.1/src/writer.rs:270`), as a 100/0/100 stream confirms by producing a two-child layout. The equivalent array shape is in the corpus as `encodings/chunked_empty_chunks` |
 | unknown encoding id | Not producible by any writer by definition: the per-kind allowlist rejects an unregistered id, and `disable_editions()` only widens it to ids the session has registered. It is produced by byte-patching instead, and shipped in the forged-fixture set |
 | nullable top-level struct | Unwritable by any configuration. `write_internal` always calls `accumulate_stats`, which constructs a `FileStatsAccumulator` before looking at the requested statistics, and that constructor panics on a nullable top-level struct (`layouts/file_stats.rs:461`). `with_file_statistics(vec![])` does not help. Nullable structs are still covered as non-root columns |
 | `DType::Union` | `vortex.union` is in no core edition, and the generic builder refuses it outright (`todo!("TODO(connor)[Union]: unimplemented")`, `builders/mod.rs:462`) |
 | `preview2026.08.0` edition | Preview editions are not frozen, so a file written against one carries no read-forever guarantee and has no place in a corpus for interoperability regressions |
-| Vortex 0.36.0 floor files | This crate is pinned to exactly 0.86.1. Floor files would need a separately pinned generator, and `editions/core2025.05.0` is as close as this one gets |
+| Vortex 0.36.0 floor files | This crate is pinned to exactly 0.90.0. Floor files would need a separately pinned generator, and `editions/core2025.05.0` is as close as this one gets |
 
 `fastlanes.delta` and `vortex.zstd_buffers` are not gaps, since they are generated. Neither belongs to
 a core edition, but "no core edition contains it" is a weaker claim than "this release cannot write
@@ -371,7 +379,8 @@ structurally valid files carrying an encoding a conformant reader may legitimate
 Two runs produce byte-identical output, `.vortex` files, sidecars, `manifest.json` and `SIDECAR.md`
 alike. This was verified over every file by SHA-256, across separate processes and different output
 paths, across `TZ=Asia/Tokyo` and `TZ=Pacific/Kiritimati`, `LC_ALL=tr_TR.UTF-8` and `LC_ALL=C`, and
-under ten-way CPU contention. The 0.86.1 writer has no nondeterministic dimension.
+under ten-way CPU contention. The 0.86.1 writer has no nondeterministic dimension, and the 0.90.0
+corpus came out identical, every file and sidecar by SHA-256, from two separate runs.
 
 Three things make that true, all recorded in `manifest.json`:
 
@@ -386,7 +395,8 @@ Three things make that true, all recorded in `manifest.json`:
 
 ## Caveats: reference behaviour that looks like a bug
 
-`manifest.json` carries a `caveats` array. These are things Vortex 0.86.1 really does, and a .NET test
+`manifest.json` carries a `caveats` array. These are things Vortex really does, first verified on
+0.86.1, and a .NET test
 that "corrects" one will disagree with every real Vortex file. The most important one:
 
 > The file-level `sum` statistic is not the IEEE sum on a float column containing an infinity. Vortex
@@ -417,5 +427,5 @@ over-reports as described above.
 | `examples/verify_objects.rs` | reads the objects a dataset's jobs write, each against its twin written plainly, and prunes with their zone maps as with the reference's own |
 | `examples/verify_shredded.rs` | reads every file with shredded variants we write, each against its twin written whole, value for value |
 | `examples/scan_files.rs` | reads every row of every file in a directory, the check that a strict reader takes a file at all |
-| `API-NOTES.md` | the 0.86.1 API, as this generator uses it |
+| `API-NOTES.md` | the 0.86.1 API, as this generator used it, with what 0.90.0 changed |
 | `examples/api_experiments.rs` | the runnable proof behind `API-NOTES.md` |

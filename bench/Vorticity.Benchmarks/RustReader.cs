@@ -2,8 +2,8 @@
 //
 // Both implementations are measured on the same bytes, with the same clock
 // and the same page-cache state, because cross-process comparison is exactly the noise that makes
-// a 1.4x ratio unreadable. The native side is tools/vxbench-rs, a cdylib over the same
-// `vortex = "=0.86.1"` pin the corpus was generated with.
+// a 1.4x ratio unreadable. The native side is tools/vxbench-rs, a cdylib over the same `vortex`
+// pin the corpus was generated with, which it states (`Reference`).
 //
 // THE LIBRARY IS OPTIONAL. It is ~36 MB of Rust that has to be built by hand, so its absence is a
 // first-class state rather than a crash: `Available` is false, the comparison benchmarks skip, and
@@ -312,6 +312,38 @@ internal static partial class RustReader
     private static string? _fingerprint;
 
     private static string? ComputeFingerprint() => Locate() is { } path ? FingerprintOf(path) : null;
+
+    /// <summary>
+    /// The reference the loaded library was built against, as the pages name it, "Vortex 0.90.0": the library
+    /// states it, having read its `vortex` pin from its lock when it was built.
+    /// </summary>
+    /// <remarks>
+    /// A library built before it stated its version, such as the one a <c>--rebase-from</c> carries the tables
+    /// from, says so rather than borrowing the pin of the sources beside it.
+    /// </remarks>
+    internal static string Reference => _reference ??= ComputeReference();
+
+    private static string? _reference;
+
+    [LibraryImport(Library, EntryPoint = "vxbench_vortex_version")]
+    private static partial nint VortexVersion();
+
+    private static string ComputeReference()
+    {
+        if (!Available)
+        {
+            return "Vortex";
+        }
+
+        try
+        {
+            return "Vortex " + Marshal.PtrToStringUTF8(VortexVersion());
+        }
+        catch (EntryPointNotFoundException)
+        {
+            return "Vortex, from a library built before it stated its version";
+        }
+    }
 
     /// <summary>The first twelve hex digits of the SHA-256 of the binary at <paramref name="path"/>, or null.</summary>
     internal static string? FingerprintOf(string path)

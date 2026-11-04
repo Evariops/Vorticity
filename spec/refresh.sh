@@ -11,7 +11,7 @@
 set -euo pipefail
 
 # Matches the vortex pin in tools/conformance-gen/Cargo.toml. Moving one means moving both.
-PINNED_REF="0.86.1"
+PINNED_REF="0.90.0"
 
 ref="${1:-$PINNED_REF}"
 base="https://raw.githubusercontent.com/vortex-data/vortex/${ref}"

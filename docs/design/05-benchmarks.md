@@ -32,7 +32,7 @@ it, and [bench/README.md](../../bench/README.md) explains how to run each one.
   measured on the spot, file by file and axis by axis. On all cores Rust keeps its default, whose
   splits spread its work.
 * Each side is built for speed. Vorticity runs as a Native AOT binary for the machine's instruction
-  set. Vortex 0.86.1 is built the way upstream builds its own benchmarks: mimalloc,
+  set. The Vortex reference is built the way upstream builds its own benchmarks: mimalloc,
   `-C target-cpu=native`, one codegen unit, no LTO, upstream's `release_debug` profile and the
   `RUSTFLAGS` of its benchmark workflows.
 * Both sides use the same threads. Every scenario runs on one core (Rust's single-threaded runtime,
@@ -221,9 +221,9 @@ own sections of the benchmark page and leaves the others alone:
 | BenchmarkDotNet | one kernel against its baseline, on one clock | a class name, such as `fastlanes` |
 | the ratchets | [allocations](#5-allocations) | `dotnet test Vorticity.slnx -c Release` |
 
-Rust is driven through [tools/vxbench-rs](../../tools/vxbench-rs), built against the same
-`vortex = "=0.86.1"` pin the corpus was written with: a C ABI for the in-process gates, and a binary
-for the report. `--ffi-check` checks that both readers return the same rows and the same checksum of
+Rust is driven through [tools/vxbench-rs](../../tools/vxbench-rs), built against the same `vortex`
+pin the corpus was written with, which the library states and every page names: a C ABI for the
+in-process gates, and a binary for the report. `--ffi-check` checks that both readers return the same rows and the same checksum of
 every decoded value before a ratio is trusted, and the gates refuse to run under a Rust build other
 than the one their ceilings were set with. [bench/README.md](../../bench/README.md) has every
 command, what it costs, and how a ceiling moves.

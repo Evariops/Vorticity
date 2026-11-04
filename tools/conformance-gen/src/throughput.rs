@@ -35,7 +35,6 @@ use std::process::Command;
 
 use anyhow::Context;
 use serde::Serialize;
-use vortex::array::session::ArraySessionExt;
 use vortex::io::session::RuntimeSessionExt;
 use vortex::io::std_file::FileWrite;
 use vortex::session::VortexSession;

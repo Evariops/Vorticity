@@ -412,7 +412,13 @@ public sealed class PathAllocationTests
         //
         // The mapping these scans read through is made by the scan rather than by the open, and
         // the reader that makes it is smaller than the mapped source was: 48 bytes less on each.
-        ("scan, fastlanes.delta", "encodings/fastlanes_delta", 2_992, FullScan),
+        //
+        // This file is written with editions off, so its footer declares every array id the
+        // writer's session registers. Since the corpus came from Vortex 0.90.0 that is 41 ids
+        // rather than 39: version 2 of FoR, of bit-packing and of decimal byte parts joined, and
+        // fastlanes.transposed_bool left. The open resolves each declared id into two tables, a
+        // ushort and an 8-byte location: 24 bytes more, the file's and not the path's.
+        ("scan, fastlanes.delta", "encodings/fastlanes_delta", 3_016, FullScan),
         // The page sizes are read in place from the node's metadata rather than into a list a
         // chunk, and the chunk metadata with its ANS tables and the latent states are kept from one
         // decode to the next rather than built by each: 1 536 bytes less on this file's one chunk,

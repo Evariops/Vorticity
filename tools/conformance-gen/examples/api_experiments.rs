@@ -11,7 +11,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use vortex::VortexSessionDefault;
-use vortex::array::ArrayId;
 use vortex::array::ArrayRef;
 use vortex::array::IntoArray;
 use vortex::array::arrays::ChunkedArray;
@@ -44,13 +43,15 @@ use vortex::layout::layouts::compressed::CompressingStrategy;
 use vortex::layout::layouts::flat::Flat;
 use vortex::layout::layouts::flat::writer::FlatLayoutStrategy;
 use vortex::layout::layouts::table::TableStrategy;
-use vortex::array::session::ArraySessionExt;
 use vortex::session::VortexSession;
-use vortex::utils::aliases::hash_set::HashSet;
 use vortex_btrblocks::SchemeExt;
 use vortex_btrblocks::schemes::integer::FoRScheme;
 use vortex_btrblocks::schemes::integer::IntDictScheme;
 use vortex_btrblocks::schemes::string::StringDictScheme;
+
+/// FoR with a single reference, the only mode 0.86.1 had: since 0.90 a scheme is a value with a
+/// mode, and `with_new_scheme` takes a `'static` one.
+static FOR_V1: FoRScheme = FoRScheme::v1();
 
 fn out_dir() -> PathBuf {
     let dir = std::env::temp_dir().join("conformance-gen-experiments");
@@ -67,7 +68,7 @@ fn main() -> anyhow::Result<()> {
         "02-uncompressed",
         |s| {
             s.write_options().with_strategy(
-                WriteStrategyBuilder::default()
+                WriteStrategyBuilder::from_session(s)
                     .with_btrblocks_builder(BtrBlocksCompressorBuilder::empty())
                     .build(),
             )
@@ -86,25 +87,9 @@ fn main() -> anyhow::Result<()> {
         sample_struct,
     )?;
 
-    // 3a. Encoding allowlist by ARRAY ENCODING ID (no vortex-btrblocks dependency needed).
-    //     Only schemes whose produced encodings are all in the set survive.
-    run(
-        "03a-allowlist-for-bitpacked",
-        |s| {
-            let allowed: HashSet<ArrayId> = ["fastlanes.for", "fastlanes.bitpacked"]
-                .into_iter()
-                .map(ArrayId::new)
-                .collect();
-            s.write_options().with_strategy(
-                WriteStrategyBuilder::default()
-                    .with_btrblocks_builder(
-                        BtrBlocksCompressorBuilder::default().retain_allowed_encodings(&allowed),
-                    )
-                    .build(),
-            )
-        },
-        sample_struct,
-    )?;
+    // 3a. (0.86.1 only) An allowlist of array encoding ids, `retain_allowed_encodings`, is gone
+    //     in 0.90: the ids a compressor may produce come from the session's registered arrays and
+    //     enabled editions, and the scheme-level control of 3b and 3c is what remains.
 
     // 3b. Scheme-level control: start empty, add exactly one scheme. Requires a direct
     //     `vortex-btrblocks` dependency because `SchemeId` is opaque outside that crate.
@@ -112,9 +97,9 @@ fn main() -> anyhow::Result<()> {
         "03b-only-for-scheme",
         |s| {
             s.write_options().with_strategy(
-                WriteStrategyBuilder::default()
+                WriteStrategyBuilder::from_session(s)
                     .with_btrblocks_builder(
-                        BtrBlocksCompressorBuilder::empty().with_new_scheme(&FoRScheme),
+                        BtrBlocksCompressorBuilder::empty().with_new_scheme(&FOR_V1),
                     )
                     .build(),
             )
@@ -127,9 +112,9 @@ fn main() -> anyhow::Result<()> {
         "03c-no-dict-schemes",
         |s| {
             s.write_options().with_strategy(
-                WriteStrategyBuilder::default()
+                WriteStrategyBuilder::from_session(s)
                     .with_btrblocks_builder(
-                        BtrBlocksCompressorBuilder::default()
+                        BtrBlocksCompressorBuilder::from_session(s)
                             .exclude_schemes([IntDictScheme.id(), StringDictScheme.id()]),
                     )
                     .build(),
@@ -143,7 +128,7 @@ fn main() -> anyhow::Result<()> {
         "04-row-block-1024",
         |s| {
             s.write_options().with_strategy(
-                WriteStrategyBuilder::default()
+                WriteStrategyBuilder::from_session(s)
                     .with_row_block_size(1024)
                     .with_data_block_target_bytes(None)
                     .build(),
@@ -157,7 +142,7 @@ fn main() -> anyhow::Result<()> {
         "04b-row-block-1024-with-default-coalescing",
         |s| {
             s.write_options().with_strategy(
-                WriteStrategyBuilder::default()
+                WriteStrategyBuilder::from_session(s)
                     .with_row_block_size(1024)
                     .build(),
             )
@@ -171,7 +156,7 @@ fn main() -> anyhow::Result<()> {
         |s| {
             s.write_options()
                 .with_file_statistics(vec![])
-                .with_strategy(no_zonemap_strategy())
+                .with_strategy(no_zonemap_strategy(s))
         },
         sample_struct,
     )?;
@@ -226,7 +211,7 @@ fn main() -> anyhow::Result<()> {
                 session
                     .write_options()
                     .with_file_statistics(vec![])
-                    .with_strategy(no_zonemap_strategy()),
+                    .with_strategy(no_zonemap_strategy(&session)),
                 sample_struct(&session)?,
             )
             .await
@@ -242,47 +227,23 @@ fn main() -> anyhow::Result<()> {
     }
 
     // 9. core2025.05.0 done properly: no zone maps AND a compressor restricted to that
-    //    edition's encodings. Passing `with_strategy` opts out of the writer's automatic
-    //    `retain_allowed_encodings`, so we have to reapply it ourselves.
+    //    edition's encodings. A strategy passed by hand compresses with the builder it was
+    //    given, so it takes `BtrBlocksCompressorBuilder::from_session`, which keeps only the
+    //    schemes whose produced ids the session's enabled editions all allow.
     run(
         "09-edition-2025-05-0-working",
         |s| {
             s.enable_edition(CORE_2025_05_0).expect("registered edition");
-            let allowed = allowed_encodings_for_session(s);
             s.write_options()
                 .with_file_statistics(vec![])
-                .with_strategy(edition_safe_strategy(&allowed))
+                .with_strategy(edition_safe_strategy(s))
         },
         sample_struct,
     )?;
 
-    // 10. An allowlist wide enough for bit-packing to actually be selected: BitPackingScheme
-    //     also produces patch encodings, and `retain_allowed_encodings` drops any scheme whose
-    //     produced set is not fully covered.
-    run(
-        "10-allowlist-bitpacking-with-patches",
-        |s| {
-            let allowed: HashSet<ArrayId> = [
-                "fastlanes.for",
-                "fastlanes.bitpacked",
-                "vortex.sparse",
-                "vortex.patched",
-                "vortex.constant",
-                "vortex.primitive",
-            ]
-            .into_iter()
-            .map(ArrayId::new)
-            .collect();
-            s.write_options().with_strategy(
-                WriteStrategyBuilder::default()
-                    .with_btrblocks_builder(
-                        BtrBlocksCompressorBuilder::default().retain_allowed_encodings(&allowed),
-                    )
-                    .build(),
-            )
-        },
-        sample_struct,
-    )?;
+    // 10. (0.86.1 only) An allowlist wide enough for bit-packing, which showed that
+    //     `retain_allowed_encodings` dropped a scheme whose produced ids it did not all cover.
+    //     0.90 keeps that rule, now applied to the ids the session's editions allow (9).
 
     // 8. Edition enforcement off entirely.
     run(
@@ -421,12 +382,18 @@ fn walk(
 // Strategies
 // ------------------------------------------------------------------------------------------
 
-/// The default pipeline minus `ZonedStrategy`: struct split, compress, chunk, flat.
-fn no_zonemap_strategy() -> Arc<dyn LayoutStrategy> {
+/// The default pipeline minus `ZonedStrategy`: struct split, compress, chunk, flat. Its
+/// compressor is unrestricted, every scheme the session holds whatever ids it produces, as 0.86.1's
+/// `BtrBlocksCompressorBuilder::default()` was: under an older edition its write fails (7).
+fn no_zonemap_strategy(session: &VortexSession) -> Arc<dyn LayoutStrategy> {
     let flat: Arc<dyn LayoutStrategy> = Arc::new(FlatLayoutStrategy::default());
     let chunked = ChunkedLayoutStrategy::new(Arc::clone(&flat));
-    let compressing =
-        CompressingStrategy::new(chunked, BtrBlocksCompressorBuilder::default().build());
+    let compressing = CompressingStrategy::new(
+        chunked,
+        BtrBlocksCompressorBuilder::from_session(session)
+            .unrestricted()
+            .build(),
+    );
     let validity = CollectStrategy::new(Arc::clone(&flat));
     Arc::new(TableStrategy::new(
         Arc::new(validity),
@@ -434,27 +401,13 @@ fn no_zonemap_strategy() -> Arc<dyn LayoutStrategy> {
     ))
 }
 
-/// The set of in-memory array encodings the session's enabled editions permit, resolved the same
-/// way `vortex_file::writer::new_array_context` does: serialized id -> registry -> plugin id.
-fn allowed_encodings_for_session(session: &VortexSession) -> HashSet<ArrayId> {
-    let arrays = session.arrays();
-    session
-        .enabled_component_ids(ComponentKind::Array)
-        .iter()
-        .filter_map(|serialized_id| arrays.registry().get(serialized_id))
-        .map(|plugin| plugin.id())
-        .collect()
-}
-
-/// No zone maps, and the data compressor restricted to `allowed`.
-fn edition_safe_strategy(allowed: &HashSet<ArrayId>) -> Arc<dyn LayoutStrategy> {
+/// No zone maps, and the data compressor restricted to the ids the session's editions allow.
+fn edition_safe_strategy(session: &VortexSession) -> Arc<dyn LayoutStrategy> {
     let flat: Arc<dyn LayoutStrategy> = Arc::new(FlatLayoutStrategy::default());
     let chunked = ChunkedLayoutStrategy::new(Arc::clone(&flat));
     let compressing = CompressingStrategy::new(
         chunked,
-        BtrBlocksCompressorBuilder::default()
-            .retain_allowed_encodings(allowed)
-            .build(),
+        BtrBlocksCompressorBuilder::from_session(session).build(),
     );
     let validity = CollectStrategy::new(Arc::clone(&flat));
     Arc::new(TableStrategy::new(

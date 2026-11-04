@@ -114,7 +114,7 @@ public sealed class RoundTripSweepTests
             await using VortexFile source = await VortexFile.OpenAsync(
                 entry.Path, await CorpusSweep.OpenOptionsForAsync(entry.Path), CancellationToken.None);
             // WITH INDEXES, so that the whole corpus crosses the rule that a file with an index
-            // opens and scans in a strict Rust 0.86.1 reader, without error and without
+            // opens and scans in a strict Rust 0.90.0 reader, without error and without
             // configuration. The files take four policies in turn, budget lifted: a Bloom
             // filter at all three resolutions on every column, postings on every column, sorted
             // runs cut into small segments on every column, and `Auto` with a Bloom on every other

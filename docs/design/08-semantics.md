@@ -197,7 +197,7 @@ the segment table reserves a compression byte too. A compressed buffer is refuse
 `VortexUnsupportedException` naming the id `lz4` and the kind `compression`, and nothing is ever
 written compressed.
 
-There is nothing to conform to. In the whole of Vortex 0.86.1, `lz4` appears in the two schemas that
+There is nothing to conform to. In the whole of Vortex 0.90.0, as in 0.86.1, `lz4` appears in the two schemas that
 declare the enum and in the generated code that mirrors them, and nowhere else. The reference writes
 `Compression::None`, never reads the field, and depends on no LZ4 implementation. The schema names an
 algorithm and stops there: it does not say whether the bytes would be a raw LZ4 block or a frame, and

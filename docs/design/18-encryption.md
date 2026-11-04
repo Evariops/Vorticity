@@ -593,7 +593,7 @@ proposal of this design, to be measured.
 
 | claim | where it comes from |
 |---|---|
-| the format's encryption fields are reserved and `EncryptionSpec` is empty | code: `spec/flatbuffers/footer.fbs`, vendored at Vortex 0.86.1 |
+| the format's encryption fields are reserved and `EncryptionSpec` is empty | code: `spec/flatbuffers/footer.fbs`, vendored at Vortex 0.90.0 |
 | the core already has a component kind `Encryption` for unsupported components | code: [error handling](03-architecture.md#5-error-handling) |
 | a plaintext open reads the last 64 KiB of an object in a store and the last 8 KiB of a local file | code: `VortexOpenOptions.cs` (`DefaultInitialReadBytes`), `LocalFileSource.cs` (`TailReadSize`) |
 | an append never rewrites a byte before the old end, a torn one leaves the previous version readable, and an abandoned one truncates back | [appending to a file](11-write-strategy.md#38-appending-to-a-file) |

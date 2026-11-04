@@ -45,8 +45,9 @@ the way the reference's writer makes them, so the read scenarios can run on a fi
 * it is a general-purpose C API with its own object model, whose per-call overhead would land inside
   the measurement
 
-This shim is built against the same crates.io pin the corpus was generated with
-(`vortex = "=0.86.1"`), exposes one entry point per benchmark axis, and returns a row count once every
+This shim is built against the same crates.io pin the corpus was generated with (`vortex` in
+`Cargo.toml`), which it states through `vxbench_vortex_version` for the pages to name, exposes one
+entry point per benchmark axis, and returns a row count once every
 value it returns has been read. There are no handles, no allocation across the boundary and no object
 lifetime to manage, so there is nothing in the interface to measure except the scan. The empty-call
 floor is 2.5 ns.

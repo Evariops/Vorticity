@@ -12,7 +12,7 @@ using static Vorticity.Tests.IO.IoTestData;
 namespace Vorticity.Tests.IO;
 
 /// <summary>
-/// The I/O layer against real files written by Vortex 0.86.1. Value-by-value conformance belongs
+/// The I/O layer against real files written by Vortex 0.90.0. Value-by-value conformance belongs
 /// to the conformance component; what is proved here is narrower and is
 /// the I/O layer's own claim: the three sources return the same bytes as the file itself, for
 /// ranges shaped and aligned the way a real footer's <c>segment_specs</c> are.
