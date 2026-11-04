@@ -391,7 +391,7 @@ public sealed class DatasetWriter
     private ObjectOutput Direct()
     {
         ThrowIfDone();
-        return _direct ??= _dataset.StartObjectUnder(_schema, shredded: _shredded);
+        return _direct ??= _dataset.StartObjectUnder(_schema, shredded: _shredded, countsPaths: _dataset.Options.PathDirectoryOnAppend);
     }
 
     /// <summary>The store the builders fill: the one partition's own when the dataset has no partition.</summary>
@@ -678,7 +678,8 @@ public sealed class DatasetWriter
                 keys.SortStable(order.AsSpan(0, rows));
             }
 
-            output = _dataset.StartObjectUnder(_schema, inKeyOrder: keys is not null, rowBound: rows, contents: true, shredded: _shredded);
+            output = _dataset.StartObjectUnder(
+                _schema, inKeyOrder: keys is not null, rowBound: rows, contents: true, shredded: _shredded, countsPaths: _dataset.Options.PathDirectoryOnAppend);
             VortexFileWriter writer = output.Writer;
             DeclareDictionaries(writer, arena, root, rows);
             SortedRows? sorted = keys is null ? null : _sorted ??= new SortedRows(_key!, _prefix, skip: _partition is null ? 0 : 1);

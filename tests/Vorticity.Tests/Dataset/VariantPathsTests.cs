@@ -100,6 +100,48 @@ public sealed partial class VariantPathsTests
         Assert.Equal(Sorted(Truth(rows, r => r.Attributes)), Sorted(tally.ToPaths(nameof(Event.Attributes)).ToDictionary(Key, path => path.Rows)));
     }
 
+    /// <summary>
+    /// Objects appended and never compacted carry the directory their writer counted: the paths of every row are theirs,
+    /// exact, with no object opened, and a question on a rare key refutes the granules of an append that lack it. Told not
+    /// to, an append writes none, and its rows are counted instead.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task AnAppendWritesTheDirectoryOfItsRows(bool directories)
+    {
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await CreateAsync(store, directories);
+        List<Event> rows = [];
+        Random random = new Random(19);
+        for (int part = 0; part < 6; part++)
+        {
+            Event[] batch = [.. Enumerable.Range(rows.Count, 400).Select(i => new Event(Noon.AddSeconds(i * 2.5), random.Next(6), Attributes(random, i), Extra(random, i)))];
+            rows.AddRange(batch);
+            await using ObjectDraft draft = dataset.StartObject();
+            await draft.Writer.WriteAsync<Event>(batch, Ct);
+            await dataset.AppendAsync(draft, Ct);
+        }
+
+        DatasetScanCounters metrics = new DatasetScanCounters();
+        PathTally tally = new PathTally();
+        await dataset.ScanBuilder().WithMetrics(metrics)
+            .TallyPathsAsync(new PathsQuestion([new PathColumn(new ColumnFieldExpr(nameof(Event.Attributes)), tally)], Exact: false, Memory: null), Ct);
+        VariantPaths found = tally.ToPaths(nameof(Event.Attributes));
+        Assert.True(found.Exact && found.Complete);
+        Assert.Equal(Sorted(Truth(rows, r => r.Attributes)), Sorted(found.ToDictionary(Key, path => path.Rows)));
+        Assert.Equal(directories ? 0 : (await dataset.ListObjectsAsync(Ct).ToListAsync(Ct)).Count, metrics.ObjectsOpened);
+
+        // The rare key: a granule or two of the objects that hold it, none of the others, when the appends wrote directories.
+        Assert.Equal(rows.Count(r => r.Attributes.Has("deploy")), await dataset.Scan<Event>().Where(r => r.Attributes.Has("deploy")).CountAsync(Ct));
+        ScanPlan plan = await dataset.Scan<Event>().Where(r => r.Attributes.Has("deploy")).ExplainAsync(analyze: true, Ct);
+        Assert.Equal(directories, plan.Pruning.Any(step => step.Structure == "path directory" && step.BlocksPruned > 0));
+        if (directories)
+        {
+            Assert.InRange(plan.LiveBlocks, 1, 6);
+        }
+    }
+
     /// <summary>Two variant columns in one pass, one of them nullable, as each alone gives them.</summary>
     [Fact]
     public async Task SeveralColumnsAreAnsweredInOnePass()
@@ -204,7 +246,7 @@ public sealed partial class VariantPathsTests
     private static Scan<Event> Scan(VortexDataset dataset, Func<Probe<Event>, Predicate>? filter) =>
         filter is null ? dataset.Scan<Event>() : dataset.Scan<Event>().Where(filter);
 
-    private static ValueTask<VortexDataset> CreateAsync(IObjectStore store) =>
+    private static ValueTask<VortexDataset> CreateAsync(IObjectStore store, bool directories = true) =>
         VortexDataset.CreateAsync(store, Event.Schema, new DatasetOptions
         {
             Layout = new DatasetLayout
@@ -217,6 +259,7 @@ public sealed partial class VariantPathsTests
             Write = new VortexWriteOptions { BlockRows = 64 },
             MarkedObjectBytes = 0,
             MarkedShare = 1,
+            PathDirectoryOnAppend = directories,
         }, Ct);
 
     /// <summary>

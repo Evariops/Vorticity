@@ -56,8 +56,10 @@ for each object the keys to write as typed columns inside the variant, the forma
 values of one class number 2 048 or more in the object becomes a column of its own, dense, or sparse where nine rows
 in ten lack it, and the rarer keys stay in a binary residual, the path directory saying which granules hold them. No
 saving in bytes decides: a question on a shredded key reads its values alone. Each object keeps a directory of the keys its rows hold, with their
-counts, and a map of where each shredded key's buffers lie, so that a question on one key reads that key's buffers
-alone. A key the object left in its residual is read from the residual of the chunks that hold it, never every row's.
+counts and the granules they lie in, and a map of where each shredded key's buffers lie, so that a question on one key
+reads that key's buffers alone. An append writes the directory of its own rows too, counted on another lane while it
+writes them, so that a question on a key refutes the last minutes' objects and granules that lack it; set
+`DatasetOptions.PathDirectoryOnAppend` to false for appends whose variants are never asked. A key the object left in its residual is read from the residual of the chunks that hold it, never every row's.
 Until a job rewrites an appended object, the first question that reads its variants shreds a copy in memory, once per
 object and within the session's budget, and the questions after it read typed columns there too.
 
@@ -83,6 +85,45 @@ SortKey =
 A row that does not hold the key, or holds it in another class, sorts as null, after every value. See
 [dataset-layout.md](dataset-layout.md).
 
+## Which keys a window holds
+
+`PathsAsync` lists the paths of a variant column among the rows a scan keeps, each with the class a typed read takes
+it as and the rows that hold it:
+
+```csharp
+VariantPaths paths = await dataset.Scan<LogRow>()
+    .Where(r => r.Service == "checkout" & r.At >= from & r.At < to)
+    .PathsAsync(r => r.Attributes);
+
+foreach (VariantPath path in paths)
+{
+    Console.WriteLine(path);   // ['http.route'] String: 1840 rows
+}
+```
+
+A path is a list of keys, `['cart']['items']` for a key inside an object, and a key keeps its dots. The class says
+which read takes the values: `Integer` for `AsInt64()`, `Double` for `AsDouble()`, `String` for `AsString()`,
+`Boolean` for `AsBool()`, `Timestamp` for `AsTimestamp()`, `Object` and `List` for `Has`, `Other` for the dedicated
+readers of decimals, dates, uuids and bytes. The path with no key is the column's own values: how many rows hold an
+object, a text, a null. A list is a path of its own, its elements are not.
+
+The answer comes from the path directory each object keeps, at the cost of a count of the same rows: the objects a
+count reads, and a directory each, read without opening an object the scan keeps whole.
+
+* Every path a kept row holds is listed.
+* A count is exact where the scan keeps every row of the granules the path lies in: the window holds whole objects,
+  or the path lies in granules inside it.
+* Elsewhere it is estimated from the share of rows the scan keeps there, and `Exact` is false. A path held only by
+  rows of such a granule that the scan leaves out can be listed too, with an estimated count: the directory knows
+  granules, not rows.
+* `new PathsOptions { Exact = true }` counts the rows of those objects instead, every count exact.
+* `VariantPaths.Complete` is false when an object's directory had left rare paths out under its size bound, as keys
+  taken from data make it do, and no exact count replaced it.
+
+Several columns are answered in one pass, `PathsAsync(r => (r.Attributes, r.Resource))`, and the tool path names
+them, `scan.PathsAsync("Attributes")`. A variant column inside a nested record has no directory of its own: its kept
+rows are counted.
+
 ## On the tool path
 
 A tool that learns its columns at run time names a key in a filter's text, `Attributes['http.route']`, and reads it
@@ -101,8 +142,13 @@ See [untyped-files.md](untyped-files.md).
 
 On a million rows of six to eight attributes (`vortex-queries --micro shredwrite`, best of five), a job counts and
 chooses the keys in 256 ns a row, and writes the rows shredded in 438 ns a row where it writes them whole in 128 ns:
-some 0.57 µs a row in all, paid by a job that rewrites the rows anyway, never by an append. The shredded rows took
-12.2 MB where the whole ones took 16.7 MB.
+some 0.57 µs a row in all, paid by a job that rewrites the rows anyway. The shredded rows took 12.2 MB where the
+whole ones took 16.7 MB.
+
+An append pays the count of its directory alone, a census of its rows beside the writer's work: on a million log
+records appended 65 536 at a time (`vortex-queries --micro appenddirectory`, best of five), 0.37 µs of a processor a
+row at one lane, and at sixteen 0.5 µs, of which 0.26 µs of time a row the writer's lanes do not hide: some 4 to 5 % of
+a core at 100 000 rows a second. The directory of such an append takes about 12 KB, 0.46 % of its bytes.
 
 ## Watch out
 

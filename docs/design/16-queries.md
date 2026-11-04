@@ -64,6 +64,7 @@ two columns of a file, and it buys names, batches by default, and no cap on the 
 | `Aggregation<T>`, `Aggregation`, `Projection<T>`, `Projection` | `As<TRecord>()` | `Scan<TRecord>` over the result ([`As<TRecord>`](#71-astrecord)) |
 | `Aggregation<T>`, `Projection<T>` | `WithCancellation`, `ToListAsync`, `ToArrayAsync`, `ToValuesAsync` | the same kind, `ValueTask<…>` ([values and records](#72-values-and-records)), or `IAsyncEnumerable<T>` |
 | `Scan<TRecord>` | `AggregateAsync(a => e)`, `AggregateAsync<TResult>(a => (e1, e2, …))`, `CountAsync`, `AverageAsync` and the other single answers | `ValueTask<…>` ([one row](#8-one-row-the-aggregates-of-the-whole-scan)) |
+| `Scan<TRecord>`, `Scan` | `PathsAsync` on a variant column, or several | `ValueTask<VariantPaths>`: the column's paths among the rows kept, with their class and rows ([the paths of a window](21-variant-columns.md#7-decisions)) |
 
 An operator that returns a query only describes it and runs nothing. `await foreach` runs it,
 `ExplainAsync` plans it without reading a data segment, and a method that returns a `ValueTask` runs

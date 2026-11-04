@@ -347,6 +347,13 @@ public sealed record VortexWriteOptions
     internal IReadOnlyDictionary<string, Indexes.VariantDirectory>? VariantDirectories { get; init; }
 
     /// <summary>
+    /// Whether the writer counts the paths of each top-level variant column as it takes the rows, on another lane while it
+    /// encodes them, and writes their directory, a group of rows a block (<see cref="VariantDirectories"/>): what an append
+    /// to a dataset does, which reads its rows nowhere else. A column whose directory is declared is not counted.
+    /// </summary>
+    internal bool CountsPaths { get; init; }
+
+    /// <summary>
     /// The chunks of a page of a file's chunk directories, those that hold more than a page laid in pages
     /// (<see cref="global::Vorticity.Indexes.SliceChunks.PagedVersion"/>): <see cref="global::Vorticity.Indexes.SliceChunks.DefaultPageEntries"/>. Lowered by tests,
     /// so that objects of a few chunks lay their directories in pages as a day's do.

@@ -313,7 +313,9 @@ drops the entry.
 ### 4.6 `vorticity.variant.directory.v1`: every path a variant holds
 
 A job that writes an object with a sparse index counts the paths of each variant column as the object's rows
-are written ([shredded variants](11-write-strategy.md#10-shredded-variants)), and the
+are written ([shredded variants](11-write-strategy.md#10-shredded-variants)), and an append counts them too,
+on another lane while its writer encodes the rows (`DatasetOptions.PathDirectoryOnAppend`, on by default:
+about 0.37 µs of a processor a row of log records, a directory of about 12 KB an append of 65 536). The
 object carries what it counted: for every path and class of value the rows hold there (a boolean, an
 integer, a number, a text, a timestamp, an object, a list, a null, anything else), how many values, where
 they lie (the typed column a shredded path keeps, the values of other classes beside it, or the
@@ -338,7 +340,15 @@ fenced predicate asks for a path the file never holds, for a class the path neve
 values outside its bounds, under the filter's conjunctions and disjunctions. A presence asked absent, a
 conversion of any class, and a negation refute nothing. A refuted file reads no block (`ScanPlan.MayMatch` is false, and `Explain`
 names the step `path directory`). Otherwise it asks the same of each granule, and kills the blocks of
-the granules refuted. An append drops the entry, since it parses none of its rows.
+the granules refuted.
+
+A question for the paths of a variant column among the rows a scan keeps (`PathsAsync`) walks the objects a count
+of the same rows walks, and reads each one's directory whole, walked as it lies into a table of paths keyed by their
+bytes, a string made once a path: an object the scan keeps whole answers without being opened, its counts exact; one
+it keeps in part answers for the granules the count's plan keeps, exact for a path whose granules it keeps whole,
+estimated elsewhere from the share of rows the count keeps. The granule is the resolution: a path is never missed,
+and may be listed for a kept granule's rows the scan leaves out. An object without a directory, or one a question
+asking exact counts would estimate, has its kept rows counted instead.
 
 ### 4.7 `vorticity.variant.blocks.v1`: a shredded key's zone map
 

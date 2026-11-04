@@ -99,7 +99,10 @@ select (g.Key, g.Count())
 - A path an object did not shred costs the rows that hold it, never every row.
 - A new key changes no schema.
 - Ingestion pays nothing for shredding: appends write variants as they come, and shredding happens in
-  a job that rewrites the rows anyway.
+  a job that rewrites the rows anyway. An append counts the paths of its rows for its directory alone, on
+  another lane than its writer's ([decision 23](#7-decisions)).
+- The paths of any window are listed at the cost of a count of its rows, none missed
+  ([decision 24](#7-decisions)).
 - Every file reads in Rust 0.85.0 and later, under the edition `core2026.08.3`, which carries a
   read-forever guarantee.
 
@@ -231,6 +234,7 @@ double class leaves out, from the field's `value` of the rows that hold them.
 | the same answers shredded or not | every question of a matrix over paths, on the same rows written shredded and unshredded |
 | the column budget | the bytes of the file and the tables of its largest encoding tree (`ShreddingChoiceTests`) |
 | ingestion does not pay for shredding | appended objects carry no path map, and the append path takes no shredding (`ShreddedDatasetTests`) |
+| a window's paths are never missed | every path and class of the kept rows listed and every exact count right, over appends and jobs, deletes, and filters on the key, a column and a path (`VariantPathsTests`, `VariantPathsFileTests`) |
 | shredding costs little where it happens | `--micro shredwrite`: 181 ns a row to count and choose, 310 more to write shredded, for six to eight attributes |
 | a path read fetches only its bytes | no byte of another key read beyond the padding two ranges share, on a counting store (`VariantKeyReadTests`) |
 | a range on a path skips what it skips on a declared column | five ranges keep the same live blocks on the key and on a column holding the same values (`VariantBlockStatsTests`) |
@@ -269,6 +273,8 @@ double class leaves out, from the field's `value` of the rows that hold them.
 | 20 | the shapes a variant chunk holds | each chunk shreds the keys its rows hold (measured) | chunks cut where the shape changes, or a budget that counts a chunk's shapes |
 | 21 | a path's encoding across chunks | chosen per chunk, each key's region of the path map one zstd frame, 32 to 82 bytes a chunk (measured) | fixed per object, at a cost in compression |
 | 22 | the variants of level 0 | shredded in memory once per query node and object, kept until it leaves level 0, the copy made beside the first question, which parses the object as it lies, one copy of an object at a time and its memory reserved before it; an object an append shredded read as it lies, with no copy. Made on the first question's path, the copy kept the services under a status of 500 or more over the logs of a short S1 at 1 045 ms at first at 32 lanes, 255 beside it, the questions after alike (measured) | shredded in the append, from the previous object's choice of paths, for every handle |
+| 23 | the path directory of an append | counted by the append's writer on another lane while it encodes the rows, a group a granule, under the index budget: about 0.37 µs of a processor a row of log records at one lane, 0.5 at sixteen, of which 0.26 µs of time a row the writer's lanes do not hide, some 4 to 5 % of a core at 10⁵ rows a second, and a directory of about 12 KB an append of 65 536 rows, 0.46 % of its bytes (measured); `DatasetOptions.PathDirectoryOnAppend` turns it off. A question on a path then refutes the last minutes' objects and granules, and a question for the paths of a window reads directories rather than rows | none, the rule of decision 12 applied to counting too: every question on the window's appended objects counted their rows, some 0.17 s of a core for an hour of one source of a short S1, at every question, since nothing decoded outlives one |
+| 24 | the paths of a window | a question of its own on a filtered scan (`PathsAsync`), answered like a count: the directories of the objects a count reads, a path per granule kept, exact where the granules a path lies in are kept whole, estimated from the share of rows kept elsewhere, the kept rows counted where no directory answers or exact counts are asked | an aggregate that unfolds the paths of each row into groups, more general, at the price of a row feeding several groups and of the directories reaching the planner of states |
 
 ## 8. Alternatives weighed
 

@@ -91,6 +91,7 @@ public sealed partial class ShreddedDatasetTests
         await using VortexDataset levels = await VortexDataset.CreateAsync(levelsStore, Event.Schema, new DatasetOptions
         {
             Layout = new DatasetLayout { SortKey = [LayoutValue.Column(nameof(Event.At))] },
+            PathDirectoryOnAppend = false,
         }, Ct);
         await AppendAsync(clustered, levels);
         await CompactAsync(clustered, levels);

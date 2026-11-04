@@ -473,6 +473,11 @@ ingestion pays nothing for shredding, unless the dataset asks its appends to shr
 of level 0 shreds a copy of them in memory, once per object and under the session's budget, and keeps it
 until the object leaves level 0, so every question after the first reads typed columns there too.
 
+An append still counts the paths of its rows, on another lane than its writer's and without shredding them, for its
+path directory, so that a question on a path refutes the objects and granules of level 0 that lack it, and the paths
+of a window are read from directories (`DatasetOptions.PathDirectoryOnAppend`, on by default): about 0.37 µs of a
+processor a row of log records.
+
 The job's first pass counts each top-level key, its class and its bytes (`PathCensus`). Every path whose
 dominant class the object holds 2 048 values of or more has its typed column, a stream of its own, dense,
 or sparse where the compressor finds nine nulls in ten (`vortex.sparse`); a rarer path stays in the

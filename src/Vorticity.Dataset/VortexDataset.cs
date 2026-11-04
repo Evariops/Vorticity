@@ -890,7 +890,8 @@ public sealed class VortexDataset : IAsyncDisposable
     internal ObjectOutput StartObjectUnder(
         DatasetSchema schema, bool inKeyOrder = false, long rowBound = 0, bool contents = false, bool synopses = false,
         IReadOnlyDictionary<string, Types.Variants.VariantShredding>? shredded = null, IReadOnlyDictionary<string, int>? variantChunks = null,
-        IReadOnlyDictionary<string, Indexes.VariantDirectory>? directories = null, long byteBound = -1, PartitionPostings? postings = null)
+        IReadOnlyDictionary<string, Indexes.VariantDirectory>? directories = null, long byteBound = -1, PartitionPostings? postings = null,
+        bool countsPaths = false)
     {
         RequireConditionalCreation(_store);
         Guid identity = Guid.NewGuid();
@@ -926,10 +927,15 @@ public sealed class VortexDataset : IAsyncDisposable
             };
         }
 
-        // Every path and class of the variant columns, which a job counted from the object's rows.
+        // Every path and class of the variant columns, which a job counted from the object's rows, or which the writer of an
+        // append counts as it takes them (DatasetOptions.PathDirectoryOnAppend).
         if (directories is { Count: > 0 })
         {
             write = write with { VariantDirectories = directories };
+        }
+        else if (countsPaths)
+        {
+            write = write with { CountsPaths = true };
         }
 
         if (_store is SealedObjectStore { Seals: true })
