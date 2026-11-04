@@ -45,6 +45,12 @@ internal static class VariantPathsMicro
         Console.WriteLine(string.Create(
             CultureInfo.InvariantCulture,
             $"paths held {truth.Count}, listed {found.Count} ({found.Count(path => !held.ContainsKey(Key(path)))} held by no kept row), missing {missing}; {found.Count(path => path.Exact)} exact; estimated rows {estimated:N0} against {trueOfEstimated:N0}; complete {found.Complete}"));
+        Console.WriteLine($"read: {found.Reading}");
+        foreach (VariantPath extra in found.Where(path => !held.ContainsKey(Key(path))))
+        {
+            Console.WriteLine($"  held by no kept row: {extra}");
+        }
+
         return missing == 0 ? 0 : 1;
     }
 
