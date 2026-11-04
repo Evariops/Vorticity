@@ -256,20 +256,35 @@ internal sealed class ChosenColumnNode<T> : ResultNode<T>, IChosenColumn
     private VortexType Natural =>
         Row.Kind is AggregateKind.MinBy or AggregateKind.MaxBy || Row.Filter is not null ? Read.Type.Nullable : Read.Type;
 
+    /// <summary>
+    /// Whether the column holds no single value — a list, a variant, a struct — whose rows are kept as rows and gathered
+    /// into the result, rather than read as values of <typeparamref name="T"/>.
+    /// </summary>
+    private bool AsRows => Read.Type.Kind is VortexTypeKind.List or VortexTypeKind.FixedSizeList or VortexTypeKind.Struct
+        or VortexTypeKind.Variant or VortexTypeKind.Map or VortexTypeKind.Union;
+
     internal override ColumnSym? Comparable =>
         _comparable ??= new ColumnSym(new ResultFieldExpr($"${Key}", this, -1), Natural, Read.Extensions, null, -1, []);
 
-    public ChosenValues CreateValues() => new ChosenValues<T>(this);
+    public ChosenValues CreateValues() => AsRows ? new ChosenRows(Natural) : new ChosenValues<T>(this);
 
     internal override Func<int, T> Bind(AggregationOutcome outcome)
     {
+        if (AsRows)
+        {
+            throw new NotSupportedException(
+                $"'{this}' is a {Read.Type} of a chosen row, which a result holds as a column, not as one value: read it through a record, AggregateAsync<TResult>(…) or As<TRecord>().");
+        }
+
         ChosenValues<T> values = (ChosenValues<T>)outcome.ChosenOf(this);
         return values.At;
     }
 
-    public override ResultColumn Column(string name, ColumnShape[] keys) => new ChosenResultColumn<T>(name, Natural, this);
+    public override ResultColumn Column(string name, ColumnShape[] keys) =>
+        AsRows ? new ChosenRowsColumn(name, Natural, this) : new ChosenResultColumn<T>(name, Natural, this);
 
-    private protected override ResultColumn Typed(VortexField member, ColumnShape[] keys) => new ChosenResultColumn<T>(member.Name, member.Type, this);
+    private protected override ResultColumn Typed(VortexField member, ColumnShape[] keys) =>
+        AsRows ? new ChosenRowsColumn(member.Name, member.Type, this) : new ChosenResultColumn<T>(member.Name, member.Type, this);
 
     public override string ToString() => $"{Row}.{Read.Field.Path}";
 }

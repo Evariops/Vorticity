@@ -185,6 +185,22 @@ it. So an `OrderByDescending` with `Take(10)` reads ten rows whatever the number
 first and last rows of a day share one read. A chosen row's column is a result: a `Where` or an
 `OrderBy` after the group by can compare it, but an aggregate cannot read it.
 
+A chosen row's column can be of any type, a list or a variant as well as a number or a text:
+
+```csharp
+.Select(g => (g.Key, g.First().Frames, g.MaxBy(r => r.At).Attributes))
+.As<LatestStack>()
+
+[VortexRecord]
+public partial record struct LatestStack(string Service, ReadOnlyMemory<string> Frames, Variant? Attributes);
+```
+
+A list or a variant is kept as the row it is: copied from the read into a store of its column's type, then into
+the result, without becoming a .NET value on the way, so a list of a thousand elements costs bytes, not objects,
+until the record reads it. It is read through a record, `As<TRecord>()` or `AggregateAsync<TResult>(…)`, since it
+is a column of the result rather than one value. A `Where` after the group by can test it, `IsNull` say; an
+`OrderBy` cannot, a list and a variant having no order.
+
 ## Buckets of time and of numbers
 
 ```csharp

@@ -104,7 +104,105 @@ internal sealed class TerminalScan
     internal async ValueTask<bool> AnyAsync(CancellationToken cancellationToken) =>
         await RunAsync(stopAtFirst: true, cancellationToken).ConfigureAwait(false) > 0;
 
-    private async ValueTask<long> RunAsync(bool stopAtFirst, CancellationToken cancellationToken)
+    /// <summary>
+    /// What the scan keeps of the file's rows, range by range, as a count plans it and before any data is read: none of a
+    /// range outside its rows or whose blocks the structures prune, every row of one inside them that the zone maps prove the
+    /// filter true on and no row left out of, some of any other. The plan it holds counts the rows kept later, of every range
+    /// (<see cref="CountedAsync"/>) or of some (<see cref="KeptByGroupAsync"/>).
+    /// </summary>
+    /// <param name="cancellationToken">Cancels the reads.</param>
+    /// <exception cref="InvalidOperationException">The scan takes rows by their places, which no range says.</exception>
+    internal async ValueTask<KeptRows> JudgeAsync(CancellationToken cancellationToken)
+    {
+        if (_take is not null)
+        {
+            throw new InvalidOperationException("A scan that takes rows by their places keeps no range of them.");
+        }
+
+        if (_filter is null || _rows.IsEmpty)
+        {
+            return new KeptRows(_rows, null, null, _excluded, filtered: _filter is not null, kept: _filter is null ? null : 0);
+        }
+
+        ZonePruningPlan.PruningPlan pruning = _prune
+            ? await ZonePruningPlan
+                .PlanAsync(_file, _tree, _filter, cancellationToken, steps: null, _metrics, _indexes, proofs: true)
+                .ConfigureAwait(false)
+            : default;
+        return new KeptRows(_rows, pruning.Live, pruning.Zones, _excluded, filtered: true) { Plan = pruning };
+    }
+
+    /// <summary>
+    /// <paramref name="judged"/>, a judgment of this scan (<see cref="JudgeAsync"/>), with the rows it keeps counted under the
+    /// plan it was judged by, which says the share of the rows of the ranges kept in part it keeps; itself when they are.
+    /// </summary>
+    /// <param name="judged">The judgment.</param>
+    /// <param name="cancellationToken">Cancels the reads.</param>
+    internal async ValueTask<KeptRows> CountedAsync(KeptRows judged, CancellationToken cancellationToken) =>
+        judged.Counted || !judged.Filtered
+            ? judged
+            : judged.WithKept(await RunAsync(stopAtFirst: false, cancellationToken, judged.Plan).ConfigureAwait(false));
+
+    /// <summary>
+    /// The rows the scan keeps of each group of <paramref name="groupRows"/> rows <paramref name="part"/> names, added to
+    /// <paramref name="kept"/>: a count's work under the plan <paramref name="judged"/> was judged by, its splits no wider than
+    /// a group, over those groups alone. A split that straddles groups and keeps some of its rows, not all, which no group
+    /// can be told its own of, marks each of them -1.
+    /// </summary>
+    /// <param name="judged">A judgment of this scan (<see cref="JudgeAsync"/>).</param>
+    /// <param name="groupRows">The rows of a group.</param>
+    /// <param name="part">Whether a group is one whose kept rows are asked.</param>
+    /// <param name="kept">A count a group, added to.</param>
+    /// <param name="cancellationToken">Cancels the reads.</param>
+    internal async ValueTask KeptByGroupAsync(KeptRows judged, long groupRows, Func<int, bool> part, long[] kept, CancellationToken cancellationToken)
+    {
+        if (_filter is not null && !_rows.IsEmpty)
+        {
+            await RunAsync(stopAtFirst: false, cancellationToken, judged.Plan, new GroupCounts(groupRows, part, kept, this)).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>Where a count by group (<see cref="KeptByGroupAsync"/>) puts each split's rows.</summary>
+    private sealed class GroupCounts(long groupRows, Func<int, bool> part, long[] kept, TerminalScan scan)
+    {
+        internal long GroupRows => groupRows;
+
+        /// <summary>Whether <paramref name="split"/> holds a row of a group asked for.</summary>
+        internal bool Wants(RowRange split)
+        {
+            for (long g = split.Start / groupRows; g * groupRows < split.End; g++)
+            {
+                if (part((int)g))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        /// <summary>The <paramref name="rows"/> kept of <paramref name="split"/> put to its group, or its groups when it keeps all or none.</summary>
+        internal void Counted(RowRange split, long rows)
+        {
+            long first = split.Start / groupRows;
+            long last = (split.End - 1) / groupRows;
+            if (first == last)
+            {
+                kept[first] += rows;
+                return;
+            }
+
+            long all = split.Length - scan.ExcludedIn(split);
+            for (long g = first; g <= last; g++)
+            {
+                RowRange overlap = split.Intersect(new RowRange(g * groupRows, (g + 1) * groupRows));
+                kept[g] = rows == 0 || kept[g] < 0 ? kept[g] : rows == all ? kept[g] + overlap.Length - scan.ExcludedIn(overlap) : -1;
+            }
+        }
+    }
+
+    private async ValueTask<long> RunAsync(
+        bool stopAtFirst, CancellationToken cancellationToken, ZonePruningPlan.PruningPlan? planned = null, GroupCounts? groups = null)
     {
         if (_filter is null)
         {
@@ -118,17 +216,17 @@ internal sealed class TerminalScan
             return 0;
         }
 
-        if (await TryExactCountAsync(cancellationToken).ConfigureAwait(false) is long exact)
+        if (groups is null && await TryExactCountAsync(cancellationToken).ConfigureAwait(false) is long exact)
         {
             return exact;
         }
 
-        SplitPlan plan = SplitPlan.Compute(_tree, _rows, in _mask, _cap);
-        ZonePruningPlan.PruningPlan pruning = _prune
+        SplitPlan plan = SplitPlan.Compute(_tree, _rows, in _mask, groups is null ? _cap : Math.Min(_cap, groups.GroupRows));
+        ZonePruningPlan.PruningPlan pruning = planned ?? (_prune
             ? await ZonePruningPlan
                 .PlanAsync(_file, _tree, _filter, cancellationToken, steps: null, _metrics, _indexes, proofs: !stopAtFirst)
                 .ConfigureAwait(false)
-            : default;
+            : default);
         BlockMask? live = pruning.Live;
         ZonePruner? zones = (_tiers & TerminalTiers.FullBlock) != 0 ? pruning.Zones : null;
         _file.AnticipateReads(plan.ShareOf(_file.RowCount, live, _take));
@@ -159,7 +257,7 @@ internal sealed class TerminalScan
             SplitCursor cursor = plan.CreateCursor();
             while (cursor.TryNext(out RowRange split))
             {
-                if (_take is not null && !_take.Touches(split))
+                if ((_take is not null && !_take.Touches(split)) || groups?.Wants(split) == false)
                 {
                     continue;
                 }
@@ -171,18 +269,22 @@ internal sealed class TerminalScan
                 }
 
                 long blocks = (split.Length + blockRows - 1) / blockRows;
+                long rows;
                 if (zones is not null && TryProve(zones, split, out long proven))
                 {
-                    total += proven;
+                    rows = proven;
                     Diagnostics.VortexEventSource.Counted(blocks, 0);
                 }
                 else
                 {
                     Diagnostics.VortexEventSource.Counted(0, blocks);
                     cancellationToken.ThrowIfCancellationRequested();
-                    total += await DecodeAndCountAsync(context, decodes, split, states, cancellationToken)
+                    rows = await DecodeAndCountAsync(context, decodes, split, states, cancellationToken)
                         .ConfigureAwait(false);
                 }
+
+                total += rows;
+                groups?.Counted(split, rows);
 
                 if (stopAtFirst && total > 0)
                 {
@@ -989,5 +1091,56 @@ internal sealed class TerminalScan
 
         public int Compare((RowRange Split, FilterLiteral Bound) a, (RowRange Split, FilterLiteral Bound) b) =>
             Order(a.Bound, b.Bound, _wantMin);
+    }
+}
+
+/// <summary>
+/// The rows a scan keeps of a file, range by range: those of its own rows that the blocks left live hold, none of a range
+/// whose rows are all left out, and every one where the zone maps prove the filter true and no row is left out.
+/// </summary>
+/// <param name="range">The scan's rows.</param>
+/// <param name="live">The blocks the structures leave live; null for every one.</param>
+/// <param name="zones">What proves the filter true on a range; null for nothing.</param>
+/// <param name="excluded">The rows left out whatever the filter says; null for none.</param>
+/// <param name="filtered">Whether a filter applies, which only a proof says keeps every row of a range.</param>
+/// <param name="kept">The rows the scan keeps, counted; null when they are not, which without a filter are its rows not left out.</param>
+internal sealed class KeptRows(RowRange range, BlockMask? live, ZonePruner? zones, IRowExclusion? excluded, bool filtered, long? kept = null)
+    : Types.Variants.IGroupJudge
+{
+    /// <summary>The scan's rows.</summary>
+    internal RowRange Range => range;
+
+    /// <summary>The rows left out whatever the filter says; null for none.</summary>
+    internal IRowExclusion? Excluded => excluded;
+
+    /// <summary>Whether a filter applies.</summary>
+    internal bool Filtered => filtered;
+
+    /// <summary>Whether the rows kept were counted.</summary>
+    internal bool Counted => kept is not null;
+
+    /// <summary>The plan the scan was judged by, which a count of the rows it keeps runs under; null for none made.</summary>
+    internal ZonePruningPlan.PruningPlan? Plan { get; init; }
+
+    /// <summary>This judgment with the rows kept counted, <paramref name="rows"/>.</summary>
+    internal KeptRows WithKept(long rows) => new KeptRows(range, live, zones, excluded, filtered, rows) { Plan = Plan };
+
+    public (bool Kept, bool Whole, long Held) Judge(RowRange rows)
+    {
+        RowRange held = rows.Intersect(range);
+        long left = excluded is null ? 0 : excluded.ExcludedBefore(held.End) - excluded.ExcludedBefore(held.Start);
+        if (held.IsEmpty || left == held.Length || (live is not null && !live.AnyLive(held)))
+        {
+            return (false, false, 0);
+        }
+
+        bool whole = held.Length == rows.Length && left == 0 && (!filtered || (zones is not null && zones.Verdict(held).IsAllTrue));
+        return (true, whole, held.Length);
+    }
+
+    public double Share(long whole, long partial)
+    {
+        long rows = kept ?? (filtered ? -1 : range.Length - (excluded is null ? 0 : excluded.ExcludedBefore(range.End) - excluded.ExcludedBefore(range.Start)));
+        return partial <= 0 || rows < 0 ? 1 : Math.Clamp((rows - whole) / (double)partial, 0, 1);
     }
 }

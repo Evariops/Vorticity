@@ -230,6 +230,22 @@ internal sealed class FileScanSource : ScanSource, IRowsCapability, IStatisticsC
         return await Builder(spec, metrics).CountAsync(cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>The paths of variant columns among the rows the scan keeps: none when the statistics refute it, its file's answer otherwise.</summary>
+    public async ValueTask PathsAsync(ScanSpec spec, PathsQuestion question, ScanCounters metrics, CancellationToken cancellationToken)
+    {
+        if (spec.MatchesNothing || await RefuseAsync(spec, metrics, cancellationToken).ConfigureAwait(false))
+        {
+            return;
+        }
+
+        // The directories first; the columns they leave counted from the rows kept, read once.
+        ScanBuilder builder = Builder(spec, metrics);
+        if (await builder.TallyDirectoriesAsync(question, excluded: null, cancellationToken).ConfigureAwait(false) is { } left)
+        {
+            await PathQuestions.CountAsync(builder.ExecuteAsync(), question, left, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
     private async ValueTask<bool> AnyAsync(ScanSpec spec, ScanCounters metrics, CancellationToken cancellationToken) =>
         !spec.MatchesNothing
         && !await RefuseAsync(spec, metrics, cancellationToken).ConfigureAwait(false)

@@ -1846,6 +1846,32 @@ Vorticity:     method void Deconstruct(out long, out int, out long)
 Vorticity:     property int RowGroupCount { get; init; }
 Vorticity:     property long Bytes { get; init; }
 Vorticity:     property long RowCount { get; init; }
+Vorticity: sealed class Vorticity.PathsOptions : IEquatable<PathsOptions>
+Vorticity:     ctor PathsOptions()
+Vorticity:     method PathsOptions <Clone>$()
+Vorticity:     method bool Equals(PathsOptions)
+Vorticity:     method bool Equals(object)
+Vorticity:     method bool op_Equality(PathsOptions, PathsOptions)
+Vorticity:     method bool op_Inequality(PathsOptions, PathsOptions)
+Vorticity:     method int GetHashCode()
+Vorticity:     method string ToString()
+Vorticity:     property bool Exact { get; init; }
+Vorticity: sealed class Vorticity.PathsReading : IEquatable<PathsReading>
+Vorticity:     ctor PathsReading(int, int, int, long, int, long)
+Vorticity:     method PathsReading <Clone>$()
+Vorticity:     method bool Equals(PathsReading)
+Vorticity:     method bool Equals(object)
+Vorticity:     method bool op_Equality(PathsReading, PathsReading)
+Vorticity:     method bool op_Inequality(PathsReading, PathsReading)
+Vorticity:     method int GetHashCode()
+Vorticity:     method string ToString()
+Vorticity:     method void Deconstruct(out int, out int, out int, out long, out int, out long)
+Vorticity:     property int Censuses { get; init; }
+Vorticity:     property int Directories { get; init; }
+Vorticity:     property int EdgeGranules { get; init; }
+Vorticity:     property int Unopened { get; init; }
+Vorticity:     property long CensusRows { get; init; }
+Vorticity:     property long EdgeRows { get; init; }
 Vorticity: sealed class Vorticity.PlanCost : IEquatable<PlanCost>
 Vorticity:     ctor PlanCost(long, long, double, TimeSpan)
 Vorticity:     method PlanCost <Clone>$()
@@ -1952,8 +1978,10 @@ Vorticity:     method Scan Where(ref FilterHandler)
 Vorticity:     method Scan With(ScanOptions)
 Vorticity:     method Scan WithCancellation(CancellationToken)
 Vorticity:     method Scan.AsyncEnumerator GetAsyncEnumerator(CancellationToken = default)
+Vorticity:     method ValueTask<IReadOnlyList<VariantPaths>> PathsAsync(IReadOnlyList<string>, PathsOptions = default, CancellationToken = default)
 Vorticity:     method ValueTask<ScanPlan> ExplainAsync(CancellationToken = default)
 Vorticity:     method ValueTask<ScanPlan> ExplainAsync(bool, CancellationToken = default)
+Vorticity:     method ValueTask<VariantPaths> PathsAsync(string, PathsOptions = default, CancellationToken = default)
 Vorticity:     method ValueTask<bool> AnyAsync(CancellationToken = default)
 Vorticity:     method ValueTask<long> CountAsync(CancellationToken = default)
 Vorticity:     property ScanMetrics Metrics { get; }
@@ -1978,6 +2006,7 @@ Vorticity:     method Scan<TRecord> Where(Func<Probe<TRecord>, Predicate>)
 Vorticity:     method Scan<TRecord> With(ScanOptions)
 Vorticity:     method Scan<TRecord> WithCancellation(CancellationToken)
 Vorticity:     method Scan<TRecord>.AsyncEnumerator<TRecord> GetAsyncEnumerator(CancellationToken = default)
+Vorticity:     method ValueTask<IReadOnlyList<VariantPaths>> PathsAsync(Func<Probe<TRecord>, ITuple>, PathsOptions = default, CancellationToken = default)
 Vorticity:     method ValueTask<Nullable<double>> AverageAsync<T>(Func<Probe<TRecord>, Sym<Nullable<T>>>, CancellationToken = default)
 Vorticity:     method ValueTask<Nullable<double>> AverageAsync<T>(Func<Probe<TRecord>, Sym<T>>, CancellationToken = default)
 Vorticity:     method ValueTask<Scan<TRecord>> WhereInAsync<T1, T2, T3, T4>(Func<Probe<TRecord>, ValueTuple<Sym<T1>, Sym<T2>, Sym<T3>, Sym<T4>>>, Projection, int = default, CancellationToken = default)
@@ -1994,6 +2023,8 @@ Vorticity:     method ValueTask<T> SumAsync<T>(Func<Probe<TRecord>, Sym<T>>, Can
 Vorticity:     method ValueTask<TResult> AggregateAsync<TResult>(Func<Aggregates<TRecord>, ITuple>, CancellationToken = default)
 Vorticity:     method ValueTask<TState> AggregateAsync<T, TAggregator, TState>(Func<Probe<TRecord>, Sym<Nullable<T>>>, CancellationToken = default)
 Vorticity:     method ValueTask<TState> AggregateAsync<T, TAggregator, TState>(Func<Probe<TRecord>, Sym<T>>, CancellationToken = default)
+Vorticity:     method ValueTask<VariantPaths> PathsAsync(Func<Probe<TRecord>, Sym<Nullable<Variant>>>, PathsOptions = default, CancellationToken = default)
+Vorticity:     method ValueTask<VariantPaths> PathsAsync(Func<Probe<TRecord>, Sym<Variant>>, PathsOptions = default, CancellationToken = default)
 Vorticity:     method ValueTask<bool> AnyAsync(CancellationToken = default)
 Vorticity:     method ValueTask<double> SumAsync(Func<Probe<TRecord>, Sym<Half>>, CancellationToken = default)
 Vorticity:     method ValueTask<double> SumAsync(Func<Probe<TRecord>, Sym<Nullable<Half>>>, CancellationToken = default)
@@ -2427,6 +2458,40 @@ Vorticity:     const VariantKind Time = 14
 Vorticity:     const VariantKind Timestamp = 12
 Vorticity:     const VariantKind Uuid = 15
 Vorticity:     field byte value__
+Vorticity: struct Vorticity.VariantPath : IEquatable<VariantPath>
+Vorticity:     ctor VariantPath(IReadOnlyList<string>, VariantPathClass, long, bool)
+Vorticity:     method bool Equals(VariantPath)
+Vorticity:     method bool Equals(object)
+Vorticity:     method bool op_Equality(VariantPath, VariantPath)
+Vorticity:     method bool op_Inequality(VariantPath, VariantPath)
+Vorticity:     method int GetHashCode()
+Vorticity:     method string ToString()
+Vorticity:     method void Deconstruct(out IReadOnlyList<string>, out VariantPathClass, out long, out bool)
+Vorticity:     property IReadOnlyList<string> Keys { get; init; }
+Vorticity:     property VariantPathClass Class { get; init; }
+Vorticity:     property bool Exact { get; init; }
+Vorticity:     property long Rows { get; init; }
+Vorticity:     property string Path { get; }
+Vorticity: enum Vorticity.VariantPathClass
+Vorticity:     const VariantPathClass Boolean = 1
+Vorticity:     const VariantPathClass Double = 3
+Vorticity:     const VariantPathClass Integer = 2
+Vorticity:     const VariantPathClass List = 7
+Vorticity:     const VariantPathClass Null = 0
+Vorticity:     const VariantPathClass Object = 6
+Vorticity:     const VariantPathClass Other = 8
+Vorticity:     const VariantPathClass String = 4
+Vorticity:     const VariantPathClass Timestamp = 5
+Vorticity:     field byte value__
+Vorticity: sealed class Vorticity.VariantPaths : IReadOnlyList<VariantPath>
+Vorticity:     method IEnumerator<VariantPath> GetEnumerator()
+Vorticity:     method string ToString()
+Vorticity:     property PathsReading Reading { get; }
+Vorticity:     property VariantPath Item[int] { get; }
+Vorticity:     property bool Complete { get; }
+Vorticity:     property bool Exact { get; }
+Vorticity:     property int Count { get; }
+Vorticity:     property string Column { get; }
 Vorticity: static class Vorticity.VariantSymbols
 Vorticity:     method Predicate Has(Sym<Nullable<Variant>>, string)
 Vorticity:     method Predicate Has(Sym<Variant>, string)
@@ -3212,6 +3277,7 @@ Vorticity.Dataset:     property VortexSession Session { get; init; }
 Vorticity.Dataset:     property VortexWriteOptions Write { get; init; }
 Vorticity.Dataset:     property bool Encrypted { get; init; }
 Vorticity.Dataset:     property bool LockedStore { get; init; }
+Vorticity.Dataset:     property bool PathDirectoryOnAppend { get; init; }
 Vorticity.Dataset:     property bool ShredOnAppend { get; init; }
 Vorticity.Dataset:     property int MaxAttempts { get; init; }
 Vorticity.Dataset:     property int MaxOpenObjects { get; init; }

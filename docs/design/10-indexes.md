@@ -313,17 +313,21 @@ drops the entry.
 ### 4.6 `vorticity.variant.directory.v1`: every path a variant holds
 
 A job that writes an object with a sparse index counts the paths of each variant column as the object's rows
-are written ([shredded variants](11-write-strategy.md#10-shredded-variants)), and the
+are written ([shredded variants](11-write-strategy.md#10-shredded-variants)), and an append counts them too,
+on another lane while its writer encodes the rows (`DatasetOptions.PathDirectoryOnAppend`, on by default:
+about 0.25 µs of a processor a row of log records, a directory of about 12 KB an append of 65 536). The
 object carries what it counted: for every path and class of value the rows hold there (a boolean, an
 integer, a number, a text, a timestamp, an object, a list, a null, anything else), how many values, where
 they lie (the typed column a shredded path keeps, the values of other classes beside it, or the
 residual), and their bounds. An integer or a timestamp keeps its least and greatest, a number its least
 and greatest and whether one was NaN, a boolean which of the two it saw, and a text its least and
 greatest cut to the bytes a text column's zones keep, the greatest one past its cut when a longer text
-shares it. Each path also names, a bit each, the granules of the object it may hold a value in, from the
-spans of rows its values lie in as the rows are written: two values closer than a granule is long share a
-span, so a path keeps about a span per granule at most, and the bits are a superset of the granules that
-hold it. The entry
+shares it. Each path and class also names, a bit each, the granules of the object that hold a value of that
+class there, from the spans of rows those values lie in as the rows are written: two values closer than a
+granule is long share a span, so a path keeps about a span per granule at most, and no span reaches over a
+granule that holds none. A directory written before 0.10.0 named the granules of the path, whatever the
+class: a key some sources send as text and others as a number named every source's granules as holding
+text. The entry
 is on the variant column. Its one run holds one region, behind a version byte (2; version 1 named the
 slices of the key) and the body's length, the body one zstd frame.
 
@@ -338,7 +342,23 @@ fenced predicate asks for a path the file never holds, for a class the path neve
 values outside its bounds, under the filter's conjunctions and disjunctions. A presence asked absent, a
 conversion of any class, and a negation refute nothing. A refuted file reads no block (`ScanPlan.MayMatch` is false, and `Explain`
 names the step `path directory`). Otherwise it asks the same of each granule, and kills the blocks of
-the granules refuted. An append drops the entry, since it parses none of its rows.
+the granules refuted.
+
+A question for the paths of a variant column among the rows a scan keeps (`PathsAsync`) walks the objects a count
+of the same rows walks, and reads each one's directory whole, walked as it lies into a table of paths keyed by their
+bytes, a string made once a path: an object the scan keeps whole answers without being opened, its counts exact.
+Of one it keeps in part, the count's plan says which granules it keeps none of and which every row of; the others are
+counted as a count counts them, the filter's columns alone read, a count a granule, which says which of them it keeps
+whole after all, where the zone maps could not prove it. The granules then kept in part, the edges of a window, are
+read again, the variant column as its shredding holds it (no row put back together: a typed column is counted a word
+of 64 rows at a time by its validity, the residual walked as it lies), and the paths of their kept rows and of their
+other rows counted. A path is then listed when a granule kept whole holds it or a kept row of an edge does, and its
+count is the edge's kept rows plus its values outside the edges spread over the granules it lies in, exact when none
+of those is outside the window. Where the granules kept in part are many, more than four and more than a quarter of
+the rows kept whole, as under a filter on a column the rows are not sorted by, they are not read again: a path's
+values there are taken in the share of their rows kept, and a path their rows outside the window hold can be listed.
+An object without a directory, or one a question asking exact counts would estimate, has its kept rows counted
+instead. `VariantPaths.Reading` says what was read.
 
 ### 4.7 `vorticity.variant.blocks.v1`: a shredded key's zone map
 

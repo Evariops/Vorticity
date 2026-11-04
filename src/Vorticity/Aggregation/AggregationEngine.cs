@@ -694,6 +694,9 @@ internal sealed class AggregationOutcome
     internal void Delivered()
     {
         Parts?.Close();
+
+        // The rows the chosen rows' columns kept go back to the pool before the memory they are held under.
+        LetChosen();
         if (Memory is { } memory)
         {
             _plan.LastPeakBytes = Math.Max(_plan.LastPeakBytes, memory.Peak);

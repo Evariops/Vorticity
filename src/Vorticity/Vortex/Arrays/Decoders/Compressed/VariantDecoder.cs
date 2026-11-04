@@ -106,6 +106,26 @@ internal sealed class VariantDecoder : ArrayDecoder
         // A chunk read for keys its shredding does not hold gives its residual alone, where such a key lies and nowhere
         // else: putting the shredded keys back, row by row, took two thirds of a question over one key of the residual.
         DType shreddedType = DTypeProtobuf.Read(metadata.ShreddedDType, context.Types);
+
+        // A census of the paths takes the shredding as it lies, the standard's group of the storage and its typed columns: putting
+        // a log's four hundred keys back, row by row, cost what reading an edge granule again cost (Types.Variants.ApartCensus).
+        if (context.Scan.VariantsApart)
+        {
+            // The column's own shredding alone: a key's values of several forms, a variant of its own below, put back as they are.
+            int apart;
+            context.Scan.VariantsApart = false;
+            try
+            {
+                apart = context.DecodeChildRows(in node, 1, shreddedType, length, start, count, wanted, rows);
+            }
+            finally
+            {
+                context.Scan.VariantsApart = true;
+            }
+
+            return ShreddedTree.Group(context, dtype, core, apart, out _);
+        }
+
         if (residual && context.Scan.VariantKeys is { } reads && reads.LeavesUnshredded(shreddedType))
         {
             context.Scan.Metrics?.AddResidualChunk();

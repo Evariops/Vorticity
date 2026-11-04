@@ -423,6 +423,7 @@ internal static class ParquetVariant
     }
 
     /// <summary>The little-endian unsigned number of one to four bytes the encoding sizes its counts, ids and offsets with.</summary>
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
     internal static uint Unsigned(ReadOnlySpan<byte> bytes) => bytes.Length switch
     {
         1 => bytes[0],

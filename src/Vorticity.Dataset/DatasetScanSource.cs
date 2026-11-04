@@ -298,6 +298,15 @@ internal sealed partial class DatasetScanSource
     private async ValueTask<long> CountAsync(ScanSpec spec, ScanCounters metrics, CancellationToken cancellationToken) =>
         spec.MatchesNothing ? 0L : await Builder(spec, metrics).CountAsync(cancellationToken).ConfigureAwait(false);
 
+    /// <summary>The paths of variant columns among the rows the scan keeps, object by object as a count walks them.</summary>
+    public async ValueTask PathsAsync(ScanSpec spec, PathsQuestion question, ScanCounters metrics, CancellationToken cancellationToken)
+    {
+        if (!spec.MatchesNothing)
+        {
+            await Builder(spec, metrics).TallyPathsAsync(question, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
     private async ValueTask<bool> AnyAsync(ScanSpec spec, ScanCounters metrics, CancellationToken cancellationToken) =>
         !spec.MatchesNothing && await Builder(spec, metrics).AnyAsync(cancellationToken).ConfigureAwait(false);
 

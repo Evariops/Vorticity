@@ -348,6 +348,16 @@ public sealed record DatasetOptions
     public bool ShredOnAppend { get; init; }
 
     /// <summary>
+    /// Whether an append writes the path directory of each variant column, as a job does: every path and class its rows
+    /// hold, and the granules each lies in, counted on another lane while the object is written. A question on a path
+    /// then refutes the objects and granules of the last minutes that lack it, and the paths of a window
+    /// (<c>PathsAsync</c>) are read from the directories rather than counted from the rows. True, the default; false
+    /// spares an append that never asks its variants the counting, about 0.4 µs of a processor a row. A setting of
+    /// the handle, which each writer chooses.
+    /// </summary>
+    public bool PathDirectoryOnAppend { get; init; } = true;
+
+    /// <summary>
     /// The bytes an object's marks may take: <see cref="MarkedVectorBytes"/>, or a part of the
     /// object's own (<see cref="MarkedVectorShare"/>), whichever is more.
     /// </summary>

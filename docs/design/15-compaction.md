@@ -310,7 +310,8 @@ variants](11-write-strategy.md#10-shredded-variants)). The second pass writes th
 its paths again as its rows are written, at their granules, for its path directory. On a million rows
 of six to eight attributes, counting and choosing take 256 ns a row, and the shredded write 310 ns a
 row more than the whole one (`vortex-queries --micro shredwrite`). An append shreds nothing, unless the
-dataset asks it to shred the paths it declares (`DatasetOptions.ShredOnAppend`).
+dataset asks it to shred the paths it declares (`DatasetOptions.ShredOnAppend`), but counts its paths for its
+own directory, on another lane than its writer's (`DatasetOptions.PathDirectoryOnAppend`).
 
 ### The memory of a job
 

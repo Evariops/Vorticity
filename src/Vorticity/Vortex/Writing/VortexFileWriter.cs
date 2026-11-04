@@ -431,6 +431,12 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// <summary>By column, the path directory of a variant column; null when none has one.</summary>
     private VariantDirectory?[]? _directories;
 
+    /// <summary>
+    /// By column, the census of a variant column's paths the writer counts as it takes the rows, for its directory
+    /// (<see cref="VortexWriteOptions.CountsPaths"/>); null when it counts none. Each counts groups of a block's rows.
+    /// </summary>
+    private PathCensus?[]? _census;
+
     /// <summary>By column, the shredded keys whose values are counted block by block; null when no column shreds one.</summary>
     private (int Index, string Key, Types.Variants.PathClass Class)[]?[]? _countedKeys;
 
@@ -1016,6 +1022,18 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             (writer._directories ??= new VariantDirectory?[writer._fieldCount])[field] = column.Value;
         }
 
+        // The paths the writer counts itself, of each variant column whose directory nobody declared, a group a block.
+        if (options.CountsPaths && writer._isTabular)
+        {
+            for (int field = 0; field < writer._fieldCount; field++)
+            {
+                if (schema.GetField(field).Kind == DTypeKind.Variant && writer._directories?[field] is null)
+                {
+                    (writer._census ??= new PathCensus?[writer._fieldCount])[field] = new PathCensus(options.StringBoundBytes, writer.CensusGroupRows);
+                }
+            }
+        }
+
         foreach (KeyValuePair<string, VariantShredding> column in options.ShreddedVariants ?? ImmutableDictionary<string, VariantShredding>.Empty)
         {
             int field = writer._isTabular ? schema.IndexOfField(column.Key) : -1;
@@ -1290,6 +1308,70 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         // Rows delivered encoded are decoded here, once, so that the statistics, the distinct
         // tables, the indexes and the blob writer behind this line only ever meet canonical nodes.
         root = arena.DecodedTree(root);
+
+        // The paths of the variant columns counted on another lane while the rows are taken, and done counting before the
+        // caller may reset the arena: the rows of each call follow those of the call before.
+        Task? counting = _census is null ? null : CountPathsAsync(arena, root, rows);
+        try
+        {
+            await WriteCountedAsync(arena, root, rows, seal, cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            if (counting is not null)
+            {
+                await counting.ContinueWith(static _ => { }, TaskScheduler.Default).ConfigureAwait(false);
+            }
+
+            throw;
+        }
+
+        if (counting is not null)
+        {
+            await counting.ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>The rows of a group the paths the writer counts name: a block's, a granule's.</summary>
+    private long CensusGroupRows => Math.Max(_blockRows, 1);
+
+    /// <summary>
+    /// Counts the paths of the rows of <paramref name="root"/> into each variant column's census, made ready here, which may
+    /// add nodes to the arena; with lanes to spare, on another while the writer takes the same rows, returning what it runs
+    /// on; inline otherwise, returning null.
+    /// </summary>
+    private Task? CountPathsAsync(CanonicalArena arena, int root, int rows)
+    {
+        PathCensus?[] census = _census!;
+        PathCensus.Counting[] ready = new PathCensus.Counting[census.Length];
+        for (int field = 0; field < census.Length; field++)
+        {
+            if (census[field] is not null)
+            {
+                ready[field] = PathCensus.Prepare(arena, arena.GetNode(root).GetFieldIndex(field), rows);
+            }
+        }
+
+        if (_lanes <= 1)
+        {
+            Count(census, ready);
+            return null;
+        }
+
+        return Task.Run(() => Count(census, ready));
+
+        static void Count(PathCensus?[] census, PathCensus.Counting[] ready)
+        {
+            for (int field = 0; field < census.Length; field++)
+            {
+                census[field]?.Add(in ready[field]);
+            }
+        }
+    }
+
+    /// <summary><see cref="WriteCoreAsync"/> for rows checked against the schema and decoded, their paths counted aside.</summary>
+    private async ValueTask WriteCountedAsync(CanonicalArena arena, int root, int rows, bool seal, CancellationToken cancellationToken)
+    {
         await StartAsync(cancellationToken).ConfigureAwait(false);
 
         // A small batch waits with the ones after it until together they make a batch worth the
@@ -2843,6 +2925,22 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                 {
                     VariantPathMap built = map.Build(_gathering?[field]?.ChunkRows ?? _chunkRows, [.. _arrayEncodings.Ids]);
                     await closed.AddVariantPathsAsync(_sink, field, built, _rowCount, _blockRows, cancellationToken).ConfigureAwait(false);
+                }
+            }
+
+            // The directories the writer counted as it took the rows, of every row: a census that missed some rows, as an
+            // append to a file's tail would, writes none.
+            for (int field = 0; field < (_census?.Length ?? 0); field++)
+            {
+                if (_census![field] is { } census)
+                {
+                    if (census.Rows == _rowCount)
+                    {
+                        (_directories ??= new VariantDirectory?[_fieldCount])[field] = VariantDirectory.From(census, _shredding?[field], CensusGroupRows);
+                    }
+
+                    census.Release();
+                    _census[field] = null;
                 }
             }
 

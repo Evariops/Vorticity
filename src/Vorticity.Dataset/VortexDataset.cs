@@ -12,6 +12,7 @@ using Vorticity.RowEncoding;
 using Vorticity.Scanning;
 using Vorticity.Types;
 using Vorticity.Types.Serialization;
+using Vorticity.Types.Variants;
 
 namespace Vorticity.Dataset;
 
@@ -889,7 +890,8 @@ public sealed class VortexDataset : IAsyncDisposable
     internal ObjectOutput StartObjectUnder(
         DatasetSchema schema, bool inKeyOrder = false, long rowBound = 0, bool contents = false, bool synopses = false,
         IReadOnlyDictionary<string, Types.Variants.VariantShredding>? shredded = null, IReadOnlyDictionary<string, int>? variantChunks = null,
-        IReadOnlyDictionary<string, Indexes.VariantDirectory>? directories = null, long byteBound = -1, PartitionPostings? postings = null)
+        IReadOnlyDictionary<string, Indexes.VariantDirectory>? directories = null, long byteBound = -1, PartitionPostings? postings = null,
+        bool countsPaths = false)
     {
         RequireConditionalCreation(_store);
         Guid identity = Guid.NewGuid();
@@ -925,10 +927,15 @@ public sealed class VortexDataset : IAsyncDisposable
             };
         }
 
-        // Every path and class of the variant columns, which a job counted from the object's rows.
+        // Every path and class of the variant columns, which a job counted from the object's rows, or which the writer of an
+        // append counts as it takes them (DatasetOptions.PathDirectoryOnAppend).
         if (directories is { Count: > 0 })
         {
             write = write with { VariantDirectories = directories };
+        }
+        else if (countsPaths)
+        {
+            write = write with { CountsPaths = true };
         }
 
         if (_store is SealedObjectStore { Seals: true })
@@ -3767,11 +3774,32 @@ public sealed class VortexDataset : IAsyncDisposable
     /// trip, none once the session's cache holds it. Null when the entry carries no table of contents this
     /// library reads, or the column no directory.
     /// </summary>
-    internal async ValueTask<Indexes.VariantDirectory?> ReadPathDirectoryAsync(ObjectEntry entry, int field, CancellationToken cancellationToken)
+    internal ValueTask<Indexes.VariantDirectory?> ReadPathDirectoryAsync(ObjectEntry entry, int field, CancellationToken cancellationToken) =>
+        WithPathDirectoryAsync(entry, field, static (region, _) => Indexes.VariantDirectory.From(region), (object?)null, cancellationToken);
+
+    /// <summary>
+    /// The path directory of variant column <paramref name="field"/> of the object <paramref name="entry"/> names, opened
+    /// (<see cref="Indexes.VariantDirectory.Open"/>) and read with no open of the object, as
+    /// <see cref="ReadPathDirectoryAsync"/> reads it; null when the entry names none, or it does not decode.
+    /// </summary>
+    internal ValueTask<Indexes.VariantDirectory.DirectoryBody?> OpenPathDirectoryAsync(ObjectEntry entry, int field, CancellationToken cancellationToken) =>
+        WithPathDirectoryAsync(entry, field, static (region, _) => Indexes.VariantDirectory.Open(region), (object?)null, cancellationToken);
+
+    /// <summary>What a span of the bytes of a region gives.</summary>
+    private delegate TResult RegionReader<TState, TResult>(ReadOnlySpan<byte> region, TState state);
+
+    /// <summary>
+    /// What <paramref name="read"/> gives of the path directory of variant column <paramref name="field"/> of the object
+    /// <paramref name="entry"/> names, read with no open of the object: the region its entry's table of contents names, in one
+    /// round trip, none once the session's cache holds it; the default when the entry names none, or its bytes are not the
+    /// region's.
+    /// </summary>
+    private async ValueTask<TResult?> WithPathDirectoryAsync<TState, TResult>(
+        ObjectEntry entry, int field, RegionReader<TState, TResult> read, TState state, CancellationToken cancellationToken)
     {
         if (entry.Contents is not { } contents)
         {
-            return null;
+            return default;
         }
 
         foreach ((int column, Indexes.IndexSegment region) in contents.PathDirectories ?? [])
@@ -3787,11 +3815,11 @@ public sealed class VortexDataset : IAsyncDisposable
                 using Buffers.SegmentOwner bytes = await Footerless(source, entry, contents)
                     .ReadAsync(new Serialization.Schemas.SegmentSpec(region.Offset, region.Length, region.AlignmentExponent, 0, 0), cancellationToken)
                     .ConfigureAwait(false);
-                return region.Holds(bytes.Buffer.Span) ? Indexes.VariantDirectory.From(bytes.Buffer.Span) : null;
+                return region.Holds(bytes.Buffer.Span) ? read(bytes.Buffer.Span, state) : default;
             }
         }
 
-        return null;
+        return default;
     }
 
     /// <summary>
