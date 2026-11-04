@@ -109,7 +109,8 @@ object, a text, a null. A list is a path of its own, its elements are not.
 
 The answer comes from the path directory each object keeps, and from the granules the window cuts, read again: the
 objects a count reads, a directory each, read without opening an object the scan keeps whole, and the rows of the
-granules at the edges of the window, counted as the shredding holds them.
+granules at the edges of the window, counted as the shredding holds them, of their keys those the directories place
+there alone. The objects are answered side by side, as many at once as the scan's degree of parallelism.
 
 * Every path a kept row holds is listed, and no path that no kept row holds.
 * A count is exact unless the path lies in granules outside the window too; it is then estimated from the path's
@@ -150,14 +151,15 @@ whole ones took 16.7 MB.
 
 An append pays the count of its directory alone, a census of its rows beside the writer's work: on a million log
 records appended 65 536 at a time (`vortex-queries --micro appenddirectory`, best of five to nine), 0.24 µs of a
-processor a row at one lane, and at sixteen 0.15 to 0.19 µs, of which 0.11 µs of time a row the writer's lanes do not
-hide: some 2.4 % of a core at 100 000 rows a second. The directory of such an append takes about 12 KB, 0.46 % of its
-bytes.
+processor a row at one lane, and at sixteen 0.15 to 0.19 µs, of which 0.06 µs of time a row the writer's lanes do not
+hide, a call's rows counted in slices on lanes of their own: some 2.4 % of a core at 100 000 rows a second. The
+directory of such an append takes about 12 KB, 0.46 % of its bytes.
 
 The paths of an hour of one source of a short S1 of log records, 1.8 million rows over five objects
-(`vortex-queries --micro variantpaths`), take 92 ms warm at one lane and 29 ms at 32, where a count of the same rows
-takes 14 and 4: the edges of the window, seven granules, are read again so that the 66 paths listed are the 66 its
-rows hold. Exact counts, every kept row counted, take 1.4 s and 0.53 s.
+(`vortex-queries --micro variantpaths`), take about 28 ms warm at one lane and 11 ms at 32, where a count of the same
+rows takes 6 and 4: the edges of the window, seven granules, are read again so that the 66 paths listed are the 66 its
+rows hold. Cold, over a store that waits 5 ms a request, they take 0.22 s and 0.08 s. Exact counts, every kept row
+counted, take 1.4 s and 0.26 s.
 
 ## Watch out
 
