@@ -1422,7 +1422,11 @@ internal sealed partial class DatasetScanBuilder
     {
         if (_metrics is { } metrics)
         {
-            metrics.ObjectsCounted++;
+            // The paths of a window answer several objects at once.
+            lock (metrics)
+            {
+                metrics.ObjectsCounted++;
+            }
         }
     }
 
