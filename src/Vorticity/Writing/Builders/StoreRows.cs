@@ -99,17 +99,15 @@ internal static class StoreRows
 
             case StructStore structure:
             {
-                if (!valid.IsEmpty && ArenaWords.NullCount(arena, node) > 0)
-                {
-                    throw new NotSupportedException("A struct column that holds a null is not gathered into one batch.");
-                }
-
-                CanonicalNode fields = arena.GetNode(node);
+                // Its fields appended whole, a null row's included, whatever they hold there; then its null rows marked.
+                // The node is read again for each field: a field's append may add nodes, which moves the records.
+                int first = structure.Rows;
                 for (int i = 0; i < structure.Children.Length; i++)
                 {
-                    Append(structure.Children[i], arena, fields.GetFieldIndex(i));
+                    Append(structure.Children[i], arena, arena.GetNode(node).GetFieldIndex(i));
                 }
 
+                structure.AppendedWhole(first, rows, valid);
                 return;
             }
 

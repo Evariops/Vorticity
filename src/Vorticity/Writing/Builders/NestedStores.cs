@@ -81,6 +81,24 @@ internal sealed class StructStore : ColumnStore
         _rows++;
     }
 
+    /// <summary>
+    /// Closes the <paramref name="rows"/> rows from <paramref name="first"/> whose fields were appended whole, a null row's
+    /// fields holding whatever they hold: a struct of no fields counts them, and the rows <paramref name="valid"/> clears
+    /// are null; every row is valid when it is empty.
+    /// </summary>
+    internal void AppendedWhole(int first, int rows, ReadOnlySpan<ulong> valid)
+    {
+        if (Children.Length == 0)
+        {
+            _rows += rows;
+        }
+
+        if (!valid.IsEmpty)
+        {
+            CopyValidity(first, valid, rows);
+        }
+    }
+
     internal override int Build(CanonicalArena arena, int rows)
     {
         Validity validity = BuildValidity(arena, rows);
