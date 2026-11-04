@@ -1,6 +1,6 @@
 // The one test `vortex.stats` can have.
 //
-// No 0.86.1 writer path constructs a vortex.stats layout, so the corpus has no fixture and never
+// No writer path of Vortex 0.86.1 or 0.90.0 constructs a vortex.stats layout, so the corpus has no fixture and never
 // will while the corpus records a single-version pin. But `vortex.zoned` and `vortex.stats` are
 // both exactly TWELVE BYTES, so overwriting the id in the footer's layout_specs is
 // length-preserving: every offset in the file stays valid and the reader takes the legacy path

@@ -8,9 +8,9 @@ writer builds one in its single pass in [11-write-strategy.md](11-write-strategy
 An index is an optional accelerator. A reader that ignores it returns the same rows as a reader that
 uses it, and the pruning invariant (pruning never removes a row a full scan returns, see [statistic
 precision](08-semantics.md#1-statistic-precision-what-inexact-licenses)) holds for every kind. It is
-also ahead of upstream. Vortex 0.86.1 ships a Bloom filter aggregate its authors call unstable and no
+also ahead of upstream. Vortex 0.90.0 ships a Bloom filter aggregate its authors call unstable and no
 edition declares, and its index designs are still proposals. This design takes their structure and
-adds one rule they have not fixed: a file with an index stays readable by a strict Rust 0.86.1
+adds one rule they have not fixed: a file with an index stays readable by a strict Rust 0.90.0
 reader, with the index simply invisible to it. That rule decides [where an index
 lives](#2-where-an-index-lives), and the rest follows.
 
@@ -30,7 +30,7 @@ directory entry, and everything it needs to probe it is in the runs.
 
 ## 2. Where an index lives
 
-The rule is that a file with an index opens and scans, with no configuration, in Rust 0.86.1 with a
+The rule is that a file with an index opens and scans, with no configuration, in Rust 0.90.0 with a
 strict session (the default, and what DuckDB, DataFusion, Spark and the Python bindings use), in any
 earlier Vorticity, and in this one, which then uses the index.
 
@@ -130,7 +130,7 @@ A filter is `n` blocks of 256 bits (eight 32-bit words). To insert, compute `h =
 0)`, pick block `((h >> 32) × n) >> 32`, and in it set one bit per word using the eight Parquet salts
 applied to `(uint)h`. A probe checks that the same eight bits are all set. The layout and salts are
 Parquet's and the hash is upstream's, so a filter is bit-identical to Rust's `BloomPartial` of
-0.86.1, tested against vectors it built, and becomes upstream's by a change of id the day they freeze
+0.86.1 and of 0.90.0, tested against vectors each built, and becomes upstream's by a change of id the day they freeze
 it. A variant using Parquet's xxHash64 is bit-identical to a Parquet SBBF, tested against the
 `parquet` crate's own filters, for a caller who exchanges filters with Parquet tooling.
 

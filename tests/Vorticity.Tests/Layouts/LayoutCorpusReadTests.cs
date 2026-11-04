@@ -1,6 +1,6 @@
 // Every fully decodable corpus file, read whole and read as two halves, with the halves required
 // to compose back to the whole. This is the broad sweep the sampled LayoutExecutionTests trades
-// away for depth: ~500 real files, every layout shape a 0.86.1 writer produces, every dtype the
+// away for depth: ~500 real files, every layout shape a 0.90.0 writer produces, every dtype the
 // decoders implement.
 using System;
 using System.Collections.Generic;

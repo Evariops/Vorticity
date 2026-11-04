@@ -5,20 +5,19 @@ tree into the local cargo registry, for **two** versions. Every agent and every 
 decoder should read it there rather than guessing or fetching:
 
 ```
-~/.cargo/registry/src/index.crates.io-*/vortex-0.84.0/           # what conformance-gen links
-~/.cargo/registry/src/index.crates.io-*/vortex-0.86.1/           # newest published
-~/.cargo/registry/src/index.crates.io-*/vortex-array-0.84.0/     # arrays, dtype, scalar, patches, stats
-~/.cargo/registry/src/index.crates.io-*/vortex-file-0.84.0/      # postscript, footer, open path, writer
-~/.cargo/registry/src/index.crates.io-*/vortex-layout-0.84.0/    # layout tree, zoned, scan
-~/.cargo/registry/src/index.crates.io-*/vortex-fastlanes-0.84.0/ # for, bitpacked, rle, delta
+~/.cargo/registry/src/index.crates.io-*/vortex-0.90.0/           # what conformance-gen links
+~/.cargo/registry/src/index.crates.io-*/vortex-array-0.90.0/     # arrays, dtype, scalar, patches, stats
+~/.cargo/registry/src/index.crates.io-*/vortex-file-0.90.0/      # postscript, footer, open path, writer
+~/.cargo/registry/src/index.crates.io-*/vortex-layout-0.90.0/    # layout tree, zoned, scan
+~/.cargo/registry/src/index.crates.io-*/vortex-fastlanes-0.90.0/ # for, bitpacked, rle, delta
 ~/.cargo/registry/src/index.crates.io-*/fastlanes-0.7.2/         # the kernels themselves
-~/.cargo/registry/src/index.crates.io-*/vortex-fsst-0.84.0/  vortex-alp-0.84.0/  vortex-zstd-0.84.0/
-~/.cargo/registry/src/index.crates.io-*/vortex-btrblocks-0.84.0/ # the default compressor + scheme order
-~/.cargo/registry/src/index.crates.io-*/vortex-edition-0.84.0/   # edition enforcement
+~/.cargo/registry/src/index.crates.io-*/vortex-fsst-0.90.0/  vortex-alp-0.90.0/  vortex-zstd-0.90.0/
+~/.cargo/registry/src/index.crates.io-*/vortex-btrblocks-0.90.0/ # the default compressor + scheme order
+~/.cargo/registry/src/index.crates.io-*/vortex-edition-0.90.0/   # edition enforcement
 ```
 
-`0.86.1` sources are present too (pulled during dependency resolution), which is what lets us diff
-a behaviour between the version our corpus is pinned to and the newest release.
+`0.86.1` sources are present too when an older build pulled them, which is what lets us diff a
+behaviour between the release the corpus was first written with and the one it is pinned to now.
 
 Reading these is not "translating from reference code" for licensing purposes — consulting the
 reference for *semantics* is the project's declared default working mode

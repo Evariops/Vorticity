@@ -1,7 +1,8 @@
-# Vortex 0.86.1 Rust API — notes for the corpus generator
+# Vortex Rust API — notes for the corpus generator, from 0.86.1 to 0.90.0
 
-Everything here is verified by compiling and running against `vortex = "=0.86.1"` on
-rustc 1.98.1 (macOS aarch64). Two runnable artefacts back these notes:
+Sections 0 to 6 are verified by compiling and running against `vortex = "=0.86.1"` on
+rustc 1.98.1 (macOS aarch64). Section 7 says what 0.90.0 changed, verified against `=0.90.0` the same
+way, and the second appendix is its run. Two runnable artefacts back these notes:
 
 | what | how to run |
 | --- | --- |
@@ -699,7 +700,39 @@ corpus gap is also recorded in `manifest.json`'s `skipped` list.
   produces is **1 912 bytes** (`containers/postscript_max_metadata`), two orders of magnitude
   short.
 
-## Appendix — recorded output of `cargo run --release --example api_experiments`
+## 7. What 0.90.0 changed
+
+The generator moved to 0.90.0 on 2026-11-04, and the corpus came out with the same array, layout,
+extension and aggregate ids, identical from one run to the next. These are the changes in the API it
+uses.
+
+- An expression is bound to its scope before it is optimized. `Expression::bind(&dtype)` gives a
+  `BoundExpression`, whose `optimize_recursive()` takes no scope. 0.86.1 optimized first, with the
+  scope, and bound after.
+- A compressor and a write strategy are built from a session.
+  `BtrBlocksCompressorBuilder::from_session(&session)` keeps the schemes whose produced ids the
+  session's enabled editions all allow, which is the rule of §3.2 applied by the builder, and
+  `Default` and `retain_allowed_encodings` are gone. `unrestricted()` lifts the restriction, which is
+  what 0.86.1's `default()` was, and `disable_editions()` allows the ids the session registers
+  outside any edition. `WriteStrategyBuilder::from_session(&session)` replaces its `default()` the
+  same way. The id allowlist of §3.2 has no equivalent, so experiments 3a and 10 are gone from
+  `api_experiments`.
+- The list layout is written when an enabled edition admits `vortex.list`, and no edition of
+  Vortex's does. `with_list_layout()` and `VORTEX_EXPERIMENTAL_LIST_LAYOUT` are gone, so
+  `containers/experimental_list_layout` enables an edition of the corpus's own family that admits it,
+  beside core (`emit::LIST_LAYOUT_EDITION`). `VORTEX_EXPERIMENTAL_PATCHED_ARRAY` is still read
+  (`vortex-array-0.90.0/src/arrays/patched/mod.rs:117`).
+- A scheme is a value. `FoRScheme::v1()` subtracts one reference and `FoRScheme::v2()` one per 1 024
+  values (`fastlanes.for.v2`), and bit-packing has a version 2 with a width per block
+  (`fastlanes.bitpacked.v2`, read through `BitPackedDataParts::bit_widths`). With `vortex.indexed`,
+  these are the three array ids 0.90.0 adds. No edition admits any of them, so an edition-enforced
+  write never produces one.
+- Several constructors take an execution context last: `ListArray::try_new`,
+  `MaskedArray::try_new`, `Sparse::try_new`, `Patches::new` and `ListViewArray::list_elements_at`.
+  `Delta::try_new` takes the array's validity.
+- The UUID extension moved from `vortex::extension::uuid` to `vortex::encodings::uuid`.
+
+## Appendix — recorded output of `cargo run --release --example api_experiments`, at 0.86.1
 
 ```
 -- 01-default
@@ -773,6 +806,93 @@ corpus gap is also recorded in `manifest.json`'s `skipped` list.
      array  ids: {"fastlanes.bitpacked", "fastlanes.for", "vortex.bool", "vortex.constant", "vortex.struct", "vortex.varbinview"}
 -- 08-editions-disabled
    10092 bytes, 4096 rows
+     layout ids: {"vortex.dict", "vortex.flat", "vortex.struct", "vortex.zoned"}
+     array  ids: {"fastlanes.bitpacked", "fastlanes.for", "vortex.bool", "vortex.constant", "vortex.fsst", "vortex.sequence", "vortex.struct"}
+-- 12-chunked-stream
+   4288 bytes, 300 rows
+     layout ids: {"vortex.chunked", "vortex.flat"}
+     array  ids: {"vortex.primitive"}
+-- 11-array-tree-display (06-forced-dict.vortex, first flat leaf)
+root: vortex.dict(utf8, len=64) nbytes=320 B (100.00%)
+  metadata: all_values_referenced: false
+  codes: vortex.primitive(u32, len=64) nbytes=256 B (80.00%)
+    metadata: ptype: u32
+    buffer: values host 256 B (align=4) (100.00%)
+  values: vortex.varbinview(utf8, len=4) nbytes=64 B (20.00%)
+    metadata: 
+    buffer: views host 64 B (align=16) (100.00%)
+
+```
+
+## Appendix — recorded output of `cargo run --release --example api_experiments`, at 0.90.0
+
+Experiments 3a and 10 are gone (§7). Under `core2025.05.0` the default strategy and the unrestricted
+one fail as they did on 0.86.1, and experiment 9, restricted by the session, writes.
+
+```
+-- 01-default
+   9972 bytes, 4096 rows
+     layout ids: {"vortex.dict", "vortex.flat", "vortex.struct", "vortex.zoned"}
+     array  ids: {"fastlanes.bitpacked", "fastlanes.for", "vortex.bool", "vortex.constant", "vortex.fsst", "vortex.sequence", "vortex.struct"}
+-- 02-uncompressed
+   101556 bytes, 4096 rows
+     layout ids: {"vortex.flat", "vortex.struct", "vortex.zoned"}
+     array  ids: {"vortex.bool", "vortex.constant", "vortex.primitive", "vortex.struct", "vortex.varbinview"}
+-- 02b-uncompressed-no-zonemaps
+   100240 bytes, 4096 rows
+     layout ids: {"vortex.flat", "vortex.struct"}
+     array  ids: {"vortex.primitive", "vortex.varbinview"}
+-- 03b-only-for-scheme
+   74004 bytes, 4096 rows
+     layout ids: {"vortex.flat", "vortex.struct", "vortex.zoned"}
+     array  ids: {"fastlanes.bitpacked", "fastlanes.for", "vortex.bool", "vortex.constant", "vortex.struct", "vortex.varbinview"}
+-- 03c-no-dict-schemes
+   10708 bytes, 4096 rows
+     layout ids: {"vortex.flat", "vortex.struct", "vortex.zoned"}
+     array  ids: {"fastlanes.bitpacked", "fastlanes.for", "vortex.bool", "vortex.constant", "vortex.onpair", "vortex.primitive", "vortex.sequence", "vortex.struct"}
+-- 04-row-block-1024
+   11588 bytes, 4096 rows
+     layout ids: {"vortex.chunked", "vortex.dict", "vortex.flat", "vortex.struct", "vortex.zoned"}
+     array  ids: {"fastlanes.bitpacked", "fastlanes.for", "vortex.bool", "vortex.constant", "vortex.fsst", "vortex.sequence", "vortex.struct"}
+-- 04b-row-block-1024-with-default-coalescing
+   9972 bytes, 4096 rows
+     layout ids: {"vortex.dict", "vortex.flat", "vortex.struct", "vortex.zoned"}
+     array  ids: {"fastlanes.bitpacked", "fastlanes.for", "vortex.bool", "vortex.constant", "vortex.fsst", "vortex.sequence", "vortex.struct"}
+-- 05-no-zonemaps
+   8568 bytes, 4096 rows
+     layout ids: {"vortex.flat", "vortex.struct"}
+     array  ids: {"fastlanes.bitpacked", "fastlanes.for", "vortex.constant", "vortex.dict", "vortex.fsst", "vortex.sequence"}
+-- 06-forced-dict
+   1948 bytes, 64 rows
+     layout ids: {"vortex.flat"}
+     array  ids: {"vortex.dict", "vortex.primitive", "vortex.varbinview"}
+-- 06b-forced-dict-default-strategy
+   3040 bytes, 64 rows
+     layout ids: {"vortex.dict", "vortex.flat", "vortex.zoned"}
+     array  ids: {"vortex.bool", "vortex.constant", "vortex.fsst", "vortex.primitive", "vortex.struct"}
+-- edition core2025.05.0: 23 array ids, 5 layout ids, 4 dtype ids, 0 aggregates
+   default strategy FAILED: Other error: Aggregate vortex.max not permitted by ctx
+   no-zonemap strategy FAILED: Other error: Serialized array ID vortex.sequence not permitted by ctx
+-- edition core2026.08.1: 31 array ids, 6 layout ids, 4 dtype ids, 6 aggregates
+   default strategy: 9876 bytes, 4096 rows
+     layout ids: {"vortex.dict", "vortex.flat", "vortex.struct", "vortex.zoned"}
+     array  ids: {"fastlanes.bitpacked", "fastlanes.for", "vortex.bool", "vortex.constant", "vortex.fsst", "vortex.sequence", "vortex.struct"}
+   no-zonemap strategy: 8464 bytes, 4096 rows
+     layout ids: {"vortex.flat", "vortex.struct"}
+     array  ids: {"fastlanes.bitpacked", "fastlanes.for", "vortex.constant", "vortex.dict", "vortex.fsst", "vortex.sequence"}
+-- edition core2026.08.3: 34 array ids, 6 layout ids, 5 dtype ids, 6 aggregates
+   default strategy: 9972 bytes, 4096 rows
+     layout ids: {"vortex.dict", "vortex.flat", "vortex.struct", "vortex.zoned"}
+     array  ids: {"fastlanes.bitpacked", "fastlanes.for", "vortex.bool", "vortex.constant", "vortex.fsst", "vortex.sequence", "vortex.struct"}
+   no-zonemap strategy: 8568 bytes, 4096 rows
+     layout ids: {"vortex.flat", "vortex.struct"}
+     array  ids: {"fastlanes.bitpacked", "fastlanes.for", "vortex.constant", "vortex.dict", "vortex.fsst", "vortex.sequence"}
+-- 09-edition-2025-05-0-working
+   8208 bytes, 4096 rows
+     layout ids: {"vortex.flat", "vortex.struct"}
+     array  ids: {"fastlanes.bitpacked", "fastlanes.for", "vortex.constant", "vortex.dict", "vortex.fsst", "vortex.primitive"}
+-- 08-editions-disabled
+   10244 bytes, 4096 rows
      layout ids: {"vortex.dict", "vortex.flat", "vortex.struct", "vortex.zoned"}
      array  ids: {"fastlanes.bitpacked", "fastlanes.for", "vortex.bool", "vortex.constant", "vortex.fsst", "vortex.sequence", "vortex.struct"}
 -- 12-chunked-stream

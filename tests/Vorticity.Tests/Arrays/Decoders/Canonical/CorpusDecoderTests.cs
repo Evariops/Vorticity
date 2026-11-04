@@ -1,4 +1,4 @@
-// The oracle. Every one of these files was written by Vortex 0.86.1 and carries a JSONL sidecar of
+// The oracle. Every one of these files was written by Vortex 0.90.0 and carries a JSONL sidecar of
 // expected values; agreeing with our own encoder would prove nothing.
 //
 // The set is exactly the corpus entries whose root layout is a single `vortex.flat` leaf, so the

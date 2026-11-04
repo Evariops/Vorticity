@@ -12,7 +12,7 @@ comparator has to become a `memcmp`.
 > may change between Vortex releases, and its spec says not to persist these bytes as an interchange
 > format. So it ships in its own package, `Vorticity.RowEncoding`, marked
 > `[Experimental("VX0002")]`, and the encoder names the release its bytes follow (`vortex-row
-> 0.86.1`). Encoded bytes are safe to compare within one process, or within one cluster running one
+> 0.86.1`, whose bytes 0.90.0 still writes). Encoded bytes are safe to compare within one process, or within one cluster running one
 > version, and a durable index that stores them records that name (see [composite
 > keys](10-indexes.md#54-composite-keys-through-the-row-encoding)).
 

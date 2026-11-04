@@ -1,6 +1,6 @@
 // The split-block Bloom filter against the reference's own, byte for byte.
 //
-// `tools/conformance-gen/examples/gen_bloom_vectors.rs` builds each filter through vortex 0.86.1's
+// `tools/conformance-gen/examples/gen_bloom_vectors.rs` builds each filter through vortex 0.90.0's
 // public `Accumulator` over a typed array, so the vectors carry upstream's hash, seed, block
 // choice, salt order AND its rule for which bytes a value hashes as. Our side inserts the row bytes
 // the generator recorded; equal filters prove both halves at once. Regenerate with:

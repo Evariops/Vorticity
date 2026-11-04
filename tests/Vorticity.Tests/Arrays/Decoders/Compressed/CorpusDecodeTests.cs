@@ -1,5 +1,5 @@
 // Decoding the golden corpus, value for value against the sidecars. Agreeing with our own encoder
-// proves nothing; these are real files written by Vortex 0.86.1.
+// proves nothing; these are real files written by Vortex 0.90.0.
 //
 // Every file here is a single-column `vortex.flat` layout over segment 0, so the layout reader
 // (another component) is not needed: the root layout's `segments[0]` names the

@@ -46,7 +46,7 @@ AOT and trimming.
   of the core editions up to `core2026.08.3`, `vortex.zstd_buffers` from the draft `zstd2026.02.0`
   edition, and the three components Rust writes outside every edition when an upstream flag asks for
   them: `fastlanes.delta`, `vortex.patched` and the experimental `vortex.list` layout.
-- Every file from Rust 0.36.0 up to the version the conformance corpus is pinned to, 0.86.1, value
+- Every file from Rust 0.36.0 up to the version the conformance corpus is pinned to, 0.90.0, value
   for value ([04-conformance.md](04-conformance.md)).
 - Lazily. An id this library does not know only fails the read that needs it. An unprojected column
   may use one, and a zone-map aggregate nobody knows only disables its own pruning (see [unknown

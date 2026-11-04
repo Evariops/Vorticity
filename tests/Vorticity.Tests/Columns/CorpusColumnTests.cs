@@ -1,4 +1,4 @@
-// Real files, written by Vortex 0.86.1, read through the public column API, each for a contract
+// Real files, written by Vortex 0.90.0, read through the public column API, each for a contract
 // the column accessors keep: a non-struct root, field names, nesting, UUIDs, units, bit offsets,
 // null counts. The files are walked by the test walker, which understands vortex.flat,
 // vortex.struct and vortex.zoned; every in-scope file's values are compared with its sidecar by the

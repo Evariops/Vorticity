@@ -1,5 +1,5 @@
 // Real metadata payloads, copied out of the `metadata_b64` fields of the golden corpus sidecars in
-// tests/Vorticity.Conformance/corpus. Every one was written by Vortex 0.86.1, so a byte-exact
+// tests/Vorticity.Conformance/corpus. Every one was written by Vortex 0.90.0, so a byte-exact
 // re-serialization is the strongest available statement that this codec agrees with upstream on
 // both the tag numbers and the implicit/explicit presence rules.
 using System;

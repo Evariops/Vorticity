@@ -1,8 +1,8 @@
 // vortex.stats, the only layout this library reads that no corpus file exercises.
 //
 // It is the legacy zone map of editions core2025.05.0 through core2025.10.0, read upstream by the
-// same ZonedReader as vortex.zoned and structurally identical to it - data at child 0. Vortex 0.86.1
-// has no writer path that emits one, so no corpus file contains one. A reader can
+// same ZonedReader as vortex.zoned and structurally identical to it - data at child 0. Vortex, 0.86.1
+// as 0.90.0, has no writer path that emits one, so no corpus file contains one. A reader can
 // support a component and never once be exercised, and nothing in the suite could tell the
 // difference between that and a reader that does not support it at all.
 //

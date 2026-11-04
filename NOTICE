@@ -12,9 +12,8 @@ Vendored schemas and edition manifests
 --------------------------------------
 
 Fifteen files under spec/ are copied verbatim from the Vortex repository
-(https://github.com/vortex-data/vortex) at tag 0.86.1, commit d1fe2dc46d, and
-remain under its license. Upstream paths are the ones that tag uses; several
-moved afterwards, with byte-identical contents.
+(https://github.com/vortex-data/vortex) at tag 0.90.0, commit 6c3ef48e57, and
+remain under its license. Upstream paths are the ones that tag uses.
 
     SPDX-License-Identifier: Apache-2.0
     SPDX-FileCopyrightText: Copyright the Vortex contributors

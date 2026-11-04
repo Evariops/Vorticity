@@ -1,6 +1,8 @@
 # Sources and how to verify them again
 
-This specification is derived from primary sources, against Vortex 0.86.1.
+This specification is derived from primary sources against Vortex 0.86.1, and checked again against
+0.90.0: its schemas and editions are unchanged but for the expression protobuf
+([spec/README.md](../../spec/README.md)), and the corpus it regenerates reads back value for value.
 
 ## Primary sources
 
@@ -19,9 +21,9 @@ The raw doc sources can be fetched directly, which avoids paraphrase:
 
 ## Files in the reference repository that define the wire format
 
-These are the paths on `develop`. At tag `0.86.1`, which is the one pinned here, the schemas live
-under `vortex-flatbuffers/` and `vortex-proto/` instead, since upstream relocated them afterwards with
-byte-identical contents. All of them are vendored in [spec/](../../spec/), which records both layouts,
+These are the paths on `develop` and at tag `0.90.0`, the one pinned here. Up to `0.86.1` the schemas
+lived under `vortex-flatbuffers/` and `vortex-proto/` instead, and upstream relocated them afterwards
+with byte-identical contents. All of them are vendored in [spec/](../../spec/), which records both layouts,
 so read them from there rather than fetching them.
 
 ```
@@ -68,7 +70,7 @@ where they are used:
 | `min` and `max` are computed with `skip_nans()`, and NaN is tracked separately in `nan_count` | `vortex-array/src/stats/expr.rs` | [NaN](08-semantics.md#2-nan) |
 | The writer filters the compressor's candidate schemes by the edition allowlist before sampling | `vortex-file/src/writer.rs`, `retain_allowed_encodings` | [90-registry.md](90-registry.md) |
 | Row encoding passes the parent's `RowSortField` unchanged to nested children, and inversion is applied once, at the leaf | `vortex-row/src/codec.rs`, `encode_struct` and `field_encode` | [per-type encodings](06-row-encoding.md#3-per-type-encodings) |
-| `Buffer.compression` and `SegmentSpec._compression` are declared but unimplemented: 0.86.1 writes `None`, never reads either field, and depends on no lz4 crate, and `footer.fbs` calls the segment field "reserved for future use" | `vortex-array/src/serde.rs`, `vortex-flatbuffers/flatbuffers/**/*.fbs` (the only four files in the tree that mention lz4 are the two schemas and their generated code) | [buffer-level LZ4](08-semantics.md#7-buffer-level-lz4) |
+| `Buffer.compression` and `SegmentSpec._compression` are declared but unimplemented: 0.86.1 writes `None`, as 0.90.0 still does at the same line, never reads either field, and depends on no lz4 crate, and `footer.fbs` calls the segment field "reserved for future use" | `vortex-array/src/serde.rs`, `vortex-flatbuffers/flatbuffers/**/*.fbs` (the only four files in the tree that mention lz4 are the two schemas and their generated code) | [buffer-level LZ4](08-semantics.md#7-buffer-level-lz4) |
 | The child null sentinel under a null parent is chosen by the child's dtype with the inherited field, and fixed-width children are zero-filled even when descending | `vortex-row/src/codec.rs`, `child_canonical_null_byte` | [per-type encodings](06-row-encoding.md#3-per-type-encodings) |
 
 Each of these would have been a plausible guess in either direction, and each one guessed wrong

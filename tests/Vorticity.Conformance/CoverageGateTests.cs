@@ -6,7 +6,7 @@
 // untested, which is the state this gate exists to catch.
 //
 // The one exemption is data-driven: `coverage.layouts.missing` in the corpus manifest, whose
-// `skipped` list explains that vortex.stats has no writer path in Vortex 0.86.1 at all. Reading the
+// `skipped` list explains that vortex.stats has no writer path in Vortex 0.90.0 at all. Reading the
 // exemption from the corpus keeps it visible and keeps it from silently growing.
 using System;
 using System.Collections.Generic;
