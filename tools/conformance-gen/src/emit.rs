@@ -27,7 +27,10 @@ use vortex::compressor::BtrBlocksCompressorBuilder;
 use vortex::dtype::DType;
 use vortex::dtype::Nullability;
 use vortex::dtype::PType;
+use vortex::editions::Edition;
+use vortex::editions::EditionDeclaration;
 use vortex::editions::EditionId;
+use vortex::editions::EditionMember;
 use vortex::error::VortexResult;
 use vortex::error::vortex_err;
 use vortex::file::OpenOptionsSessionExt;
@@ -71,6 +74,22 @@ pub const EDITIONS: &[(&str, EditionId)] = &[
 
 /// The edition a default `VortexSession` targets.
 pub const DEFAULT_EDITION: &str = "core2026.08.3";
+
+/// The name an entry gives to be written under [`LIST_LAYOUT_EDITION`] beside the default core
+/// edition.
+pub const LIST_LAYOUT_EDITION_NAME: &str = "conformance2026.11.0";
+
+/// An edition of this corpus's own family that admits the `vortex.list` layout. No edition of
+/// Vortex 0.90 does, and its default writer lays lists out with that layout only when an enabled
+/// edition admits it, where 0.86.1 took `VORTEX_EXPERIMENTAL_LIST_LAYOUT=1`. Enabled beside core,
+/// it leaves every other id under core's enforcement.
+pub static LIST_LAYOUT_EDITION: EditionDeclaration = EditionDeclaration {
+    edition: Edition {
+        id: EditionId::new("conformance", 2026, 11, 0),
+        min_library_version: Some("0.90.0"),
+    },
+    added: &[EditionMember::layout(&"vortex.list")],
+};
 
 /// How the layout pipeline is assembled for one entry.
 #[derive(Clone, Debug)]
@@ -1452,7 +1471,7 @@ fn container_entries() -> Vec<Entry> {
     let mut list_layout = entry(
         "containers/experimental_list_layout",
         "D",
-        "VORTEX_EXPERIMENTAL_LIST_LAYOUT=1: lists get their own layout strategy",
+        "an edition admitting vortex.list beside core: lists get their own layout strategy",
         Box::new(|_session, _rng| {
             let elem = Arc::new(DType::Primitive(PType::I32, Nullability::NonNullable));
             let dtype = DType::List(Arc::clone(&elem), Nullability::NonNullable);
@@ -1469,19 +1488,17 @@ fn container_entries() -> Vec<Entry> {
             })?;
             Ok(Build {
                 array: StructArray::try_from_iter([("items", column)])?.into_array(),
-                spec: WriteSpec {
-                    disable_editions: true,
-                    ..WriteSpec::default()
-                },
+                spec: WriteSpec::default(),
             })
         }),
     );
-    list_layout.env = vec![("VORTEX_EXPERIMENTAL_LIST_LAYOUT".into(), "1".into())];
+    list_layout.edition = Some(LIST_LAYOUT_EDITION_NAME);
     list_layout.expected_layout_ids = vec!["vortex.list".into()];
     list_layout.notes.push(
-        "edition enforcement is off: the `vortex.list` LAYOUT id belongs to no core edition \
-         (spec/editions/*.toml lists six layouts and this is not one), so the write is rejected \
-         otherwise. A forward-compatibility fixture, not a conformance target."
+        "the `vortex.list` LAYOUT id belongs to no core edition (spec/editions/*.toml lists six \
+         layouts and this is not one), so the entry enables an edition of the corpus's own family \
+         that admits it, beside core, whose enforcement every other id stays under. A \
+         forward-compatibility fixture, not a conformance target."
             .into(),
     );
     out.push(list_layout);

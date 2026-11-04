@@ -331,7 +331,11 @@ fn run(
                 Some((_, session)) => session.clone(),
                 None => {
                     let session = VortexSession::default().with_handle(handle.clone());
-                    if let Some(name) = entry.edition {
+                    if entry.edition == Some(emit::LIST_LAYOUT_EDITION_NAME) {
+                        // An edition of another family than core's, so core stays enabled.
+                        session.editions().declare(&emit::LIST_LAYOUT_EDITION)?;
+                        session.enable_edition(emit::LIST_LAYOUT_EDITION.edition.id)?;
+                    } else if let Some(name) = entry.edition {
                         let id = emit::EDITIONS
                             .iter()
                             .find(|(n, _)| *n == name)

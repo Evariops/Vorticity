@@ -16,9 +16,9 @@ use std::collections::BTreeSet;
 use serde::Deserialize;
 use serde::Serialize;
 
-/// The Vortex release this corpus is generated against. A bump is a corpus regeneration, not a
-/// dependency update — see the pin comment in `Cargo.toml`.
-pub const VORTEX_VERSION: &str = "0.86.1";
+/// The Vortex release this corpus is generated against, read from `Cargo.lock` by `build.rs`. A
+/// bump is a corpus regeneration, not a dependency update — see the pin comment in `Cargo.toml`.
+pub const VORTEX_VERSION: &str = env!("VORTEX_CRATE_VERSION");
 
 /// Bumped whenever the manifest shape changes in a way a consumer must notice.
 pub const MANIFEST_FORMAT: &str = "vortex-conformance-corpus/2";
