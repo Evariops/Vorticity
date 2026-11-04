@@ -1523,6 +1523,38 @@ internal sealed class ScanBuilder
         }
     }
 
+    /// <summary>Whether the filter's path <paramref name="path"/> lies in a column of the file that holds a variant, at any depth.</summary>
+    private bool ReadsVariant(FieldExpr path)
+    {
+        int field = _file.DType.IndexOfField(path.SegmentsUtf8[0]);
+        return field < 0 || HoldsVariantBelow(_file.DType.GetField(field), depth: 1);
+    }
+
+    /// <summary>Whether <paramref name="type"/> is a variant or holds one, a struct's field or a list's element.</summary>
+    private static bool HoldsVariantBelow(DType type, int depth)
+    {
+        VortexLimits.CheckDepth(depth, VortexLimits.MaxDTypeDepth, "Variant search");
+        switch (type.Kind)
+        {
+            case DTypeKind.Variant:
+                return true;
+            case DTypeKind.Struct:
+                for (int f = 0; f < type.FieldCount; f++)
+                {
+                    if (HoldsVariantBelow(type.GetField(f), depth + 1))
+                    {
+                        return true;
+                    }
+                }
+
+                return false;
+            case DTypeKind.List or DTypeKind.FixedSizeList:
+                return HoldsVariantBelow(type.ElementType, depth + 1);
+            default:
+                return false;
+        }
+    }
+
     /// <summary>A batch of the rows of groups kept in part, with a bit a row the scan keeps and one a row it leaves of those groups, valid until the next.</summary>
     private sealed class PartRows
     {
@@ -1542,8 +1574,9 @@ internal sealed class ScanBuilder
         Types.Variants.GroupVerdicts verdicts, KeptRows judge, List<FieldExpr> columns,
         [System.Runtime.CompilerServices.EnumeratorCancellation] System.Threading.CancellationToken cancellationToken)
     {
-        // The columns counted read as their shredding holds them, when the filter reads none of them: it evaluates them put back.
-        bool apart = columns.Count > 0 && (_filterPaths ?? []).TrueForAll(path => !columns.Exists(column => column.SegmentsUtf8[0].AsSpan().SequenceEqual(path.SegmentsUtf8[0])));
+        // The columns counted read as their shredding holds them, when the filter reads no variant column: it evaluates those put
+        // back, any of them, the columns counted or another.
+        bool apart = columns.Count > 0 && (_filterPaths ?? []).TrueForAll(path => !ReadsVariant(path));
         FilterEvaluator? evaluator = _filter is null ? null : new FilterEvaluator(_filter);
         RowRange range = judge.Range;
         IRowExclusion? excluded = judge.Excluded;

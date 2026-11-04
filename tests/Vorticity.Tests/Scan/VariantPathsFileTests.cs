@@ -147,6 +147,56 @@ public sealed partial class VariantPathsFileTests
     }
 
     /// <summary>Rows by the minute, sorted by it; a kind in no order; attributes whose keys vary by the minute's tens and by the row.</summary>
+    [Fact]
+    public async Task AFilterOnAnotherShreddedVariantReadsItPutBackWhereTheEdgesAreReadAgain()
+    {
+        // The edges of a window read again for their paths hand the column counted back as its shredding holds it; a filter on
+        // another variant column, shredded too, reads that one put back, or it would keep no row of the edges.
+        Random random = new Random(3);
+        Tagged[] rows = [.. Enumerable.Range(0, Rows).Select(i => new Tagged(
+            i,
+            Variant.Object(("route", Variant.From($"/r/{random.Next(5)}")), ($"k{i / 600}", Variant.From(i))),
+            Variant.Object(("tenant", Variant.From($"t-{i % 3}")))))];
+        VortexWriteOptions options = new VortexWriteOptions
+        {
+            RowBlockSize = GranuleRows,
+            ShreddedVariants = new Dictionary<string, VariantShredding>
+            {
+                [nameof(Tagged.Attributes)] = VariantShredding.Object(("route", VariantShredding.Primitive(VariantClass.String))),
+                [nameof(Tagged.Resource)] = VariantShredding.Object(("tenant", VariantShredding.Primitive(VariantClass.String))),
+            },
+        };
+        PathCensus census = new PathCensus(options.StringBoundBytes, GranuleRows);
+        foreach (Tagged row in rows)
+        {
+            census.Add(row.Attributes.Metadata.Span, row.Attributes.Value.Span);
+        }
+
+        options = options with { VariantDirectories = new Dictionary<string, VariantDirectory> { [nameof(Tagged.Attributes)] = VariantDirectory.From(census, null, GranuleRows) } };
+        census.Release();
+        string path = Path.Combine(AppContext.BaseDirectory, $"variant-paths-{Environment.ProcessId}-{Guid.NewGuid():N}.vortex");
+        await using (VortexFileWriter writer = VortexSession.Default.CreateWriter<Tagged>(path, options))
+        {
+            await writer.WriteAsync<Tagged>(rows, Ct);
+            await writer.CompleteAsync(Ct);
+        }
+
+        try
+        {
+            await using VortexFile file = await VortexFile.OpenAsync(path, Ct);
+            Scan<Tagged> Window() => file.Scan<Tagged>().Where(r => r.Id >= 1_000 & r.Id < 1_700 & r.Resource["tenant"].AsString() == "t-1");
+            VariantPaths found = await Window().PathsAsync(r => r.Attributes, cancellationToken: Ct);
+            VariantPaths truth = await Window().PathsAsync(r => r.Attributes, new PathsOptions { Exact = true }, Ct);
+            Assert.True(found.Reading.EdgeGranules > 0, found.Reading.ToString());
+            Assert.Equal(Sorted(Counts(truth)).Select(p => p.Key), Sorted(Counts(found)).Select(p => p.Key));
+            Assert.All(found.Where(p => p.Exact), p => Assert.Equal(truth.Single(t => Key(t) == Key(p)).Rows, p.Rows));
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
     private static Item[] Items()
     {
         Random random = new Random(5);
@@ -250,4 +300,7 @@ public sealed partial class VariantPathsFileTests
 
     [VortexRecord]
     public partial record struct Nested(long Id, Variant Payload);
+
+    [VortexRecord]
+    public partial record struct Tagged(long Id, Variant Attributes, Variant Resource);
 }
