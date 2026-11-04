@@ -742,19 +742,33 @@ internal sealed class RunEndDecoder : ArrayDecoder
         return low;
     }
 
-    /// <summary>Checks that the ends of the runs a range read strictly increase.</summary>
+    /// <summary>Checks that the ends of the runs a range read strictly increase, read typed.</summary>
     private static void ValidateRangeEnds(ReadOnlySpan<byte> ends, PType endsPType, int runCount)
     {
-        ulong previous = 0;
-        for (int run = 0; run < runCount; run++)
+        bool increasing = endsPType switch
         {
-            ulong end = CompressedValues.ReadUnsigned(ends, endsPType, run);
-            if (run > 0 && end <= previous)
+            PType.U8 => Increasing(ends[..runCount]),
+            PType.U16 => Increasing(MemoryMarshal.Cast<byte, ushort>(ends)[..runCount]),
+            PType.U32 => Increasing(MemoryMarshal.Cast<byte, uint>(ends)[..runCount]),
+            _ => Increasing(MemoryMarshal.Cast<byte, ulong>(ends)[..runCount]),
+        };
+        if (!increasing)
+        {
+            CompressedThrow.Format($"{Id} run ends must strictly increase over the runs a range read.");
+        }
+
+        static bool Increasing<TEnd>(ReadOnlySpan<TEnd> runs)
+            where TEnd : unmanaged, IComparisonOperators<TEnd, TEnd, bool>
+        {
+            for (int run = 1; run < runs.Length; run++)
             {
-                CompressedThrow.Format($"{Id} run ends must strictly increase; a range read {end} after {previous}.");
+                if (runs[run] <= runs[run - 1])
+                {
+                    return false;
+                }
             }
 
-            previous = end;
+            return true;
         }
     }
 

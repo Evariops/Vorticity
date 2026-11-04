@@ -92,7 +92,7 @@ public sealed partial class PerRowDispatchTests
         ("Vortex/Arrays/Decoders/Compressed/FsstDecoder.cs", 2, 0, "R11 done: a selection's offsets and lengths are read at their types, resolved once; the two left bound the code stream"),
         ("Vortex/Arrays/Decoders/Compressed/OnPairDecoder.cs", 6, 3, "R2; the dictionary's two walks are typed, and the one call left there refuses a type that is not an integer"),
         ("Vortex/Arrays/Decoders/Compressed/Patches.cs", 3, 1, "R4 (GetPosition); the other two are per run"),
-        ("Vortex/Arrays/Decoders/Compressed/RunEndDecoder.cs", 2, 0, "per run, not per row: the walk of a shape with no typed kernel, and the search for a range's first run; the ends' checks and a take's searches read them typed"),
+        ("Vortex/Arrays/Decoders/Compressed/RunEndDecoder.cs", 4, 0, "per run, not per row: the walk of a shape with no typed kernel, and the searches for a range's first run, the ends sampled and the ends read; the ends' checks and a take's searches read them typed"),
         ("Vortex/Layouts/DictLayoutReader.cs", 1, 0, "R6 done: the one left is an error path"),
         ("Vortex/Writing/ArrayBlobWriter.cs", 0, 0, "W-13 done: a block with nulls takes the lanes and clears its nulls by their bits"),
         ("Vortex/Writing/BitPackPlan.cs", 0, 0, "W-11 done: the minimum is read at the element's own width"),
@@ -103,7 +103,7 @@ public sealed partial class PerRowDispatchTests
     /// A wired site resolves the physical type once, before its walk; the shape it is supposed to
     /// make is its file going to zero calls.
     /// </remarks>
-    private const int TotalCalls = 42;
+    private const int TotalCalls = 44;
 
     /// <summary>Calls the table classifies as being inside a per-row or per-patch loop.</summary>
     /// <remarks>
