@@ -21,11 +21,8 @@ using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Buffers;
-using Vorticity.Columns;
 using Vorticity.Expressions;
-using Vorticity.File;
 using Vorticity.Indexes;
-using Vorticity.IO;
 using Vorticity.Scanning;
 using Vorticity.Tests.Scan;
 using Vorticity.Types;
@@ -130,7 +127,7 @@ public sealed class HashedPostingsTests
         await using VortexFile file = await OpenAsync(bytes);
         int row = 12_345;
         VortexExpr equal = column == "k" ? Equal("k", FilterLiteral.From(K(row))) : Equal("s", FilterLiteral.From(S(row)));
-        ScanExplanation plan = await file.ScanBuilder().Where(equal).ExplainAsync(Ct);
+        ScanExplanation plan = await file.ScanBuilder().Where(equal).ExplainAsync(analyze: true, Ct);
         PruningStep locating = Assert.Single(plan.Pruning, step => step.Structure == "locating index");
         int holding = Holding(r => column == "k" ? K(r) == K(row) : S(r) == S(row));
         Assert.Equal(holding, plan.LiveBlocks);
@@ -167,7 +164,7 @@ public sealed class HashedPostingsTests
         await using VortexFile file = await OpenAsync(bytes);
         foreach (double zero in new[] { 0.0, -0.0 })
         {
-            ScanExplanation plan = await file.ScanBuilder().Where(Equal("f", FilterLiteral.From(zero))).ExplainAsync(Ct);
+            ScanExplanation plan = await file.ScanBuilder().Where(Equal("f", FilterLiteral.From(zero))).ExplainAsync(analyze: true, Ct);
             Assert.Equal(2, plan.LiveBlocks);
         }
     }
@@ -185,7 +182,7 @@ public sealed class HashedPostingsTests
         int live = 0;
         foreach (long value in absent)
         {
-            live += (await file.ScanBuilder().Where(Equal("k", FilterLiteral.From(value))).ExplainAsync(Ct)).LiveBlocks;
+            live += (await file.ScanBuilder().Where(Equal("k", FilterLiteral.From(value))).ExplainAsync(analyze: true, Ct)).LiveBlocks;
         }
 
         Assert.InRange(live, 0, 5);
@@ -210,7 +207,7 @@ public sealed class HashedPostingsTests
         async Task<long> ZonesAsync(VortexExpr filter, bool indexes = true)
         {
             await using VortexFile file = await OpenAsync(bytes);
-            ScanExplanation plan = await file.ScanBuilder().Where(filter).WithIndexes(indexes).ExplainAsync(Ct);
+            ScanExplanation plan = await file.ScanBuilder().Where(filter).WithIndexes(indexes).ExplainAsync(analyze: true, Ct);
             Assert.Equal(await CountRowsAsync(file, filter, indexes: false), await CountRowsAsync(file, filter, indexes));
             return plan.Pruning.Where(step => step.Structure == "zone map").Sum(step => step.BytesRead);
         }
@@ -278,7 +275,7 @@ public sealed class HashedPostingsTests
                 {
                     VortexExpr equal = Equal("k", FilterLiteral.From(K(row)));
                     Assert.Equal(1, await CountRowsAsync(file, equal, indexes: true));
-                    Assert.Equal(1, (await file.ScanBuilder().Where(equal).ExplainAsync(Ct)).LiveBlocks);
+                    Assert.Equal(1, (await file.ScanBuilder().Where(equal).ExplainAsync(analyze: true, Ct)).LiveBlocks);
                 }
             }
         }
@@ -490,7 +487,7 @@ public sealed class HashedPostingsTests
         Assert.NotNull(written);
 
         VortexExpr equal = Equal("n", FilterLiteral.From(5L));
-        ScanExplanation plan = await file.ScanBuilder().Where(equal).ExplainAsync(Ct);
+        ScanExplanation plan = await file.ScanBuilder().Where(equal).ExplainAsync(analyze: true, Ct);
         Assert.Equal(0, plan.LiveBlocks);
         Assert.Equal(0, await CountRowsAsync(file, equal, indexes: true));
         Assert.Equal(0, await CountRowsAsync(file, Expr.In(Expr.Field("n"), [FilterLiteral.From(5L), FilterLiteral.From(7L)]), indexes: true));

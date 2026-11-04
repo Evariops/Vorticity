@@ -350,8 +350,6 @@ internal sealed class RawKeys<TWord> : GroupKeys
         }
     }
 
-    internal override int[] Order(bool sorted) => Identity(Count);
-
     internal override bool Orders(int component) => !IsFloat(_layout.Shapes[component].PType);
 
     internal override int CompareKeys(int a, int b, int component) => Compare(_keys[a], _keys[b], component);

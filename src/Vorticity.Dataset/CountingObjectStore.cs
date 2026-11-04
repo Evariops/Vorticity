@@ -134,6 +134,9 @@ public sealed class CountingObjectStore : IObjectStore
     /// <inheritdoc/>
     public ObjectStoreCapabilities Capabilities => _inner.Capabilities;
 
+    /// <summary>The store it counts the requests of's.</summary>
+    public CostProfile CostProfile => _inner.CostProfile;
+
     /// <inheritdoc/>
     public async ValueTask<ObjectRead> ReadAsync(
         string key, long offset, Memory<byte> destination, string? ifToken, CancellationToken cancellationToken)

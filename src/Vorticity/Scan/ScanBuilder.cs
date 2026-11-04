@@ -2,11 +2,9 @@ using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
-using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Columns;
 using Vorticity.Compute;
 using Vorticity.Expressions;
-using Vorticity.File;
 using Vorticity.Layouts;
 using Vorticity.Types;
 
@@ -91,9 +89,6 @@ internal sealed class ScanBuilder
         return this;
     }
 
-    /// <summary>Whether the decoders may deliver dictionary and run-end columns encoded.</summary>
-    internal bool KeepEncodings => _keepEncodings;
-
     /// <summary>Lets the decoders deliver dictionary and run-end columns in their encoded form.</summary>
     /// <param name="keep">Whether they may.</param>
     /// <param name="sinkDecodes">Whether the consumer reads the encoded forms itself, so that only the blocks it decodes count as decoded.</param>
@@ -128,6 +123,68 @@ internal sealed class ScanBuilder
     }
 
     private IReadOnlyDictionary<string, string[]>? _variantKeys;
+
+    /// <summary>
+    /// Says what the question this scan belongs to read already, which its pruning reads the variant directories through,
+    /// and keeps what it reads for the question's other scans (<see cref="Indexes.QuestionReads"/>).
+    /// </summary>
+    internal ScanBuilder WithQuestionReads(Indexes.QuestionReads? question)
+    {
+        _question = question;
+        return this;
+    }
+
+    private Indexes.QuestionReads? _question;
+
+    /// <summary>
+    /// Says that the top-level columns of <paramref name="keys"/>, by name, are read only through those functions of them:
+    /// a split whose zones send each function to one value takes the zones' values in place of the column, which it then
+    /// does not read (<see cref="ZoneKeyReads"/>), for a consumer that keeps the encodings and a scan in the file's order.
+    /// </summary>
+    internal ScanBuilder WithZoneKeys(ZoneKeyReads.Request? keys)
+    {
+        _zoneKeys = keys;
+        return this;
+    }
+
+    private ZoneKeyReads.Request? _zoneKeys;
+
+    /// <summary>
+    /// Reads a part of a chunk by its granules alone (spec C, 2), where <paramref name="geometry"/> knows the chunk's tree
+    /// and marks: what a dataset's object, whose table of contents names them, gives a read of a few of its granules. Null
+    /// reads every chunk whole.
+    /// </summary>
+    internal ScanBuilder WithGranules(Indexes.GranuleGeometry? geometry)
+    {
+        _granules = geometry;
+        return this;
+    }
+
+    private Indexes.GranuleGeometry? _granules;
+
+    // Whether shredded variant columns are handed back as their shredding holds them (ScanContext.VariantsApart): a census of
+    // a part of the rows' paths reads them so.
+    private bool _variantsApart;
+
+    /// <summary>Hands shredded variant columns back as their shredding holds them (<see cref="Arrays.ScanContext.VariantsApart"/>), for a census of their paths.</summary>
+    internal ScanBuilder WithVariantsApart(bool apart)
+    {
+        _variantsApart = apart;
+        return this;
+    }
+
+    /// <summary>
+    /// Reads only the blocks <paramref name="granted"/> keeps, those where a row the filter selects may lie by structures the
+    /// caller read, a dataset's object's index of where its values lie (spec D, 4.3): the scan's pruning starts from them
+    /// and adds its own. Null for every block.
+    /// </summary>
+    internal ScanBuilder WithGranuleMask(BlockMask? granted)
+    {
+        _granted = granted;
+        return this;
+    }
+
+    private BlockMask? _granted;
 
     internal ScanBuilder(VortexFile file)
     {
@@ -437,22 +494,6 @@ internal sealed class ScanBuilder
         return this;
     }
 
-    /// <summary>
-    /// Walks the key order in windows of about <paramref name="rows"/> entries rather than the file's zone length, for
-    /// a reader of the whole file in key order, such as a compaction: a window reads every split its rows lie in, so on
-    /// rows mostly in key order, some of them a few seconds late, small windows read the splits ahead of them again and
-    /// again for the few late rows each holds, where a wide one finds them among its own. The window is a power of two,
-    /// <paramref name="rows"/> rounded down to one, its exponent held in a byte so that no scan grows.
-    /// </summary>
-    internal ScanBuilder WithKeyWindow(int rows)
-    {
-        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(rows);
-        _keyWindowShift = (byte)System.Numerics.BitOperations.Log2((uint)rows);
-        return this;
-    }
-
-    private byte _keyWindowShift;
-
     private void ThrowIfOrdered(string method)
     {
         if (_orderPath is not null)
@@ -585,20 +626,112 @@ internal sealed class ScanBuilder
     private IAsyncEnumerable<RecordBatch> BatchesAsync(IRowExclusion? excluded)
     {
         IAsyncEnumerable<RecordBatch> scan = WholeAsync(excluded, out BatchAsyncEnumerable batches);
-        return _variantKeys is { } keys ? new KeyedBatches(scan, batches, _file, keys) : scan;
+        batches.Granules = _granules;
+        if (_variantsApart)
+        {
+            // A census's own read of a part of the rows, no filter of its own: its enumerator told, where a flag on every
+            // scan's enumerable made each scan's allocation 8 bytes more.
+            return ReferenceEquals(scan, batches) && _variantKeys is null
+                ? new ApartBatches(batches)
+                : throw new InvalidOperationException("A read of variants as their shredding holds them takes no filter, take or keys of its own.");
+        }
+
+        IReadOnlyDictionary<string, string[]>? filtered = FilterOnlyKeys();
+        // The zones of the columns read through functions, which the file keeps from the first scan that loaded them.
+        ZoneKeyReads.Request? zoned = _keepEncodings && _orderPath is null ? _zoneKeys : null;
+        if (zoned is not null && ZoneKeyReads.TryHeld(_file, zoned, _filter, _granules is not null, out ZoneKeyReads? held))
+        {
+            batches.ZoneKeys = held;
+            zoned = null;
+        }
+
+        return _variantKeys is not null || filtered is not null || zoned is not null
+            ? new KeyedBatches(scan, batches, _file, _variantKeys, filtered, zoned, _granules is not null, _filter, _metrics)
+            : scan;
+    }
+
+    /// <summary>The batches of a scan whose shredded variants are handed back as their shredding holds them (<see cref="Arrays.ScanContext.VariantsApart"/>).</summary>
+    private sealed class ApartBatches(BatchAsyncEnumerable batches) : IAsyncEnumerable<RecordBatch>
+    {
+        public IAsyncEnumerator<RecordBatch> GetAsyncEnumerator(CancellationToken cancellationToken = default)
+        {
+            BatchAsyncEnumerator enumerator = (BatchAsyncEnumerator)batches.GetAsyncEnumerator(cancellationToken);
+            enumerator.VariantsApart = true;
+            return enumerator;
+        }
     }
 
     /// <summary>
-    /// A scan whose variant columns are read through some shredded keys alone: the file's path maps
-    /// are read once, before its first batch, and the lanes told which chunks they read by keys.
+    /// The keys of the variant columns the filter alone reads through top-level keys, those the projection reads whole: what
+    /// the filter's own pass reads them through (<see cref="Indexes.VariantKeyReads"/>); null for none, and for a file of no
+    /// variant column or a filter whose paths all lie in columns the scan reads by keys, with nothing made.
+    /// </summary>
+    private IReadOnlyDictionary<string, string[]>? FilterOnlyKeys()
+    {
+        VariantPathSeeker seeker = new VariantPathSeeker(_variantKeys);
+        if (_filter is null || !HoldsVariant(_file.DType) || VisitFields(_filter, ref seeker) || Indexes.VariantKeyReads.Of([], _filter) is not { } asked)
+        {
+            return null;
+        }
+
+        Dictionary<string, string[]>? filtered = null;
+        foreach ((string column, string[] keys) in asked)
+        {
+            if (_variantKeys?.ContainsKey(column) != true)
+            {
+                (filtered ??= new Dictionary<string, string[]>(StringComparer.Ordinal))[column] = keys;
+            }
+        }
+
+        return filtered;
+
+        static bool HoldsVariant(DType schema)
+        {
+            for (int f = 0; schema.Kind == DTypeKind.Struct && f < schema.FieldCount; f++)
+            {
+                if (schema.GetField(f).Kind == DTypeKind.Variant)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// A walk of a filter's columns that stops at the first path into a variant the scan does not read by keys already
+    /// (<paramref name="keyed"/>): none met, it walks them all.
+    /// </summary>
+    private readonly struct VariantPathSeeker(IReadOnlyDictionary<string, string[]>? keyed) : IFieldVisitor
+    {
+        public bool Visit(FieldExpr field) => field is not Compute.VariantFieldExpr path || keyed?.ContainsKey(path.Column.Path) == true;
+    }
+
+    /// <summary>
+    /// A scan whose variant columns are read through some shredded keys alone, by the scan or by its filter's own pass, or
+    /// whose columns read through functions alone are taken from their zones where they give a split's values: the file's
+    /// path maps and those zones are read once, before its first batch, and the lanes told which chunks they read by keys
+    /// and which columns their splits take from the zones.
     /// </summary>
     private sealed class KeyedBatches(
-        IAsyncEnumerable<RecordBatch> scan, BatchAsyncEnumerable batches, VortexFile file, IReadOnlyDictionary<string, string[]> keys)
+        IAsyncEnumerable<RecordBatch> scan, BatchAsyncEnumerable batches, VortexFile file,
+        IReadOnlyDictionary<string, string[]>? keys, IReadOnlyDictionary<string, string[]>? filtered,
+        ZoneKeyReads.Request? zoned, bool byGranules, VortexExpr? filter, ScanCounters? metrics)
         : IAsyncEnumerable<RecordBatch>
     {
         public async IAsyncEnumerator<RecordBatch> GetAsyncEnumerator(CancellationToken cancellationToken = default)
         {
-            batches.VariantKeys ??= await Indexes.VariantKeyReads.LoadAsync(file, keys, cancellationToken).ConfigureAwait(false);
+            if (keys is not null || filtered is not null)
+            {
+                batches.VariantKeys ??= await Indexes.VariantKeyReads.LoadAsync(file, keys, filtered, cancellationToken).ConfigureAwait(false);
+            }
+
+            if (zoned is not null)
+            {
+                batches.ZoneKeys ??= await ZoneKeyReads.LoadAsync(file, zoned, filter, byGranules, metrics, cancellationToken).ConfigureAwait(false);
+            }
+
             await foreach (RecordBatch batch in scan.WithCancellation(cancellationToken).ConfigureAwait(false))
             {
                 yield return batch;
@@ -650,11 +783,32 @@ internal sealed class ScanBuilder
         if (_filter is null && _take is null)
         {
             // A mask with no filter is an aggregation's: the blocks its zone maps answered, which
-            // no split reads.
-            return _pruned && _live is not null ? new LiveBatches(batches, _live) : batches;
+            // no split reads; or the blocks a caller's structures leave, which alone are read, a
+            // split a block (Frame), so that none reads a row of a block they leave out. Read whole,
+            // the rest of a dataset object's granules its statistics answered was counted twice.
+            BlockMask? live = _pruned ? _live : null;
+            if (_granted is { } granted)
+            {
+                live = live is null ? granted : Both(live, granted);
+            }
+
+            return live is not null ? new LiveBatches(batches, live) : batches;
         }
 
-        return new FilteredBatches(batches, _filter, _prune, _indexes, rows) { Refined = _pruned, Live = _live };
+        return new FilteredBatches(batches, _filter, _prune, _indexes, rows) { Refined = _pruned, Live = _live, Granted = _granted, Question = _question };
+    }
+
+    /// <summary>The blocks both <paramref name="first"/> and <paramref name="second"/> keep, a mask of its own.</summary>
+    private static BlockMask Both(BlockMask first, BlockMask second)
+    {
+        BlockMask both = new BlockMask(first.RowCount, first.BlockRows);
+        both.Keep(first.Words);
+        if (second.BlockRows == first.BlockRows && second.BlockCount == first.BlockCount)
+        {
+            both.Keep(second.Words);
+        }
+
+        return both;
     }
 
     /// <summary>The batches of an unfiltered scan that reads only the splits a mask keeps.</summary>
@@ -723,8 +877,11 @@ internal sealed class ScanBuilder
 
     /// <summary>
     /// The plan of this scan without executing it: splits and blocks, what each structure prunes,
-    /// the segments and bytes the live splits would read, against the file.
+    /// the segments and bytes the live splits would read, against the file; without
+    /// <paramref name="analyze"/>, from the layout and the file statistics alone, every block they
+    /// do not rule out taken as live, no structure read (spec B, 7).
     /// </summary>
+    /// <param name="analyze">Whether to read the structures the scan would consult: zone maps, indexes, a sorted column.</param>
     /// <param name="cancellationToken">Cancels the one read this makes.</param>
     /// <returns>The plan.</returns>
     /// <remarks>
@@ -738,7 +895,7 @@ internal sealed class ScanBuilder
     /// and what it did.
     /// </remarks>
     public async System.Threading.Tasks.ValueTask<ScanExplanation> ExplainAsync(
-        System.Threading.CancellationToken cancellationToken = default)
+        bool analyze, System.Threading.CancellationToken cancellationToken = default)
     {
         LayoutTree tree = _file.LayoutTree;
         ScanProjection keep = _fields is null ? ScanProjection.All : ScanProjection.Create(_fields.Build());
@@ -749,9 +906,9 @@ internal sealed class ScanBuilder
         // Each structure is credited with the blocks it pruned among those the scan's rows reach, so
         // that the blocks, the live ones and what each structure pruned add up.
         List<PruningStep> steps = [];
-        Compute.ZonePruningPlan.PruningPlan pruning = _filter is not null && _prune
+        Compute.ZonePruningPlan.PruningPlan pruning = analyze && _filter is not null && _prune
             ? await Compute.ZonePruningPlan
-                .PlanAsync(_file, tree, _filter, cancellationToken, steps, metrics: null, _indexes, Scope(tree, rows, natural))
+                .PlanAsync(_file, tree, _filter, cancellationToken, steps, metrics: null, _indexes, Scope(tree, rows, natural), proofs: true)
                 .ConfigureAwait(false)
             : default;
         Compute.BlockMask? live = pruning.Live;
@@ -762,8 +919,9 @@ internal sealed class ScanBuilder
         // What the scan's first step does after the pruning: ask the filter's exact source, when
         // it has one, for the rows it proves, unless the zone maps already show they cannot fit a
         // batch. When they fit, the scan reads the splits holding them and nothing else.
-        (RowSelection? proven, string? structure, ScanCounters? probe) =
-            await ProbeAsync(rows, natural, plan, pruning, cancellationToken).ConfigureAwait(false);
+        (RowSelection? proven, string? structure, ScanCounters? probe) = analyze
+            ? await ProbeAsync(rows, natural, plan, pruning, cancellationToken).ConfigureAwait(false)
+            : (null, null, null);
 
         // Counted over the splits the scan's rows touch, as the scan counts what it decodes and
         // prunes: a range or a take covers the blocks it reaches, not the file's, and a block is
@@ -787,7 +945,7 @@ internal sealed class ScanBuilder
         {
             walk = Union(read, [Expr.Field(_orderPath)]).RootMask;
             keyZones = pruning.Zones?.Column(_orderPath);
-            if (keyZones is null)
+            if (keyZones is null && analyze)
             {
                 orderCost = new ScanCounters();
                 keyZones = (await Compute.ZonePruningPlan
@@ -796,12 +954,23 @@ internal sealed class ScanBuilder
             }
         }
 
+        // The columns the scan takes from their zones where they give a split's values, whose zones it reads first and whose
+        // segments those splits do not register, as the scan does.
+        ScanCounters? zoneCost = null;
+        ZoneKeyReads? zoneKeys = null;
+        if (analyze && _keepEncodings && _orderPath is null && _zoneKeys is { } keyed)
+        {
+            zoneCost = new ScanCounters();
+            zoneKeys = await ZoneKeyReads.LoadAsync(_file, keyed, _filter, _granules is not null, zoneCost, cancellationToken).ConfigureAwait(false);
+        }
+
         int splits = 0;
         int zoneLiveSplits = 0;
         int liveSplits = 0;
         IO.SegmentRequestSet segments = new IO.SegmentRequestSet();
         try
         {
+            segments.ZoneKeys = zoneKeys;
             LayoutNode root = tree.Root;
             LayoutReader reader = LayoutReaderTable.Require(in root);
             FieldMask mask = walk;
@@ -862,9 +1031,15 @@ internal sealed class ScanBuilder
                 bytes += orderCost.BytesRequested;
             }
 
+            if (zoneCost is not null)
+            {
+                toRead += checked((int)zoneCost.SegmentRequests);
+                bytes += zoneCost.BytesRequested;
+            }
+
             // The whole file-level answer: the statistics, then the file filters when indexes are on.
             bool fileMayMatch = _filter is null
-                || (_indexes
+                || (_indexes && analyze
                     ? await _file.MayMatchAsync(_filter, cancellationToken).ConfigureAwait(false)
                     : Compute.FileStatisticsPruner.MayMatch(_file, _filter));
             // The exact cover, the first tier a count takes: a scan whose cover holds a batch or
@@ -872,11 +1047,16 @@ internal sealed class ScanBuilder
             CountExplanation? count = null;
             if (_filter is not null)
             {
-                (bool exact, long covered) = await ExactAsync(pruning.Zones, cancellationToken).ConfigureAwait(false);
+                (bool exact, long covered) = analyze ? await ExactAsync(pruning.Zones, cancellationToken).ConfigureAwait(false) : (false, 0L);
                 count = new CountExplanation(exact, covered, splitsPruned, splitsProven, zoneLiveSplits - splitsProven);
             }
 
-            OrderExplanation? order = _orderPath is null ? null : await OrderAsync(keyZones, cancellationToken).ConfigureAwait(false);
+            OrderExplanation? order = _orderPath is null ? null
+                : analyze ? await OrderAsync(keyZones, cancellationToken).ConfigureAwait(false)
+                : new OrderExplanation(
+                    _orderComposite is null ? _orderPath : "(" + string.Join(", ", _orderComposite) + ")",
+                    _orderComposite is null && Keys.KeyCursorBuilder.StatedSorted(_file, _orderPath) ? KeySourceKind.SortedColumn : KeySourceKind.None,
+                    0, 0, null, 0, _descending);
             return new ScanExplanation(
                 _take?.Count ?? rows.Length, blockRows, checked((int)blocks), checked((int)liveBlocks), steps, splits, liveSplits,
                 proven?.Count ?? 0, toRead, bytes, _file.FileLength, fileMayMatch)
@@ -958,7 +1138,6 @@ internal sealed class ScanBuilder
         string structure = cover.Kind switch
         {
             KeySourceKind.SortedColumn => "sorted column",
-            KeySourceKind.Slices => "time slices",
             _ => "sorted runs",
         };
         long[]? proven;
@@ -1137,6 +1316,369 @@ internal sealed class ScanBuilder
         string path, System.Threading.CancellationToken cancellationToken = default) =>
         Terminal(Resolved(path)).ExtremeAsync(path, wantMin: false, cancellationToken);
 
+    /// <summary>
+    /// Tallies the paths of those of <paramref name="question"/>'s variant columns the file's path directories answer for,
+    /// among the rows the scan keeps but <paramref name="excluded"/>: a top-level column's directory, where the file holds one
+    /// the question takes, for the groups of rows the scan keeps. A count's plan says which groups the scan keeps none of and
+    /// which every row of, with no read; the rows of the others are read, the filter's columns alone, and the rows each keeps
+    /// counted, which says the rest. The groups then kept in part are read again and their paths counted, of the rows kept and
+    /// of the others, where they are few (<see cref="Types.Variants.GroupVerdicts.EdgesWorthCounting"/>): no path is then
+    /// listed that no kept row holds; where they are many, a directory's values there are taken in the share of their rows
+    /// kept. The columns left, whose kept rows the caller counts once for all of them; null for none.
+    /// </summary>
+    internal async System.Threading.Tasks.ValueTask<List<PathColumn>?> TallyDirectoriesAsync(
+        PathsQuestion question, IRowExclusion? excluded, System.Threading.CancellationToken cancellationToken)
+    {
+        List<PathColumn>? left = null;
+        List<(PathColumn Column, Indexes.VariantDirectory.DirectoryBody Body)> opened = [];
+        try
+        {
+            foreach (PathColumn column in question.Columns)
+            {
+                int field = _take is null ? TopVariant(column.Field) : -1;
+                if (field >= 0
+                    && await Indexes.VariantDirectory.OpenAsync(_file, field, _metrics, cancellationToken).ConfigureAwait(false) is { } body)
+                {
+                    opened.Add((column, body));
+                    continue;
+                }
+
+                (left ??= []).Add(column);
+            }
+
+            if (opened.Count == 0)
+            {
+                return left;
+            }
+
+            TerminalScan terminal = Terminal(excluded: excluded);
+            KeptRows judge = await terminal.JudgeAsync(cancellationToken).ConfigureAwait(false);
+            List<(PathColumn Column, Indexes.VariantDirectory.DirectoryBody Body)> taken = [];
+            foreach ((PathColumn column, Indexes.VariantDirectory.DirectoryBody body) in opened)
+            {
+                column.Tally.Verdicts.Judge(body, judge);
+                if (question.Exact && (column.Tally.Verdicts.Partial || column.Tally.Verdicts.PartGroups > 0))
+                {
+                    // Only exact rows asked for, which a directory says of groups kept whole alone: the kept rows counted.
+                    (left ??= []).Add(column);
+                    continue;
+                }
+
+                taken.Add((column, body));
+            }
+
+            // The directories that judged their groups alike settled together: their groups' rows read once.
+            bool[] done = new bool[taken.Count];
+            for (int i = 0; i < taken.Count; i++)
+            {
+                if (done[i])
+                {
+                    continue;
+                }
+
+                Types.Variants.GroupVerdicts verdicts = taken[i].Column.Tally.Verdicts;
+                List<int> alike = [i];
+                for (int j = i + 1; j < taken.Count; j++)
+                {
+                    if (!done[j] && taken[j].Column.Tally.Verdicts.SameAs(verdicts))
+                    {
+                        alike.Add(j);
+                    }
+                }
+
+                Types.Variants.EdgeCounts[]? edges = null;
+                if (verdicts.PartGroups > 0 && verdicts.Grouped && verdicts.Rows == _file.RowCount)
+                {
+                    long[] kept = await KeptByGroupAsync(terminal, verdicts, judge, cancellationToken).ConfigureAwait(false);
+                    foreach (int a in alike)
+                    {
+                        taken[a].Column.Tally.Verdicts.Refine(kept, judge.Range);
+                    }
+
+                    if (verdicts.EdgesWorthCounting)
+                    {
+                        question.Reads.EdgeGranules += verdicts.PartGroups;
+                        edges = await CountEdgesAsync(verdicts, alike.ConvertAll(a => taken[a].Column.Field), judge, question, cancellationToken)
+                            .ConfigureAwait(false);
+                    }
+                }
+                else if (verdicts.PartGroups > 0)
+                {
+                    // A directory of no groups, or of rows not the file's: its values in the share of the rows a count keeps.
+                    judge = await terminal.CountedAsync(judge, cancellationToken).ConfigureAwait(false);
+                    foreach (int a in alike)
+                    {
+                        Types.Variants.GroupVerdicts other = taken[a].Column.Tally.Verdicts;
+                        other.Share = judge.Share(other.WholeRows, other.PartRows);
+                    }
+                }
+
+                for (int a = 0; a < alike.Count; a++)
+                {
+                    done[alike[a]] = true;
+                    taken[alike[a]].Column.Tally.AddDirectory(taken[alike[a]].Body, edges?[a], exact: false);
+                    question.Reads.Directories++;
+                }
+            }
+        }
+        finally
+        {
+            foreach ((_, Indexes.VariantDirectory.DirectoryBody body) in opened)
+            {
+                body.Dispose();
+            }
+        }
+
+        return left;
+    }
+
+    /// <summary>
+    /// The rows the scan keeps of each group <paramref name="verdicts"/> judged kept in part, by <paramref name="judge"/>: with
+    /// no filter, the group's rows among the scan's but those left out; under one, the rows a count of those groups keeps
+    /// (<see cref="TerminalScan.KeptByGroupAsync"/>), a count's work over them, the filter's columns alone read.
+    /// </summary>
+    private static async System.Threading.Tasks.ValueTask<long[]> KeptByGroupAsync(
+        TerminalScan terminal, Types.Variants.GroupVerdicts verdicts, KeptRows judge, System.Threading.CancellationToken cancellationToken)
+    {
+        long[] kept = new long[verdicts.Groups];
+        if (!judge.Filtered)
+        {
+            for (int g = 0; g < verdicts.Groups; g++)
+            {
+                if (verdicts.IsPart(g))
+                {
+                    RowRange held = new RowRange(g * verdicts.GroupRows, Math.Min((g + 1) * verdicts.GroupRows, verdicts.Rows)).Intersect(judge.Range);
+                    kept[g] = held.Length - (judge.Excluded is { } left ? left.ExcludedBefore(held.End) - left.ExcludedBefore(held.Start) : 0);
+                }
+            }
+
+            return kept;
+        }
+
+        await terminal.KeptByGroupAsync(judge, verdicts.GroupRows, verdicts.IsPart, kept, cancellationToken).ConfigureAwait(false);
+        return kept;
+    }
+
+    /// <summary>
+    /// The paths of <paramref name="columns"/> among the rows of the groups <paramref name="verdicts"/> judged kept in part, of
+    /// those the scan keeps by <paramref name="judge"/> and of the others; the counts held under the question's memory.
+    /// </summary>
+    private async System.Threading.Tasks.ValueTask<Types.Variants.EdgeCounts[]> CountEdgesAsync(
+        Types.Variants.GroupVerdicts verdicts, List<FieldExpr> columns, KeptRows judge, PathsQuestion question, System.Threading.CancellationToken cancellationToken)
+    {
+        Types.Variants.PathCensus[] kept = new Types.Variants.PathCensus[columns.Count];
+        Types.Variants.PathCensus[] others = new Types.Variants.PathCensus[columns.Count];
+        Types.Variants.EdgeCounts[] counts = new Types.Variants.EdgeCounts[columns.Count];
+        for (int c = 0; c < columns.Count; c++)
+        {
+            kept[c] = new Types.Variants.PathCensus();
+            others[c] = new Types.Variants.PathCensus();
+            counts[c] = new Types.Variants.EdgeCounts();
+        }
+
+        long held = 0;
+        try
+        {
+            await foreach (PartRows part in PartRowsAsync(verdicts, judge, columns, cancellationToken).ConfigureAwait(false))
+            {
+                RecordBatch batch = part.Batch;
+                long keys = 0;
+                question.Reads.EdgeRows += batch.RowCount;
+                for (int c = 0; c < columns.Count; c++)
+                {
+                    // A shredded column as its shredding holds it, counted so; a column of values whole counted row by row.
+                    int node = FilterEvaluator.Resolve(batch.Arena, batch.RootIndex, columns[c], batch.RowCount);
+                    if (Types.Variants.ApartCensus.IsGroup(batch.Arena, node))
+                    {
+                        Types.Variants.ApartCensus.Add(batch.Arena, node, batch.RowCount, part.Keep.AsSpan(0, part.Words), part.Other.AsSpan(0, part.Words), counts[c]);
+                    }
+                    else
+                    {
+                        Types.Variants.PathCensus.Counting counting = Types.Variants.PathCensus.Prepare(batch.Arena, node, batch.RowCount);
+                        kept[c].Add(counting, part.Keep.AsSpan(0, part.Words));
+                        others[c].Add(counting, part.Other.AsSpan(0, part.Words));
+                    }
+
+                    keys += kept[c].HeldKeys + others[c].HeldKeys + counts[c].Count;
+                }
+
+                held = PathQuestions.Hold(question, keys, held);
+            }
+
+            for (int c = 0; c < counts.Length; c++)
+            {
+                counts[c].Add(kept[c], others[c]);
+            }
+
+            return counts;
+        }
+        finally
+        {
+            question.Memory?.LetGo(held);
+            for (int c = 0; c < columns.Count; c++)
+            {
+                kept[c].Release();
+                others[c].Release();
+            }
+        }
+    }
+
+    /// <summary>A batch of the rows of groups kept in part, with a bit a row the scan keeps and one a row it leaves of those groups, valid until the next.</summary>
+    private sealed class PartRows
+    {
+        internal RecordBatch Batch = null!;
+        internal ulong[] Keep = [];
+        internal ulong[] Other = [];
+        internal int Words;
+    }
+
+    /// <summary>
+    /// The rows of the groups <paramref name="verdicts"/> judged kept in part, those groups read alone with <paramref name="columns"/>
+    /// and the filter's, each batch's rows told kept or left: kept when the filter keeps them, inside the scan's rows, and
+    /// not left out by <paramref name="judge"/>; a row of a group not kept in part, which a split wider than a group brings,
+    /// neither.
+    /// </summary>
+    private async IAsyncEnumerable<PartRows> PartRowsAsync(
+        Types.Variants.GroupVerdicts verdicts, KeptRows judge, List<FieldExpr> columns,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] System.Threading.CancellationToken cancellationToken)
+    {
+        // The columns counted read as their shredding holds them, when the filter reads none of them: it evaluates them put back.
+        bool apart = columns.Count > 0 && (_filterPaths ?? []).TrueForAll(path => !columns.Exists(column => column.SegmentsUtf8[0].AsSpan().SequenceEqual(path.SegmentsUtf8[0])));
+        FilterEvaluator? evaluator = _filter is null ? null : new FilterEvaluator(_filter);
+        RowRange range = judge.Range;
+        IRowExclusion? excluded = judge.Excluded;
+        byte[] states = [];
+        PartRows rows = new PartRows();
+
+        // Each run of groups kept in part read by its rows, which a mask of its blocks read a split at a time: a split wider
+        // than a group read the groups beside an edge too, four times the rows.
+        for (int first = 0; first < verdicts.Groups; first++)
+        {
+            if (!verdicts.IsPart(first))
+            {
+                continue;
+            }
+
+            int last = first;
+            while (last + 1 < verdicts.Groups && verdicts.IsPart(last + 1))
+            {
+                last++;
+            }
+
+            RowRange groups = new RowRange(first * verdicts.GroupRows, Math.Min((last + 1) * verdicts.GroupRows, verdicts.Rows));
+            first = last;
+            ScanBuilder read = new ScanBuilder(_file).Rows(groups).WithGranules(_granules);
+            read._metrics = _metrics;
+            read._indexes = _indexes;
+            read.WithVariantsApart(apart);
+            FieldMaskBuilder fields = read.Fields();
+            foreach (FieldExpr column in columns)
+            {
+                ScanProjection.IncludeField(_file.DType, column, fields, nameof(columns));
+            }
+
+            foreach (FieldExpr path in _filterPaths ?? [])
+            {
+                ScanProjection.IncludeField(_file.DType, path, fields, nameof(columns));
+            }
+
+            await foreach (RecordBatch batch in read.ExecuteAsync().WithCancellation(cancellationToken).ConfigureAwait(false))
+            {
+                int count = batch.RowCount;
+                int words = (count + 63) >> 6;
+                if (count == 0)
+                {
+                    continue;
+                }
+
+                if (rows.Keep.Length < words)
+                {
+                    rows.Keep = new ulong[words];
+                    rows.Other = new ulong[words];
+                }
+
+                Span<ulong> keep = rows.Keep.AsSpan(0, words);
+                keep.Clear();
+                if (evaluator is not null)
+                {
+                    if (states.Length < count)
+                    {
+                        states = new byte[count];
+                    }
+
+                    evaluator.Evaluate(batch.Arena, batch.RootIndex, count, states.AsSpan(0, count));
+                    Trilean.ToWords(states.AsSpan(0, count), Trilean.True, equal: true, keep);
+                }
+                else
+                {
+                    keep.Fill(ulong.MaxValue);
+                }
+
+                // The rows outside the scan's, and those left out, are not kept.
+                long start = batch.StartRow;
+                long end = start + count;
+                Clear(keep, start, start, Math.Min(end, range.Start));
+                Clear(keep, start, Math.Max(start, range.End), end);
+                if (excluded is not null)
+                {
+                    for (int run = excluded.FirstEndingAfter(start); run < excluded.Runs && excluded.StartOf(run) < end; run++)
+                    {
+                        Clear(keep, start, Math.Max(start, excluded.StartOf(run)), Math.Min(end, excluded.EndOf(run)));
+                    }
+                }
+
+                Span<ulong> other = rows.Other.AsSpan(0, words);
+                for (int w = 0; w < words; w++)
+                {
+                    other[w] = ~keep[w];
+                }
+
+                if ((count & 63) != 0)
+                {
+                    keep[^1] &= (1UL << (count & 63)) - 1;
+                    other[^1] &= (1UL << (count & 63)) - 1;
+                }
+
+                for (long g = start / verdicts.GroupRows; g * verdicts.GroupRows < end; g++)
+                {
+                    if (!verdicts.IsPart((int)g))
+                    {
+                        long from = Math.Max(start, g * verdicts.GroupRows);
+                        long to = Math.Min(end, (g + 1) * verdicts.GroupRows);
+                        Clear(keep, start, from, to);
+                        Clear(other, start, from, to);
+                    }
+                }
+
+                rows.Batch = batch;
+                rows.Words = words;
+                yield return rows;
+            }
+        }
+
+        // Clears the bits of rows [from, to) of a batch whose first row is `first`.
+        static void Clear(Span<ulong> words, long first, long from, long to)
+        {
+            for (long row = from; row < to; row++)
+            {
+                int at = (int)(row - first);
+                words[at >> 6] &= ~(1UL << (at & 63));
+            }
+        }
+    }
+
+    /// <summary>The top-level field of the file that <paramref name="column"/> names, when it is a variant column; -1 otherwise.</summary>
+    private int TopVariant(Expressions.FieldExpr column)
+    {
+        if (column.SegmentsUtf8.Length != 1)
+        {
+            return -1;
+        }
+
+        int field = _file.DType.IndexOfField(column.SegmentsUtf8[0]);
+        return field >= 0 && _file.DType.GetField(field).Kind == DTypeKind.Variant ? field : -1;
+    }
+
     /// <summary>Forces terminal tiers off, for the tests that hold every tier to the decode.</summary>
     /// <param name="tiers">The tiers a terminal may take; <see cref="TerminalTiers.Decode"/> is always taken.</param>
     /// <returns>This builder.</returns>
@@ -1190,13 +1732,8 @@ internal sealed class ScanBuilder
             natural = int.MaxValue;
         }
 
-        long batch = _filter is null && _take is null && _orderPath is null ? WindowBatch(natural) : natural;
-
-        // A reader of the whole object in key order walks windows of its own size, as many zones as fit.
-        if (_orderPath is not null && _take is null && _keyWindowShift > 0 && (1L << _keyWindowShift) > natural)
-        {
-            batch = (1L << _keyWindowShift) / natural * natural;
-        }
+        // A caller's mask of blocks with no filter is read a block a split: wider, a split would run into a block it leaves out.
+        long batch = _filter is null && _take is null && _orderPath is null && _granted is null ? WindowBatch(natural) : natural;
 
         return (rows, natural, Capped(batch));
     }
@@ -1232,7 +1769,7 @@ internal sealed class ScanBuilder
             ? _variantKeys ?? Indexes.VariantKeyReads.Of([], _filter)
             : null;
         return new TerminalScan(
-            _file, tree, _filter, rows, wholeFile, cap, read, _take, _prune, _tiers, _metrics, _indexes, excluded, keys);
+            _file, tree, _filter, rows, wholeFile, cap, read, _take, _prune, _tiers, _metrics, _indexes, excluded, keys, _granules);
     }
 
     /// <summary>The projection of exactly the fields a filter reads, plus one.</summary>
@@ -1403,6 +1940,16 @@ internal sealed class ScanBuilder
                 return visitor.Visit(check.Field);
             case InExpr membership:
                 return visitor.Visit(membership.Field);
+            case TupleInExpr tuples:
+                foreach (FieldExpr field in tuples.Fields)
+                {
+                    if (!visitor.Visit(field))
+                    {
+                        return false;
+                    }
+                }
+
+                return true;
             case StringMatchExpr match:
                 return visitor.Visit(match.Field);
             case ListContainsExpr contains:

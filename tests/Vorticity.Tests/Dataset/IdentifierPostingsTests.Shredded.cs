@@ -28,9 +28,9 @@ public sealed partial class IdentifierPostingsTests
             List<Visit> rows = [];
             await using (VortexDataset dataset = await VortexDataset.CreateAsync(store, Visit.Schema, new DatasetOptions
             {
-                ClusteringKey = [nameof(Visit.At)],
+                Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(Visit.At)).Truncate(CalendarUnit.Hour), SortKey = [LayoutValue.Column(nameof(Visit.At))], Organization = LayoutOrganization.Leveled },
                 ShreddedPaths = declared ? ["Attributes['rare'].AsInt64()"] : null,
-                Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Hour, SliceTargetRows = 500 },
+                ContentsObjectBytes = 0,
             }, Ct))
             {
                 for (int part = 0; part < 16; part++)
@@ -52,7 +52,7 @@ public sealed partial class IdentifierPostingsTests
 
                 int field = Visit.Schema.IndexOf(nameof(Visit.Attributes));
                 int hours = 0;
-                await foreach (TreeEntry leaf in dataset.Levels[PeriodLevels.Periods].EnumerateAsync(dataset.Pages, Ct))
+                await foreach (TreeEntry leaf in dataset.AboveLevelZeroAsync(Ct))
                 {
                     VariantDirectory directory = (await dataset.ReadPathDirectoryAsync(ObjectEntry.FromBytes(leaf.Value.Span), field, Ct))!;
                     PathEntry rare = Assert.Single(directory.Of(["rare"]).ToArray(), entry => entry.Class == PathClass.Integer);
@@ -60,7 +60,7 @@ public sealed partial class IdentifierPostingsTests
                     hours++;
                 }
 
-                Assert.Equal(2, hours);
+                Assert.Equal(3, hours);
                 Assert.Equal(rows.Count(r => r.Attributes["rare"] is not null), await dataset.Scan<Visit>().Where(r => r.Attributes["rare"].AsInt64() >= 0).CountAsync(Ct));
             }
 
@@ -82,7 +82,7 @@ public sealed partial class IdentifierPostingsTests
             await using MemoryObjectStore store = new MemoryObjectStore();
             await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Visit.Schema, new DatasetOptions
             {
-                ClusteringKey = [nameof(Visit.At)],
+                Layout = new DatasetLayout { SortKey = [LayoutValue.Column(nameof(Visit.At))] },
                 ShreddedPaths = ["Attributes['status'].AsInt64()"],
                 ShredOnAppend = onAppend,
             }, Ct);
@@ -103,6 +103,9 @@ public sealed partial class IdentifierPostingsTests
                 Assert.Equal(
                     rows.Where(r => r.Attributes["status"]?.AsInt64() >= 400).Select(r => r.Attributes["status"]?.AsInt64()).Order(),
                     (await dataset.Scan<Visit>().Where(r => r.Attributes["status"].AsInt64() >= 400).Select(r => r.Attributes["status"].AsInt64()).ToListAsync(Ct)).Order());
+
+                // The copies of the objects shredded are made beside the first question.
+                await dataset.LevelZero.WhenMadeAsync();
                 Assert.Equal(onAppend ? 3 * asked : 0, dataset.LevelZero.AsAppended);
                 Assert.Equal(onAppend ? 0 : 3, dataset.LevelZero.Shredded);
             }
@@ -117,10 +120,10 @@ public sealed partial class IdentifierPostingsTests
     }
 
     /// <summary>
-    /// The key one row in five hundred holds, declared shredded once the hour of noon is sealed and taken back once the
-    /// next is: the hour of noon keeps it in the residual, the next in a typed column, the one after in the residual again,
-    /// each job shredding the paths of the version it starts from on a handle opened before any change; a question on the
-    /// key counts what the rows hold over the three. A change worked out against paths another writer changed first is
+    /// The key one row in five hundred holds, declared shredded once the hour of noon is compacted and taken back an hour
+    /// later: the objects written while it is declared keep it in a typed column, every other in the residual, each job
+    /// shredding the paths of the version it starts from on a handle opened before any change; a question on the key
+    /// counts what the rows hold over them all. A change worked out against paths another writer changed first is
     /// refused, one that asks for the paths the dataset has is done, and a path that names no such key is refused.
     /// </summary>
     [Fact]
@@ -129,8 +132,7 @@ public sealed partial class IdentifierPostingsTests
         await using MemoryObjectStore store = new MemoryObjectStore();
         DatasetOptions options = new DatasetOptions
         {
-            ClusteringKey = [nameof(Visit.At)],
-            Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Hour, SliceTargetRows = 500 },
+            Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(Visit.At)).Truncate(CalendarUnit.Hour), SortKey = [LayoutValue.Column(nameof(Visit.At))], Organization = LayoutOrganization.Leveled }, ContentsObjectBytes = 0,
         };
         await using VortexDataset writer = await VortexDataset.CreateAsync(store, Visit.Schema, options, Ct);
         await using VortexDataset compactor = await VortexDataset.OpenAsync(store, options, Ct);
@@ -138,8 +140,8 @@ public sealed partial class IdentifierPostingsTests
         const string Rare = "Attributes['rare'].AsInt64()";
         List<Visit> rows = [];
 
-        // Nine parts of 400 visits a second and a quarter apart take the rows a quarter of an hour past the hour that
-        // follows, which seals the hour before.
+        // Nine parts of 400 visits a second and a quarter apart take the rows to a quarter of an hour past the hour that
+        // follows; the rows after that come as objects of their own, beside those of their hour.
         async Task AppendAsync(int from, int to)
         {
             for (int part = from; part < to; part++)
@@ -164,29 +166,50 @@ public sealed partial class IdentifierPostingsTests
         await AppendAsync(0, 9);
         ulong declared = await writer.SetShreddedPathsAsync([Rare], Ct);
         Assert.Equal([Rare], writer.Snapshot.Header.ShreddedPaths);
-        Assert.Equal(DatasetFeatures.ShreddedPaths, writer.Snapshot.Header.Features & DatasetFeatures.ShreddedPaths);
         Assert.Equal(declared, await writer.SetShreddedPathsAsync([Rare], Ct));
         await Assert.ThrowsAsync<InvalidOperationException>(async () => await stale.SetShreddedPathsAsync(["Attributes['route'].AsString()"], Ct));
         Assert.Equal(declared, await stale.SetShreddedPathsAsync([Rare], Ct));
         ArgumentException refused = await Assert.ThrowsAsync<ArgumentException>(async () => await writer.SetShreddedPathsAsync([nameof(Visit.At)], Ct));
         Assert.Equal("paths", refused.ParamName);
 
+        HashSet<string> undeclared = await KeysAsync();
         await AppendAsync(9, 18);
+        HashSet<string> declaredSince = await KeysAsync();
+        declaredSince.ExceptWith(undeclared);
         await writer.SetShreddedPathsAsync([], Ct);
         Assert.Empty(writer.Snapshot.Header.ShreddedPaths);
         await AppendAsync(18, 27);
 
+        // Each object keeps the key where the paths of the version its job started from put it.
         int field = Visit.Schema.IndexOf(nameof(Visit.Attributes));
-        List<PathPlace> places = [];
-        await foreach (TreeEntry leaf in compactor.Levels[PeriodLevels.Periods].EnumerateAsync(compactor.Pages, Ct))
+        List<(PathPlace Place, PathPlace Expected)> places = [];
+        await foreach (TreeEntry leaf in compactor.AboveLevelZeroAsync(Ct))
         {
-            VariantDirectory directory = (await compactor.ReadPathDirectoryAsync(ObjectEntry.FromBytes(leaf.Value.Span), field, Ct))!;
-            places.Add(Assert.Single(directory.Of(["rare"]).ToArray(), entry => entry.Class == PathClass.Integer).Place);
+            ObjectEntry entry = ObjectEntry.FromBytes(leaf.Value.Span);
+            VariantDirectory directory = (await compactor.ReadPathDirectoryAsync(entry, field, Ct))!;
+            if (directory.Of(["rare"]).ToArray() is { Length: > 0 } rare)
+            {
+                places.Add((Assert.Single(rare, held => held.Class == PathClass.Integer).Place, declaredSince.Contains(entry.Key) ? PathPlace.Typed : PathPlace.Residual));
+            }
         }
 
-        Assert.Equal([PathPlace.Residual, PathPlace.Typed, PathPlace.Residual], places);
+        Assert.Contains(places, place => place.Expected == PathPlace.Typed);
+        Assert.Contains(places, place => place.Expected == PathPlace.Residual);
+        Assert.All(places, place => Assert.Equal(place.Expected, place.Place));
         await writer.RefreshAsync(Ct);
         Assert.Equal(rows.Count(r => r.Attributes["rare"] is not null), await writer.Scan<Visit>().Where(r => r.Attributes["rare"].AsInt64() >= 0).CountAsync(Ct));
+
+        // The keys of the objects above level 0 the compactor's handle holds.
+        async Task<HashSet<string>> KeysAsync()
+        {
+            HashSet<string> keys = new HashSet<string>(StringComparer.Ordinal);
+            await foreach (TreeEntry leaf in compactor.AboveLevelZeroAsync(Ct))
+            {
+                keys.Add(ObjectEntry.FromBytes(leaf.Value.Span).Key);
+            }
+
+            return keys;
+        }
     }
 
     [Theory]
@@ -200,7 +223,7 @@ public sealed partial class IdentifierPostingsTests
         await using MemoryObjectStore store = new MemoryObjectStore();
         ArgumentException refused = await Assert.ThrowsAsync<ArgumentException>(async () => await VortexDataset.CreateAsync(store, Visit.Schema, new DatasetOptions
         {
-            ClusteringKey = [nameof(Visit.At)],
+            Layout = new DatasetLayout { SortKey = [LayoutValue.Column(nameof(Visit.At))] },
             ShreddedPaths = [path],
         }, Ct));
         Assert.Contains("Attributes['status'].AsInt64()", refused.Message, StringComparison.Ordinal);

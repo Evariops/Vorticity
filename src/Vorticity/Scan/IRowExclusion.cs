@@ -7,9 +7,6 @@ namespace Vorticity.Scanning;
 /// </summary>
 internal interface IRowExclusion
 {
-    /// <summary>How many rows are left out.</summary>
-    long ExcludedCount { get; }
-
     /// <summary>How many runs they form.</summary>
     int Runs { get; }
 

@@ -21,14 +21,6 @@ internal struct ObjectRange : IDisposable
 {
     private SegmentLease _bytes;
 
-    /// <summary>A range over bytes a store holds, with the token of the object they came from.</summary>
-    /// <param name="bytes">The bytes, released when the range is disposed.</param>
-    /// <param name="token">The object's token, as <see cref="ObjectHead.Token"/> defines it.</param>
-    public ObjectRange(SegmentLease bytes, string token)
-        : this(bytes, token, -1)
-    {
-    }
-
     /// <summary>A range over bytes a store holds, with the token and the length of the object they came from.</summary>
     /// <param name="bytes">The bytes, released when the range is disposed.</param>
     /// <param name="token">The object's token, as <see cref="ObjectHead.Token"/> defines it.</param>

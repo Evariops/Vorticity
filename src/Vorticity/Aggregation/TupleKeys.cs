@@ -1,11 +1,9 @@
 using System;
-using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
-using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Types;
 using Vorticity.Writing;
@@ -588,8 +586,6 @@ internal sealed class TupleKeys : GroupKeys
         _tuples.GroupsOf(batch, shape, entries, groups, scratch);
         Count = _tuples.Count;
     }
-
-    internal override int[] Order(bool sorted) => Identity(Count);
 
     internal override bool Orders(int component) => true;
 

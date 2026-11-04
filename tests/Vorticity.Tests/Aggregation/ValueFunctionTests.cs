@@ -213,8 +213,8 @@ public sealed partial class ValueFunctionTests
 
             foreach ((Func<Probe<Reading>, Predicate> function, Func<Probe<Reading>, Predicate> range) in pairs)
             {
-                ScanPlan byFunction = await file.Scan<Reading>().Where(function).ExplainAsync(Ct);
-                ScanPlan byRange = await file.Scan<Reading>().Where(range).ExplainAsync(Ct);
+                ScanPlan byFunction = await file.Scan<Reading>().Where(function).ExplainAsync(analyze: true, Ct);
+                ScanPlan byRange = await file.Scan<Reading>().Where(range).ExplainAsync(analyze: true, Ct);
                 Assert.True(byFunction.LiveBlocks < byFunction.Blocks / 4, $"{byFunction.LiveBlocks} of {byFunction.Blocks} blocks live: {string.Join(", ", byFunction.Pruning)}");
                 Assert.Equal(byRange.LiveBlocks, byFunction.LiveBlocks);
                 Assert.Equal(byRange.Pruning.Select(s => (s.Structure, s.BlocksPruned)), byFunction.Pruning.Select(s => (s.Structure, s.BlocksPruned)));
@@ -222,7 +222,7 @@ public sealed partial class ValueFunctionTests
             }
 
             // A day is a block or two of the sorted instants, which the zone maps keep alone.
-            ScanPlan oneDay = await file.Scan<Reading>().Where(pairs[0].Function).ExplainAsync(Ct);
+            ScanPlan oneDay = await file.Scan<Reading>().Where(pairs[0].Function).ExplainAsync(analyze: true, Ct);
             Assert.True(oneDay.LiveBlocks <= 2, $"{oneDay.LiveBlocks} of {oneDay.Blocks} blocks live");
             Assert.Equal(oneDay.Blocks - oneDay.LiveBlocks, Assert.Single(oneDay.Pruning, step => step.Structure == "zone map").BlocksPruned);
 
@@ -273,9 +273,12 @@ public sealed partial class ValueFunctionTests
             new InstantTruncate(CalendarUnit.Day, TimeUnit.Nanoseconds, null),
             new InstantTruncate(CalendarUnit.Year, TimeUnit.Seconds, null),
             new InstantTruncate(CalendarUnit.Minute, TimeUnit.Microseconds, null),
+            new InstantTruncate(CalendarUnit.Hour, TimeUnit.Microseconds, null),
+            new InstantTruncate(CalendarUnit.Week, TimeUnit.Milliseconds, null),
             new InstantTruncate(CalendarUnit.Month, TimeUnit.Microseconds, Paris),
             new InstantTruncate(CalendarUnit.Hour, TimeUnit.Nanoseconds, Paris),
             new DateTruncate(CalendarUnit.Quarter),
+            new DateTruncate(CalendarUnit.Week),
             new InstantBucket(7_000, TimeSpan.FromMilliseconds(7)),
             new NumberBucket(PType.I8, 10, 10, "10"),
             new NumberBucket(PType.U16, 1_000, 1_000, "1000"),

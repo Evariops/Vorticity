@@ -48,74 +48,15 @@ internal readonly ref struct ArrayStatsSet
     /// <summary>Exactness of <see cref="MinBytes"/>. Defaults to <see cref="StatPrecision.Inexact"/>.</summary>
     public StatPrecision MinPrecision => IsEmpty ? StatPrecision.Inexact : Record.MinPrecision;
 
-    /// <summary><see langword="true"/> when a <c>max</c> is present and non-empty.</summary>
-    public bool HasMax => !IsEmpty && Record.MaxLength > 0;
-
-    /// <summary>The <c>max</c> as a Protobuf-serialized <c>ScalarValue</c>. Empty when absent.</summary>
-    public ReadOnlySpan<byte> MaxBytes
-    {
-        get
-        {
-            if (IsEmpty)
-            {
-                return default;
-            }
-
-            ref readonly ArrayStatsRecord r = ref Record;
-            return r.MaxLength > 0 ? _arena!.TreeSpan.Slice(r.MaxOffset, r.MaxLength) : default;
-        }
-    }
-
-    /// <summary>Exactness of <see cref="MaxBytes"/>. Defaults to <see cref="StatPrecision.Inexact"/>.</summary>
-    public StatPrecision MaxPrecision => IsEmpty ? StatPrecision.Inexact : Record.MaxPrecision;
-
-    /// <summary><see langword="true"/> when a <c>sum</c> is present and non-empty.</summary>
-    public bool HasSum => !IsEmpty && Record.SumLength > 0;
-
-    /// <summary>The <c>sum</c> as a Protobuf-serialized <c>ScalarValue</c>. Empty when absent.</summary>
-    public ReadOnlySpan<byte> SumBytes
-    {
-        get
-        {
-            if (IsEmpty)
-            {
-                return default;
-            }
-
-            ref readonly ArrayStatsRecord r = ref Record;
-            return r.SumLength > 0 ? _arena!.TreeSpan.Slice(r.SumOffset, r.SumLength) : default;
-        }
-    }
-
     /// <summary>Reads the tri-state <c>is_sorted</c>.</summary>
     /// <param name="value">The value when present.</param>
     /// <returns><see langword="false"/> when the statistic is unknown.</returns>
     public bool TryGetIsSorted(out bool value) => TryGetFlag(ArrayStatsRecord.FlagIsSorted, ArrayStatsRecord.ValueIsSorted, out value);
 
-    /// <summary>Reads the tri-state <c>is_strict_sorted</c>.</summary>
-    /// <param name="value">The value when present.</param>
-    /// <returns><see langword="false"/> when the statistic is unknown.</returns>
-    public bool TryGetIsStrictSorted(out bool value) => TryGetFlag(ArrayStatsRecord.FlagIsStrictSorted, ArrayStatsRecord.ValueIsStrictSorted, out value);
-
-    /// <summary>Reads the tri-state <c>is_constant</c>.</summary>
-    /// <param name="value">The value when present.</param>
-    /// <returns><see langword="false"/> when the statistic is unknown.</returns>
-    public bool TryGetIsConstant(out bool value) => TryGetFlag(ArrayStatsRecord.FlagIsConstant, ArrayStatsRecord.ValueIsConstant, out value);
-
     /// <summary>Reads the tri-state <c>null_count</c>. A present 0 is not the same as absent.</summary>
     /// <param name="value">The value when present.</param>
     /// <returns><see langword="false"/> when the statistic is unknown.</returns>
     public bool TryGetNullCount(out ulong value) => TryGetCount(ArrayStatsRecord.FlagNullCount, 0, out value);
-
-    /// <summary>Reads the tri-state <c>uncompressed_size_in_bytes</c>.</summary>
-    /// <param name="value">The value when present.</param>
-    /// <returns><see langword="false"/> when the statistic is unknown.</returns>
-    public bool TryGetUncompressedSizeInBytes(out ulong value) => TryGetCount(ArrayStatsRecord.FlagUncompressedSize, 1, out value);
-
-    /// <summary>Reads the tri-state <c>nan_count</c>.</summary>
-    /// <param name="value">The value when present.</param>
-    /// <returns><see langword="false"/> when the statistic is unknown.</returns>
-    public bool TryGetNanCount(out ulong value) => TryGetCount(ArrayStatsRecord.FlagNanCount, 2, out value);
 
     private ref readonly ArrayStatsRecord Record => ref _arena!.StatsRef(_index);
 

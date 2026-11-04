@@ -4,7 +4,6 @@ using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Layouts;
-using Vorticity.Writing;
 using Xunit;
 
 namespace Vorticity.Tests.Layouts;
@@ -15,7 +14,7 @@ namespace Vorticity.Tests.Layouts;
 /// strings, bits with nulls and a dictionary of many doubles whose values every window borrows,
 /// side by side in one table; and a column of runs kept encoded, whose windows start inside a run.
 /// </summary>
-public sealed class WindowedChunkTests
+public sealed partial class WindowedChunkTests
 {
     private const int Rows = 300_000;
 
@@ -174,6 +173,57 @@ public sealed class WindowedChunkTests
         await writer.CompleteAsync(CancellationToken.None);
         return path;
     }
+
+    /// <summary>
+    /// A column null over a chunk larger than a window, which the writer keeps as one null value, is laid out a window at
+    /// a time as its rows are read, as every other column is: the first window of a scan decodes a window of each
+    /// column, where the null one was laid out whole for it and kept, a chunk of rows for every input of a merge.
+    /// </summary>
+    [Fact]
+    public async Task ANullColumnLargerThanAWindowIsLaidOutAWindowAtATime()
+    {
+        string directory = Path.Combine(AppContext.BaseDirectory, "windows");
+        Directory.CreateDirectory(directory);
+        string path = Path.Combine(directory, $"nulls-{Environment.ProcessId}-{Guid.NewGuid():N}.vortex");
+        try
+        {
+            await using (VortexFileWriter writer = VortexSession.Default.CreateWriter<Note>(path, new VortexWriteOptions { DataBlockTargetBytes = 64 << 20 }))
+            {
+                Note[] rows = new Note[Rows];
+                for (int row = 0; row < Rows; row++)
+                {
+                    rows[row] = new Note(row, null);
+                }
+
+                await writer.WriteAsync<Note>(rows, TestContext.Current.CancellationToken);
+                await writer.CompleteAsync(TestContext.Current.CancellationToken);
+            }
+
+            await using VortexFile file = await VortexFile.OpenAsync(path, TestContext.Current.CancellationToken);
+            Scan<Note> scan = file.Scan<Note>().With(new ScanOptions { Prefetch = 0 });
+            long seen = 0;
+            await foreach (RecordBatch batch in scan.ToBatchesAsync(TestContext.Current.CancellationToken))
+            {
+                using (batch)
+                {
+                    seen = batch.RowCount;
+                }
+
+                break;
+            }
+
+            Assert.InRange(seen, 1, Rows - 1);
+            Assert.Equal(2L * seen, scan.Counters.ValuesDecoded);
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
+    /// <summary>A row whose text is null throughout the table.</summary>
+    [VortexRecord]
+    internal partial record struct Note(long Sequence, string? Text);
 
     /// <summary>Rows per run of the run-end table.</summary>
     private const int RunLength = 100;

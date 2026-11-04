@@ -4,7 +4,6 @@
 using System;
 using System.Collections.Generic;
 using Vorticity.Arrays;
-using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Types;
 
 namespace Vorticity.Tests.Arrays.Decoders.Canonical;

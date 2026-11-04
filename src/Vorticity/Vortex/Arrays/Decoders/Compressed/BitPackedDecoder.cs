@@ -1,5 +1,6 @@
 using System;
 using System.Buffers;
+using System.Buffers.Binary;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -56,38 +57,8 @@ internal sealed class BitPackedDecoder : ArrayDecoder
         ReadOnlySpan<int> wanted)
     {
         ArgumentNullException.ThrowIfNull(context);
-
-        ArrayDecodeContext.RequireBufferCount(node.BufferCount, 1, Id);
-        BitPackedMetadata metadata = BitPackedMetadata.Read(node.Metadata);
-        PType ptype = CompressedValues.RequireIntegerPrimitive(dtype, Id);
-        int elementBits = ptype.ByteWidth() * 8;
-
-        if (metadata.BitWidth > (uint)elementBits)
-        {
-            CompressedThrow.Format(
-                $"{Id} bit width {metadata.BitWidth} exceeds the {elementBits} bits of " +
-                $"{ptype.Name()}.");
-        }
-
-        int bitWidth = (int)metadata.BitWidth;
-        int offset = (int)metadata.Offset;
-
-        VortexBuffer packed = node.GetBuffer(0);
-        long blocks = ((long)length + offset + FastLanes.BlockSize - 1) / FastLanes.BlockSize;
-        long expected = blocks * FastLanes.BlockByteLength(bitWidth);
-        if (packed.Length != expected)
-        {
-            CompressedThrow.Format(
-                $"{Id} needs exactly {expected} packed bytes for {length} rows at offset " +
-                $"{offset} and bit width {bitWidth}; the buffer holds {packed.Length}.");
-        }
-
-        int validityChildIndex = metadata.HasPatches
-            ? (metadata.Patches.HasChunkOffsets ? 3 : 2)
-            : 0;
-        ArrayDecodeContext.RequireChildCount(
-            node.ChildCount, validityChildIndex, validityChildIndex + 1, Id);
-
+        Packing packing = Packing.Of(in node, dtype, length);
+        PType ptype = packing.PType;
         int width = ptype.ByteWidth();
         int count = wanted.Length;
         int total = ArrayDecodeContext.CheckedMultiply(count, width, "BitPacked values");
@@ -99,22 +70,350 @@ internal sealed class BitPackedDecoder : ArrayDecoder
             // Uninitialized: the gather writes every wanted value, and clears the span itself at
             // bit width 0. Patches only overwrite.
             output = CompressedValues.AllocateUninitialized(context, total, width, Id, out destination);
-            Gather(packed.Span, bitWidth, offset, width, wanted, destination);
+            Gather(packing.Packed.Span, packing.BitWidth, packing.Offset, width, wanted, destination);
         }
 
-        if (metadata.HasPatches)
+        if (packing.Metadata.HasPatches)
         {
             // Applied against the whole row space and then narrowed, which is the cheap direction:
             // a patch set is small, and the alternative is a search per wanted row.
-            ApplySelectedPatches(context, in node, dtype, length, in metadata, width, wanted, destination);
+            int patchCount = ArrayDecodeContext.CheckedLength(packing.Metadata.Patches.Length, $"{Id} patch count");
+
+            // Every selective read of the node reads the whole patch set: decoded once for all of them,
+            // as a range's is, when there are enough patches for that to pay.
+            ReadOnlySpan<byte> values = Patches.Read(
+                context, in node, 0, dtype, packing.Metadata.Patches, length, retained: patchCount >= Patches.RetainedFrom, Id, out Patches patches);
+            Patches.ApplySelected(in patches, values, width, wanted, destination);
         }
 
         Validity validity = Compute.CanonicalFilter.FilterValidity(
             context.Canonical,
-            context.DecodeValidity(in node, validityChildIndex, dtype.Nullability, length),
+            context.DecodeValidity(in node, packing.ValidityChild, dtype.Nullability, length),
             wanted);
 
         return context.Canonical.AddPrimitive(dtype, count, validity, ptype, output);
+    }
+
+    /// <inheritdoc/>
+    public override bool EvaluatesWithoutFullDecode => true;
+
+    /// <summary>
+    /// Answers a comparison, a range or a set on the packed values themselves: the question it asks of the column's
+    /// integers (<see cref="TryEvaluateIntegers"/>).
+    /// </summary>
+    /// <inheritdoc/>
+    public override bool TryEvaluate(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, Compute.EncodedPredicate predicate,
+        ref Compute.PredicateBits bits)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        PType ptype = CompressedValues.RequireIntegerPrimitive(dtype, Id);
+        return Compute.IntegerQuestion.TryOf(predicate, ptype, out Compute.IntegerQuestion question)
+            && TryEvaluateIntegers(context, in node, dtype, length, in question, ref bits);
+    }
+
+    /// <summary>
+    /// Answers a question on the packed patterns, a block of 1 024 rows at a time, without writing a value out: a range
+    /// is tested as the kernel unpacks (<see cref="FastLanes.InRange{T}"/>).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Packed patterns lie from 0 to <c>2^w - 1</c> for a width <c>w</c> under the element's: a range that holds none of
+    /// them or all settles every packed row. A patch holds a pattern of any width; each is judged on its own and set over
+    /// its row's bit.
+    /// </para>
+    /// <para>
+    /// A set is tested by its members while they are few, by a bit for each pattern of the width up to 16 bits, and
+    /// declined past both, where an equality a member would cost more than decoding.
+    /// </para>
+    /// </remarks>
+    /// <inheritdoc/>
+    public override bool TryEvaluateIntegers(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, in Compute.IntegerQuestion question,
+        ref Compute.PredicateBits bits)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        Packing packing = Packing.Of(in node, dtype, length);
+        bool answered = packing.PType.ByteWidth() switch
+        {
+            1 => Answer<byte>(in packing, length, in question, ref bits),
+            2 => Answer<ushort>(in packing, length, in question, ref bits),
+            4 => Answer<uint>(in packing, length, in question, ref bits),
+            _ => Answer<ulong>(in packing, length, in question, ref bits),
+        };
+
+        if (!answered)
+        {
+            return false;
+        }
+
+        if (packing.Metadata.HasPatches && question.Kind is Compute.QuestionKind.Range or Compute.QuestionKind.Members)
+        {
+            ReadOnlySpan<byte> values = Patches.Read(context, in node, 0, dtype, packing.Metadata.Patches, length, retained: false, Id, out Patches patches);
+            int width = packing.PType.ByteWidth();
+            for (int i = 0; i < patches.Count; i++)
+            {
+                bits.Set(patches.GetPosition(i), question.Holds(ReadPattern(values.Slice(i * width, width))));
+            }
+        }
+
+        bits.ApplyValidity(ValidityMask.From(
+            context, context.DecodeValidity(in node, packing.ValidityChild, dtype.Nullability, length)));
+        return true;
+    }
+
+    /// <summary>
+    /// The packed rows' answer: settled for every row when the packed patterns' range decides it, else the kernel's, over
+    /// the blocks the rows touch. False for a set the kernels do not take.
+    /// </summary>
+    private static bool Answer<T>(in Packing packing, int length, in Compute.IntegerQuestion question, ref Compute.PredicateBits bits)
+        where T : unmanaged, IBinaryInteger<T>, IUnsignedNumber<T>
+    {
+        int bitWidth = packing.BitWidth;
+        ulong packedMask = bitWidth == 64 ? ulong.MaxValue : (1UL << bitWidth) - 1;
+        ReadOnlySpan<T> packed = MemoryMarshal.Cast<byte, T>(packing.Packed.Span);
+        switch (question.Kind)
+        {
+            case Compute.QuestionKind.None:
+            case Compute.QuestionKind.All:
+                bits.Fill(question.Kind == Compute.QuestionKind.All);
+                return true;
+
+            case Compute.QuestionKind.Range:
+                // Where 0 falls in the range's frame: the packed patterns run from it, packedMask past it, wrapping.
+                ulong first = (0 - question.Low) & question.Mask;
+                bool wraps = packedMask > question.Mask - first;
+                if (first > question.Span && !wraps)
+                {
+                    bits.Fill(question.Negated);
+                    return true;
+                }
+
+                if (first <= question.Span && packedMask <= question.Span - first)
+                {
+                    bits.Fill(!question.Negated);
+                    return true;
+                }
+
+                Blocks(packed, bitWidth, packing.Offset, length, Kernel.Range, T.CreateTruncating(question.Low),
+                    T.CreateTruncating(question.Span), default, default, bits.Truth);
+                bits.Trim();
+                if (question.Negated)
+                {
+                    bits.Invert();
+                }
+
+                return true;
+        }
+
+        // The members' patterns the packed values can hold.
+        ReadOnlySpan<Int128> members = question.Members;
+        Span<T> few = stackalloc T[FewMembers];
+        int count = 0;
+        for (int m = 0; m < members.Length && count <= FewMembers; m++)
+        {
+            if (question.TryPattern(members[m], out ulong pattern) && pattern <= packedMask)
+            {
+                if (count < FewMembers)
+                {
+                    few[count] = T.CreateTruncating(pattern);
+                }
+
+                count++;
+            }
+        }
+
+        if (count == 0)
+        {
+            bits.Fill(false);
+            return true;
+        }
+
+        if (count <= FewMembers)
+        {
+            Blocks(packed, bitWidth, packing.Offset, length, Kernel.Members, default, default, few[..count], default, bits.Truth);
+            bits.Trim();
+            return true;
+        }
+
+        if (bitWidth > SetWidth)
+        {
+            return false;
+        }
+
+        int words = Math.Max(1, (1 << bitWidth) >> 6);
+        ulong[] set = ArrayPool<ulong>.Shared.Rent(words);
+        try
+        {
+            Span<ulong> held = set.AsSpan(0, words);
+            held.Clear();
+            for (int m = 0; m < members.Length; m++)
+            {
+                if (question.TryPattern(members[m], out ulong pattern) && pattern <= packedMask)
+                {
+                    held[(int)(pattern >> 6)] |= 1UL << (int)(pattern & 63);
+                }
+            }
+
+            Blocks(packed, bitWidth, packing.Offset, length, Kernel.Set, default, default, default, held, bits.Truth);
+            bits.Trim();
+            return true;
+        }
+        finally
+        {
+            ArrayPool<ulong>.Shared.Return(set);
+        }
+    }
+
+    /// <summary>The members a set tests by an equality each, a vector of rows at a time.</summary>
+    private const int FewMembers = 16;
+
+    /// <summary>The widest packing a set of more members tests by a bit for each value: 8 KiB of bits.</summary>
+    private const int SetWidth = 16;
+
+    /// <summary>What a run of blocks is asked.</summary>
+    private enum Kernel : byte
+    {
+        Range,
+        Members,
+        Set,
+    }
+
+    /// <summary>
+    /// The kernel's answer over rows <c>[offset, offset + length)</c> of the packed blocks, into
+    /// <paramref name="truth"/> from its first bit: whole blocks straight into it, a last partial block through a block
+    /// of scratch, and the blocks of a slice that starts inside one through scratch moved down to its first row.
+    /// </summary>
+    [SkipLocalsInit]
+    private static void Blocks<T>(
+        ReadOnlySpan<T> packed, int bitWidth, int offset, int length, Kernel kernel, T low, T span,
+        ReadOnlySpan<T> members, ReadOnlySpan<ulong> set, Span<ulong> truth)
+        where T : unmanaged, IBinaryInteger<T>, IUnsignedNumber<T>
+    {
+        int wordsPerBlock = FastLanes.BlockByteLength(bitWidth) / Unsafe.SizeOf<T>();
+        int firstBlock = offset / FastLanes.BlockSize;
+        int within = offset - (firstBlock * FastLanes.BlockSize);
+        if (within == 0)
+        {
+            int whole = length / FastLanes.BlockSize;
+            if (whole > 0)
+            {
+                Run(packed.Slice(firstBlock * wordsPerBlock, whole * wordsPerBlock), bitWidth, kernel, low, span, members, set,
+                    truth[..(whole * FastLanes.BlockWords)], whole);
+            }
+
+            int rest = length - (whole * FastLanes.BlockSize);
+            if (rest > 0)
+            {
+                Span<ulong> last = stackalloc ulong[FastLanes.BlockWords];
+                Run(packed.Slice((firstBlock + whole) * wordsPerBlock, wordsPerBlock), bitWidth, kernel, low, span, members, set, last, 1);
+                last[..Compute.PredicateBits.WordsOf(rest)].CopyTo(truth[(whole * FastLanes.BlockWords)..]);
+            }
+
+            return;
+        }
+
+        int blocks = ((within + length - 1) / FastLanes.BlockSize) + 1;
+        ulong[] rented = ArrayPool<ulong>.Shared.Rent(blocks * FastLanes.BlockWords);
+        try
+        {
+            Span<ulong> answers = rented.AsSpan(0, blocks * FastLanes.BlockWords);
+            Run(packed.Slice(firstBlock * wordsPerBlock, blocks * wordsPerBlock), bitWidth, kernel, low, span, members, set, answers, blocks);
+            BitmapKernels.CopyRange(MemoryMarshal.AsBytes(answers), within, MemoryMarshal.AsBytes(truth), 0, length);
+        }
+        finally
+        {
+            ArrayPool<ulong>.Shared.Return(rented);
+        }
+    }
+
+    private static void Run<T>(
+        ReadOnlySpan<T> packed, int bitWidth, Kernel kernel, T low, T span, ReadOnlySpan<T> members, ReadOnlySpan<ulong> set,
+        Span<ulong> words, int blocks)
+        where T : unmanaged, IBinaryInteger<T>, IUnsignedNumber<T>
+    {
+        switch (kernel)
+        {
+            case Kernel.Range:
+                FastLanes.InRange(packed, bitWidth, low, span, words, blocks);
+                break;
+            case Kernel.Members:
+                FastLanes.AnyOf(packed, bitWidth, members, words, blocks);
+                break;
+            default:
+                FastLanes.InSet(packed, bitWidth, set, words, blocks);
+                break;
+        }
+    }
+
+    /// <summary>A little-endian pattern of one to eight bytes.</summary>
+    private static ulong ReadPattern(ReadOnlySpan<byte> bytes) => bytes.Length switch
+    {
+        1 => bytes[0],
+        2 => BinaryPrimitives.ReadUInt16LittleEndian(bytes),
+        4 => BinaryPrimitives.ReadUInt32LittleEndian(bytes),
+        _ => BinaryPrimitives.ReadUInt64LittleEndian(bytes),
+    };
+
+    /// <summary>A node's packing, checked against its rows and its type before a byte of it is read.</summary>
+    private readonly struct Packing
+    {
+        private Packing(BitPackedMetadata metadata, PType ptype, VortexBuffer packed, int validityChild)
+        {
+            Metadata = metadata;
+            PType = ptype;
+            Packed = packed;
+            ValidityChild = validityChild;
+        }
+
+        internal BitPackedMetadata Metadata { get; }
+
+        internal PType PType { get; }
+
+        internal VortexBuffer Packed { get; }
+
+        /// <summary>Where the validity child sits, when there is one: after the patches' children.</summary>
+        internal int ValidityChild { get; }
+
+        internal int BitWidth => (int)Metadata.BitWidth;
+
+        /// <summary>The row of the first block that is the node's first; <see cref="BitPackedMetadata.Read"/> keeps it under 1 024.</summary>
+        internal int Offset => (int)Metadata.Offset;
+
+        /// <exception cref="VortexFormatException">The width exceeds the type's, or the buffer is not whole blocks for the rows.</exception>
+        internal static Packing Of(in ArrayNode node, DType dtype, int length)
+        {
+            ArrayDecodeContext.RequireBufferCount(node.BufferCount, 1, Id);
+            BitPackedMetadata metadata = BitPackedMetadata.Read(node.Metadata);
+            PType ptype = CompressedValues.RequireIntegerPrimitive(dtype, Id);
+            int elementBits = ptype.ByteWidth() * 8;
+
+            // The metadata is checked before the packed buffer is touched.
+            if (metadata.BitWidth > (uint)elementBits)
+            {
+                CompressedThrow.Format(
+                    $"{Id} bit width {metadata.BitWidth} exceeds the {elementBits} bits of " +
+                    $"{ptype.Name()}.");
+            }
+
+            int bitWidth = (int)metadata.BitWidth;
+            int offset = (int)metadata.Offset;
+            VortexBuffer packed = node.GetBuffer(0);
+            long blocks = ((long)length + offset + FastLanes.BlockSize - 1) / FastLanes.BlockSize;
+            long expected = blocks * FastLanes.BlockByteLength(bitWidth);
+            if (packed.Length != expected)
+            {
+                CompressedThrow.Format(
+                    $"{Id} needs exactly {expected} packed bytes for {length} rows at offset " +
+                    $"{offset} and bit width {bitWidth}; the buffer holds {packed.Length}.");
+            }
+
+            int validityChild = metadata.HasPatches
+                ? (metadata.Patches.HasChunkOffsets ? 3 : 2)
+                : 0;
+            ArrayDecodeContext.RequireChildCount(node.ChildCount, validityChild, validityChild + 1, Id);
+            return new Packing(metadata, ptype, packed, validityChild);
+        }
     }
 
     /// <inheritdoc/>
@@ -161,39 +460,9 @@ internal sealed class BitPackedDecoder : ArrayDecoder
         ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, int start, int count,
         ulong reference = 0)
     {
-        ArrayDecodeContext.RequireBufferCount(node.BufferCount, 1, Id);
-
-        BitPackedMetadata metadata = BitPackedMetadata.Read(node.Metadata);
-        PType ptype = CompressedValues.RequireIntegerPrimitive(dtype, Id);
-        int elementBits = ptype.ByteWidth() * 8;
-
-        // The metadata is checked before the packed buffer is touched.
-        if (metadata.BitWidth > (uint)elementBits)
-        {
-            CompressedThrow.Format(
-                $"{Id} bit width {metadata.BitWidth} exceeds the {elementBits} bits of " +
-                $"{ptype.Name()}.");
-        }
-
-        int bitWidth = (int)metadata.BitWidth;
-        int offset = (int)metadata.Offset;   // BitPackedMetadata.Read already rejects >= 1024
-
-        VortexBuffer packed = node.GetBuffer(0);
-        long blocks = ((long)length + offset + FastLanes.BlockSize - 1) / FastLanes.BlockSize;
-        long expected = blocks * FastLanes.BlockByteLength(bitWidth);
-        if (packed.Length != expected)
-        {
-            CompressedThrow.Format(
-                $"{Id} needs exactly {expected} packed bytes for {length} rows at offset " +
-                $"{offset} and bit width {bitWidth}; the buffer holds {packed.Length}.");
-        }
-
-        int validityChildIndex = metadata.HasPatches
-            ? (metadata.Patches.HasChunkOffsets ? 3 : 2)
-            : 0;
-        ArrayDecodeContext.RequireChildCount(
-            node.ChildCount, validityChildIndex, validityChildIndex + 1, Id);
-
+        Packing packing = Packing.Of(in node, dtype, length);
+        PType ptype = packing.PType;
+        int validityChildIndex = packing.ValidityChild;
         int width = ptype.ByteWidth();
         int total = ArrayDecodeContext.CheckedMultiply(count, width, "BitPacked values");
 
@@ -204,14 +473,14 @@ internal sealed class BitPackedDecoder : ArrayDecoder
             // Uninitialized: Unpack writes all `total` bytes, including at bit width 0 where it
             // clears the span itself rather than inheriting a cleared one. Patches only overwrite.
             output = CompressedValues.AllocateUninitialized(context, total, width, Id, out destination);
-            Unpack(packed.Span, bitWidth, offset + start, count, width, destination, reference);
+            Unpack(packing.Packed.Span, packing.BitWidth, packing.Offset + start, count, width, destination, reference);
         }
 
         // Patches are decoded and applied before the validity child only because the validity child
         // sits after them; the order of the two operations is otherwise independent.
-        if (metadata.HasPatches)
+        if (packing.Metadata.HasPatches)
         {
-            ApplyPatches(context, in node, dtype, length, in metadata, width, destination, start, count, reference);
+            ApplyPatches(context, in node, dtype, length, packing.Metadata, width, destination, start, count, reference);
         }
 
         bool whole = start == 0 && count == length;
@@ -421,157 +690,21 @@ internal sealed class BitPackedDecoder : ArrayDecoder
             AddInPlace(copied, reference);
         }
     }
-
-    /// <summary>
-    /// Applies the patches that land on a wanted row, at the position that row now occupies.
-    /// </summary>
-    /// <remarks>
-    /// The validation is the full decode's, unchanged - a malformed patch set must be refused
-    /// whether or not a take happens to skip the row it corrupts.
-    /// </remarks>
-    private static void ApplySelectedPatches(
-        ArrayDecodeContext context,
-        in ArrayNode node,
-        DType dtype,
-        int length,
-        in BitPackedMetadata metadata,
-        int width,
-        ReadOnlySpan<int> wanted,
-        Span<byte> destination)
-    {
-        PatchesMetadata patchesMetadata = metadata.Patches;
-        int patchCount = ArrayDecodeContext.CheckedLength(
-            patchesMetadata.Length, $"{Id} patch count");
-
-        // Every selective read of the node reads the whole patch set: decoded once for all of them,
-        // as a range's is, when there are enough patches for that to pay.
-        bool whole = patchCount >= Patches.RetainedFrom;
-        DType indicesType = context.Types.Primitive(
-            patchesMetadata.IndicesPType, Nullability.NonNullable);
-        int indicesIndex = whole
-            ? context.DecodeWholeChild(in node, 0, indicesType, patchCount)
-            : context.DecodeChild(in node, 0, indicesType, patchCount);
-        int valuesIndex = whole
-            ? context.DecodeWholeChild(in node, 1, dtype, patchCount)
-            : context.DecodeChild(in node, 1, dtype, patchCount);
-
-        if (patchesMetadata.HasChunkOffsets)
-        {
-            int chunkOffsetsLength = ArrayDecodeContext.CheckedLength(
-                patchesMetadata.ChunkOffsetsLength, $"{Id} patch chunk_offsets_len");
-            DType chunkOffsetsType = context.Types.Primitive(
-                patchesMetadata.ChunkOffsetsPType, Nullability.NonNullable);
-            int chunkOffsets = whole
-                ? context.DecodeWholeChild(in node, 2, chunkOffsetsType, chunkOffsetsLength)
-                : context.DecodeChild(in node, 2, chunkOffsetsType, chunkOffsetsLength);
-            CompressedValues.RequireIndexChild(
-                context, chunkOffsets, patchesMetadata.ChunkOffsetsPType, chunkOffsetsLength, Id,
-                "patch_chunk_offsets");
-        }
-
-        bool walked = context.IsNodeChecked(in node);
-        Patches patches = Patches.Create(
-            context, in patchesMetadata, length, indicesIndex, valuesIndex, Id, walked);
-        if (!walked)
-        {
-            context.MarkNodeChecked(in node);
-        }
-
-        // A span is read below, so a constant child is expanded into one rather than refused.
-        CanonicalNode values = context.Canonical.GetNode(
-            CanonicalSupport.ExpandIfConstant(context, valuesIndex));
-        if (values.Kind != CanonicalKind.Primitive)
-        {
-            CompressedThrow.ChildKind(Id, "patch_values", values.Kind, "a Primitive");
-        }
-
-        if (values.PType != dtype.PType)
-        {
-            CompressedThrow.Format(
-                $"{Id}'s patch values decoded as {values.PType.Name()}; " +
-                $"{dtype.PType.Name()} was required.");
-        }
-
-        if (!values.Validity.IsAllValid)
-        {
-            CompressedThrow.Format($"{Id} patch values must not contain nulls.");
-        }
-
-        Patches.ApplySelected(in patches, values.Values.Span, width, wanted, destination);
-    }
-
     private static void ApplyPatches(
         ArrayDecodeContext context,
         in ArrayNode node,
         DType dtype,
         int length,
-        in BitPackedMetadata metadata,
+        BitPackedMetadata metadata,
         int width,
         Span<byte> destination,
         int start,
         int count,
         ulong reference)
     {
-        PatchesMetadata patchesMetadata = metadata.Patches;
-        int patchCount = ArrayDecodeContext.CheckedLength(
-            patchesMetadata.Length, $"{Id} patch count");
-
         // A range reads the whole patch set, decoded once for every range of the node.
         bool whole = start == 0 && count == length;
-        DType indicesType = context.Types.Primitive(
-            patchesMetadata.IndicesPType, Nullability.NonNullable);
-        int indicesIndex = whole
-            ? context.DecodeChild(in node, 0, indicesType, patchCount)
-            : context.DecodeWholeChild(in node, 0, indicesType, patchCount);
-        int valuesIndex = whole
-            ? context.DecodeChild(in node, 1, dtype, patchCount)
-            : context.DecodeWholeChild(in node, 1, dtype, patchCount);
-
-        if (patchesMetadata.HasChunkOffsets)
-        {
-            // Read, validated and then deliberately unused: the range's first patch is found by a
-            // binary search over the indices, which the per-chunk offsets would only shorten.
-            int chunkOffsetsLength = ArrayDecodeContext.CheckedLength(
-                patchesMetadata.ChunkOffsetsLength, $"{Id} patch chunk_offsets_len");
-            DType chunkOffsetsType = context.Types.Primitive(
-                patchesMetadata.ChunkOffsetsPType, Nullability.NonNullable);
-            int chunkOffsets = whole
-                ? context.DecodeChild(in node, 2, chunkOffsetsType, chunkOffsetsLength)
-                : context.DecodeWholeChild(in node, 2, chunkOffsetsType, chunkOffsetsLength);
-            CompressedValues.RequireIndexChild(
-                context, chunkOffsets, patchesMetadata.ChunkOffsetsPType, chunkOffsetsLength, Id,
-                "patch_chunk_offsets");
-        }
-
-        bool walked = context.IsNodeChecked(in node);
-        Patches patches = Patches.Create(
-            context, in patchesMetadata, length, indicesIndex, valuesIndex, Id, walked);
-        if (!walked)
-        {
-            context.MarkNodeChecked(in node);
-        }
-
-        // A span is read below, so a constant child is expanded into one rather than refused.
-        CanonicalNode values = context.Canonical.GetNode(
-            CanonicalSupport.ExpandIfConstant(context, valuesIndex));
-        if (values.Kind != CanonicalKind.Primitive)
-        {
-            CompressedThrow.ChildKind(Id, "patch_values", values.Kind, "a Primitive");
-        }
-
-        if (values.PType != dtype.PType)
-        {
-            CompressedThrow.Format(
-                $"{Id}'s patch values decoded as {values.PType.Name()}; " +
-                $"{dtype.PType.Name()} was required.");
-        }
-
-        if (!values.Validity.IsAllValid)
-        {
-            CompressedThrow.Format($"{Id} patch values must not contain nulls.");
-        }
-
-        ReadOnlySpan<byte> source = values.Values.Span;
+        ReadOnlySpan<byte> source = Patches.Read(context, in node, 0, dtype, metadata.Patches, length, retained: !whole, Id, out Patches patches);
         byte[]? added = null;
         if (reference != 0)
         {

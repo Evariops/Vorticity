@@ -105,14 +105,6 @@ internal ref struct PcoBitReader
     internal static ulong Low(ulong value, int width) =>
         Bmi2.X64.IsSupported ? Bmi2.X64.ZeroHighBits(value, (ulong)width) : value & Mask(width);
 
-    /// <summary>
-    /// The low <paramref name="width"/> bits of <paramref name="value"/>, 0 to 63 of them: <see cref="Low"/>
-    /// without the test for 64, which a width that cannot reach it does not need.
-    /// </summary>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    internal static ulong LowUnder64(ulong value, int width) =>
-        Bmi2.X64.IsSupported ? Bmi2.X64.ZeroHighBits(value, (ulong)width) : value & ((1UL << width) - 1);
-
     private static ulong LittleEndian(ulong word) =>
         BitConverter.IsLittleEndian ? word : BinaryPrimitives.ReverseEndianness(word);
 

@@ -3,15 +3,15 @@
 // One batch of 2,048 list rows of W 64-bit elements each, their views either disjoint, as a writer
 // lays lists, or sliding over one element at a time, which list views may legally do: the rows then
 // name W times more elements than the window they share holds. The value sought appears once in a
-// thousand elements. `Original` searches each row's elements for a match (`ListContainsBefore.cs`);
-// `Library` is the library's test, which answers overlapping rows from a count of the matches.
+// thousand elements. `Library` is the library's test, which answers overlapping rows from a count of
+// the matches; the search of each row's elements it replaced took 41.1 µs at W = 4,096 sliding,
+// where the test takes 5.96 (3059c5b2, the measure against a checkout of the original).
 using System;
 using System.Runtime.InteropServices;
 
 using BenchmarkDotNet.Attributes;
 
 using Vorticity.Arrays;
-using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Buffers;
 using Vorticity.Compute;
 using Vorticity.Expressions;
@@ -74,14 +74,6 @@ public class ListContainsBenchmarks
     /// <summary>Gives the arena's blocks back.</summary>
     [GlobalCleanup]
     public void Cleanup() => _arena.Reset();
-
-    /// <summary>Each row's elements searched.</summary>
-    [Benchmark(Baseline = true)]
-    public int Original()
-    {
-        ListContainsBefore.Views(_arena, _arena.GetNode(_node), ValidityMask.NonNullable, _sought, _states);
-        return Trilean.CountTrue(_states);
-    }
 
     /// <summary>The library's test.</summary>
     [Benchmark]

@@ -1,6 +1,5 @@
 using System;
 using System.Buffers;
-using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
@@ -81,9 +80,6 @@ internal sealed class SealedSegmentReader : ISegmentReader
 
     /// <summary>What the object's trailer says: its descriptor and its epochs.</summary>
     internal SealedLayout Layout => _layout;
-
-    /// <summary>The source of the sealed bytes.</summary>
-    internal ISegmentReader Inner => _inner;
 
     /// <summary>
     /// Opens the sealed object <paramref name="inner"/> reads: one read of its trailer and its last

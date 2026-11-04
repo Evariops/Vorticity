@@ -3,10 +3,11 @@
 // One node of 262,144 rows of one to five codes each, over a dictionary of T tokens of one to
 // sixteen bytes. It is read in batches of 8,192 rows, each a take of one row in N of its window, as
 // a scan with a selection reads a flat node larger than its batch: the batch reset, the blob
-// loaded again, a node-check scope open around the decode. `Original` is the decoder as it was
-// (`OnPairDecoderBefore`), which checks the whole dictionary and builds a table of every token at
-// every batch; `Library` is the decoder of the library, which copies a few rows' tokens straight
-// from the offsets and checks the dictionary once for the node.
+// loaded again, a node-check scope open around the decode. `Library` is the decoder of the library,
+// which copies a few rows' tokens straight from the offsets and checks the dictionary once for the
+// node; the decoder it replaced checked the whole dictionary and built a table of every token at
+// every batch, 50 times what it costs now at 65,536 tokens and a row in 256 (1e029d42, the measure
+// against a checkout of the original).
 using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
@@ -158,10 +159,6 @@ public class OnPairTakeBenchmarks
     /// <summary>Gives the context back.</summary>
     [GlobalCleanup]
     public void Cleanup() => _context.Dispose();
-
-    /// <summary>The whole dictionary checked and tabled at every batch.</summary>
-    [Benchmark(Baseline = true)]
-    public long Original() => ReadNode(OnPairDecoderBefore.Instance);
 
     /// <summary>The decoder of the library.</summary>
     [Benchmark]

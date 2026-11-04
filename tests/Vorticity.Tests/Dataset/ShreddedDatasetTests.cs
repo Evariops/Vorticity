@@ -1,4 +1,4 @@
-// Shredding in a dataset's jobs: the objects a dataset of periods writes above level 0 shred their
+// Shredding in a dataset's jobs: the objects a clustered dataset writes above level 0 shred their
 // variant columns as their own rows pay for, while appends shred nothing; and every question over a key
 // answers as over the same rows in a dataset of levels, whose objects shred nothing.
 using System;
@@ -29,57 +29,48 @@ public sealed partial class ShreddedDatasetTests
     [Fact]
     public async Task JobsShredWhatAppendsLeaveWhole()
     {
-        await using MemoryObjectStore periodsStore = new MemoryObjectStore();
+        await using MemoryObjectStore clusteredStore = new MemoryObjectStore();
         await using MemoryObjectStore levelsStore = new MemoryObjectStore();
-        await using VortexDataset periods = await VortexDataset.CreateAsync(periodsStore, Event.Schema, new DatasetOptions
+        await using VortexDataset clustered = await VortexDataset.CreateAsync(clusteredStore, Event.Schema, new DatasetOptions
         {
-            ClusteringKey = [nameof(Event.At)],
-            Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Hour, SliceTargetRows = 500 },
+            Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(Event.At)).Truncate(CalendarUnit.Hour), SortKey = [LayoutValue.Column(nameof(Event.At))], Organization = LayoutOrganization.Leveled }, ContentsObjectBytes = 0,
         }, Ct);
         await using VortexDataset levels = await VortexDataset.CreateAsync(levelsStore, Event.Schema, new DatasetOptions
         {
-            ClusteringKey = [nameof(Event.At)],
+            Layout = new DatasetLayout { SortKey = [LayoutValue.Column(nameof(Event.At))] },
         }, Ct);
 
-        await AppendAsync(periods, levels);
+        await AppendAsync(clustered, levels);
 
         // An append writes the rows as they come: no path map.
-        Assert.All(await MapsAsync(periods), map => Assert.Equal((0, false), (map.Level, map.Keys is not null)));
+        Assert.All(await MapsAsync(clustered), map => Assert.Equal((0, false), (map.Level, map.Keys is not null)));
 
-        CompactionOptions compaction = new CompactionOptions { LevelZeroCeiling = 2 };
-        foreach (VortexDataset dataset in new[] { periods, levels })
-        {
-            while (await dataset.CompactAsync(compaction, Ct) is not null)
-            {
-            }
-        }
+        await CompactAsync(clustered, levels);
 
-        // Every object a job wrote in sorted slices shreds what its own rows pay for. A sealed hour,
-        // 2 880 rows, shreds the four keys its rows hold throughout. The fresh object of the last 640
-        // rows leaves the flag in the residual: a boolean saves 0.13 bytes a row as a typed column,
-        // 83 bytes there, short of the 202 its path costs in a chunk.
-        List<(int Level, string[]? Keys)> shredded = await MapsAsync(periods);
-        Assert.Equal(2, shredded.Count(map => map.Level == PeriodLevels.Periods));
-        Assert.All(shredded.Where(map => map.Level == PeriodLevels.Periods), map => Assert.Equal(Dense, map.Keys));
-        Assert.All(shredded.Where(map => PeriodLevels.IsFresh(map.Level)), map => Assert.Equal(["route", "score", "status"], map.Keys!));
+        // Every object a job wrote shreds the paths its rows hold 2,048 times or more (spec E, 2). A whole hour, 2 880 rows,
+        // shreds the four keys its rows hold throughout; the last hour's 640 rows hold none so often, and leave every key in
+        // the residual.
+        List<(int Level, string[]? Keys)> shredded = [.. (await MapsAsync(clustered)).Where(map => map.Level > 0)];
+        Assert.Equal(2, shredded.Count(map => map.Keys is { } keys && keys.SequenceEqual(Dense)));
+        Assert.Empty(Assert.Single(shredded, map => !(map.Keys ?? []).SequenceEqual(Dense)).Keys ?? []);
         Assert.All(await MapsAsync(levels), map => Assert.Null(map.Keys));
 
         // Each question over a key answers alike, whatever the order the objects give the rows in.
         Assert.Equal(
             Sorted(await levels.Scan<Event>().Select(r => r.Attributes["status"].AsInt64()).ToListAsync(Ct)),
-            Sorted(await periods.Scan<Event>().Select(r => r.Attributes["status"].AsInt64()).ToListAsync(Ct)));
+            Sorted(await clustered.Scan<Event>().Select(r => r.Attributes["status"].AsInt64()).ToListAsync(Ct)));
         Assert.Equal(
             Sorted(await levels.Scan<Event>().Select(r => r.Attributes["status"].AsString()).ToListAsync(Ct)),
-            Sorted(await periods.Scan<Event>().Select(r => r.Attributes["status"].AsString()).ToListAsync(Ct)));
+            Sorted(await clustered.Scan<Event>().Select(r => r.Attributes["status"].AsString()).ToListAsync(Ct)));
         Assert.Equal(
             Sorted(await levels.Scan<Event>().Select(r => r.Attributes["score"].ToDouble()).ToListAsync(Ct)),
-            Sorted(await periods.Scan<Event>().Select(r => r.Attributes["score"].ToDouble()).ToListAsync(Ct)));
+            Sorted(await clustered.Scan<Event>().Select(r => r.Attributes["score"].ToDouble()).ToListAsync(Ct)));
         Assert.Equal(
             await levels.Scan<Event>().Where(r => r.Attributes.Has("rare")).CountAsync(Ct),
-            await periods.Scan<Event>().Where(r => r.Attributes.Has("rare")).CountAsync(Ct));
+            await clustered.Scan<Event>().Where(r => r.Attributes.Has("rare")).CountAsync(Ct));
         Assert.Equal(
             await RoutesAsync(levels),
-            await RoutesAsync(periods));
+            await RoutesAsync(clustered));
     }
 
     /// <summary>
@@ -91,44 +82,39 @@ public sealed partial class ShreddedDatasetTests
     [Fact]
     public async Task AQuestionOnAKeyAnObjectLacksRefutesItBeforeItsData()
     {
-        await using MemoryObjectStore periodsStore = new MemoryObjectStore();
+        await using MemoryObjectStore clusteredStore = new MemoryObjectStore();
         await using MemoryObjectStore levelsStore = new MemoryObjectStore();
-        await using VortexDataset periods = await VortexDataset.CreateAsync(periodsStore, Event.Schema, new DatasetOptions
+        await using VortexDataset clustered = await VortexDataset.CreateAsync(clusteredStore, Event.Schema, new DatasetOptions
         {
-            ClusteringKey = [nameof(Event.At)],
-            Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Hour, SliceTargetRows = 500 },
+            Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(Event.At)).Truncate(CalendarUnit.Hour), SortKey = [LayoutValue.Column(nameof(Event.At))], Organization = LayoutOrganization.Leveled }, ContentsObjectBytes = 0,
         }, Ct);
         await using VortexDataset levels = await VortexDataset.CreateAsync(levelsStore, Event.Schema, new DatasetOptions
         {
-            ClusteringKey = [nameof(Event.At)],
+            Layout = new DatasetLayout { SortKey = [LayoutValue.Column(nameof(Event.At))] },
+            PathDirectoryOnAppend = false,
         }, Ct);
-        await AppendAsync(periods, levels);
-        foreach (VortexDataset dataset in new[] { periods, levels })
-        {
-            while (await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 2 }, Ct) is not null)
-            {
-            }
-        }
+        await AppendAsync(clustered, levels);
+        await CompactAsync(clustered, levels);
 
-        Assert.Equal(await levels.Scan<Event>().Where(r => r.Attributes.Has("deploy")).CountAsync(Ct), await periods.Scan<Event>().Where(r => r.Attributes.Has("deploy")).CountAsync(Ct));
-        Assert.Equal(100, await periods.Scan<Event>().Where(r => r.Attributes.Has("deploy")).CountAsync(Ct));
-        Assert.Equal(0, await periods.Scan<Event>().Where(r => r.Attributes["status"].AsInt64() > 10_000).CountAsync(Ct));
+        Assert.Equal(await levels.Scan<Event>().Where(r => r.Attributes.Has("deploy")).CountAsync(Ct), await clustered.Scan<Event>().Where(r => r.Attributes.Has("deploy")).CountAsync(Ct));
+        Assert.Equal(100, await clustered.Scan<Event>().Where(r => r.Attributes.Has("deploy")).CountAsync(Ct));
+        Assert.Equal(0, await clustered.Scan<Event>().Where(r => r.Attributes["status"].AsInt64() > 10_000).CountAsync(Ct));
         Assert.Equal(
             await levels.Scan<Event>().Where(r => r.Attributes["status"].AsString() == "502").CountAsync(Ct),
-            await periods.Scan<Event>().Where(r => r.Attributes["status"].AsString() == "502").CountAsync(Ct));
+            await clustered.Scan<Event>().Where(r => r.Attributes["status"].AsString() == "502").CountAsync(Ct));
         Assert.Equal(
             await levels.Scan<Event>().Where(r => r.Attributes["deploy"].AsString() == "v1").CountAsync(Ct),
-            await periods.Scan<Event>().Where(r => r.Attributes["deploy"].AsString() == "v1").CountAsync(Ct));
+            await clustered.Scan<Event>().Where(r => r.Attributes["deploy"].AsString() == "v1").CountAsync(Ct));
 
         // Two of the three objects lack the key: each read its directory, one region, and none of its blocks.
-        ScanPlan plan = await periods.Scan<Event>().Where(r => r.Attributes.Has("deploy")).ExplainAsync(Ct);
+        ScanPlan plan = await clustered.Scan<Event>().Where(r => r.Attributes.Has("deploy")).ExplainAsync(analyze: true, Ct);
         PruningStep step = Assert.Single(plan.Pruning, s => s.Structure == "path directory");
         Assert.Equal(3, step.SegmentsRead);
         Assert.InRange(step.BlocksPruned, 1, plan.Blocks - 1);
         Assert.Equal(plan.Blocks - step.BlocksPruned, plan.LiveBlocks);
 
         // A bound no object reaches refutes them all: what is read is their directories alone.
-        ScanPlan none = await periods.Scan<Event>().Where(r => r.Attributes["status"].AsInt64() > 10_000).ExplainAsync(Ct);
+        ScanPlan none = await clustered.Scan<Event>().Where(r => r.Attributes["status"].AsInt64() > 10_000).ExplainAsync(analyze: true, Ct);
         PruningStep refuted = Assert.Single(none.Pruning, s => s.Structure == "path directory");
         Assert.Equal(none.Blocks, refuted.BlocksPruned);
         Assert.Equal((refuted.SegmentsRead, refuted.BytesRead), (none.Segments, none.BytesToRead));
@@ -136,76 +122,23 @@ public sealed partial class ShreddedDatasetTests
     }
 
     /// <summary>
-    /// Three sources of attributes, a route and a status, a route and keys of data, a query alone,
-    /// beside a host among forty: the objects a job writes order each slice by the attributes' shape,
-    /// then by the route the object shreds, nine values, before the host, so the rows of each shape lie
-    /// together in every slice; and the rows are the ones appended.
+    /// Compacts both datasets to the end: the clustered one's jobs write an object an hour, whatever its bytes; the levels'
+    /// aim at their level's size, too small for a table of contents, so that they shred nothing.
     /// </summary>
-    [Fact]
-    public async Task AnObjectOrdersItsSlicesByShape()
+    private static async Task CompactAsync(VortexDataset clustered, VortexDataset levels)
     {
-        await using MemoryObjectStore store = new MemoryObjectStore();
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Hosted.Schema, new DatasetOptions
-        {
-            ClusteringKey = [nameof(Hosted.At)],
-            Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Hour, SliceTargetRows = 500 },
-        }, Ct);
-        Random random = new Random(23);
-        List<Hosted> appended = [];
-        for (int part = 0; part < 16; part++)
-        {
-            Hosted[] rows = [.. Enumerable.Range(part * 400, 400).Select(i => new Hosted(
-                Noon.AddSeconds(i * 1.25),
-                $"host-{random.Next(40)}",
-                (i % 3) switch
-                {
-                    0 => Variant.Object(("route", Variant.From($"/r/{i % 9}")), ("status", Variant.From(200 + (i % 4)))),
-                    1 => Variant.Object(("route", Variant.From($"/r/{i % 9}")), ($"user.{random.Next(1_000)}.score", Variant.From(i))),
-                    _ => Variant.Object(("query", Variant.From($"q{i % 5}"))),
-                }))];
-            await using ObjectDraft draft = dataset.StartObject();
-            await draft.Writer.WriteAsync<Hosted>(rows, Ct);
-            await dataset.AppendAsync(draft, Ct);
-            appended.AddRange(rows);
-        }
-
-        while (await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 2 }, Ct) is not null)
+        while (await clustered.CompactAsync(new CompactionOptions { LevelZeroCeiling = 2, TargetBytesAtLevelOne = 1L << 30 }, Ct) is not null)
         {
         }
 
-        int sealedObjects = 0;
-        await foreach (TreeEntry leaf in dataset.Levels[PeriodLevels.Periods].EnumerateAsync(dataset.Pages, Ct))
+        while (await levels.CompactAsync(new CompactionOptions { LevelZeroCeiling = 2 }, Ct) is not null)
         {
-            await using ObjectLease lease = await dataset.RentAsync(ObjectEntry.FromBytes(leaf.Value.Span), Ct);
-            int attributes = lease.File.DType.IndexOfField(nameof(Hosted.Attributes));
-            SliceTable table = (await SliceTable.ReadAsync(lease.File, Ct))!;
-            // The shape first, then the route, a shredded key of nine values, then the host; the keys left in
-            // the residual are counted, never sorted by.
-            Assert.Equal([new SynopsisPath(attributes, "route", Vorticity.Types.Variants.VariantClass.String)], table.Paths.Where(p => !p.Residual));
-            Assert.Equal([-attributes - 1, SynopsisPath.Entry(0), lease.File.DType.IndexOfField(nameof(Hosted.Host))], table.Order);
-
-            // In every slice, the rows of one shape lie together: a route, or none.
-            List<Hosted> stored = await lease.File.Scan<Hosted>().ToRecordsAsync(Ct).ToListAsync(Ct);
-            foreach (TimeSlice slice in table.Slices)
-            {
-                bool[] routes = [.. stored.GetRange((int)slice.FirstRow, (int)slice.Rows).Select(r => r.Attributes.Has("route"))];
-                Assert.Equal(1, routes.Zip(routes.Skip(1)).Count(pair => pair.First != pair.Second));
-            }
-
-            // The host's rows lie apart, on either side of the shapes, and its run statistics count them alike.
-            Assert.True(await SynopsisTableTests.CoarseTablesAreTheMergeOfTheirRunsAsync(lease.File, table) > 0);
-            sealedObjects++;
         }
-
-        Assert.Equal(2, sealedObjects);
-        Assert.Equal(
-            appended.Select(r => (r.At, r.Host)).Order(),
-            (await dataset.Scan<Hosted>().ToRecordsAsync(Ct).ToListAsync(Ct)).Select(r => (r.At, r.Host)).Order());
     }
 
     /// <summary>
-    /// The .NET half of Rust reading the objects a job shreds: each object above level 0 of a dataset of
-    /// periods written out as it is stored, beside its rows in the same order written whole, for
+    /// The .NET half of Rust reading the objects a job shreds: each object above level 0 of a clustered
+    /// dataset written out as it is stored, beside its rows in the same order written whole, for
     /// `cargo run --example verify_shredded` to compare (`bench/crosscheck.sh`). It skips rather than
     /// passes without its directory.
     /// </summary>
@@ -218,15 +151,16 @@ public sealed partial class ShreddedDatasetTests
         await using MemoryObjectStore store = new MemoryObjectStore();
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Event.Schema, new DatasetOptions
         {
-            ClusteringKey = [nameof(Event.At)],
-            Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Hour, SliceTargetRows = 500 },
+            Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(Event.At)).Truncate(CalendarUnit.Hour), SortKey = [LayoutValue.Column(nameof(Event.At))], Organization = LayoutOrganization.Leveled }, ContentsObjectBytes = 0,
         }, Ct);
         await AppendAsync(dataset);
-        while (await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 2 }, Ct) is not null)
+        while (await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 2, TargetBytesAtLevelOne = 1L << 30 }, Ct) is not null)
         {
         }
 
+        // Every object a job wrote, the hours that shred their keys and the last one, whose rows hold none often enough.
         int written = 0;
+        int shredded = 0;
         foreach ((int level, DatasetTree tree) in dataset.Levels.Occupied())
         {
             if (level == 0)
@@ -245,7 +179,7 @@ public sealed partial class ShreddedDatasetTests
                 List<Event> stored = [];
                 await using (ObjectLease lease = await dataset.RentAsync(entry, Ct))
                 {
-                    Assert.NotNull(await VariantPathMap.ReadAsync(lease.File, lease.File.DType.IndexOfField(nameof(Event.Attributes)), Dense, Ct));
+                    shredded += await VariantPathMap.ReadAsync(lease.File, lease.File.DType.IndexOfField(nameof(Event.Attributes)), Dense, Ct) is null ? 0 : 1;
                     await foreach (Event row in lease.File.Scan<Event>().ToRecordsAsync(Ct))
                     {
                         stored.Add(row);
@@ -258,7 +192,7 @@ public sealed partial class ShreddedDatasetTests
             }
         }
 
-        Assert.True(written >= 3, $"{written} shredded objects");
+        Assert.True(written >= 3 && shredded >= 2, $"{written} objects, {shredded} of them shredded");
     }
 
     /// <summary>Sixteen appends of 400 events, 1.25 seconds apart from noon, the same into each dataset.</summary>
@@ -321,7 +255,4 @@ public sealed partial class ShreddedDatasetTests
 
     [VortexRecord]
     public partial record struct RouteCount(string? Route, long Rows, long Statuses);
-
-    [VortexRecord]
-    public partial record struct Hosted(DateTimeOffset At, string Host, Variant Attributes);
 }

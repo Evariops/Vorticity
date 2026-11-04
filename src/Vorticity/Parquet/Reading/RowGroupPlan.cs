@@ -1,12 +1,10 @@
 using System;
 using System.Buffers.Binary;
-using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using Vorticity.Compute;
 using Vorticity.Expressions;
 using Vorticity.Parquet.Metadata;
 using Vorticity.Parquet.Schema;
-using Vorticity.Scanning;
 using Vorticity.Types.Numerics;
 
 namespace Vorticity.Parquet.Reading;

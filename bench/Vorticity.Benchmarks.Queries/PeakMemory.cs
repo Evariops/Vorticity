@@ -19,7 +19,7 @@ internal sealed class PeakMemory : IDisposable
     {
         using (Process self = Process.GetCurrentProcess())
         {
-            First = _peak = self.PrivateMemorySize64;
+            First = _peak = PrivateBytes(self);
         }
 
         _thread = new Thread(Sample) { IsBackground = true, Name = "peak memory" };
@@ -45,8 +45,7 @@ internal sealed class PeakMemory : IDisposable
         using Process self = Process.GetCurrentProcess();
         while (!_stop)
         {
-            self.Refresh();
-            long bytes = self.PrivateMemorySize64;
+            long bytes = PrivateBytes(self);
             if (bytes > Interlocked.Read(ref _peak))
             {
                 PeakNative = NativeSegmentOwner.NativeBytes;
@@ -57,6 +56,21 @@ internal sealed class PeakMemory : IDisposable
 
             Thread.Sleep(100);
         }
+    }
+
+    /// <summary>
+    /// The private bytes of the process: from its counters on Windows, where a refreshed <see cref="Process"/> read every
+    /// process's information at each sample, 17 MB over a consolidation of four minutes counted as the job's.
+    /// </summary>
+    private static long PrivateBytes(Process self)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return MemoryPeaks.Read().Private;
+        }
+
+        self.Refresh();
+        return self.PrivateMemorySize64;
     }
 
     public void Dispose()

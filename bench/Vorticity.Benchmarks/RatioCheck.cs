@@ -32,11 +32,7 @@ using System.Linq;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
-
-using Vorticity.Columns;
-using Vorticity.Editions;
 using Vorticity.Expressions;
-using Vorticity.File;
 using Vorticity.Scanning;
 
 namespace Vorticity.Benchmarks;
@@ -541,6 +537,10 @@ internal static class RatioCheck
     /// measurements. It is a flag rather than a default so that a raise is always a deliberate act
     /// with a commit message behind it.
     /// </param>
+    /// <param name="abSame">
+    /// With <paramref name="rebase"/>, the caller's word that `bench/ab.sh` reports `same` for these axes between the
+    /// commit that set the reference and this one: the measurement moved, the code did not, and a reference may rise.
+    /// </param>
     /// <param name="onePass">
     /// Set by <see cref="PassFlag"/>: measure once and print machine-readable lines for the parent
     /// process that spawned this one. Not a user-facing mode.
@@ -645,7 +645,7 @@ internal static class RatioCheck
                 : recalibrate > 0 && rebaseFrom is not null
                     ? await CarryAsync(axes, recalibrate, rebaseFrom).ConfigureAwait(false)
                 : recalibrate > 0
-                    ? await RecalibrateAsync(path, axes, recalibrate, rebase, abSame).ConfigureAwait(false)
+                    ? await RecalibrateAsync(axes, recalibrate, rebase, abSame).ConfigureAwait(false)
                     : await CheckAsync(path, axes).ConfigureAwait(false);
         }
         finally
@@ -882,7 +882,7 @@ internal static class RatioCheck
     /// also pass its own gate would be a ratchet setting itself.
     /// </remarks>
     private static async Task<int> RecalibrateAsync(
-        string path, Axis[] axes, int passes, bool rebase, bool abSame)
+        Axis[] axes, int passes, bool rebase, bool abSame)
     {
         Console.Out.WriteLine(
             $"RECALIBRATE: {passes} PROCESSES over {axes.Length} axis/axes. " +
@@ -1103,6 +1103,11 @@ internal static class RatioCheck
     }
 
     /// <summary>Runs one recalibration pass in a CHILD PROCESS and folds its result in.</summary>
+    /// <param name="axes">The axes the pass measures.</param>
+    /// <param name="pass">The pass's number among <paramref name="passes"/>.</param>
+    /// <param name="passes">How many passes the recalibration runs.</param>
+    /// <param name="ratios">Each axis's medians so far, to which the pass adds its own.</param>
+    /// <param name="grouped">Each axis's repeats a round, as the last pass timed it.</param>
     /// <param name="binary">The reference binary the pass loads, or null for the running one.</param>
     /// <returns>Null on success, or an exit code.</returns>
     private static async Task<int?> PassAsync(
@@ -1219,6 +1224,7 @@ internal static class RatioCheck
     /// axes that read the pair.
     /// </summary>
     /// <param name="temporary">Collects the files written, for the caller to delete.</param>
+    /// <param name="selected">Whether an axis, by its name, is asked for.</param>
     /// <remarks>
     /// The rewrite happens here rather than per round because writing is not what this measures.
     /// Both files are asserted to hold the same rows before either is timed: a rewrite that dropped
@@ -1818,12 +1824,12 @@ internal static class RatioCheck
     /// <remarks>
     /// EXPOSED FOR INSPECTION. The `rewritten` axes write this file into a temporary directory and
     /// delete it, which is right for a gate and useless for asking WHICH encoding our writer puts
-    /// where the reference puts another. `--rewrite <in> <out>` keeps the bytes so
+    /// where the reference puts another. `--rewrite &lt;in&gt; &lt;out&gt;` keeps the bytes so
     /// `vxdump --encodings` and `--throughput` can be pointed at them.
     /// </remarks>
     /// <param name="edition">
     /// The edition the writer targets. Older editions exclude later encodings, which is how
-    /// `--rewrite <in> <out> <edition>` isolates one of them: `Core20250500` has no
+    /// `--rewrite &lt;in&gt; &lt;out&gt; &lt;edition&gt;` isolates one of them: `Core20250500` has no
     /// `vortex.zstd`, so the difference between the two rewrites IS zstd.
     /// </param>
     /// <param name="rowBlock">
@@ -2091,13 +2097,6 @@ internal static class RatioCheck
     private static Task<long> FilteredScan(string path, long low, long width) =>
         Scenarios.FilteredScan(path, low, width);
 
-    /// <summary>Takes the same strided rows the Rust side is given.</summary>
-    /// <param name="path">The file.</param>
-    /// <param name="count">How many rows.</param>
-    /// <param name="stride">The gap between them.</param>
-    private static Task<long> ScatteredTake(string path, long count, long stride) =>
-        Scenarios.ScatteredTake(path, count, stride);
-
     private static async Task<long> FirstBatch(string path)
     {
         await using VortexFile file = await Vorticity.Bench.Scenarios.ScenarioSet.OpenAsync(path);
@@ -2109,18 +2108,6 @@ internal static class RatioCheck
 
         return 0;
     }
-
-    /// <summary>
-    /// Reads a file and writes it back out, which is the write axis -- the one the benchmark design
-    /// never gave a timing reference.
-    /// </summary>
-    /// <remarks>
-    /// The read is on both sides of the ratio and is therefore common-mode, but it is not small:
-    /// subtract the `full scan` axis from both before reading the quotient as a statement about
-    /// writers. The sink discards, on both sides, because a write benchmark that measures the
-    /// filesystem measures the filesystem.
-    /// </remarks>
-    private static Task<long> ReadAndWrite(string path) => Scenarios.ReadAndWrite(path);
 
     private static async Task<long> FooterOnly(string path)
     {

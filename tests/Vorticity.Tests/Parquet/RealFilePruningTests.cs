@@ -95,7 +95,7 @@ public sealed class RealFilePruningTests
                     }
 
                     // What the statistics did, so that a run shows they were put to the test.
-                    CountPlan plan = (await file.Scan().Where(filter).With(new ScanOptions { BatchRows = batchRows }).ExplainAsync(Ct)).Count;
+                    CountPlan plan = (await file.Scan().Where(filter).With(new ScanOptions { BatchRows = batchRows }).ExplainAsync(analyze: true, Ct)).Count;
                     blocksPruned += plan.Pruned;
                     blocksProven += plan.Proven;
                     report?.WriteLine($"{name}: {filter} {pruned} {whole}, {plan.Pruned} pruned, {plan.Proven} proven");

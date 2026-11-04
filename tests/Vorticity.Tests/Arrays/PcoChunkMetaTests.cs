@@ -18,7 +18,6 @@
 // order 1, and two latent variables rather than one. What it does NOT exercise is the ANS coder -
 // both tables have a single bin and an ANS size log of zero, the degenerate path - so the pieces
 // after this one still need their own evidence.
-using System;
 using Vorticity.Arrays.Decoders.Compressed.Pco;
 using Vorticity.Types;
 using Xunit;

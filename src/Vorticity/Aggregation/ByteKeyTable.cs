@@ -41,9 +41,6 @@ internal sealed class ByteKeyTable
     /// <summary>How far past its own slot a key lands before the table reseeds: linear probing at half load keeps its runs far shorter.</summary>
     private const int MaxProbes = 128;
 
-    /// <summary>The most bytes ahead of a key's: its number, then its length in 7-bit groups.</summary>
-    private const int MostAhead = sizeof(int) + 5;
-
     /// <summary>The bits of a position within a page.</summary>
     private const int PageBits = 20;
 

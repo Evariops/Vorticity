@@ -64,26 +64,42 @@ internal sealed class DictDecoder : ArrayDecoder
     /// cannot hold the literal before they are read, while this answers the rows of a chunk that
     /// was read. The two compose, and share one decode of the values child.
     /// </para>
+    /// <para>
+    /// A range, a set and a prefix match are answered as a comparison is: the distinct values judged
+    /// once, the answers spread over the rows by their codes.
+    /// </para>
     /// </remarks>
-    public override bool TryCompare(
-        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
-        Expressions.ComparisonOp op, Expressions.FilterLiteral literal, Span<byte> destination) =>
-        TryAnswer(context, in node, dtype, length, op, literal, prefix: false, destination);
+    public override bool TryEvaluate(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, Compute.EncodedPredicate predicate,
+        ref Compute.PredicateBits bits)
+    {
+        if (predicate.Kind is Compute.EncodedPredicateKind.Prefix or Compute.EncodedPredicateKind.Contains
+            && dtype.Kind is not (DTypeKind.Utf8 or DTypeKind.Binary))
+        {
+            return false;
+        }
 
-    /// <summary>
-    /// Answers a prefix match as a comparison is answered: the distinct values matched once, the
-    /// answers spread over the rows by their codes.
-    /// </summary>
-    /// <inheritdoc/>
-    public override bool TryStartsWith(
-        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
-        Expressions.FilterLiteral literal, Span<byte> destination) =>
-        literal.Kind == Expressions.FilterLiteralKind.Bytes && dtype.Kind is DTypeKind.Utf8 or DTypeKind.Binary &&
-        TryAnswer(context, in node, dtype, length, Expressions.ComparisonOp.Equal, literal, prefix: true, destination);
+        byte[] rented = System.Buffers.ArrayPool<byte>.Shared.Rent(Math.Max(length, 1));
+        try
+        {
+            Span<byte> states = rented.AsSpan(0, length);
+            if (!TryAnswer(context, in node, dtype, length, predicate, states))
+            {
+                return false;
+            }
+
+            bits.FromStates(states);
+            return true;
+        }
+        finally
+        {
+            System.Buffers.ArrayPool<byte>.Shared.Return(rented);
+        }
+    }
 
     private static bool TryAnswer(
-        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
-        Expressions.ComparisonOp op, Expressions.FilterLiteral literal, bool prefix, Span<byte> destination)
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, Compute.EncodedPredicate predicate,
+        Span<byte> destination)
     {
         ArgumentNullException.ThrowIfNull(context);
         ArrayDecodeContext.RequireBufferCount(node.BufferCount, 0, Id);
@@ -116,18 +132,13 @@ internal sealed class DictDecoder : ArrayDecoder
             CompressedThrow.ChildLength(Id, "values", values.Length, valuesLength);
         }
 
-        byte[] rented = System.Buffers.ArrayPool<byte>.Shared.Rent(Math.Max(valuesLength, 1));
+        byte[] rented = System.Buffers.ArrayPool<byte>.Shared.Rent(Math.Max(2 * valuesLength, 1));
         try
         {
             Span<byte> answers = rented.AsSpan(0, valuesLength);
-            if (prefix)
+            if (!Compute.ValueVerdicts.TryJudge(context.Canonical, valuesIndex, predicate, answers, rented.AsSpan(valuesLength, valuesLength)))
             {
-                Compute.ComparisonKernels.StringMatch(
-                    context.Canonical, valuesIndex, Expressions.StringMatchOp.StartsWith, literal, escape: 0, answers);
-            }
-            else
-            {
-                Compute.ComparisonKernels.Compare(context.Canonical, valuesIndex, op, literal, answers);
+                return false;
             }
 
             DType codesType = context.Types.Primitive(metadata.CodesPType, codesNullability);

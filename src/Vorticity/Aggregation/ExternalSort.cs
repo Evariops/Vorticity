@@ -80,9 +80,6 @@ internal sealed class ExternalSort : IAsyncDisposable
         _batchRows = batchRows;
     }
 
-    /// <summary>The runs the sort wrote to its scratch.</summary>
-    internal int Runs => _runs.Count;
-
     /// <summary>
     /// The rows of <paramref name="batch"/>, a struct of the sort's columns, gathered; the rows gathered
     /// before written as a run first when the memory holds them no more.
@@ -562,7 +559,7 @@ internal sealed class ExternalSort : IAsyncDisposable
         internal async ValueTask<bool> NextBatchAsync()
         {
             _batches ??= file.ScanSource
-                .BatchesAsync(new ScanSpec { Options = ScanOptions.Default with { BatchRows = sort._batchRows } }, new ScanCounters())
+                .Rows.BatchesAsync(new ScanSpec { Options = ScanOptions.Default with { BatchRows = sort._batchRows } }, new ScanCounters())
                 .GetAsyncEnumerator(cancellationToken);
             while (await _batches.MoveNextAsync().ConfigureAwait(false))
             {

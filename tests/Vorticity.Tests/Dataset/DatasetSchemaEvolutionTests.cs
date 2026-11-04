@@ -1,11 +1,9 @@
 using System;
 using System.Collections.Generic;
-using System.IO.Pipelines;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Dataset;
-using Vorticity.File;
 using Vorticity.IO;
 using Vorticity.Tests.Scan;
 using Vorticity.Writing;
@@ -268,9 +266,9 @@ public sealed class DatasetSchemaEvolutionTests
         await AssertRefusedAsync(dataset, "cannot become", [key, reading with { Type = VortexType.UInt64 }, site]);
         await AssertRefusedAsync(dataset, "cannot become", [key, reading, site with { Type = VortexType.Int32 }]);
         await AssertRefusedAsync(dataset, "cannot become", [key, reading with { Type = VortexType.Int64.Nullable }, site with { Type = VortexType.Binary }]);
-        await AssertRefusedAsync(dataset, "clustering key", [key with { Type = VortexType.Int64.Nullable }, reading, site]);
-        await AssertRefusedAsync(dataset, "clustering key", [reading, site]);
-        await AssertRefusedAsync(dataset, "clustering key", [key with { Name = "Id" }, reading, site], new Dictionary<string, string> { ["Id"] = "Key" });
+        await AssertRefusedAsync(dataset, "read by the dataset's layout", [key with { Type = VortexType.Int64.Nullable }, reading, site]);
+        await AssertRefusedAsync(dataset, "read by the dataset's layout", [reading, site]);
+        await AssertRefusedAsync(dataset, "read by the dataset's layout", [key with { Name = "Id" }, reading, site], new Dictionary<string, string> { ["Id"] = "Key" });
         await AssertRefusedAsync(dataset, "is a column already", [key, reading, site with { Name = "Reading" }], new Dictionary<string, string> { ["Reading"] = "Site" });
         await AssertRefusedAsync(dataset, "no column of that name", [key, reading, site with { Name = "City" }], new Dictionary<string, string> { ["City"] = "Town" });
 
@@ -626,7 +624,7 @@ public sealed class DatasetSchemaEvolutionTests
     {
         Seed = 0x5C4E_3A,
         Write = new VortexWriteOptions { RowBlockSize = 64, DataBlockTargetBytes = 2 << 10 },
-        ClusteringKey = clustered ? ["Key"] : null,
+        Layout = clustered ? new DatasetLayout { SortKey = [LayoutValue.Column("Key")] } : null,
     };
 
     private static async Task<List<TRecord>> RowsAsync<TRecord>(VortexDataset dataset, CancellationToken ct)

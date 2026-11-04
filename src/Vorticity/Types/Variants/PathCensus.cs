@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using System.Text;
+using Vorticity.Aggregating;
 
 namespace Vorticity.Types.Variants;
 
@@ -16,23 +18,40 @@ namespace Vorticity.Types.Variants;
 /// directory holds: text bounds cut to <paramref name="stringBoundBytes"/>, as a text column's zones
 /// cut theirs, none at 0.
 /// <para>
-/// Given each row's instant, rows in time order, each path also keeps the spans of time its values lie
-/// in, from which the directory says which slices of the object hold it. Two values of a path closer
-/// than a slice is wide, <paramref name="sliceTargetRows"/> rows at the rate counted so far, share a
-/// span, so a path keeps about a span per slice at most and the slices a span names are a superset of
-/// those that hold it.
+/// Given <paramref name="groupRows"/>, each path also keeps the spans of rows its values lie in, from
+/// which the directory says which groups of that many rows of the object hold it. Two values of a path
+/// that many rows apart or fewer share a span, so a path keeps about a span per group at most and the
+/// groups a span names are a superset of those that hold it.
 /// </para>
 /// </remarks>
-internal sealed class PathCensus(int stringBoundBytes = 0, long sliceTargetRows = 0)
+internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
 {
-    private byte[] _metadata = [];
-    private int _metadataLength = -1;
-    private string?[] _names = [];
+    // The name of the key being looked up, decoded: a key met before is found by it, without a string.
+    private char[] _chars = new char[64];
 
     // The run of rows of the same metadata being counted, which the counts' field ids are kept for; and the ids the counts
     // keep, every count together.
     private int _epoch;
     private long _heldIds;
+
+    // The run's metadata, its bytes and their length, -1 before a row; and the rows of the run so far, the row being counted's included.
+    private byte[] _metadata = [];
+    private int _metadataLength = -1;
+    private int _runRows;
+
+    // The names met, numbered: a count finds its keys by a name's number, where it decoded the name and looked it up as
+    // characters at every key of every row. The number of each field id of the run's metadata, stamped with the run; and the
+    // generation of the numbers, which what is found by them is valid for.
+    private readonly Aggregating.ByteKeyTable _names = new Aggregating.ByteKeyTable();
+    private int[] _nameNumbers = [];
+    private int[] _nameStamps = [];
+    private int _generation;
+
+    /// <summary>
+    /// The names the census numbers before it forgets them and numbers them again: keys used as data, an id a key, would
+    /// otherwise grow its table without end, past the keys it counts.
+    /// </summary>
+    private const int MaxNames = 4 * MaxKeys;
 
     /// <summary>
     /// The field ids the counts keep the count of, every count together: 2 MB of references. An object's count keeps the
@@ -41,11 +60,8 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long sliceTargetRows 
     /// </summary>
     private const long MaxHeldIds = 1 << 18;
 
-    // The instant of the row being counted, long.MinValue without one; the first instant, and the gap
-    // under which two values of a path share a span.
-    private long _instant = long.MinValue;
-    private long _firstInstant = long.MinValue;
-    private long _gap;
+    // The rows within which two values of a path share a span; 0 when the paths keep no spans.
+    private readonly long _gap = groupRows;
 
     /// <summary>
     /// The most keys the census counts, every depth of objects together: past them, the values of a key it has not met
@@ -54,8 +70,10 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long sliceTargetRows 
     /// </summary>
     internal const int MaxKeys = 16_384;
 
-    // The keys counted so far, every depth together.
+    // The keys counted so far, every depth together; and the counts the tree holds, those of rows counted before a Clear
+    // included.
     private int _keyCount;
+    private int _held;
 
     /// <summary>The bytes a text bound keeps; 0 for none.</summary>
     internal int StringBoundBytes { get; } = stringBoundBytes;
@@ -75,69 +93,118 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long sliceTargetRows 
     /// <summary>The bytes of the rows' values, as the residual would hold them unshredded.</summary>
     internal long ValueBytes { get; private set; }
 
+    /// <summary>The counts of keys the census's tree holds, those of the rows counted before a <see cref="Clear"/> included.</summary>
+    internal int HeldKeys => _held;
+
     /// <summary>Counts a null row.</summary>
     internal void AddNull() => Rows++;
 
+    /// <summary>The spans the paths keep given back to the process's shelf, once nothing reads them: the census's spans are none after.</summary>
+    internal void Release() => Root.Release();
+
+    /// <summary>
+    /// Forgets every row counted and keeps its tree of paths for the next rows: a key met again counts from nothing, as
+    /// one met for the first time does, its name and its keys' kept; one not met again counts nothing, which
+    /// <see cref="Merge"/> passes over. A job's first pass counts its inputs one after the other in the census of a lane,
+    /// whose tree, made new for every input, was a few hundred bytes a key.
+    /// </summary>
+    internal void Clear()
+    {
+        Rows = 0;
+        ValueBytes = 0;
+        Partial = false;
+        _keyCount = 0;
+        _metadataLength = -1;
+        _epoch++;
+        // The keys found by number forgotten too: one past the keys counted then may be counted now.
+        _generation++;
+        Root.Clear();
+    }
+
     /// <summary>
     /// Counts every row of the variant column <paramref name="field"/> of <paramref name="batch"/>'s root
-    /// struct, at <paramref name="instants"/>, one a row in time order, or at none.
+    /// struct, after the rows counted before.
     /// </summary>
     /// <exception cref="VortexFormatException">A row's value or metadata does not decode.</exception>
-    internal void Add(RecordBatch batch, int field, ReadOnlySpan<long> instants = default)
+    internal void Add(RecordBatch batch, int field) => Add(Prepare(batch, field));
+
+    /// <summary>
+    /// Counts the rows of the variant column <paramref name="field"/> of <paramref name="batch"/>'s root struct that its
+    /// selection keeps, every row when it has none, after the rows counted before.
+    /// </summary>
+    /// <exception cref="VortexFormatException">A row's value or metadata does not decode.</exception>
+    internal void AddSelected(RecordBatch batch, int field) => Add(Prepare(batch, field), batch.SelectionWords);
+
+    /// <summary>
+    /// The variant column <paramref name="field"/> of <paramref name="batch"/>'s root struct made ready to count: its metadata
+    /// and its values in canonical form, which may add nodes to the batch's arena; counting them after only reads it, and may
+    /// run on another thread while the batch is written.
+    /// </summary>
+    internal static Counting Prepare(RecordBatch batch, int field)
     {
         Arrays.CanonicalArena arena = batch.Arena;
         int column = arena.GetNode(batch.RootIndex).GetFieldIndex(field);
         Arrays.CanonicalNode variant = arena.GetNode(column);
-        int metadata = EncodedForms.Canonical(arena, variant.GetFieldIndex(0));
-        int value = EncodedForms.Canonical(arena, variant.GetFieldIndex(1));
-        Arrays.CanonicalNode metadataNode = arena.GetNode(metadata);
-        Arrays.CanonicalNode valueNode = arena.GetNode(value);
-        bool timed = sliceTargetRows > 0 && instants.Length == batch.RowCount;
-        if (timed && instants.Length > 0)
-        {
-            // A slice is as wide as its target rows take at the rate of the rows counted, this batch's among them: the
-            // first batch too, whose values would otherwise each open a span of their own.
-            _firstInstant = _firstInstant == long.MinValue ? instants[0] : _firstInstant;
-            _gap = (long)Math.Min((double)(instants[^1] - _firstInstant) / Math.Max(Rows + batch.RowCount, 1) * sliceTargetRows, long.MaxValue / 4);
-        }
+        return new Counting(
+            arena, column, EncodedForms.Canonical(arena, variant.GetFieldIndex(0)), EncodedForms.Canonical(arena, variant.GetFieldIndex(1)), batch.RowCount);
+    }
 
-        for (int row = 0; row < batch.RowCount; row++)
+    /// <summary>Counts every row of a variant column made ready (<see cref="Prepare(RecordBatch, int)"/>), after the rows counted before.</summary>
+    /// <exception cref="VortexFormatException">A row's value or metadata does not decode.</exception>
+    internal void Add(in Counting counting) => Add(in counting, default);
+
+    /// <summary>
+    /// Counts the rows of a variant column made ready (<see cref="Prepare(RecordBatch, int)"/>) that <paramref name="selection"/> keeps, a bit
+    /// a row, every row when it is empty, after the rows counted before.
+    /// </summary>
+    /// <exception cref="VortexFormatException">A row's value or metadata does not decode.</exception>
+    internal void Add(in Counting counting, ReadOnlySpan<ulong> selection)
+    {
+        Arrays.CanonicalArena arena = counting.Arena;
+
+        // The views and their data resolved once: a row's through the node's accessors were a sixth of what a row cost.
+        Arrays.ViewValues metadata = new Arrays.ViewValues(arena.GetNode(counting.Metadata));
+        Arrays.ViewValues values = new Arrays.ViewValues(arena.GetNode(counting.Value));
+        for (int row = 0; row < counting.Rows; row++)
         {
-            if (!Arrays.ArenaWords.IsValid(arena, column, row))
+            if (!selection.IsEmpty && ((selection[row >> 6] >> (row & 63)) & 1) == 0)
+            {
+                continue;
+            }
+
+            if (!Arrays.ArenaWords.IsValid(arena, counting.Column, row))
             {
                 AddNull();
                 continue;
             }
 
-            Count(
-                Compute.LiteralReader.ViewAt(metadataNode, row),
-                Arrays.ArenaWords.IsValid(arena, value, row) ? Compute.LiteralReader.ViewAt(valueNode, row) : VariantEncoding.NullValue,
-                timed ? instants[row] : long.MinValue);
+            Add(metadata.At(row), Arrays.ArenaWords.IsValid(arena, counting.Value, row) ? values.At(row) : VariantEncoding.NullValue);
         }
     }
 
     /// <summary>
-    /// Counts a row of <paramref name="value"/>, its keys named by <paramref name="metadata"/>, at
-    /// <paramref name="instant"/>, after the rows counted before; long.MinValue for none.
+    /// The variant column at <paramref name="column"/>, a node of <paramref name="arena"/> of <paramref name="rows"/> rows, made
+    /// ready to count, as <see cref="Prepare(RecordBatch, int)"/> makes a batch's top-level one: a nested column too.
     /// </summary>
-    /// <exception cref="VortexFormatException">The value or the metadata does not decode.</exception>
-    internal void Add(ReadOnlySpan<byte> metadata, ReadOnlySpan<byte> value, long instant = long.MinValue)
+    internal static Counting Prepare(Arrays.CanonicalArena arena, int column, int rows)
     {
-        // A slice as wide as its target rows take at the rate of the rows counted so far, this one among them, as a
-        // batch of rows reckons it for all its rows at once.
-        if (sliceTargetRows > 0 && instant != long.MinValue)
-        {
-            _firstInstant = _firstInstant == long.MinValue ? instant : _firstInstant;
-            _gap = (long)Math.Min((double)(instant - _firstInstant) / (Rows + 1) * sliceTargetRows, long.MaxValue / 4);
-        }
-
-        Count(metadata, value, instant);
+        column = EncodedForms.Canonical(arena, column);
+        Arrays.CanonicalNode variant = arena.GetNode(column);
+        int metadata = variant.GetFieldIndex(0);
+        int value = arena.GetNode(column).GetFieldIndex(1);
+        return new Counting(arena, column, EncodedForms.Canonical(arena, metadata), EncodedForms.Canonical(arena, value), rows);
     }
 
-    /// <summary>Counts a row of <paramref name="value"/> at <paramref name="instant"/>, under the gap reckoned for it.</summary>
-    private void Count(ReadOnlySpan<byte> metadata, ReadOnlySpan<byte> value, long instant)
+    /// <summary>A batch's variant column made ready to count (<see cref="Prepare(RecordBatch, int)"/>): the arena, the column, its metadata and its values in canonical form, its rows.</summary>
+    internal readonly record struct Counting(Arrays.CanonicalArena Arena, int Column, int Metadata, int Value, int Rows);
+
+    /// <summary>
+    /// Counts a row of <paramref name="value"/>, its keys named by <paramref name="metadata"/>, after the rows counted
+    /// before.
+    /// </summary>
+    /// <exception cref="VortexFormatException">The value or the metadata does not decode.</exception>
+    internal void Add(ReadOnlySpan<byte> metadata, ReadOnlySpan<byte> value)
     {
-        _instant = instant;
         Rows++;
         ValueBytes += value.Length;
         if (metadata.Length != _metadataLength || !metadata.SequenceEqual(_metadata.AsSpan(0, _metadataLength)))
@@ -149,23 +216,76 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long sliceTargetRows 
 
             metadata.CopyTo(_metadata);
             _metadataLength = metadata.Length;
-            Array.Clear(_names);
             _epoch++;
+            _runRows = 0;
         }
 
+        _runRows++;
         VariantDictionary dictionary = VariantDictionary.Read(metadata);
         Root.Add(this, in dictionary, value, depth: 1);
     }
 
-    /// <summary>Key <paramref name="id"/> of the current metadata, decoded once per run of rows that share it.</summary>
-    private string Name(in VariantDictionary dictionary, int id)
+    /// <summary>
+    /// Adds what <paramref name="other"/> counted, as if its rows had been counted after these: its counts and bounds path by
+    /// path, its keys this census has not met counted as theirs while <see cref="MaxKeys"/> lets it, and as their objects'
+    /// other keys past it. Under that many keys, the census is the one the rows of both, counted one after the other, make.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">Either census keeps the spans of its paths' rows, which only a count in order makes.</exception>
+    internal void Merge(PathCensus other)
     {
-        if (_names.Length < dictionary.Count)
+        if (_gap > 0 || other._gap > 0)
         {
-            _names = new string?[Math.Max(dictionary.Count, 2 * _names.Length)];
+            throw new InvalidOperationException("A census that keeps the spans of its rows counts them in order and merges with none.");
         }
 
-        return _names[id] ??= Encoding.UTF8.GetString(dictionary[id]);
+        Rows += other.Rows;
+        ValueBytes += other.ValueBytes;
+        Partial |= other.Partial;
+        Root.Merge(this, other.Root);
+    }
+
+    /// <summary>The UTF-8 name <paramref name="utf8"/> decoded into the census's scratch, valid until the next name decoded.</summary>
+    private ReadOnlySpan<char> Chars(ReadOnlySpan<byte> utf8)
+    {
+        int most = Encoding.UTF8.GetMaxCharCount(utf8.Length);
+        if (_chars.Length < most)
+        {
+            _chars = new char[Math.Max(most, 2 * _chars.Length)];
+        }
+
+        return _chars.AsSpan(0, Encoding.UTF8.GetChars(utf8, _chars));
+    }
+
+    /// <summary>
+    /// The number of the name of field id <paramref name="id"/> of <paramref name="dictionary"/>, the run's metadata: found once
+    /// a run, the name hashed as its bytes lie.
+    /// </summary>
+    private int NameOf(in VariantDictionary dictionary, int id)
+    {
+        if ((uint)id < (uint)_nameStamps.Length && _nameStamps[id] == _epoch)
+        {
+            return _nameNumbers[id];
+        }
+
+        if (_names.Count >= MaxNames)
+        {
+            // Every number forgotten, those of the run's ids with them: the counts find their keys by name again.
+            _names.Clear();
+            _generation++;
+            _epoch++;
+        }
+
+        if (_nameStamps.Length <= id)
+        {
+            int length = Math.Max(id + 1, Math.Max(dictionary.Count, 2 * _nameStamps.Length));
+            Array.Resize(ref _nameStamps, length);
+            Array.Resize(ref _nameNumbers, length);
+        }
+
+        int number = _names.GetOrAdd(dictionary[id], out _);
+        _nameStamps[id] = _epoch;
+        _nameNumbers[id] = number;
+        return number;
     }
 
     /// <summary>
@@ -189,8 +309,24 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long sliceTargetRows 
     /// <summary>The counts of the values at one path: by class, and of an object's keys.</summary>
     internal sealed class PathCount
     {
-        /// <summary>Occurrences by class: the four shreddable classes, an object, a list of each class, and anything else.</summary>
-        private readonly long[] _classes = new long[Slots];
+        /// <summary>
+        /// Occurrences by class: the four shreddable classes, an object, a list of each class, and anything else. Held in the
+        /// count, as the classes a question reads are: a value counted touches the count's own lines, where two arrays of
+        /// their own were two more a key of every row.
+        /// </summary>
+        private SlotCounts _classes;
+
+        [System.Runtime.CompilerServices.InlineArray(Slots)]
+        private struct SlotCounts
+        {
+            private long _first;
+        }
+
+        [System.Runtime.CompilerServices.InlineArray(PathClasses)]
+        private struct ClassCounts
+        {
+            private long _first;
+        }
 
         private Dictionary<string, PathCount>? _keys;
 
@@ -202,8 +338,14 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long sliceTargetRows 
         private int _byIdEpoch = -1;
         private static readonly PathCount Uncounted = new PathCount();
 
+        // The keys met, by the number of their name in the census, a key past the census's keys among them, and the
+        // census's generation of numbers they were met under: a metadata other than the row's before finds them so,
+        // the name hashed as it lies, where it was decoded and looked up as characters.
+        private Dictionary<int, PathCount>? _byName;
+        private int _byNameGeneration = -1;
+
         /// <summary>Occurrences by the class a question reads them as.</summary>
-        private readonly long[] _read = new long[PathClasses];
+        private ClassCounts _read;
 
         private long _minInteger = long.MaxValue;
         private long _maxInteger = long.MinValue;
@@ -215,16 +357,18 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long sliceTargetRows 
         private bool _false;
         private bool _true;
 
-        // The spans of time the values lie in, a first and a last instant each, the last span open.
-        private long[]? _spans;
-        private int _spanCount;
-
         // The text bounds, each cut to the census's bound, in buffers of that length; -1 before a text.
         private byte[]? _minText;
         private byte[]? _maxText;
         private int _minTextLength = -1;
         private int _maxTextLength = -1;
         private bool _maxTextCut;
+
+        // The first eight bytes of each text bound, big-endian, zero past its end, when they are kept: a text whose own lie
+        // strictly between them moves neither bound, its bytes compared no further, as most texts of a key do.
+        private ulong _minPrefix;
+        private ulong _maxPrefix;
+        private bool _prefixed;
 
         private const int ObjectSlot = 4;
         private const int ListSlot = 5;
@@ -256,27 +400,103 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long sliceTargetRows 
         /// <summary>The values a question reads as <paramref name="class"/>.</summary>
         internal long Read(PathClass @class) => _read[(int)@class];
 
-        /// <summary>The spans of time the values lie in, a first and a last instant each, in time order; empty without instants.</summary>
-        internal ReadOnlySpan<long> Spans => _spans.AsSpan(0, 2 * _spanCount);
+        /// <summary>
+        /// The spans of rows the values of <paramref name="class"/> lie in, a first and a last row each, in order; empty when the
+        /// census keeps none. Each class keeps its own, so that a directory names the groups that hold a path in one class:
+        /// a path's spans whatever the class named, for a key of numbers sent as text by a few sources, the groups of every
+        /// source as holding text.
+        /// </summary>
+        internal ReadOnlySpan<long> SpansOf(PathClass @class) =>
+            @class == _spanClass ? _spans.View() : _classSpans is { } others ? others[(int)@class].View() : default;
 
-        /// <summary>Notes a value at <paramref name="instant"/>, in the open span when it is within <paramref name="gap"/> of its end.</summary>
-        private void Occur(long instant, long gap)
+        // The spans of the first class a value at this path was of, held here as most paths hold one class; those of the
+        // others, made when a second class comes.
+        private SpanList _spans;
+        private PathClass _spanClass = NoClass;
+        private SpanList[]? _classSpans;
+        private const PathClass NoClass = (PathClass)byte.MaxValue;
+
+        /// <summary>Notes a value of <paramref name="class"/> at <paramref name="row"/>, in its class's spans.</summary>
+        private void Occur(PathClass @class, long row, long gap)
         {
-            int last = (2 * _spanCount) - 1;
-            if (_spanCount > 0 && instant - _spans![last] <= gap)
+            if (@class == _spanClass)
             {
-                _spans[last] = Math.Max(_spans[last], instant);
-                return;
+                _spans.Occur(row, gap);
+            }
+            else if (_spanClass == NoClass)
+            {
+                _spanClass = @class;
+                _spans.Occur(row, gap);
+            }
+            else
+            {
+                (_classSpans ??= new SpanList[PathClasses])[(int)@class].Occur(row, gap);
+            }
+        }
+
+        /// <summary>The spans of rows values lie in, the open one's end kept beside them: a value within the gap of it touches the end alone.</summary>
+        private struct SpanList
+        {
+            private long[]? _spans;
+            private int _count;
+            private long _openEnd;
+
+            /// <summary>The spans, a first and a last row each.</summary>
+            internal ReadOnlySpan<long> View()
+            {
+                if (_count > 0)
+                {
+                    _spans![(2 * _count) - 1] = _openEnd;
+                }
+
+                return _spans.AsSpan(0, 2 * _count);
             }
 
-            if (_spans is null || last + 2 >= _spans.Length)
+            /// <summary>Notes a value at <paramref name="row"/>, in the open span when it is within <paramref name="gap"/> rows of its end.</summary>
+            internal void Occur(long row, long gap)
             {
-                Array.Resize(ref _spans, Math.Max(4, 2 * (_spans?.Length ?? 0)));
+                if (_count > 0 && row - _openEnd <= gap)
+                {
+                    _openEnd = row;
+                    return;
+                }
+
+                int last = (2 * _count) - 1;
+                if (_count > 0)
+                {
+                    _spans![last] = _openEnd;
+                }
+
+                if (_spans is null || last + 2 >= _spans.Length)
+                {
+                    // From the process's shelf, given back when the census is (Release): an object's census keeps spans for
+                    // each of its paths, 3 bytes a row of a build of the client's log records made new.
+                    long[] held = _spans ?? [];
+                    long[] grown = ArrayShelf.Retained.Take<long>(ArrayShelf.Grown(last + 3, held.Length, least: 4), zeroed: false);
+                    held.AsSpan(0, 2 * _count).CopyTo(grown);
+                    ArrayShelf.Retained.Give(held);
+                    _spans = grown;
+                }
+
+                _spans[last + 1] = row;
+                _spans[last + 2] = row;
+                _openEnd = row;
+                _count++;
             }
 
-            _spans[last + 1] = instant;
-            _spans[last + 2] = instant;
-            _spanCount++;
+            /// <summary>No span, the buffer kept.</summary>
+            internal void Clear() => _count = 0;
+
+            /// <summary>The buffer given back to the process's shelf.</summary>
+            internal void Release()
+            {
+                if (_spans is { } spans)
+                {
+                    ArrayShelf.Retained.Give(spans);
+                    _spans = null;
+                    _count = 0;
+                }
+            }
         }
 
         /// <summary>The least and greatest integer; meaningless without one.</summary>
@@ -303,12 +523,75 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long sliceTargetRows 
         /// <summary>Whether a text that cut to <see cref="MaxText"/> was longer, in which case it bounds nothing from above.</summary>
         internal bool MaxTextCut => _maxTextCut;
 
+        /// <summary>The spans of this path and of every key below given back to the process's shelf, and kept no more.</summary>
+        internal void Release()
+        {
+            _spans.Release();
+            _spanClass = NoClass;
+            if (_classSpans is { } others)
+            {
+                for (int c = 0; c < others.Length; c++)
+                {
+                    others[c].Release();
+                }
+            }
+
+            if (_keys is { } keys)
+            {
+                foreach (PathCount key in keys.Values)
+                {
+                    key.Release();
+                }
+            }
+        }
+
+        /// <summary>These counts and those of every key below, back to none, the keys and the buffers kept (<see cref="PathCensus.Clear"/>).</summary>
+        internal void Clear()
+        {
+            Values = 0;
+            OtherKeys = 0;
+            ((Span<long>)_classes).Clear();
+            ((Span<long>)_read).Clear();
+            _minInteger = long.MaxValue;
+            _maxInteger = long.MinValue;
+            _minDouble = double.PositiveInfinity;
+            _maxDouble = double.NegativeInfinity;
+            _nans = false;
+            _minTime = long.MaxValue;
+            _maxTime = long.MinValue;
+            _false = false;
+            _true = false;
+            _spans.Clear();
+            _spanClass = NoClass;
+            if (_classSpans is { } held)
+            {
+                for (int c = 0; c < held.Length; c++)
+                {
+                    held[c].Clear();
+                }
+            }
+
+            _minTextLength = -1;
+            _maxTextLength = -1;
+            _maxTextCut = false;
+            _keptIds = 0;
+            _byIdEpoch = -1;
+            if (_keys is { } keys)
+            {
+                foreach (PathCount key in keys.Values)
+                {
+                    key.Clear();
+                }
+            }
+        }
+
         internal void Add(PathCensus census, in VariantDictionary dictionary, ReadOnlySpan<byte> value, int depth)
         {
             Values++;
-            if (census._instant != long.MinValue)
+            // At the row being counted, the census's last.
+            if (census._gap > 0)
             {
-                Occur(census._instant, census._gap);
+                Occur(ApartCensus.ClassOf(value), census.Rows - 1, census._gap);
             }
 
             switch (value[0] & 0x03)
@@ -327,34 +610,28 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long sliceTargetRows 
 
                     // The count of each field id of the metadata the rows of the run share, found by its name once a run:
                     // rows of one source share their metadata, whose names would otherwise be hashed and looked up again
-                    // at every row.
-                    if (_byIdEpoch != census._epoch)
+                    // at every row. Kept from a run's second row: a run of one row, interleaved sources' rows each, would
+                    // clear and fill the ids for nothing.
+                    int kept = 0;
+                    if (census._runRows > 1)
                     {
-                        _byIdEpoch = census._epoch;
-                        _keptIds = census.KeepIds(ref _byId, dictionary.Count);
+                        if (_byIdEpoch != census._epoch)
+                        {
+                            _byIdEpoch = census._epoch;
+                            _keptIds = census.KeepIds(ref _byId, dictionary.Count);
+                        }
+
+                        kept = _keptIds;
                     }
 
                     for (int i = 0; i < fields.Count; i++)
                     {
                         int id = fields.IdAt(i);
-                        PathCount? key = (uint)id < (uint)_keptIds ? _byId[id] : null;
+                        PathCount? key = (uint)id < (uint)kept ? _byId[id] : null;
                         if (key is null)
                         {
-                            string name = census.Name(in dictionary, id);
-                            if (!_keys.TryGetValue(name, out key))
-                            {
-                                if (census._keyCount >= MaxKeys)
-                                {
-                                    key = Uncounted;
-                                }
-                                else
-                                {
-                                    _keys[name] = key = new PathCount();
-                                    census._keyCount++;
-                                }
-                            }
-
-                            if ((uint)id < (uint)_keptIds)
+                            key = Child(census, in dictionary, id);
+                            if ((uint)id < (uint)kept)
                             {
                                 _byId[id] = key;
                             }
@@ -401,18 +678,277 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long sliceTargetRows 
                 }
 
                 default:
+                    Scalar(census.StringBoundBytes, value);
+                    return;
+            }
+        }
+
+        /// <summary>
+        /// Counts the scalar <paramref name="value"/> in its class and in the class a question reads it as, and widens that
+        /// class's bounds: the texts, integers, doubles, booleans and nulls of log records read from their header as they lie,
+        /// any other through <see cref="VariantScalar"/>, which a value of these made half of what the census cost a value.
+        /// </summary>
+        private void Scalar(int stringBoundBytes, ReadOnlySpan<byte> value)
+        {
+            byte header = value[0];
+            if ((header & 0x03) == ParquetVariant.BasicShortString)
+            {
+                if (value.Length > header >> 2)
                 {
-                    VariantScalar scalar = VariantScalar.Read(value);
-                    _classes[SlotOf(scalar.Kind)]++;
-                    Bound(census, scalar);
+                    String(stringBoundBytes, value.Slice(1, header >> 2));
                     return;
                 }
+            }
+            else if (!Short(header >> 2, value))
+            {
+                Typed(header, stringBoundBytes, value);
+                return;
+            }
+
+            // Cut short, or of another type: read whole, which says which.
+            VariantScalar scalar = VariantScalar.Read(value);
+            _classes[SlotOf(scalar.Kind)]++;
+            Bound(stringBoundBytes, scalar);
+
+            // Whether a primitive of type id `type` read as it lies holds fewer bytes than it takes, or is not one read so.
+            static bool Short(int type, ReadOnlySpan<byte> value) => type switch
+            {
+                0 or 1 or 2 => false,
+                3 => value.Length < 2,
+                4 => value.Length < 3,
+                5 => value.Length < 5,
+                6 or 7 => value.Length < 9,
+                16 => value.Length < 5 || (uint)(value.Length - 5) < System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(value[1..]),
+                _ => true,
+            };
+        }
+
+        /// <summary>A primitive of the types <see cref="Scalar"/> reads as it lies, whose bytes are all there, counted.</summary>
+        private void Typed(byte header, int stringBoundBytes, ReadOnlySpan<byte> value)
+        {
+            switch (header >> 2)
+            {
+                case 0:
+                    _classes[OtherSlot]++;
+                    _read[(int)PathClass.Null]++;
+                    return;
+                case 1 or 2:
+                    _classes[(int)VariantClass.Boolean]++;
+                    _read[(int)PathClass.Boolean]++;
+                    _true |= header >> 2 == 1;
+                    _false |= header >> 2 == 2;
+                    return;
+                case 3:
+                    Integer((sbyte)value[1]);
+                    return;
+                case 4:
+                    Integer(System.Buffers.Binary.BinaryPrimitives.ReadInt16LittleEndian(value[1..]));
+                    return;
+                case 5:
+                    Integer(System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(value[1..]));
+                    return;
+                case 6:
+                    Integer(System.Buffers.Binary.BinaryPrimitives.ReadInt64LittleEndian(value[1..]));
+                    return;
+                case 7:
+                {
+                    _classes[(int)VariantClass.Double]++;
+                    _read[(int)PathClass.Double]++;
+                    double number = System.Buffers.Binary.BinaryPrimitives.ReadDoubleLittleEndian(value[1..]);
+                    if (double.IsNaN(number))
+                    {
+                        _nans = true;
+                        return;
+                    }
+
+                    _minDouble = Math.Min(_minDouble, number);
+                    _maxDouble = Math.Max(_maxDouble, number);
+                    return;
+                }
+
+                default:
+                    String(stringBoundBytes, value.Slice(5, (int)System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(value[1..])));
+                    return;
+            }
+        }
+
+        /// <summary>Counts an integer of any width, and widens the integers' bounds.</summary>
+        private void Integer(long integer)
+        {
+            _classes[(int)VariantClass.Integer]++;
+            _read[(int)PathClass.Integer]++;
+            _minInteger = Math.Min(_minInteger, integer);
+            _maxInteger = Math.Max(_maxInteger, integer);
+        }
+
+        /// <summary>Counts a text, and widens the texts' bounds by its bytes when the census keeps them.</summary>
+        private void String(int stringBoundBytes, ReadOnlySpan<byte> text)
+        {
+            _classes[(int)VariantClass.String]++;
+            _read[(int)PathClass.String]++;
+            if (stringBoundBytes > 0)
+            {
+                Text(text, stringBoundBytes);
+            }
+        }
+
+        /// <summary>
+        /// The count of the key named by field id <paramref name="id"/> of the run's metadata, made when the key is new and the
+        /// census lets it count one more, <see cref="Uncounted"/> when it does not.
+        /// </summary>
+        private PathCount Child(PathCensus census, in VariantDictionary dictionary, int id)
+        {
+            // Found by the name's number: rows whose metadata is not the row's before, log records of interleaved sources whose
+            // keys differ row by row, decoded and looked up every key of every row as characters.
+            int number = census.NameOf(in dictionary, id);
+            if (_byNameGeneration != census._generation)
+            {
+                _byName?.Clear();
+                _byNameGeneration = census._generation;
+            }
+
+            _byName ??= [];
+            ref PathCount? found = ref System.Runtime.InteropServices.CollectionsMarshal.GetValueRefOrAddDefault(_byName, number, out bool exists);
+            if (exists)
+            {
+                return found!;
+            }
+
+            // Found by the name's characters, decoded into the census's scratch: a name met for the first time takes a string.
+            _keys ??= new Dictionary<string, PathCount>(StringComparer.Ordinal);
+            ReadOnlySpan<char> name = census.Chars(dictionary[id]);
+            if (!_keys.GetAlternateLookup<ReadOnlySpan<char>>().TryGetValue(name, out PathCount? key))
+            {
+                if (census._keyCount >= MaxKeys)
+                {
+                    key = Uncounted;
+                }
+                else
+                {
+                    _keys[new string(name)] = key = new PathCount();
+                    census._keyCount++;
+                    census._held++;
+                }
+            }
+            else if (key.Values == 0)
+            {
+                // A key the tree kept from rows counted before a Clear, or a merge: new to these rows, met for the first time.
+                if (census._keyCount >= MaxKeys)
+                {
+                    key = Uncounted;
+                }
+                else
+                {
+                    census._keyCount++;
+                }
+            }
+
+            found = key;
+            return key;
+        }
+
+        /// <summary>Adds what <paramref name="other"/> counted at the same path of another census to these counts, in <paramref name="census"/> (<see cref="PathCensus.Merge"/>).</summary>
+        internal void Merge(PathCensus census, PathCount other)
+        {
+            Values += other.Values;
+            OtherKeys += other.OtherKeys;
+            for (int slot = 0; slot < Slots; slot++)
+            {
+                _classes[slot] += other._classes[slot];
+            }
+
+            for (int @class = 0; @class < PathClasses; @class++)
+            {
+                _read[@class] += other._read[@class];
+            }
+
+            _minInteger = Math.Min(_minInteger, other._minInteger);
+            _maxInteger = Math.Max(_maxInteger, other._maxInteger);
+            _minDouble = Math.Min(_minDouble, other._minDouble);
+            _maxDouble = Math.Max(_maxDouble, other._maxDouble);
+            _nans |= other._nans;
+            _minTime = Math.Min(_minTime, other._minTime);
+            _maxTime = Math.Max(_maxTime, other._maxTime);
+            _false |= other._false;
+            _true |= other._true;
+            if (other.HasTextBounds)
+            {
+                Text(other, census.StringBoundBytes);
+            }
+
+            if (other._keys is not { Count: > 0 } keys)
+            {
+                return;
+            }
+
+            _keys ??= new Dictionary<string, PathCount>(StringComparer.Ordinal);
+            foreach ((string name, PathCount count) in keys)
+            {
+                // A key the other's tree kept from rows it counted before a Clear, which its rows did not meet.
+                if (count.Values == 0)
+                {
+                    continue;
+                }
+
+                bool found = _keys.TryGetValue(name, out PathCount? mine);
+                if (!found || mine!.Values == 0)
+                {
+                    // A key past the census's: its values go to its objects' other keys, as a count in order puts them.
+                    if (census._keyCount >= MaxKeys)
+                    {
+                        OtherKeys += count.Values;
+                        census.Partial = true;
+                        continue;
+                    }
+
+                    if (!found)
+                    {
+                        _keys[name] = mine = new PathCount();
+                        census._held++;
+                    }
+
+                    census._keyCount++;
+                }
+
+                mine!.Merge(census, count);
+            }
+        }
+
+        /// <summary>Widens the text bounds by those of <paramref name="other"/>, already cut to <paramref name="bound"/> bytes.</summary>
+        private void Text(PathCount other, int bound)
+        {
+            _prefixed = false;
+            if (!HasTextBounds)
+            {
+                Bounds(bound);
+                other.MinText.CopyTo(_minText);
+                other.MaxText.CopyTo(_maxText);
+                _minTextLength = other._minTextLength;
+                _maxTextLength = other._maxTextLength;
+                _maxTextCut = other._maxTextCut;
+                return;
+            }
+
+            if (other.MinText.SequenceCompareTo(MinText) < 0)
+            {
+                other.MinText.CopyTo(_minText);
+                _minTextLength = other._minTextLength;
+            }
+
+            int order = other.MaxText.SequenceCompareTo(MaxText);
+            if (order > 0)
+            {
+                other.MaxText.CopyTo(_maxText);
+                _maxTextLength = other._maxTextLength;
+                _maxTextCut = other._maxTextCut;
+            }
+            else if (order == 0)
+            {
+                _maxTextCut |= other._maxTextCut;
             }
         }
 
         /// <summary>Counts <paramref name="scalar"/> in the class a question reads it as, and widens that class's bounds.</summary>
-        private void Bound(PathCensus census, VariantScalar scalar) => Bound(census.StringBoundBytes, scalar);
-
         private void Bound(int stringBoundBytes, VariantScalar scalar)
         {
             switch (scalar.Kind)
@@ -472,19 +1008,63 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long sliceTargetRows 
             }
         }
 
+        /// <summary>The buffers of the text bounds, of <paramref name="bound"/> bytes: those a cleared count kept, or new.</summary>
+        [MemberNotNull(nameof(_minText), nameof(_maxText))]
+        private void Bounds(int bound)
+        {
+            if (_minText?.Length != bound || _maxText?.Length != bound)
+            {
+                _minText = new byte[bound];
+                _maxText = new byte[bound];
+            }
+        }
+
+        /// <summary>The first eight bytes of <paramref name="text"/> as a big-endian number, zero past its end.</summary>
+        private static ulong Prefix(ReadOnlySpan<byte> text)
+        {
+            if (text.Length >= sizeof(ulong))
+            {
+                return System.Buffers.Binary.BinaryPrimitives.ReadUInt64BigEndian(text);
+            }
+
+            ulong prefix = 0;
+            for (int i = 0; i < text.Length; i++)
+            {
+                prefix |= (ulong)text[i] << (56 - (8 * i));
+            }
+
+            return prefix;
+        }
+
         /// <summary>Widens the text bounds by <paramref name="text"/>, cut to <paramref name="bound"/> bytes.</summary>
         private void Text(ReadOnlySpan<byte> text, int bound)
         {
             ReadOnlySpan<byte> cut = text[..Math.Min(text.Length, bound)];
             bool longer = text.Length > bound;
+            ulong prefix = Prefix(cut);
             if (_minTextLength < 0)
             {
-                _minText = new byte[bound];
-                _maxText = new byte[bound];
+                Bounds(bound);
                 cut.CopyTo(_minText);
                 cut.CopyTo(_maxText);
                 _minTextLength = _maxTextLength = cut.Length;
                 _maxTextCut = longer;
+                _minPrefix = _maxPrefix = prefix;
+                _prefixed = true;
+                return;
+            }
+
+            if (!_prefixed)
+            {
+                _minPrefix = Prefix(MinText);
+                _maxPrefix = Prefix(MaxText);
+                _prefixed = true;
+            }
+
+            // Above the least and below the greatest by its first eight bytes, which order texts as their bytes do when they
+            // differ: it moves neither.
+            if (prefix > _minPrefix && prefix < _maxPrefix)
+            {
                 return;
             }
 
@@ -492,6 +1072,7 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long sliceTargetRows 
             {
                 cut.CopyTo(_minText);
                 _minTextLength = cut.Length;
+                _minPrefix = prefix;
             }
 
             int order = cut.SequenceCompareTo(_maxText.AsSpan(0, _maxTextLength));
@@ -500,6 +1081,7 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long sliceTargetRows 
                 cut.CopyTo(_maxText);
                 _maxTextLength = cut.Length;
                 _maxTextCut = longer;
+                _maxPrefix = prefix;
             }
             else if (order == 0)
             {

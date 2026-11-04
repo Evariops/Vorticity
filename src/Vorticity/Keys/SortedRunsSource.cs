@@ -77,9 +77,6 @@ internal sealed partial class SortedRunsSource : KeySource
 
     internal override string? KeyFormat => _keyFormat;
 
-    /// <summary>Which kind of run this source merges.</summary>
-    internal KeySourceKind Kind => _source;
-
     /// <summary>Every entry of every run: the column's non-null rows, for sorted runs.</summary>
     internal long Entries { get; }
 

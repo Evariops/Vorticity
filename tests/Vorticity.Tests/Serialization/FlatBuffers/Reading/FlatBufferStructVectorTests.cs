@@ -3,7 +3,6 @@
 // ([uint32]) are all read this way with no traversal and no allocation.
 using System;
 using System.Runtime.CompilerServices;
-using Vorticity;
 using Vorticity.Serialization.FlatBuffers;
 using Xunit;
 using static Vorticity.Tests.Serialization.FlatBuffers.TestFlatBuffers;

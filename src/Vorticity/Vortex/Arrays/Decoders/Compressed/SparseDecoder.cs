@@ -1,4 +1,5 @@
 using System;
+using System.Buffers;
 using System.Buffers.Binary;
 using Vorticity.Arrays.Metadata;
 using Vorticity.Buffers;
@@ -53,9 +54,103 @@ internal sealed class SparseDecoder : ArrayDecoder
     /// <inheritdoc/>
     public override bool SelectsWithoutFullDecode => true;
 
-    // There is deliberately no pushed comparison: expanding a sparse column is a fill of one value
-    // plus its patches, and answering a comparison over it would be a fill too, so both write one
-    // state per row and there is nothing to win.
+    /// <inheritdoc/>
+    public override bool EvaluatesWithoutFullDecode => true;
+
+    /// <summary>
+    /// Judges the fill once and spreads its verdict a word at a time, then judges the patches alone, each set over its
+    /// row: a cost of the rows over 64 and of the values present, where decoding writes every row.
+    /// </summary>
+    /// <remarks>
+    /// The verdicts are the comparison kernels' over the fill as a value of one row and over the patch values
+    /// (<see cref="Compute.ValueVerdicts"/>), so the answer is the one the decoded column gives, a null fill or a null
+    /// patch unknown. A match of bytes on no text declines.
+    /// </remarks>
+    /// <inheritdoc/>
+    public override bool TryEvaluate(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, Compute.EncodedPredicate predicate,
+        ref Compute.PredicateBits bits)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        if (predicate.Kind is Compute.EncodedPredicateKind.Prefix or Compute.EncodedPredicateKind.Contains
+            && dtype.Kind is not (DTypeKind.Utf8 or DTypeKind.Binary))
+        {
+            return false;
+        }
+
+        ArrayDecodeContext.RequireBufferCount(node.BufferCount, 1, Id);
+        ArrayDecodeContext.RequireChildCount(node.ChildCount, 2, Id);
+        SparseMetadata metadata = SparseMetadata.Read(node.Metadata);
+        PatchesMetadata patchesMetadata = metadata.Patches;
+        int patchCount = ArrayDecodeContext.CheckedLength(patchesMetadata.Length, $"{Id} patch count");
+        DType indicesType = context.Types.Primitive(patchesMetadata.IndicesPType, Nullability.NonNullable);
+        int indicesIndex = context.DecodeChild(in node, 0, indicesType, patchCount);
+
+        // The patch values judged in their encoding where it answers, a packing, a frame or a dictionary, which decodes none
+        // of them; else decoded and judged one by one.
+        int words = Compute.PredicateBits.WordsOf(Math.Max(patchCount, 1));
+        ulong[] answers = ArrayPool<ulong>.Shared.Rent(2 * words);
+        Compute.PredicateBits judged = new Compute.PredicateBits(answers.AsSpan(0, words), answers.AsSpan(words, words), patchCount);
+        bool inEncoding = patchCount > 0 && context.TryEvaluateChild(in node, 1, dtype, patchCount, predicate, ref judged);
+        int valuesIndex = inEncoding ? -1 : context.DecodeChild(in node, 1, dtype, patchCount);
+        bool walked = context.IsNodeChecked(in node);
+        Patches patches = Patches.Create(context, in patchesMetadata, length, indicesIndex, valuesIndex, Id, walked);
+        if (!walked)
+        {
+            context.MarkNodeChecked(in node);
+        }
+
+        TypedScalar fill = TypedScalarReader.Read(node.GetBuffer(0).Span, dtype, context.Scalars, context.Types);
+        int fillIndex = Canonical.ConstantCanonicalizer.Build(context, dtype, 1, in fill);
+        byte[] rented = ArrayPool<byte>.Shared.Rent(Math.Max(2 * patchCount, 2));
+        try
+        {
+            Span<byte> verdict = rented.AsSpan(0, 1);
+            Span<byte> scratch = rented.AsSpan(1, 1);
+            if (!Compute.ValueVerdicts.TryJudge(context.Canonical, fillIndex, predicate, verdict, scratch))
+            {
+                return false;
+            }
+
+            if (verdict[0] == Compute.Trilean.Unknown)
+            {
+                bits.FillUnknown();
+            }
+            else
+            {
+                bits.Fill(verdict[0] == Compute.Trilean.True);
+            }
+
+            if (patchCount > 0)
+            {
+                byte fillVerdict = verdict[0];
+                Span<byte> states = rented.AsSpan(0, patchCount);
+                if (inEncoding)
+                {
+                    for (int patch = 0; patch < patchCount; patch++)
+                    {
+                        ulong bit = 1UL << (patch & 63);
+                        states[patch] = (judged.Truth[patch >> 6] & bit) != 0 ? Compute.Trilean.True
+                            : judged.Unknown && (judged.Known[patch >> 6] & bit) == 0 ? Compute.Trilean.Unknown
+                            : Compute.Trilean.False;
+                    }
+                }
+                else
+                {
+                    Compute.ValueVerdicts.TryJudge(context.Canonical, valuesIndex, predicate, states, rented.AsSpan(patchCount, patchCount));
+                }
+
+                patches.Judge(states, fillVerdict, ref bits);
+            }
+
+            return true;
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(rented);
+            ArrayPool<ulong>.Shared.Return(answers);
+        }
+    }
 
     private static int Core(
         ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,

@@ -156,7 +156,7 @@ internal sealed class CardinalitySketch : IGroupSketch<CardinalitySketch>
             }
         }
 
-        return (long)Math.Round(Ertl(counts));
+        return (long)Math.Round(Indexes.HyperLogLog.Estimate(counts, Precision));
     }
 
     /// <summary>
@@ -249,7 +249,7 @@ internal sealed class CardinalitySketch : IGroupSketch<CardinalitySketch>
     /// each the gap from the one before and its rank in a byte, behind their count, two bytes a register where they lie
     /// close; or, past half of them set, every register's rank, a byte each.
     /// </summary>
-    internal void Encode(IBufferWriter<byte> into)
+    public void Encode(IBufferWriter<byte> into)
     {
         if (_hashes is { } hashes)
         {
@@ -553,67 +553,5 @@ internal sealed class CardinalitySketch : IGroupSketch<CardinalitySketch>
         _dense = dense;
         _table = null;
         _set = 0;
-    }
-
-    /// <summary>Ertl's improved estimator over the registers counted by rank, <paramref name="counts"/>[0] the empty ones.</summary>
-    private static double Ertl(ReadOnlySpan<int> counts)
-    {
-        const double m = Registers;
-        const int q = 64 - Precision;
-        double z = m * Tau(1 - (counts[q + 1] / m));
-        for (int k = q; k >= 1; k--)
-        {
-            z = 0.5 * (z + counts[k]);
-        }
-
-        z += m * Sigma(counts[0] / m);
-        return AlphaInfinity * m * m / z;
-    }
-
-    /// <summary>1 / (2 ln 2), written out: a platform's logarithm need not round alike, a literal does.</summary>
-    private const double AlphaInfinity = 0.7213475204444817;
-
-    private static double Sigma(double x)
-    {
-        if (x == 1)
-        {
-            return double.PositiveInfinity;
-        }
-
-        double y = 1;
-        double z = x;
-        while (true)
-        {
-            x *= x;
-            double previous = z;
-            z += x * y;
-            y += y;
-            if (z == previous)
-            {
-                return z;
-            }
-        }
-    }
-
-    private static double Tau(double x)
-    {
-        if (x == 0 || x == 1)
-        {
-            return 0;
-        }
-
-        double y = 1;
-        double z = 1 - x;
-        while (true)
-        {
-            x = Math.Sqrt(x);
-            double previous = z;
-            y *= 0.5;
-            z -= (1 - x) * (1 - x) * y;
-            if (z == previous)
-            {
-                return z / 3;
-            }
-        }
     }
 }
