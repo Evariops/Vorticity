@@ -121,7 +121,7 @@ first components is never served worse than in the order of arrival. What the or
 components, and every column that depends on them, nearly constant in each granule, which the synopses
 of section 5 measure column by column, and runs, which the engine folds as weighted rows.
 
-o11y-line, for instance, partitions by day and leads its key with its emitter, `service`, `version`
+A log or trace store, for instance, partitions by day and leads its key with its emitter, `service`, `version`
 and `host`, then the hour, the status and the route, then the instant. Every resource attribute is
 then constant in a granule, and only the attributes of an event vary within an hour of an emitter.
 
