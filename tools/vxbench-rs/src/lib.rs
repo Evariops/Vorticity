@@ -514,6 +514,17 @@ pub extern "C" fn vxbench_noop() -> i64 {
     0
 }
 
+/// The version of the `vortex` crate this library is built against, read from `Cargo.lock` by
+/// `build.rs`: the reference the bench's pages name, as a NUL-terminated string that lives as
+/// long as the library.
+///
+/// # Safety
+/// None; takes nothing, and the string is static.
+#[unsafe(no_mangle)]
+pub extern "C" fn vxbench_vortex_version() -> *const c_char {
+    concat!(env!("VORTEX_CRATE_VERSION"), "\0").as_ptr().cast()
+}
+
 /// Opens `path` and scans every column of every batch, returning the row count.
 ///
 /// It reads nothing: the arrays stay in their stored encodings and `len()` answers from their

@@ -1781,7 +1781,7 @@ internal static class ThroughputCheck
 
         text.AppendLine();
         text.AppendLine(ResultsPage.Provenance(
-            $"Vortex 0.86.1 through the C ABI of `tools/vxbench-rs`, binary {RustReader.Fingerprint ?? "unknown"}"));
+            $"{RustReader.Reference} through the C ABI of `tools/vxbench-rs`, binary {RustReader.Fingerprint ?? "unknown"}"));
         return text.ToString();
     }
 

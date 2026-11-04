@@ -1106,7 +1106,7 @@ internal static class Report
         : string.Create(CultureInfo.InvariantCulture, $"the other {byDefault.Count}, one split per chunk on {string.Join(separator, perChunk)}");
 
     /// <summary>The reference build the figures were taken against, for a section's provenance.</summary>
-    private static string Reference() => $"Vortex 0.86.1, {RustVersion()}";
+    private static string Reference() => $"{RustReader.Reference}, {RustVersion()}";
 
     /// <summary>How the page names a file: after the writer that made it.</summary>
     private static string FileName(Fixture fixture) => fixture.Writer == Ours ? "Vorticity's" : "Vortex Rust's";
@@ -1326,7 +1326,7 @@ internal static class Report
             $"machine: {ResultsPage.Processor()} ({RuntimeInformation.OSArchitecture}), " +
             $"{Environment.ProcessorCount} processors, {RuntimeInformation.OSDescription}\n" +
             $"runtime: {RuntimeInformation.FrameworkDescription}, as Native AOT for this instruction set and on the JIT; " +
-            $"reference: Vortex 0.86.1, upstream's benchmark build (mimalloc, target-cpu=native, codegen-units=1, no LTO), " +
+            $"reference: {RustReader.Reference}, upstream's benchmark build (mimalloc, target-cpu=native, codegen-units=1, no LTO), " +
             $"{RustVersion()}\n" +
             $"commit: {ResultsPage.Commit()}\n" +
             $"date: {DateTime.UtcNow:yyyy-MM-dd HH:mm} UTC");

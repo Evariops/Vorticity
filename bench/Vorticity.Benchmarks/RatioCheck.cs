@@ -869,7 +869,7 @@ internal static class RatioCheck
         text.AppendLine(string.Create(CultureInfo.InvariantCulture,
             $"Rust is timed under the faster of its two splits, axis by axis: one split per chunk on {perChunk.Count} of {shown.Count}, its default on {Report.Fewer(perChunk, byDefault, "; ")}."));
         text.AppendLine();
-        text.AppendLine(ResultsPage.Provenance($"Vortex 0.86.1 through the C ABI of `tools/vxbench-rs`, binary {binary}"));
+        text.AppendLine(ResultsPage.Provenance($"{RustReader.Reference} through the C ABI of `tools/vxbench-rs`, binary {binary}"));
         return text.ToString();
     }
 
