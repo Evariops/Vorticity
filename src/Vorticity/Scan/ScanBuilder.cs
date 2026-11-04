@@ -162,17 +162,6 @@ internal sealed class ScanBuilder
 
     private Indexes.GranuleGeometry? _granules;
 
-    // Whether shredded variant columns are handed back as their shredding holds them (ScanContext.VariantsApart): a census of
-    // a part of the rows' paths reads them so.
-    private bool _variantsApart;
-
-    /// <summary>Hands shredded variant columns back as their shredding holds them (<see cref="Arrays.ScanContext.VariantsApart"/>), for a census of their paths.</summary>
-    internal ScanBuilder WithVariantsApart(bool apart)
-    {
-        _variantsApart = apart;
-        return this;
-    }
-
     /// <summary>
     /// Reads only the blocks <paramref name="granted"/> keeps, those where a row the filter selects may lie by structures the
     /// caller read, a dataset's object's index of where its values lie (spec D, 4.3): the scan's pruning starts from them
@@ -627,15 +616,6 @@ internal sealed class ScanBuilder
     {
         IAsyncEnumerable<RecordBatch> scan = WholeAsync(excluded, out BatchAsyncEnumerable batches);
         batches.Granules = _granules;
-        if (_variantsApart)
-        {
-            // A census's own read of a part of the rows, no filter of its own: its enumerator told, where a flag on every
-            // scan's enumerable made each scan's allocation 8 bytes more.
-            return ReferenceEquals(scan, batches) && _variantKeys is null
-                ? new ApartBatches(batches)
-                : throw new InvalidOperationException("A read of variants as their shredding holds them takes no filter, take or keys of its own.");
-        }
-
         IReadOnlyDictionary<string, string[]>? filtered = FilterOnlyKeys();
         // The zones of the columns read through functions, which the file keeps from the first scan that loaded them.
         ZoneKeyReads.Request? zoned = _keepEncodings && _orderPath is null ? _zoneKeys : null;
@@ -650,13 +630,36 @@ internal sealed class ScanBuilder
             : scan;
     }
 
+    /// <summary>
+    /// The rows of the scan with its shredded variant columns handed back as their shredding holds them, and of their keys
+    /// those <paramref name="keys"/> names alone decoded, every key for null (<see cref="Arrays.ScanContext.ApartKeys"/>): a
+    /// census's read of a part of the rows, whose directory says which keys they hold.
+    /// </summary>
+    internal IAsyncEnumerable<RecordBatch> ApartAsync(Types.Variants.ApartKeys? keys)
+    {
+        IAsyncEnumerable<RecordBatch> scan = WholeAsync(excluded: null, out BatchAsyncEnumerable batches);
+        batches.Granules = _granules;
+
+        // A census's own read of a part of the rows, no filter of its own: its enumerator told, where a flag on every scan's
+        // enumerable made each scan's allocation 8 bytes more.
+        return ReferenceEquals(scan, batches) && _variantKeys is null
+            ? new ApartBatches(batches, keys)
+            : throw new InvalidOperationException("A read of variants as their shredding holds them takes no filter, take or keys of its own.");
+    }
+
     /// <summary>The batches of a scan whose shredded variants are handed back as their shredding holds them (<see cref="Arrays.ScanContext.VariantsApart"/>).</summary>
-    private sealed class ApartBatches(BatchAsyncEnumerable batches) : IAsyncEnumerable<RecordBatch>
+    private sealed class ApartBatches(BatchAsyncEnumerable batches, Types.Variants.ApartKeys? keys) : IAsyncEnumerable<RecordBatch>
     {
         public IAsyncEnumerator<RecordBatch> GetAsyncEnumerator(CancellationToken cancellationToken = default)
         {
             BatchAsyncEnumerator enumerator = (BatchAsyncEnumerator)batches.GetAsyncEnumerator(cancellationToken);
             enumerator.VariantsApart = true;
+            enumerator.FewRowsOfChunks = true;
+            if (keys is not null)
+            {
+                enumerator.ApartKeys = keys;
+            }
+
             return enumerator;
         }
     }
@@ -1398,7 +1401,14 @@ internal sealed class ScanBuilder
                     if (verdicts.EdgesWorthCounting)
                     {
                         question.Reads.EdgeGranules += verdicts.PartGroups;
-                        edges = await CountEdgesAsync(verdicts, alike.ConvertAll(a => taken[a].Column.Field), judge, question, cancellationToken)
+                        // The keys the directories place in the groups kept in part: the others, no row of those groups holds.
+                        Types.Variants.ApartKeys keys = new Types.Variants.ApartKeys();
+                        foreach (int a in alike)
+                        {
+                            keys.AddEdges(taken[a].Body, taken[a].Column.Tally.Verdicts);
+                        }
+
+                        edges = await CountEdgesAsync(verdicts, alike.ConvertAll(a => taken[a].Column.Field), keys, judge, question, cancellationToken)
                             .ConfigureAwait(false);
                     }
                 }
@@ -1464,7 +1474,8 @@ internal sealed class ScanBuilder
     /// those the scan keeps by <paramref name="judge"/> and of the others; the counts held under the question's memory.
     /// </summary>
     private async System.Threading.Tasks.ValueTask<Types.Variants.EdgeCounts[]> CountEdgesAsync(
-        Types.Variants.GroupVerdicts verdicts, List<FieldExpr> columns, KeptRows judge, PathsQuestion question, System.Threading.CancellationToken cancellationToken)
+        Types.Variants.GroupVerdicts verdicts, List<FieldExpr> columns, Types.Variants.ApartKeys keys, KeptRows judge, PathsQuestion question,
+        System.Threading.CancellationToken cancellationToken)
     {
         Types.Variants.PathCensus[] kept = new Types.Variants.PathCensus[columns.Count];
         Types.Variants.PathCensus[] others = new Types.Variants.PathCensus[columns.Count];
@@ -1479,10 +1490,10 @@ internal sealed class ScanBuilder
         long held = 0;
         try
         {
-            await foreach (PartRows part in PartRowsAsync(verdicts, judge, columns, cancellationToken).ConfigureAwait(false))
+            await foreach (PartRows part in PartRowsAsync(verdicts, judge, columns, keys, cancellationToken).ConfigureAwait(false))
             {
                 RecordBatch batch = part.Batch;
-                long keys = 0;
+                long heldKeys = 0;
                 question.Reads.EdgeRows += batch.RowCount;
                 for (int c = 0; c < columns.Count; c++)
                 {
@@ -1499,10 +1510,10 @@ internal sealed class ScanBuilder
                         others[c].Add(counting, part.Other.AsSpan(0, part.Words));
                     }
 
-                    keys += kept[c].HeldKeys + others[c].HeldKeys + counts[c].Count;
+                    heldKeys += kept[c].HeldKeys + others[c].HeldKeys + counts[c].Count;
                 }
 
-                held = PathQuestions.Hold(question, keys, held);
+                held = PathQuestions.Hold(question, heldKeys, held);
             }
 
             for (int c = 0; c < counts.Length; c++)
@@ -1568,14 +1579,13 @@ internal sealed class ScanBuilder
     /// The rows of the groups <paramref name="verdicts"/> judged kept in part, those groups read alone with <paramref name="columns"/>
     /// and the filter's, each batch's rows told kept or left: kept when the filter keeps them, inside the scan's rows, and
     /// not left out by <paramref name="judge"/>; a row of a group not kept in part, which a split wider than a group brings,
-    /// neither.
+    /// neither. A shredded variant column is read as its shredding holds it, of its keys those <paramref name="keys"/> names
+    /// alone, when the filter reads no variant column, which it evaluates put back.
     /// </summary>
     private async IAsyncEnumerable<PartRows> PartRowsAsync(
-        Types.Variants.GroupVerdicts verdicts, KeptRows judge, List<FieldExpr> columns,
+        Types.Variants.GroupVerdicts verdicts, KeptRows judge, List<FieldExpr> columns, Types.Variants.ApartKeys keys,
         [System.Runtime.CompilerServices.EnumeratorCancellation] System.Threading.CancellationToken cancellationToken)
     {
-        // The columns counted read as their shredding holds them, when the filter reads no variant column: it evaluates those put
-        // back, any of them, the columns counted or another.
         bool apart = columns.Count > 0 && (_filterPaths ?? []).TrueForAll(path => !ReadsVariant(path));
         FilterEvaluator? evaluator = _filter is null ? null : new FilterEvaluator(_filter);
         RowRange range = judge.Range;
@@ -1603,7 +1613,6 @@ internal sealed class ScanBuilder
             ScanBuilder read = new ScanBuilder(_file).Rows(groups).WithGranules(_granules);
             read._metrics = _metrics;
             read._indexes = _indexes;
-            read.WithVariantsApart(apart);
             FieldMaskBuilder fields = read.Fields();
             foreach (FieldExpr column in columns)
             {
@@ -1615,7 +1624,7 @@ internal sealed class ScanBuilder
                 ScanProjection.IncludeField(_file.DType, path, fields, nameof(columns));
             }
 
-            await foreach (RecordBatch batch in read.ExecuteAsync().WithCancellation(cancellationToken).ConfigureAwait(false))
+            await foreach (RecordBatch batch in (apart ? read.ApartAsync(keys) : read.ExecuteAsync()).WithCancellation(cancellationToken).ConfigureAwait(false))
             {
                 int count = batch.RowCount;
                 int words = (count + 63) >> 6;

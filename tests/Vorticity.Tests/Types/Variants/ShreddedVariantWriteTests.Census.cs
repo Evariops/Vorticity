@@ -1,6 +1,7 @@
 // A census of a shredded variant's paths taken from its shredding as it lies counts, path by path and class by class, what a
 // census of its rows put back together counts: over random shreddings of random documents, nested objects, lists, values of
-// another class than their key's column, rows that are no object, the variant null and a null column among them.
+// another class than their key's column, rows that are no object, the variant null and a null column among them; and read
+// for the keys the rows hold alone, a shredded key no row holds left undecoded, it counts the same.
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -40,9 +41,11 @@ public sealed partial class ShreddedVariantWriteTests
             {
                 List<(string, long, long)> whole = await CountAsync(file, column, apart: false);
                 List<(string, long, long)> apart = await CountAsync(file, column, apart: true);
+                List<(string, long, long)> keyed = await CountAsync(file, column, apart: true, Held());
                 Assert.True(whole.Count > 5, $"{column}: {whole.Count} paths");
                 Assert.Contains(whole, path => path.Item2 > 0 && path.Item3 > 0);
                 Assert.Equal(whole, apart);
+                Assert.Equal(whole, keyed);
             }
         }
         finally
@@ -51,17 +54,51 @@ public sealed partial class ShreddedVariantWriteTests
         }
     }
 
+    [Fact]
+    public async Task AShreddingNoneOfWhoseKeysTheReadNamesIsCountedFromItsResidualAlone()
+    {
+        Random random = new Random(7);
+        Doc[] rows = [.. Enumerable.Range(0, 2_000).Select(i => new Doc(i, Document(random), Document(random)))];
+        VariantShredding missing = VariantShredding.Object(("missing", VariantShredding.Primitive(VariantClass.String)));
+        string path = await WriteAsync(rows, new() { [nameof(Doc.Attributes)] = missing, [nameof(Doc.Extra)] = missing }, degree: 1);
+        try
+        {
+            await using VortexFile file = await VortexFile.OpenAsync(path, Ct);
+            List<(string, long, long)> whole = await CountAsync(file, nameof(Doc.Attributes), apart: false);
+            Assert.True(whole.Count > 5, $"{whole.Count} paths");
+            Assert.Equal(whole, await CountAsync(file, nameof(Doc.Attributes), apart: true, Held()));
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
+    /// <summary>The keys a document may hold, "missing" not among them, which a shredding may name.</summary>
+    private static ApartKeys Held()
+    {
+        ApartKeys keys = new ApartKeys();
+        foreach (string key in new[] { "status", "duration", "route", "ok", "user", "tags", "big", "http.route" }.Concat(Enumerable.Range(0, 30).Select(k => $"k{k}")))
+        {
+            keys.Add(System.Text.Encoding.UTF8.GetBytes(key));
+        }
+
+        return keys;
+    }
+
     /// <summary>
     /// The paths of <paramref name="column"/>, read as the shredding holds it or put back, of the rows a third of which are left
-    /// and the others kept: each path and class with its rows kept and left, in order.
+    /// and the others kept: each path and class with its rows kept and left, in order; apart, of the keys <paramref name="keys"/>
+    /// names alone, or every key.
     /// </summary>
-    private static async Task<List<(string Path, long Kept, long Left)>> CountAsync(VortexFile file, string column, bool apart)
+    private static async Task<List<(string Path, long Kept, long Left)>> CountAsync(VortexFile file, string column, bool apart, ApartKeys? keys = null)
     {
         EdgeCounts counts = new EdgeCounts();
         PathCensus kept = new PathCensus();
         PathCensus left = new PathCensus();
         FieldExpr field = new ColumnFieldExpr(column);
-        await foreach (RecordBatch batch in file.ScanBuilder().Project(column).WithVariantsApart(apart).ExecuteAsync().WithCancellation(Ct))
+        ScanBuilder read = file.ScanBuilder().Project(column);
+        await foreach (RecordBatch batch in (apart ? read.ApartAsync(keys) : read.ExecuteAsync()).WithCancellation(Ct))
         {
             int rows = batch.RowCount;
             ulong[] keep = new ulong[(rows + 63) >> 6];

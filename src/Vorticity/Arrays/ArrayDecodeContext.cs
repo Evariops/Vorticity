@@ -524,6 +524,17 @@ internal sealed class ArrayDecodeContext
             : DecodeChildShared(in node, childIndex, childDType, childLength);
 
     /// <summary>
+    /// Whether this scan holds child <paramref name="childIndex"/> of <paramref name="node"/> decoded whole already
+    /// (<see cref="DecodeWholeChild"/>), which a range of the node then slices rather than decode its part again.
+    /// </summary>
+    /// <param name="node">The parent node.</param>
+    /// <param name="childIndex">0-based child position.</param>
+    internal bool ChildRetained(in ArrayNode node, int childIndex) =>
+        _scan.NodeCheckScope is uint segment
+        && ScanContext.ChildKey(segment, node.GetChild(childIndex).Index) is long key
+        && _scan.TryPeekRetained(key, out _, out _);
+
+    /// <summary>
     /// Shared children materialized, across every scan in the process: once per chunk when they are
     /// shared as they should be, once per window or per batch when they are not.
     /// </summary>

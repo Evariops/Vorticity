@@ -284,18 +284,29 @@ internal sealed class RunEndDecoder : ArrayDecoder
         int offset = ArrayDecodeContext.CheckedLength(metadata.Offset, Id, "offset");
 
         // The ends and values are one entry per run and every range or batch of the node reads all
-        // of them, so anything short of the whole node decodes them once for every visit.
+        // of them, so anything short of the whole node decodes them once for every visit; but a
+        // scan that reads a few rows of the node decodes the runs of its range alone.
         bool whole = !selective && start == 0 && count == length;
         DType endsType = context.Types.Primitive(metadata.EndsPType, Nullability.NonNullable);
-        int endsIndex = whole
-            ? context.DecodeChild(in node, 0, endsType, runCount)
-            : context.DecodeWholeChild(in node, 0, endsType, runCount);
-        int valuesIndex = whole
-            ? context.DecodeChild(in node, 1, dtype, runCount)
-            : context.DecodeWholeChild(in node, 1, dtype, runCount);
-
-        ReadOnlySpan<byte> ends = CompressedValues.RequireIndexChild(
-            context, endsIndex, metadata.EndsPType, runCount, Id, "ends");
+        ReadOnlySpan<byte> ends;
+        int valuesIndex;
+        bool partial = false;
+        if (!whole && !selective && context.Scan.FewRowsOfChunks && (long)count * PartialRows <= length
+            && TryRunsOfRange(context, in node, dtype, endsType, metadata.EndsPType, runCount, offset, start, count, out ends, out valuesIndex, out int runs))
+        {
+            partial = true;
+            runCount = runs;
+        }
+        else
+        {
+            int endsIndex = whole
+                ? context.DecodeChild(in node, 0, endsType, runCount)
+                : context.DecodeWholeChild(in node, 0, endsType, runCount);
+            valuesIndex = whole
+                ? context.DecodeChild(in node, 1, dtype, runCount)
+                : context.DecodeWholeChild(in node, 1, dtype, runCount);
+            ends = CompressedValues.RequireIndexChild(context, endsIndex, metadata.EndsPType, runCount, Id, "ends");
+        }
 
         ValueReader values = ValueReader.Of(context.Canonical, valuesIndex, Id);
         if (values.Length != runCount)
@@ -321,7 +332,12 @@ internal sealed class RunEndDecoder : ArrayDecoder
         // Once per node per scan, not once per batch: the ends belong to the node and cannot change
         // between two batches of it, so the walk is a question already answered. The context only
         // remembers the verdict for a take over an oversized node, so every other path still walks.
-        if (!context.IsNodeChecked(in node))
+        // The runs of a range are checked as read, and say nothing of the node's others.
+        if (partial)
+        {
+            ValidateRangeEnds(ends, metadata.EndsPType, runCount);
+        }
+        else if (!context.IsNodeChecked(in node))
         {
             ValidateEnds(ends, metadata.EndsPType, runCount, offset, length);
             context.MarkNodeChecked(in node);
@@ -620,6 +636,126 @@ internal sealed class RunEndDecoder : ArrayDecoder
         }
 
         return found;
+    }
+
+    /// <summary>
+    /// How many times a range's rows a node holds, at least, for a scan that reads a few rows of each chunk to decode the
+    /// range's runs alone.
+    /// </summary>
+    private const int PartialRows = 4;
+
+    /// <summary>The ends a search of a range's first run samples at a time.</summary>
+    private const int SampleProbes = 64;
+
+    /// <summary>The runs below which a search of a range's first run stops sampling and reads the ends from there.</summary>
+    private const int SampleWindow = 1024;
+
+    /// <summary>
+    /// The runs rows <c>[start, start + count)</c> fall in, their ends and values decoded alone: the first run found by
+    /// narrowing where it lies a sample of the ends at a time, then the ends read from there over as many runs as the range
+    /// holds rows, a run holding one row at least. False, for the caller to decode the ends and values whole, when a range
+    /// of the node read either whole already, or when the ends do not select their rows or a child does not decode a range.
+    /// </summary>
+    /// <remarks>
+    /// A granule of a log's attributes read again out of a chunk of some three hundred thousand rows decoded, for each key
+    /// its shredding holds, the whole of the key's run values, a dictionary of the chunk's, for the score of runs it falls in.
+    /// </remarks>
+    private static bool TryRunsOfRange(
+        ArrayDecodeContext context, scoped in ArrayNode node, DType dtype, DType endsType, PType endsPType, int runCount, int offset,
+        int start, int count, out ReadOnlySpan<byte> ends, out int valuesIndex, out int runs)
+    {
+        ends = default;
+        valuesIndex = -1;
+        runs = 0;
+        if (context.ChildRetained(in node, 0) || context.ChildRetained(in node, 1)
+            || !context.ChildDecodesRange(in node, 0) || !context.ChildDecodesRange(in node, 1)
+            || (runCount > SampleWindow && !context.ChildSelectsWithoutFullDecode(in node, 0, endsType)))
+        {
+            return false;
+        }
+
+        // The run of the range's first row is the first whose end is above it, at most that row's own number of runs in:
+        // the ends strictly increase.
+        ulong first = (ulong)offset + (ulong)(uint)start;
+        ulong last = first + (ulong)(uint)count - 1;
+        int low = 0;
+        int high = (int)Math.Min((ulong)runCount, first + 2);
+        Span<int> probes = stackalloc int[SampleProbes];
+        while (high - low > SampleWindow)
+        {
+            // The run lies in [low, high): the probes cut that span into as many parts again, each probe a run of its own.
+            int span = high - low;
+            for (int j = 0; j < SampleProbes; j++)
+            {
+                probes[j] = low + (int)((long)span * (j + 1) / (SampleProbes + 1));
+            }
+
+            int sampled = context.DecodeChildSelected(in node, 0, endsType, runCount, probes);
+            ReadOnlySpan<byte> at = CompressedValues.RequireIndexChild(context, sampled, endsPType, SampleProbes, Id, "ends");
+            int above = 0;
+            while (above < SampleProbes && CompressedValues.ReadUnsigned(at, endsPType, above) <= first)
+            {
+                above++;
+            }
+
+            int nextLow = above == 0 ? low : probes[above - 1] + 1;
+            high = above == SampleProbes ? high : probes[above] + 1;
+            low = nextLow;
+        }
+
+        int window = (int)Math.Min((long)runCount - low, (long)(high - low) + count + 1);
+        int endsIndex = context.DecodeChildRange(in node, 0, endsType, runCount, low, window);
+        ReadOnlySpan<byte> read = CompressedValues.RequireIndexChild(context, endsIndex, endsPType, window, Id, "ends");
+        int firstRun = FirstAbove(read, endsPType, 0, window, first);
+        int lastRun = firstRun == window ? window : FirstAbove(read, endsPType, firstRun, window, last);
+        if (lastRun == window)
+        {
+            CompressedThrow.Format(
+                $"{Id} runs do not cover rows [{start}, {(long)start + count}); the last run end must reach offset + length.");
+        }
+
+        int width = endsPType.ByteWidth();
+        runs = lastRun - firstRun + 1;
+        ends = read.Slice(firstRun * width, runs * width);
+        valuesIndex = context.DecodeChildRange(in node, 1, dtype, runCount, low + firstRun, runs);
+        return true;
+    }
+
+    /// <summary>The first of runs <c>[from, to)</c> whose end is above <paramref name="target"/>; <paramref name="to"/> when none.</summary>
+    private static int FirstAbove(ReadOnlySpan<byte> ends, PType endsPType, int from, int to, ulong target)
+    {
+        int low = from;
+        int high = to;
+        while (low < high)
+        {
+            int middle = low + ((high - low) / 2);
+            if (CompressedValues.ReadUnsigned(ends, endsPType, middle) > target)
+            {
+                high = middle;
+            }
+            else
+            {
+                low = middle + 1;
+            }
+        }
+
+        return low;
+    }
+
+    /// <summary>Checks that the ends of the runs a range read strictly increase.</summary>
+    private static void ValidateRangeEnds(ReadOnlySpan<byte> ends, PType endsPType, int runCount)
+    {
+        ulong previous = 0;
+        for (int run = 0; run < runCount; run++)
+        {
+            ulong end = CompressedValues.ReadUnsigned(ends, endsPType, run);
+            if (run > 0 && end <= previous)
+            {
+                CompressedThrow.Format($"{Id} run ends must strictly increase; a range read {end} after {previous}.");
+            }
+
+            previous = end;
+        }
     }
 
     private static void ValidateEnds(
