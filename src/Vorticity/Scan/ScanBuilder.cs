@@ -627,7 +627,15 @@ internal sealed class ScanBuilder
     {
         IAsyncEnumerable<RecordBatch> scan = WholeAsync(excluded, out BatchAsyncEnumerable batches);
         batches.Granules = _granules;
-        batches.VariantsApart = _variantsApart;
+        if (_variantsApart)
+        {
+            // A census's own read of a part of the rows, no filter of its own: its enumerator told, where a flag on every
+            // scan's enumerable made each scan's allocation 8 bytes more.
+            return ReferenceEquals(scan, batches) && _variantKeys is null
+                ? new ApartBatches(batches)
+                : throw new InvalidOperationException("A read of variants as their shredding holds them takes no filter, take or keys of its own.");
+        }
+
         IReadOnlyDictionary<string, string[]>? filtered = FilterOnlyKeys();
         // The zones of the columns read through functions, which the file keeps from the first scan that loaded them.
         ZoneKeyReads.Request? zoned = _keepEncodings && _orderPath is null ? _zoneKeys : null;
@@ -640,6 +648,17 @@ internal sealed class ScanBuilder
         return _variantKeys is not null || filtered is not null || zoned is not null
             ? new KeyedBatches(scan, batches, _file, _variantKeys, filtered, zoned, _granules is not null, _filter, _metrics)
             : scan;
+    }
+
+    /// <summary>The batches of a scan whose shredded variants are handed back as their shredding holds them (<see cref="Arrays.ScanContext.VariantsApart"/>).</summary>
+    private sealed class ApartBatches(BatchAsyncEnumerable batches) : IAsyncEnumerable<RecordBatch>
+    {
+        public IAsyncEnumerator<RecordBatch> GetAsyncEnumerator(CancellationToken cancellationToken = default)
+        {
+            BatchAsyncEnumerator enumerator = (BatchAsyncEnumerator)batches.GetAsyncEnumerator(cancellationToken);
+            enumerator.VariantsApart = true;
+            return enumerator;
+        }
     }
 
     /// <summary>

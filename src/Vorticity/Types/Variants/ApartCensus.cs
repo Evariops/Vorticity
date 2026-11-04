@@ -115,7 +115,7 @@ internal static class ApartCensus
 
             // A row the typed value holds: its class, and below it an object's typed fields; its residual's fields beside them.
             Typed(0, typed, typedKeep, typedOther);
-            Values(0, value, keep, other, typedKeep, typedOther, residual: true);
+            Values(0, value, keep, other, typedKeep, typedOther, root: true);
         }
 
         /// <summary>
@@ -195,16 +195,16 @@ internal static class ApartCensus
 
             if (value >= 0)
             {
-                Values(length, value, keep, other, typedKeep, typedOther, residual: false);
+                Values(length, value, keep, other, typedKeep, typedOther, root: false);
             }
         }
 
         /// <summary>
-        /// The rows of the binary values <paramref name="value"/> the selections keep, but those the typed column held: walked as
-        /// they lie at the path built so far, or for <paramref name="residual"/> a root, an object's residual fields below a
-        /// typed object, its own value elsewhere.
+        /// The rows of the binary values <paramref name="value"/> the selections keep, walked as they lie at the path built so
+        /// far: a row the typed value holds as an object, its residual's fields alone below it, the object counted already;
+        /// any other, its value whole. At a <paramref name="root"/>, a row neither holds is the variant null.
         /// </summary>
-        private void Values(int length, int value, ReadOnlySpan<ulong> keep, ReadOnlySpan<ulong> other, ReadOnlySpan<ulong> typedKeep, ReadOnlySpan<ulong> typedOther, bool residual)
+        private void Values(int length, int value, ReadOnlySpan<ulong> keep, ReadOnlySpan<ulong> other, ReadOnlySpan<ulong> typedKeep, ReadOnlySpan<ulong> typedOther, bool root)
         {
             ReadOnlySpan<ulong> held = ArenaWords.Validity(arena, value);
             ViewValues values = new ViewValues(arena.GetNode(value));
@@ -222,11 +222,10 @@ internal static class ApartCensus
                         int bit = BitOperations.TrailingZeroCount(bits);
                         bits &= bits - 1;
                         int row = (w << 6) + bit;
-                        bool residualFields = residual && (underTyped & (1UL << bit)) != 0;
-                        Walk(length, Metadata.At(row), values.At(row), kept, fieldsOnly: residualFields);
+                        Walk(length, Metadata.At(row), values.At(row), kept, fieldsOnly: (underTyped & (1UL << bit)) != 0);
                     }
 
-                    if (residual)
+                    if (root)
                     {
                         // A row neither column holds is the variant null.
                         ulong neither = selected & ~valid & ~underTyped;

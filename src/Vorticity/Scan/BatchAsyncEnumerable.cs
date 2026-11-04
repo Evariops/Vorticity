@@ -138,9 +138,6 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
     /// </summary>
     internal Indexes.VariantKeyReads? VariantKeys { get; set; }
 
-    /// <summary>Whether shredded variant columns are handed back as their shredding holds them (<see cref="ScanContext.VariantsApart"/>). Set before the scan starts.</summary>
-    internal bool VariantsApart { get; set; }
-
     /// <summary>
     /// The columns the scan's consumer reads through functions alone whose zones give a split their values, the columns then
     /// not read; null for none. Set before the scan starts.
@@ -159,11 +156,6 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
         if (VariantKeys is { } keys)
         {
             enumerator.VariantKeys = keys;
-        }
-
-        if (VariantsApart)
-        {
-            enumerator.VariantsApart = true;
         }
 
         if (ZoneKeys is { } zoned)
