@@ -4,7 +4,6 @@
     <Project Path="src/Vorticity.RowEncoding/Vorticity.RowEncoding.csproj" />
     <Project Path="src/Vorticity.Dataset/Vorticity.Dataset.csproj" />
     <Project Path="src/Vorticity.ObjectStorage/Vorticity.ObjectStorage.csproj" />
-    <Project Path="src/Vorticity.Cluster.Tcp/Vorticity.Cluster.Tcp.csproj" />
     <Project Path="src/Vorticity.Generators/Vorticity.Generators.csproj" />
   </Folder>
   <Folder Name="/bench/">

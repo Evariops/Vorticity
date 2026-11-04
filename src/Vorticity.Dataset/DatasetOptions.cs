@@ -151,14 +151,6 @@ public sealed record DatasetOptions
     public TimeProvider TimeProvider { get; init; } = TimeProvider.System;
 
     /// <summary>
-    /// Called with each version this handle moves to past the one it read, by a commit of its own (an append, a job) or a
-    /// refresh: what a cluster wires to its nodes, so that each warms the objects it owns in it
-    /// (<see cref="ClusterExecutor.WarmAsync"/>, spec F, 7). Null, the default, for none. It runs on the committing thread
-    /// and must not block.
-    /// </summary>
-    public Action<ulong>? Moved { get; init; }
-
-    /// <summary>
     /// Whether the dataset lives on a store that keeps every object under a retention lock, S3 Object
     /// Lock, Azure immutable blob storage, a GCS bucket lock, so that nothing it writes can be deleted
     /// before the lock's date; fixed when the dataset is created and carried by every commit.

@@ -4168,7 +4168,6 @@ public sealed class VortexDataset : IAsyncDisposable
             next ??= new DatasetSnapshot(commit, PagesOf(version, commit), _objects, knownAt, Costs, current.Schema);
             if (ReferenceEquals(Interlocked.CompareExchange(ref _snapshot, next, current), current))
             {
-                _options.Moved?.Invoke(version);
                 return;
             }
         }
