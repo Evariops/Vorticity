@@ -724,9 +724,12 @@ uses.
   (`vortex-array-0.90.0/src/arrays/patched/mod.rs:117`).
 - A scheme is a value. `FoRScheme::v1()` subtracts one reference and `FoRScheme::v2()` one per 1 024
   values (`fastlanes.for.v2`), and bit-packing has a version 2 with a width per block
-  (`fastlanes.bitpacked.v2`, read through `BitPackedDataParts::bit_widths`). With `vortex.indexed`,
-  these are the three array ids 0.90.0 adds. No edition admits any of them, so an edition-enforced
-  write never produces one.
+  (`fastlanes.bitpacked.v2`, read through `BitPackedDataParts::bit_widths`). With
+  `vortex.decimal_byte_parts.v2`, these are the array ids a 0.90.0 session registers that 0.86.1's
+  did not, and `fastlanes.transposed_bool` is no longer registered. No edition admits any of the new
+  ones, so an edition-enforced write never produces one. A write with editions off still declares
+  every registered id in its footer: `encodings/fastlanes_delta` declares 41 array ids, 39 under
+  0.86.1.
 - Several constructors take an execution context last: `ListArray::try_new`,
   `MaskedArray::try_new`, `Sparse::try_new`, `Patches::new` and `ListViewArray::list_elements_at`.
   `Delta::try_new` takes the array's validity.
