@@ -13,13 +13,9 @@
 // after a scan is planned and fully drained, the file's arena holds exactly the nodes it held at
 // open. The fixtures below cover the two places a derivation can hide: decode time (masked) and
 // parse time (zoned).
-using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
-
-using Vorticity.Columns;
-using Vorticity.File;
 using Vorticity.Scanning;
 using Xunit;
 

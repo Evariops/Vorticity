@@ -118,7 +118,7 @@ Two more kinds of keys stream. A column of integers stored nearly in order, like
 appended slightly out of order, streams on its zone maps: a group goes out once every block still to
 read holds larger keys. It streams on one lane, under a `Take`, and under a tight memory budget. On
 several lanes without either, the pass blocks instead, because that runs faster there. A dataset's
-clustering key also streams, since the dataset reads its objects in key order. The plan says which
+sort key also streams, since the dataset reads its objects in key order. The plan says which
 component streams, and [the query design](../design/16-queries.md#23-a-group-by-that-streams)
 explains when each one does.
 

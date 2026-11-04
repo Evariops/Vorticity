@@ -267,6 +267,84 @@ public sealed partial class ShreddedVariantWriteTests
         }
     }
 
+    /// <summary>
+    /// A chunk written a typed column at a time, each laid out only while the blob writes it, is the blob of its
+    /// shredding laid out whole: the same bytes, compressed or not, in frames of a block or one, for documents of every
+    /// shape under shreddings drawn at random, a column of some null rows among them.
+    /// </summary>
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    [InlineData(4)]
+    [InlineData(5)]
+    [InlineData(6)]
+    [InlineData(7)]
+    [InlineData(8)]
+    public async Task AChunkWrittenAColumnAtATimeIsTheBlobOfItsShreddingLaidOutWhole(int seed)
+    {
+        Random random = new Random(seed);
+        Doc[] rows = [.. Enumerable.Range(0, 3_000).Select(i => new Doc(i, Document(random), random.Next(10) == 0 ? null : Document(random)))];
+        await AssertSameBlobsAsync(rows, Shredding(random), Shredding(random));
+    }
+
+    /// <summary>
+    /// The same for the chunks whose tree holds nothing: rows all null, written as one null; objects that hold none of
+    /// the keys, whose struct keeps every key, each a column of nulls; rows that are no objects.
+    /// </summary>
+    [Fact]
+    public async Task AChunkOfNoKeyWrittenAColumnAtATimeIsTheBlobOfItsShreddingLaidOutWhole()
+    {
+        VariantShredding plan = VariantShredding.Object(
+            ("route", VariantShredding.Primitive(VariantClass.String)),
+            ("user", VariantShredding.Object(("id", VariantShredding.Primitive(VariantClass.Integer)))),
+            ("tags", VariantShredding.List(VariantClass.String)));
+        Doc[] none = [.. Enumerable.Range(0, 2_000).Select(i => new Doc(i, Variant.Object(("other", i)), null))];
+        Doc[] scalars = [.. Enumerable.Range(0, 2_000).Select(i => new Doc(i, Variant.From((long)i), i % 3 == 0 ? null : Variant.From("x")))];
+        await AssertSameBlobsAsync(none, plan, plan);
+        await AssertSameBlobsAsync(scalars, plan, plan);
+    }
+
+    /// <summary>
+    /// Writes <paramref name="rows"/> whole in one chunk, then each variant column of the chunk under its shredding,
+    /// compressed or not and in frames of a block or one, laid out whole and a column at a time: the two blobs are equal.
+    /// </summary>
+    private static async Task AssertSameBlobsAsync(Doc[] rows, VariantShredding attributes, VariantShredding extra)
+    {
+        string path = await WriteAsync(rows, null, 1, blockRows: rows.Length);
+        try
+        {
+            await using VortexFile file = await VortexFile.OpenAsync(path, Ct);
+            await foreach (RecordBatch batch in file.Scan<Doc>().ToBatchesAsync(Ct))
+            {
+                using (batch)
+                {
+                    foreach ((string name, VariantShredding plan) in new[] { (nameof(Doc.Attributes), attributes), (nameof(Doc.Extra), extra) })
+                    {
+                        int column = batch.Arena.GetNode(batch.RootIndex).GetFieldIndex(file.DType.IndexOfField(name));
+                        foreach ((bool compress, int frameRows) in new[] { (true, 0), (true, 512), (false, 0) })
+                        {
+                            using ArrayBlobWriter.Workspace whole = new ArrayBlobWriter.Workspace { FrameRows = frameRows };
+                            using ArrayBlobWriter.Workspace streamed = new ArrayBlobWriter.Workspace { FrameRows = frameRows };
+                            int shredded = VariantShredder.Shred(batch.Arena, new DTypeArena(), column, plan);
+                            using ArrayBlobWriter.BlobLease expected = ArrayBlobWriter.Write(
+                                whole, batch.Arena, shredded, new EncodingDictionary(ComponentKind.Array, Vorticity.Editions.EditionRegistry.Newest), compress);
+                            using ArrayBlobWriter.BlobLease actual = VariantShredder.Write(
+                                streamed, batch.Arena, column, plan, null, new EncodingDictionary(ComponentKind.Array, Vorticity.Editions.EditionRegistry.Newest), compress);
+                            Assert.True(
+                                expected.Memory.Span.SequenceEqual(actual.Memory.Span),
+                                $"{name}, compressed {compress}, frames of {frameRows} rows: {actual.Length} bytes a column at a time against {expected.Length} laid out whole");
+                        }
+                    }
+                }
+            }
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
     /// <summary>A shredding names top-level variant columns only, before anything is written.</summary>
     [Fact]
     public async Task AShreddingOfAnotherColumnIsRefused()

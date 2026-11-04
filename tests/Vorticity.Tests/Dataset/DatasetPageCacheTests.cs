@@ -534,7 +534,7 @@ public sealed class DatasetPageCacheTests
                 options.SynopsisCache = new SynopsisCache(directory, 64 << 20);
             });
             Decoders.EnsureRegistered();
-            DatasetOptions options = new DatasetOptions { Session = session, Seed = Seed, ClusteringKey = ["key"], Encrypted = true };
+            DatasetOptions options = new DatasetOptions { Session = session, Seed = Seed, Layout = new DatasetLayout { SortKey = [LayoutValue.Column("key")] }, Encrypted = true };
             await using (VortexDataset created = await VortexDataset.CreateAsync(store, Schema(), options, ct))
             {
                 Assert.True(created.IsEncrypted);
@@ -863,7 +863,7 @@ public sealed class DatasetPageCacheTests
     private static async Task<VortexDataset> CreateAsync(IObjectStore store, DatasetOptions options, int objects, CancellationToken ct)
     {
         Decoders.EnsureRegistered();
-        options = options with { Seed = Seed, ClusteringKey = ["key"] };
+        options = options with { Seed = Seed, Layout = new DatasetLayout { SortKey = [LayoutValue.Column("key")] } };
         await using (VortexDataset created = await VortexDataset.CreateAsync(store, Schema(), options, ct))
         {
         }
@@ -875,7 +875,7 @@ public sealed class DatasetPageCacheTests
 
     /// <summary>A handle in <paramref name="session"/> on the dataset <see cref="CreateAsync(IObjectStore, DatasetOptions, CancellationToken)"/> made.</summary>
     private static ValueTask<VortexDataset> OpenAsync(IObjectStore store, VortexSession session, CancellationToken ct) =>
-        VortexDataset.OpenAsync(store, new DatasetOptions { Session = session, Seed = Seed, ClusteringKey = ["key"] }, ct);
+        VortexDataset.OpenAsync(store, new DatasetOptions { Session = session, Seed = Seed, Layout = new DatasetLayout { SortKey = [LayoutValue.Column("key")] } }, ct);
 
     /// <summary>The datasets' schema: a key, and a measure.</summary>
     private static DType Schema()

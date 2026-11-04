@@ -6,9 +6,7 @@ using System.Threading;
 using System.Threading.Tasks;
 
 using Vorticity.Arrays;
-using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Arrays.Decoders.Compressed;
-using Vorticity.File;
 using Vorticity.Layouts;
 
 namespace Vorticity.Tests.Layouts;

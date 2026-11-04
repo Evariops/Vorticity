@@ -11,15 +11,11 @@
 // zones falls to zero and the pruned path converges on the unpruned one plus the cost of having
 // checked. Where that crossover sits is a property of the file's zone length and of nothing else,
 // and until it is measured, "pruning takes 0.14x the time" is a sentence about one predicate.
-using System;
 using System.Threading;
 using System.Threading.Tasks;
 
 using BenchmarkDotNet.Attributes;
-
-using Vorticity.Columns;
 using Vorticity.Expressions;
-using Vorticity.File;
 using Vorticity.Scanning;
 
 namespace Vorticity.Benchmarks;

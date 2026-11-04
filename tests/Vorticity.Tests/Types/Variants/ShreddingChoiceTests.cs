@@ -1,5 +1,5 @@
-// The choice of the paths an object shreds: those whose occurrences save more residual bytes than they
-// add to each chunk, in the class most of their values hold, the nested keys of an object, a list of
+// The choice of the paths an object shreds: those that hold 2 048 values of their dominant class or more
+// (spec E, 2), in that class, the nested keys of an object, a list of
 // one class; and when more pay than a chunk's tree may hold, those that save the most. A ratchet on a
 // column of ten thousand keys that are data: only the keys every row holds are shredded, the file is
 // smaller than unshredded, and its largest encoding tree stays small.
@@ -56,8 +56,9 @@ public sealed partial class ShreddingChoiceTests
         VariantShredding plan = ShreddingChoice.Choose(census)!;
         Assert.Equal(VariantShreddingKind.Object, plan.Kind);
         Dictionary<string, VariantShredding> keys = plan.Keys.ToDictionary(key => key.Name, key => key.Field);
-        // A boolean held by half the rows writes a slot for every null row, and costs more than it saves.
-        Assert.Equal(["duration", "mixed", "route", "status", "tags", "user"], keys.Keys.Order(StringComparer.Ordinal));
+        // A boolean held by half the rows holds 10 000 values, past the 2 048 a path is shredded at; each key of the ten
+        // thousand, about two, stays in the residual.
+        Assert.Equal(["duration", "mixed", "ok", "route", "status", "tags", "user"], keys.Keys.Order(StringComparer.Ordinal));
         Assert.Equal((VariantShreddingKind.Primitive, VariantClass.Integer), (keys["status"].Kind, keys["status"].Class));
         Assert.Equal((VariantShreddingKind.Primitive, VariantClass.String), (keys["route"].Kind, keys["route"].Class));
         Assert.Equal((VariantShreddingKind.Primitive, VariantClass.Double), (keys["duration"].Kind, keys["duration"].Class));
@@ -66,7 +67,7 @@ public sealed partial class ShreddingChoiceTests
         Assert.Equal(VariantShreddingKind.Object, keys["user"].Kind);
         Assert.Equal(["id", "name"], keys["user"].Keys.Select(key => key.Name));
 
-        // A path with too few occurrences to pay for a chunk is left in the residual.
+        // A path of too few values is left in the residual.
         PathCensus rare = new PathCensus();
         for (int i = 0; i < 100; i++)
         {
@@ -94,8 +95,8 @@ public sealed partial class ShreddingChoiceTests
             census.Add(row.Metadata.Span, row.Value.Span);
         }
 
-        // Ten rows in a thousand: the residual keeps the user, alone.
-        Assert.DoesNotContain("user", ShreddingChoice.Choose(census)!.Keys.Select(key => key.Name));
+        // A thousand rows, under the 2 048 values a path is shredded at: the residual keeps every key.
+        Assert.Null(ShreddingChoice.Choose(census));
 
         Dictionary<string, VariantClass> required = new() { ["user"] = VariantClass.String };
         VariantShredding forced = ShreddingChoice.Choose(census, required: required)!;
@@ -107,7 +108,7 @@ public sealed partial class ShreddingChoiceTests
         Assert.Equal(["user"], cut.Keys.Select(key => key.Name));
 
         // An integer identifier forces nothing on a key that holds text.
-        Assert.DoesNotContain("user", ShreddingChoice.Choose(census, required: new Dictionary<string, VariantClass> { ["user"] = VariantClass.Integer })!.Keys.Select(key => key.Name));
+        Assert.Null(ShreddingChoice.Choose(census, required: new Dictionary<string, VariantClass> { ["user"] = VariantClass.Integer }));
     }
 
     /// <summary>When more paths pay than the tree may hold, the ones that save the most, the densest here, are kept.</summary>

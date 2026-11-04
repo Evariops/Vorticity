@@ -12,10 +12,8 @@ using System.Threading.Tasks;
 
 using Vorticity.Arrays;
 using Vorticity.Buffers;
-using Vorticity.Columns;
 using Vorticity.Scanning;
 using Vorticity.Types;
-using Vorticity.Writing;
 
 namespace Vorticity.Benchmarks;
 
@@ -308,7 +306,7 @@ internal static class EncodingTradeoffs
             }
         }
 
-        text.Append(Profiles(rows, measured));
+        text.Append(Profiles(measured));
         text.AppendLine(ResultsPage.Provenance());
         return text.ToString();
     }
@@ -356,7 +354,7 @@ internal static class EncodingTradeoffs
         r.Bytes <= auto.Bytes ? 0 : (r.Bytes - auto.Bytes) / (auto.ScanMs - r.ScanMs) / 1_000;
 
     /// <summary>What the profiles chose over every column, computed from the tables.</summary>
-    private static string Profiles(long rows, List<(Column Column, List<Result> Results)> measured)
+    private static string Profiles(List<(Column Column, List<Result> Results)> measured)
     {
         int fastestSame = 0;
         int noneLargest = 0;

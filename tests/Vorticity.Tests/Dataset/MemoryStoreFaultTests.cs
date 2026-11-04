@@ -8,7 +8,6 @@
 // first test here is the smallest possible instance of that invariant: requests issued together
 // cost one λ, and requests issued in a row cost one λ each.
 using System;
-using System.Collections.Generic;
 using System.Diagnostics;
 using System.Text;
 using System.Threading;

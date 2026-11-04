@@ -3,7 +3,6 @@
 using System;
 using System.Globalization;
 using System.Numerics;
-using Vorticity;
 using Vorticity.Types.Numerics;
 using Xunit;
 

@@ -1,6 +1,6 @@
 using System;
 using System.Buffers;
-using System.Collections.Generic;
+using Vorticity.Aggregating;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Compressed;
 using Vorticity.Types;
@@ -79,17 +79,17 @@ internal sealed class FsstPlan
         table?.Recycle();
         if (codes.Length > 0)
         {
-            ArrayPool<byte>.Shared.Return(codes);
+            WorkArrays.Return(codes);
         }
 
         if (offsets.Length > 0)
         {
-            ArrayPool<int>.Shared.Return(offsets);
+            WorkArrays.Return(offsets);
         }
 
         if (lengths.Length > 0)
         {
-            ArrayPool<int>.Shared.Return(lengths);
+            WorkArrays.Return(lengths);
         }
     }
 
@@ -120,12 +120,12 @@ internal sealed class FsstPlan
         // The sizes are read from the views, a null row's as zero: its bytes are unspecified, so it
         // contributes nothing to the corpus and nothing to the stream, but still occupies a row slot.
         ValidityReader valid = ValidityReader.Of(arena, node.Validity);
-        int[] lengths = ArrayPool<int>.Shared.Rent(Math.Max(rows, 1));
+        int[] lengths = WorkArrays.Rent<int>(Math.Max(rows, 1));
         long plain = ViewHeap.Lengths(node, valid, lengths.AsSpan(0, rows));
 
         if (plain > int.MaxValue - ViewHeap.Slack || CodedFloor(lengths.AsSpan(0, rows), plain) > sizeCeiling)
         {
-            ArrayPool<int>.Shared.Return(lengths);
+            WorkArrays.Return(lengths);
             return null;
         }
 
@@ -137,8 +137,8 @@ internal sealed class FsstPlan
         // every position as one eight-byte word however near the end of its value, so eight bytes
         // past the values are cleared.
         int heapBytes = Math.Max((int)plain, 1);
-        byte[] heap = ArrayPool<byte>.Shared.Rent(heapBytes + ViewHeap.Slack);
-        int[] starts = ArrayPool<int>.Shared.Rent(Math.Max(rows, 1));
+        byte[] heap = WorkArrays.Rent<byte>(heapBytes + ViewHeap.Slack);
+        int[] starts = WorkArrays.Rent<int>(Math.Max(rows, 1));
         byte[]? codes = null;
         int[]? offsets = null;
         FsstSymbols? table = null;
@@ -159,8 +159,8 @@ internal sealed class FsstPlan
 
             // An escape costs two bytes, so the worst case is twice the input.
             int codeRoom = (int)Math.Max(plain * 2, 1);
-            codes = ArrayPool<byte>.Shared.Rent(codeRoom);
-            offsets = ArrayPool<int>.Shared.Rent(rows + 1);
+            codes = WorkArrays.Rent<byte>(codeRoom);
+            offsets = WorkArrays.Rent<int>(rows + 1);
             heap.AsSpan(at, FsstSymbols.MaxSymbolLength).Clear();
             int written = table.CompressAll(
                 heap.AsSpan(0, at + FsstSymbols.MaxSymbolLength), starts.AsSpan(0, rows), lengths.AsSpan(0, rows),
@@ -191,19 +191,19 @@ internal sealed class FsstPlan
                 table?.Recycle();
                 if (codes is not null)
                 {
-                    ArrayPool<byte>.Shared.Return(codes);
+                    WorkArrays.Return(codes);
                 }
 
                 if (offsets is not null)
                 {
-                    ArrayPool<int>.Shared.Return(offsets);
+                    WorkArrays.Return(offsets);
                 }
 
-                ArrayPool<int>.Shared.Return(lengths);
+                WorkArrays.Return(lengths);
             }
 
-            ArrayPool<int>.Shared.Return(starts);
-            ArrayPool<byte>.Shared.Return(heap);
+            WorkArrays.Return(starts);
+            WorkArrays.Return(heap);
         }
     }
 
@@ -254,31 +254,5 @@ internal sealed class FsstPlan
     {
         int bits = maximum <= 0 ? 0 : 64 - System.Numerics.BitOperations.LeadingZeroCount((ulong)maximum);
         return Math.Min(((count * bits) + 7) / 8, count * IndexPType(maximum).ByteWidth());
-    }
-
-    /// <summary>
-    /// Whether row <paramref name="row"/> of a canonical varbinview node holds a value. This is for
-    /// callers asking about one row; a run of rows should resolve a <see cref="ValidityReader"/>
-    /// once per node instead of switching on the validity kind per row.
-    /// </summary>
-    internal static bool IsValid(CanonicalArena arena, CanonicalNode node, int row)
-    {
-        Validity validity = node.Validity;
-        switch (validity.Kind)
-        {
-            case ValidityKind.NonNullable:
-            case ValidityKind.AllValid:
-                return true;
-            case ValidityKind.AllInvalid:
-                return false;
-            default:
-            {
-                CanonicalNode bits = arena.GetNode(validity.CanonicalNodeIndex);
-                int bit = bits.BitOffset + row;
-                ReadOnlySpan<byte> span = bits.Bits.Span;
-                return (uint)(bit >> 3) < (uint)span.Length
-                    && (span[bit >> 3] & (1 << (bit & 7))) != 0;
-            }
-        }
     }
 }

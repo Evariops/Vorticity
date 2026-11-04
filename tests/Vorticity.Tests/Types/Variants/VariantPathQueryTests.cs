@@ -10,7 +10,6 @@ using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Compute;
 using Vorticity.Expressions;
-using Vorticity.Writing;
 using Xunit;
 
 namespace Vorticity.Tests.Types.Variants;

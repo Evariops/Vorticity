@@ -4,11 +4,9 @@ using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Aggregating;
-using Vorticity.Columns;
+using Vorticity.Arrays;
 using Vorticity.Compute;
 using Vorticity.Expressions;
-using Vorticity.File;
-using Vorticity.Indexes;
 using Vorticity.Keys;
 using Vorticity.Layouts;
 using Vorticity.RowEncoding;
@@ -29,6 +27,21 @@ internal sealed class DatasetScanCounters
     /// <summary>Objects whose own summaries refuted the predicate, so nothing was opened.</summary>
     public long ObjectsSkipped { get; internal set; }
 
+    /// <summary>
+    /// The objects whose key range the filter refutes, passed over unopened, and the granules of the objects read that the
+    /// key's pruning passed over by their sparse indexes (<see cref="KeyPruning"/>).
+    /// </summary>
+    public long ObjectsPrunedByKey { get; internal set; }
+
+    /// <summary>The objects a lookup passed over unread, the index of their partition locating none of its values in them (D13).</summary>
+    public long ObjectsPassedByPartitionIndex { get; internal set; }
+
+    /// <summary>The granules of the objects read that the key's pruning passed over.</summary>
+    public long GranulesPrunedByKey { get; internal set; }
+
+    /// <summary>Objects whose column sheets proved a value the predicate asks for absent, so nothing but the sheets was read.</summary>
+    public long ObjectsRefutedBySheets { get; internal set; }
+
     /// <summary>Objects the scan went to read. <see cref="CacheHits"/> of them cost no open.</summary>
     public long ObjectsOpened { get; internal set; }
 
@@ -45,6 +58,26 @@ internal sealed class DatasetScanCounters
     public long ObjectsCounted { get; internal set; }
 
     /// <summary>
+    /// Objects whose counts answered an aggregation as states; <see cref="StateRows"/> rows of states stood for their rows.
+    /// </summary>
+    public long ObjectsAnswered { get; internal set; }
+
+    /// <summary>The rows of states the answered objects gave, an entry of their counts each.</summary>
+    public long StateRows { get; internal set; }
+
+    /// <summary>Rollups whose totals answered an aggregation as states, each for the objects it covers, which <see cref="ObjectsAnswered"/> counts.</summary>
+    public long RollupsAnswered { get; internal set; }
+
+    /// <summary>Granules of objects an aggregation took from their zone maps, their rows not read: granules no delete marked a row of.</summary>
+    public long GranulesSettled { get; internal set; }
+
+    /// <summary>
+    /// Granules of objects whose columns' statistics over them answered an aggregation as states (<see cref="GranuleAnswer"/>),
+    /// their rows not read; <see cref="StateRows"/> counts the rows of states they gave.
+    /// </summary>
+    public long GranulesAnswered { get; internal set; }
+
+    /// <summary>
     /// The most data objects the scan read at once: one in the tree's order, two once a prefetch
     /// opens the next object ahead, and under <see cref="DatasetScanBuilder.InKeyOrder(string, bool)"/>
     /// the inputs the merge held open.
@@ -58,7 +91,7 @@ internal sealed class DatasetScanCounters
 /// own file scan, carrying the filter, the projection, the rows and the options, and its batches
 /// are counted from the object's first row among the dataset's.
 /// </summary>
-internal sealed class DatasetScanBuilder
+internal sealed partial class DatasetScanBuilder
 {
     private readonly VortexDataset _dataset;
     private readonly DatasetSnapshot _version;
@@ -82,6 +115,39 @@ internal sealed class DatasetScanBuilder
     // The filter's lookup of an identifier, worked out the first time an object asks (Lookup).
     private VortexExpr? _lookup;
     private bool _lookupKnown;
+
+    // What an aggregation asks as states in place of rows, which the objects' counts answer where they can (StatesAsync).
+    private StateRequest? _states;
+
+    // The aggregation whose blocks each object read as rows settles by its zone maps, where no delete marked a row of them.
+    private AggregationPlan? _settles;
+
+    // The proof, by an object's summaries, that the filter keeps the object whole, made once: a filter on the key's first
+    // column alone; null for one that reads another column, under which no block settles (MaySettle).
+    private SummaryPruner? _whole;
+    private bool _wholeKnown;
+
+    // How the objects' counts answer _states, worked out the first time a read asks (Answer); null when they answer none,
+    // why then, for an explanation; and so for their granules' statistics.
+    private CountsAnswer? _answer;
+    private string? _answerDeclined;
+    private bool _answerKnown;
+    private GranuleAnswer? _granuleAnswer;
+    private string? _granuleDeclined;
+    private bool _granuleAnswerKnown;
+
+    // The granules of each object a selected row may lie in, a bit a granule, by where its columns' values lie, for the
+    // objects whose indexes leave granules out (SheetPruning.KeptAsync); read by the lanes that read the objects. Made at the
+    // first such object: a scan that meets none allocates nothing for them.
+    private System.Collections.Concurrent.ConcurrentDictionary<UInt128, ulong[]>? _narrowed;
+    private Action<PositionedObject, ulong[]>? _narrowing;
+
+    // The granules of one object a part of a scan reads alone, a bit a granule, the others answered by their statistics
+    // (StatesAsync): never noted as where the filter's rows lie, since those others hold some.
+    private (UInt128 Uid, ulong[] Granules)? _unsettled;
+
+    // Whether the walk counts the objects it considers: not in a part of a scan whose own walk counted them (Part).
+    private bool _considers = true;
 
     internal DatasetScanBuilder(VortexDataset dataset, DatasetSnapshot version)
     {
@@ -169,7 +235,7 @@ internal sealed class DatasetScanBuilder
     /// interleave give batches as short as one row.
     /// </summary>
     /// <remarks>
-    /// On the clustering key an object is opened only once it could hold the next row, so a consumer
+    /// On the sort key an object is opened only once it could hold the next row, so a consumer
     /// that stops after <c>k</c> rows never opens an object whose minimum lies past the k-th key; on
     /// any other column every object the summaries keep may be open at once. A row whose key is null
     /// comes last in both directions, and an object with no source for the column is refused when
@@ -193,7 +259,7 @@ internal sealed class DatasetScanBuilder
 
         foreach (string path in paths)
         {
-            _ = ClusteringKey.Resolve(_version.Schema.DType, path);
+            _ = DatasetKey.Resolve(_version.Schema.DType, path);
         }
 
         if (_rowsSet || _take is not null)
@@ -239,6 +305,188 @@ internal sealed class DatasetScanBuilder
     }
 
     /// <summary>
+    /// Says the shape of the question the scan answers (<see cref="LogicalQuery.Shape"/>), which the entry alternative
+    /// answers some objects of from their entries alone: a count, whether a row is, an extreme.
+    /// </summary>
+    internal DatasetScanBuilder WithShape(LogicalShape? shape)
+    {
+        _shape = shape;
+        return this;
+    }
+
+    // The shape of the question the scan answers, from its logical plan; null for a read of rows the engine asks itself.
+    private LogicalShape? _shape;
+
+    /// <summary>
+    /// Answers what the objects' counts can of <paramref name="states"/> as batches of states, and the rest as rows;
+    /// null for rows alone.
+    /// </summary>
+    internal DatasetScanBuilder WithStates(StateRequest? states)
+    {
+        _states = states;
+        return this;
+    }
+
+    /// <summary>
+    /// Settles, for <paramref name="plan"/>, the blocks of each object it reads as rows whose zone maps answer its keys and
+    /// aggregates, and that hold no row a delete marked: each folded as a block of its zones' bounds, its rows not read.
+    /// </summary>
+    internal DatasetScanBuilder WithSettles(AggregationPlan? plan)
+    {
+        _settles = plan;
+        return this;
+    }
+
+    /// <summary>
+    /// Makes the scan one of the question <paramref name="source"/> asks, whose lanes share what the question reads once:
+    /// the lookup of its partitions' indexes (<see cref="DatasetScanSource.LocatesOf"/>).
+    /// </summary>
+    internal DatasetScanBuilder OfQuestion(DatasetScanSource source)
+    {
+        _question = source;
+        return this;
+    }
+
+    private DatasetScanSource? _question;
+
+    /// <summary>
+    /// What the question's scans read of its objects' indexes, kept for its other scans and dropped with it: the question's,
+    /// or, for a scan asked of no question, its own, which the parts it cuts share.
+    /// </summary>
+    private Indexes.QuestionReads Reads => _question?.Reads ?? LazyInitializer.EnsureInitialized(ref _reads);
+
+    private Indexes.QuestionReads? _reads;
+
+    /// <summary>
+    /// The lookup of the values <paramref name="filter"/> seeks of <paramref name="columns"/> over the partitions' indexes:
+    /// the question's, shared by its lanes, or the scan's own.
+    /// </summary>
+    private PartitionLocates? LocatesOf(VortexExpr filter, List<int> columns) =>
+        _question is { } question ? question.LocatesOf(filter, columns) : PartitionLocates.Of(_dataset, _version, filter, columns);
+
+    /// <summary>The top-level columns the scan's filter reads but the key's first, by name, which a sort key led by it would narrow; found once.</summary>
+    private List<string> FilterColumns()
+    {
+        if (_filterColumns is null)
+        {
+            string? leading = _version.Schema.ObjectOrder?.Paths[0];
+            List<string> columns = [];
+            foreach (string path in FilterPaths())
+            {
+                int dot = path.IndexOf('.', StringComparison.Ordinal);
+                string top = dot < 0 ? path : path[..dot];
+                if (!string.Equals(top, leading, StringComparison.Ordinal) && _version.Schema.DType.IndexOfField(top) >= 0 && !columns.Contains(top))
+                {
+                    columns.Add(top);
+                }
+            }
+
+            // A variant key's read is a value of its own, which a component may read as well.
+            if (_filter is { } filter)
+            {
+                VariantReads reads = new VariantReads(columns);
+                ScanBuilder.VisitFields(filter, ref reads);
+            }
+
+            columns.Sort(StringComparer.Ordinal);
+            _filterColumns = columns;
+        }
+
+        return _filterColumns;
+    }
+
+    /// <summary>A walk over a filter's columns that keeps the text of each variant key's read it meets.</summary>
+    private readonly struct VariantReads(List<string> into) : ScanBuilder.IFieldVisitor
+    {
+        public bool Visit(FieldExpr field)
+        {
+            if (field is Compute.VariantFieldExpr variant && !into.Contains(variant.Text))
+            {
+                into.Add(variant.Text);
+            }
+
+            return true;
+        }
+    }
+
+    private List<string>? _filterColumns;
+
+    /// <summary>The paths the scan's filter reads, none without one; found once.</summary>
+    private HashSet<string> FilterPaths()
+    {
+        if (_filterPaths is null)
+        {
+            HashSet<string> paths = [];
+            _filter?.CollectFields(paths);
+            _filterPaths = paths;
+        }
+
+        return _filterPaths;
+    }
+
+    private HashSet<string>? _filterPaths;
+
+    /// <summary>The top-level columns the scan reads, those its mask selects and those its filter reads, as a mask of the version's; every one without a mask.</summary>
+    internal FieldMask ReadMask => _mask is null ? FieldMask.All : FieldMasks.Of(FieldsRead());
+
+    /// <summary>The top-level columns the scan reads, by their places: those its mask selects and those its filter reads, or every one; found once.</summary>
+    private int[] FieldsRead()
+    {
+        if (_fieldsRead is null)
+        {
+            int count = _version.Schema.DType.IsDefault ? 0 : _version.Schema.DType.FieldCount;
+            if (_mask is not { } mask)
+            {
+                _fieldsRead = [.. System.Linq.Enumerable.Range(0, count)];
+                return _fieldsRead;
+            }
+
+            Span<bool> read = count <= 256 ? stackalloc bool[count] : new bool[count];
+            int total = 0;
+            for (int i = 0; i < mask.SelectedCount(count); i++)
+            {
+                total += Read(read, mask.SelectedField(i));
+            }
+
+            foreach (string path in _filter is null ? [] : FilterPaths())
+            {
+                int dot = path.IndexOf('.', StringComparison.Ordinal);
+                total += _version.Schema.DType.IndexOfField(dot < 0 ? path : path[..dot]) is int field and >= 0 ? Read(read, field) : 0;
+            }
+
+            int[] fields = new int[total];
+            for (int field = 0, at = 0; field < count; field++)
+            {
+                if (read[field])
+                {
+                    fields[at++] = field;
+                }
+            }
+
+            _fieldsRead = fields;
+        }
+
+        return _fieldsRead;
+
+        // Marks a column read, 1 the first time.
+        static int Read(Span<bool> read, int field)
+        {
+            int first = read[field] ? 0 : 1;
+            read[field] = true;
+            return first;
+        }
+    }
+
+    private int[]? _fieldsRead;
+
+    /// <summary>What keys the scan filter's pages (<see cref="PredicatePages"/>): its canonical text and the version's columns.</summary>
+    private UInt128 PredicateKey => _predicateKey ??=
+        System.IO.Hashing.XxHash128.HashToUInt128(System.Runtime.InteropServices.MemoryMarshal.AsBytes(ExprText.Format(_filter!).AsSpan()))
+        ^ System.IO.Hashing.XxHash128.HashToUInt128(_version.Schema.Bytes.Span);
+
+    private UInt128? _predicateKey;
+
+    /// <summary>
     /// Says that the variant columns of <paramref name="keys"/>, by name, are read only through those
     /// top-level keys, which each object's path map lets its scan read alone.
     /// </summary>
@@ -251,43 +499,16 @@ internal sealed class DatasetScanBuilder
     private IReadOnlyDictionary<string, string[]>? _variantKeys;
 
     /// <summary>
-    /// The states an aggregation would take in place of rows (<see cref="StateRequest"/>): an object its
-    /// synopsis answers is read as a batch of states, and the slices at the window's edges as rows.
+    /// Says that the top-level columns of <paramref name="keys"/>, by name, are read only through those functions of them,
+    /// which the scan of each object read in the dataset's columns takes from its zones where they give a split's values.
     /// </summary>
-    internal DatasetScanBuilder WithStates(StateRequest? states)
+    internal DatasetScanBuilder WithZoneKeys(Scanning.ZoneKeyReads.Request? keys)
     {
-        _states = states;
+        _zoneKeys = keys;
         return this;
     }
 
-    private StateRequest? _states;
-
-    /// <summary>What the answers of the objects to the states asked share, worked out at the first object's.</summary>
-    private SynopsisQuestion? _question;
-
-    /// <summary>The question of <paramref name="request"/> under the scan's filter, worked out once for every object it asks.</summary>
-    private SynopsisQuestion QuestionOf(StateRequest request, string instant) =>
-        _question is { } known && ReferenceEquals(known.Request, request) && ReferenceEquals(known.Filter, _filter)
-            ? known
-            : _question = new SynopsisQuestion(request, _filter, instant, _version.Header.Identifiers);
-
-    /// <summary>The question the answers of the scan's objects share, once one was asked; null before.</summary>
-    internal SynopsisQuestion? Question => _question;
-
-    /// <summary>The objects a plan of pieces walked, in their order, which the scan of a piece takes as they are; null to walk the tree.</summary>
-    private PositionedObject[]? _planned;
-
-    /// <summary>
-    /// Has the scan, a piece of a pass on several lanes, take the objects the plan of its pieces walked, the pass's every
-    /// one in their order, those its rows cover among them, rather than walk the tree to its rows again; and the question
-    /// their answers share, which the plan worked out (<see cref="QuestionOf"/> takes it when it is the scan's own).
-    /// </summary>
-    internal DatasetScanBuilder WithPlanned(PositionedObject[] objects, SynopsisQuestion? question)
-    {
-        _planned = objects;
-        _question ??= question;
-        return this;
-    }
+    private Scanning.ZoneKeyReads.Request? _zoneKeys;
 
     /// <summary>
     /// The splits each object's scan of one lane reads ahead of the one it decodes, over a store whose read is a round
@@ -305,59 +526,6 @@ internal sealed class DatasetScanBuilder
 
     /// <summary>Whether an aggregation granted the scan its reads ahead, none among them, which its objects read as granted.</summary>
     private bool _readAheadGranted;
-
-    /// <summary>
-    /// Has the scan of one lane of an object read ahead, over a store whose read is a round trip, as many of its splits as
-    /// a pass's lanes keep in flight together (<see cref="AggregationEngine.TotalAhead"/>), reserved in the session's
-    /// budget as a pass reserves them: half as many at a time as the budget grants fewer, and none below two, the scan
-    /// then decoding a batch ahead as before. The reservation, held while the scan reads; null when it reads none ahead:
-    /// an aggregation's lane, granted its own, a scan of several lanes, of a take, or of a file that costs no round trip.
-    /// </summary>
-    private QueryMemory? ReadsAhead(ScanBuilder scan, VortexFile file)
-    {
-        int degree = _options.DegreeOfParallelism > 0 ? _options.DegreeOfParallelism : _dataset.Session.Options.MaxDegreeOfParallelism;
-        if (_readAheadGranted || degree > 1 || _options.Prefetch > 1 || _take is not null || _orderPaths is not null
-            || file.Source.CostsNoRoundTrip || scan.LargestSplitBytes() is not (> 0 and var split))
-        {
-            return null;
-        }
-
-        QueryMemory memory = new QueryMemory(_dataset.Session.Options.MemoryBudget ?? QueryMemoryBudget.Process);
-        int ahead = AggregationEngine.TotalAhead(split);
-        while (ahead >= BatchAsyncEnumerator.ReadAheadSplits && !memory.TryGrow(ahead * split))
-        {
-            ahead /= 2;
-        }
-
-        if (ahead < BatchAsyncEnumerator.ReadAheadSplits)
-        {
-            memory.Dispose();
-            return null;
-        }
-
-        scan.WithReadAhead(ahead);
-        return memory;
-    }
-
-    /// <summary>
-    /// A lease of <paramref name="held"/>: for a scan that reads keys of variant columns, an object of level 0
-    /// through the node's memo of it shredded in memory, which parses its keys once; the object itself otherwise.
-    /// </summary>
-    private async ValueTask<ObjectLease> RentAsync(PositionedObject held, CancellationToken cancellationToken)
-    {
-        // Once a scan, the memo lets go of the objects that have left level 0 since it last looked.
-        if (!_memoChecked)
-        {
-            _memoChecked = true;
-            await _dataset.LevelZero.ForgetMovedAsync(_version, cancellationToken).ConfigureAwait(false);
-        }
-
-        return held.Level == 0 && _variantKeys is { Count: > 0 } keys
-            ? await _dataset.LevelZero.RentAsync(_dataset, _version, held.Entry, keys, cancellationToken).ConfigureAwait(false)
-            : await _version.RentAsync(held.Entry, cancellationToken).ConfigureAwait(false);
-    }
-
-    private bool _memoChecked;
 
     /// <summary>
     /// Runs every object's scan under <paramref name="options"/>: the batch cap, zone-map pruning,
@@ -396,9 +564,9 @@ internal sealed class DatasetScanBuilder
             yield break;
         }
 
-        if (_states is { } request)
+        if (Answer() is { } answer && await _version.KeepsCountsAsync(cancellationToken).ConfigureAwait(false))
         {
-            await foreach (RecordBatch batch in StatesAsync(request, cancellationToken).ConfigureAwait(false))
+            await foreach (RecordBatch batch in StatesAsync(answer, cancellationToken).ConfigureAwait(false))
             {
                 yield return batch;
             }
@@ -416,7 +584,17 @@ internal sealed class DatasetScanBuilder
             yield break;
         }
 
-        IAsyncEnumerator<PositionedObject> walk = WalkAsync(cancellationToken).GetAsyncEnumerator(cancellationToken);
+        if (_take is { Length: <= TakeAheadPlaces } && _options.Compact)
+        {
+            await foreach (RecordBatch batch in TakenAsync(cancellationToken).ConfigureAwait(false))
+            {
+                yield return batch;
+            }
+
+            yield break;
+        }
+
+        IAsyncEnumerator<PositionedObject> walk = WalkAsync(cancellationToken, granules: true).GetAsyncEnumerator(cancellationToken);
         await using (walk.ConfigureAwait(false))
         {
             using CancellationTokenSource stopped = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -520,1740 +698,40 @@ internal sealed class DatasetScanBuilder
         return null;
     }
 
-    /// <summary>
-    /// One object's batches as the dataset's rows, its lease held until the last is read; for an aggregation
-    /// that takes states, the batch of states its synopsis answers with, then the rows of its edge slices.
-    /// </summary>
-    private async IAsyncEnumerable<RecordBatch> ObjectAsync(
-        PositionedObject held, int open, [EnumeratorCancellation] CancellationToken cancellationToken)
-    {
-        IAsyncEnumerable<RecordBatch> batches = _states is { } request && Answer(held, request) is ({ } answer, { } contents, string instant)
-            ? AnsweredAsync(held, answer, contents, instant, open, cancellationToken)
-            : RowsAsync(held, open, cancellationToken);
-        await foreach (RecordBatch batch in batches.ConfigureAwait(false))
-        {
-            yield return batch;
-        }
-    }
+    /// <summary>One object's batches as the dataset's rows, its lease held until the last is read.</summary>
+    private IAsyncEnumerable<RecordBatch> ObjectAsync(PositionedObject held, int open, CancellationToken cancellationToken) =>
+        RowsAsync(held, open, cancellationToken);
 
     /// <summary>
-    /// The conjunct of <paramref name="filter"/> that looks one value of a declared identifier up, or a few,
-    /// <c>id == v</c> or <c>id IN (…)</c> on a column of its own, never null: what the identifier's index answers object
-    /// by object with no open of the object (<see cref="VortexDataset.LookupAsync"/>). Null for any other filter.
+    /// The scan of rows <c>[from, to)</c> <paramref name="filter"/> keeps, as this scan reads rows, with no states asked and
+    /// none of its objects counted again: an answered object's edges, or the objects between those its counts answer.
     /// </summary>
-    internal static VortexExpr? LookupOf(VortexExpr? filter, IReadOnlyList<string> identifiers)
-    {
-        if (filter is null || identifiers.Count == 0)
-        {
-            return null;
-        }
-
-        List<VortexExpr> conjuncts = [];
-        GroupPredicates.Conjuncts(filter, conjuncts);
-        foreach (VortexExpr conjunct in conjuncts)
-        {
-            FieldExpr? field = conjunct switch
-            {
-                ComparisonExpr { Op: ComparisonOp.Equal } equal when equal.Value.Kind != FilterLiteralKind.Null => equal.Field,
-                InExpr inList when inList.Values.Count > 0 && !HoldsNull(inList.Literals) => inList.Field,
-                _ => null,
-            };
-            if (field is ColumnFieldExpr)
-            {
-                foreach (string identifier in identifiers)
-                {
-                    if (string.Equals(identifier, field.Path, StringComparison.Ordinal))
-                    {
-                        return conjunct;
-                    }
-                }
-            }
-        }
-
-        return null;
-
-        static bool HoldsNull(FilterLiteral[] values)
-        {
-            foreach (FilterLiteral value in values)
-            {
-                if (value.Kind == FilterLiteralKind.Null)
-                {
-                    return true;
-                }
-            }
-
-            return false;
-        }
-    }
-
-    /// <summary>
-    /// The filter's lookup of an identifier (<see cref="LookupOf"/>), for a scan of rows that reads them in the tree's order
-    /// with its indexes; null otherwise.
-    /// </summary>
-    private VortexExpr? Lookup
-    {
-        get
-        {
-            if (!_lookupKnown)
-            {
-                _lookup = _indexes && _states is null && _orderPaths is null && _take is null && LookupColumns(out _)
-                    ? LookupOf(_filter, _version.Header.Identifiers)
-                    : null;
-                _lookupKnown = true;
-            }
-
-            return _lookup;
-        }
-    }
-
-    /// <summary>
-    /// The columns a lookup reads its rows for: the projected ones, whole, which the filter's must be among; null in
-    /// <paramref name="columns"/> for every one. False when the projection keeps part of a column, or leaves out a column
-    /// the filter reads.
-    /// </summary>
-    private bool LookupColumns(out int[]? columns)
-    {
-        columns = null;
-        if (_mask is not { IsAll: false } mask)
-        {
-            return true;
-        }
-
-        DType schema = _version.Schema.DType;
-        int count = mask.SelectedCount(schema.FieldCount);
-        int[] fields = new int[count];
-        for (int i = 0; i < count; i++)
-        {
-            if (!mask.SelectedMask(i).IsAll)
-            {
-                return false;
-            }
-
-            fields[i] = mask.SelectedField(i);
-        }
-
-        HashSet<string> named = new HashSet<string>(StringComparer.Ordinal);
-        _filter?.CollectFields(named);
-        foreach (string path in named)
-        {
-            int field = schema.IndexOfField(path);
-            if (field < 0 || Array.IndexOf(fields, field) < 0)
-            {
-                return false;
-            }
-        }
-
-        columns = fields;
-        return true;
-    }
-
-    /// <summary>
-    /// Whether an object's rows are found by its identifier's index rather than its open, when a scan looks a value up: one
-    /// with no row marked, whose footer an open would read is large (<see cref="DatasetOptions.LookupFooterBytes"/>), and
-    /// whose entry carries a table of contents that names its index directory.
-    /// </summary>
-    internal static bool LooksUp(ObjectEntry entry, DatasetOptions options) =>
-        !entry.HasDeletions && entry.FooterBytes >= options.LookupFooterBytes && entry.Contents is { DirectoryRegion: not null };
-
-    /// <summary>
-    /// The filter's lookup when <paramref name="held"/> takes it: an object the scan covers whole, with no row marked, of the
-    /// version's own columns, whose footer an open would read is large (<see cref="DatasetOptions.LookupFooterBytes"/>), and
-    /// whose entry carries a table of contents that names its index directory; null otherwise.
-    /// </summary>
-    private VortexExpr? LookupFor(in PositionedObject held)
-    {
-        if (Lookup is not { } lookup || Covered(held) != held.Entry.Rows || !LooksUp(held.Entry, _dataset.Options)
-            || held.Entry.Contents is not { } contents)
-        {
-            return null;
-        }
-
-        try
-        {
-            return _version.Schema.ColumnsOf(contents.SchemaType, held.Entry.Key) is null ? lookup : null;
-        }
-        catch (VortexFormatException)
-        {
-            return null;
-        }
-    }
-
-    /// <summary>
-    /// The scan of a lookup of an identifier: every object the walk keeps that takes the lookup (<see cref="LookupFor"/>)
-    /// looked up at once, as many reads in flight as the session lets be, and the objects' rows given in the tree's order;
-    /// an object that does not take it, a small one whose footer an open reads in a request, read as the scan reads any,
-    /// <see cref="LookupReads"/> of them at once, the rows they keep copied. A lookup takes four round trips whatever the
-    /// object holds, and an open and a read of a small object two or three: thirty objects one after the other would wait
-    /// for 120, or for 60 to 90.
-    /// </summary>
-    private async IAsyncEnumerable<RecordBatch> LookedUpAsync(VortexExpr lookup, [EnumeratorCancellation] CancellationToken cancellationToken)
-    {
-        LookupColumns(out int[]? columns);
-        List<(PositionedObject Held, Task<List<RecordBatch>?>? Found, bool Looked)> objects = [];
-        using CancellationTokenSource stopped = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        SemaphoreSlim? reading = null;
-        try
-        {
-            int read = 0;
-            await foreach (PositionedObject held in WalkAsync(cancellationToken).ConfigureAwait(false))
-            {
-                if (Covered(held) > 0)
-                {
-                    bool looked = LookupFor(held) is not null;
-                    objects.Add((held, looked ? _dataset.LookupAsync(held.Entry, lookup, columns, stopped.Token).AsTask() : null, looked));
-                    read += looked ? 0 : 1;
-                }
-            }
-
-            // Objects read as rows, two or more, read ahead together; one alone is read when its turn comes, as a scan reads it.
-            for (int i = 0; i < objects.Count && read > 1; i++)
-            {
-                if (!objects[i].Looked)
-                {
-                    reading ??= new SemaphoreSlim(LookupReads);
-                    objects[i] = (objects[i].Held, ReadAheadAsync(objects[i].Held, reading, stopped.Token), false);
-                }
-            }
-
-            foreach ((PositionedObject held, Task<List<RecordBatch>?>? found, bool looked) in objects)
-            {
-                if (looked)
-                {
-                    await foreach (RecordBatch batch in FoundAsync(held, await found!.ConfigureAwait(false), cancellationToken).ConfigureAwait(false))
-                    {
-                        yield return batch;
-                    }
-
-                    continue;
-                }
-
-                if (found is not null)
-                {
-                    foreach (RecordBatch batch in await found.ConfigureAwait(false) ?? [])
-                    {
-                        yield return batch;
-                    }
-
-                    continue;
-                }
-
-                await foreach (RecordBatch batch in RowsAsync(held, 1, cancellationToken).ConfigureAwait(false))
-                {
-                    yield return batch;
-                }
-            }
-        }
-        finally
-        {
-            // A scan stopped or failed: the lookups and the reads still on their way are called off and end, and what they
-            // found is let go.
-            await stopped.CancelAsync().ConfigureAwait(false);
-            foreach ((_, Task<List<RecordBatch>?>? found, _) in objects)
-            {
-                if (found is null)
-                {
-                    continue;
-                }
-
-                try
-                {
-                    foreach (RecordBatch batch in await found.ConfigureAwait(false) ?? [])
-                    {
-                        batch.Dispose();
-                    }
-                }
-                catch (Exception) when (found.IsFaulted || found.IsCanceled)
-                {
-                }
-            }
-
-            reading?.Dispose();
-        }
-    }
-
-    /// <summary>The objects a lookup's scan reads as rows at once, those that do not take the lookup.</summary>
-    private const int LookupReads = 16;
-
-    /// <summary>
-    /// The rows of <paramref name="held"/> the scan keeps, read as the scan reads any object once <paramref name="reading"/>
-    /// lets one more be read, each batch that keeps a row copied, the scan's own batches being let go as it moves on.
-    /// </summary>
-    private async Task<List<RecordBatch>?> ReadAheadAsync(PositionedObject held, SemaphoreSlim reading, CancellationToken cancellationToken)
-    {
-        await reading.WaitAsync(cancellationToken).ConfigureAwait(false);
-        List<RecordBatch> kept = [];
-        try
-        {
-            await foreach (RecordBatch batch in RowsAsync(held, 1, cancellationToken).ConfigureAwait(false))
-            {
-                if (batch.SelectedRows > 0)
-                {
-                    kept.Add(batch.View.ToOwned());
-                }
-            }
-
-            return kept;
-        }
-        catch
-        {
-            foreach (RecordBatch batch in kept)
-            {
-                batch.Dispose();
-            }
-
-            throw;
-        }
-        finally
-        {
-            reading.Release();
-        }
-    }
-
-    /// <summary>
-    /// The rows an object's lookup found, the scan's filter kept, as the dataset's; the object's rows as any other's when its
-    /// index could not say (<paramref name="found"/> null). The batches stay the lookup's, which the scan lets go.
-    /// </summary>
-    private async IAsyncEnumerable<RecordBatch> FoundAsync(
-        PositionedObject held, List<RecordBatch>? found, [EnumeratorCancellation] CancellationToken cancellationToken)
-    {
-        if (found is null)
-        {
-            await foreach (RecordBatch batch in RowsAsync(held, 1, cancellationToken).ConfigureAwait(false))
-            {
-                yield return batch;
-            }
-
-            yield break;
-        }
-
-        if (_metrics is { } metrics)
-        {
-            metrics.ObjectsLookedUp++;
-        }
-
-        RecordBatch? view = null;
-        try
-        {
-            foreach (RecordBatch batch in found)
-            {
-                if (_filter is { } filter)
-                {
-                    SelectBy(batch, filter);
-                }
-
-                if (batch.SelectedRows > 0)
-                {
-                    yield return InDataset(batch, held.FirstRow, ref view);
-                }
-            }
-        }
-        finally
-        {
-            view?.Dispose();
-        }
-    }
-
-    /// <summary>One object's rows as the dataset's, its lease held until the last is read.</summary>
-    private async IAsyncEnumerable<RecordBatch> RowsAsync(
-        PositionedObject held, int open, [EnumeratorCancellation] CancellationToken cancellationToken)
-    {
-        ObjectLease lease = await RentAsync(held, cancellationToken).ConfigureAwait(false);
-        await using (lease.ConfigureAwait(false))
-        {
-            RecordOpen(lease, open);
-            ObjectColumns? columns = ColumnsOf(lease, held.Entry);
-            if (columns is null && !held.Entry.HasDeletions)
-            {
-                // The object's own scan, which every object of the version's schema with no row
-                // marked is read by, rebased into one view for the whole object.
-                RecordBatch? view = null;
-                ScanBuilder scan = Of(lease.File, held);
-                using QueryMemory? ahead = ReadsAhead(scan, lease.File);
-                await foreach (RecordBatch batch in scan.ExecuteAsync()
-                    .WithCancellation(cancellationToken).ConfigureAwait(false))
-                {
-                    yield return InDataset(batch, held.FirstRow, ref view);
-                }
-
-                yield break;
-            }
-
-            if (BatchesOfAsync(lease.File, held, PartOf(columns, _mask), held.FirstRow, _options.Compact, cancellationToken) is { } batches)
-            {
-                await foreach (RecordBatch batch in batches.ConfigureAwait(false))
-                {
-                    yield return batch;
-                }
-            }
-        }
-    }
-
-    /// <summary>
-    /// What the synopsis of an object the scan covers, of the version's schema, answers of <paramref name="request"/>:
-    /// the answer, the object's table of contents, and the dataset's instant; nothing when its rows are read. An object
-    /// covered in part, from the first row of a slice to the last of one and with no row marked, as a lane covers a part
-    /// of an object its pieces cut (<see cref="SynopsisAnswer.Cuts"/>), is answered under a window that ends where the
-    /// part does; one covered in part otherwise is read.
-    /// </summary>
-    private (SynopsisAnswer? Answer, SynopsisContents? Contents, string? Instant) Answer(in PositionedObject held, StateRequest request)
-    {
-        long covered = Covered(held);
-        if (covered == 0 || _dataset.Key is not { } key || held.Entry.Contents is not { } contents)
-        {
-            return default;
-        }
-
-        // A part of the object is answered under a window that ends where the part does: the slices it begins and ends
-        // with, or the one slice that holds it, a lane's share of an edge, whose answer is then that edge alone.
-        (long, long)? within = null;
-        long first = Math.Max(_from, held.FirstRow) - held.FirstRow;
-        bool inSlice = false;
-        if (covered != held.Entry.Rows)
-        {
-            if (held.Entry.HasDeletions || _take is not null)
-            {
-                return default;
-            }
-
-            (long, long)? slice = SliceHolding(contents.Slices.Slices, first, covered);
-            within = Within(contents.Slices.Slices, first, covered) ?? slice;
-            inSlice = slice is not null;
-            if (within is null)
-            {
-                return default;
-            }
-        }
-
-        DType schema;
-        try
-        {
-            schema = contents.SchemaType;
-        }
-        catch (VortexFormatException)
-        {
-            return default;
-        }
-
-        // The instants the object's rows hold, which bound its buckets however wide its slices' unit.
-        (long, long)? instants = held.Entry.Summaries.TryGet(key.InstantPath, out ColumnSummary summary)
-            && summary is { HasMin: true, HasMax: true, Min.Kind: FilterLiteralKind.Signed, Max.Kind: FilterLiteralKind.Signed }
-            ? (summary.Min.SignedValue, summary.Max.SignedValue)
-            : null;
-        if (_version.Schema.ColumnsOf(schema, held.Entry.Key) is not null)
-        {
-            return default;
-        }
-
-        // An answer that cannot take the values of identifiers the filter leaves out of its tables, a distinct count
-        // from sketches, takes them for absent instead: the identifier's index says so before the tables answer. A part
-        // in one slice the window cuts answers with that edge alone, read by the object's chunk directories with no open
-        // of it, where a scan of its rows read the footer, 31 MB for a day's, and the instant's zone map.
-        SynopsisQuestion question = QuestionOf(request, key.InstantPath);
-        IReadOnlyDictionary<string, FilterLiteral>? partition = PartitionFilter.ValuesOf(held.Entry, key);
-        if ((SynopsisAnswer.Of(question, contents, schema, instants, partition, within, held.Entry.HasDeletions, edgesAlone: inSlice)
-                ?? (question.MayExclude ? SynopsisAnswer.Of(question, contents, schema, instants, partition, within, held.Entry.HasDeletions, assumeAbsent: true, edgesAlone: inSlice) : null))
-            is not { } answer)
-        {
-            return default;
-        }
-
-        // A share of a slice: its own rows of the edge, or, should the tables answer the slice, its rows, which no table holds apart.
-        if (inSlice && answer.Edges is [TimeSlice edge] && (edge.FirstRow != first || edge.Rows != covered))
-        {
-            if (answer.Parts.Count > 0)
-            {
-                return default;
-            }
-
-            answer = answer with { Edges = [new TimeSlice(edge.Start, edge.End, first, covered)] };
-        }
-        else if (inSlice && Within(contents.Slices.Slices, first, covered) is null)
-        {
-            return default;
-        }
-
-        return (answer, contents, key.InstantPath);
-    }
-
-    /// <summary>
-    /// The instants of the one slice of <paramref name="slices"/> that holds rows <paramref name="first"/> to
-    /// <paramref name="first"/> + <paramref name="count"/> of an object, its start to its end, inclusive: what a lane's share
-    /// of an edge, or a whole edge, lies in. Null when no one slice holds them all.
-    /// </summary>
-    private static (long Low, long High)? SliceHolding(IReadOnlyList<TimeSlice> slices, long first, long count)
-    {
-        int low = 0;
-        int high = slices.Count - 1;
-        while (low <= high)
-        {
-            int middle = (int)((uint)(low + high) >> 1);
-            TimeSlice slice = slices[middle];
-            if (first < slice.FirstRow)
-            {
-                high = middle - 1;
-            }
-            else if (first >= slice.FirstRow + slice.Rows)
-            {
-                low = middle + 1;
-            }
-            else
-            {
-                return first + count <= slice.FirstRow + slice.Rows ? (slice.Start, slice.End - 1) : null;
-            }
-        }
-
-        return null;
-    }
-
-    /// <summary>
-    /// The instants of the slices that hold rows <paramref name="first"/> to <paramref name="first"/> +
-    /// <paramref name="count"/> of an object, the first's start to the last's end, inclusive; null when those rows do
-    /// not begin and end with slices.
-    /// </summary>
-    private static (long Low, long High)? Within(IReadOnlyList<TimeSlice> slices, long first, long count)
-    {
-        // The first slice that begins at the first row, then the last that ends at the end.
-        int low = 0;
-        int high = slices.Count;
-        while (low < high)
-        {
-            int middle = (int)((uint)(low + high) >> 1);
-            if (slices[middle].FirstRow < first)
-            {
-                low = middle + 1;
-            }
-            else
-            {
-                high = middle;
-            }
-        }
-
-        if (low == slices.Count || slices[low].FirstRow != first)
-        {
-            return null;
-        }
-
-        int start = low;
-        long end = first + count;
-        high = slices.Count;
-        while (low < high)
-        {
-            int middle = (int)((uint)(low + high) >> 1);
-            if (slices[middle].FirstRow + slices[middle].Rows <= end)
-            {
-                low = middle + 1;
-            }
-            else
-            {
-                high = middle;
-            }
-        }
-
-        int last = low - 1;
-        return last >= start && slices[last].FirstRow + slices[last].Rows == end ? (slices[start].Start, slices[last].End - 1) : null;
-    }
-
-
-    /// <summary>
-    /// Whether the synopsis of an object the scan covers answers the states it asks: what the version's
-    /// entries hold, with no read of an object.
-    /// </summary>
-    internal async ValueTask<bool> AnswersAnyAsync(CancellationToken cancellationToken)
-    {
-        if (_states is not { } request || _orderPaths is not null || _take is not null)
-        {
-            return false;
-        }
-
-        await foreach (PositionedObject held in WalkAsync(cancellationToken).ConfigureAwait(false))
-        {
-            if (Answer(held, request).Answer is not null)
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    /// <summary>
-    /// Whether the synopsis of <paramref name="held"/> answers the states the scan asks, as its scan would
-    /// find: what its entry holds, with no read of it; and whether the answer is <paramref name="light"/>, its
-    /// tables alone, no row read beside them at its edges, of an identifier left out or of a delete.
-    /// </summary>
-    internal bool Answers(in PositionedObject held, out bool light) => AnswerOf(held, out light, out _) is not null;
-
-    /// <summary>
-    /// The answer of <paramref name="held"/>'s synopsis to the states the scan asks, as its scan would find it, and the
-    /// object's table of contents: what its entry holds, with no read of it; null when its rows are read. The answer is
-    /// <paramref name="light"/> when it reads its tables alone, no row beside them at its edges, of an identifier left out
-    /// or of a delete.
-    /// </summary>
-    internal SynopsisAnswer? AnswerOf(in PositionedObject held, out bool light, out SynopsisContents? contents)
-    {
-        (SynopsisAnswer? answer, contents, _) = _states is { } request && _orderPaths is null && _take is null ? Answer(held, request) : default;
-        light = answer is { Edges.Count: 0, Excluded.Count: 0, Absent.Count: 0 } && !held.Entry.HasDeletions;
-        return answer;
-    }
-
-    /// <summary>
-    /// An object answered by its synopsis, with no open of it: the batches of states of its tables' kept
-    /// buckets, the rows its deletion marked and the rows the filter leaves out by an identifier taken out
-    /// of them, then the rows of the slices at the window's edges, through its chunk directories, the marked
-    /// ones left out. When a row cannot come out of a table exactly, or an identifier's index cannot find
-    /// the rows left out, the object's rows instead.
-    /// </summary>
-    private async IAsyncEnumerable<RecordBatch> AnsweredAsync(
-        PositionedObject held, SynopsisAnswer answer, SynopsisContents contents, string instant, int open,
-        [EnumeratorCancellation] CancellationToken cancellationToken)
-    {
-        if (await AnswerObjectAsync(held, answer, contents, instant, cancellationToken).ConfigureAwait(false) is { } answered)
-        {
-            foreach (RecordBatch batch in Delivered(held, answered))
-            {
-                yield return batch;
-            }
-
-            yield break;
-        }
-
-        await foreach (RecordBatch batch in RowsAsync(held, open, cancellationToken).ConfigureAwait(false))
-        {
-            yield return batch;
-        }
-    }
-
-    /// <summary>
-    /// The objects of an aggregation that takes states, newest first: the answers of those their synopses
-    /// answer read ahead of the consumer, as many at once as the session lets reads be in flight, so that a
-    /// question over a month of objects costs the round trips of one object, not one per object; an object
-    /// read as rows is read in its turn, alone ahead of none.
-    /// </summary>
-    /// <remarks>
-    /// An answer read ahead holds its tables' states and its edges' rows until its turn: a few tables' rows
-    /// and a few slices an object, against the rows a scan of the object would hold.
-    /// </remarks>
-    private async IAsyncEnumerable<RecordBatch> StatesAsync(StateRequest request, [EnumeratorCancellation] CancellationToken cancellationToken)
-    {
-        // The objects walked, in an array of the process's pool grown as the walk goes and given back at the end: a list
-        // of them grew for each question, five arrays for 48 objects.
-        PositionedObject[] objects = System.Buffers.ArrayPool<PositionedObject>.Shared.Rent(16);
-        int count = 0;
-        using CancellationTokenSource stopped = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        int width = _dataset.Session.Options.MaxConcurrentReads;
-        bool prefetch = _options.Prefetch > 0;
-        Queue<Turn>? ahead = null;
-        int next = 0;
-        try
-        {
-            await foreach (PositionedObject held in WalkAsync(cancellationToken).ConfigureAwait(false))
-            {
-                if (Covered(held) > 0)
-                {
-                    if (count == objects.Length)
-                    {
-                        PositionedObject[] grown = System.Buffers.ArrayPool<PositionedObject>.Shared.Rent(2 * count);
-                        objects.AsSpan(0, count).CopyTo(grown);
-                        System.Buffers.ArrayPool<PositionedObject>.Shared.Return(objects, clearArray: true);
-                        objects = grown;
-                    }
-
-                    objects[count++] = held;
-                }
-            }
-
-            NewestFirst(objects.AsSpan(0, count));
-            ahead = new Queue<Turn>(Math.Min(width, count));
-            while (true)
-            {
-                while (ahead.Count < width && next < count)
-                {
-                    PositionedObject held = objects[next++];
-                    ahead.Enqueue(Answer(held, request) is not ({ } answer, { } contents, string instant) ? new Turn(held)
-                        : TryAnswerNow(held, answer, contents, instant, out AnsweredObject? done) ? new Turn(held, done)
-                        : new Turn(held, AnswerObjectAsync(held, answer, contents, instant, stopped.Token)));
-                }
-
-                if (!ahead.TryDequeue(out Turn? turn))
-                {
-                    break;
-                }
-
-                // The answer was done, or started by this walk a few turns before. Its batches go as the dataset's,
-                // each counted, then the rows its edges keep; the answer given back once the last is read, or the
-                // consumer stops.
-#pragma warning disable VSTHRD003
-                if (turn.Answers && (turn.Done ?? await turn.Answer!.ConfigureAwait(false)) is { } answered)
-#pragma warning restore VSTHRD003
-                {
-                    try
-                    {
-                        if (Covered(turn.Held) != turn.Held.Entry.Rows)
-                        {
-                            _counters?.AddAnsweredPart();
-                        }
-
-                        for (int b = 0; b < answered.States.Count; b++)
-                        {
-                            RecordBatch batch = answered.States[b];
-                            _counters?.AddSynopsisRows(batch.SelectedRows);
-                            yield return batch;
-                        }
-
-                        for (int e = 0; e < answered.Edges.Count; e++)
-                        {
-                            RecordBatch slice = answered.Edges[e];
-                            using RecordBatch rows = slice.Rebased(turn.Held.FirstRow + slice.StartRow);
-                            _counters?.AddEdgeRows(rows.SelectedRows);
-                            if (rows.SelectedRows > 0)
-                            {
-                                yield return rows;
-                            }
-                        }
-                    }
-                    finally
-                    {
-                        answered.Dispose();
-                    }
-
-                    continue;
-                }
-
-                // An object read as rows, opened ahead when it could be; the next one read as rows opens ahead
-                // while it is read, one at most, as a scan of rows opens its next object.
-#pragma warning disable VSTHRD003
-                ObjectBatches reading = await (turn.Rows ?? OpenRowsAsync(turn.Held, 1, stopped.Token)).ConfigureAwait(false);
-#pragma warning restore VSTHRD003
-                turn.Rows = null;
-                try
-                {
-                    if (prefetch && Unanswered(ahead) is { Rows: null } following)
-                    {
-                        following.Rows = OpenRowsAsync(following.Held, 2, stopped.Token);
-                    }
-
-                    for (bool more = reading.Any; more; more = await reading.Batches.MoveNextAsync().ConfigureAwait(false))
-                    {
-                        yield return reading.Batches.Current;
-                    }
-                }
-                finally
-                {
-                    await reading.Batches.DisposeAsync().ConfigureAwait(false);
-                }
-            }
-        }
-        finally
-        {
-            // The answers and the rows read ahead of a consumer that stopped, or of a failure, are nobody's.
-            await stopped.CancelAsync().ConfigureAwait(false);
-            foreach (Turn left in ahead ?? [])
-            {
-                await left.ReleaseAsync().ConfigureAwait(false);
-            }
-
-            System.Buffers.ArrayPool<PositionedObject>.Shared.Return(objects, clearArray: true);
-        }
-    }
-
-    /// <summary>The first object of <paramref name="ahead"/> its synopsis does not answer, which is read as rows; null for none.</summary>
-    private static Turn? Unanswered(Queue<Turn> ahead)
-    {
-        foreach (Turn turn in ahead)
-        {
-            if (!turn.Answers)
-            {
-                return turn;
-            }
-        }
-
-        return null;
-    }
-
-    /// <summary>An object's rows, opened and positioned on their first batch; <paramref name="open"/> is how many objects are open with it.</summary>
-    private async Task<ObjectBatches> OpenRowsAsync(PositionedObject held, int open, CancellationToken cancellationToken)
-    {
-        IAsyncEnumerator<RecordBatch> batches = RowsAsync(held, open, cancellationToken).GetAsyncEnumerator(cancellationToken);
-        try
-        {
-            return new ObjectBatches(batches, await batches.MoveNextAsync().ConfigureAwait(false));
-        }
-        catch
-        {
-            await batches.DisposeAsync().ConfigureAwait(false);
-            throw;
-        }
-    }
-
-    /// <summary>
-    /// An object of a walk that takes states, in the queue of those read ahead: the answer of its synopsis, started
-    /// when it has one, and its rows, once opened ahead.
-    /// </summary>
-    private sealed class Turn
-    {
-        /// <summary>An object read as rows.</summary>
-        internal Turn(PositionedObject held) => Held = held;
-
-        /// <summary>An object its synopsis answers, its answer started.</summary>
-        internal Turn(PositionedObject held, Task<AnsweredObject?> answer)
-        {
-            Held = held;
-            Answer = answer;
-            Answers = true;
-        }
-
-        /// <summary>An object its synopsis answered on the spot: <paramref name="done"/>, or null when its rows are read after all.</summary>
-        internal Turn(PositionedObject held, AnsweredObject? done)
-        {
-            Held = held;
-            Done = done;
-            Answers = true;
-        }
-
-        internal PositionedObject Held { get; }
-
-        /// <summary>Whether its synopsis answers it: an answer done or started, which may still find its rows read.</summary>
-        internal bool Answers { get; }
-
-        /// <summary>The answer done on the spot, the walk's to deliver or to let go.</summary>
-        internal AnsweredObject? Done { get; }
-
-        internal Task<AnsweredObject?>? Answer { get; }
-
-        internal Task<ObjectBatches>? Rows { get; set; }
-
-        /// <summary>Lets go what was read ahead and never delivered: the answer's states, the rows' lease.</summary>
-        internal async ValueTask ReleaseAsync()
-        {
-            Done?.Dispose();
-            if (Answer is { } answer)
-            {
-                try
-                {
-#pragma warning disable VSTHRD003
-                    (await answer.ConfigureAwait(false))?.Dispose();
-#pragma warning restore VSTHRD003
-                }
-                catch (Exception) when (answer.IsFaulted || answer.IsCanceled)
-                {
-                }
-            }
-
-            if (Rows is { } rows)
-            {
-                try
-                {
-#pragma warning disable VSTHRD003
-                    await (await rows.ConfigureAwait(false)).Batches.DisposeAsync().ConfigureAwait(false);
-#pragma warning restore VSTHRD003
-                }
-                catch (Exception) when (rows.IsFaulted || rows.IsCanceled)
-                {
-                }
-            }
-        }
-    }
-
-    /// <summary>
-    /// Orders <paramref name="objects"/> by the newest instant each holds, newest first, those whose
-    /// summary does not say last, each kind in the walk's order.
-    /// </summary>
-    private void NewestFirst(Span<PositionedObject> objects)
-    {
-        if (_dataset.Key is not { } key)
-        {
-            return;
-        }
-
-        Span<(long Newest, int At)> order = objects.Length <= 512 ? stackalloc (long, int)[objects.Length] : new (long, int)[objects.Length];
-        for (int i = 0; i < order.Length; i++)
-        {
-            long newest = objects[i].Entry.Summaries.TryGet(key.InstantPath, out ColumnSummary summary)
-                && summary is { HasMax: true, Max.Kind: FilterLiteralKind.Signed }
-                ? summary.Max.SignedValue
-                : long.MinValue;
-            order[i] = (newest, i);
-        }
-
-        order.Sort(static (a, b) => a.Newest != b.Newest ? b.Newest.CompareTo(a.Newest) : a.At.CompareTo(b.At));
-
-        // Each place takes the object the order puts there, a cycle of places at a time, in place: a place done is
-        // marked by its source made -1.
-        for (int i = 0; i < order.Length; i++)
-        {
-            if (order[i].At < 0)
-            {
-                continue;
-            }
-
-            PositionedObject first = objects[i];
-            for (int place = i; ;)
-            {
-                int from = order[place].At;
-                order[place].At = -1;
-                if (from == i)
-                {
-                    objects[place] = first;
-                    break;
-                }
-
-                objects[place] = objects[from];
-                place = from;
-            }
-        }
-    }
-
-    /// <summary>What an object's synopsis answered: its batches of states, the tables they lie in, and the rows of its edge slices.</summary>
-    private sealed class AnsweredObject(List<RecordBatch> states, SynopsisTableSet? tables, List<RecordBatch> edges) : IDisposable
-    {
-        internal List<RecordBatch> States { get; } = states;
-
-        internal List<RecordBatch> Edges { get; } = edges;
-
-        public void Dispose()
-        {
-            foreach (RecordBatch batch in States)
-            {
-                batch.Dispose();
-            }
-
-            foreach (RecordBatch batch in Edges)
-            {
-                batch.Dispose();
-            }
-
-            tables?.Dispose();
-        }
-    }
-
-    /// <summary>
-    /// The batches of an object's answer as the dataset's: its states, then the rows its edges keep, each
-    /// counted; the answer given back once the last is read, or the consumer stops.
-    /// </summary>
-    private IEnumerable<RecordBatch> Delivered(PositionedObject held, AnsweredObject answered)
-    {
-        try
-        {
-            foreach (RecordBatch batch in answered.States)
-            {
-                _counters?.AddSynopsisRows(batch.SelectedRows);
-                yield return batch;
-            }
-
-            foreach (RecordBatch slice in answered.Edges)
-            {
-                using RecordBatch rows = slice.Rebased(held.FirstRow + slice.StartRow);
-                _counters?.AddEdgeRows(rows.SelectedRows);
-                if (rows.SelectedRows > 0)
-                {
-                    yield return rows;
-                }
-            }
-        }
-        finally
-        {
-            answered.Dispose();
-        }
-    }
-
-    /// <summary>
-    /// What an object's synopsis answers when its tables alone answer it, no row read beside them, and the session's
-    /// synopsis cache holds every chunk of them: read, decoded and folded on the spot, with no task, null when a row
-    /// cannot come out of a table exactly; false when the answer needs a read of its own, which
-    /// <see cref="AnswerObjectAsync"/> makes. A walk of a warm question over many objects answers each so, where a task an
-    /// object was the most it allocated for one.
-    /// </summary>
-    private bool TryAnswerNow(PositionedObject held, SynopsisAnswer answer, SynopsisContents contents, string instant, out AnsweredObject? answered)
-    {
-        answered = null;
-        if (held.Entry.HasDeletions || answer.Edges.Count > 0 || answer.Excluded.Count > 0 || answer.Absent.Count > 0 || answer.Parts.Count == 0)
-        {
-            return false;
-        }
-
-        answer.Project(contents);
-        if (_dataset.ReadSynopsisCached(held.Entry, contents, answer) is not { } tables)
-        {
-            return false;
-        }
-
-        DType schema = contents.SchemaType;
-        List<RecordBatch> states = new List<RecordBatch>(tables.Tables.Count);
-        bool exact = true;
-        try
-        {
-            for (int p = 0; p < answer.Parts.Count && exact; p++)
-            {
-                exact = answer.TryBatches(tables, answer.Parts[p], contents, instant, held.FirstRow, states, null, schema, contents.Slices);
-            }
-        }
-        catch
-        {
-            LetGo(states, tables);
-            throw;
-        }
-
-        if (!exact)
-        {
-            LetGo(states, tables);
-            return true;
-        }
-
-        answered = new AnsweredObject(states, tables, NoRows);
-        return true;
-    }
-
-    /// <summary>The batches and tables of an answer given back.</summary>
-    private static void LetGo(List<RecordBatch> states, SynopsisTableSet tables)
-    {
-        foreach (RecordBatch batch in states)
-        {
-            batch.Dispose();
-        }
-
-        tables.Dispose();
-    }
-
-    /// <summary>
-    /// Reads what an object's synopsis answers, with no open of it, as <see cref="AnsweredAsync"/> delivers it;
-    /// null, with nothing held, when a row cannot come out of a table exactly or an identifier's index cannot
-    /// find the rows left out.
-    /// </summary>
-    private async Task<AnsweredObject?> AnswerObjectAsync(
-        PositionedObject held, SynopsisAnswer answer, SynopsisContents contents, string instant, CancellationToken cancellationToken)
-    {
-        // A deletion vector kept out of line is read before the rows it marks are.
-        if (held.Entry.HasDeletions && !held.Entry.IsResolved)
-        {
-            await held.Entry.ResolveAsync(_version.Pages, cancellationToken).ConfigureAwait(false);
-        }
-
-        // The slices cut and the rows marked are read beside the tables, not after them: their chunk
-        // directories and their chunks take two round trips, the tables one, so the object costs two.
-        DType schema = contents.SchemaType;
-        Task<List<RecordBatch>>? edges = answer.Edges.Count > 0
-            ? ReadSpansAsync(held, contents, answer.Edges, EdgeColumns(schema), select: true, cancellationToken)
-            : null;
-        Task<List<RecordBatch>>? marked = held.Entry.HasDeletions && answer.Parts.Count > 0
-            ? ReadSpansAsync(held, contents, MarkedSpans(held.Entry.Deletions), MeasuredColumns(answer), select: false, cancellationToken)
-            : null;
-        Task<List<RecordBatch>>? excluded = answer.Excluded.Count > 0 && answer.Parts.Count > 0
-            ? ExcludedAsync(held, answer.Excluded, ExcludedColumns(answer, schema), cancellationToken)
-            : null;
-
-        // The values the answer takes for absent, looked up beside the tables: a row that holds one sends the object to its rows.
-        Task<List<RecordBatch>>? present = answer.Absent.Count > 0 && answer.Parts.Count > 0
-            ? ExcludedAsync(held, answer.Absent, LeftOutColumns(answer.Absent, [], schema), cancellationToken)
-            : null;
-        List<RecordBatch> states = [];
-        SynopsisTableSet? tables = null;
-        bool exact = true;
-        try
-        {
-            if (answer.Parts.Count > 0)
-            {
-                // The fields the batches of states are read by, but every one where a row comes out of a table.
-                if (!held.Entry.HasDeletions && answer.Excluded.Count == 0)
-                {
-                    answer.Project(contents);
-                }
-
-                tables = await _dataset.ReadSynopsisAsync(held.Entry, contents, answer, cancellationToken).ConfigureAwait(false);
-                if (present is not null)
-                {
-                    List<RecordBatch> found = await present.ConfigureAwait(false);
-                    exact = !ReferenceEquals(found, Unfound) && found.TrueForAll(static batch => batch.SelectedRows == 0);
-                }
-
-                List<RecordBatch>? removed = marked is null ? null : await marked.ConfigureAwait(false);
-                if (excluded is not null)
-                {
-                    List<RecordBatch> left = await excluded.ConfigureAwait(false);
-                    exact = !ReferenceEquals(left, Unfound);
-                    removed = removed is null ? left : [.. removed, .. left];
-                }
-
-                foreach (SynopsisPart part in answer.Parts)
-                {
-                    if (!exact || !answer.TryBatches(tables, part, contents, instant, held.FirstRow, states, removed, schema, contents.Slices))
-                    {
-                        exact = false;
-                        break;
-                    }
-                }
-            }
-        }
-        catch
-        {
-            await LetGoAsync(states, tables, marked, edges, excluded, present).ConfigureAwait(false);
-            throw;
-        }
-
-        // The rows taken out are spent once the states are corrected, and the rows looked for once seen.
-        if (marked is not null || excluded is not null || present is not null)
-        {
-            await LetGoAsync(NoRows, null, marked, excluded, present).ConfigureAwait(false);
-        }
-
-        if (!exact)
-        {
-            await LetGoAsync(states, tables, edges).ConfigureAwait(false);
-            return null;
-        }
-
-        try
-        {
-            return new AnsweredObject(states, tables, edges is null ? NoRows : await edges.ConfigureAwait(false));
-        }
-        catch
-        {
-            await LetGoAsync(states, tables).ConfigureAwait(false);
-            throw;
-        }
-    }
-
-    /// <summary>What <see cref="ExcludedAsync"/> answers when an identifier's index cannot find the rows left out.</summary>
-    private static readonly List<RecordBatch> Unfound = [];
-
-    /// <summary>No batch: the edges of an answer that cuts none, the rows of none taken out. Never added to.</summary>
-    private static readonly List<RecordBatch> NoRows = [];
-
-    /// <summary>
-    /// The rows the filter leaves out by an identifier's value, found by the identifier's index with no open
-    /// of the object, three round trips cold, beside the tables: each part's rows, those an earlier part
-    /// already left out and those a deletion marked left out too, since a row comes out of a table once.
-    /// Batches counted from the object's first physical row, which the caller disposes; <see cref="Unfound"/>
-    /// when an index cannot say.
-    /// </summary>
-    private async Task<List<RecordBatch>> ExcludedAsync(
-        PositionedObject held, IReadOnlyList<(VortexExpr Part, VortexExpr Kept)> excluded, int[]? columns, CancellationToken cancellationToken)
-    {
-        Task<List<RecordBatch>?>[] lookups = new Task<List<RecordBatch>?>[excluded.Count];
-        for (int i = 0; i < lookups.Length; i++)
-        {
-            lookups[i] = _dataset.LookupAsync(held.Entry, excluded[i].Part, columns, cancellationToken).AsTask();
-        }
-
-        try
-        {
-            await Task.WhenAll(lookups).ConfigureAwait(false);
-        }
-        catch
-        {
-            foreach (Task<List<RecordBatch>?> lookup in lookups)
-            {
-                if (lookup.IsCompletedSuccessfully)
-                {
-                    foreach (RecordBatch batch in await lookup.ConfigureAwait(false) ?? [])
-                    {
-                        batch.Dispose();
-                    }
-                }
-            }
-
-            throw;
-        }
-
-        List<RecordBatch> rows = [];
-        bool found = true;
-        VortexExpr? earlier = null;
-        for (int i = 0; i < lookups.Length; i++)
-        {
-            List<RecordBatch>? batches = await lookups[i].ConfigureAwait(false);
-            found &= batches is not null;
-            VortexExpr part = earlier is null ? excluded[i].Part : Expr.And(excluded[i].Part, earlier);
-            foreach (RecordBatch batch in batches ?? [])
-            {
-                rows.Add(batch);
-                SelectBy(batch, part);
-                if (held.Entry.HasDeletions)
-                {
-                    LeaveOutMarked(batch, held.Entry.Deletions);
-                }
-            }
-
-            earlier = earlier is null ? excluded[i].Kept : Expr.And(earlier, excluded[i].Kept);
-        }
-
-        if (found)
-        {
-            return rows;
-        }
-
-        foreach (RecordBatch batch in rows)
-        {
-            batch.Dispose();
-        }
-
-        return Unfound;
-    }
-
-    /// <summary>The batches and tables of an answer given back, those read beside it once their reads end.</summary>
-    private static async ValueTask LetGoAsync(List<RecordBatch> states, SynopsisTableSet? tables, params Task<List<RecordBatch>>?[] reads)
-    {
-        foreach (RecordBatch batch in states)
-        {
-            batch.Dispose();
-        }
-
-        if (!ReferenceEquals(states, NoRows))
-        {
-            states.Clear();
-        }
-
-        tables?.Dispose();
-        foreach (Task<List<RecordBatch>>? read in reads)
-        {
-            if (read is null)
-            {
-                continue;
-            }
-
-            try
-            {
-                foreach (RecordBatch batch in await read.ConfigureAwait(false))
-                {
-                    batch.Dispose();
-                }
-            }
-            catch (Exception) when (read.IsFaulted || read.IsCanceled)
-            {
-            }
-        }
-    }
-
-    /// <summary>
-    /// Rows of the object read with no open of it, through its chunk directories, a batch per span of
-    /// <paramref name="columns"/>, the rows its deletion marked left out; with <paramref name="select"/>, the
-    /// rows the filter holds for alone. Batches counted from the object's first physical row, which the
-    /// caller disposes.
-    /// </summary>
-    private async Task<List<RecordBatch>> ReadSpansAsync(
-        PositionedObject held, SynopsisContents contents, IReadOnlyList<TimeSlice> spans, int[]? columns, bool select, CancellationToken cancellationToken)
-    {
-        List<RecordBatch> batches = [.. await _dataset.ReadSlicesAsync(held.Entry, contents, spans, columns, cancellationToken).ConfigureAwait(false)];
-        try
-        {
-            foreach (RecordBatch batch in batches)
-            {
-                if (select && _filter is { } filter)
-                {
-                    SelectBy(batch, filter);
-                }
-
-                if (select && held.Entry.HasDeletions)
-                {
-                    LeaveOutMarked(batch, held.Entry.Deletions);
-                }
-            }
-
-            return batches;
-        }
-        catch
-        {
-            foreach (RecordBatch batch in batches)
-            {
-                batch.Dispose();
-            }
-
-            throw;
-        }
-    }
-
-    /// <summary>The runs of rows a deletion marked, as spans of the object's physical rows.</summary>
-    private static List<TimeSlice> MarkedSpans(DeletionVector deletions)
-    {
-        List<TimeSlice> spans = new List<TimeSlice>(deletions.Runs);
-        for (int run = 0; run < deletions.Runs; run++)
-        {
-            spans.Add(new TimeSlice(0, 1, deletions.StartOf(run), deletions.EndOf(run) - deletions.StartOf(run)));
-        }
-
-        return spans;
-    }
-
-    /// <summary>
-    /// The columns the rows an identifier's index finds are read for: the keys and the measures of the tables they come out
-    /// of, and the columns of the filters that leave them out and keep the rest; null, every one, when a filter names a
-    /// column that is none of the schema's. Every column's chunk directory was read and parsed for them, at every question.
-    /// </summary>
-    private static int[]? ExcludedColumns(SynopsisAnswer answer, DType schema) => LeftOutColumns(answer.Excluded, MeasuredColumns(answer), schema);
-
-    /// <summary>
-    /// The columns of <paramref name="measured"/> and those the filters of <paramref name="leftOut"/> read, which leave
-    /// values of identifiers out and keep the rest; null, every one, when a filter names a column that is none of the
-    /// schema's.
-    /// </summary>
-    private static int[]? LeftOutColumns(IReadOnlyList<(VortexExpr Part, VortexExpr Kept)> leftOut, int[] measured, DType schema)
-    {
-        SortedSet<int> fields = [.. measured];
-        HashSet<string> named = new HashSet<string>(StringComparer.Ordinal);
-        foreach ((VortexExpr part, VortexExpr kept) in leftOut)
-        {
-            part.CollectFields(named);
-            kept.CollectFields(named);
-        }
-
-        foreach (string name in named)
-        {
-            int field = schema.IndexOfField(name);
-            if (field < 0)
-            {
-                return null;
-            }
-
-            fields.Add(field);
-        }
-
-        return [.. fields];
-    }
-
-    /// <summary>The columns the answer's tables key and measure: what charges a row taken out to its table's row.</summary>
-    private static int[] MeasuredColumns(SynopsisAnswer answer)
-    {
-        SortedSet<int> fields = [];
-        foreach (SynopsisPart part in answer.Parts)
-        {
-            foreach (int field in part.Table.Keys)
-            {
-                if (!SynopsisPath.Names(field))
-                {
-                    fields.Add(field);
-                }
-            }
-
-            foreach (int field in part.Table.Measures)
-            {
-                if (!SynopsisPath.Names(field))
-                {
-                    fields.Add(field);
-                }
-            }
-        }
-
-        return [.. fields];
-    }
-
-    /// <summary>Leaves the rows a deletion marked out of a batch of an object's physical rows.</summary>
-    private static void LeaveOutMarked(RecordBatch batch, DeletionVector deletions)
-    {
-        int rows = batch.RowCount;
-        int words = Math.Max((rows + 63) >> 6, 1);
-        Buffers.VortexBuffer selection = batch.Arena.Allocate(words * sizeof(ulong), sizeof(ulong), out Span<byte> bytes);
-        Span<ulong> live = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, ulong>(bytes);
-        deletions.Live(batch.StartRow, rows, live);
-        ReadOnlySpan<ulong> kept = batch.SelectionWords;
-        int selected = 0;
-        for (int w = 0; w < words; w++)
-        {
-            if (!kept.IsEmpty)
-            {
-                live[w] &= kept[w];
-            }
-
-            selected += System.Numerics.BitOperations.PopCount(live[w]);
-        }
-
-        batch.Select(selection, selected);
-    }
-
-    /// <summary>
-    /// The top-level columns of <paramref name="schema"/> an edge reads: those the pass projects and those
-    /// the filter names; null for every column, the pass projecting none.
-    /// </summary>
-    private int[]? EdgeColumns(DType schema)
-    {
-        if (_mask is not { } mask)
-        {
-            return null;
-        }
-
-        SortedSet<int> fields = [];
-        HashSet<string> named = new HashSet<string>(StringComparer.Ordinal);
-        foreach (string path in PathsOf(mask, schema))
-        {
-            named.Add(path.Split('.')[0]);
-        }
-
-        _filter?.CollectFields(named);
-        foreach (string name in named)
-        {
-            int field = schema.IndexOfField(name.Split('.')[0]);
-            if (field >= 0)
-            {
-                fields.Add(field);
-            }
-        }
-
-        return [.. fields];
-    }
-
-    /// <summary>Selects the rows of <paramref name="batch"/> <paramref name="filter"/> holds for.</summary>
-    private static void SelectBy(RecordBatch batch, VortexExpr filter)
-    {
-        int rows = batch.RowCount;
-        byte[] states = System.Buffers.ArrayPool<byte>.Shared.Rent(Math.Max(rows, 1));
-        try
-        {
-            FilterEvaluator.Evaluate(filter, batch.Arena, batch.RootIndex, rows, states.AsSpan(0, rows));
-            int words = Math.Max((rows + 63) >> 6, 1);
-            Buffers.VortexBuffer selection = batch.Arena.Allocate(words * sizeof(ulong), sizeof(ulong), out Span<byte> bytes);
-            Span<ulong> kept = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, ulong>(bytes);
-
-            // The states compared 64 at a time, each word of the selection written whole, and counted by its popcount; the
-            // one word of a batch of no row, which no compare writes, cleared.
-            kept[^1] = 0;
-            int selected = Trilean.ToWords(states.AsSpan(0, rows), Trilean.True, equal: true, kept);
-            batch.Select(selection, selected);
-        }
-        finally
-        {
-            System.Buffers.ArrayPool<byte>.Shared.Return(states);
-        }
-    }
-
-    /// <summary>
-    /// The rows the scan selects, without materialising them, cheapest proof first: an object whose
-    /// covered rows are all kept is counted from its entry without being opened, which is every
-    /// object when there is no filter and, under a range on the clustering key, an object whose
-    /// summary bounds lie wholly inside it and whose key holds no null; any other object is counted
-    /// by its own file's count, from statistics, zone maps and indexes before any decode.
-    /// </summary>
-    public async ValueTask<long> CountAsync(CancellationToken cancellationToken = default)
-    {
-        long rows = 0;
-        KeyRange? range = CountRange();
-        await foreach (PositionedObject held in WalkAsync(cancellationToken).ConfigureAwait(false))
-        {
-            long covered = Covered(held);
-            if (covered == 0)
-            {
-                continue;
-            }
-
-            if (Settled(held, range))
-            {
-                rows += covered;
-                RecordCounted();
-                continue;
-            }
-
-            ObjectLease lease = await RentAsync(held, cancellationToken).ConfigureAwait(false);
-            await using (lease.ConfigureAwait(false))
-            {
-                RecordOpen(lease);
-                rows += await CountOfAsync(lease.File, held, PartOf(ColumnsOf(lease, held.Entry), FieldMask.Empty), stopAtOne: false, cancellationToken)
-                    .ConfigureAwait(false);
-            }
-        }
-
-        return rows;
-    }
-
-    /// <summary>
-    /// Whether the scan would return at least one row; the first object that holds one answers for
-    /// the dataset, and one whose entry settles it answers without being opened.
-    /// </summary>
-    public async ValueTask<bool> AnyAsync(CancellationToken cancellationToken = default)
-    {
-        KeyRange? range = CountRange();
-        await foreach (PositionedObject held in WalkAsync(cancellationToken).ConfigureAwait(false))
-        {
-            if (Covered(held) == 0)
-            {
-                continue;
-            }
-
-            if (Settled(held, range))
-            {
-                RecordCounted();
-                return true;
-            }
-
-            ObjectLease lease = await RentAsync(held, cancellationToken).ConfigureAwait(false);
-            await using (lease.ConfigureAwait(false))
-            {
-                RecordOpen(lease);
-                if (await CountOfAsync(lease.File, held, PartOf(ColumnsOf(lease, held.Entry), FieldMask.Empty), stopAtOne: true, cancellationToken)
-                    .ConfigureAwait(false) > 0)
-                {
-                    return true;
-                }
-            }
-        }
-
-        return false;
-    }
-
-    /// <summary>
-    /// The smallest non-null value of a column among the rows the scan would return, or
-    /// <see cref="FilterLiteral.Null"/> when there is none.
-    /// </summary>
-    public ValueTask<FilterLiteral> MinAsync(string path, CancellationToken cancellationToken = default) =>
-        ExtremeAsync(path, wantMin: true, cancellationToken);
-
-    /// <summary>
-    /// The largest non-null value of a column among the rows the scan would return, or
-    /// <see cref="FilterLiteral.Null"/> when there is none.
-    /// </summary>
-    public ValueTask<FilterLiteral> MaxAsync(string path, CancellationToken cancellationToken = default) =>
-        ExtremeAsync(path, wantMin: false, cancellationToken);
-
-    /// <summary>
-    /// What the scan would read, without reading a data object. A level 0 that has outgrown its
-    /// ceiling is reported as a lag rather than refused, since compaction is the caller's own
-    /// background job and the answers stay correct meanwhile.
-    /// </summary>
-    public async ValueTask<DatasetPlan> ExplainAsync(CancellationToken cancellationToken = default)
-    {
-        DatasetScanCounters metrics = new DatasetScanCounters();
-        long objects = 0;
-        long rows = 0;
-        List<long> keptByLevel = [];
-        await foreach (PositionedObject held in _version
-            .WalkAsync(Pruner(), _from, _to, metrics, cancellationToken).ConfigureAwait(false))
-        {
-            if (Covered(held) == 0)
-            {
-                continue;
-            }
-
-            objects++;
-            rows += held.Entry.Rows;
-            while (keptByLevel.Count <= held.Level)
-            {
-                keptByLevel.Add(0);
-            }
-
-            keptByLevel[held.Level]++;
-        }
-
-        DatasetLevels levels = _version.Levels;
-        long[] byLevel = new long[Math.Max(levels.Count, 1)];
-        for (int level = 0; level < byLevel.Length; level++)
-        {
-            byLevel[level] = levels[level].Entries;
-        }
-
-        return new DatasetPlan(
-            _version.Version,
-            byLevel,
-            levels.LagAtLevelZero(),
-            _version.Header.ClusteringKey.Count > 0,
-            objects,
-            rows,
-            metrics.ObjectsSkipped,
-            metrics.SubtreesSkipped,
-            _orderPaths is null ? null : _orderPaths.Length == 1 ? _orderPaths[0] : "(" + string.Join(", ", _orderPaths) + ")",
-            CursorBound(objects, keptByLevel));
-    }
-
-    /// <summary>
-    /// What the scan will do as the core's plan, summed over the objects it would open: each one's
-    /// own plan, worked out from its statistics, zone maps and indexes, and before them the rows the
-    /// summaries refute as one step. No data segment is read, but every kept object is opened.
-    /// </summary>
-    /// <remarks>
-    /// An object the summaries refute is never opened, so its blocks are counted at the block size
-    /// of the objects that were, or at the dataset's own when none was.
-    /// </remarks>
-    public async ValueTask<ScanPlan> PlanAsync(CancellationToken cancellationToken = default)
-    {
-        long keptRows = 0;
-        long blockRows = 0;
-        long blocks = 0;
-        long live = 0;
-        long segments = 0;
-        long bytes = 0;
-        bool mayMatch = false;
-        List<PruningStep> steps = [];
-        Dictionary<string, int> stepAt = new Dictionary<string, int>(StringComparer.Ordinal);
-        bool exact = true;
-        long exactRows = 0;
-        long pruned = 0;
-        long proven = 0;
-        long decoded = 0;
-        List<string> sources = [];
-        long runs = 0;
-        long entries = 0;
-        List<StatesStep> states = [];
-        KeyRange? range = CountRange();
-        await foreach (PositionedObject held in WalkAsync(cancellationToken).ConfigureAwait(false))
-        {
-            long covered = Covered(held);
-            if (covered == 0)
-            {
-                continue;
-            }
-
-            // What an aggregation that takes states reads of the object: its tables, then its edges' rows,
-            // or its rows and why. An object its synopsis answers is not opened, by the plan as by the pass.
-            if (_states is { } request && StatesOf(held, request, states) is not null)
-            {
-                keptRows += covered;
-                mayMatch = true;
-                continue;
-            }
-
-            ScanExplanation plan;
-            bool evaluated = false;
-            ObjectLease lease = await RentAsync(held, cancellationToken).ConfigureAwait(false);
-            await using (lease.ConfigureAwait(false))
-            {
-                RecordOpen(lease);
-
-                // An object is planned as its own scan reads it: the filter it takes, or none when the
-                // filter is evaluated on its reshaped batches.
-                ObjectPart part = PartOf(ColumnsOf(lease, held.Entry), _mask);
-                if (part.Fate == FilterFate.None)
-                {
-                    continue;
-                }
-
-                evaluated = part.Fate == FilterFate.Reshaped;
-                ScanBuilder scan = _orderPaths is { } paths && part.Mapped is null
-                    ? OrderedOf(lease.File, paths, withKey: false)
-                    : ScanOf(lease.File, held, part);
-                plan = await scan.ExplainAsync(cancellationToken).ConfigureAwait(false);
-            }
-
-            keptRows += covered;
-
-            blockRows = blockRows == 0 ? plan.BlockRows : blockRows;
-            blocks += plan.Blocks;
-            live += plan.LiveBlocks;
-            segments += plan.SegmentsToRead;
-            bytes += plan.BytesToRead;
-            mayMatch |= plan.FileMayMatch;
-            foreach (PruningStep step in plan.Pruning)
-            {
-                if (stepAt.TryGetValue(step.Structure, out int at))
-                {
-                    PruningStep sum = steps[at];
-                    steps[at] = sum with
-                    {
-                        BlocksPruned = sum.BlocksPruned + step.BlocksPruned,
-                        SegmentsRead = sum.SegmentsRead + step.SegmentsRead,
-                        BytesRead = sum.BytesRead + step.BytesRead,
-                    };
-                }
-                else
-                {
-                    stepAt[step.Structure] = steps.Count;
-                    steps.Add(step);
-                }
-            }
-
-            if (evaluated || (held.Entry.HasDeletions && !Settled(held, range)))
-            {
-                // Its rows are counted by evaluating the filter on them, or its own plan counts rows
-                // that are deleted: no plan settles the count.
-                exact = false;
-            }
-            else if (Settled(held, range) || plan.Count is null)
-            {
-                exactRows += covered;
-            }
-            else
-            {
-                CountExplanation count = plan.Count;
-                exact &= count.ExactCover;
-                exactRows += count.ExactCount;
-                pruned += count.SplitsPruned;
-                proven += count.SplitsProven;
-                decoded += count.SplitsDecoded;
-            }
-
-            if (plan.Order is { } order)
-            {
-                string source = order.Source.ToString();
-                if (!sources.Contains(source))
-                {
-                    sources.Add(source);
-                }
-
-                runs += order.RunsInRange;
-                entries += order.EntriesInRange;
-            }
-        }
-
-        long coveredRows = _take is { } take ? take.Length : Math.Max(Math.Min(_to, _version.RowCount) - _from, 0);
-        long refuted = Math.Max(coveredRows - keptRows, 0);
-        long perBlock = blockRows > 0 ? blockRows : Math.Max(_dataset.Options.Write.BlockRows, 1);
-        long refutedBlocks = (refuted + perBlock - 1) / perBlock;
-        List<PruningStep> pruning = new List<PruningStep>(steps.Count + 1);
-        if (refutedBlocks > 0)
-        {
-            pruning.Add(new PruningStep("object summaries", Narrow(refutedBlocks), 0, 0));
-        }
-
-        pruning.AddRange(steps);
-        return new ScanPlan(
-            coveredRows,
-            Narrow(blocks + refutedBlocks),
-            Narrow(live),
-            Narrow(segments),
-            bytes,
-            mayMatch,
-            [.. pruning],
-            new CountPlan(exact, exactRows, Narrow(pruned), Narrow(proven), Narrow(decoded)),
-            _orderPaths is null
-                ? null
-                : new OrderPlan(sources.Count == 0 ? nameof(KeySourceKind.None) : string.Join('+', sources), Narrow(runs), entries, _descending))
-        {
-            States = [.. states],
+    private DatasetScanBuilder Part(VortexExpr? filter, long from, long to) =>
+        new DatasetScanBuilder(_dataset, _version)
+        {
+            _filter = filter,
+            _mask = _mask,
+            _indexes = _indexes,
+            _summaries = _summaries,
+            _from = from,
+            _to = to,
+            _rowsSet = true,
+            _considers = false,
+            _metrics = _metrics,
+            _counters = _counters,
+            _options = _options,
+            _keepEncodings = _keepEncodings,
+            _sinkDecodes = _sinkDecodes,
+            _positionsUnread = _positionsUnread,
+            _variantKeys = _variantKeys,
+            _zoneKeys = _zoneKeys,
+            _readAhead = _readAhead,
+            _readAheadGranted = _readAheadGranted,
+            _settles = _settles,
+            _geometries = LazyInitializer.EnsureInitialized(ref _geometries),
+            _question = _question,
+            _reads = _question is null ? LazyInitializer.EnsureInitialized(ref _reads) : null,
         };
-    }
-
-    /// <summary>
-    /// Adds to <paramref name="into"/> what the object reads for an aggregation that takes states: each
-    /// table of its answer with the buckets it folds and the slices read at its edges; or its rows, and
-    /// why. The answer, or null when the rows are read whole.
-    /// </summary>
-    private SynopsisAnswer? StatesOf(in PositionedObject held, StateRequest request, List<StatesStep> into)
-    {
-        string key = held.Entry.Key.ToString();
-        (SynopsisAnswer? answer, SynopsisContents? contents, _) = Answer(held, request);
-        if (answer is null || contents is null)
-        {
-            string why = Covered(held) != held.Entry.Rows ? "a part of its rows asked"
-                : held.Entry.Synopsis.IsEmpty ? "no synopsis"
-                : "no table holds the keys, the measures and the window";
-            into.Add(new StatesStep(key, "rows", why, held.Entry.Rows));
-            return null;
-        }
-
-        if (held.Entry.HasDeletions && answer.Parts.Count > 0)
-        {
-            into.Add(new StatesStep(key, "marked", "rows a delete marked, taken out of the tables, or the object's rows if one cannot be", held.Entry.DeletedRows));
-        }
-
-        if (answer.Excluded.Count > 0 && answer.Parts.Count > 0)
-        {
-            into.Add(new StatesStep(
-                key, "excluded", "rows the filter leaves out by an identifier, found by its index and taken out of the tables", answer.Excluded.Count));
-        }
-
-        if (answer.Absent.Count > 0 && answer.Parts.Count > 0)
-        {
-            into.Add(new StatesStep(
-                key, "absent", "values the filter leaves out by an identifier, which its index must find in no row before the tables answer, or the object's rows", answer.Absent.Count));
-        }
-
-        DType schema = contents.SchemaType;
-        foreach (SynopsisPart part in answer.Parts)
-        {
-            string[] keys = Array.ConvertAll(part.Table.Keys, field => SynopsisTableInfo.NameOf(field, schema, contents.Slices.Paths));
-            into.Add(new StatesStep(key, "table", $"{part.Table.Kind} by {part.Table.Bucket} on ({string.Join(", ", keys)})", part.KeptCount));
-        }
-
-        if (answer.Edges.Count > 0)
-        {
-            into.Add(new StatesStep(key, "edges", "the slices the window or a key of time cuts", answer.Edges.Count));
-        }
-
-        return answer;
-    }
 
     /// <summary>
     /// The objects this scan will read, in key order, each with its first row: the walk with its
@@ -2262,106 +740,12 @@ internal sealed class DatasetScanBuilder
     public IAsyncEnumerable<PositionedObject> ObjectsAsync(CancellationToken cancellationToken = default) =>
         WalkAsync(cancellationToken);
 
-    /// <summary>
-    /// The extreme over the objects, each one skipped when its own summary cannot beat the best so
-    /// far, and taken from its summary without being opened when that summary is exact and covers
-    /// every row the scan keeps in it. A summary's min is at or below the object's true minimum, so
-    /// a summary min that already loses cannot hide a winner behind it.
-    /// </summary>
-    private async ValueTask<FilterLiteral> ExtremeAsync(
-        string path, bool wantMin, CancellationToken cancellationToken)
-    {
-        ArgumentNullException.ThrowIfNull(path);
-        FieldMask projection = new FieldMaskBuilder().Include(ToolPaths.Resolve(_version.Schema.Columns, path)).Build();
-        FilterLiteral best = FilterLiteral.Null;
-        await foreach (PositionedObject held in WalkAsync(cancellationToken).ConfigureAwait(false))
-        {
-            if (Covered(held) == 0)
-            {
-                continue;
-            }
-
-            if (_summaries && Loses(held.Entry.Summaries, path, best, wantMin))
-            {
-                if (_metrics is { } skipped)
-                {
-                    skipped.ObjectsSkipped++;
-                }
-
-                continue;
-            }
-
-            if (_summaries && _filter is null && Whole(held) && Exact(held.Entry.Summaries, path, wantMin, out FilterLiteral bound))
-            {
-                if (Beats(bound, best, wantMin))
-                {
-                    best = bound;
-                }
-
-                RecordCounted();
-                continue;
-            }
-
-            ObjectLease lease = await RentAsync(held, cancellationToken).ConfigureAwait(false);
-            await using (lease.ConfigureAwait(false))
-            {
-                RecordOpen(lease);
-                FilterLiteral candidate = await ObjectExtremeAsync(lease.File, held, ColumnsOf(lease, held.Entry), path, projection, wantMin, cancellationToken)
-                    .ConfigureAwait(false);
-                if (candidate.Kind != FilterLiteralKind.Null && Beats(candidate, best, wantMin))
-                {
-                    best = candidate;
-                }
-            }
-        }
-
-        return best;
-    }
-
-    /// <summary>Whether an object's summary proves it cannot hold a better value than the best.</summary>
-    private static bool Loses(ObjectSummaries summaries, string path, FilterLiteral best, bool wantMin)
-    {
-        if (best.Kind == FilterLiteralKind.Null || !summaries.TryGet(path, out ColumnSummary column))
-        {
-            return false;
-        }
-
-        if (wantMin)
-        {
-            return column.HasMin && Comparable(column.Min, best) && KeyCursor.Compare(column.Min, best) >= 0;
-        }
-
-        return column.HasMax && Comparable(column.Max, best) && KeyCursor.Compare(column.Max, best) <= 0;
-    }
-
-    /// <summary>The true extreme an object's summary records, when it records one.</summary>
-    private static bool Exact(ObjectSummaries summaries, string path, bool wantMin, out FilterLiteral bound)
-    {
-        bound = FilterLiteral.Null;
-        if (!summaries.TryGet(path, out ColumnSummary column) || !column.IsExact)
-        {
-            return false;
-        }
-
-        bound = wantMin ? column.Min : column.Max;
-        return (wantMin ? column.HasMin : column.HasMax) && bound.Kind != FilterLiteralKind.Null;
-    }
-
-    private static bool Beats(FilterLiteral candidate, FilterLiteral best, bool wantMin) =>
-        best.Kind == FilterLiteralKind.Null
-        || !Comparable(candidate, best)
-        || (wantMin ? KeyCursor.Compare(candidate, best) < 0 : KeyCursor.Compare(candidate, best) > 0);
-
-    /// <summary>Whether two literals are of one comparison kind, so that an order holds between them.</summary>
-    private static bool Comparable(FilterLiteral left, FilterLiteral right) =>
-        left.Kind == right.Kind && left.Kind != FilterLiteralKind.Null;
-
-    /// <summary>The range on the clustering key the entries can count the filter by, or null.</summary>
+    /// <summary>The range on the sort key the entries can count the filter by, or null.</summary>
     private KeyRange? CountRange() => _filter is not null && _summaries ? KeyRange.Of(_dataset, _filter) : null;
 
     /// <summary>
     /// Whether every row the scan covers in an object is kept, known without opening it: there is
-    /// no filter, or the object lies wholly inside the scan and inside a range on the clustering key.
+    /// no filter, or the object lies wholly inside the scan and inside a range on the sort key.
     /// </summary>
     private bool Settled(in PositionedObject held, KeyRange? range) =>
         _filter is null || (range is { } key && Whole(held) && key.Holds(held.Entry.Summaries));
@@ -2380,6 +764,12 @@ internal sealed class DatasetScanBuilder
 
         long lower = Math.Max(_from, held.FirstRow);
         long upper = Math.Min(_to, held.FirstRow + held.Entry.Rows);
+        if (held.Granules is { } part)
+        {
+            lower = Math.Max(lower, held.FirstRow + part.Start);
+            upper = Math.Min(upper, held.FirstRow + part.End);
+        }
+
         return Math.Max(upper - lower, 0);
     }
 
@@ -2400,895 +790,366 @@ internal sealed class DatasetScanBuilder
 
     private static int Narrow(long value) => (int)Math.Min(value, int.MaxValue);
 
-    /// <summary>
-    /// A file's batch seen as the dataset's rows: row 0 is the object's row <c>StartRow</c>, after
-    /// the rows before the object. One view serves the whole stream, bound again per batch, since a
-    /// batch is valid until the next one is asked for and a view per batch would be an allocation
-    /// per batch.
-    /// </summary>
-    /// <param name="batch">The file's batch.</param>
-    /// <param name="firstRow">The dataset row the object's row 0 is.</param>
-    /// <param name="view">The stream's view, made at the first batch that needs one.</param>
-    private static RecordBatch InDataset(RecordBatch batch, long firstRow, ref RecordBatch? view)
-    {
-        if (firstRow == 0)
-        {
-            return batch;
-        }
-
-        if (view is null)
-        {
-            view = batch.Rebased(firstRow + batch.StartRow);
-            return view;
-        }
-
-        view.Dispose();
-        view.RebindRebased(batch, firstRow + batch.StartRow);
-        return view;
-    }
-
-    /// <summary>
-    /// The most objects the scan will hold open at once, stated before any is read: one in the
-    /// tree's order, two with a prefetch, which opens the next object ahead; key-ordered on the
-    /// clustering key, level 0's objects, a late level's, and one per other level; on any other column
-    /// every object, the summaries giving no disjointness to lean on.
-    /// </summary>
-    private long CursorBound(long objects, List<long> keptByLevel)
-    {
-        if (objects == 0)
-        {
-            return 0;
-        }
-
-        if (_orderPaths is not { } paths)
-        {
-            return objects > 1 && _options.Prefetch > 0 ? 2 : 1;
-        }
-
-        if (!_summaries || !RidesDisjointLevels(paths))
-        {
-            return objects;
-        }
-
-        // Level 0's objects, and a late level's, overlap: each may be open at once.
-        long cursors = keptByLevel.Count > 0 ? keptByLevel[0] : 0;
-        for (int level = 1; level < keptByLevel.Count; level++)
-        {
-            cursors += _version.Levels.IsDisjoint(level) ? Math.Min(keptByLevel[level], 1) : keptByLevel[level];
-        }
-
-        return cursors;
-    }
-
-    /// <summary>
-    /// Whether a merge on those columns reads the key-disjoint objects of a level one after another:
-    /// on the clustering key, upward by the tree's exact minima, downward by summary maxima that the
-    /// key order respects, which a composite key has none of.
-    /// </summary>
-    private bool RidesDisjointLevels(string[] paths) =>
-        IsClusteringKey(paths)
-        && (!_descending || (paths.Length == 1 && HasKeyOrderBounds(ClusteringKey.Resolve(_version.Schema.DType, paths[0]))));
-
     private SummaryPruner? Pruner() => _summaries && _filter is { } filter ? new SummaryPruner(filter) : null;
 
-    private IAsyncEnumerable<PositionedObject> WalkAsync(CancellationToken cancellationToken) =>
-        _planned is { } planned ? new PlannedObjects(planned, _from, _to) : _version.WalkAsync(Pruner(), _from, _to, _metrics, cancellationToken);
-
     /// <summary>
-    /// The objects of a plan of pieces the rows <c>[from, to)</c> overlap, in their order, from the first found by its
-    /// place: what a walk of the tree over those rows gives, with no page read and no pruner made.
+    /// The objects the scan walks: those the summaries keep; with <paramref name="granules"/>, those whose key range the
+    /// filter does not refute, judged first since the tree holds their keys, then of them those the sheets do not refute,
+    /// by the ranges of their granules the key's pruning keeps.
     /// </summary>
-    private sealed class PlannedObjects(PositionedObject[] planned, long from, long to) : IAsyncEnumerable<PositionedObject>, IAsyncEnumerator<PositionedObject>
+    private IAsyncEnumerable<PositionedObject> WalkAsync(CancellationToken cancellationToken, bool granules = false)
     {
-        private int _next = First(planned, from);
-        private bool _taken;
-
-        public PositionedObject Current { get; private set; }
-
-        public IAsyncEnumerator<PositionedObject> GetAsyncEnumerator(CancellationToken cancellationToken = default)
+        IAsyncEnumerable<PositionedObject> walk = _version.WalkAsync(Pruner(), _from, _to, _considers ? _metrics : null, cancellationToken);
+        KeyPruning? pruning = granules && _summaries && _indexes && _take is null ? KeyPruning.Of(_version.Schema, _filter) : null;
+        if (pruning is not null)
         {
-            // An enumeration of its own each time, as a walk is: the first takes this one.
-            if (_taken)
-            {
-                return new PlannedObjects(planned, from, to).GetAsyncEnumerator(cancellationToken);
-            }
-
-            _taken = true;
-            return this;
+            walk = KeyHeldAsync(walk, pruning, cancellationToken);
         }
 
-        public ValueTask<bool> MoveNextAsync()
+        if (_summaries && _filter is { } filter && (SheetPruning.Asks(filter, _version.Schema.DType) || SheetPaths() is { Count: > 0 }))
         {
-            while (_next < planned.Length && planned[_next].FirstRow < to)
-            {
-                PositionedObject held = planned[_next++];
-                if (held.FirstRow + held.Entry.Rows > from)
-                {
-                    Current = held;
-                    return new ValueTask<bool>(true);
-                }
-            }
-
-            return new ValueTask<bool>(false);
+            walk = SheetPrunedAsync(walk, filter, cancellationToken);
         }
 
-        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
-
-        /// <summary>The first of <paramref name="objects"/>, in the order of their rows, that ends past <paramref name="row"/>.</summary>
-        private static int First(PositionedObject[] objects, long row)
-        {
-            int low = 0;
-            int high = objects.Length;
-            while (low < high)
-            {
-                int middle = (int)((uint)(low + high) >> 1);
-                if (objects[middle].FirstRow + objects[middle].Entry.Rows <= row)
-                {
-                    low = middle + 1;
-                }
-                else
-                {
-                    high = middle;
-                }
-            }
-
-            return low;
-        }
+        return pruning is not null ? KeyPrunedAsync(walk, pruning, cancellationToken) : walk;
     }
 
-    private void RecordOpen(ObjectLease lease, int open = 1)
+    /// <summary>The objects of <paramref name="walk"/> whose key range the filter does not refute (<see cref="KeyPruning.MayHold"/>), with no read.</summary>
+    private async IAsyncEnumerable<PositionedObject> KeyHeldAsync(
+        IAsyncEnumerable<PositionedObject> walk, KeyPruning pruning, [EnumeratorCancellation] CancellationToken cancellationToken)
     {
-        if (_metrics is { } metrics)
+        await foreach (PositionedObject held in walk.WithCancellation(cancellationToken).ConfigureAwait(false))
         {
-            // A lookup's scan opens the objects it reads as rows several at once.
-            lock (metrics)
+            if (KeyRefutes(pruning, held, out _))
             {
-                metrics.ObjectsOpened++;
-                metrics.Cursors = Math.Max(metrics.Cursors, open);
-                if (lease.WasCached)
+                if (_considers && _metrics is { } skipped)
                 {
-                    metrics.CacheHits++;
+                    skipped.ObjectsPrunedByKey++;
                 }
-            }
-        }
-    }
 
-    private void RecordCounted()
-    {
-        if (_metrics is { } metrics)
-        {
-            metrics.ObjectsCounted++;
-        }
-    }
-
-    /// <summary>The key-ordered read: every kept object's own key-ordered scan, merged.</summary>
-    private async IAsyncEnumerable<RecordBatch> MergedAsync(
-        string[] paths, [EnumeratorCancellation] CancellationToken cancellationToken)
-    {
-        // The key is read whatever the projection says, and dropped before a batch goes out.
-        FieldMask mask = _mask ?? FieldMask.All;
-        bool drop = !mask.IsAll && !Array.TrueForAll(paths, path => Covers(mask, _version.Schema.DType, path));
-        ScanProjection? kept = null;
-        KeyOrderedMerge merge = new KeyOrderedMerge(
-            _version,
-            MergeObjectsAsync(paths, cancellationToken),
-            paths,
-            _descending,
-            rankedTies: true,
-            (lease, entry) => OrderedBatchesAsync(lease, entry, paths, drop, cancellationToken),
-            lease => RecordOpen(lease),
-            cancellationToken);
-        RecordBatch? view = null;
-        await using (merge.ConfigureAwait(false))
-        {
-            try
-            {
-                while (await merge.MoveNextAsync().ConfigureAwait(false))
-                {
-                    RecordBatch run = merge.Current;
-                    long firstRow = merge.CurrentFirstRow;
-                    if (!drop)
-                    {
-                        yield return InDataset(run, firstRow, ref view);
-                        continue;
-                    }
-
-                    kept ??= ScanProjection.Parse(run.DType, PathsOf(mask, _version.Schema.DType));
-                    RecordBatch projected = run.Project(kept.Value);
-                    try
-                    {
-                        yield return InDataset(projected, firstRow, ref view);
-                    }
-                    finally
-                    {
-                        projected.Dispose();
-                    }
-                }
-            }
-            finally
-            {
-                if (_metrics is { } metrics)
-                {
-                    metrics.Cursors = Math.Max(metrics.Cursors, merge.MostOpen);
-                }
-            }
-        }
-    }
-
-    /// <summary>
-    /// The objects the merge reads, in the order of a lower bound on their keys, each with the rank
-    /// its ties go by. On the clustering key upward the tree already is that order, and the walk is
-    /// lazy, so a consumer that stops early stops the walk; anywhere else the kept objects are
-    /// collected and sorted by their summaries' bound, without being opened. A composite key is
-    /// bounded upward by its first column, whose encoded minimum prefixes every tuple above it, and
-    /// not downward.
-    /// </summary>
-    private async IAsyncEnumerable<MergeObject> MergeObjectsAsync(
-        string[] paths, [EnumeratorCancellation] CancellationToken cancellationToken)
-    {
-        string path = paths[0];
-        if (!_summaries || (!_descending && IsClusteringKey(paths)))
-        {
-            // Without summaries there is no bound to lean on: every object is opened before a row
-            // goes out, and the lazy merge must answer the same as this eager one.
-            long ordinal = 0;
-            await foreach (PositionedObject held in WalkAsync(cancellationToken).ConfigureAwait(false))
-            {
-                ReadOnlyMemory<byte> bound = _summaries ? VortexDataset.OrderOf(held.TreeKey) : default;
-                yield return new MergeObject(held.Entry, bound, _descending ? -ordinal : ordinal, held.FirstRow);
-                ordinal++;
+                continue;
             }
 
-            yield break;
-        }
-
-        DType dtype = ClusteringKey.Resolve(_version.Schema.DType, path);
-        RowSortField field = KeyOrderedMerge.Field(_descending);
-        List<MergeObject> objects = [];
-        long position = 0;
-        await foreach (PositionedObject held in WalkAsync(cancellationToken).ConfigureAwait(false))
-        {
-            ReadOnlyMemory<byte> bound = paths.Length > 1 && _descending
-                ? default
-                : SummaryBound(held.Entry.Summaries, path, dtype, field, _descending);
-            objects.Add(new MergeObject(held.Entry, bound, _descending ? -position : position, held.FirstRow));
-            position++;
-        }
-
-        objects.Sort(static (left, right) =>
-        {
-            int order = left.Bound.Span.SequenceCompareTo(right.Bound.Span);
-            return order != 0 ? order : left.Rank.CompareTo(right.Rank);
-        });
-        foreach (MergeObject held in objects)
-        {
             yield return held;
         }
     }
 
-    /// <summary>Whether the columns are the dataset's whole clustering key, in order.</summary>
-    private bool IsClusteringKey(string[] paths) =>
-        _version.Schema.Key is { } key && System.Linq.Enumerable.SequenceEqual(key.Paths, paths, StringComparer.Ordinal);
-
     /// <summary>
-    /// A summary's bound on a column, encoded as the merge compares keys: its minimum upward, its
-    /// maximum downward, and empty when the summary gives none that the key order respects. A float
-    /// gives none, its zone bounds excluding NaN while the key order places NaN first or last, so an
-    /// object holding one would have a key outside its own summary.
+    /// Whether <paramref name="pruning"/> refutes the keys of the object <paramref name="held"/>, from its tree key's to its last
+    /// key, with no read; <paramref name="first"/> its first key, empty for an object of no key.
     /// </summary>
-    private static ReadOnlyMemory<byte> SummaryBound(
-        ObjectSummaries summaries, string path, DType dtype, RowSortField field, bool descending)
+    private static bool KeyRefutes(KeyPruning pruning, in PositionedObject held, out ReadOnlyMemory<byte> first)
     {
-        if (!HasKeyOrderBounds(dtype) || !summaries.TryGet(path, out ColumnSummary column))
-        {
-            return default;
-        }
-
-        bool known = descending ? column.HasMax : column.HasMin;
-        FilterLiteral bound = descending ? column.Max : column.Min;
-        if (!known || bound.Kind == FilterLiteralKind.Null)
-        {
-            return default;
-        }
-
-        return RowEncoder.EncodeKey([bound], [dtype], [field]);
+        first = held.TreeKey.Length > VortexDataset.UidBytes ? VortexDataset.OrderOf(held.TreeKey) : default;
+        return !first.IsEmpty && !pruning.MayHold(first.Span, held.Entry.LastKey.Span);
     }
 
     /// <summary>
-    /// Whether a column's summary bounds are bounds in the key order (see <see cref="SummaryBound"/>). An
-    /// extension's, a timestamp's say, are its storage's, which the key order encodes it as.
+    /// The objects of <paramref name="walk"/> as the key's pruning keeps them (<see cref="KeyPruning"/>): an object whose key
+    /// range the filter refutes is passed over unopened, and one that keeps a sparse index is read by the ranges of its
+    /// granules the filter may keep a row of, a part of it each. An object with marked rows, whose index counts its rows
+    /// before the marks, is read whole past its range.
     /// </summary>
-    private static bool HasKeyOrderBounds(DType dtype) => dtype.Kind switch
+    private async IAsyncEnumerable<PositionedObject> KeyPrunedAsync(
+        IAsyncEnumerable<PositionedObject> walk, KeyPruning pruning, [EnumeratorCancellation] CancellationToken cancellationToken)
     {
-        DTypeKind.Primitive => !dtype.PType.IsFloat(),
-        DTypeKind.Bool or DTypeKind.Utf8 or DTypeKind.Binary => true,
-        DTypeKind.Extension => HasKeyOrderBounds(dtype.StorageType),
-        _ => false,
-    };
-
-    /// <summary>Whether a projection already reads a path, itself or through an ancestor.</summary>
-    private static bool Covers(FieldMask mask, DType schema, string path)
-    {
-        FieldMask at = mask;
-        DType type = schema;
-        ReadOnlySpan<char> rest = path;
-        foreach (Range segment in rest.Split('.'))
+        // The indexes of the next objects are asked while the walk goes on, their reads in one wave rather than a round trip
+        // each; an index in hand, with nothing asked before it still waiting, answers at once and makes no task.
+        Queue<Ahead>? ahead = null;
+        await foreach (PositionedObject held in walk.WithCancellation(cancellationToken).ConfigureAwait(false))
         {
-            if (at.IsAll)
+            if (KeyRefutes(pruning, held, out ReadOnlyMemory<byte> first))
             {
-                return true;
-            }
-
-            int field = ColumnPath.IndexOf(type, rest[segment]);
-            if (field < 0 || !at.Includes(field))
-            {
-                return false;
-            }
-
-            at = at.Descend(field);
-            type = type.GetField(field);
-        }
-
-        return true;
-    }
-
-    /// <summary>The <c>.</c>-separated paths a projection reads, by the schema's field names.</summary>
-    private static string[] PathsOf(FieldMask mask, DType schema)
-    {
-        List<string> paths = [];
-        Collect(mask, schema, string.Empty, paths);
-        return [.. paths];
-
-        static void Collect(FieldMask at, DType type, string prefix, List<string> into)
-        {
-            if (prefix.Length > 0 && (at.IsAll || at.IsEmpty || type.Kind != DTypeKind.Struct))
-            {
-                into.Add(prefix);
-                return;
-            }
-
-            for (int i = 0; i < at.NamedFieldCount; i++)
-            {
-                int field = at.GetNamedField(i);
-                string name = type.GetFieldName(field);
-                Collect(at.Descend(field), type.GetField(field), prefix.Length == 0 ? name : prefix + "." + name, into);
-            }
-        }
-    }
-
-    /// <summary>One object's own key-ordered scan, carrying this builder's filter, projection and options.</summary>
-    private ScanBuilder OrderedOf(VortexFile file, string[] paths, bool withKey)
-    {
-        ScanBuilder scan = Configure(file.ScanBuilder(), _filter, _mask, canonical: false);
-        if (withKey)
-        {
-            scan.Project(paths);
-        }
-
-        return scan.InKeyOrder(paths, _descending);
-    }
-
-    /// <summary>
-    /// One object's rows in key order, gathered: its own key-ordered scan, reshaped when it was
-    /// written under another schema. An object that lacks the key's column holds only null keys,
-    /// which come last in either direction, so its rows come in their own order; a tuple holding a
-    /// null is in no run, so an object that lacks a column of a composite key delivers none.
-    /// </summary>
-    private IAsyncEnumerable<RecordBatch> OrderedBatchesAsync(ObjectLease lease, ObjectEntry entry, string[] paths, bool withKey, CancellationToken cancellationToken)
-    {
-        if (ColumnsOf(lease, entry) is not { } columns)
-        {
-            return entry.HasDeletions
-                ? LiveOrderedAsync(lease.File, entry, paths, withKey, cancellationToken)
-                : OrderedOf(lease.File, paths, withKey).ExecuteAsync();
-        }
-
-        FieldMask projection = _mask ?? FieldMask.All;
-        if (withKey)
-        {
-            FieldMaskBuilder keyed = new FieldMaskBuilder().Include(in projection);
-            foreach (string path in paths)
-            {
-                keyed.Include(ToolPaths.Resolve(_version.Schema.Columns, path));
-            }
-
-            projection = keyed.Build();
-        }
-
-        ObjectReadPlan read = columns.Read(_filter, projection);
-        string[]? source = columns.SourcePaths(paths);
-        if (read.Fate == FilterFate.None || (source is null && paths.Length > 1))
-        {
-            return System.Linq.AsyncEnumerable.Empty<RecordBatch>();
-        }
-
-        ScanBuilder scan = Configure(lease.File.ScanBuilder(), read.Pushed, read.Shape.Source, canonical: true).WithCompaction(true);
-        IAsyncEnumerable<RecordBatch> rows;
-        if (source is not null)
-        {
-            scan = scan.InKeyOrder(source, _descending);
-            rows = entry.HasDeletions
-                ? LiveRows.OrderedAsync(
-                    scan,
-                    NullsOf(lease.File, source[0], paths.Length > 1, read.Pushed, read.Shape.Source),
-                    entry.Deletions,
-                    _descending,
-                    cancellationToken)
-                : scan.ExecuteAsync();
-        }
-        else
-        {
-            // Every key is null, and null keys come last in their own order either way.
-            rows = entry.HasDeletions
-                ? LiveRows.WithoutDeletedAsync(scan.WithCompaction(false).ExecuteAsync(), entry.Deletions, compact: true, 0, cancellationToken)
-                : scan.ExecuteAsync();
-        }
-
-        return ObjectColumns.ReshapeAsync(rows, read.Shape, read.Evaluated, 0, compact: true, cancellationToken);
-    }
-
-    /// <summary>
-    /// How an object answers for the version's columns: null when it holds exactly them, the case of
-    /// every object written since the schema last changed, whose own scan then serves unchanged.
-    /// </summary>
-    private ObjectColumns? ColumnsOf(ObjectLease lease, ObjectEntry entry) => _version.Schema.ColumnsOf(lease.File.DType, entry.Key);
-
-    /// <summary>
-    /// An object's part of this read of the columns <paramref name="mask"/> names: what the filter is
-    /// for it, from <paramref name="columns"/> for an object of an earlier schema, and for one of the
-    /// version's own the filter whole, which its scan takes as it is. What an object was written under
-    /// is settled here, once, and every terminal goes by the filter's fate alone.
-    /// </summary>
-    private ObjectPart PartOf(ObjectColumns? columns, FieldMask? mask)
-    {
-        if (columns is null)
-        {
-            return new ObjectPart(_filter is null ? FilterFate.Every : FilterFate.Pushed, _filter, mask, null);
-        }
-
-        ObjectReadPlan read = columns.Read(_filter, mask ?? FieldMask.All);
-        return new ObjectPart(read.Fate, read.Pushed, read.Shape.Source, read);
-    }
-
-    /// <summary>The object's own scan for its part of the read: the filter it takes and the fields it reads, decoded whole when its batches are to be reshaped.</summary>
-    private ScanBuilder ScanOf(VortexFile file, PositionedObject held, in ObjectPart part) =>
-        Of(file, held, part.Pushed, part.Source, canonical: part.Mapped is not null);
-
-    /// <summary>
-    /// The batches of an object that its own scan alone does not read as the version's rows, one of an
-    /// earlier schema or one with rows marked, counted from <paramref name="baseRow"/>; null when the
-    /// filter can keep no row of it. The one place where the steps compose, in this order whatever
-    /// reads the batches: the object's scan, its marked rows taken out or deselected, the batches
-    /// reshaped to the version's columns, and the filter evaluated on them where it could not go to
-    /// the scan.
-    /// </summary>
-    private IAsyncEnumerable<RecordBatch>? BatchesOfAsync(
-        VortexFile file, PositionedObject held, in ObjectPart part, long baseRow, bool compact, CancellationToken cancellationToken)
-    {
-        if (part.Fate == FilterFate.None)
-        {
-            return null;
-        }
-
-        return part.Mapped is { } read
-            ? ReshapedAsync(file, held, read, baseRow, compact, cancellationToken)
-            : LiveAsync(file, held, part.Pushed, part.Source, baseRow, compact, reshaped: false, cancellationToken);
-    }
-
-    /// <summary>An object of another schema read as the version's: its own scan, each batch reshaped and counted from <paramref name="baseRow"/>.</summary>
-    private IAsyncEnumerable<RecordBatch> ReshapedAsync(
-        VortexFile file, PositionedObject held, ObjectReadPlan read, long baseRow, bool compact, CancellationToken cancellationToken) =>
-        ObjectColumns.ReshapeAsync(
-            held.Entry.HasDeletions
-                ? LiveAsync(file, held, read.Pushed, read.Shape.Source, 0, compact && read.Evaluated is null, reshaped: true, cancellationToken)
-                : Of(file, held, read.Pushed, read.Shape.Source, canonical: true).ExecuteAsync(),
-            read.Shape,
-            read.Evaluated,
-            baseRow,
-            compact,
-            cancellationToken);
-
-    /// <summary>
-    /// The rows of an object its part of the read keeps; with <paramref name="stopAtOne"/>, 1 at the
-    /// first. None when the filter keeps none, every row the scan covers when it keeps all, the
-    /// object's own count when the filter goes to its scan, which leaves its marked rows out in the
-    /// same pass, and the rows selected on its reshaped batches otherwise.
-    /// </summary>
-    private async ValueTask<long> CountOfAsync(
-        VortexFile file, PositionedObject held, ObjectPart part, bool stopAtOne, CancellationToken cancellationToken)
-    {
-        switch (part.Fate)
-        {
-            case FilterFate.None:
-                return 0;
-            case FilterFate.Every:
-                return stopAtOne ? Math.Min(Covered(held), 1) : Covered(held);
-            case FilterFate.Pushed:
-                return stopAtOne
-                    ? await LiveAnyAsync(file, held, part.Pushed!, cancellationToken).ConfigureAwait(false) ? 1 : 0
-                    : await LiveCountAsync(file, held, part.Pushed!, cancellationToken).ConfigureAwait(false);
-            default:
-                long rows = 0;
-                await foreach (RecordBatch batch in BatchesOfAsync(file, held, part, 0, compact: false, cancellationToken)!.ConfigureAwait(false))
+                if (_considers && _metrics is { } skipped)
                 {
-                    rows += batch.SelectedRows;
-                    if (stopAtOne && rows > 0)
-                    {
-                        break;
-                    }
+                    skipped.ObjectsPrunedByKey++;
                 }
 
-                return rows;
-        }
-    }
-
-    /// <summary>
-    /// The extreme of a column among the rows an object keeps: none when it lacks the column; the
-    /// object's own extreme, under the column's name there, when the filter goes to its scan and no
-    /// row is marked; its live extreme when rows are; and the extreme of its reshaped batches when
-    /// the filter is evaluated on them.
-    /// </summary>
-    private async ValueTask<FilterLiteral> ObjectExtremeAsync(
-        VortexFile file, PositionedObject held, ObjectColumns? columns, string path, FieldMask projection, bool wantMin, CancellationToken cancellationToken)
-    {
-        string? named = columns is null ? path : columns.SourcePath(path);
-        ObjectPart part = PartOf(columns, projection);
-        if (named is null || part.Fate == FilterFate.None)
-        {
-            return FilterLiteral.Null;
-        }
-
-        if (part.Fate == FilterFate.Reshaped)
-        {
-            return await ExtremeOfAsync(BatchesOfAsync(file, held, part, 0, compact: true, cancellationToken)!, path, wantMin).ConfigureAwait(false);
-        }
-
-        if (held.Entry.HasDeletions)
-        {
-            return await LiveExtremeAsync(file, held, part, named, path, wantMin, cancellationToken).ConfigureAwait(false);
-        }
-
-        ScanBuilder scan = Of(file, held, part.Pushed, null, canonical: false);
-        return wantMin
-            ? await scan.MinAsync(named, cancellationToken).ConfigureAwait(false)
-            : await scan.MaxAsync(named, cancellationToken).ConfigureAwait(false);
-    }
-
-    /// <summary>The file's own scan, carrying this builder's filter, projection, options and the rows that fall in this object.</summary>
-    private ScanBuilder Of(VortexFile file, PositionedObject held) => Of(file, held, _filter, _mask, canonical: false);
-
-    /// <summary>
-    /// An object's part of a read, whatever schema it was written under: what the filter is for it,
-    /// the filter its own scan takes, the fields that scan reads, and how its batches become the
-    /// version's rows; none for an object of the version's own columns, whose batches already are.
-    /// </summary>
-    private readonly record struct ObjectPart(FilterFate Fate, VortexExpr? Pushed, FieldMask? Source, ObjectReadPlan? Mapped);
-
-    /// <summary>
-    /// The file's own scan under <paramref name="filter"/> and <paramref name="mask"/>, with this
-    /// builder's options and the rows that fall in this object; with <paramref name="canonical"/>,
-    /// every column decoded, which the reshaping of another schema's batches takes.
-    /// </summary>
-    private ScanBuilder Of(VortexFile file, PositionedObject held, VortexExpr? filter, FieldMask? mask, bool canonical)
-    {
-        ScanBuilder scan = Configure(file.ScanBuilder(), filter, mask, canonical);
-        DeletionVector deletions = held.Entry.Deletions;
-        if (_take is { } take)
-        {
-            // A row taken by its place among the dataset's live rows is at that place among the
-            // object's live rows, which the deleted rows before it push further on.
-            (int first, int count) = TakenBy(held);
-            long[] local = new long[count];
-            for (int i = 0; i < count; i++)
-            {
-                local[i] = deletions.Physical(take[first + i] - held.FirstRow);
+                continue;
             }
 
-            return scan.Take(local);
-        }
-
-        // The range is the dataset's; the file's is the part of it that falls inside this object.
-        (long lower, long upper) = PhysicalRange(held);
-
-        // An object sliced by time holds its rows slice by slice, every row's instant within its slice's bounds, so the
-        // filter's window on the instant is a range of its rows: the slices it reaches. The scan's plan, its zone maps and
-        // its walk then cover those alone, where they covered every row of the object at every question, the window's
-        // slices a day's object's 1 440 minutes for a window of an hour.
-        long low = long.MinValue;
-        long high = long.MaxValue;
-        if (held.Entry.Deletions.IsEmpty && filter is not null && _dataset.Key is { } key && Bound(filter, key.InstantPath, ref low, ref high)
-            && held.Entry.Contents is { } contents && WindowRows(contents.Slices.Slices, low, high) is { } window)
-        {
-            lower = Math.Max(lower, window.Start);
-            upper = Math.Min(upper, window.End);
-        }
-
-        if (lower > 0 || upper < held.Entry.PhysicalRows)
-        {
-            scan.Rows(new RowRange(lower, Math.Max(upper, lower)));
-        }
-
-        return scan;
-    }
-
-    /// <summary>
-    /// Narrows <paramref name="low"/> and <paramref name="high"/>, inclusive, by the conjuncts of <paramref name="filter"/>
-    /// that compare <paramref name="instant"/> itself, as an answer reads its window (<see cref="SynopsisAnswer.Bound"/>);
-    /// whether one did. A walk of the conjunctions, which allocates nothing.
-    /// </summary>
-    internal static bool Bound(VortexExpr filter, string instant, ref long low, ref long high)
-    {
-        if (filter is LogicalExpr { IsAnd: true } both)
-        {
-            bool left = Bound(both.Left, instant, ref low, ref high);
-            return Bound(both.Right, instant, ref low, ref high) | left;
-        }
-
-        return SynopsisAnswer.Bound(filter, instant, ref low, ref high);
-    }
-
-    /// <summary>
-    /// The rows of the slices of <paramref name="slices"/> the window from <paramref name="low"/> to <paramref name="high"/>,
-    /// inclusive, reaches, from the first's first row to the last's last, empty when it reaches none; null when the object
-    /// has no slice.
-    /// </summary>
-    internal static RowRange? WindowRows(IReadOnlyList<Indexes.TimeSlice> slices, long low, long high)
-    {
-        if (slices.Count == 0)
-        {
-            return null;
-        }
-
-        // A slice [Start, End) the window [low, high] reaches: one that ends past its low and starts at its high or before.
-        int first = 0;
-        while (first < slices.Count && slices[first].End <= low)
-        {
-            first++;
-        }
-
-        int last = slices.Count - 1;
-        while (last >= first && slices[last].Start > high)
-        {
-            last--;
-        }
-
-        return last < first
-            ? RowRange.Empty
-            : new RowRange(slices[first].FirstRow, slices[last].FirstRow + slices[last].Rows);
-    }
-
-    /// <summary>
-    /// The part of the scan's range inside an object, at the object's own positions: the range
-    /// counts live rows, and the deleted rows before and inside it push it further on.
-    /// </summary>
-    private (long Lower, long Upper) PhysicalRange(in PositionedObject held)
-    {
-        long lower = Math.Max(_from - held.FirstRow, 0);
-        long upper = _to == long.MaxValue ? held.Entry.Rows : Math.Min(_to - held.FirstRow, held.Entry.Rows);
-        DeletionVector deletions = held.Entry.Deletions;
-        if (deletions.IsEmpty)
-        {
-            return (lower, upper);
-        }
-
-        long first = deletions.Physical(lower);
-        return (first, upper <= lower ? first : deletions.Physical(upper - 1) + 1);
-    }
-
-    /// <summary>
-    /// An object's rows under <paramref name="filter"/> and <paramref name="mask"/> without the
-    /// ones it deleted: its own scan run without compaction, so that the deleted rows can be found
-    /// at their places, then taken out, which gathers decoded columns, and the rest numbered from
-    /// <paramref name="baseRow"/>. Batches not compacted that nobody reads a place of keep their rows
-    /// instead, the deleted ones deselected, and their columns encoded as an object without deletions
-    /// delivers them; <paramref name="reshaped"/> decodes every column all the same, for the
-    /// reshaping of another schema's batches.
-    /// </summary>
-    private IAsyncEnumerable<RecordBatch> LiveAsync(
-        VortexFile file, PositionedObject held, VortexExpr? filter, FieldMask? mask, long baseRow, bool compact, bool reshaped, CancellationToken cancellationToken)
-    {
-        bool deselect = !compact && _positionsUnread;
-        IAsyncEnumerable<RecordBatch> rows = Of(file, held, filter, mask, canonical: reshaped || !deselect).WithCompaction(false).ExecuteAsync();
-        return deselect
-            ? LiveRows.DeselectedAsync(rows, held.Entry.Deletions, baseRow, cancellationToken)
-            : LiveRows.WithoutDeletedAsync(rows, held.Entry.Deletions, compact, baseRow, cancellationToken);
-    }
-
-    /// <summary>
-    /// The rows of an object <paramref name="filter"/> keeps, the deleted ones not counted: its own
-    /// count with them left out, cheapest proof first, in one pass. A take of the dataset's rows
-    /// names live rows only.
-    /// </summary>
-    private async ValueTask<long> LiveCountAsync(VortexFile file, PositionedObject held, VortexExpr filter, CancellationToken cancellationToken)
-    {
-        ScanBuilder scan = Of(file, held, filter, null, canonical: false);
-        return _take is null && held.Entry.HasDeletions
-            ? await scan.CountExcludingAsync(held.Entry.Deletions, cancellationToken).ConfigureAwait(false)
-            : await scan.CountAsync(cancellationToken).ConfigureAwait(false);
-    }
-
-    /// <summary>Whether <paramref name="filter"/> keeps a live row of an object, the first one found answering.</summary>
-    private async ValueTask<bool> LiveAnyAsync(VortexFile file, PositionedObject held, VortexExpr filter, CancellationToken cancellationToken)
-    {
-        ScanBuilder scan = Of(file, held, filter, null, canonical: false);
-        return _take is null && held.Entry.HasDeletions
-            ? await scan.AnyExcludingAsync(held.Entry.Deletions, cancellationToken).ConfigureAwait(false)
-            : await scan.AnyAsync(cancellationToken).ConfigureAwait(false);
-    }
-
-    /// <summary>
-    /// The extreme of a column among an object's live rows, under the filter its part of the read
-    /// gives its scan, the column <paramref name="named"/> as the object names it. A column the
-    /// object's statistics say is sorted and holds no null nor NaN has it at its first or its last
-    /// live row, when every row is kept: the object's own extreme while that row is the column's end,
-    /// and that row's value, one row read, once a delete took the end. Otherwise the object's own
-    /// extreme is the answer when a live row holds it, which a count of the rows equal to it settles;
-    /// when every row holding it is gone, or the column is a float whose equality a count cannot
-    /// settle, its live rows are read for it, as the version's columns, under <paramref name="path"/>.
-    /// </summary>
-    private async ValueTask<FilterLiteral> LiveExtremeAsync(
-        VortexFile file, PositionedObject held, ObjectPart part, string named, string path, bool wantMin, CancellationToken cancellationToken)
-    {
-        if (part.Fate == FilterFate.Every && Whole(held) && SortedWithoutGaps(file, named))
-        {
-            ObjectEntry entry = held.Entry;
-            long end = wantMin ? 0 : entry.PhysicalRows - 1;
-            long live = entry.Deletions.Physical(wantMin ? 0 : entry.Rows - 1);
-            ScanBuilder ends = Configure(file.ScanBuilder(), null, null, canonical: false);
-            if (live != end)
+            ValueTask<(List<(int First, int End)> Ranges, Indexes.GranuleGrid Grid)?> asked = KeptGranulesAsync(held, pruning, first, read: true, cancellationToken);
+            if (asked.IsCompletedSuccessfully && (ahead is null || ahead.Count == 0))
             {
-                ends.Take([live]);
+                (List<(int First, int End)> Ranges, Indexes.GranuleGrid Grid)? kept = await asked.ConfigureAwait(false);
+                if (Whole(kept) || Narrows(held, kept))
+                {
+                    yield return held;
+                    continue;
+                }
+
+                foreach ((int from, int end) in kept!.Value.Ranges)
+                {
+                    yield return ByGranules(held, kept.Value.Grid, from, end);
+                }
+
+                continue;
             }
 
-            return wantMin
-                ? await ends.MinAsync(named, cancellationToken).ConfigureAwait(false)
-                : await ends.MaxAsync(named, cancellationToken).ConfigureAwait(false);
-        }
-
-        DType column = ClusteringKey.Resolve(file.DType, named);
-        if (column.Kind is DTypeKind.Utf8 or DTypeKind.Binary or DTypeKind.Bool or DTypeKind.Decimal
-            || (column.Kind == DTypeKind.Primitive && !column.PType.IsFloat()))
-        {
-            ScanBuilder scan = Of(file, held, part.Pushed, null, canonical: false);
-            FilterLiteral found = wantMin
-                ? await scan.MinAsync(named, cancellationToken).ConfigureAwait(false)
-                : await scan.MaxAsync(named, cancellationToken).ConfigureAwait(false);
-            if (found.Kind == FilterLiteralKind.Null)
-            {
-                return found;
-            }
-
-            VortexExpr equal = Expr.Eq(Expr.Field(named), Expr.Literal(found));
-            if (await LiveCountAsync(file, held, part.Pushed is null ? equal : Expr.And(part.Pushed, equal), cancellationToken).ConfigureAwait(false) > 0)
-            {
-                return found;
-            }
-        }
-
-        return await ExtremeOfAsync(BatchesOfAsync(file, held, part, 0, compact: true, cancellationToken)!, path, wantMin).ConfigureAwait(false);
-    }
-
-    /// <summary>Whether a file's statistics say a top-level column is sorted, and holds no null and no NaN.</summary>
-    private static bool SortedWithoutGaps(VortexFile file, string path)
-    {
-        if (!KeyCursorBuilder.StatedSorted(file, path))
-        {
-            return false;
-        }
-
-        int field = file.DType.IndexOfField(path);
-        FieldStatistics statistics = file.FileStatistics.GetField(field);
-        bool floats = file.DType.GetField(field) is { Kind: DTypeKind.Primitive } column && column.PType.IsFloat();
-        return statistics.TryGetStoredNullCount(out ulong nulls) && nulls == 0
-            && (!floats || (statistics.TryGetNanCount(out ulong nans) && nans == 0));
-    }
-
-    /// <summary>The extreme of a column over a stream of batches that hold it.</summary>
-    private static async ValueTask<FilterLiteral> ExtremeOfAsync(IAsyncEnumerable<RecordBatch> batches, string path, bool wantMin)
-    {
-        FilterLiteral best = FilterLiteral.Null;
-        await foreach (RecordBatch batch in batches.ConfigureAwait(false))
-        {
-            int node = ColumnPath.NodeOf(batch, path);
-            if (!Extremes.TryFind(batch.Arena, node, default, listed: false, wantMin, out int row))
+            ahead ??= new Queue<Ahead>(KeysAhead);
+            ahead.Enqueue(asked.IsCompletedSuccessfully ? new Ahead(held, await asked.ConfigureAwait(false), null) : new Ahead(held, null, asked.AsTask()));
+            if (ahead.Count < KeysAhead)
             {
                 continue;
             }
 
-            bool numeric = batch.Arena.GetNode(ComparisonKernels.Unwrap(batch.Arena, node)).DType.Kind == DTypeKind.Decimal;
-            bool read = numeric
-                ? LiteralReader.TryReadDecimal(batch.Arena, node, row, out FilterLiteral value)
-                : LiteralReader.TryRead(batch.Arena, node, row, out value);
-            if (read && Beats(value, best, wantMin))
+            Ahead next = ahead.Dequeue();
+
+            // Each read was asked by this walk, a few objects before.
+#pragma warning disable VSTHRD003
+            (List<(int First, int End)> Ranges, Indexes.GranuleGrid Grid)? read = next.Reading is { } reading ? await reading.ConfigureAwait(false) : next.Kept;
+#pragma warning restore VSTHRD003
+            if (Whole(read) || Narrows(next.Held, read))
             {
-                best = value;
+                yield return next.Held;
+                continue;
+            }
+
+            foreach ((int from, int end) in read!.Value.Ranges)
+            {
+                yield return ByGranules(next.Held, read.Value.Grid, from, end);
             }
         }
 
-        return best;
-    }
-
-    /// <summary>
-    /// An object's rows in key order without the ones it deleted: its own key-ordered scan, which
-    /// skips their entries as it walks, then the live rows whose key is null.
-    /// </summary>
-    private IAsyncEnumerable<RecordBatch> LiveOrderedAsync(VortexFile file, ObjectEntry entry, string[] paths, bool withKey, CancellationToken cancellationToken)
-    {
-        FieldMask? projection = _mask;
-        if (withKey && _mask is { } mask)
+        while (ahead is not null && ahead.TryDequeue(out Ahead last))
         {
-            FieldMaskBuilder keyed = new FieldMaskBuilder().Include(in mask);
-            foreach (string path in paths)
+#pragma warning disable VSTHRD003
+            (List<(int First, int End)> Ranges, Indexes.GranuleGrid Grid)? read = last.Reading is { } reading ? await reading.ConfigureAwait(false) : last.Kept;
+#pragma warning restore VSTHRD003
+            if (Whole(read) || Narrows(last.Held, read))
             {
-                keyed.Include(ToolPaths.Resolve(_version.Schema.Columns, path));
+                yield return last.Held;
+                continue;
             }
 
-            projection = keyed.Build();
+            foreach ((int from, int end) in read!.Value.Ranges)
+            {
+                yield return ByGranules(last.Held, read.Value.Grid, from, end);
+            }
+        }
+    }
+
+    /// <summary>The objects whose sparse indexes <see cref="KeyPrunedAsync"/> asks for ahead of the one it hands out.</summary>
+    private const int KeysAhead = 16;
+
+    /// <summary>An object whose index <see cref="KeyPrunedAsync"/> asked for ahead: what it kept, when in hand, or its read.</summary>
+    private readonly record struct Ahead(
+        PositionedObject Held,
+        (List<(int First, int End)> Ranges, Indexes.GranuleGrid Grid)? Kept,
+        Task<(List<(int First, int End)> Ranges, Indexes.GranuleGrid Grid)?>? Reading);
+
+    /// <summary>
+    /// Whether an object is read whole, <paramref name="kept"/> the ranges of granules its index keeps: none read, or all kept;
+    /// the granules and objects pruned counted.
+    /// </summary>
+    private bool Whole((List<(int First, int End)> Ranges, Indexes.GranuleGrid Grid)? kept)
+    {
+        if (kept is not ({ } ranges, var keys))
+        {
+            return true;
         }
 
-        return LiveRows.OrderedAsync(
-            OrderedOf(file, paths, withKey),
-            NullsOf(file, paths[0], paths.Length > 1, _filter, projection),
-            entry.Deletions,
-            _descending,
-            cancellationToken);
+        int granules = 0;
+        foreach ((int from, int end) in ranges)
+        {
+            granules += end - from;
+        }
+
+        if (_considers && _metrics is { } metrics)
+        {
+            metrics.GranulesPrunedByKey += keys.Granules - granules;
+            metrics.ObjectsPrunedByKey += ranges.Count == 0 ? 1 : 0;
+        }
+
+        return ranges.Count == 1 && ranges[0] == (0, keys.Granules);
     }
 
     /// <summary>
-    /// The scan of an object's rows whose key is null under a filter and a projection, decoded; null
-    /// when the key cannot be null there, or is composite, whose run holds no tuple with a null.
+    /// Whether <paramref name="held"/> is read once by the granules its index keeps, <paramref name="kept"/>, noted where
+    /// its read takes them alone (<see cref="Narrow(PositionedObject, ulong[])"/>): an object of the version's columns, with
+    /// no row marked, under the scan's filter, whose index keeps several ranges of them. A part a range waited a round trip
+    /// each, read one after the other: the last quarter of an hour of 600 services under a key they lead was 600 ranges an
+    /// object.
     /// </summary>
-    private ScanBuilder? NullsOf(VortexFile file, string path, bool composite, VortexExpr? filter, FieldMask? projection)
+    private bool Narrows(in PositionedObject held, (List<(int First, int End)> Ranges, Indexes.GranuleGrid Grid)? kept)
     {
-        if (composite || !ColumnPath.MayBeNull(file.DType, path))
+        if (kept is not ({ Count: > 1 } ranges, var keys) || held.Entry.HasDeletions || _take is not null || _filter is null
+            || !_version.Schema.Holds(held.Entry))
+        {
+            return false;
+        }
+
+        ulong[] granules = new ulong[(keys.Granules + 63) / 64];
+        foreach ((int from, int end) in ranges)
+        {
+            for (int granule = from; granule < end; granule++)
+            {
+                granules[granule >> 6] |= 1UL << (granule & 63);
+            }
+        }
+
+        Narrow(held, granules);
+        return true;
+    }
+
+    /// <summary><paramref name="held"/> read by its granules from <paramref name="from"/> to <paramref name="end"/>.</summary>
+    private static PositionedObject ByGranules(PositionedObject held, Indexes.GranuleGrid keys, int from, int end) => held with
+    {
+        Granules = new RowRange((long)from * keys.GranuleRows, Math.Min((long)end * keys.GranuleRows, keys.Rows)),
+    };
+
+    /// <summary>
+    /// The ranges of the granules of the object <paramref name="held"/>, <paramref name="first"/> its first key, that its key's
+    /// sparse index keeps under <paramref name="pruning"/>, with the object's granules; null when the object has rows marked,
+    /// keeps no index, the index can refute none of its granules (<see cref="KeyPruning.IndexMayRefute"/>), its key range
+    /// keeps every granule (<see cref="KeyPruning.HoldsWhole"/>), reading the index weighs more than it may spare
+    /// (<see cref="ReadsKeyIndex"/>), or a page of it does not hold the keys its table names; and, unless
+    /// <paramref name="read"/>, when the pruning has not searched it yet.
+    /// </summary>
+    /// <remarks>
+    /// The index is read for the search and given back: the pruning keeps the ranges for the question, whose other parts ask
+    /// them (<see cref="KeyPruning.TryKept"/>) before they would read the index again, and its bytes stay in the session's
+    /// caches. One kept in hand made each question on a pod's exceptions after one on a service search every object's index
+    /// for no granule refuted, 4.6 ms and 2 MB a question where it takes 0.17 ms and 63 KB (2026-11-02): none is now.
+    /// </remarks>
+    internal async ValueTask<(List<(int First, int End)> Ranges, Indexes.GranuleGrid Grid)?> KeptGranulesAsync(
+        PositionedObject held, KeyPruning pruning, ReadOnlyMemory<byte> first, bool read, CancellationToken cancellationToken)
+    {
+        if (!held.Entry.Deletions.IsEmpty || held.Entry.Contents is not { KeyIndex: { } index } contents)
         {
             return null;
         }
 
-        VortexExpr isNull = Expr.IsNull(Expr.Field(path));
-        return Configure(file.ScanBuilder(), filter is null ? isNull : Expr.And(isNull, filter), projection, canonical: true);
+        DatasetSchema schema = _version.Schema;
+        int prefix = schema.Partitioned && !first.IsEmpty ? schema.Tree!.PrefixLength(first.Span, 1) : 0;
+        ReadOnlyMemory<byte> partition = prefix > 0 ? first[..prefix] : default;
+        if (pruning.TryKept(held.Entry.Uid, partition.Span, out List<(int First, int End)> known, out Indexes.GranuleGrid grid))
+        {
+            return (known, grid);
+        }
+
+        if (!read || !ReadsKeyIndex(held)
+            || !pruning.IndexMayRefute(held.Summaries(schema), held.Entry.PhysicalRows) || pruning.HoldsWhole(first.Span, held.Entry.LastKey.Span)
+            || await KeysAsync(held, contents, index, cancellationToken).ConfigureAwait(false) is not { } keys)
+        {
+            return null;
+        }
+
+        using (keys)
+        {
+            if (keys.Rows != held.Entry.PhysicalRows)
+            {
+                return null;
+            }
+
+            try
+            {
+                return (pruning.Granules(held.Entry.Uid, keys, partition.Span), keys.Grid);
+            }
+            catch (VortexFormatException)
+            {
+                // A page that does not hold the keys its table names: the object is read as if it kept no index.
+                return null;
+            }
+        }
     }
 
-    /// <summary>A file's scan under a filter, a projection and this builder's options.</summary>
-    private ScanBuilder Configure(ScanBuilder scan, VortexExpr? filter, FieldMask? projection, bool canonical)
+    /// <summary>
+    /// The sparse index of the object <paramref name="held"/>, for one search, which disposes it: read through its open when
+    /// it lies in the tail the open reads, the object then kept open by the handle's cache for the read of its granules; with
+    /// no open otherwise.
+    /// </summary>
+    private async ValueTask<Indexes.GranuleKeys?> KeysAsync(
+        PositionedObject held, Indexes.ObjectContents contents, Indexes.IndexSegment index, CancellationToken cancellationToken)
     {
-        if (filter is not null)
+        if (!PathCosts.InOpen(held.Entry, index))
         {
-            scan.Where(filter);
+            return await _dataset.KeyIndexAsync(held.Entry, contents, cancellationToken).ConfigureAwait(false);
         }
 
-        // An object read in the dataset's own columns reads its variants by keys where its path map
-        // allows; one reshaped from an earlier schema reads them whole.
-        if (!canonical)
+        // Through the object's open, whose tail holds the index; a copy written again in memory holds none of the object's regions.
+        ObjectLease lease = await RentAsync(held, cancellationToken).ConfigureAwait(false);
+        await using (lease.ConfigureAwait(false))
         {
-            scan.WithVariantKeys(_variantKeys);
+            return await _dataset.KeyIndexAsync(held.Entry, contents, cancellationToken, lease.IsCopy ? null : lease.File).ConfigureAwait(false);
+        }
+    }
+
+    // The rule that says whose sheets the walk reads, as a delegate made once.
+    private Func<PositionedObject, bool>? _consulted;
+
+    /// <summary>The objects a sheet read at once may pass over, in the walk's order.</summary>
+    private const int SheetBatch = 16;
+
+    /// <summary>
+    /// The objects of <paramref name="walk"/> their column sheets do not refute <paramref name="filter"/> by: an object
+    /// whose sheets are to be read (<see cref="ReadsSheets"/>) has them read with no open of it, the objects of a
+    /// batch side by side, and one that lacks every value an equality or a set asks for there is passed over. An object
+    /// with none passes at once while no batch waits, so that a walk of small objects holds and allocates nothing.
+    /// </summary>
+    private async IAsyncEnumerable<PositionedObject> SheetPrunedAsync(
+        IAsyncEnumerable<PositionedObject> walk, VortexExpr filter, [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        DType schema = _version.Schema.DType;
+        List<int>? columns = null;
+        PartitionLocates? partitions = null;
+        List<PositionedObject>? batch = null;
+        DatasetScanCounters? metrics = _considers ? _metrics : null;
+        await foreach (PositionedObject held in walk.ConfigureAwait(false))
+        {
+            if (batch is not { Count: > 0 } && !ReadsSheets(held))
+            {
+                yield return held;
+                continue;
+            }
+
+            (batch ??= new List<PositionedObject>(SheetBatch)).Add(held);
+            if (batch.Count == SheetBatch)
+            {
+                if (columns is null)
+                {
+                    columns = SheetPruning.Columns(filter, schema);
+                    partitions = LocatesOf(filter, columns);
+                }
+
+                foreach (PositionedObject kept in await SheetPruning.KeptAsync(
+                    _dataset, _version.Schema, batch, filter, columns, metrics, _consulted ??= held => ReadsSheets(held), cancellationToken, _narrowing ??= Narrow,
+                    partitions, SheetPaths()).ConfigureAwait(false))
+                {
+                    yield return kept;
+                }
+
+                batch.Clear();
+            }
         }
 
-        if (projection is { } mask)
+        if (batch is { Count: > 0 })
         {
-            scan.ProjectMask(in mask);
-        }
+            if (columns is null)
+            {
+                columns = SheetPruning.Columns(filter, schema);
+                partitions = LocatesOf(filter, columns);
+            }
 
-        if (_options.BatchRows > 0)
-        {
-            scan.WithMaxBatchRows(_options.BatchRows);
+            foreach (PositionedObject kept in await SheetPruning.KeptAsync(
+                _dataset, _version.Schema, batch, filter, columns, metrics, _consulted ??= held => ReadsSheets(held), cancellationToken, _narrowing ??= Narrow,
+                partitions, SheetPaths()).ConfigureAwait(false))
+            {
+                yield return kept;
+            }
         }
+    }
 
-        int degree = _options.DegreeOfParallelism > 0
-            ? _options.DegreeOfParallelism
-            : _dataset.Session.Options.MaxDegreeOfParallelism;
-        scan.WithPruning(_options.UseStatistics)
-            .WithIndexes(_indexes)
-            .WithDegreeOfParallelism(Math.Max(degree, 1))
-            .WithPrefetch(_options.Prefetch)
-            .WithCompaction(_options.Compact)
-            .WithEncodings(!canonical && _keepEncodings, !canonical && _sinkDecodes);
-        if (_readAhead > 0)
-        {
-            scan.WithReadAhead(_readAhead);
-        }
-
-        return _counters is { } counters ? scan.WithMetrics(counters) : scan;
+    /// <summary>
+    /// Keeps the granules of the object <paramref name="held"/> a selected row may lie in, which its read takes alone: those
+    /// both its key's index and its sheets keep, when each narrowed it.
+    /// </summary>
+    private void Narrow(PositionedObject held, ulong[] granules)
+    {
+        System.Collections.Concurrent.ConcurrentDictionary<UInt128, ulong[]> narrowed = Volatile.Read(ref _narrowed)
+            ?? Interlocked.CompareExchange(ref _narrowed, new System.Collections.Concurrent.ConcurrentDictionary<UInt128, ulong[]>(), null)
+            ?? _narrowed!;
+        narrowed.AddOrUpdate(held.Entry.Uid, static (_, granules) => granules, static (_, before, granules) => before.Length == granules.Length ? Both(before, granules) : granules, granules);
     }
 }
 
@@ -3300,8 +1161,68 @@ internal readonly record struct PositionedObject(ObjectEntry Entry, long FirstRo
     /// <summary>The level whose tree holds it; level 0 is the one an append lands in.</summary>
     public int Level { get; init; }
 
+    /// <summary>
+    /// The rows of the object, its own, that a read takes of it: the granules the key's pruning kept, one range a part
+    /// (<see cref="KeyPruning"/>); null for every row.
+    /// </summary>
+    internal RowRange? Granules { get; init; }
+
     /// <summary>Its key in that tree: what orders it, then its uid.</summary>
     internal ReadOnlyMemory<byte> TreeKey { get; init; }
+
+    /// <summary>
+    /// Its entry's summaries, the first column of <paramref name="key"/> bounded by its keys where they do not bound it, a
+    /// text's (<see cref="DatasetKey.Bounded"/>): its smallest key, which its tree key leads with, and its largest, which
+    /// its entry states. The entry's own when the dataset has no key, or the object states no largest.
+    /// </summary>
+    internal ObjectSummaries Summaries(DatasetKey? key)
+    {
+        if (key is null || Entry.LastKey.IsEmpty || TreeKey.Length <= VortexDataset.UidBytes)
+        {
+            return Entry.Summaries;
+        }
+
+        if (Entry.ByKey is { } known && known.Holds(key, TreeKey))
+        {
+            return known.Summaries;
+        }
+
+        ObjectSummaries bounded = key.Bounded(Entry.Summaries, VortexDataset.OrderOf(TreeKey).Span, Entry.LastKey.Span, exact: !Entry.HasDeletions);
+        Entry.ByKey = new KeyBounded(key, TreeKey, bounded);
+        return bounded;
+    }
+
+    /// <summary>
+    /// Its entry's summaries with what its keys prove under <paramref name="schema"/>'s layout, a partition leading them or
+    /// not (<see cref="DatasetSchema.Bounded"/>): the partition's column, and the key's first column between its smallest key,
+    /// which its tree key leads with, and its largest, which its entry states.
+    /// </summary>
+    internal ObjectSummaries Summaries(DatasetSchema schema)
+    {
+        if (TreeKey.Length <= VortexDataset.UidBytes)
+        {
+            return Entry.Summaries;
+        }
+
+        if (Entry.BySchema is { } known && known.Holds(schema, TreeKey))
+        {
+            return known.Summaries;
+        }
+
+        ObjectSummaries bounded = schema.Bounded(Entry.Summaries, VortexDataset.OrderOf(TreeKey).Span, Entry.LastKey.Span, exact: !Entry.HasDeletions);
+        Entry.BySchema = new KeyBounded(schema, TreeKey, bounded);
+        return bounded;
+    }
+}
+
+/// <summary>An entry's summaries bounded by what its keys prove (<see cref="ObjectEntry.BySchema"/>): by what, under which tree key.</summary>
+/// <param name="By">The schema or the key that bound them.</param>
+/// <param name="TreeKey">The entry's key in the tree they were bound under.</param>
+/// <param name="Summaries">The summaries bounded.</param>
+internal sealed record KeyBounded(object By, ReadOnlyMemory<byte> TreeKey, ObjectSummaries Summaries)
+{
+    /// <summary>Whether they are what <paramref name="by"/> bounds under <paramref name="treeKey"/>.</summary>
+    internal bool Holds(object by, ReadOnlyMemory<byte> treeKey) => ReferenceEquals(By, by) && TreeKey.Span.SequenceEqual(treeKey.Span);
 }
 
 /// <summary>What a dataset scan would read, and what it costs.</summary>
@@ -3311,8 +1232,8 @@ internal readonly record struct PositionedObject(ObjectEntry Entry, long FirstRo
 /// The objects level 0 holds above its ceiling: the extra objects every key lookup has to touch
 /// until compaction catches up, and zero when it has.
 /// </param>
-/// <param name="IsClustered">
-/// Whether a clustering key is declared. Without one, levels are size tiers and a lookup touches
+/// <param name="IsKeyed">
+/// Whether a sort key is declared. Without one, levels are size tiers and a lookup touches
 /// every object the summaries cannot refute, which is output-sensitive and not bounded.
 /// </param>
 /// <param name="Objects">The objects the scan would open.</param>
@@ -3322,14 +1243,14 @@ internal readonly record struct PositionedObject(ObjectEntry Entry, long FirstRo
 /// <param name="Order">The column a key-ordered scan delivers its rows by, or null for the tree's order.</param>
 /// <param name="Cursors">
 /// The most objects the scan will hold open at once: one in the tree's order, two with a prefetch,
-/// which opens the next object ahead; key-ordered on the clustering key, level 0's objects and one
+/// which opens the next object ahead; key-ordered on the sort key, level 0's objects and one
 /// per level above it; on any other column, every object it would open.
 /// </param>
 internal sealed record DatasetPlan(
     ulong Version,
     IReadOnlyList<long> ObjectsByLevel,
     long Lag,
-    bool IsClustered,
+    bool IsKeyed,
     long Objects,
     long Rows,
     long ObjectsSkipped,

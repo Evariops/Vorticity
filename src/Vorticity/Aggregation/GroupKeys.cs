@@ -337,9 +337,6 @@ internal abstract class GroupKeys
     internal virtual int CompareKeys(GroupKeys other, int a, int b, int component) =>
         throw new NotSupportedException("These keys are ordered by the column of their values.");
 
-    /// <summary>The groups in the order they are delivered: by key, nulls last, when <paramref name="sorted"/>; as first seen otherwise.</summary>
-    internal abstract int[] Order(bool sorted);
-
     /// <summary>Reads component <paramref name="component"/> of a group's key as <typeparamref name="T"/>.</summary>
     internal abstract Func<int, T> Reader<T>(int component);
 
@@ -475,17 +472,6 @@ internal abstract class GroupKeys
     {
         Scratch.Return(ref _codeGroups);
         _codeOrigin = default;
-    }
-
-    private protected static int[] Identity(int count)
-    {
-        int[] order = new int[count];
-        for (int i = 0; i < count; i++)
-        {
-            order[i] = i;
-        }
-
-        return order;
     }
 }
 
@@ -2285,33 +2271,6 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         return _keys[a].CompareTo(right._keys[b]);
     }
 
-    internal override int[] Order(bool sorted)
-    {
-        int[] order = Identity(Count);
-        if (sorted)
-        {
-            SpanSort.Sort(order.AsSpan(), new ByKey(_keys, _null));
-        }
-
-        return order;
-    }
-
-    /// <summary>Groups by their key, the null group last.</summary>
-    private readonly struct ByKey : IComparer<int>
-    {
-        private readonly TValue[] _keys;
-        private readonly int _null;
-
-        internal ByKey(TValue[] keys, int nullGroup)
-        {
-            _keys = keys;
-            _null = nullGroup;
-        }
-
-        public int Compare(int a, int b) =>
-            a == _null ? (b == _null ? 0 : 1) : b == _null ? -1 : _keys[a].CompareTo(_keys[b]);
-    }
-
     internal override Func<int, T> Reader<T>(int component)
     {
         ColumnShape shape = _shape;
@@ -2736,27 +2695,6 @@ internal sealed class BytesKeys : GroupKeys
         return _table.KeyOf(a).SequenceCompareTo(right._table.KeyOf(b));
     }
 
-    internal override int[] Order(bool sorted)
-    {
-        int[] order = Identity(Count);
-        if (sorted)
-        {
-            SpanSort.Sort(order.AsSpan(), new ByKey(this));
-        }
-
-        return order;
-    }
-
-    /// <summary>Groups by their key's bytes, the null group last.</summary>
-    private readonly struct ByKey : IComparer<int>
-    {
-        private readonly BytesKeys _keys;
-
-        internal ByKey(BytesKeys keys) => _keys = keys;
-
-        public int Compare(int a, int b) => _keys.Compare(a, b);
-    }
-
     internal override Func<int, T> Reader<T>(int component)
     {
         ColumnShape shape = _shape;
@@ -2966,27 +2904,6 @@ internal sealed class BoolKeys : GroupKeys
     }
 
     internal override int CompareKeys(GroupKeys other, int a, int b, int component) => _keyOf[a].CompareTo(((BoolKeys)other)._keyOf[b]);
-
-    internal override int[] Order(bool sorted)
-    {
-        int[] order = Identity(Count);
-        if (sorted)
-        {
-            SpanSort.Sort(order.AsSpan(), new ByKey(_keyOf));
-        }
-
-        return order;
-    }
-
-    /// <summary>Groups by false, true, then null: the order of their codes.</summary>
-    private readonly struct ByKey : IComparer<int>
-    {
-        private readonly byte[] _keys;
-
-        internal ByKey(byte[] keys) => _keys = keys;
-
-        public int Compare(int a, int b) => _keys[a].CompareTo(_keys[b]);
-    }
 
     internal override Func<int, T> Reader<T>(int component)
     {

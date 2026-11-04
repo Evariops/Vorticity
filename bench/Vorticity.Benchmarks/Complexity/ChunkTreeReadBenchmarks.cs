@@ -16,8 +16,6 @@ using BenchmarkDotNet.Attributes;
 
 using Vorticity.Arrays;
 using Vorticity.Buffers;
-using Vorticity.Columns;
-using Vorticity.File;
 using Vorticity.IO;
 using Vorticity.Indexes;
 using Vorticity.Layouts;

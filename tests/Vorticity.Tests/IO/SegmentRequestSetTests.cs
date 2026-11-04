@@ -1,8 +1,6 @@
 using System;
-using Vorticity;
 using Vorticity.Buffers;
 using Vorticity.IO;
-using Vorticity.Serialization.Schemas;
 using Xunit;
 using static Vorticity.Tests.IO.IoTestData;
 

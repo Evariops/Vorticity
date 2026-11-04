@@ -56,9 +56,6 @@ internal sealed class WkbBounds
     /// <summary>Whether a value was not ISO WKB this build reads, which leaves the box and the types unknown.</summary>
     internal bool Unknown => _unknown;
 
-    /// <summary>Whether a value has edges: a line or a polygon, whose geodesics a box of vertices does not bound on a sphere.</summary>
-    internal bool HasEdges => _edges;
-
     /// <summary>The X added strictly between the ends <see cref="Gap"/> set.</summary>
     internal long InGap => _inGap;
 

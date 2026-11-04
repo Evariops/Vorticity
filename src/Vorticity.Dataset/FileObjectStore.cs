@@ -92,6 +92,9 @@ public sealed class FileObjectStore : IObjectStore
     public ObjectStoreCapabilities Capabilities =>
         ObjectStoreCapabilities.ReadsSuffix | ObjectStoreCapabilities.ListsInOrder | ObjectStoreCapabilities.CreatesConditionally;
 
+    /// <summary>A local disk's: 0.1 ms a read among 64 in flight over 3 GB/s, a request worth some 4.7 KB.</summary>
+    public CostProfile CostProfile => CostProfile.LocalDisk;
+
     /// <inheritdoc/>
     public ValueTask<ObjectRead> ReadAsync(
         string key, long offset, Memory<byte> destination, string? ifToken, CancellationToken cancellationToken)

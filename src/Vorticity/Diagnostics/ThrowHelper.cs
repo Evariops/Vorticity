@@ -10,12 +10,6 @@ namespace Vorticity;
 internal static class ThrowHelper
 {
     [MethodImpl(MethodImplOptions.NoInlining)]
-    internal static void ThrowFormat(string message) => throw new VortexFormatException(message);
-
-    [MethodImpl(MethodImplOptions.NoInlining)]
-    internal static T ThrowFormat<T>(string message) => throw new VortexFormatException(message);
-
-    [MethodImpl(MethodImplOptions.NoInlining)]
     internal static void ThrowTruncated(string what, long need, long have) =>
         throw new VortexFormatException(
             $"Truncated {what}: needed {need} bytes, {have} available.");
@@ -24,8 +18,4 @@ internal static class ThrowHelper
     internal static void ThrowOutOfBounds(string what, long offset, long length, long limit) =>
         throw new VortexFormatException(
             $"{what} range [{offset}, {offset + length}) is outside the available {limit} bytes.");
-
-    [MethodImpl(MethodImplOptions.NoInlining)]
-    internal static T ThrowUnsupported<T>(string componentId, ComponentKind kind) =>
-        throw new VortexUnsupportedException(componentId, kind);
 }

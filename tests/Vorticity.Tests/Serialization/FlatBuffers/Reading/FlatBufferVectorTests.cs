@@ -1,6 +1,5 @@
 // Strings, byte vectors and vectors of tables/strings.
 using System;
-using Vorticity;
 using Vorticity.Serialization.FlatBuffers;
 using Xunit;
 using static Vorticity.Tests.Serialization.FlatBuffers.TestFlatBuffers;

@@ -177,37 +177,73 @@ public sealed class TransportTests
         // the writer without completing it cancels them, rather than waiting out their deadlines.
         CancellationToken ct = TestContext.Current.CancellationToken;
         using S3Emulator emulator = new S3Emulator { MinimumPartSize = 64 << 10 };
+        TaskCompletionSource parked = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         emulator.Hold = async (request, _, token) =>
         {
             if (request.RequestUri!.Query.Contains("partNumber", StringComparison.Ordinal))
             {
+                parked.TrySetResult();
                 await Task.Delay(Timeout.Infinite, token);
             }
         };
         await using S3ObjectStore lake = Store(emulator, new StoreTransportOptions { RetryBaseDelay = TimeSpan.Zero, FirstByteTimeout = TimeSpan.FromMinutes(5) });
         await using VortexSession session = VortexSession.Create(o => o.ObjectStores.Add("s3://lake", lake));
         VortexFileWriter writer = session.CreateWriter<LocationTests.Reading>("s3://lake/out/given-up.vortex");
-        Stopwatch waited = Stopwatch.StartNew();
-        for (int day = 0; emulator.OpenUploads == 0; day++)
+
+        // Days until a part hangs: a day takes about 37 KB, and the upload starts with the writer's first chunk, near
+        // 1 MB. Eighty days stay under the 4 MiB the pipe holds, so the writer is never held back by the parts that
+        // hang, however late the upload starts.
+        for (int day = 0; day < 80 && !parked.Task.IsCompleted; day++)
         {
-            Assert.True(waited.Elapsed < TimeSpan.FromSeconds(30), "no upload started");
             await writer.WriteAsync<LocationTests.Reading>([.. Enumerable.Range(0, 20_000).Select(i => new LocationTests.Reading(day, (i * 7919 % 4000) / 100.0))], ct);
             await writer.FlushAsync(ct);
         }
 
+        await parked.Task.WaitAsync(TimeSpan.FromSeconds(30), ct);
         Stopwatch watch = Stopwatch.StartNew();
         await writer.DisposeAsync();
         Assert.True(watch.Elapsed < TimeSpan.FromSeconds(10), $"the writer took {watch.Elapsed} to give its upload up");
+        Assert.Equal(0, emulator.OpenUploads);
+        Assert.Null(emulator.BytesOf(Bucket, "out/given-up.vortex"));
+    }
 
-        // The abort goes on its own, so that the caller is not held by it: under the load of the whole
-        // suite it may land after the disposal returned, within its deadline.
+    [Fact]
+    public async Task AnUploadStartedAsItsPutIsGivenUpIsAbortedOnceItsAnswerComes()
+    {
+        // The service makes the upload, and its answer is slow to come back: the put, given up meanwhile, returns at
+        // once, and the upload, which that answer alone names, is aborted once it lands rather than left open.
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        using S3Emulator emulator = new S3Emulator { MinimumPartSize = 64 << 10 };
+        TaskCompletionSource made = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        TaskCompletionSource answer = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        emulator.Answering = async (request, token) =>
+        {
+            if (request.Method == HttpMethod.Post && request.RequestUri!.Query == "?uploads")
+            {
+                made.TrySetResult();
+                await answer.Task.WaitAsync(token);
+            }
+        };
+        await using S3ObjectStore store = Store(emulator);
+        Pipe pipe = new Pipe(new PipeOptions(pauseWriterThreshold: 8 << 20, resumeWriterThreshold: 4 << 20));
+        using CancellationTokenSource giveUp = new CancellationTokenSource();
+        Task<PutOutcome> put = store.PutAsync("files/given-up", pipe.Reader, -1, PutCondition.None, giveUp.Token).AsTask();
+        await pipe.Writer.WriteAsync(new byte[1 << 20], ct);
+        await made.Task.WaitAsync(ct);
+        Stopwatch watch = Stopwatch.StartNew();
+        await giveUp.CancelAsync();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => put);
+        Assert.True(watch.Elapsed < TimeSpan.FromSeconds(10), $"the put took {watch.Elapsed} to give up");
+        Assert.Equal(1, emulator.OpenUploads);
+
+        answer.TrySetResult();
         while (emulator.OpenUploads > 0 && watch.Elapsed < TimeSpan.FromSeconds(10))
         {
             await Task.Delay(10, ct);
         }
 
         Assert.Equal(0, emulator.OpenUploads);
-        Assert.Null(emulator.BytesOf(Bucket, "out/given-up.vortex"));
+        await pipe.Writer.CompleteAsync();
     }
 
     [Fact]

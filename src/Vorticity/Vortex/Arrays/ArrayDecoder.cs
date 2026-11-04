@@ -178,8 +178,8 @@ internal abstract class ArrayDecoder
     public virtual bool SelectsByRow => SelectsWithoutFullDecode;
 
     /// <summary>
-    /// Whether <see cref="TryCompare"/> is overridden, i.e. whether this encoding can answer a
-    /// comparison without materializing the whole node.
+    /// Whether <see cref="TryEvaluate"/> is overridden, i.e. whether this encoding can answer a
+    /// predicate without materializing the whole node.
     /// </summary>
     /// <remarks>
     /// The guard, and the same one <see cref="SelectsWithoutFullDecode"/> puts in front of the
@@ -191,57 +191,69 @@ internal abstract class ArrayDecoder
     public virtual bool EvaluatesWithoutFullDecode => false;
 
     /// <summary>
-    /// Answers <paramref name="op"/> against <paramref name="literal"/> over this node's rows
-    /// without decoding it, writing one <see cref="Compute.Trilean"/> state per row.
+    /// Answers <paramref name="predicate"/> over this node's rows without decoding it, a bit a row
+    /// into <paramref name="bits"/>.
     /// </summary>
     /// <param name="context">Per-batch arenas, buffers, options and the decoder table.</param>
     /// <param name="node">The serialized node.</param>
     /// <param name="dtype">The DType this node would produce.</param>
     /// <param name="length">The row count this node would produce.</param>
-    /// <param name="op">The comparison.</param>
-    /// <param name="literal">Its right-hand side.</param>
-    /// <param name="destination">Receives <paramref name="length"/> states.</param>
+    /// <param name="predicate">The comparison, range, set or prefix.</param>
+    /// <param name="bits">Receives the rows selected and, when some row is unknown, the rows known.</param>
     /// <returns>
-    /// <see langword="false"/> when this encoding will not answer this comparison, leaving
-    /// <paramref name="destination"/> untouched and the caller to decode as it always has.
+    /// <see langword="false"/> when this encoding will not answer this predicate, leaving the
+    /// caller to decode as it always has; whatever was written is then discarded.
     /// </returns>
     /// <remarks>
     /// An override answers the same thing the kernels would answer over the decoded node, three
     /// valued and row for row: a dictionary compares the literal to its values and expands over its
-    /// codes, and a compressed-string encoding compresses the needle rather than decompressing the
-    /// column. Refusing per call rather than per encoding is deliberate -- an encoding that answers
-    /// equality has no reason to answer an ordering, and saying so here costs one branch.
+    /// codes, a compressed-string encoding compresses the needle rather than decompressing the
+    /// column, and a packing tests its values as it unpacks them. A node of encoded children asks
+    /// them in turn (<see cref="ArrayDecodeContext.TryEvaluateChild"/>), the predicate moved into
+    /// their domain. Refusing per call rather than per encoding is deliberate -- an encoding that
+    /// answers equality has no reason to answer an ordering, and saying so here costs one branch.
     /// </remarks>
-    public virtual bool TryCompare(
+    public virtual bool TryEvaluate(
         ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
-        Expressions.ComparisonOp op, Expressions.FilterLiteral literal, Span<byte> destination) =>
+        Compute.EncodedPredicate predicate, ref Compute.PredicateBits bits) =>
         false;
 
     /// <summary>
-    /// Answers <c>StartsWith(<paramref name="prefix"/>)</c> over this node's rows without decoding
-    /// it, writing one <see cref="Compute.Trilean"/> state per row, as
-    /// <see cref="TryCompare"/> answers a comparison.
+    /// As <see cref="TryEvaluate"/>, over rows <c>[start, start + count)</c> of the node alone, a bit a row of them into
+    /// <paramref name="bits"/>: what a read of a chunk by its granules asks, whose buffers hold those rows' bytes alone.
     /// </summary>
     /// <param name="context">Per-batch arenas, buffers, options and the decoder table.</param>
     /// <param name="node">The serialized node.</param>
     /// <param name="dtype">The DType this node would produce.</param>
-    /// <param name="length">The row count this node would produce.</param>
-    /// <param name="prefix">The bytes a row must start with, a bytes literal.</param>
-    /// <param name="destination">Receives <paramref name="length"/> states.</param>
-    /// <returns><see langword="false"/> when this encoding will not answer, as for <see cref="TryCompare"/>.</returns>
+    /// <param name="length">The row count of the whole node.</param>
+    /// <param name="start">The first row answered.</param>
+    /// <param name="count">The rows answered.</param>
+    /// <param name="predicate">The comparison, range, set or prefix.</param>
+    /// <param name="bits">Receives the rows selected among those answered and, when some row is unknown, the rows known.</param>
+    /// <returns><see langword="false"/> when this encoding will not answer this predicate over a range.</returns>
     /// <remarks>
-    /// <para>
-    /// An encoding that stores its distinct values once -- a dictionary -- matches those and spreads
-    /// the answers over its codes, which costs a fraction of building the column to match it.
-    /// </para>
-    /// <para>
-    /// FSST answers on its codes: those every row starting with the prefix shares are compared as
-    /// bytes, and the few bytes past them decoded. Decompressing each row only as far as the prefix
-    /// is long, a symbol at a time, measured as costly as decoding the column in blocks.
-    /// </para>
+    /// An override reads nothing of the node past what decoding the same rows reads (<see cref="DecodesRange"/>): the
+    /// region a granule's plan lays leaves every other byte as the arena gives it.
     /// </remarks>
-    public virtual bool TryStartsWith(
+    public virtual bool TryEvaluateRange(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, int start, int count,
+        Compute.EncodedPredicate predicate, ref Compute.PredicateBits bits) =>
+        false;
+
+    /// <summary>
+    /// Answers <paramref name="question"/>, asked of this node's integer patterns, a bit a row
+    /// into <paramref name="bits"/>: what a parent of integers asks its child once it moved its
+    /// own question into the child's patterns.
+    /// </summary>
+    /// <param name="context">Per-batch arenas, buffers, options and the decoder table.</param>
+    /// <param name="node">The serialized node.</param>
+    /// <param name="dtype">The integer DType this node would produce.</param>
+    /// <param name="length">The row count this node would produce.</param>
+    /// <param name="question">The range or the set, on this node's patterns.</param>
+    /// <param name="bits">Receives the rows selected and, when some row is unknown, the rows known.</param>
+    /// <returns><see langword="false"/> when this encoding will not answer.</returns>
+    public virtual bool TryEvaluateIntegers(
         ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
-        Expressions.FilterLiteral prefix, Span<byte> destination) =>
+        in Compute.IntegerQuestion question, ref Compute.PredicateBits bits) =>
         false;
 }

@@ -16,6 +16,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Dataset;
 using Vorticity.IO;
+using Vorticity.Serialization.Protobuf;
 using Xunit;
 
 namespace Vorticity.Tests.Dataset;
@@ -51,7 +52,7 @@ public sealed class CommitObjectTests
             Parent = 6,
             Seed = 0x0123_4567_89AB_CDEF,
             Schema = Encoding.UTF8.GetBytes("{struct}"),
-            ClusteringKey = ["tenant", "stamp"],
+            Layout = new DatasetLayout { SortKey = [LayoutValue.Column("tenant"), LayoutValue.Column("stamp")] },
             WritePolicy = new byte[] { 1, 2, 3 },
             Chunker = new ChunkerSettings(64 << 10, 128 << 10, 256 << 10),
             Compaction = new CompactionSettings(4, 128L << 20, 10),
@@ -82,7 +83,7 @@ public sealed class CommitObjectTests
         Assert.Equal(written.Parent, commit.Header.Parent);
         Assert.Equal(written.Seed, commit.Header.Seed);
         Assert.Equal(written.Schema.ToArray(), commit.Header.Schema.ToArray());
-        Assert.Equal(written.ClusteringKey, commit.Header.ClusteringKey);
+        Assert.Equal(written.Layout, commit.Header.Layout);
         Assert.Equal(written.WritePolicy.ToArray(), commit.Header.WritePolicy.ToArray());
         Assert.Equal(written.Chunker, commit.Header.Chunker);
         Assert.Equal(written.Compaction, commit.Header.Compaction);
@@ -272,52 +273,45 @@ public sealed class CommitObjectTests
     }
 
     [Fact]
-    public void AnObjectOfAnEarlierFormatOpensAndOneOfALaterFormatIsRefused()
+    public void AnObjectOfAnotherFormatIsRefusedWithWhatItIs()
     {
-        // A dataset a release before this one wrote opens as it is; one a later release wrote, whose
-        // header may say what this one would not know to heed, is refused rather than read wrongly.
+        // A dataset an earlier release wrote is rebuilt from its rows rather than read in part; one a later release wrote,
+        // whose header may say what this one would not know to heed, is refused rather than read wrongly.
         (byte[] bytes, CommitHeader header, _, _, _, _) = Build();
         Assert.Equal(CommitFormat.Version, System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(8)));
 
         byte[] earlier = [.. bytes];
-        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(earlier.AsSpan(8), CommitFormat.OldestRead);
-        Assert.Equal(header.Version, CommitObject.Open(earlier, earlier.Length).Header.Version);
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(earlier.AsSpan(8), CommitFormat.Version - 1);
+        CommitFormatException old = Assert.Throws<CommitFormatException>(() => CommitObject.Open(earlier, earlier.Length));
+        Assert.Contains($"format {CommitFormat.Version - 1} by an earlier release", old.Message, StringComparison.Ordinal);
 
         byte[] later = [.. bytes];
-        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(later.AsSpan(8), CommitFormat.Newest + 1);
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(later.AsSpan(8), CommitFormat.Version + 1);
         CommitFormatException refused = Assert.Throws<CommitFormatException>(() => CommitObject.Open(later, later.Length));
-        Assert.Contains($"format {CommitFormat.Newest + 1}", refused.Message, StringComparison.Ordinal);
+        Assert.Contains($"format {CommitFormat.Version + 1} by a later release", refused.Message, StringComparison.Ordinal);
 
-        // A header that counts source offsets is written in format 3, which a writer of format 2
-        // refuses as this one refuses format 4, and which this one reads back whole.
+        // A header that counts source offsets reads them back whole, in the one format.
         CommitHeader counting = header with { Sources = [new SourceOffset("raw/spans/17", 41_200, 1_700_000_000_000)] };
         byte[] written = new CommitObjectBuilder(counting.Version).Build(counting);
-        Assert.Equal(CommitFormat.WithSources, System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(written.AsSpan(8)));
+        Assert.Equal(CommitFormat.Version, System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(written.AsSpan(8)));
         Assert.Equal(counting.Sources, CommitObject.Open(written, written.Length).Header.Sources);
 
-        // A header that names a feature of format 4 is written in format 4, whatever else it counts,
-        // and reads back with it.
-        CommitHeader featured = counting with { Features = DatasetFeatures.EntryFields };
-        byte[] fourth = new CommitObjectBuilder(featured.Version).Build(featured);
-        Assert.Equal(CommitFormat.WithFeatures, System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(fourth.AsSpan(8)));
-        CommitHeader reread = CommitObject.Open(fourth, fourth.Length).Header;
-        Assert.Equal(DatasetFeatures.EntryFields, reread.Features);
-        Assert.Equal(counting.Sources, reread.Sources);
-
-        // A feature this library does not know is a later format's, refused as a later format is; so is a flag of periods
-        // without its lateness horizon, and one that goes with it reads back.
-        CommitHeader unknown = featured with { Features = DatasetFeatures.EntryFields | (DatasetFeatures)(1UL << 40) };
-        byte[] unknownBytes = new CommitObjectBuilder(unknown.Version).Build(unknown);
-        CommitFormatException unknownRefused = Assert.Throws<CommitFormatException>(() => CommitObject.Open(unknownBytes, unknownBytes.Length));
-        Assert.Contains("features 0x10000000000", unknownRefused.Message, StringComparison.Ordinal);
-
-        CommitHeader alone = featured with { Features = DatasetFeatures.Periods };
-        byte[] aloneBytes = new CommitObjectBuilder(alone.Version).Build(alone);
-        Assert.Throws<CommitFormatException>(() => CommitObject.Open(aloneBytes, aloneBytes.Length));
-
-        CommitHeader periods = alone with { Lateness = TimeSpan.FromMinutes(5), PeriodLength = SliceWidth.Hour };
-        byte[] periodsBytes = new CommitObjectBuilder(periods.Version).Build(periods);
-        Assert.True(CommitObject.Open(periodsBytes, periodsBytes.Length).Header.ByPeriods);
+        // The fields of retired designs, the periods' among them, are skipped, never read.
+        ProtoWriter writer = new ProtoWriter();
+        try
+        {
+            counting.Write(ref writer);
+            writer.WriteUInt64(19, 300);
+            writer.WriteBytes(21, [8, 3]);
+            writer.WriteBytes(22, [8, 1, 16, 2]);
+            CommitHeader skipped = CommitHeader.Read(writer.WrittenSpan);
+            Assert.Equal(counting.Sources, skipped.Sources);
+            Assert.Equal(counting.Layout, skipped.Layout);
+        }
+        finally
+        {
+            writer.Dispose();
+        }
     }
 
     // An entry that records its object's footer length: the same bytes as before up to its summaries, the
@@ -331,10 +325,9 @@ public sealed class CommitObjectTests
         PageReference fragment = new PageReference(7, 100, 40, 0xFEED);
         ObjectEntry plain = new ObjectEntry("data/0001.vortex", 11, 1_000, 5_000_000, 22, [fragment], summaries);
         Assert.Same(plain, plain.WithFooterBytes(ObjectEntry.FirstReadBytes));
-        Assert.False(plain.HasFields);
+        Assert.Equal(0, plain.FooterBytes);
 
         ObjectEntry described = plain.WithFooterBytes(300_000);
-        Assert.True(described.HasFields);
         Assert.Equal(300_000, described.FooterBytes);
         byte[] before = plain.ToBytes();
         byte[] after = described.ToBytes();
@@ -349,7 +342,7 @@ public sealed class CommitObjectTests
             Assert.Equal(300_000, back.FooterBytes);
             Assert.Equal(bytes, back.ToBytes());
             Assert.Equal(entry.DeletedRows, back.DeletedRows);
-            (long bytesOf, long rows, long deletedRows, long fragments, long _) = ObjectEntry.TallyOf(bytes);
+            (long bytesOf, long rows, long deletedRows, long fragments, long _, long _) = ObjectEntry.TallyOf(bytes);
             Assert.Equal((entry.Bytes, entry.Rows, entry.DeletedRows, 1L), (bytesOf, rows, deletedRows, fragments));
             Assert.Equal(entry.Summaries.ToBytes(), ObjectEntry.SummaryOf(bytes).ToArray());
             Assert.True(ObjectEntry.NamesAny(bytes, [7]));

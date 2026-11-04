@@ -3,7 +3,6 @@ using System.Threading;
 using System.Threading.Tasks;
 
 using Vorticity.Arrays;
-using Vorticity.File;
 using Vorticity.IO;
 using Vorticity.Layouts;
 using Vorticity.Scanning;

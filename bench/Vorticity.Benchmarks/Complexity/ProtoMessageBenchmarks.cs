@@ -1,16 +1,16 @@
 // What the small messages a writer mostly writes cost: `Node` clears the writer and writes a few
 // fields and one nested message, as the blob writer's workspace does for each node's metadata;
 // `Fields` writes one message of 4,096 varint fields, where the capacity check is most of the work.
-// Each against `ProtoWriterBefore`, the writer as it kept its waiting lengths in an array of its own.
-using System;
-
+// The writer keeps its waiting lengths at the end of its pooled array; when it kept them in an array
+// of its own, a node's metadata took 13.2 to 14.1 µs where it takes 8.6 to 8.8 (311f31fd, the
+// measure against a checkout of the original).
 using BenchmarkDotNet.Attributes;
 
 using Vorticity.Serialization.Protobuf;
 
 namespace Vorticity.Benchmarks.Complexity;
 
-/// <summary>Small protobuf messages written, against the original writer.</summary>
+/// <summary>Small protobuf messages written.</summary>
 [Config(typeof(BenchmarkConfig))]
 [BenchmarkCategory(BenchmarkConfig.Explore)]
 public class ProtoMessageBenchmarks
@@ -23,15 +23,10 @@ public class ProtoMessageBenchmarks
     // Held by the object and reached by reference, kept from one call to the next, as the
     // workspace holds its metadata writer.
     private ProtoWriter _writer;
-    private ProtoWriterBefore _writerBefore;
 
-    /// <summary>Hands the writers' arrays back.</summary>
+    /// <summary>Hands the writer's array back.</summary>
     [GlobalCleanup]
-    public void Cleanup()
-    {
-        _writer.Dispose();
-        _writerBefore.Dispose();
-    }
+    public void Cleanup() => _writer.Dispose();
 
     /// <summary>The nodes' metadata written, each after a clear.</summary>
     [Benchmark]
@@ -52,47 +47,6 @@ public class ProtoMessageBenchmarks
         }
 
         return total;
-    }
-
-    /// <summary>The nodes' metadata written by the original writer.</summary>
-    [Benchmark(Baseline = true)]
-    public int NodeBefore()
-    {
-        ref ProtoWriterBefore writer = ref _writerBefore;
-        int total = 0;
-        for (int i = 0; i < Nodes; i++)
-        {
-            writer.Clear();
-            writer.WriteUInt32(1, (uint)i);
-            ProtoWriterBefore.MessageScope scope = writer.BeginMessage(2);
-            writer.WriteUInt64(1, (ulong)i * 3);
-            writer.WriteBool(2, true);
-            scope.End();
-            writer.WriteBytes(3, _bytes);
-            total += writer.Length;
-        }
-
-        return total;
-    }
-
-    /// <summary>One message of many varint fields, by the original writer.</summary>
-    [Benchmark]
-    public int FieldsBefore()
-    {
-        ProtoWriterBefore writer = default;
-        try
-        {
-            for (int i = 0; i < FieldCount; i++)
-            {
-                writer.WriteUInt64(1, (ulong)i * 7);
-            }
-
-            return writer.Length;
-        }
-        finally
-        {
-            writer.Dispose();
-        }
     }
 
     /// <summary>One message of many varint fields.</summary>

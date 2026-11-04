@@ -1,7 +1,6 @@
 // Round trip and rejection tests for `table Footer` and `table FileStatistics`.
 using System;
 using System.Text;
-using Vorticity;
 using Vorticity.Serialization.FlatBuffers;
 using Vorticity.Serialization.Schemas;
 using Xunit;

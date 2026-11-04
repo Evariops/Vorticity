@@ -4,8 +4,6 @@ using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Buffers;
-using Vorticity.Columns;
-using Vorticity.File;
 using Vorticity.IO;
 using Vorticity.Scanning;
 using Vorticity.Serialization.Schemas;
@@ -52,6 +50,31 @@ public sealed class DegreeOfParallelismTests
         Report($"per scan, degree {degree}", peak, batches);
         Assert.True(batches > degree, "the file must produce more batches than lanes to be a test");
         Assert.InRange(peak, 1, degree);
+    }
+
+    /// <summary>
+    /// A scan of one lane that reads two splits ahead, as a lane of a pass at 32 lanes does, while its pass's pool holds
+    /// fourteen that lanes whose ranges were all read gave up: it reads more than two ahead, sixteen at most, and gives
+    /// every one it took back. Alone, it reads two. Kept to two, the last long piece of the 99th percentile per service
+    /// over S1's last quarter of an hour (QP-6) at the S3 profile read its splits one round trip after another.
+    /// </summary>
+    [Fact]
+    public async Task AScanReadsAheadWhatTheLanesOfItsPassGaveUp()
+    {
+        (int alone, int batches) = await ScanAsync(builder => builder.WithDegreeOfParallelism(1).WithReadAhead(2));
+        int peak;
+        using (ReadAheadPool pool = ReadAheadPool.Lend(lanes: 1)!)
+        {
+            pool.Finished(14);
+            (peak, _) = await ScanAsync(builder => builder.WithDegreeOfParallelism(1).WithReadAhead(ReadAheadPool.Carry(2, pool)));
+            Assert.Equal(14, pool.Free);
+        }
+
+        Report("one lane, two ahead of its own", alone, batches);
+        Report("one lane, two ahead and fourteen of its pass's", peak, batches);
+        Assert.True(batches > ReadAheadPool.Most, "the file must produce more batches than a scan reads ahead to be a test");
+        Assert.InRange(alone, 1, 2);
+        Assert.InRange(peak, 3, ReadAheadPool.Most);
     }
 
     [Theory]

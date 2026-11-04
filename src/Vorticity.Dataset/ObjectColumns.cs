@@ -147,7 +147,7 @@ internal sealed class ObjectColumns
             if (changes[column] != ColumnChange.None && schema.IsKeyed(dataset.GetFieldName(column)))
             {
                 throw new VortexSchemaException(
-                    $"'{objectKey}' holds '{dataset.GetFieldName(column)}' as {was}; it is a column of the clustering key, which orders " +
+                    $"'{objectKey}' holds '{dataset.GetFieldName(column)}' as {was}; it is a column of the sort key, which orders " +
                     $"every object, and every object holds it as the dataset's {type}.");
             }
         }
@@ -551,8 +551,27 @@ internal sealed class ObjectColumns
 
             case InExpr membership:
                 return Leaf(membership.Field, pushable: false) is { } member
-                    ? (Truth.Expression, ReferenceEquals(member, membership.Field) ? membership : new InExpr(member, membership.Literals))
+                    ? (Truth.Expression, ReferenceEquals(member, membership.Field) ? membership : new InExpr(member, membership.Literals) { Projects = membership.Projects })
                     : Missing(membership.Field);
+
+            case TupleInExpr tuples:
+            {
+                FieldExpr[] fields = new FieldExpr[tuples.Arity];
+                bool renamed = false;
+                for (int column = 0; column < fields.Length; column++)
+                {
+                    if (Leaf(tuples.Fields[column], pushable: false) is not { } field)
+                    {
+                        // A column the object lacks holds nulls: each row is unknown or false, which only a selection tells apart.
+                        return Absent(tuples.Fields[column]) && select ? (Truth.False, null) : (Truth.Unsettled, null);
+                    }
+
+                    fields[column] = field;
+                    renamed |= !ReferenceEquals(field, tuples.Fields[column]);
+                }
+
+                return (Truth.Expression, renamed ? tuples.Over(fields) : tuples);
+            }
 
             case StringMatchExpr match:
                 return Leaf(match.Field, pushable: false) is { } matched
@@ -726,6 +745,7 @@ internal sealed class ObjectColumns
         return field switch
         {
             Compute.FunctionFieldExpr function => function.Over(new ColumnFieldExpr(renamed)),
+            Compute.MappedFieldExpr mapped => mapped.Over(new ColumnFieldExpr(renamed)),
             Compute.VariantFieldExpr path => path.Over(new ColumnFieldExpr(renamed)),
             _ => new ColumnFieldExpr(renamed),
         };

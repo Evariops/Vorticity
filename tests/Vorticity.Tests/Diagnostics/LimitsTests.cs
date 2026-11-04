@@ -1,5 +1,4 @@
 using System;
-using Vorticity;
 using Xunit;
 
 namespace Vorticity.Tests.Diagnostics;

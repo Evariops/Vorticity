@@ -172,8 +172,6 @@ public sealed partial class Scan<TRecord>
 
         internal override ScanCounters Counters => _scan.Counters;
 
-        internal override ScanMetrics Metrics => _scan.Metrics;
-
         internal override ScanSpec Spec() => _scan.Spec();
 
         internal override void Begin() => _scan.Begin();

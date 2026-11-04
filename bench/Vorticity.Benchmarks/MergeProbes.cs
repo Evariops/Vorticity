@@ -13,10 +13,8 @@ using BenchmarkDotNet.Attributes;
 
 using Vorticity.Arrays;
 using Vorticity.Buffers;
-using Vorticity.Columns;
 using Vorticity.Dataset;
 using Vorticity.Types;
-using Vorticity.Writing;
 
 namespace Vorticity.Benchmarks;
 
@@ -110,7 +108,7 @@ public class MergeProbes
         {
             Seed = 0xC1057E_5EED,
             Write = new VortexWriteOptions { RowBlockSize = 64, DataBlockTargetBytes = 8 << 10 },
-            ClusteringKey = ["key"],
+            Layout = new DatasetLayout { SortKey = [LayoutValue.Column("key")] },
         };
 
         VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, options).ConfigureAwait(false);

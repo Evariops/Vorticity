@@ -8,7 +8,6 @@ using System.IO.Pipelines;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
-using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.IO;
@@ -330,7 +329,7 @@ public sealed class S3WriteTests
         using S3Emulator emulator = new S3Emulator();
         await using S3ObjectStore lake = Small(emulator);
         await using VortexSession session = VortexSession.Create(o => o.ObjectStores.Add("s3://lake", lake));
-        Vorticity.Dataset.DatasetOptions options = new Vorticity.Dataset.DatasetOptions { Session = session, ClusteringKey = ["Day"] };
+        Vorticity.Dataset.DatasetOptions options = new Vorticity.Dataset.DatasetOptions { Session = session, Layout = new Vorticity.Dataset.DatasetLayout { SortKey = [Vorticity.Dataset.LayoutValue.Column("Day")] } };
         await using (Vorticity.Dataset.VortexDataset dataset = await Vorticity.Dataset.VortexDataset.CreateAsync("s3://lake/tables/readings", LocationTests.Reading.Schema, options, ct))
         {
             for (int append = 0; append < 4; append++)
