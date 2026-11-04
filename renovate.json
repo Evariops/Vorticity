@@ -50,6 +50,21 @@
       "groupName": "vortex"
     },
     {
+      "description": "The Arrow variant crates of the corpus generator are pinned to the major the vortex crates take, so that its shredded columns are the reference's own: a major moves with vortex, by hand, never alone.",
+      "matchManagers": [
+        "cargo"
+      ],
+      "matchDepNames": [
+        "arrow-array",
+        "arrow-schema",
+        "parquet-variant-compute"
+      ],
+      "matchUpdateTypes": [
+        "major"
+      ],
+      "enabled": false
+    },
+    {
       "description": "zizmor is pinned twice, by the pre-commit hook and by the workflow that runs it at its strictest: one pull request moves both.",
       "matchDepNames": [
         "zizmorcore/zizmor",
