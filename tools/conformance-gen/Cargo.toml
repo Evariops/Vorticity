@@ -23,7 +23,7 @@ vortex-btrblocks = "=0.86.1"
 vortex-onpair = "=0.86.1"
 # Ground truth for the `vortex.pco` port: pco's own metadata parser, so a C# parser can be checked
 # field by field against the reference rather than against my reading of its source.
-pco = "=1.0.3"
+pco = "=1.0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 sha2 = "0.11"
