@@ -158,14 +158,23 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
     /// a row, every row when it is empty, after the rows counted before.
     /// </summary>
     /// <exception cref="VortexFormatException">A row's value or metadata does not decode.</exception>
-    internal void Add(in Counting counting, ReadOnlySpan<ulong> selection)
+    internal void Add(in Counting counting, ReadOnlySpan<ulong> selection) => Add(in counting, selection, 0, counting.Rows);
+
+    /// <summary>
+    /// Counts rows <c>[start, start + count)</c> of a variant column made ready (<see cref="Prepare(RecordBatch, int)"/>), after the
+    /// rows counted before: a slice of the rows a writer counts on a lane of its own, merged after the slices before it.
+    /// </summary>
+    /// <exception cref="VortexFormatException">A row's value or metadata does not decode.</exception>
+    internal void Add(in Counting counting, int start, int count) => Add(in counting, default, start, start + count);
+
+    private void Add(in Counting counting, ReadOnlySpan<ulong> selection, int start, int end)
     {
         Arrays.CanonicalArena arena = counting.Arena;
 
         // The views and their data resolved once: a row's through the node's accessors were a sixth of what a row cost.
         Arrays.ViewValues metadata = new Arrays.ViewValues(arena.GetNode(counting.Metadata));
         Arrays.ViewValues values = new Arrays.ViewValues(arena.GetNode(counting.Value));
-        for (int row = 0; row < counting.Rows; row++)
+        for (int row = start; row < end; row++)
         {
             if (!selection.IsEmpty && ((selection[row >> 6] >> (row & 63)) & 1) == 0)
             {
@@ -227,21 +236,23 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
 
     /// <summary>
     /// Adds what <paramref name="other"/> counted, as if its rows had been counted after these: its counts and bounds path by
-    /// path, its keys this census has not met counted as theirs while <see cref="MaxKeys"/> lets it, and as their objects'
-    /// other keys past it. Under that many keys, the census is the one the rows of both, counted one after the other, make.
+    /// path, the spans of its paths' rows moved past these rows, its keys this census has not met counted as theirs while
+    /// <see cref="MaxKeys"/> lets it, and as their objects' other keys past it. Under that many keys, the census is the one
+    /// the rows of both, counted one after the other, make.
     /// </summary>
-    /// <exception cref="InvalidOperationException">Either census keeps the spans of its paths' rows, which only a count in order makes.</exception>
+    /// <exception cref="InvalidOperationException">The censuses keep the spans of their rows within different gaps, or one keeps none.</exception>
     internal void Merge(PathCensus other)
     {
-        if (_gap > 0 || other._gap > 0)
+        if (_gap != other._gap)
         {
-            throw new InvalidOperationException("A census that keeps the spans of its rows counts them in order and merges with none.");
+            throw new InvalidOperationException("Two censuses merge when both keep the spans of their rows within one gap, or neither keeps any.");
         }
 
+        long offset = Rows;
         Rows += other.Rows;
         ValueBytes += other.ValueBytes;
         Partial |= other.Partial;
-        Root.Merge(this, other.Root);
+        Root.Merge(this, other.Root, offset);
     }
 
     /// <summary>The UTF-8 name <paramref name="utf8"/> decoded into the census's scratch, valid until the next name decoded.</summary>
@@ -416,6 +427,32 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
         private SpanList[]? _classSpans;
         private const PathClass NoClass = (PathClass)byte.MaxValue;
 
+        /// <summary>Appends <paramref name="spans"/>, a first and a last row each, <paramref name="offset"/> rows on, to the spans of <paramref name="class"/>.</summary>
+        private void Spans(PathClass @class, ReadOnlySpan<long> spans, long offset, long gap)
+        {
+            for (int i = 0; i < spans.Length; i += 2)
+            {
+                SpanListOf(@class).Append(spans[i] + offset, spans[i + 1] + offset, gap);
+            }
+        }
+
+        /// <summary>The spans of <paramref name="class"/>: the first class met kept in the node, the others beside it.</summary>
+        private ref SpanList SpanListOf(PathClass @class)
+        {
+            if (@class == _spanClass)
+            {
+                return ref _spans;
+            }
+
+            if (_spanClass == NoClass)
+            {
+                _spanClass = @class;
+                return ref _spans;
+            }
+
+            return ref (_classSpans ??= new SpanList[PathClasses])[(int)@class];
+        }
+
         /// <summary>Notes a value of <paramref name="class"/> at <paramref name="row"/>, in its class's spans.</summary>
         private void Occur(PathClass @class, long row, long gap)
         {
@@ -482,6 +519,23 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
                 _spans[last + 2] = row;
                 _openEnd = row;
                 _count++;
+            }
+
+            /// <summary>
+            /// Appends the span <paramref name="first"/> to <paramref name="last"/>, past every span noted: the open span's end
+            /// taken on to <paramref name="last"/> when <paramref name="first"/> is within <paramref name="gap"/> rows of it, as
+            /// noting its rows one by one would.
+            /// </summary>
+            internal void Append(long first, long last, long gap)
+            {
+                if (_count > 0 && first - _openEnd <= gap)
+                {
+                    _openEnd = Math.Max(_openEnd, last);
+                    return;
+                }
+
+                Occur(first, gap);
+                _openEnd = last;
             }
 
             /// <summary>No span, the buffer kept.</summary>
@@ -847,8 +901,11 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
             return key;
         }
 
-        /// <summary>Adds what <paramref name="other"/> counted at the same path of another census to these counts, in <paramref name="census"/> (<see cref="PathCensus.Merge"/>).</summary>
-        internal void Merge(PathCensus census, PathCount other)
+        /// <summary>
+        /// Adds what <paramref name="other"/> counted at the same path of another census to these counts, in <paramref name="census"/>
+        /// (<see cref="PathCensus.Merge"/>), its rows <paramref name="offset"/> rows past these.
+        /// </summary>
+        internal void Merge(PathCensus census, PathCount other, long offset)
         {
             Values += other.Values;
             OtherKeys += other.OtherKeys;
@@ -874,6 +931,19 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
             if (other.HasTextBounds)
             {
                 Text(other, census.StringBoundBytes);
+            }
+
+            if (census._gap > 0)
+            {
+                if (other._spanClass != NoClass)
+                {
+                    Spans(other._spanClass, other._spans.View(), offset, census._gap);
+                }
+
+                for (int @class = 0; other._classSpans is { } others && @class < others.Length; @class++)
+                {
+                    Spans((PathClass)@class, others[@class].View(), offset, census._gap);
+                }
             }
 
             if (other._keys is not { Count: > 0 } keys)
@@ -910,7 +980,7 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
                     census._keyCount++;
                 }
 
-                mine!.Merge(census, count);
+                mine!.Merge(census, count, offset);
             }
         }
 

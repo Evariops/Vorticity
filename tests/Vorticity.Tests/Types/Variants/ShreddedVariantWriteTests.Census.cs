@@ -107,6 +107,39 @@ public sealed partial class ShreddedVariantWriteTests
         }
     }
 
+    /// <summary>
+    /// A writer that counts its rows' paths itself, as an append's does: at eight lanes, a call's rows counted in slices on lanes
+    /// of their own and merged, it writes the directories one lane writes, byte for byte.
+    /// </summary>
+    [Fact]
+    public async Task AWritersCensusCountedInSlicesWritesTheDirectoryOneLaneWrites()
+    {
+        Doc[] rows = Counted(new Random(9));
+        string one = await CountedAsync(rows, degree: 1);
+        long sliced = System.Threading.Interlocked.Read(ref VortexFileWriter.CensusesSliced);
+        string eight = await CountedAsync(rows, degree: 8);
+        try
+        {
+            Assert.True(System.Threading.Interlocked.Read(ref VortexFileWriter.CensusesSliced) > sliced, "no call was counted in slices");
+            await using VortexFile alone = await VortexFile.OpenAsync(one, Ct);
+            await using VortexFile lanes = await VortexFile.OpenAsync(eight, Ct);
+            foreach (string column in new[] { nameof(Doc.Attributes), nameof(Doc.Extra) })
+            {
+                int field = alone.DType.IndexOfField(System.Text.Encoding.UTF8.GetBytes(column));
+                (Vorticity.Indexes.VariantDirectory? expected, _, _) = await Vorticity.Indexes.VariantDirectory.ReadAsync(alone, field, null, Ct);
+                (Vorticity.Indexes.VariantDirectory? actual, _, _) = await Vorticity.Indexes.VariantDirectory.ReadAsync(lanes, field, null, Ct);
+                Assert.NotNull(expected);
+                Assert.NotNull(actual);
+                Assert.Equal(Convert.ToHexString(expected.ToBytes()), Convert.ToHexString(actual.ToBytes()));
+            }
+        }
+        finally
+        {
+            System.IO.File.Delete(one);
+            System.IO.File.Delete(eight);
+        }
+    }
+
     /// <summary>Seventy thousand documents, past the last of their 1,024-row blocks by 368.</summary>
     private static Doc[] Counted(Random random) =>
         [.. Enumerable.Range(0, 70_000).Select(i => new Doc(i, Document(random), random.Next(10) == 0 ? null : Document(random)))];

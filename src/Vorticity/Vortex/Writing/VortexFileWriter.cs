@@ -437,6 +437,12 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// </summary>
     private PathCensus?[]? _census;
 
+    /// <summary>
+    /// By column, the censuses of the lanes that count slices of a call's rows beside the column's own, merged into it in
+    /// order (<see cref="CountSlicesAsync"/>); null until a call is cut in slices.
+    /// </summary>
+    private PathCensus?[][]? _sliceCensus;
+
     /// <summary>By column, the shredded keys whose values are counted block by block; null when no column shreds one.</summary>
     private (int Index, string Key, Types.Variants.PathClass Class)[]?[]? _countedKeys;
 
@@ -1335,11 +1341,26 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// <summary>The rows of a group the paths the writer counts name: a block's, a granule's.</summary>
     private long CensusGroupRows => Math.Max(_blockRows, 1);
 
+    /// <summary>The rows of a call counted on a lane of their own, at least, when the call's rows are cut in slices.</summary>
+    private const int CensusSliceRows = 16_384;
+
+    /// <summary>
+    /// The calls whose rows a writer's census counted in slices, across every writer in the process. Internal and
+    /// diagnostic: without it, a census counted on one lane is invisible to the tests.
+    /// </summary>
+    internal static long CensusesSliced;
+
     /// <summary>
     /// Counts the paths of the rows of <paramref name="root"/> into each variant column's census, made ready here, which may
-    /// add nodes to the arena; with lanes to spare, on another while the writer takes the same rows, returning what it runs
-    /// on; inline otherwise, returning null.
+    /// add nodes to the arena; with lanes to spare, on others while the writer takes the same rows, returning what they run
+    /// on; inline otherwise, returning null. With lanes to spare and rows enough, the rows are cut in slices, the first
+    /// counted by the census, each other by a census of its own merged into it in order (<see cref="PathCensus.Merge"/>):
+    /// the census the rows counted in order make.
     /// </summary>
+    /// <remarks>
+    /// One lane counting the rows of an append of 16 lanes left 109 to 117 ms of a 617 ms append unhidden: its rows cost
+    /// some 190 ns each, the writer's own work at 16 lanes less.
+    /// </remarks>
     private Task? CountPathsAsync(CanonicalArena arena, int root, int rows)
     {
         PathCensus?[] census = _census!;
@@ -1354,17 +1375,82 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
         if (_lanes <= 1)
         {
-            Count(census, ready);
+            Count(census, ready, 0, rows);
             return null;
         }
 
-        return Task.Run(() => Count(census, ready));
+        int slices = Math.Min(_lanes, rows / CensusSliceRows);
+        return slices <= 1 ? Task.Run(() => Count(census, ready, 0, rows)) : CountSlicesAsync(census, ready, rows, slices);
 
-        static void Count(PathCensus?[] census, PathCensus.Counting[] ready)
+        static void Count(PathCensus?[] census, PathCensus.Counting[] ready, int start, int count)
         {
             for (int field = 0; field < census.Length; field++)
             {
-                census[field]?.Add(in ready[field]);
+                census[field]?.Add(in ready[field], start, count);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Counts <paramref name="rows"/> rows made ready in <paramref name="slices"/> slices on lanes of their own: the first into
+    /// <paramref name="census"/>, each other into a census of its lane, cleared first, then merged into it in order.
+    /// </summary>
+    private async Task CountSlicesAsync(PathCensus?[] census, PathCensus.Counting[] ready, int rows, int slices)
+    {
+        Interlocked.Increment(ref CensusesSliced);
+        PathCensus?[][] lanes = _sliceCensus ??= new PathCensus?[census.Length][];
+        for (int field = 0; field < census.Length; field++)
+        {
+            if (census[field] is null)
+            {
+                continue;
+            }
+
+            PathCensus?[] held = lanes[field] ??= [];
+            if (held.Length < slices)
+            {
+                Array.Resize(ref held, slices);
+                lanes[field] = held;
+            }
+
+            for (int slice = 1; slice < slices; slice++)
+            {
+                held[slice] ??= new PathCensus(census[field]!.StringBoundBytes, CensusGroupRows);
+            }
+        }
+
+        Task[] counting = new Task[slices];
+        for (int slice = 0; slice < slices; slice++)
+        {
+            int at = slice;
+            int start = (int)((long)rows * at / slices);
+            int end = (int)((long)rows * (at + 1) / slices);
+            counting[at] = Task.Run(() =>
+            {
+                for (int field = 0; field < census.Length; field++)
+                {
+                    if (census[field] is not { } own)
+                    {
+                        continue;
+                    }
+
+                    PathCensus into = at == 0 ? own : lanes[field][at]!;
+                    if (at > 0)
+                    {
+                        into.Clear();
+                    }
+
+                    into.Add(in ready[field], start, end - start);
+                }
+            });
+        }
+
+        await Task.WhenAll(counting).ConfigureAwait(false);
+        for (int field = 0; field < census.Length; field++)
+        {
+            for (int slice = 1; census[field] is { } own && slice < slices; slice++)
+            {
+                own.Merge(lanes[field][slice]!);
             }
         }
     }
@@ -2950,7 +3036,14 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                     census.Release();
                     _census[field] = null;
                 }
+
+                foreach (PathCensus? lane in _sliceCensus?[field] ?? [])
+                {
+                    lane?.Release();
+                }
             }
+
+            _sliceCensus = null;
 
             // Every path and class of a variant column, for a question that refutes the file by them.
             List<(int Field, IndexSegment Region)> pathDirectories = [];
