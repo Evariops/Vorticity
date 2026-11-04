@@ -2,7 +2,6 @@ using System;
 using System.IO.Hashing;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
-using Vorticity.Arrays;
 
 namespace Vorticity.Aggregating;
 

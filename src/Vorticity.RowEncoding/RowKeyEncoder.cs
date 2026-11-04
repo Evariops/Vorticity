@@ -1,11 +1,8 @@
 using System;
-using System.Buffers.Binary;
 using System.Globalization;
 using System.Text;
 using Vorticity.Arrays;
-using Vorticity.Buffers;
 using Vorticity.Expressions;
-using Vorticity.Indexes;
 using Vorticity.Types;
 using Vorticity.Writing;
 
@@ -294,6 +291,185 @@ public static partial class RowEncoder
             default:
                 throw Unkeyed(dtype);
         }
+    }
+
+    /// <summary>
+    /// The bytes the first value of an ascending row-encoded key takes, a value of <paramref name="dtype"/>: its width for
+    /// a fixed one, its sentinel and blocks for a variable one, the last block's marker the first that is no continuation.
+    /// Two keys hold the same first value when these bytes of theirs are the same.
+    /// </summary>
+    internal static int FirstValueLength(ReadOnlySpan<byte> key, DType dtype)
+    {
+        dtype = Storage(dtype);
+        switch (dtype.Kind)
+        {
+            case DTypeKind.Bool:
+                return 2;
+
+            case DTypeKind.Primitive:
+                return dtype.PType.ByteWidth() + 1;
+
+            case DTypeKind.Utf8 or DTypeKind.Binary:
+                return VariableLength(key);
+
+            default:
+                throw Unkeyed(dtype);
+        }
+    }
+
+    /// <summary>The width <see cref="EncodedWidth"/> gives a text or a binary, whose bytes tell their length.</summary>
+    internal const int VariableWidth = -2;
+
+    /// <summary>
+    /// What <see cref="ValueLength(ReadOnlySpan{byte}, DType)"/> needs of <paramref name="dtype"/>, worked out once for a
+    /// key's component: the width of a fixed one, <see cref="VariableWidth"/> for a text or a binary, -1 for a struct or a
+    /// list whose width depends on its data.
+    /// </summary>
+    internal static int EncodedWidth(DType dtype)
+    {
+        dtype = Storage(dtype);
+        RowWidth width = RowWidths.For(dtype);
+        return width.IsFixed ? width.Width : dtype.Kind is DTypeKind.Utf8 or DTypeKind.Binary ? VariableWidth : -1;
+    }
+
+    /// <summary>
+    /// <see cref="ValueLength(ReadOnlySpan{byte}, DType)"/> from the width <see cref="EncodedWidth"/> gave the value's type:
+    /// a walk of a key's components a run at a time reads no type, whose copy cost more than the walk (2026-11-02, the
+    /// prefix runs of a granule's question).
+    /// </summary>
+    internal static int ValueLength(ReadOnlySpan<byte> key, int width) =>
+        width >= 0 ? width : width == VariableWidth ? VariableLength(key) : -1;
+
+    /// <summary>
+    /// The bytes a text's or a binary's first value takes: its sentinel alone for a null or an empty value, else its
+    /// sentinel and blocks, the last block's marker the first that is no continuation.
+    /// </summary>
+    private static int VariableLength(ReadOnlySpan<byte> key)
+    {
+        if (key[0] != RowSentinels.VarNonEmpty(RowSortField.Ascending))
+        {
+            return 1;
+        }
+
+        const byte Continuation = 0xFF;
+        int length = 1;
+        while (key[length + RowWidths.VarBlockData] == Continuation)
+        {
+            length += RowWidths.VarBlockTotal;
+        }
+
+        return length + RowWidths.VarBlockTotal;
+    }
+
+    /// <summary>
+    /// The bytes the first value of an ascending row-encoded key takes, a value of <paramref name="dtype"/>, nulls first or
+    /// last: the dtype's width when it is fixed, a text's or a binary's sentinel and blocks; -1 for a struct or a list whose
+    /// width depends on its data, which a caller encodes apart.
+    /// </summary>
+    internal static int ValueLength(ReadOnlySpan<byte> key, DType dtype)
+    {
+        dtype = Storage(dtype);
+        RowWidth width = RowWidths.For(dtype);
+        if (width.IsFixed)
+        {
+            return width.Width;
+        }
+
+        return dtype.Kind is DTypeKind.Utf8 or DTypeKind.Binary ? FirstValueLength(key, dtype) : -1;
+    }
+
+    /// <summary>
+    /// The first value of an ascending row-encoded key, a value of <paramref name="dtype"/>, as the literal
+    /// <see cref="WriteValue"/> writes it from: a fixed width's bits mapped back from their order, a text's or a binary's
+    /// bytes out of their blocks, a null as a null.
+    /// </summary>
+    internal static FilterLiteral ReadFirstValue(ReadOnlySpan<byte> key, DType dtype)
+    {
+        dtype = Storage(dtype);
+        if (dtype.Kind is DTypeKind.Utf8 or DTypeKind.Binary)
+        {
+            return ReadFirstBytes(key);
+        }
+
+        if (dtype.Kind is not (DTypeKind.Bool or DTypeKind.Primitive))
+        {
+            throw Unkeyed(dtype);
+        }
+
+        if (key[0] != RowSentinels.FixedNonNull)
+        {
+            return FilterLiteral.Null;
+        }
+
+        if (dtype.Kind == DTypeKind.Bool)
+        {
+            return FilterLiteral.From(key[1] == 0x02);
+        }
+
+        PType ptype = dtype.PType;
+        int width = ptype.ByteWidth();
+        ulong ordered = 0;
+        for (int i = 0; i < width; i++)
+        {
+            ordered = (ordered << 8) | key[1 + i];
+        }
+
+        ulong sign = 1UL << ((8 * width) - 1);
+        ulong mask = width == sizeof(ulong) ? ulong.MaxValue : (1UL << (8 * width)) - 1;
+        if (ptype.IsFloat())
+        {
+            // A non-negative had its sign bit set, a negative every bit flipped.
+            ulong raw = (ordered & sign) != 0 ? ordered ^ sign : ~ordered & mask;
+            return FilterLiteral.From(ptype switch
+            {
+                PType.F16 => (double)BitConverter.UInt16BitsToHalf((ushort)raw),
+                PType.F32 => BitConverter.UInt32BitsToSingle((uint)raw),
+                _ => BitConverter.UInt64BitsToDouble(raw),
+            });
+        }
+
+        if (!ptype.IsSignedInteger())
+        {
+            return FilterLiteral.From(ordered);
+        }
+
+        // The sign bit flipped back, then extended from the column's width.
+        int shift = 64 - (8 * width);
+        return FilterLiteral.From((long)((ordered ^ sign) << shift) >> shift);
+    }
+
+    /// <summary>
+    /// The first value of an ascending row-encoded key, a text or a binary: its sentinel, then blocks of 32 bytes each
+    /// followed by a continuation marker but the last, whose marker is its length (<see cref="RowBytes.WriteVarBody"/>).
+    /// </summary>
+    private static FilterLiteral ReadFirstBytes(ReadOnlySpan<byte> key)
+    {
+        if (key[0] == RowSentinels.VarEmpty(RowSortField.Ascending))
+        {
+            return FilterLiteral.From(ReadOnlySpan<byte>.Empty);
+        }
+
+        if (key[0] != RowSentinels.VarNonEmpty(RowSortField.Ascending))
+        {
+            return FilterLiteral.Null;
+        }
+
+        const byte Continuation = 0xFF;
+        int full = 0;
+        while (key[1 + (full * RowWidths.VarBlockTotal) + RowWidths.VarBlockData] == Continuation)
+        {
+            full++;
+        }
+
+        int last = key[1 + (full * RowWidths.VarBlockTotal) + RowWidths.VarBlockData];
+        byte[] value = new byte[(full * RowWidths.VarBlockData) + last];
+        for (int block = 0; block <= full; block++)
+        {
+            int length = block < full ? RowWidths.VarBlockData : last;
+            key.Slice(1 + (block * RowWidths.VarBlockTotal), length).CopyTo(value.AsSpan(block * RowWidths.VarBlockData));
+        }
+
+        return FilterLiteral.From(value);
     }
 
     /// <summary>

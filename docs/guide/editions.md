@@ -15,7 +15,7 @@ foreach (VortexEdition edition in Enum.GetValues<VortexEdition>())
     }
 
     await using VortexFile file = await VortexFile.OpenAsync(path);
-    ScanPlan plan = await file.Scan<Reading>().Where(r => r.Day >= 900).ExplainAsync(ct);
+    ScanPlan plan = await file.Scan<Reading>().Where(r => r.Day >= 900).ExplainAsync(analyze: true, ct);
     // …
 }
 ```

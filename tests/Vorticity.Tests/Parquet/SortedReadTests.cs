@@ -64,7 +64,7 @@ public sealed partial class SortedReadTests : IDisposable
 
         // In the key's order, the file streams as it lies: no sort, the same rows in the same order,
         // under a filter and a take as well.
-        Assert.Equal(nameof(KeySourceKind.SortedColumn), (await file.Scan<Tick>().OrderBy(t => t.Key).ExplainAsync(Ct)).Order!.Source);
+        Assert.Equal(nameof(KeySourceKind.SortedColumn), (await file.Scan<Tick>().OrderBy(t => t.Key).ExplainAsync(analyze: true, Ct)).Order!.Source);
         Assert.Equal(rows, await ListAsync(file.Scan<Tick>().OrderBy(t => t.Key)));
         Assert.Equal(
             rows.Where(t => t.Key >= 9_000 && t.Size < 40),
@@ -72,16 +72,16 @@ public sealed partial class SortedReadTests : IDisposable
         Assert.Equal(rows.Take(10).Select(t => t.Key), await file.Scan<Tick>().OrderBy(t => t.Key).Select(t => t.Key).Take(10).ToListAsync(Ct));
 
         // Any other order is a sort: the key backwards, or another column.
-        Assert.Equal(nameof(KeySourceKind.InMemory), (await file.Scan<Tick>().OrderByDescending(t => t.Key).ExplainAsync(Ct)).Order!.Source);
+        Assert.Equal(nameof(KeySourceKind.InMemory), (await file.Scan<Tick>().OrderByDescending(t => t.Key).ExplainAsync(analyze: true, Ct)).Order!.Source);
         Assert.Equal(rows.OrderByDescending(t => t.Key), await ListAsync(file.Scan<Tick>().OrderByDescending(t => t.Key)));
-        Assert.Equal(nameof(KeySourceKind.InMemory), (await file.Scan<Tick>().OrderBy(t => t.Size).ExplainAsync(Ct)).Order!.Source);
+        Assert.Equal(nameof(KeySourceKind.InMemory), (await file.Scan<Tick>().OrderBy(t => t.Size).ExplainAsync(analyze: true, Ct)).Order!.Source);
         Assert.Equal(rows.OrderBy(t => t.Size), await ListAsync(file.Scan<Tick>().OrderBy(t => t.Size)));
 
         // The same rows with no declaration are sorted, to the same order.
         string plain = await WriteAsync(rows, null);
         await using ParquetFile undeclared = await ParquetFile.OpenAsync(plain, Ct);
         Assert.All(undeclared.Metadata.RowGroups, group => Assert.Empty(group.SortingColumns));
-        Assert.Equal(nameof(KeySourceKind.InMemory), (await undeclared.Scan<Tick>().OrderBy(t => t.Key).ExplainAsync(Ct)).Order!.Source);
+        Assert.Equal(nameof(KeySourceKind.InMemory), (await undeclared.Scan<Tick>().OrderBy(t => t.Key).ExplainAsync(analyze: true, Ct)).Order!.Source);
         Assert.Equal(rows, await ListAsync(undeclared.Scan<Tick>().OrderBy(t => t.Key)));
     }
 
@@ -94,9 +94,9 @@ public sealed partial class SortedReadTests : IDisposable
         await using ParquetFile file = await ParquetFile.OpenAsync(path, Ct);
         Assert.Empty(await file.VerifyAsync(Ct));
 
-        Assert.Equal(nameof(KeySourceKind.SortedColumn), (await file.Scan<Stamp>().OrderByDescending(s => s.At).ExplainAsync(Ct)).Order!.Source);
+        Assert.Equal(nameof(KeySourceKind.SortedColumn), (await file.Scan<Stamp>().OrderByDescending(s => s.At).ExplainAsync(analyze: true, Ct)).Order!.Source);
         Assert.Equal(rows, await ListAsync(file.Scan<Stamp>().OrderByDescending(s => s.At)));
-        Assert.Equal(nameof(KeySourceKind.InMemory), (await file.Scan<Stamp>().OrderBy(s => s.At).ExplainAsync(Ct)).Order!.Source);
+        Assert.Equal(nameof(KeySourceKind.InMemory), (await file.Scan<Stamp>().OrderBy(s => s.At).ExplainAsync(analyze: true, Ct)).Order!.Source);
         Assert.Equal(rows.OrderBy(s => s.At), await ListAsync(file.Scan<Stamp>().OrderBy(s => s.At)));
     }
 
@@ -121,13 +121,13 @@ public sealed partial class SortedReadTests : IDisposable
         Assert.Empty(await file.VerifyAsync(Ct));
 
         // A key that holds nulls is sorted: the scan places them last, where the file has them first.
-        Assert.Equal(nameof(KeySourceKind.InMemory), (await file.Scan<Quote>().OrderBy(q => q.Desk).ExplainAsync(Ct)).Order!.Source);
+        Assert.Equal(nameof(KeySourceKind.InMemory), (await file.Scan<Quote>().OrderBy(q => q.Desk).ExplainAsync(analyze: true, Ct)).Order!.Source);
         Assert.Equal(
             [.. rows.Where(q => q.Desk is not null).OrderBy(q => q.Desk, StringComparer.Ordinal), .. rows.Where(q => q.Desk is null)],
             await ListAsync(file.Scan<Quote>().OrderBy(q => q.Desk)));
 
         // The second key orders the rows only within the first's ties: no order of the file's.
-        Assert.Equal(nameof(KeySourceKind.InMemory), (await file.Scan<Quote>().OrderByDescending(q => q.Key).ExplainAsync(Ct)).Order!.Source);
+        Assert.Equal(nameof(KeySourceKind.InMemory), (await file.Scan<Quote>().OrderByDescending(q => q.Key).ExplainAsync(analyze: true, Ct)).Order!.Source);
     }
 
     [Fact]
@@ -238,7 +238,7 @@ public sealed partial class SortedReadTests : IDisposable
         Assert.Equal("sorting_columns", found.Structure);
         Assert.Contains(finding, found.Message, StringComparison.Ordinal);
 
-        Assert.Equal(nameof(KeySourceKind.InMemory), (await file.Scan<Row>().OrderBy(r => r.Id).ExplainAsync(Ct)).Order!.Source);
+        Assert.Equal(nameof(KeySourceKind.InMemory), (await file.Scan<Row>().OrderBy(r => r.Id).ExplainAsync(analyze: true, Ct)).Order!.Source);
         Assert.Equal([new Row(3), new Row(5), new Row(6), new Row(7)], await ListAsync(file.Scan<Row>().OrderBy(r => r.Id)));
     }
 

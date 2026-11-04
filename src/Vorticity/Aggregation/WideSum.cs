@@ -24,9 +24,6 @@ internal struct WideSum
     private ulong _l3;
     private ulong _l4;
 
-    /// <summary>Whether the total is zero.</summary>
-    internal readonly bool IsZero => (_l0 | _l1 | _l2 | _l3 | _l4) == 0;
-
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal void Add(Int128 value)
     {

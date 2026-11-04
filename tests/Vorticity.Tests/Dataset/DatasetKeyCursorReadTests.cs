@@ -7,14 +7,12 @@ using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Buffers;
-using Vorticity.Columns;
 using Vorticity.Dataset;
 using Vorticity.Expressions;
 using Vorticity.IO;
 using Vorticity.Scanning;
 using Vorticity.Tests.Scan;
 using Vorticity.Types;
-using Vorticity.Writing;
 using Xunit;
 
 namespace Vorticity.Tests.Dataset;
@@ -144,7 +142,7 @@ public sealed class DatasetKeyCursorReadTests
         }
 
         sorted.Sort((left, right) => string.CompareOrdinal(left.City, right.City) is int order and not 0 ? order : left.Row.CompareTo(right.Row));
-        await using DatasetKeyCursor cursor = await DatasetKeyCursor.OpenAsync(dataset, dataset.Snapshot, "City", distinct: false, indexes: true, ct);
+        await using DatasetKeyCursor cursor = await DatasetKeyCursor.OpenAsync(dataset.Snapshot, "City", distinct: false, indexes: true, ct);
         Action<int> at = index =>
         {
             Assert.Equal(sorted[index].City, Encoding.UTF8.GetString(cursor.KeyBytes));
@@ -227,7 +225,7 @@ public sealed class DatasetKeyCursorReadTests
         DatasetOptions options = new DatasetOptions
         {
             Seed = Seed,
-            ClusteringKey = ["Key"],
+            Layout = new DatasetLayout { SortKey = [LayoutValue.Column("Key")], ObjectBytes = 2 << 10 },
             Write = new VortexWriteOptions
             {
                 RowBlockSize = 64,
@@ -236,10 +234,12 @@ public sealed class DatasetKeyCursorReadTests
             },
 
             // Pages of a few entries, so that a level's tree is many leaves under internal pages,
-            // and a delete marks its rows rather than rewriting their object.
+            // and a delete marks its rows rather than rewriting their object; every column chunked with
+            // the object, so that the objects a compaction rolls at its sizes are those its blocks make.
             Rule = new ProllyBoundaryRule(Seed, minBytes: 256, targetBytes: 512, maxBytes: 1_024),
             MarkedObjectBytes = 0,
             MarkedShare = 1,
+            ChunkBytes = 0,
         };
 
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, ChangeRow.Schema, options, ct);
@@ -266,7 +266,6 @@ public sealed class DatasetKeyCursorReadTests
             {
                 LevelZeroCeiling = 1,
                 TargetBytesAtLevelOne = levelOne,
-                MaxObjectBytes = 2 << 10,
                 Fanout = 4,
             };
             while (levelOne > 0 && await dataset.CompactAsync(compaction, ct) is not null)
@@ -295,7 +294,7 @@ public sealed class DatasetKeyCursorReadTests
             ["key", "measure"],
             [types.Primitive(PType.I64, Nullability.NonNullable), types.Primitive(PType.F64, Nullability.NonNullable)],
             Nullability.NonNullable);
-        DatasetOptions options = new DatasetOptions { Seed = Seed, ClusteringKey = ["key"] };
+        DatasetOptions options = new DatasetOptions { Seed = Seed, Layout = new DatasetLayout { SortKey = [LayoutValue.Column("key")] } };
         List<DatasetOperation> adds = new List<DatasetOperation>(Objects);
         await using (VortexDataset writer = await VortexDataset.CreateAsync(store, schema, options, ct))
         {
@@ -332,14 +331,12 @@ public sealed class DatasetKeyCursorReadTests
         }
 
         draft.Take();
-        await draft.Writer.CompleteAsync(ct);
-        await draft.Writer.DisposeAsync();
-        WrittenObject written = Assert.NotNull(await dataset.SealAsync(draft, draft.Writer.RowCount, 0, ct));
+        WrittenObject written = Assert.Single(await draft.Writer.FinishAsync(0, ct));
         return new DatasetOperation.AddObject(written.Key, written.Entry) { Level = 1 };
     }
 
     /// <summary>Object <paramref name="i"/>'s entry alone, with bounds enough to make it about 200 bytes.</summary>
-    private static DatasetOperation Unwritten(ClusteringKey clustering, int i)
+    private static DatasetOperation Unwritten(DatasetKey clustering, int i)
     {
         long low = 10L * i;
         UInt128 uid = (UInt128)(ulong)i + 1;

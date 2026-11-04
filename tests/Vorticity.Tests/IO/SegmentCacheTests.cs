@@ -119,6 +119,60 @@ public sealed class SegmentCacheTests
     }
 
     [Fact]
+    public async Task ASessionGivenNoCacheKeepsItsSegmentsInTheProcesssUntilItsFileCloses()
+    {
+        byte[] content = Pattern(40_000);
+        using TempFile file = new TempFile(content);
+        await using VortexSession session = VortexSession.Create(_ => { });
+        FileSegmentSource source = new FileSegmentSource(file.Path_);
+        ISegmentReader reader = SessionReader.Wrap(source, session);
+        try
+        {
+            using SegmentOwner read = await reader.ReadAsync(Spec(2_048, 1_000), CancellationToken.None);
+            Assert.True(SegmentCache.Shared.TryGet(source, 2_048, 1_000, out SegmentOwner kept, out VortexBuffer view));
+            try
+            {
+                Assert.True(view.Span.SequenceEqual(content.AsSpan(2_048, 1_000)));
+            }
+            finally
+            {
+                kept.Release();
+            }
+        }
+        finally
+        {
+            await reader.DisposeAsync();
+        }
+
+        Assert.False(SegmentCache.Shared.TryGet(source, 2_048, 1_000, out _, out _));
+    }
+
+    [Fact]
+    public async Task ASessionThatHoldsKeysOrGivesACacheOfNoBytesKeepsNothing()
+    {
+        // A session with a keyring would leave the plaintext of its sealed files to every session of the process.
+        using VortexKeyring keyring = Sealing.SealedObjects.Keyring();
+        byte[] content = Pattern(40_000);
+        using TempFile file = new TempFile(content);
+        foreach (Action<VortexSessionOptions> configure in (Action<VortexSessionOptions>[])[o => o.Keyring = keyring, o => o.SegmentCache = new SegmentCache(0)])
+        {
+            await using VortexSession session = VortexSession.Create(configure);
+            Assert.Null(session.Options.ReadCache);
+            FileSegmentSource source = new FileSegmentSource(file.Path_);
+            ISegmentReader reader = SessionReader.Wrap(source, session);
+            try
+            {
+                using SegmentOwner read = await reader.ReadAsync(Spec(2_048, 1_000), CancellationToken.None);
+                Assert.False(SegmentCache.Shared.TryGet(source, 2_048, 1_000, out _, out _));
+            }
+            finally
+            {
+                await reader.DisposeAsync();
+            }
+        }
+    }
+
+    [Fact]
     public void KeptSegmentsLeaveInTheirOrderOfUseAndWithTheirFile()
     {
         // Keeps, lookups and file closes drawn at random, against a model of what the cache must

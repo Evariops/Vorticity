@@ -1,4 +1,6 @@
 using System;
+using System.Buffers;
+using System.Numerics;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Arrays.Metadata;
 using Vorticity.Buffers;
@@ -62,9 +64,288 @@ internal sealed class DateTimePartsDecoder : ArrayDecoder
     /// <inheritdoc/>
     public override bool SelectsWithoutFullDecode => true;
 
+    /// <inheritdoc/>
+    public override bool DecodesRange(ArrayDecodeContext context, in ArrayNode node)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        return node.ChildCount == 3
+            && context.ChildDecodesRange(in node, 0) && context.ChildDecodesRange(in node, 1) && context.ChildDecodesRange(in node, 2);
+    }
+
+    /// <summary>The three parts' ranges, recomposed: a range of timestamps is the same range of each part.</summary>
+    /// <inheritdoc/>
+    public override int DecodeRange(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, int start, int count)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        return Core(context, in node, dtype, length, wanted: default, selective: false, start, count);
+    }
+
+    /// <inheritdoc/>
+    public override bool EvaluatesWithoutFullDecode => true;
+
+    /// <summary>
+    /// Answers a comparison or a range of the timestamps on their parts, never recomposing one: a timestamp is its days,
+    /// then its seconds, then its subseconds, in that order, so it lies in a range when its days lie strictly inside the
+    /// range's, or on the range's first day past its time of day, or on its last day short of it. Each of those is a
+    /// question each part's encoding answers in its own patterns, and the answers are joined a word at a time.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The order holds while the seconds are less than a day and the subseconds less than a second, and while no day
+    /// recomposes past the timestamp's range, which the decode would wrap: those are asked first, and a node that a
+    /// writer did not make so declines. A set declines: its members would each be a question.
+    /// </para>
+    /// <para>
+    /// A question a time of day settles is not asked: a range from midnight needs no seconds on its first day, one to
+    /// the last subsecond of a day none on its last.
+    /// </para>
+    /// </remarks>
+    /// <inheritdoc/>
+    public override bool TryEvaluate(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, Compute.EncodedPredicate predicate,
+        ref Compute.PredicateBits bits)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        ArrayDecodeContext.RequireBufferCount(node.BufferCount, 0, Id);
+        ArrayDecodeContext.RequireChildCount(node.ChildCount, 3, Id);
+        CanonicalSupport.RequireKind(dtype, DTypeKind.Extension, Id);
+        long divisor = SubsecondsPerSecond(dtype, dtype.StorageType);
+        DateTimePartsMetadata metadata = DateTimePartsMetadata.Read(node.Metadata);
+        RequireIntegerPart(metadata.DaysPType, "days");
+        RequireIntegerPart(metadata.SecondsPType, "seconds");
+        RequireIntegerPart(metadata.SubsecondsPType, "subseconds");
+        if (!Compute.IntegerQuestion.TryOf(predicate, PType.I64, out Compute.IntegerQuestion question)
+            || question.Kind == Compute.QuestionKind.Members)
+        {
+            return false;
+        }
+
+        DType days = context.Types.Primitive(metadata.DaysPType, dtype.Nullability);
+        DType seconds = context.Types.Primitive(metadata.SecondsPType, Nullability.NonNullable);
+        DType subseconds = context.Types.Primitive(metadata.SubsecondsPType, Nullability.NonNullable);
+        if (question.Kind != Compute.QuestionKind.Range)
+        {
+            // Every row or none: the days' own answer, which carries the nulls.
+            Compute.IntegerQuestion settled = Compute.IntegerQuestion.Settled(
+                metadata.DaysPType.ByteWidth() * 8, question.Kind == Compute.QuestionKind.All);
+            return context.TryEvaluateIntegersChild(in node, 0, days, length, in settled, ref bits);
+        }
+
+        // The range as values: a range cut to the timestamps' does not wrap.
+        Int128 low = (long)question.Low;
+        Int128 high = low + question.Span;
+        if (high > long.MaxValue)
+        {
+            return false;
+        }
+
+        long day = SecondsPerDay * divisor;
+        int words = Compute.PredicateBits.WordsOf(length);
+        ulong[] rented = ArrayPool<ulong>.Shared.Rent(Math.Max(1, words * Scratches));
+        try
+        {
+            Span<ulong> scratch = rented.AsSpan(0, words * Scratches);
+            Span<ulong> known = scratch.Slice(0, words);
+            Span<ulong> part = scratch.Slice(words, words);
+            Span<ulong> answer = scratch.Slice(2 * words, words);
+            Span<ulong> ofDay = scratch.Slice(3 * words, words);
+            Span<ulong> within = scratch.Slice(4 * words, words);
+
+            // The parts the order holds for: seconds within a day, subseconds within a second, days that do not wrap.
+            if (!AskAll(context, in node, 1, seconds, length, 0, SecondsPerDay - 1, part, known)
+                || !AskAll(context, in node, 2, subseconds, length, 0, divisor - 1, part, known)
+                || !Ask(context, in node, 0, days, length, CeilDiv(long.MinValue, day), FloorDiv(long.MaxValue - (day - 1), day), part, known, out bool unknown)
+                || !Covers(part, known, unknown, length))
+            {
+                return false;
+            }
+
+            (Int128 firstDay, Int128 firstTime) = DivMod(low, day);
+            (Int128 lastDay, Int128 lastTime) = DivMod(high, day);
+            answer.Clear();
+            if (firstDay == lastDay)
+            {
+                // One day: its rows from the first time of day to the last.
+                if (!Ask(context, in node, 0, days, length, firstDay, firstDay, answer, known, out unknown)
+                    || !TimeOfDay(context, in node, seconds, subseconds, length, divisor, firstTime, from: true, within, part, known)
+                    || !TimeOfDay(context, in node, seconds, subseconds, length, divisor, lastTime, from: false, ofDay, part, known))
+                {
+                    return false;
+                }
+
+                And(answer, within);
+                And(answer, ofDay);
+            }
+            else
+            {
+                // The days strictly inside, then the first day past its time and the last day short of its own.
+                if (!Ask(context, in node, 0, days, length, firstDay + 1, lastDay - 1, answer, known, out unknown)
+                    || !Ask(context, in node, 0, days, length, firstDay, firstDay, ofDay, known, out _)
+                    || !TimeOfDay(context, in node, seconds, subseconds, length, divisor, firstTime, from: true, within, part, known))
+                {
+                    return false;
+                }
+
+                And(ofDay, within);
+                Or(answer, ofDay);
+                if (!Ask(context, in node, 0, days, length, lastDay, lastDay, ofDay, known, out _)
+                    || !TimeOfDay(context, in node, seconds, subseconds, length, divisor, lastTime, from: false, within, part, known))
+                {
+                    return false;
+                }
+
+                And(ofDay, within);
+                Or(answer, ofDay);
+            }
+
+            answer.CopyTo(bits.Truth);
+            bits.Trim();
+            if (unknown)
+            {
+                // The days' nulls, which every answer on them shares: the last one asked left them in `known`.
+                bits.ApplyKnown(known);
+            }
+
+            if (question.Negated)
+            {
+                bits.Invert();
+            }
+
+            return true;
+        }
+        finally
+        {
+            ArrayPool<ulong>.Shared.Return(rented);
+        }
+    }
+
+    /// <summary>The bitmaps the parts' answers are joined in: the known rows, a part's answer, the answer, two more.</summary>
+    private const int Scratches = 5;
+
+    /// <summary>
+    /// The rows whose time of day is at <paramref name="time"/> or past it (<paramref name="from"/>), or at it or before:
+    /// the seconds strictly past, or the same seconds with the subseconds past, as two questions of the seconds and one of
+    /// the subseconds; every row when the time is the day's first, or its last for the rows before it.
+    /// </summary>
+    private static bool TimeOfDay(
+        ArrayDecodeContext context, in ArrayNode node, DType seconds, DType subseconds, int length, long divisor, Int128 time,
+        bool from, Span<ulong> answer, Span<ulong> part, Span<ulong> known)
+    {
+        Int128 second = time / divisor;
+        Int128 subsecond = time % divisor;
+        if (from ? time == 0 : time == (SecondsPerDay * divisor) - 1)
+        {
+            answer.Fill(ulong.MaxValue);
+            return true;
+        }
+
+        // The seconds strictly on the range's side, then the same second with the subseconds on it.
+        bool asked = from
+            ? Ask(context, in node, 1, seconds, length, second + 1, SecondsPerDay - 1, answer, known, out _)
+            : Ask(context, in node, 1, seconds, length, 0, second - 1, answer, known, out _);
+        if (!asked || !Ask(context, in node, 1, seconds, length, second, second, part, known, out _))
+        {
+            return false;
+        }
+
+        bool whole = from ? subsecond == 0 : subsecond == divisor - 1;
+        if (!whole)
+        {
+            Span<ulong> same = part;
+            ulong[] rented = ArrayPool<ulong>.Shared.Rent(Math.Max(1, part.Length));
+            try
+            {
+                Span<ulong> ofSecond = rented.AsSpan(0, part.Length);
+                if (!(from
+                        ? Ask(context, in node, 2, subseconds, length, subsecond, divisor - 1, ofSecond, known, out _)
+                        : Ask(context, in node, 2, subseconds, length, 0, subsecond, ofSecond, known, out _)))
+                {
+                    return false;
+                }
+
+                And(same, ofSecond);
+            }
+            finally
+            {
+                ArrayPool<ulong>.Shared.Return(rented);
+            }
+        }
+
+        Or(answer, part);
+        return true;
+    }
+
+    /// <summary>
+    /// Asks part <paramref name="child"/> the rows whose value lies from <paramref name="low"/> to <paramref name="high"/>,
+    /// into <paramref name="truth"/>, its known rows into <paramref name="known"/>.
+    /// </summary>
+    private static bool Ask(
+        ArrayDecodeContext context, in ArrayNode node, int child, DType type, int length, Int128 low, Int128 high,
+        Span<ulong> truth, Span<ulong> known, out bool unknown)
+    {
+        Compute.PredicateBits answer = new Compute.PredicateBits(truth, known, length);
+        Compute.IntegerQuestion question = Compute.IntegerQuestion.OfRange(
+            new Compute.IntegerRange(low, high, Negated: false), type.PType.ByteWidth() * 8, type.PType.IsSignedInteger());
+        bool asked = context.TryEvaluateIntegersChild(in node, child, type, length, in question, ref answer);
+        unknown = asked && answer.Unknown;
+        return asked;
+    }
+
+    /// <summary>Whether every row of a part that has no nulls lies from <paramref name="low"/> to <paramref name="high"/>.</summary>
+    private static bool AskAll(
+        ArrayDecodeContext context, in ArrayNode node, int child, DType type, int length, Int128 low, Int128 high,
+        Span<ulong> truth, Span<ulong> known) =>
+        Ask(context, in node, child, type, length, low, high, truth, known, out bool unknown) && Covers(truth, known, unknown, length);
+
+    /// <summary>Whether <paramref name="truth"/> holds every known row.</summary>
+    private static bool Covers(ReadOnlySpan<ulong> truth, ReadOnlySpan<ulong> known, bool unknown, int length)
+    {
+        long selected = 0;
+        long held = 0;
+        for (int w = 0; w < truth.Length; w++)
+        {
+            selected += BitOperations.PopCount(truth[w]);
+            held += unknown ? BitOperations.PopCount(known[w]) : 0;
+        }
+
+        return selected == (unknown ? held : length);
+    }
+
+    private static void And(Span<ulong> into, ReadOnlySpan<ulong> other)
+    {
+        for (int w = 0; w < into.Length; w++)
+        {
+            into[w] &= other[w];
+        }
+    }
+
+    private static void Or(Span<ulong> into, ReadOnlySpan<ulong> other)
+    {
+        for (int w = 0; w < into.Length; w++)
+        {
+            into[w] |= other[w];
+        }
+    }
+
+    /// <summary>The floor of <paramref name="value"/> over <paramref name="divisor"/>, and what it leaves, never negative.</summary>
+    private static (Int128 Quotient, Int128 Remainder) DivMod(Int128 value, Int128 divisor)
+    {
+        Int128 quotient = FloorDiv(value, divisor);
+        return (quotient, value - (quotient * divisor));
+    }
+
+    private static Int128 FloorDiv(Int128 value, Int128 divisor)
+    {
+        Int128 quotient = value / divisor;
+        return value % divisor != 0 && (value < 0) != (divisor < 0) ? quotient - 1 : quotient;
+    }
+
+    private static Int128 CeilDiv(Int128 value, Int128 divisor) => -FloorDiv(-value, divisor);
+
     private static int Core(
         ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
-        ReadOnlySpan<int> wanted, bool selective)
+        ReadOnlySpan<int> wanted, bool selective, int start = 0, int count = -1)
     {
         ArrayDecodeContext.RequireBufferCount(node.BufferCount, 0, Id);
         ArrayDecodeContext.RequireChildCount(node.ChildCount, 3, Id);
@@ -81,15 +362,15 @@ internal sealed class DateTimePartsDecoder : ArrayDecoder
         // The array's nullability rides on `days` alone; the other two are always non-nullable.
         CanonicalNode days = DecodePart(
             context, in node, 0, "days", metadata.DaysPType, dtype.Nullability, length,
-            wanted, selective);
+            wanted, selective, start, count);
         CanonicalNode seconds = DecodePart(
             context, in node, 1, "seconds", metadata.SecondsPType, Nullability.NonNullable, length,
-            wanted, selective);
+            wanted, selective, start, count);
         CanonicalNode subseconds = DecodePart(
             context, in node, 2, "subseconds", metadata.SubsecondsPType, Nullability.NonNullable,
-            length, wanted, selective);
+            length, wanted, selective, start, count);
 
-        int produced = selective ? wanted.Length : length;
+        int produced = selective ? wanted.Length : count >= 0 ? count : length;
         int storageIndex = produced == 0
             ? context.Canonical.AddPrimitive(
                 storageDType, 0, days.Validity, PType.I64, VortexBuffer.Empty)
@@ -144,15 +425,20 @@ internal sealed class DateTimePartsDecoder : ArrayDecoder
         Nullability nullability,
         int length,
         ReadOnlySpan<int> wanted,
-        bool selective)
+        bool selective,
+        int start,
+        int count)
     {
         DType childType = context.Types.Primitive(ptype, nullability);
+        bool ranged = count >= 0 && (start != 0 || count != length);
         int index = selective
             ? context.DecodeChildSelected(in node, childIndex, childType, length, wanted)
-            : context.DecodeChild(in node, childIndex, childType, length);
+            : ranged
+                ? context.DecodeChildRange(in node, childIndex, childType, length, start, count)
+                : context.DecodeChild(in node, childIndex, childType, length);
         index = CanonicalSupport.ExpandIfConstant(context, index);
         CanonicalNode child = context.Canonical.GetNode(index);
-        int produced = selective ? wanted.Length : length;
+        int produced = selective ? wanted.Length : ranged ? count : length;
 
         if (child.Kind != CanonicalKind.Primitive)
         {

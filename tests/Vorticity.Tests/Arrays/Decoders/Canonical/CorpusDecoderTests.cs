@@ -10,7 +10,6 @@ using System.Collections.Generic;
 using System.Text.Json;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
-using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Tests.Scan;
 using Xunit;
 

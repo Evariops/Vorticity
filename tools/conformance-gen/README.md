@@ -51,11 +51,14 @@ VORTICITY_WRITE_CORPUS=/tmp/vxwritten dotnet test ../../Vorticity.slnx -c Releas
 VORTEX_EXPERIMENTAL_PATCHED_ARRAY=1 VORTEX_EXPERIMENTAL_LIST_LAYOUT=1 \
     cargo run --release -j 6 --example verify_written -- \
     ../../tests/Vorticity.Conformance/corpus /tmp/vxwritten
-# Does it read the objects a dataset of periods sorts slice by slice? Each is compared, as a multiset
-# of rows, with its twin written in time order.
-VORTICITY_WRITE_SLICES=/tmp/vxslices dotnet test ../../Vorticity.slnx -c Release \
-    --filter-method '*WritesSortedSlicesOutForTheRustCrossCheck*'
-cargo run --release -j 6 --example verify_sliced -- /tmp/vxslices
+# Does it read the objects a dataset's jobs write, their columns against object dictionaries and
+# chunked apart? Each is compared, as a multiset of rows, with its twin written plainly, then filtered
+# on each column, its zone maps pruning as those of a file the reference writes of the same rows do;
+# and the partial of a question over them, the states of its groups, read whole.
+VORTICITY_WRITE_OBJECTS=/tmp/vxobjects dotnet test ../../Vorticity.slnx -c Release \
+    --filter-method '*WritesDatasetObjectsOutForTheRustCrossCheck*'
+cargo run --release -j 6 --example verify_objects -- /tmp/vxobjects
+cargo run --release -j 6 --example scan_files -- /tmp/vxobjects/partials
 # Does it read the shredded variants we write, value for value? Each file is compared row by row with
 # its twin written whole, integers widened and null fields left out on both sides.
 VORTICITY_WRITE_SHREDDED=/tmp/vxshredded dotnet test ../../Vorticity.slnx -c Release \
@@ -411,7 +414,7 @@ over-reports as described above.
 | `src/forged.rs` | the forged-fixture set: byte patches no writer can produce, with their provenance |
 | `examples/verify_corpus.rs` | independent derivation of the coverage, sharing no code with `emit` |
 | `examples/verify_forged.rs` | asserts the forged manifest's expectations against the Rust reader |
-| `examples/verify_sliced.rs` | reads the objects a dataset of periods sorts slice by slice, each against its twin in time order |
+| `examples/verify_objects.rs` | reads the objects a dataset's jobs write, each against its twin written plainly, and prunes with their zone maps as with the reference's own |
 | `examples/verify_shredded.rs` | reads every file with shredded variants we write, each against its twin written whole, value for value |
 | `examples/scan_files.rs` | reads every row of every file in a directory, the check that a strict reader takes a file at all |
 | `API-NOTES.md` | the 0.86.1 API, as this generator uses it |

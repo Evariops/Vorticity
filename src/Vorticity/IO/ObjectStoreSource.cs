@@ -1,7 +1,6 @@
 using System;
 using System.Buffers;
 using System.Runtime.CompilerServices;
-using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Buffers;
@@ -33,6 +32,9 @@ internal sealed class ObjectStoreSource : ISegmentReader
     internal const int TailBytes = 65_536;
 
     private readonly IObjectStore _store;
+
+    /// <summary>What reading the store costs (<see cref="IObjectStore.CostProfile"/>).</summary>
+    internal CostProfile Profile => _store.CostProfile;
     private readonly string _key;
     private readonly SegmentReadOptions _options;
     private readonly bool _ownsStore;
@@ -48,7 +50,7 @@ internal sealed class ObjectStoreSource : ISegmentReader
     /// <param name="store">The store.</param>
     /// <param name="key">The object's key.</param>
     /// <param name="length">The object's length when the caller knows it, which spares its request; -1 otherwise.</param>
-    /// <param name="options">The coalescing budgets, the defaults when null.</param>
+    /// <param name="options">The coalescing budgets; the store's profile's when null (<see cref="CostProfile.JoinedGap"/>).</param>
     /// <param name="ownsStore">Whether disposing the source disposes the store.</param>
     internal ObjectStoreSource(IObjectStore store, string key, long length = -1, SegmentReadOptions? options = null, bool ownsStore = false)
     {
@@ -59,12 +61,9 @@ internal sealed class ObjectStoreSource : ISegmentReader
         _key = key;
         _length = length;
         _givenLength = length;
-        _options = options ?? SegmentReadOptions.Default;
+        _options = options ?? store.CostProfile.ReadOptions;
         _ownsStore = ownsStore;
     }
-
-    /// <summary>The object's key.</summary>
-    internal string Key => _key;
 
     /// <summary>
     /// Whether <paramref name="obj"/> reads the same object: the same store, key and length, the length
@@ -86,9 +85,6 @@ internal sealed class ObjectStoreSource : ISegmentReader
     // The length the caller gave, -1 for none: what equality reads, since the length learned later would
     // change the hash of a key already kept.
     private readonly long _givenLength;
-
-    /// <summary>The store the object lies in.</summary>
-    internal IObjectStore Store => _store;
 
     /// <summary>
     /// The object's token as of the first answer that gave it, or null before any. A caller holding a

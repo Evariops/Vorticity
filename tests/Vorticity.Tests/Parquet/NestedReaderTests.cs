@@ -1,11 +1,9 @@
 using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Parquet;
 using Vorticity.Parquet.Metadata;
-using Vorticity.Scanning;
 using Xunit;
 
 namespace Vorticity.Tests.Parquet;

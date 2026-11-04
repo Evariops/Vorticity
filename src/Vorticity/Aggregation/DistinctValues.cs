@@ -237,19 +237,6 @@ internal sealed class DistinctValues<TValue>
         return copied;
     }
 
-    /// <summary>Adds to <paramref name="counts"/> the values of each part of <c>2^<paramref name="bits"/></c>, the top bits of their hash; the value of zero bits not among them.</summary>
-    internal void CountParts(int bits, Span<long> counts)
-    {
-        int shift = 64 - bits;
-        foreach (TValue value in _slots)
-        {
-            if (!IsFree(value))
-            {
-                counts[bits == 0 ? 0 : (int)(HashOf(value) >> shift)]++;
-            }
-        }
-    }
-
     /// <summary>Adds <paramref name="value"/>, not the free one, when the top bits past <paramref name="shift"/> of its hash are <paramref name="part"/>.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private void AddOfPart(TValue value, int part, int shift)

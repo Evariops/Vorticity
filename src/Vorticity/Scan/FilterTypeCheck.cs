@@ -92,6 +92,18 @@ internal static class FilterTypeCheck
                 return;
             }
 
+            case TupleInExpr tuples:
+                for (int t = 0; t < tuples.Count; t++)
+                {
+                    ReadOnlySpan<FilterLiteral> values = tuples.Tuple(t);
+                    for (int column = 0; column < values.Length; column++)
+                    {
+                        CheckConstant(schema, tuples.Fields[column], values[column], parameterName);
+                    }
+                }
+
+                return;
+
             case StringMatchExpr match:
                 CheckText(schema, match.Field, match.Op, parameterName);
                 return;

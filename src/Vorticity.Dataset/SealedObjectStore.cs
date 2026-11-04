@@ -144,6 +144,9 @@ internal sealed class SealedObjectStore : IObjectStore
     /// <inheritdoc/>
     public ObjectStoreCapabilities Capabilities => _inner.Capabilities;
 
+    /// <summary>The store it seals the objects of's.</summary>
+    public CostProfile CostProfile => _inner.CostProfile;
+
     /// <inheritdoc/>
     /// <remarks>A commit object's plaintext, decrypted and copied into the destination; anything else as the store under it holds it.</remarks>
     public ValueTask<ObjectRead> ReadAsync(string key, long offset, Memory<byte> destination, string? ifToken, CancellationToken cancellationToken) =>

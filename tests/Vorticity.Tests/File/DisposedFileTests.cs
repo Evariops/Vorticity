@@ -1,8 +1,6 @@
 using System;
 using System.Threading;
 using System.Threading.Tasks;
-using Vorticity.Columns;
-using Vorticity.File;
 using Vorticity.Scanning;
 using Vorticity.Serialization.Schemas;
 using Vorticity.Tests.Scan;

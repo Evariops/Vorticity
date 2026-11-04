@@ -118,6 +118,14 @@ public sealed class MemoryObjectStore : IObjectStore
         | ObjectStoreCapabilities.ReplacesOnTokenMatch | ObjectStoreCapabilities.KeepsLocks
         | ObjectStoreCapabilities.CreatesConditionally;
 
+    /// <summary>
+    /// The profile of the store it stands for, which planners price their paths by and its readers join ranges by: a remote
+    /// object store's by default, as a store in memory whose latency and faults are injected stands for one;
+    /// <see cref="CostProfile.Memory"/> for a store that is memory. A reader opened before a change keeps the profile it
+    /// opened with.
+    /// </summary>
+    public CostProfile CostProfile { get; set; } = CostProfile.Remote;
+
     /// <inheritdoc/>
     public async ValueTask<ObjectRead> ReadAsync(
         string key, long offset, Memory<byte> destination, string? ifToken, CancellationToken cancellationToken)

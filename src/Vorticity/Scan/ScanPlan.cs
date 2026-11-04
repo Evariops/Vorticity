@@ -16,14 +16,35 @@ namespace Vorticity;
 public sealed record PruningStep(string Structure, int BlocksPruned, int SegmentsRead, long BytesRead);
 
 /// <summary>
-/// What an aggregation reads of one object of a dataset: a table of its synopsis, whose states stand for
-/// the rows of the buckets it folds; the rows of the slices a window cuts; or its rows whole, and why.
+/// How one unit of a question over a dataset is answered (spec B, 7): a rollup's run or an object, the alternative its weight
+/// chose, what that reads and weighs, and why each other alternative lost.
 /// </summary>
-/// <param name="Object">The object, by its key in the dataset.</param>
-/// <param name="Read"><c>table</c>, <c>edges</c> or <c>rows</c>.</param>
-/// <param name="Detail">The table's kind, its bucket and the columns that key it; or why the rows are read.</param>
-/// <param name="Count">The buckets the table folds, the slices read at the edges, or the object's rows.</param>
-public sealed record StatesStep(string Object, string Read, string Detail, long Count);
+/// <param name="Unit">The unit, by its key in the dataset: a rollup's, or an object's.</param>
+/// <param name="Level"><c>run</c> for a rollup standing for the objects it covers, <c>object</c> for an object.</param>
+/// <param name="Alternative">
+/// The alternative taken: <c>entry</c> (what the object's entry says), <c>rollup</c>, <c>counts</c> (the object's counts of
+/// a column), <c>granules</c> (its columns' statistics over its granules, the rows of the others read besides),
+/// <c>zones</c> (its rows, the blocks its zone maps settle taken from them) or <c>rows</c>.
+/// </param>
+/// <param name="Detail">What it reads.</param>
+/// <param name="Requests">Its requests to the store.</param>
+/// <param name="Bytes">Its bytes from the store.</param>
+/// <param name="Weight">
+/// What it weighs at the dataset's cost profile, in bytes of the store's link: its bytes, a request's worth a request, its
+/// reads from a cache and its processing.
+/// </param>
+/// <param name="Rejected">Each other alternative and why it lost: it does not cover the unit, or what it weighs.</param>
+public sealed record UnitStep(string Unit, string Level, string Alternative, string Detail, long Requests, long Bytes, double Weight, ImmutableArray<string> Rejected);
+
+/// <summary>What a plan costs at the source's cost profile, before reading anything (spec B, 7).</summary>
+/// <param name="Requests">Its requests to the store.</param>
+/// <param name="Bytes">Its bytes from the store.</param>
+/// <param name="Nanoseconds">What the processor spends on its values, in nanoseconds of one core.</param>
+/// <param name="Predicted">
+/// The time it is predicted to take cold: its requests in rounds of those in flight, a round trip each, its bytes over the
+/// link, its processing over the cores.
+/// </param>
+public sealed record PlanCost(long Requests, long Bytes, double Nanoseconds, TimeSpan Predicted);
 
 /// <summary>
 /// What a scan will do, worked out from statistics, zone maps and indexes before a data segment is
@@ -48,14 +69,29 @@ public sealed record ScanPlan(
     long Rows, int Blocks, int LiveBlocks, int Segments, long BytesToRead, bool MayMatch,
     ImmutableArray<PruningStep> Pruning, CountPlan Count, OrderPlan? Order)
 {
+    /// <summary>
+    /// The question the scan answers, in words: the shape of its answer (rows, an aggregate, a count), its source, the columns
+    /// it reads, its filter, its options; what it asks, never how.
+    /// </summary>
+    public string Logical { get; init; } = string.Empty;
+
     /// <summary>What a group by will do with the rows; null without a group by.</summary>
     public GroupPlan? Grouping { get; init; }
 
     /// <summary>
-    /// For an aggregation over a dataset whose objects keep synopses, what each object reads: its tables'
-    /// states, the rows at a window's edges, or its rows and why; empty otherwise.
+    /// Over a dataset, how each unit is answered: each rollup and object the scan covers, the alternative its weight chose at
+    /// the dataset's cost profile, and why the others lost; empty over a file.
     /// </summary>
-    public ImmutableArray<StatesStep> States { get; init; } = [];
+    public ImmutableArray<UnitStep> Units { get; init; } = [];
+
+    /// <summary>What the plan costs at the source's cost profile, before reading anything; null where the source does not say.</summary>
+    public PlanCost? Cost { get; init; }
+
+    /// <summary>
+    /// The range an aggregation over a dataset would answer under <see cref="ScanOptions.AlignWindow"/>, when it grows the
+    /// one asked (<see cref="ScanMetrics.Window"/>); null when it applies its filter as asked.
+    /// </summary>
+    public VortexExpr? Window { get; init; }
 
     /// <summary>The engine's own explanation, with its splits, for the tests that hold the plan to the execution.</summary>
     internal ScanExplanation? Detail { get; init; }
@@ -111,31 +147,17 @@ public readonly record struct ScanMetrics(
     /// <summary>What a group by did with the rows; null without a group by, or before it ran.</summary>
     public GroupMetrics? Grouping { get; init; }
 
-    /// <summary>Rows of a dataset's synopsis tables an aggregation folded as states, in place of the rows they stand for.</summary>
-    public long SynopsisRows { get; init; }
-
-    /// <summary>Rows of the slices at a window's edges, read beside their objects' states: part of <see cref="Rows"/>.</summary>
-    public long EdgeRows { get; init; }
-
     /// <summary>
-    /// The first instant of the window a dataset's aggregation answered under <see cref="ScanOptions.AlignWindow"/>,
-    /// at or before the one asked; null for a scan that aligned no window, or one with no lower bound.
+    /// The range on the first column of a dataset's sort key its aggregation answered under
+    /// <see cref="ScanOptions.AlignWindow"/>, when it grew the one asked: the conjuncts on that column the answer applies,
+    /// whose bounds lie at or outside those asked. Null for a scan that applied its filter as asked.
     /// </summary>
-    public DateTimeOffset? WindowFrom { get; init; }
-
-    /// <summary>
-    /// The instant past the window a dataset's aggregation answered under <see cref="ScanOptions.AlignWindow"/>, at
-    /// or after the one asked; null for a scan that aligned no window, or one with no upper bound.
-    /// </summary>
-    public DateTimeOffset? WindowTo { get; init; }
+    public VortexExpr? Window { get; init; }
 
     internal static ScanMetrics From(ScanCounters counters) => new ScanMetrics(
         counters.Rows, counters.Batches, counters.SegmentRequests, counters.BytesRequested, counters.BlocksDecoded, counters.BlocksPruned, counters.CacheHits)
     {
-        SynopsisRows = counters.SynopsisRows,
-        EdgeRows = counters.EdgeRows,
-        WindowFrom = counters.WindowFrom,
-        WindowTo = counters.WindowTo,
+        Window = counters.Window,
     };
 }
 

@@ -10,8 +10,6 @@ using System.Collections.Generic;
 using System.Threading.Tasks;
 
 using Vorticity.Arrays;
-using Vorticity.File;
-using Vorticity.IO;
 using Vorticity.Layouts;
 
 using Xunit;

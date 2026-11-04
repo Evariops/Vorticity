@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
-using Vorticity.Columns;
 using Vorticity.Parquet;
 using Vorticity.Parquet.Metadata;
 using Xunit;

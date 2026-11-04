@@ -1,5 +1,4 @@
 using System;
-using System.Buffers;
 using System.Collections.Generic;
 using System.Numerics;
 using System.Runtime.CompilerServices;
@@ -8,10 +7,8 @@ using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Buffers;
-using Vorticity.Columns;
 using Vorticity.Compute;
 using Vorticity.Expressions;
-using Vorticity.File;
 using Vorticity.Keys;
 using Vorticity.Scanning;
 using Vorticity.Types;
@@ -285,7 +282,7 @@ internal static class LiveRows
     /// with the file when the handle closes it, and are read again for another vector.
     /// </remarks>
     internal static async ValueTask<ExcludedKey[]> ExcludedKeysAsync(
-        VortexFile file, DeletionVector deletions, IReadOnlyList<string> paths, ClusteringKey key, CancellationToken cancellationToken)
+        VortexFile file, DeletionVector deletions, IReadOnlyList<string> paths, DatasetKey key, CancellationToken cancellationToken)
     {
         ExcludedRead read = Excluded.GetValue(file, static _ => new ExcludedRead());
         if (read.TryGet(deletions, paths, out ExcludedKey[] known))

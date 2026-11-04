@@ -2,9 +2,10 @@
 //
 // One gather of a batch of 8,192 rows through a dictionary of V values, a tenth of the codes null
 // and a tenth of the values: the shape of a nullable dictionary column read a batch at a time.
-// `Original` is the gather as it was (`RowKernelsBefore`), which expands the values' validity to a
-// byte per entry at every gather; `Library` is the reader's, which does so only for a dictionary of
-// at most a quarter of the batch and otherwise reads the values' bitmap at each code.
+// `Library` is the reader's gather, which expands the values' validity to a byte per entry only for a
+// dictionary of at most a quarter of the batch and otherwise reads the values' bitmap at each code;
+// the gather it replaced expanded it at every gather, 50 times what it costs now at 1,048,576 values
+// (91a2ce7b, the measure against a checkout of the original).
 using System;
 
 using BenchmarkDotNet.Attributes;
@@ -63,11 +64,6 @@ public class DictionaryGatherBenchmarks
         _target = new long[Rows];
         _output = new byte[(Rows + 7) / 8];
     }
-
-    /// <summary>The values' validity expanded at every gather.</summary>
-    [Benchmark(Baseline = true)]
-    public int Original() => RowKernelsBefore.MaskedWords<uint, long>(
-        _codes, _values, _target, _codeBits, 0, _valueBits, 0, valuesAllValid: false, (uint)Values, _output);
 
     /// <summary>The gather of the library.</summary>
     [Benchmark]

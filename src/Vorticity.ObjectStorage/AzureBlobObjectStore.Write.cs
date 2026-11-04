@@ -113,9 +113,6 @@ public sealed partial class AzureBlobObjectStore
         }
     }
 
-    /// <summary>The size of block <paramref name="number"/> of a blob of <paramref name="length"/> bytes, -1 when unknown.</summary>
-    internal int PartSizeFor(long length, int number = 1) => _limits.PartSizeOf(number, length);
-
     /// <summary>The header that carries a body's checksum, as the options choose it, or null for none.</summary>
     private (string Name, string Value)? ChecksumOf(ReadOnlySequence<byte> body) => _options.Checksum switch
     {

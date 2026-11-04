@@ -16,13 +16,10 @@
 // stays valid and the only difference is a name no registry resolves. Its own manifest states the
 // three expectations verbatim; they are the three assertions below.
 using System;
-using System.Threading;
 using System.Threading.Tasks;
-using Vorticity.Columns;
 using Vorticity.Conformance.Comparison;
 using Vorticity.Conformance.Corpus;
 using Vorticity.Conformance.Sidecar;
-using Vorticity.File;
 using Vorticity.Scanning;
 using Xunit;
 

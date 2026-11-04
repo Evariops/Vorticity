@@ -11,11 +11,9 @@ using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Buffers;
-using Vorticity.Columns;
 using Vorticity.Dataset;
 using Vorticity.IO;
 using Vorticity.Types;
-using Vorticity.Writing;
 using Xunit;
 
 namespace Vorticity.Tests.Dataset;
@@ -262,7 +260,7 @@ public sealed class MergeFanInTests
     {
         Seed = 0xC1057E_5EED,
         Write = new VortexWriteOptions { RowBlockSize = 64, DataBlockTargetBytes = 8 << 10 },
-        ClusteringKey = ["key"],
+        Layout = new DatasetLayout { SortKey = [LayoutValue.Column("key")] },
     };
 
     /// <summary>One object: the keys congruent to <paramref name="residue"/>, shuffled.</summary>

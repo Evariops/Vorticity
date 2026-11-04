@@ -184,7 +184,7 @@ public sealed class GoogleTests
         using GoogleEmulator emulator = new GoogleEmulator();
         await using GoogleCloudStorageObjectStore warehouse = Store(emulator, threshold: 256 << 10, part: 64 << 10);
         await using VortexSession session = VortexSession.Create(o => o.ObjectStores.Add("gs://warehouse", warehouse));
-        DatasetOptions options = new DatasetOptions { Session = session, ClusteringKey = ["Day"] };
+        DatasetOptions options = new DatasetOptions { Session = session, Layout = new DatasetLayout { SortKey = [LayoutValue.Column("Day")] } };
         await using (VortexDataset dataset = await VortexDataset.CreateAsync("gs://warehouse/tables/readings", LocationTests.Reading.Schema, options, ct))
         {
             for (int append = 0; append < 3; append++)

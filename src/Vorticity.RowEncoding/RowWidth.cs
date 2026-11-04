@@ -1,4 +1,3 @@
-using System;
 using Vorticity.Types;
 using Vorticity.Types.Numerics;
 

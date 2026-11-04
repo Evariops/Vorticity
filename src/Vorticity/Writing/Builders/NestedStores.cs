@@ -81,6 +81,24 @@ internal sealed class StructStore : ColumnStore
         _rows++;
     }
 
+    /// <summary>
+    /// Closes the <paramref name="rows"/> rows from <paramref name="first"/> whose fields were appended whole, a null row's
+    /// fields holding whatever they hold: a struct of no fields counts them, and the rows <paramref name="valid"/> clears
+    /// are null; every row is valid when it is empty.
+    /// </summary>
+    internal void AppendedWhole(int first, int rows, ReadOnlySpan<ulong> valid)
+    {
+        if (Children.Length == 0)
+        {
+            _rows += rows;
+        }
+
+        if (!valid.IsEmpty)
+        {
+            CopyValidity(first, valid, rows);
+        }
+    }
+
     internal override int Build(CanonicalArena arena, int rows)
     {
         Validity validity = BuildValidity(arena, rows);
@@ -247,6 +265,41 @@ internal sealed unsafe class ListStore : ColumnStore
         }
 
         Push(end, 0);
+    }
+
+    /// <summary>
+    /// Closes a row of each of <paramref name="sizes"/> over the elements appended after those of the rows before, in their
+    /// order, each that many: a row <paramref name="valid"/> marks null holds none. What a gathering of whole lists appends,
+    /// the elements of all of them at once.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">A list is open, or the elements appended are not the sizes' sum.</exception>
+    internal void AppendLists(ReadOnlySpan<int> sizes, ReadOnlySpan<ulong> valid)
+    {
+        if (_open)
+        {
+            throw new InvalidOperationException("A list is open; close it with EndList before appending another row.");
+        }
+
+        int at = EndAt(Count);
+        for (int row = 0; row < sizes.Length; row++)
+        {
+            if (!valid.IsEmpty && ((valid[row >> 6] >> (row & 63)) & 1) == 0)
+            {
+                RequireNullable();
+                int held = Count;
+                Push(at, 0);
+                MarkNulls(held, 1);
+                continue;
+            }
+
+            Push(at, sizes[row]);
+            at += sizes[row];
+        }
+
+        if (Elements.Rows != at)
+        {
+            throw new InvalidOperationException("The elements appended are not those of the lists closed.");
+        }
     }
 
     internal override int Build(CanonicalArena arena, int rows)

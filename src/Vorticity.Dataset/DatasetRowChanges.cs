@@ -7,12 +7,11 @@ using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Buffers;
-using Vorticity.Columns;
 using Vorticity.Compute;
-using Vorticity.Expressions;
-using Vorticity.File;
 using Vorticity.IO;
+using Vorticity.Indexes;
 using Vorticity.Layouts;
+using Vorticity.RowEncoding;
 using Vorticity.Scanning;
 
 namespace Vorticity.Dataset;
@@ -70,11 +69,11 @@ public sealed record RowChangeResult
 /// is not true for -- false, or unknown under a null, since a delete takes only what the filter
 /// selects -- stay: in the marked object, whose entry takes its place under the same key, or in the
 /// rewritten one, which takes the old one's place in its level. Either way a level above 0 stays
-/// key-disjoint, and without a clustering key the order holds.
+/// key-disjoint, and without a sort key the order holds.
 /// </para>
 /// <para>
 /// An update reads the rows it selects as records, changes them and writes them into new objects
-/// of level 0, as an append would, since a changed row may carry another key: without a clustering
+/// of level 0, as an append would, since a changed row may carry another key: without a sort
 /// key they follow every other row. One commit replaces everything, so a reader sees all of the
 /// change or none of it; when a concurrent commit has taken one of the objects first, the change is
 /// worked out again on the version that won, and what the lost attempt wrote is left for vacuum.
@@ -97,18 +96,42 @@ internal static class DatasetRowChanges
         RunAsync(dataset, filter, start, null, cancellationToken);
 
     /// <summary>
+    /// Whether <paramref name="pruner"/>'s filter selects every row of <paramref name="held"/>: by its summaries, or by its
+    /// partition, whose column's values there it selects whole.
+    /// </summary>
+    private static bool Covers(SummaryPruner pruner, DatasetSchema schema, in PositionedObject held) =>
+        pruner.MustMatch(held.Entry.Summaries.Columns, held.Entry.PhysicalRows)
+        || (schema.Cut is { } cut && held.TreeKey.Length > VortexDataset.UidBytes
+            && cut.Bounds(VortexDataset.OrderOf(held.TreeKey).Span) is { } partition
+            && pruner.MustMatch(partition, held.Entry.PhysicalRows));
+
+    /// <summary>
+    /// Takes out of the dataset every object whose rows <paramref name="filter"/> is true for, as the bounds its entry
+    /// states prove, and no other: an expiry, which opens no object and rewrites none. The rows of an object it does
+    /// not cover whole stay.
+    /// </summary>
+    /// <param name="dataset">The dataset.</param>
+    /// <param name="filter">The rows to take, checked against the schema; null for all of them.</param>
+    /// <param name="cancellationToken">Cancels the walk and the commit.</param>
+    /// <exception cref="ObjectStoreException">Concurrent commits took an object first on every attempt.</exception>
+    internal static ValueTask<RowChangeResult> ExpireAsync(VortexDataset dataset, VortexExpr? filter, CancellationToken cancellationToken) =>
+        RunAsync(dataset, filter, null, null, cancellationToken, whole: true);
+
+    /// <summary>
     /// <see cref="RunAsync(VortexDataset, VortexExpr?, Func{DatasetSchema, long, ChangedRows}?, CancellationToken)"/>,
     /// for a change that takes the source ranges <paramref name="consumed"/> into account: committed
     /// even when it takes no row, so that the ranges are counted, and given up when another commit
     /// counted them first.
     /// </summary>
+    /// <remarks>With <paramref name="whole"/>, an expiry's: the objects the filter covers whole alone, none opened.</remarks>
     /// <exception cref="SourceOffsetConflictException">A range does not start where the dataset counts its source up to.</exception>
     internal static async ValueTask<RowChangeResult> RunAsync(
         VortexDataset dataset,
         VortexExpr? filter,
         Func<DatasetSchema, long, ChangedRows>? start,
         IReadOnlyList<SourceRange>? consumed,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool whole = false)
     {
         CommitKind kind = start is null ? CommitKind.Delete : CommitKind.Update;
         int attempts = Math.Max(dataset.Options.MaxAttempts, 1);
@@ -132,9 +155,13 @@ internal static class DatasetRowChanges
                 {
                     // An object whose summaries prove every row selected goes whole, unopened, when no
                     // sink wants its rows: bounds only loosen under marks, so its live rows are selected too.
-                    Change change = changed is null && pruner is not null && pruner.MustMatch(held.Entry.Summaries.Columns, held.Entry.PhysicalRows)
+                    // So does an object whose partition the filter covers whole, every value its column takes
+                    // there selected: the days before an instant under a partition by day, whatever the object holds.
+                    Change change = changed is null && (pruner is null ? whole : Covers(pruner, version.Schema, held))
                         ? new Change(held.Entry.Rows, null, null)
-                        : await RewriteAsync(dataset, version, held, filter, changed, doublings, cancellationToken).ConfigureAwait(false);
+                        : whole
+                            ? new Change(0, null, null)
+                            : await RewriteAsync(dataset, version, held, filter, changed, doublings, cancellationToken).ConfigureAwait(false);
                     if (change.Taken == 0)
                     {
                         continue;
@@ -282,13 +309,19 @@ internal static class DatasetRowChanges
                 // Marked at once when the rows fit the vector's bound even as a run each; otherwise
                 // their positions are found first, since rows a range takes lie in a few runs, and
                 // only then handed to the sink, which a rewrite would hand them to instead.
+                // The rows marked are counted too, by the columns the object counts, for an object whose counts answer for
+                // the version's columns and whose rows deleted before are counted already: a question subtracts them.
                 bool fits = FitsAtWorst(dataset.Options, held.Entry, matched);
-                DeletionVector deletions = await MarkAsync(file, held, columns, filter, fits ? changed : null, cancellationToken).ConfigureAwait(false);
+                IReadOnlyList<(int Field, ColumnCounts Counts)>? counted = columns is null && (!held.Entry.HasDeletions || held.Entry.HasNegatives)
+                    ? await dataset.ReadEveryCountsAsync(held.Entry, cancellationToken).ConfigureAwait(false)
+                    : null;
+                (DeletionVector deletions, DeletedCounts? negatives) = await MarkAsync(
+                    file, held, columns, filter, fits ? changed : null, fits || changed is null ? counted : null, cancellationToken).ConfigureAwait(false);
                 if (fits || deletions.EncodedBytes <= dataset.Options.MarkedVectorBytesOf(held.Entry.Bytes))
                 {
                     if (!fits && changed is not null)
                     {
-                        deletions = await MarkAsync(file, held, columns, filter, changed, cancellationToken).ConfigureAwait(false);
+                        (deletions, negatives) = await MarkAsync(file, held, columns, filter, changed, counted, cancellationToken).ConfigureAwait(false);
                     }
 
                     if (deletions.Count - held.Entry.Deletions.Count != matched)
@@ -301,6 +334,18 @@ internal static class DatasetRowChanges
                     // Under an erasure delay the entry says when its oldest mark was made, which the
                     // planner purges it by.
                     ObjectEntry marked = held.Entry.WithDeletions(deletions);
+                    if (negatives is not null && held.Entry.HasNegatives)
+                    {
+                        negatives = await held.Entry.NegativesAsync(version.Pages, cancellationToken).ConfigureAwait(false) is { } earlier
+                            ? DeletedCounts.Merge(earlier, negatives)
+                            : null;
+                    }
+
+                    if (negatives is not null)
+                    {
+                        marked = marked.WithNegatives(negatives);
+                    }
+
                     return new Change(
                         matched,
                         null,
@@ -309,22 +354,22 @@ internal static class DatasetRowChanges
             }
 
             // Written in the version's schema, which an object of an earlier one is read as. The rows
-            // kept are the object's own in its own order, and an object above level 0 is a
-            // compaction's, whose rows come in key order, or in sorted slices for a dataset of periods.
-            // They are some of its rows, which bound what the store sizes the parts of the object from.
-            ObjectDraft? draft = matched < held.Entry.Rows
+            // kept are the object's own in its own order, the key's, so that the object keeps a sparse
+            // index and blocks over them. They are some of its rows, which bound what the store sizes
+            // the parts of the object from.
+            DatasetSchema schema = version.Schema;
+            SortKey? key = schema.Keyed ? schema.Tree : null;
+            ObjectOutput? draft = matched < held.Entry.Rows
                 ? dataset.StartObjectUnder(
-                    version.Schema, inKeyOrder: version.Levels.RowsInKeyOrder(held.Level), byteBound: ObjectBound.Of(held.Entry.Bytes, doublings, dataset.Options.BoundOutPerIn))
+                    schema, inKeyOrder: true, contents: key is not null,
+                    byteBound: ObjectBound.Of(held.Entry.Bytes, doublings, dataset.Options.BoundOutPerIn))
                 : null;
-            if (draft is not null && version.Schema.Key is { } rewritten)
-            {
-                // The rows kept are the object's own: its one partition value, if it has one.
-                draft.Partition = rewritten.PartitionOf(held.Entry.Summaries);
-            }
-
+            SortedRows? sorted = key is null || draft is null
+                ? null
+                : new SortedRows(key, Math.Min(schema.Layout!.Layout.Prefix, schema.Layout.Components.Count), skip: schema.Partitioned ? 1 : 0);
             try
             {
-                long kept = await SplitAsync(file, held.Entry, columns, filter, draft?.Writer, changed, cancellationToken).ConfigureAwait(false);
+                long kept = await SplitAsync(file, held.Entry, columns, filter, draft?.Writer, key, sorted, changed, cancellationToken).ConfigureAwait(false);
                 if (draft is null)
                 {
                     return new Change(matched, null, null);
@@ -337,16 +382,20 @@ internal static class DatasetRowChanges
                         "a rewrite that loses or doubles rows is the one failure it must not have.");
                 }
 
-                ObjectDraft sealing = draft;
+                // The object keeps the keys of its first and last kept rows, or, without a key, the old one's partition and
+                // position, so that it is read where the old one was; and when the old one's rows arrived.
+                ObjectOutput sealing = draft;
                 draft = null;
+                sealing.Keys = sorted?.Bounds;
+                sealing.Partition = !schema.Keyed && schema.Partitioned ? held.TreeKey.Span[..^(VortexDataset.UidBytes + sizeof(long))].ToArray() : null;
+                sealing.Arrival = held.Entry.Arrival;
                 await using (sealing.Writer.ConfigureAwait(false))
                 {
+                    sorted?.Finish(sealing.Writer);
                     await sealing.Writer.CompleteAsync(cancellationToken).ConfigureAwait(false);
                 }
 
-                // Without a clustering key the object keeps the old one's position, so that it is
-                // read where the old one was.
-                long position = dataset.Key is null ? VortexDataset.PositionAt(held.TreeKey.Span) : held.FirstRow;
+                long position = !schema.Keyed ? VortexDataset.PositionAt(held.TreeKey.Span) : held.FirstRow;
                 return new Change(matched, await dataset.SealAsync(sealing, kept, position, cancellationToken).ConfigureAwait(false), null);
             }
             catch
@@ -392,16 +441,26 @@ internal static class DatasetRowChanges
     /// a time, and are added as the runs they form, which carry on from one batch to the next: the
     /// cost is the batches' words and the runs, not the rows.
     /// </remarks>
-    private static async ValueTask<DeletionVector> MarkAsync(
-        VortexFile file, PositionedObject held, ObjectColumns? columns, VortexExpr? filter, ChangedRows? changed, CancellationToken cancellationToken)
+    private static async ValueTask<(DeletionVector Deletions, DeletedCounts? Negatives)> MarkAsync(
+        VortexFile file,
+        PositionedObject held,
+        ObjectColumns? columns,
+        VortexExpr? filter,
+        ChangedRows? changed,
+        IReadOnlyList<(int Field, ColumnCounts Counts)>? counted,
+        CancellationToken cancellationToken)
     {
         DeletionVector deletions = held.Entry.Deletions;
         List<long> starts = [];
         List<long> ends = [];
         ulong[] live = [];
+
+        // Read whole for a sink, else the columns the counts of the rows marked count by and sum.
+        int[]? read = changed is null && counted is not null ? DeletedCounts.Builder.ColumnsRead(counted) : null;
+        DeletedCounts.Builder? negatives = counted is null ? null : new DeletedCounts.Builder(file.DType, counted, read);
         try
         {
-            await foreach (RecordBatch batch in MatchingAsync(file, columns, filter, whole: changed is not null, cancellationToken)
+            await foreach (RecordBatch batch in MatchingAsync(file, columns, filter, whole: changed is not null, read, cancellationToken)
                 .WithCancellation(cancellationToken).ConfigureAwait(false))
             {
                 int count = batch.RowCount;
@@ -433,6 +492,7 @@ internal static class DatasetRowChanges
                 }
 
                 Runs(taken, count, batch.StartRow, starts, ends);
+                negatives?.Add(batch, taken);
                 if (changed is not null)
                 {
                     VortexBuffer buffer = batch.Arena.AllocateUninitialized(words * sizeof(ulong), 64, out Span<byte> raw);
@@ -447,7 +507,7 @@ internal static class DatasetRowChanges
             Pooled.Return(live);
         }
 
-        return deletions.WithRuns(CollectionsMarshal.AsSpan(starts), CollectionsMarshal.AsSpan(ends));
+        return (deletions.WithRuns(CollectionsMarshal.AsSpan(starts), CollectionsMarshal.AsSpan(ends)), negatives?.Finish());
     }
 
     /// <summary>
@@ -500,10 +560,11 @@ internal static class DatasetRowChanges
     /// An object's rows under the filter, at their positions: its own scan without compaction, each
     /// batch selecting what the filter keeps, reshaped when it was written under another schema.
     /// With <paramref name="whole"/> every column is read, for a sink that writes the rows again;
-    /// otherwise only what the filter needs.
+    /// otherwise only what the filter needs, and of an object of the version's columns those
+    /// <paramref name="fields"/> names.
     /// </summary>
     private static IAsyncEnumerable<RecordBatch> MatchingAsync(
-        VortexFile file, ObjectColumns? columns, VortexExpr? filter, bool whole, CancellationToken cancellationToken)
+        VortexFile file, ObjectColumns? columns, VortexExpr? filter, bool whole, int[]? fields, CancellationToken cancellationToken)
     {
         if (columns is null)
         {
@@ -515,7 +576,7 @@ internal static class DatasetRowChanges
 
             if (!whole && file.DType.Kind == Types.DTypeKind.Struct && file.DType.FieldCount > 0)
             {
-                scan.ProjectFields([0]);
+                scan.ProjectFields(fields ?? [0]);
             }
 
             return scan.ExecuteAsync();
@@ -539,7 +600,8 @@ internal static class DatasetRowChanges
     /// <summary>
     /// One pass over an object's rows: the rows the filter is not true for go to
     /// <paramref name="writer"/> and the others to <paramref name="changed"/>, each batch selected
-    /// rather than copied.
+    /// rather than copied. The kept rows' keys under <paramref name="key"/> go to
+    /// <paramref name="sorted"/>, the object's sparse index and blocks, when there is one.
     /// </summary>
     /// <returns>The rows written to <paramref name="writer"/>.</returns>
     private static async ValueTask<long> SplitAsync(
@@ -548,6 +610,8 @@ internal static class DatasetRowChanges
         ObjectColumns? columns,
         VortexExpr? filter,
         VortexFileWriter? writer,
+        SortKey? key,
+        SortedRows? sorted,
         ChangedRows? changed,
         CancellationToken cancellationToken)
     {
@@ -577,6 +641,11 @@ internal static class DatasetRowChanges
                 (VortexBuffer keptWords, int keeping) = Words(batch.Arena, states.AsSpan(0, rows), matching: false);
                 if (keeping > 0 && writer is not null)
                 {
+                    if (sorted is not null)
+                    {
+                        Index(batch, keeping < rows ? keptWords.Span : default, keeping, key!, sorted, writer);
+                    }
+
                     if (keeping < rows)
                     {
                         batch.Select(keptWords, keeping);
@@ -600,6 +669,42 @@ internal static class DatasetRowChanges
         }
 
         return kept;
+    }
+
+    /// <summary>
+    /// Gives <paramref name="sorted"/> the keys of the rows of <paramref name="batch"/> it keeps, every one when
+    /// <paramref name="words"/> selects none, and declares the blocks they close before the rows are written.
+    /// </summary>
+    private static void Index(RecordBatch batch, ReadOnlySpan<byte> words, int keeping, SortKey key, SortedRows sorted, VortexFileWriter writer)
+    {
+        using RowKeys keys = key.Encode(batch);
+        if (words.IsEmpty)
+        {
+            sorted.Take(new OrderedRows(keys, null, 0), 0, keeping, writer.BlockRows);
+        }
+        else
+        {
+            int[] kept = ArrayPool<int>.Shared.Rent(keeping);
+            try
+            {
+                int at = 0;
+                ReadOnlySpan<ulong> bits = MemoryMarshal.Cast<byte, ulong>(words);
+                for (int word = 0; word < bits.Length && at < keeping; word++)
+                {
+                    for (ulong w = bits[word]; w != 0 && at < keeping; w &= w - 1)
+                    {
+                        kept[at++] = (word << 6) + BitOperations.TrailingZeroCount(w);
+                    }
+                }
+
+                sorted.Take(new OrderedRows(keys, kept, 0), 0, keeping, writer.BlockRows);
+            }
+            finally
+            {
+                ArrayPool<int>.Shared.Return(kept);
+            }
+        }
+
     }
 
     /// <summary>
@@ -696,9 +801,9 @@ internal abstract class ChangedRows
 }
 
 /// <summary>
-/// The rows an update selects, read out of each batch as records, changed, and written into new
-/// objects rolled at level 1's target size. A changed row may carry another key, which is why they
-/// go to level 0, as appended rows do.
+/// The rows an update selects, read out of each batch as records, changed, and written as an append
+/// writes its rows (<see cref="DatasetWriter"/>): by partition, sorted by the key. A changed row may
+/// carry another key or another partition, which is why they go to level 0, as appended rows do.
 /// </summary>
 /// <typeparam name="TRecord">The record the change is written against; its members cover every column.</typeparam>
 internal sealed class ChangedRecords<TRecord> : ChangedRows
@@ -708,17 +813,14 @@ internal sealed class ChangedRecords<TRecord> : ChangedRows
     private readonly DatasetSchema _schema;
     private readonly Func<TRecord, TRecord> _update;
     private readonly RecordBinding _binding;
-    private readonly long _target;
-    private readonly List<WrittenObject> _written = [];
+    private readonly long _firstRow;
     private TRecord[] _rows = [];
-    private ObjectDraft? _draft;
-    private long _draftRows;
-    private long _firstRow;
+    private DatasetWriter? _writer;
 
     /// <param name="dataset">The dataset the objects are written for.</param>
     /// <param name="schema">The schema the rows are read as and written in.</param>
     /// <param name="update">The change, applied to every row once.</param>
-    /// <param name="firstRow">Where the first object's rows go when the dataset has no clustering key: after every other row.</param>
+    /// <param name="firstRow">Where the first object's rows go when the dataset has no sort key: after every other row.</param>
     internal ChangedRecords(VortexDataset dataset, DatasetSchema schema, Func<TRecord, TRecord> update, long firstRow)
     {
         _dataset = dataset;
@@ -726,9 +828,6 @@ internal sealed class ChangedRecords<TRecord> : ChangedRows
         _update = update;
         _binding = RecordBinding.For<TRecord>(schema.Columns, dataset.Session.Options.Extensions);
         _firstRow = firstRow;
-        // Rolled at what compaction writes at most: the changed rows land in level 0, where a
-        // large change in many small objects would put the level over its ceiling at once.
-        _target = Math.Min(CompactionOptions.DefaultMaxObjectBytes, Math.Max(dataset.Options.MaxObjectBytes / 2, 1));
     }
 
     internal override async ValueTask TakeAsync(RecordBatch batch, CancellationToken cancellationToken)
@@ -739,62 +838,30 @@ internal sealed class ChangedRecords<TRecord> : ChangedRows
             _rows[i] = _update(_rows[i]);
         }
 
-        _draft ??= _dataset.StartObjectUnder(_schema);
-        await _draft.Writer.WriteAsync<TRecord>(_rows.AsSpan(0, count), cancellationToken).ConfigureAwait(false);
-        _draftRows += count;
-        if (_draft.Sink.Position >= _target)
-        {
-            await RollAsync(cancellationToken).ConfigureAwait(false);
-        }
+        _writer ??= new DatasetWriter(_dataset, _schema, shredded: null);
+        await _writer.WriteAsync<TRecord>(_rows.AsSpan(0, count), cancellationToken).ConfigureAwait(false);
     }
 
     internal override async ValueTask<IReadOnlyList<WrittenObject>> FinishAsync(CancellationToken cancellationToken)
     {
-        await RollAsync(cancellationToken).ConfigureAwait(false);
         Release();
-        return _written;
+        if (_writer is not { } writer)
+        {
+            return [];
+        }
+
+        _writer = null;
+        return await writer.FinishAsync(_firstRow, cancellationToken).ConfigureAwait(false);
     }
 
     internal override async ValueTask AbandonAsync()
     {
         Release();
-        if (_draft is { } draft)
+        if (_writer is { } writer)
         {
-            _draft = null;
-            await draft.DisposeAsync().ConfigureAwait(false);
+            _writer = null;
+            await writer.AbandonAsync().ConfigureAwait(false);
         }
-    }
-
-    /// <summary>Seals the object being written, if there is one.</summary>
-    private async ValueTask RollAsync(CancellationToken cancellationToken)
-    {
-        if (_draft is not { } draft)
-        {
-            return;
-        }
-
-        _draft = null;
-        try
-        {
-            await using (draft.Writer.ConfigureAwait(false))
-            {
-                await draft.Writer.CompleteAsync(cancellationToken).ConfigureAwait(false);
-            }
-        }
-        catch
-        {
-            await draft.DisposeAsync().ConfigureAwait(false);
-            throw;
-        }
-
-        if (await _dataset.SealAsync(draft, _draftRows, _firstRow, cancellationToken).ConfigureAwait(false) is { } written)
-        {
-            // A changed row may carry another partition value: an object per value, as an append writes.
-            _written.AddRange(await _dataset.PartitionedAsync(written, cancellationToken).ConfigureAwait(false));
-        }
-
-        _firstRow += _draftRows;
-        _draftRows = 0;
     }
 
     /// <summary>The selected rows of a batch as records, in order, at the front of the buffer.</summary>

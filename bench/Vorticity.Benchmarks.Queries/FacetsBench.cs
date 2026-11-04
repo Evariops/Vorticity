@@ -7,9 +7,9 @@ namespace Vorticity.Benchmarks.Queries;
 
 /// <summary>
 /// The time-window design's worst case of many facets (<c>--micro facets</c>): spans with a dozen repeating
-/// facets and a route under them (<see cref="SpanGenerator"/>), over hours of periods, in memory behind a store that
-/// counts and waits. It says what the synopsis keeps of such a table, then asks questions on the shallow facets
-/// and on the route, cold and warm, from the synopses and from the rows, as <c>--micro questions</c> does.
+/// facets and a route under them (<see cref="SpanGenerator"/>), over hours partitioned by hour, in memory behind a store that
+/// counts and waits. It compacts such a table, then asks questions on the shallow facets and on the route, cold and
+/// warm, by the synopses where they answer and by the rows, as <c>--micro questions</c> does.
 /// </summary>
 internal static class FacetsBench
 {
@@ -21,8 +21,7 @@ internal static class FacetsBench
         long rows = 0;
         await using (VortexDataset dataset = await VortexDataset.CreateAsync(store, GeneratedSpan.Schema, new DatasetOptions
         {
-            ClusteringKey = [nameof(GeneratedSpan.At)],
-            Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Hour },
+            Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(GeneratedSpan.At)).Truncate(CalendarUnit.Hour), SortKey = [LayoutValue.Column(nameof(GeneratedSpan.At))], Organization = LayoutOrganization.Leveled },
             Write = new VortexWriteOptions { Indexes = IndexPolicy.Auto.WithBudgetPerMille(budget) },
         }))
         {
@@ -46,8 +45,8 @@ internal static class FacetsBench
         }
 
         Console.WriteLine(
-            $"{rows} spans over {hours} periods of an hour, written and compacted in {Stopwatch.GetElapsedTime(begin).TotalSeconds:F1} s; " +
-            $"tables up to {budget} ‰ of the data; {latency} ms a round trip; warm is the best of {rounds}");
+            $"{rows} spans over {hours} hours partitioned by hour, written and compacted in {Stopwatch.GetElapsedTime(begin).TotalSeconds:F1} s; " +
+            $"indexes up to {budget} ‰ of the data; {latency} ms a round trip; warm is the best of {rounds}");
         bytes.Latency = TimeSpan.FromMilliseconds(latency);
         Console.WriteLine($"{"question",-58} {"path",-8} {"",-4} {"requests",8} {"steps",6} {"MB",8} {"states",9} {"rows",9} {"ms",9} {"cpu ms",8}");
         (string Name, Func<Scan<GeneratedSpan>, Aggregation> Ask)[] questions =

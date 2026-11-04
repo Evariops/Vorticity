@@ -1,7 +1,6 @@
 using System;
 using Vorticity.Serialization.Schemas;
 using Vorticity.Types;
-using Vorticity.File;
 
 namespace Vorticity;
 
@@ -179,14 +178,6 @@ public readonly struct FieldStatistics
     /// <summary>True when a <c>sum</c> statistic is recorded. A sum is always exact when present.</summary>
     internal bool HasSum => (_present & Present.Sum) != 0;
 
-    /// <summary>
-    /// The <c>sum</c> statistic, untyped. Interpret it against
-    /// <see cref="FileStatistics.GetSumDType"/>, not the field DType. On a float column that
-    /// contains an infinity this is <em>not</em> the IEEE sum: the aggregate is bound with
-    /// NaN-skipping semantics and the result is still marked exact.
-    /// </summary>
-    internal ScalarValue Sum => _sum;
-
     /// <summary>Reads the <c>is_sorted</c> statistic.</summary>
     /// <param name="value">The value when present.</param>
     /// <returns>Whether the statistic was recorded.</returns>
@@ -244,7 +235,7 @@ public readonly struct FieldStatistics
     /// <summary>The column's type, which reads <see cref="Min"/> and <see cref="Max"/>.</summary>
     private VortexType? FieldType { get; init; }
 
-    /// <summary>The widened type <see cref="Sum"/> is stored at.</summary>
+    /// <summary>The widened type the field's sum is stored at.</summary>
     private VortexType? SumType { get; init; }
 
     /// <summary>These statistics, able to read their values back as the column's .NET type.</summary>

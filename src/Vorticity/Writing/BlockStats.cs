@@ -46,6 +46,19 @@ internal struct BlockStats
     internal long NullCount;
 
     /// <summary>
+    /// For a float: how many of the valid values are NaN, which the bounds leave out and the zone map's
+    /// <c>vortex.nan_count</c> states, so that a negated comparison prunes a zone of none. Zero for every
+    /// other kind.
+    /// </summary>
+    internal long NanCount;
+
+    /// <summary>
+    /// Whether <see cref="NanCount"/> may miss some: a block summarized from a zone map that stated none, which an
+    /// append does not read again. Its column's zone map then states no NaN count.
+    /// </summary>
+    internal bool NansUnknown;
+
+    /// <summary>
     /// For utf8 and binary: the bytes of the valid values, which is the heap a <c>vortex.varbin</c>
     /// form would carry. Zero for every other kind.
     /// </summary>
@@ -284,12 +297,15 @@ internal struct BlockStats
     /// <param name="min">The exact minimum, when there is one.</param>
     /// <param name="max">The exact maximum, when there is one.</param>
     /// <param name="scheme">What the block's chunk was written as, plus one; 0 when unknown.</param>
+    /// <param name="nans">A float's NaN count, as its zone states it; null when it states none.</param>
     internal static BlockStats Summary(
-        long rows, long nulls, bool summarizable, FilterLiteral? min, FilterLiteral? max, byte scheme)
+        long rows, long nulls, bool summarizable, FilterLiteral? min, FilterLiteral? max, byte scheme, long? nans = null)
     {
         BlockStats block = default;
         block.Rows = rows;
         block.NullCount = nulls;
+        block.NanCount = nans ?? 0;
+        block.NansUnknown = nans is null;
         block.IsSummarizable = summarizable;
         block.WidthsBroken = true;
         block.OrderUntracked = true;
@@ -367,6 +383,8 @@ internal struct BlockStats
 
         Rows += other.Rows;
         NullCount += other.NullCount;
+        NanCount += other.NanCount;
+        NansUnknown |= other.NansUnknown;
         TotalBytes += other.TotalBytes;
         RunBoundaries += other.RunBoundaries;
         IsSummarizable |= other.IsSummarizable;

@@ -36,15 +36,13 @@ internal sealed class SessionReader : ISegmentReader, Indexes.IIndexRegionReader
         _key = inner is SynopsisCacheReader cached ? cached.Inner : inner;
     }
 
-    internal ISegmentReader Inner => _inner;
-
     /// <summary>Whether a read costs no round trip: the reader's under the session's, which a scan reads ahead or along by.</summary>
     bool ISegmentReader.CostsNoRoundTrip => _inner.CostsNoRoundTrip;
 
     internal static ISegmentReader Wrap(ISegmentReader inner, VortexSession session) =>
         inner is MemorySegmentSource or MemoryMappedSegmentSource or SessionReader
             ? inner
-            : new SessionReader(inner, session.ReadGate, session.Options.SegmentCache);
+            : new SessionReader(inner, session.ReadGate, session.Options.ReadCache);
 
     /// <summary>The store's reader under the session's, and under the synopsis cache's when there is one.</summary>
     internal static ISegmentReader Unwrap(ISegmentReader reader)
@@ -74,7 +72,11 @@ internal sealed class SessionReader : ISegmentReader, Indexes.IIndexRegionReader
             _gate.Release();
         }
 
-        _cache?.Add(_key, (long)spec.Offset, owner, owner.Buffer);
+        if (_cache is not null && !SegmentCache.Passing)
+        {
+            _cache.Add(_key, (long)spec.Offset, owner, owner.Buffer);
+        }
+
         return owner;
     }
 
@@ -145,7 +147,7 @@ internal sealed class SessionReader : ISegmentReader, Indexes.IIndexRegionReader
                 _gate.Release();
             }
 
-            if (_cache is not null)
+            if (_cache is not null && !SegmentCache.Passing)
             {
                 for (int slot = 0; slot < requests.Count; slot++)
                 {

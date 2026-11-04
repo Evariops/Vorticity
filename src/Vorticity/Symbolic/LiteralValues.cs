@@ -3,7 +3,6 @@ using System.Globalization;
 using System.Numerics;
 using System.Text;
 using Vorticity.Expressions;
-using Vorticity.Types;
 using Vorticity.Types.Numerics;
 
 namespace Vorticity;

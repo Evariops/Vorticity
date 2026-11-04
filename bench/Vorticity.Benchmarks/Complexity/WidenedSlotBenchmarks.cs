@@ -3,8 +3,10 @@
 // One batch of 65,536 values summed over R ranges of one group each, as a grouping by a sorted or
 // run-end key folds a batch: a range per key. Decimals stored in 64 bits are read as 128-bit
 // values, so the aggregate widens them; decimals stored in 128 bits and 64-bit integers are read
-// where they are. `Original` is the aggregate that read the block again at every range, widening
-// it each time (`FixedSlotBefore.cs`); `Library` is the library's, which widens it once per batch.
+// where they are. `Library` is the library's aggregate, which widens the block once per batch; the
+// one it replaced read it again at every range, widening it each time, 75.2 ms where it takes
+// 76.7 µs for decimals stored in 64 bits at R = 4,096 (372a126a, the measure against a checkout of the
+// original).
 using System;
 using System.Runtime.InteropServices;
 
@@ -49,10 +51,9 @@ public class WidenedSlotBenchmarks
     private CanonicalArena _arena = null!;
     private int _node;
     private long _batch;
-    private AggregateSlot<Int128> _original = null!;
     private AggregateSlot<Int128> _library = null!;
 
-    /// <summary>Builds the batch and both aggregates.</summary>
+    /// <summary>Builds the batch and the aggregate.</summary>
     [GlobalSetup]
     public void Setup()
     {
@@ -66,7 +67,6 @@ public class WidenedSlotBenchmarks
                 Fill(MemoryMarshal.Cast<byte, long>(bytes));
                 DType dtype = types.Decimal(18, 2, Nullability.NonNullable);
                 _node = _arena.AddDecimal(dtype, Rows, Validity.NonNullable, DecimalStorageType.I64, 18, 2, buffer);
-                _original = new FixedSlotBefore<Int128, SumState<Int128>, DecimalSum, Int128>(StorageKind.Decimal, static s => s.Sum);
                 _library = new FixedSlot<Int128, SumState<Int128>, DecimalSum, Int128>(StorageKind.Decimal, static s => s.Sum);
                 break;
             }
@@ -82,7 +82,6 @@ public class WidenedSlotBenchmarks
 
                 DType dtype = types.Decimal(38, 2, Nullability.NonNullable);
                 _node = _arena.AddDecimal(dtype, Rows, Validity.NonNullable, DecimalStorageType.I128, 38, 2, buffer);
-                _original = new FixedSlotBefore<Int128, SumState<Int128>, DecimalSum, Int128>(StorageKind.Decimal, static s => s.Sum);
                 _library = new FixedSlot<Int128, SumState<Int128>, DecimalSum, Int128>(StorageKind.Decimal, static s => s.Sum);
                 break;
             }
@@ -93,23 +92,17 @@ public class WidenedSlotBenchmarks
                 Fill(MemoryMarshal.Cast<byte, long>(bytes));
                 DType dtype = types.Primitive(PType.I64, Nullability.NonNullable);
                 _node = _arena.AddPrimitive(dtype, Rows, Validity.NonNullable, PType.I64, buffer);
-                _original = new FixedSlotBefore<long, SumState<Int128>, SignedSum<long>, Int128>(StorageKind.Primitive, static s => s.Sum);
                 _library = new FixedSlot<long, SumState<Int128>, SignedSum<long>, Int128>(StorageKind.Primitive, static s => s.Sum);
                 break;
             }
         }
 
-        _original.EnsureGroups(Ranges);
         _library.EnsureGroups(Ranges);
     }
 
     /// <summary>Gives the arena's blocks back.</summary>
     [GlobalCleanup]
     public void Cleanup() => _arena.Reset();
-
-    /// <summary>The batch folded range by range, widened at every range.</summary>
-    [Benchmark(Baseline = true)]
-    public Int128 Original() => Fold(_original);
 
     /// <summary>The batch folded range by range by the library's aggregate.</summary>
     [Benchmark]

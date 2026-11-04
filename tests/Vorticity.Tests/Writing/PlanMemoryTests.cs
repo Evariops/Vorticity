@@ -21,7 +21,6 @@ using Vorticity.Arrays;
 using Vorticity.Indexes;
 using Vorticity.Buffers;
 using Vorticity.Columns;
-using Vorticity.File;
 using Vorticity.Scanning;
 using Vorticity.Types;
 using Vorticity.Tests.Columns;

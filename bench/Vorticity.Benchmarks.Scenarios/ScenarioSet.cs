@@ -15,10 +15,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
-
-using Vorticity.Columns;
 using Vorticity.Expressions;
-using Vorticity.File;
 using Vorticity.Indexes;
 using Vorticity.Keys;
 using Vorticity.Scanning;
@@ -239,7 +236,7 @@ public static class ScenarioSet
             new Vorticity.IO.MemorySegmentSource(prepared.Bytes), new VortexOpenOptions(), CancellationToken.None);
         ScanExplanation plan = await file.ScanBuilder()
             .Where(Expr.In(Expr.Field(prepared.Column), prepared.Probes))
-            .ExplainAsync(CancellationToken.None);
+            .ExplainAsync(analyze: true, CancellationToken.None);
         return plan.LiveBlocks;
     }
 

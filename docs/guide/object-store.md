@@ -121,8 +121,8 @@ a lower bound on the round trips that had to wait one after another, and it is w
 a store where each request costs tens of milliseconds. `Reset` starts the counts again.
 
 ```
-creating a dataset: 2 requests (0 read, 0 head, 1 put, 1 list), 2 dependent steps, 0 bytes read, 123 written
-opening it: 2 requests (1 read, 0 head, 0 put, 1 list), 2 dependent steps, 123 bytes read, 0 written
+creating a dataset: 2 requests (0 read, 0 head, 1 put, 1 list), 2 dependent steps, 0 bytes read, 126 written
+opening it: 2 requests (1 read, 0 head, 0 put, 1 list), 2 dependent steps, 126 bytes read, 0 written
 ```
 
 [dataset-maintenance.md](dataset-maintenance.md) prices compaction, verification and vacuum the
@@ -148,7 +148,7 @@ await using (VortexSession session = VortexSession.Create(o =>
 ```
 open from the store: 1000000 rows; 1 requests (1 read, 0 head, 0 put, 0 list), 1 dependent steps, 65600 bytes read, 0 written
 mean of Celsius for Day >= 900: 30.000; 2 requests (2 read, 0 head, 0 put, 0 list), 2 dependent steps, 151432 bytes read, 0 written
-a full scan, 1000000 rows: 15 requests (15 read, 0 head, 0 put, 0 list), 9 dependent steps, 1315268 bytes read, 0 written
+a full scan, 1000000 rows: 15 requests (15 read, 0 head, 0 put, 0 list), 11 dependent steps, 1315268 bytes read, 0 written
 the same scan again, its segments in the session's cache, 1000000 rows: 0 requests (0 read, 0 head, 0 put, 0 list), 0 dependent steps, 0 bytes read, 0 written
 ```
 

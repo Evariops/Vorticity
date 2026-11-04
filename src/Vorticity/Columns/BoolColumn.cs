@@ -24,11 +24,6 @@ internal readonly ref struct BoolColumn
     /// <summary>Rows in this column.</summary>
     public int Length => _batch.Node(_node).Length;
 
-    /// <summary>Whether row <paramref name="index"/> is not null. Independent of its bit.</summary>
-    /// <param name="index">0-based row index, below <see cref="Length"/>.</param>
-    /// <exception cref="ArgumentOutOfRangeException"><paramref name="index"/> is out of range.</exception>
-    public bool IsValid(int index) => ColumnCore.IsValid(_batch, _node, index);
-
     /// <summary>
     /// The raw bitmap, LSB-first, with row 0 at bit <see cref="BitOffset"/>. Zero-copy, and
     /// invalid after the owning batch is disposed.
@@ -40,7 +35,7 @@ internal readonly ref struct BoolColumn
 
     /// <summary>
     /// The value of row <paramref name="index"/>, with <see cref="BitOffset"/> applied. A null
-    /// row's bit is whatever the writer left there; check <see cref="IsValid"/> first.
+    /// row's bit is whatever the writer left there, which the node's validity tells apart.
     /// </summary>
     /// <param name="index">0-based row index, below <see cref="Length"/>.</param>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="index"/> is out of range.</exception>

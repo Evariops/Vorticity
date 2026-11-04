@@ -51,12 +51,28 @@ internal sealed class StructLayoutReader : LayoutReader
             RegisterChild(in validity, rows, in all, segments);
         }
 
-        int selected = fields.SelectedCount(dtype.FieldCount);
-        for (int s = 0; s < selected; s++)
+        // The columns the split takes from their zones are the root's alone: a struct below it is not told.
+        Scanning.ZoneKeyReads? zoned = segments.ZoneKeys;
+        segments.ZoneKeys = null;
+        try
         {
-            LayoutNode child = node.GetChild(fields.SelectedField(s) + validityChildren);
-            FieldMask childMask = fields.SelectedMask(s);
-            RegisterChild(in child, rows, in childMask, segments);
+            int selected = fields.SelectedCount(dtype.FieldCount);
+            for (int s = 0; s < selected; s++)
+            {
+                int k = fields.SelectedField(s);
+                if (zoned is not null && zoned.Covers(k, rows))
+                {
+                    continue;
+                }
+
+                LayoutNode child = node.GetChild(k + validityChildren);
+                FieldMask childMask = fields.SelectedMask(s);
+                RegisterChild(in child, rows, in childMask, segments);
+            }
+        }
+        finally
+        {
+            segments.ZoneKeys = zoned;
         }
     }
 
@@ -92,6 +108,10 @@ internal sealed class StructLayoutReader : LayoutReader
         Span<int> stack = stackalloc int[StackFields];
         Scratch<int> children = new Scratch<int>(selected, stack);
 
+        // The columns the split takes from their zones are the root's alone: a struct below it is not told.
+        Scanning.ZoneKeyReads? zoned = context.ZoneKeys;
+        context.ZoneKeys = null;
+
         // A DType is managed and cannot be stackalloc'd, so the name and dtype scratch come from
         // the pool. Both are returned in the finally.
         Scratch<int> names = new Scratch<int>(whole ? 0 : selected, default);
@@ -124,7 +144,10 @@ internal sealed class StructLayoutReader : LayoutReader
                 int decoded;
                 try
                 {
-                    decoded = ExecuteRowChild(in child, rows, in childMask, context);
+                    if (zoned is null || !zoned.TryBuild(k, context, rows, length, out decoded))
+                    {
+                        decoded = ExecuteRowChild(in child, rows, in childMask, context);
+                    }
                 }
                 finally
                 {
@@ -144,6 +167,7 @@ internal sealed class StructLayoutReader : LayoutReader
         }
         finally
         {
+            context.ZoneKeys = zoned;
             fieldTypes.Dispose();
             names.Dispose();
             children.Dispose();

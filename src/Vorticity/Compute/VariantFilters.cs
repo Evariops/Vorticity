@@ -38,6 +38,27 @@ internal static class VariantFilters
         }
     }
 
+    /// <summary>Whether <paramref name="filter"/> holds a fenced predicate that reads a path, which a file's variant directories may refute.</summary>
+    internal static bool AsksPaths(VortexExpr? filter)
+    {
+        if (filter is null)
+        {
+            return false;
+        }
+
+        Asked visitor = default;
+        Visit(filter, ref visitor);
+        return visitor.Any;
+    }
+
+    /// <summary>Whether any fenced predicate was shown.</summary>
+    private struct Asked : IFencedVisitor
+    {
+        internal bool Any;
+
+        public void Visit(VortexExpr predicate, VariantFieldExpr path) => Any = true;
+    }
+
     /// <summary>
     /// Whether a row may satisfy <paramref name="filter"/>, each fenced predicate judged by <paramref name="judge"/> under its
     /// conjunctions and disjunctions; a negation, and anything that is no fenced predicate, may.

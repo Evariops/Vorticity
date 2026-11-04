@@ -8,7 +8,6 @@ using System;
 using System.Collections.Generic;
 using Vorticity.Compute;
 using Vorticity.Expressions;
-using Vorticity.File;
 using Xunit;
 
 namespace Vorticity.Tests.Compute;

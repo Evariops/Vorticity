@@ -376,6 +376,11 @@ public readonly struct Variant : IEquatable<Variant>
     /// <exception cref="ArgumentException">A key repeats, or is null.</exception>
     public static Variant Object(params ReadOnlySpan<(string Key, Variant Value)> fields)
     {
+        if (fields.Length is > 0 and <= MostScalarFields && ScalarObject(fields) is { } scalars)
+        {
+            return scalars;
+        }
+
         List<(byte[] Key, Variant Value)> named = new(fields.Length);
         foreach ((string key, Variant value) in fields)
         {
@@ -454,6 +459,134 @@ public readonly struct Variant : IEquatable<Variant>
     {
         (byte[] metadata, byte[] value) = VariantEncoding.FromJson(utf8Json);
         return new Variant(metadata, value);
+    }
+
+    /// <summary>The fields of an object of scalars sorted in place, their keys laid out on the stack (<see cref="ScalarObject"/>).</summary>
+    private const int MostScalarFields = 64;
+
+    /// <summary>
+    /// An object of <paramref name="fields"/> whose values are scalars, as a record's attributes are, written in its two
+    /// arrays alone, the same bytes <see cref="ObjectOf"/> writes: its keys encoded into a scratch and sorted there, each
+    /// value's bytes copied as they stand. That path took a list of the fields, an array of each key's bytes, two lists and
+    /// the encoders' enumerators, half of what a generator of log records allocated. Null when a value is an object or an
+    /// array, whose keys join the object's dictionary.
+    /// </summary>
+    /// <exception cref="ArgumentException">A key repeats, or is null.</exception>
+    private static Variant? ScalarObject(ReadOnlySpan<(string Key, Variant Value)> fields)
+    {
+        int count = fields.Length;
+        int keyBytes = 0;
+        foreach ((string key, Variant value) in fields)
+        {
+            if (VariantScalar.KindOf(value.ValueSpan) is VariantKind.Object or VariantKind.Array)
+            {
+                return null;
+            }
+
+            keyBytes = checked(keyBytes + Encoding.UTF8.GetByteCount(key ?? throw new ArgumentException("A variant's key is not null.", nameof(fields))));
+        }
+
+        byte[]? rented = null;
+        Span<byte> keys = keyBytes <= 1024 ? stackalloc byte[1024] : (rented = System.Buffers.ArrayPool<byte>.Shared.Rent(keyBytes));
+        Span<int> starts = stackalloc int[MostScalarFields + 1];
+        Span<int> order = stackalloc int[MostScalarFields];
+        try
+        {
+            int at = 0;
+            for (int i = 0; i < count; i++)
+            {
+                starts[i] = at;
+                at += Encoding.UTF8.GetBytes(fields[i].Key, keys[at..]);
+                order[i] = i;
+            }
+
+            starts[count] = at;
+
+            // The fields by their keys' bytes, inserted in place: a record's few keys, often in order already.
+            for (int i = 1; i < count; i++)
+            {
+                int field = order[i];
+                ReadOnlySpan<byte> key = keys[starts[field]..starts[field + 1]];
+                int j = i - 1;
+                while (j >= 0 && keys[starts[order[j]]..starts[order[j] + 1]].SequenceCompareTo(key) > 0)
+                {
+                    order[j + 1] = order[j];
+                    j--;
+                }
+
+                order[j + 1] = field;
+            }
+
+            int size = 0;
+            for (int i = 0; i < count; i++)
+            {
+                if (i > 0 && keys[starts[order[i - 1]]..starts[order[i - 1] + 1]].SequenceEqual(keys[starts[order[i]]..starts[order[i] + 1]]))
+                {
+                    throw new ArgumentException($"A variant object repeats the key '{fields[order[i]].Key}'.", nameof(fields));
+                }
+
+                size = checked(size + ParquetVariant.SizeOf(fields[i].Value.ValueSpan));
+            }
+
+            // The dictionary: version 1, the strings sorted and unique, the offsets' width.
+            int width = ParquetVariant.WidthOf((uint)Math.Max(keyBytes, count));
+            byte[] metadata = new byte[1 + width + ((count + 1) * width) + keyBytes];
+            metadata[0] = (byte)(0x01 | 0x10 | ((width - 1) << 6));
+            int written = 1;
+            ParquetVariant.Put(metadata, ref written, (uint)count, width);
+            int offset = 0;
+            for (int i = 0; i < count; i++)
+            {
+                ParquetVariant.Put(metadata, ref written, (uint)offset, width);
+                offset += starts[order[i] + 1] - starts[order[i]];
+            }
+
+            ParquetVariant.Put(metadata, ref written, (uint)offset, width);
+            for (int i = 0; i < count; i++)
+            {
+                ReadOnlySpan<byte> key = keys[starts[order[i]]..starts[order[i] + 1]];
+                key.CopyTo(metadata.AsSpan(written));
+                written += key.Length;
+            }
+
+            // The object, each field under its key's id, which is its place among the sorted keys.
+            int countWidth = count > 0xFF ? 4 : 1;
+            int idWidth = ParquetVariant.WidthOf((uint)(count - 1));
+            int offsetWidth = ParquetVariant.WidthOf((uint)size);
+            byte[] value = new byte[checked(1 + countWidth + (count * idWidth) + ((count + 1) * offsetWidth) + size)];
+            value[0] = (byte)(((((countWidth == 4 ? 1 : 0) << 4) | ((idWidth - 1) << 2) | (offsetWidth - 1)) << 2) | ParquetVariant.BasicObject);
+            written = 1;
+            ParquetVariant.Put(value, ref written, (uint)count, countWidth);
+            for (int i = 0; i < count; i++)
+            {
+                ParquetVariant.Put(value, ref written, (uint)i, idWidth);
+            }
+
+            offset = 0;
+            for (int i = 0; i < count; i++)
+            {
+                ParquetVariant.Put(value, ref written, (uint)offset, offsetWidth);
+                offset += ParquetVariant.SizeOf(fields[order[i]].Value.ValueSpan);
+            }
+
+            ParquetVariant.Put(value, ref written, (uint)offset, offsetWidth);
+            for (int i = 0; i < count; i++)
+            {
+                ReadOnlySpan<byte> bytes = fields[order[i]].Value.ValueSpan;
+                bytes = bytes[..ParquetVariant.SizeOf(bytes)];
+                bytes.CopyTo(value.AsSpan(written));
+                written += bytes.Length;
+            }
+
+            return new Variant(metadata, value);
+        }
+        finally
+        {
+            if (rented is not null)
+            {
+                System.Buffers.ArrayPool<byte>.Shared.Return(rented);
+            }
+        }
     }
 
     private static Variant ObjectOf(List<(byte[] Key, Variant Value)> fields)
