@@ -45,9 +45,9 @@ parquet = { version = "=60.0.0", default-features = false }
 # move under the corpus. They are the 59 family of arrow-rs, beside the parquet crate pinned at
 # 60.0.0 above for its SBBF alone, default features off, so that no arrow 60 comes with it: the two
 # families meet in no type the examples pass between them.
-arrow-array = "=59.3.0"
-arrow-schema = "=59.3.0"
-parquet-variant-compute = "=59.3.0"
+arrow-array = "=60.1.0"
+arrow-schema = "=60.1.0"
+parquet-variant-compute = "=60.1.0"
 
 [profile.release]
 opt-level = 1
