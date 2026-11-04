@@ -56,6 +56,9 @@ internal sealed class S3Emulator : HttpMessageHandler
     /// <summary>Runs after a write is applied: true loses its answer, the connection failing as the object lands.</summary>
     internal Func<HttpRequestMessage, bool>? LoseAnswer { get; set; }
 
+    /// <summary>Awaited once a request is served, before its answer goes: an answer slow on its way back, the request applied.</summary>
+    internal Func<HttpRequestMessage, CancellationToken, Task>? Answering { get; set; }
+
     /// <summary>
     /// Runs before a write is applied: true loses its answer before it lands, as a slow service does, and
     /// the write lands right after the next request is answered, whatever that request found.
@@ -308,6 +311,19 @@ internal sealed class S3Emulator : HttpMessageHandler
         {
             response.Dispose();
             throw new HttpRequestException("The connection was reset after the request was served.");
+        }
+
+        if (Answering is { } answering)
+        {
+            try
+            {
+                await answering(request, cancellationToken);
+            }
+            catch
+            {
+                response.Dispose();
+                throw;
+            }
         }
 
         response.RequestMessage = request;

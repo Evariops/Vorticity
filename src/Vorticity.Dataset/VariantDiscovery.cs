@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Indexes;
-using Vorticity.Layouts;
 using Vorticity.Scanning;
 using Vorticity.Types.Variants;
 

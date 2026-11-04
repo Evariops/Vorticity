@@ -98,7 +98,7 @@ internal static class MemoryPeaks
     }
 
     /// <summary>The process's private bytes and working set: the working set alone where the counters are Windows'.</summary>
-    private static (long Private, long Working) Read()
+    internal static (long Private, long Working) Read()
     {
         if (OperatingSystem.IsWindows())
         {

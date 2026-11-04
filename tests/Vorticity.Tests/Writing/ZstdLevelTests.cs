@@ -1,7 +1,6 @@
 // The zstd level a write asks for: the range the options accept, the bytes it changes and the ones
 // it leaves alone, and the shared compressors that serve every level.
 using System;
-using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.IO;
 using System.Linq;
@@ -9,7 +8,6 @@ using System.Threading;
 using System.Threading.Tasks;
 
 using ManagedCompressions.Zstd;
-using Vorticity.File;
 using Vorticity.Tests.Scan;
 using Vorticity.Writing;
 

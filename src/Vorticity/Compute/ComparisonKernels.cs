@@ -1,15 +1,11 @@
 using System;
 using System.Buffers;
 using System.Numerics;
-using System.Buffers.Binary;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
-using System.Runtime.Intrinsics.X86;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
-using Vorticity.Arrays.Decoders.Compressed;
-using Vorticity.Buffers;
 using Vorticity.Expressions;
 using Vorticity.Types;
 using Vorticity.Types.Numerics;
@@ -205,6 +201,9 @@ internal static partial class ComparisonKernels
             case StringMatchOp.Contains:
                 MatchCore<ContainsMatch>(node, mask, needle, escape, destination);
                 return;
+            case StringMatchOp.Token:
+                MatchCore<TokenMatch>(node, mask, needle, escape, destination);
+                return;
             default:
                 MatchLike(node, mask, needle, escape, text, destination);
                 return;
@@ -307,6 +306,7 @@ internal static partial class ComparisonKernels
         {
             StringMatchOp.StartsWith => StartsWithMatch.Holds(value, pattern, escape),
             StringMatchOp.Contains => ContainsMatch.Holds(value, pattern, escape),
+            StringMatchOp.Token => TokenMatch.Holds(value, pattern, escape),
             _ when text => LikeTextMatch.Holds(value, pattern, escape),
             _ => LikeMatch.Holds(value, pattern, escape),
         };
@@ -361,6 +361,12 @@ internal static partial class ComparisonKernels
     {
         public static bool Holds(ReadOnlySpan<byte> value, ReadOnlySpan<byte> pattern, byte escape) =>
             BytePattern.Contains(value, pattern);
+    }
+
+    private readonly struct TokenMatch : IBytesMatch
+    {
+        public static bool Holds(ReadOnlySpan<byte> value, ReadOnlySpan<byte> pattern, byte escape) =>
+            BytePattern.HasToken(value, pattern);
     }
 
     private readonly struct EndsWithMatch : IBytesMatch

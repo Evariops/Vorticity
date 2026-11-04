@@ -23,7 +23,7 @@ public sealed partial class Scan<TRecord>
         }
 
         ColumnSym key = column(new Probe<TRecord>(Binding)).Column;
-        if (key.Field is Compute.FunctionFieldExpr)
+        if (key.Field is Compute.FunctionFieldExpr or Compute.MappedFieldExpr)
         {
             throw new ArgumentException($"'{key.Field.Key}' is a function of a column, which has no key source of its own.", nameof(column));
         }

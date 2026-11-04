@@ -8,7 +8,6 @@
 using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
-using Vorticity.Arrays;
 using Vorticity.Buffers;
 using Vorticity.Serialization.FlatBuffers;
 using Vorticity.Serialization.Protobuf;

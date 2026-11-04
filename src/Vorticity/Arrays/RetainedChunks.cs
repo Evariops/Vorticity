@@ -102,6 +102,21 @@ internal class RetainedChunks : IDisposable
     internal static RetainedChunks Create(int columns, int lanes) =>
         lanes > 1 ? new SideBySide(columns, lanes) : new RetainedChunks(columns, lanes);
 
+    /// <summary>
+    /// A table that contexts decoding one after another each hold a share of, and the last of them to be disposed disposes:
+    /// the spans a read of an object's rows decodes apart, each its own batch, which lend the chunks' children they all read
+    /// whole, decoded once, for as long as any of them lives. No context advances its floor: none of its entries is evicted.
+    /// </summary>
+    /// <param name="columns">How many columns the spans read (see the constructor).</param>
+    /// <param name="holders">How many contexts hold a share.</param>
+    internal sealed class Shared(int columns, int holders) : RetainedChunks(columns, lanes: 1)
+    {
+        private int _holders = holders;
+
+        /// <summary>Gives a share back; whether it was the last.</summary>
+        internal bool Leave() => Interlocked.Decrement(ref _holders) == 0;
+    }
+
     /// <summary>The lock the claims wait on: the table itself, or the monitor a table of several contexts borrows.</summary>
     internal virtual object Gate => this;
 
@@ -406,6 +421,12 @@ internal class RetainedChunks : IDisposable
     /// </summary>
     public void Dispose()
     {
+        // A table its holders share goes with the last of them.
+        if (this is Shared shared && !shared.Leave())
+        {
+            return;
+        }
+
         bool idle;
         lock (Gate)
         {

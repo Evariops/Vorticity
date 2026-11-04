@@ -36,6 +36,13 @@ public sealed class StoreTransportOptions
     /// <summary>How many times a request is sent at most, the first time included, 5 by default.</summary>
     public int MaxAttempts { get; init; } = 5;
 
+    /// <summary>
+    /// The budget of requests the store shares with the process's other stores: requests in flight and requests a second,
+    /// which a throttle halves; null, the default, for the process's own (<see cref="ObjectStorage.RequestBudget.Process"/>,
+    /// 256 in flight and 2 000 a second).
+    /// </summary>
+    public RequestBudget? RequestBudget { get; init; }
+
     /// <summary>The proxy, or null for the environment's (<c>HTTPS_PROXY</c>, <c>NO_PROXY</c>), as the platform reads it.</summary>
     public IWebProxy? Proxy { get; init; }
 

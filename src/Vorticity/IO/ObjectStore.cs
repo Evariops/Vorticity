@@ -29,6 +29,12 @@ public interface IObjectStore : IAsyncDisposable
     ObjectStoreCapabilities Capabilities { get; }
 
     /// <summary>
+    /// What reading the store costs, which a planner prices a path by before reading anything (<see cref="CostProfile"/>): a
+    /// remote object store's by default, 30 ms a round trip among 128 in flight over 1.25 GB/s.
+    /// </summary>
+    CostProfile CostProfile => CostProfile.Remote;
+
+    /// <summary>
     /// Reads bytes of an object from <paramref name="offset"/> into <paramref name="destination"/>,
     /// as many as it holds or as the object has past the offset, whichever is fewer, with the object's
     /// length and token from the same answer.

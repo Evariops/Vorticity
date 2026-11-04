@@ -17,12 +17,8 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
-using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Buffers;
-using Vorticity.Columns;
-using Vorticity.Compute;
 using Vorticity.Expressions;
-using Vorticity.File;
 using Vorticity.Indexes;
 using Vorticity.IO;
 using Vorticity.Scanning;
@@ -184,14 +180,14 @@ public sealed class BloomTreeTests
         // one that holds the key, then its sixteen leaves.
         foreach (int row in (int[])[0, 12_345, (blocks * Block) - 1])
         {
-            ScanExplanation plan = await file.ScanBuilder().Where(Equal(K(row))).ExplainAsync(ct);
+            ScanExplanation plan = await file.ScanBuilder().Where(Equal(K(row))).ExplainAsync(analyze: true, ct);
             PruningStep bloom = Assert.Single(plan.Pruning, step => step.Structure == "bloom filter");
             Assert.Equal(4, bloom.SegmentsRead);
             Assert.Equal(1, plan.LiveBlocks);
             Assert.Equal(1, await CountAsync(file, Equal(K(row)), indexes: true));
         }
 
-        ScanExplanation absent = await file.ScanBuilder().Where(Equal(Absent)).ExplainAsync(ct);
+        ScanExplanation absent = await file.ScanBuilder().Where(Equal(Absent)).ExplainAsync(analyze: true, ct);
         Assert.Equal(1, Assert.Single(absent.Pruning, step => step.Structure == "bloom filter").SegmentsRead);
         Assert.Equal(0, absent.LiveBlocks);
         Assert.True(file.MayMatch(Equal(Absent)));
@@ -200,7 +196,7 @@ public sealed class BloomTreeTests
 
         // Three keys far apart: the descent is as wide as the output, never wider.
         VortexExpr three = Expr.In(Expr.Field("k"), [FilterLiteral.From(K(3)), FilterLiteral.From(K(9_000)), FilterLiteral.From(K(30_000))]);
-        ScanExplanation wide = await file.ScanBuilder().Where(three).ExplainAsync(ct);
+        ScanExplanation wide = await file.ScanBuilder().Where(three).ExplainAsync(analyze: true, ct);
         Assert.InRange(Assert.Single(wide.Pruning, step => step.Structure == "bloom filter").SegmentsRead, 4, 1 + 1 + 3 + 3);
         Assert.Equal(3, wide.LiveBlocks);
         Assert.Equal(3, await CountAsync(file, three, indexes: true));
@@ -223,7 +219,7 @@ public sealed class BloomTreeTests
         Assert.All(nodes, n => Assert.Equal(n.Node.Level == 1, n.Node.FilterBlocks > 0));
 
         // The root, the level-2 nodes, all sixteen groups of generations, one generation's leaves.
-        ScanExplanation plan = await file.ScanBuilder().Where(Equal(K(12_345))).ExplainAsync(ct);
+        ScanExplanation plan = await file.ScanBuilder().Where(Equal(K(12_345))).ExplainAsync(analyze: true, ct);
         Assert.Equal(1 + 1 + 16 + 1, Assert.Single(plan.Pruning, step => step.Structure == "bloom filter").SegmentsRead);
         Assert.Equal(1, plan.LiveBlocks);
         Assert.Equal(1, await CountAsync(file, Equal(K(12_345)), indexes: true));
@@ -326,11 +322,11 @@ public sealed class BloomTreeTests
                 foreach (int row in (int[])[0, (boundary * Block) - 1, boundary * Block, (boundary * Block) + 4, rows - 1])
                 {
                     Assert.Equal(1, await CountAsync(file, Equal(K(row)), indexes: true));
-                    ScanExplanation plan = await file.ScanBuilder().Where(Equal(K(row))).ExplainAsync(ct);
+                    ScanExplanation plan = await file.ScanBuilder().Where(Equal(K(row))).ExplainAsync(analyze: true, ct);
                     Assert.Equal(1, plan.LiveBlocks);
                 }
 
-                Assert.Equal(0, (await file.ScanBuilder().Where(Equal(Absent)).ExplainAsync(ct)).LiveBlocks);
+                Assert.Equal(0, (await file.ScanBuilder().Where(Equal(Absent)).ExplainAsync(analyze: true, ct)).LiveBlocks);
             }
         }
         finally
@@ -363,10 +359,10 @@ public sealed class BloomTreeTests
             foreach (int row in (int[])[0, rows - 1, rows, rows + added - 1])
             {
                 Assert.Equal(1, await CountAsync(file, Equal(K(row)), indexes: true));
-                Assert.Equal(1, (await file.ScanBuilder().Where(Equal(K(row))).ExplainAsync(ct)).LiveBlocks);
+                Assert.Equal(1, (await file.ScanBuilder().Where(Equal(K(row))).ExplainAsync(analyze: true, ct)).LiveBlocks);
             }
 
-            Assert.Equal(0, (await file.ScanBuilder().Where(Equal(Absent)).ExplainAsync(ct)).LiveBlocks);
+            Assert.Equal(0, (await file.ScanBuilder().Where(Equal(Absent)).ExplainAsync(analyze: true, ct)).LiveBlocks);
         }
         finally
         {
@@ -393,12 +389,12 @@ public sealed class BloomTreeTests
         byte[] torn = (byte[])original.Clone();
         torn[(int)generations.Offset + ((int)generations.Length / 3)] ^= 0x40;
         await using VortexFile opened = await OpenAsync(torn);
-        ScanExplanation plan = await opened.ScanBuilder().Where(Equal(K(1_000))).ExplainAsync(ct);
+        ScanExplanation plan = await opened.ScanBuilder().Where(Equal(K(1_000))).ExplainAsync(analyze: true, ct);
         Assert.Equal(0, Assert.Single(plan.Pruning, step => step.Structure == "bloom filter").BlocksPruned);
         Assert.Equal(1, await CountAsync(opened, Equal(K(1_000)), indexes: true));
 
         // A value absent from the file is still refused by the root, which is intact.
-        Assert.Equal(0, (await opened.ScanBuilder().Where(Equal(Absent)).ExplainAsync(ct)).LiveBlocks);
+        Assert.Equal(0, (await opened.ScanBuilder().Where(Equal(Absent)).ExplainAsync(analyze: true, ct)).LiveBlocks);
     }
 
     [Fact]
@@ -428,7 +424,7 @@ public sealed class BloomTreeTests
             await using VortexFile file = await OpenAsync(bytes);
             int row = random.Next(blocks * Block);
             Assert.Equal(1, await CountAsync(file, Equal(K(row)), indexes: true));
-            pruned += (await file.ScanBuilder().Where(Equal(K(row))).ExplainAsync(TestContext.Current.CancellationToken)).LiveBlocks < blocks ? 1 : 0;
+            pruned += (await file.ScanBuilder().Where(Equal(K(row))).ExplainAsync(analyze: true, TestContext.Current.CancellationToken)).LiveBlocks < blocks ? 1 : 0;
         }
 
         // Most mutations leave the probe's path alone, and those still prune.

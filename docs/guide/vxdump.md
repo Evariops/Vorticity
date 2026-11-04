@@ -107,7 +107,7 @@ explain   Day >= 900
   count            100000
 ```
 
-These are the figures `ExplainAsync` returns in code, available here for a file you did not write
+These are the figures `ExplainAsync(analyze: true)` returns in code, available here for a file you did not write
 and an expression you are still working on. Only the last line reads data. The count is settled in
 tiers: the zone map prunes 109 blocks, proves 13 others match in full, and one block is decoded to
 count its survivors.

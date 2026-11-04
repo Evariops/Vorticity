@@ -2,9 +2,10 @@
 //
 // A scan holds the segments its batches read, for the batches that ask for them again, in a set
 // every lane shares. A batch first takes what the set holds, then claims each segment it still
-// lacks, and `Original` (ScanSegmentsBefore.cs) looks for each of those by a walk over everything
-// the set holds: a batch that opens G new segments while the set holds the G of the batch before
-// pays G squared comparisons, under the lock every lane takes. `Library` is the set itself.
+// lacks, by a chain of the hash of its place. The set it replaced looked for each of those by a walk
+// over everything it held: a batch that opens G new segments while the set holds the G of the batch
+// before paid G squared comparisons, under the lock every lane takes, 601 µs where it takes 43 at
+// 1,024 new segments (9a1220b4, the measure against a checkout of the original).
 using BenchmarkDotNet.Attributes;
 
 using Vorticity.Buffers;
@@ -44,42 +45,25 @@ public class ScanSegmentsBenchmarks
 
     private NativeSegmentOwner _block = null!;
     private SegmentRequestSet _requests = null!;
-    private ScanSegmentsBefore _original = null!;
     private ScanSegments _library = null!;
     private long _batch;
 
-    /// <summary>One set of each kind, and one block every segment is read into.</summary>
+    /// <summary>The set, and one block every segment is read into.</summary>
     [GlobalSetup]
     public void Setup()
     {
         _block = NativeSegmentOwner.Allocate((int)SegmentBytes, 64);
         _requests = new SegmentRequestSet(Segments);
-        _original = new ScanSegmentsBefore(lanes: 1);
         _library = new ScanSegments(lanes: 1);
     }
 
-    /// <summary>Releases what the sets hold.</summary>
+    /// <summary>Releases what the set holds.</summary>
     [GlobalCleanup]
     public void Cleanup()
     {
-        _original.Dispose();
         _library.Dispose();
         _requests.Release();
         _block.Release();
-    }
-
-    /// <summary>The set that walks what it holds for each segment it claims.</summary>
-    [Benchmark(Baseline = true)]
-    public int Original()
-    {
-        long batch = ++_batch;
-        Register(batch);
-        _original.Claim(_requests, batch, waiter: null);
-        int read = Read();
-        _original.Publish(_requests, batch);
-        _original.Release(batch);
-        _requests.Release();
-        return read;
     }
 
     /// <summary>The set of the library.</summary>

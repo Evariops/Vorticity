@@ -3,9 +3,10 @@
 //
 // One batch of 65,536 rows whose column is a dictionary of V integers, counted distinct per group
 // over R ranges, as a grouping by a sorted or run-end key folds the batch. Every value of every
-// range has been seen before, as in a batch after the first. `Original` is the aggregate that
-// cleared and swept a table of the dictionary's size at every range (`FixedDistinctSlotBefore.cs`);
-// `Library` is the library's, which pays for the range's rows.
+// range has been seen before, as in a batch after the first. `Library` is the library's aggregate,
+// which pays for the range's rows; the one it replaced cleared and swept a table of the dictionary's
+// size at every range, 5.70 ms where it takes 433 µs at V = 65,536 and R = 256 (6f8098cc, the
+// measure against a checkout of the original).
 using System;
 using System.Runtime.InteropServices;
 
@@ -36,10 +37,9 @@ public class DictionaryDistinctBenchmarks
     private CanonicalArena _arena = null!;
     private int _node;
     private long _batch;
-    private AggregateSlot<long> _original = null!;
     private AggregateSlot<long> _library = null!;
 
-    /// <summary>Builds the batch and counts it once with both aggregates.</summary>
+    /// <summary>Builds the batch and counts it once.</summary>
     [GlobalSetup]
     public void Setup()
     {
@@ -63,21 +63,14 @@ public class DictionaryDistinctBenchmarks
         }
 
         _node = _arena.AddDictionary(dtype, Rows, Validity.NonNullable, codes, values);
-        _original = new FixedDistinctSlotBefore<long>(StorageKind.Primitive);
         _library = new FixedDistinctSlot<long>(StorageKind.Primitive);
-        _original.EnsureGroups(Ranges);
         _library.EnsureGroups(Ranges);
-        Original();
         Library();
     }
 
     /// <summary>Gives the arena's blocks back.</summary>
     [GlobalCleanup]
     public void Cleanup() => _arena.Reset();
-
-    /// <summary>The batch counted range by range, a table of the dictionary cleared and swept at each.</summary>
-    [Benchmark(Baseline = true)]
-    public long Original() => Fold(_original);
 
     /// <summary>The batch counted range by range by the library's aggregate.</summary>
     [Benchmark]

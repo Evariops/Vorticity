@@ -14,35 +14,37 @@
 # encoding hint, each file compared against its canonical twin. The corpus holds the reference's
 # files, so it cannot show an encoding the reference never writes; the matrix does.
 #
-# Then the objects a dataset of periods writes in sorted slices, under both profiles, each read by
-# the reference and compared as a multiset of rows with its twin in time order.
+# Then the objects a dataset's jobs write, its columns against object dictionaries and chunked apart,
+# its synopses beside them, each read by the reference and compared as a multiset of rows with its twin
+# written plainly, then filtered on each column, its zone maps pruning as those of a file the reference
+# writes of the same rows do; and the partial of a question over them, read whole.
 #
 # Last, the shredded variants we write, fuzzed documents under random shreddings and the objects a
 # job shreds by its cost model, each read by the reference and compared row by row with its twin
 # written whole, integers widened and null fields left out on both sides.
 #
-# Needs cargo. About seven minutes on a warm build, three of them writing the matrix and four the
-# reference reading everything back, which is why it is not in bench/gate.sh by default --
+# Needs cargo. About eight minutes on a warm build, three of them writing and five the reference
+# reading everything back, which is why it is not in bench/gate.sh by default --
 # `bench/gate.sh --crosscheck` adds it when you want it.
 set -uo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 out="${VORTICITY_WRITE_CORPUS:-${TMPDIR:-/tmp}/vorticity-crosscheck}"
 matrix="${VORTICITY_WRITE_MATRIX:-${TMPDIR:-/tmp}/vorticity-crosscheck-matrix}"
-slices="${VORTICITY_WRITE_SLICES:-${TMPDIR:-/tmp}/vorticity-crosscheck-slices}"
+objects="${VORTICITY_WRITE_OBJECTS:-${TMPDIR:-/tmp}/vorticity-crosscheck-objects}"
 shredded="${VORTICITY_WRITE_SHREDDED:-${TMPDIR:-/tmp}/vorticity-crosscheck-shredded}"
 
-echo "writing the corpus to $out, the matrix to $matrix, sorted slices to $slices and shredded variants to $shredded"
-rm -rf "$out" "$matrix" "$slices" "$shredded"
+echo "writing the corpus to $out, the matrix to $matrix, a dataset's objects to $objects and shredded variants to $shredded"
+rm -rf "$out" "$matrix" "$objects" "$shredded"
 VORTICITY_WRITE_CORPUS="$out" dotnet test "$root/Vorticity.slnx" -c Release \
     --filter-method '*WritesTheCorpusOutForTheRustCrossCheck*' > "${out}.log" 2>&1 || {
     echo "the corpus could not be written:" >&2; tail -20 "${out}.log" >&2; exit 1; }
 VORTICITY_WRITE_MATRIX="$matrix" dotnet test "$root/Vorticity.slnx" -c Release \
     --filter-class '*TypeEncodingMatrixTests*' > "${matrix}.log" 2>&1 || {
     echo "the matrix could not be written:" >&2; tail -20 "${matrix}.log" >&2; exit 1; }
-VORTICITY_WRITE_SLICES="$slices" dotnet test "$root/Vorticity.slnx" -c Release \
-    --filter-method '*WritesSortedSlicesOutForTheRustCrossCheck*' > "${slices}.log" 2>&1 || {
-    echo "the sorted slices could not be written:" >&2; tail -20 "${slices}.log" >&2; exit 1; }
+VORTICITY_WRITE_OBJECTS="$objects" dotnet test "$root/Vorticity.slnx" -c Release \
+    --filter-method '*WritesDatasetObjectsOutForTheRustCrossCheck*' > "${objects}.log" 2>&1 || {
+    echo "the dataset's objects could not be written:" >&2; tail -20 "${objects}.log" >&2; exit 1; }
 VORTICITY_WRITE_SHREDDED="$shredded" dotnet test "$root/Vorticity.slnx" -c Release \
     --filter-method '*WritesShreddedVariantsOutForTheRustCrossCheck*' \
     --filter-method '*WritesJobObjectsOutForTheRustCrossCheck*' > "${shredded}.log" 2>&1 || {
@@ -50,7 +52,8 @@ VORTICITY_WRITE_SHREDDED="$shredded" dotnet test "$root/Vorticity.slnx" -c Relea
 
 cd "$root/tools/conformance-gen"
 cargo run --release --example verify_written -- "$root/tests/Vorticity.Conformance/corpus" "$out" || exit 1
-cargo run --release --example verify_sliced -- "$slices" || exit 1
+cargo run --release --example verify_objects -- "$objects" || exit 1
+cargo run --release --example scan_files -- "$objects/partials" || exit 1
 cargo run --release --example verify_shredded -- "$shredded" || exit 1
 
 status=0

@@ -41,8 +41,78 @@ internal sealed class FsstDecoder : ArrayDecoder
     public override bool EvaluatesWithoutFullDecode => true;
 
     /// <summary>
+    /// Answers an equality, its negation, a prefix or a pattern anywhere on the codes (<see cref="CompareStates"/>,
+    /// <see cref="PrefixStates"/>, <see cref="ContainsStates"/>), a state a row; anything else declines.
+    /// </summary>
+    /// <inheritdoc/>
+    public override bool TryEvaluate(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, Compute.EncodedPredicate predicate,
+        ref Compute.PredicateBits bits)
+    {
+        if (predicate.Kind is not (Compute.EncodedPredicateKind.Compare or Compute.EncodedPredicateKind.Prefix
+            or Compute.EncodedPredicateKind.Contains))
+        {
+            return false;
+        }
+
+        byte[] rented = System.Buffers.ArrayPool<byte>.Shared.Rent(Math.Max(length, 1));
+        try
+        {
+            Span<byte> states = rented.AsSpan(0, length);
+            bool answered = predicate.Kind switch
+            {
+                Compute.EncodedPredicateKind.Prefix => PrefixStates(context, in node, dtype, length, predicate.Literal, states),
+                Compute.EncodedPredicateKind.Contains => ContainsStates(context, in node, dtype, length, predicate.Literal, states),
+                _ => CompareStates(context, in node, dtype, length, predicate.Op, predicate.Literal, states),
+            };
+            if (answered)
+            {
+                bits.FromStates(states);
+            }
+
+            return answered;
+        }
+        finally
+        {
+            System.Buffers.ArrayPool<byte>.Shared.Return(rented);
+        }
+    }
+
+    /// <summary>
+    /// Answers an equality, or its negation, over a range of the rows on their codes (<see cref="CompareStates"/>): a read
+    /// of a chunk by its granules, whose region holds the codes and the offsets of their rows alone.
+    /// </summary>
+    /// <inheritdoc/>
+    public override bool TryEvaluateRange(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, int start, int count,
+        Compute.EncodedPredicate predicate, ref Compute.PredicateBits bits)
+    {
+        if (predicate.Kind != Compute.EncodedPredicateKind.Compare || start < 0 || count < 0 || start > length - count)
+        {
+            return false;
+        }
+
+        byte[] rented = System.Buffers.ArrayPool<byte>.Shared.Rent(Math.Max(count, 1));
+        try
+        {
+            Span<byte> states = rented.AsSpan(0, count);
+            if (!CompareStates(context, in node, dtype, length, predicate.Op, predicate.Literal, states, start, count))
+            {
+                return false;
+            }
+
+            bits.FromStates(states);
+            return true;
+        }
+        finally
+        {
+            System.Buffers.ArrayPool<byte>.Shared.Return(rented);
+        }
+    }
+
+    /// <summary>
     /// Answers an equality by compressing the literal and comparing code for code, so the column is
-    /// never decompressed.
+    /// never decompressed; rows <c>[start, start + count)</c> alone when <paramref name="count"/> says how many.
     /// </summary>
     /// <remarks>
     /// <para>
@@ -66,9 +136,9 @@ internal sealed class FsstDecoder : ArrayDecoder
     /// heap here.
     /// </para>
     /// </remarks>
-    public override bool TryCompare(
+    private static bool CompareStates(
         ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
-        Expressions.ComparisonOp op, Expressions.FilterLiteral literal, Span<byte> destination)
+        Expressions.ComparisonOp op, Expressions.FilterLiteral literal, Span<byte> destination, int start = 0, int count = -1)
     {
         ArgumentNullException.ThrowIfNull(context);
         if (op is not (Expressions.ComparisonOp.Equal or Expressions.ComparisonOp.NotEqual) ||
@@ -97,7 +167,18 @@ internal sealed class FsstDecoder : ArrayDecoder
 
             ReadOnlySpan<byte> wanted = rented.AsSpan(0, needleLength);
             PType offsetsPType = metadata.CodesOffsetsPType;
-            RowCodes(context, in node, dtype, length, offsetsPType, out ReadOnlySpan<byte> raw, out ReadOnlySpan<byte> stream, out ValidityReader rows);
+            scoped ReadOnlySpan<byte> raw;
+            scoped ReadOnlySpan<byte> stream;
+            scoped ValidityReader rows;
+            if (count < 0)
+            {
+                RowCodes(context, in node, dtype, length, offsetsPType, out raw, out stream, out rows);
+            }
+            else
+            {
+                RowCodesRange(context, in node, dtype, length, start, count, offsetsPType, out raw, out stream, out rows);
+                length = count;
+            }
 
             byte match = op == Expressions.ComparisonOp.Equal
                 ? Compute.Trilean.True
@@ -136,7 +217,7 @@ internal sealed class FsstDecoder : ArrayDecoder
     /// </summary>
     /// <remarks>
     /// <para>
-    /// It rests on the rule <see cref="TryCompare"/> rests on, that compression takes the longest
+    /// It rests on the rule <see cref="CompareStates"/> rests on, that compression takes the longest
     /// symbol matching at each position; <see cref="FsstPrefix"/> says why that fixes the codes a
     /// row starting with the prefix opens with.
     /// </para>
@@ -146,8 +227,7 @@ internal sealed class FsstDecoder : ArrayDecoder
     /// decoding each row only as far as the prefix, and the views over it, are not built at all.
     /// </para>
     /// </remarks>
-    /// <inheritdoc/>
-    public override bool TryStartsWith(
+    private static bool PrefixStates(
         ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
         Expressions.FilterLiteral literal, Span<byte> destination)
     {
@@ -196,6 +276,84 @@ internal sealed class FsstDecoder : ArrayDecoder
         finally
         {
             System.Buffers.ArrayPool<byte>.Shared.Return(rented);
+        }
+    }
+
+    /// <summary>
+    /// Answers a pattern anywhere in the rows on their codes, by the automaton <see cref="FsstContains"/> builds over the
+    /// chunk's symbols: a code a step, no byte decoded.
+    /// </summary>
+    private static bool ContainsStates(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
+        Expressions.FilterLiteral literal, Span<byte> destination)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        if (literal.Kind != Expressions.FilterLiteralKind.Bytes ||
+            dtype.Kind is not (DTypeKind.Utf8 or DTypeKind.Binary) ||
+            node.BufferCount != 3)
+        {
+            return false;
+        }
+
+        CanonicalSupport.RequireBinaryLike(dtype, Id);
+        ArrayDecodeContext.RequireChildCount(node.ChildCount, 2, 3, Id);
+
+        FsstMetadata metadata = FsstMetadata.Read(node.Metadata);
+        FsstSymbolTable table = FsstSymbolTable.Create(node.GetBuffer(0).Span, node.GetBuffer(1).Span, Id);
+        using FsstContains? pattern = FsstContains.Create(table, literal.BytesValue);
+        if (pattern is null)
+        {
+            return false;
+        }
+
+        PType offsetsPType = metadata.CodesOffsetsPType;
+        RowCodes(context, in node, dtype, length, offsetsPType, out ReadOnlySpan<byte> raw, out ReadOnlySpan<byte> stream, out ValidityReader rows);
+        switch (offsetsPType)
+        {
+            case PType.U8: Contains<byte>(raw, stream, pattern, in rows, length, destination); break;
+            case PType.U16: Contains<ushort>(raw, stream, pattern, in rows, length, destination); break;
+            case PType.U32: Contains<uint>(raw, stream, pattern, in rows, length, destination); break;
+            case PType.U64: Contains<ulong>(raw, stream, pattern, in rows, length, destination); break;
+            case PType.I8: Contains<sbyte>(raw, stream, pattern, in rows, length, destination); break;
+            case PType.I16: Contains<short>(raw, stream, pattern, in rows, length, destination); break;
+            case PType.I32: Contains<int>(raw, stream, pattern, in rows, length, destination); break;
+            case PType.I64: Contains<long>(raw, stream, pattern, in rows, length, destination); break;
+            default: return false;
+        }
+
+        return true;
+    }
+
+    /// <summary>Marks the rows that hold the pattern, with the offsets typed once, as <see cref="Prefix{T}"/>.</summary>
+    private static void Contains<T>(
+        ReadOnlySpan<byte> raw, ReadOnlySpan<byte> stream, FsstContains pattern,
+        in ValidityReader rows, int length, Span<byte> destination)
+        where T : unmanaged, System.Numerics.IBinaryInteger<T>
+    {
+        ReadOnlySpan<T> offsets = System.Runtime.InteropServices.MemoryMarshal
+            .Cast<byte, T>(raw)[..(length + 1)];
+        long origin = long.CreateChecked(offsets[0]);
+        long previous = origin;
+        bool allValid = rows.IsAllValid;
+        for (int row = 0; row < length; row++)
+        {
+            long next = long.CreateChecked(offsets[row + 1]);
+            if (next < previous || next - origin > stream.Length)
+            {
+                BadSpan(row, previous, next, stream.Length);
+            }
+
+            int start = (int)(previous - origin);
+            int size = (int)(next - previous);
+            previous = next;
+
+            if (!allValid && !rows.IsValid(row))
+            {
+                destination[row] = Compute.Trilean.Unknown;
+                continue;
+            }
+
+            destination[row] = pattern.Match(stream.Slice(start, size)) ? Compute.Trilean.True : Compute.Trilean.False;
         }
     }
 
@@ -559,6 +717,28 @@ internal sealed class FsstDecoder : ArrayDecoder
         raw = codesOffsets.Values.Span;
 
         Validity validity = context.DecodeValidity(in node, 2, dtype.Nullability, length);
+        rows = ValidityReader.Of(context.Canonical, validity);
+    }
+
+    /// <summary>
+    /// As <see cref="RowCodes"/>, for rows <c>[start, start + count)</c> alone: their offsets, the codes those bound, and
+    /// their validity, each read as a decode of the same rows reads them.
+    /// </summary>
+    private static void RowCodesRange(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, int start, int count, PType offsetsPType,
+        out ReadOnlySpan<byte> raw, out ReadOnlySpan<byte> stream, out ValidityReader rows)
+    {
+        CanonicalSupport.RequireIntegerPType(offsetsPType, Id + " codes_offsets");
+        int offsetCount = ArrayDecodeContext.CheckedLength((ulong)length + 1, Id + " codes_offsets");
+        DType offsetsType = context.Types.Primitive(offsetsPType, Nullability.NonNullable);
+        int offsetsIndex = context.DecodeChildRange(in node, 1, offsetsType, offsetCount, start, count + 1);
+        CanonicalNode codesOffsets = CanonicalSupport.RequirePrimitiveChild(
+            context, offsetsIndex, offsetsPType, count + 1, Id + " codes_offsets");
+
+        stream = CodeStream(codesOffsets, offsetsPType, count, node.GetBuffer(2));
+        raw = codesOffsets.Values.Span;
+
+        Validity validity = context.DecodeValidityRange(in node, 2, dtype.Nullability, length, start, count);
         rows = ValidityReader.Of(context.Canonical, validity);
     }
 

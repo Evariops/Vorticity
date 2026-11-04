@@ -53,6 +53,12 @@ internal enum ExprKind : byte
     /// columns read, but never ruled on by a statistic of the variant column.
     /// </summary>
     VariantPath = 11,
+
+    /// <summary>
+    /// <c>(a, b) IN ((1, 'x'), (2, 'y'))</c>: several columns' values against a set of tuples, which
+    /// no pruner rules on and the evaluator answers by a hashed set of the tuples.
+    /// </summary>
+    TupleIn = 12,
 }
 
 /// <summary>The three byte-pattern predicates a filter can apply to a column.</summary>
@@ -72,6 +78,12 @@ internal enum StringMatchOp : byte
 
     /// <summary>The SQL wildcard match: <c>%</c> any run, <c>_</c> any one character (byte, in binary), the escape quotes either.</summary>
     Like = 2,
+
+    /// <summary>
+    /// The pattern, one word, is a whole word of the value: no letter, digit or non-ASCII byte just before it nor just after
+    /// it (spec G, 6), which the token index answers.
+    /// </summary>
+    Token = 3,
 }
 
 /// <summary>The comparison operators a filter admits.</summary>
@@ -250,11 +262,6 @@ internal sealed class LogicalExpr : VortexExpr
 
     private readonly int _joinHeight;
 
-    internal LogicalExpr(bool isAnd, VortexExpr left, VortexExpr right)
-        : this(isAnd, left, right, ExprDepth.Over(left, right), balanced: false)
-    {
-    }
-
     /// <param name="isAnd"><see langword="true"/> for <c>AND</c>.</param>
     /// <param name="left">The left operand.</param>
     /// <param name="right">The right operand.</param>
@@ -401,6 +408,9 @@ internal sealed class InExpr : VortexExpr
     /// <summary>The candidates, without the interface indirection.</summary>
     internal FilterLiteral[] Literals => (FilterLiteral[])Values;
 
+    /// <summary>The tuples whose column's values the set is, written beside them (<see cref="TupleInExpr.Of"/>); null for a set of its own.</summary>
+    internal TupleInExpr? Projects { get; init; }
+
     /// <inheritdoc/>
     internal override ExprKind Kind => ExprKind.In;
 
@@ -480,6 +490,132 @@ internal sealed class TypedInExpr<T> : TypedInExpr
         IFormattable value => FilterLiteral.From(value.ToString(null, CultureInfo.InvariantCulture)),
         object value => FilterLiteral.From(value.ToString() ?? string.Empty),
     };
+}
+
+/// <summary>
+/// <c>(a, b) IN ((1, 'x'), (2, 'y'))</c> over columns: whether a row's values of <see cref="Fields"/> are, together, one of
+/// the tuples. A tuple that holds a null matches no row, and leaves the set when it is built. A row with a null value is
+/// unknown where a tuple holds its other values, and false otherwise, as the <c>OR</c> of the tuples' equalities says.
+/// </summary>
+/// <remarks>
+/// No pruner knows the node: a statistic of one column cannot rule on a tuple, and each pruner keeps every row for it.
+/// <see cref="Of"/> writes beside it each column's set of the tuples' values, by which the columns' structures prune; the
+/// sparse index of a dataset's key reads the tuples themselves on the key's leading columns.
+/// </remarks>
+internal sealed class TupleInExpr : VortexExpr
+{
+    /// <summary>The columns a tuple holds at most.</summary>
+    internal const int MostColumns = 8;
+
+    // The set the evaluator probes, built for the kinds of the columns it met first, and rebuilt for others.
+    private Prepared? _prepared;
+
+    internal TupleInExpr(FieldExpr[] fields, FilterLiteral[] values)
+    {
+        Fields = fields;
+        Values = values;
+    }
+
+    /// <summary>The columns, in the order of a tuple's values.</summary>
+    internal FieldExpr[] Fields { get; }
+
+    /// <summary>The tuples, end to end: tuple <c>t</c>'s value of column <c>j</c> at <c>t × Arity + j</c>.</summary>
+    internal FilterLiteral[] Values { get; }
+
+    /// <summary>The columns of a tuple.</summary>
+    internal int Arity => Fields.Length;
+
+    /// <summary>The tuples.</summary>
+    internal int Count => Values.Length / Fields.Length;
+
+    /// <summary>Tuple <paramref name="tuple"/>'s values.</summary>
+    internal ReadOnlySpan<FilterLiteral> Tuple(int tuple) => Values.AsSpan(tuple * Arity, Arity);
+
+    /// <inheritdoc/>
+    internal override ExprKind Kind => ExprKind.TupleIn;
+
+    /// <inheritdoc/>
+    internal override void CollectFields(ICollection<string> paths)
+    {
+        foreach (FieldExpr field in Fields)
+        {
+            field.CollectFields(paths);
+        }
+    }
+
+    /// <summary>The same tuples over other references to the columns: their names in an object of a dataset.</summary>
+    internal TupleInExpr Over(FieldExpr[] fields) => new TupleInExpr(fields, Values);
+
+    /// <summary>
+    /// The rows whose values of <paramref name="fields"/> are one of the tuples <paramref name="values"/> holds end to end,
+    /// with each column's set of the tuples' values beside them: the sets prune, the tuples answer each row. A tuple that
+    /// holds a null leaves; with none left, the tuples alone, which keep no row.
+    /// </summary>
+    /// <exception cref="ArgumentException">Fewer than two columns or more than <see cref="MostColumns"/>, or values that are not tuples of them.</exception>
+    internal static VortexExpr Of(FieldExpr[] fields, ReadOnlySpan<FilterLiteral> values)
+    {
+        if (fields.Length is < 2 or > MostColumns || values.Length % fields.Length != 0)
+        {
+            throw new ArgumentException($"A tuple holds 2 to {MostColumns} columns, and the values are tuples of them.", nameof(fields));
+        }
+
+        List<FilterLiteral> kept = new List<FilterLiteral>(values.Length);
+        HashSet<FilterLiteral>[] sets = new HashSet<FilterLiteral>[fields.Length];
+        for (int column = 0; column < sets.Length; column++)
+        {
+            sets[column] = [];
+        }
+
+        for (int at = 0; at < values.Length; at += fields.Length)
+        {
+            ReadOnlySpan<FilterLiteral> tuple = values.Slice(at, fields.Length);
+            bool holdsNull = false;
+            foreach (FilterLiteral value in tuple)
+            {
+                holdsNull |= value.Kind == FilterLiteralKind.Null;
+            }
+
+            if (holdsNull)
+            {
+                continue;
+            }
+
+            for (int column = 0; column < tuple.Length; column++)
+            {
+                kept.Add(tuple[column]);
+                sets[column].Add(tuple[column]);
+            }
+        }
+
+        TupleInExpr tuples = new TupleInExpr(fields, [.. kept]);
+        if (kept.Count == 0)
+        {
+            return tuples;
+        }
+
+        VortexExpr filter = tuples;
+        for (int column = 0; column < fields.Length; column++)
+        {
+            filter = Expr.And(filter, new InExpr(fields[column], [.. sets[column]]) { Projects = tuples });
+        }
+
+        return filter;
+    }
+
+    /// <summary>The set the evaluator probes for columns of <paramref name="kinds"/>; null when one kind has no set, the tuples then compared one by one.</summary>
+    internal TupleSet? SetFor(ReadOnlySpan<CandidateKind> kinds)
+    {
+        if (System.Threading.Volatile.Read(ref _prepared) is { } held && held.Kinds.AsSpan().SequenceEqual(kinds))
+        {
+            return held.Set;
+        }
+
+        Prepared made = new Prepared(kinds.ToArray(), TupleSet.TryBuild(this, kinds));
+        System.Threading.Volatile.Write(ref _prepared, made);
+        return made.Set;
+    }
+
+    private sealed record Prepared(CandidateKind[] Kinds, TupleSet? Set);
 }
 
 /// <summary>A field matched against a byte pattern.</summary>
@@ -715,6 +851,16 @@ internal static class Expr
     public static StringMatchExpr Like(
         FieldExpr field, FilterLiteral pattern, byte escape = (byte)'\\') =>
         Match(field, StringMatchOp.Like, pattern, escape);
+
+    /// <summary><paramref name="token"/>, one word, is a whole word of <c>field</c> (spec G, 6).</summary>
+    /// <param name="field">The column; utf8 or binary, or an extension over one.</param>
+    /// <param name="token">The word, as bytes.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="field"/> is null.</exception>
+    /// <exception cref="ArgumentException"><paramref name="token"/> is not a bytes literal of one word.</exception>
+    public static StringMatchExpr HasToken(FieldExpr field, FilterLiteral token) =>
+        token.Kind == FilterLiteralKind.Bytes && Indexes.Tokens.IsWord(token.BytesValue)
+            ? Match(field, StringMatchOp.Token, token, (byte)'\\')
+            : throw new ArgumentException("A token is one word: letters, digits and non-ASCII characters, no separator.", nameof(token));
 
     /// <summary><c>list</c> holds an element equal to <paramref name="value"/>.</summary>
     /// <param name="list">A list or fixed-size list column of booleans, numbers or bytes, or an extension over one.</param>

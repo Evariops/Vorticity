@@ -19,14 +19,11 @@ using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Buffers;
-using Vorticity.Columns;
 using Vorticity.Expressions;
-using Vorticity.File;
 using Vorticity.Indexes;
 using Vorticity.IO;
 using Vorticity.Keys;
 using Vorticity.Scanning;
-using Vorticity.Serialization.Protobuf;
 using Vorticity.Tests.Scan;
 using Vorticity.Types;
 using Vorticity.Types.Serialization;
@@ -663,7 +660,7 @@ public sealed class FenceTreeTests
 
     private static async Task<int> SegmentsReadAsync(VortexFile file, VortexExpr filter)
     {
-        ScanExplanation plan = await file.ScanBuilder().Where(filter).ExplainAsync();
+        ScanExplanation plan = await file.ScanBuilder().Where(filter).ExplainAsync(analyze: true);
         return Assert.Single(plan.Pruning, step => step.Structure == "locating index").SegmentsRead;
     }
 

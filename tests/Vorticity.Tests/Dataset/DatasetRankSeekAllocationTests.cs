@@ -85,7 +85,7 @@ public sealed class DatasetRankSeekAllocationTests
             ["key", "measure"],
             [types.Primitive(PType.I64, Nullability.NonNullable), types.Primitive(PType.F64, Nullability.NonNullable)],
             Nullability.NonNullable);
-        DatasetOptions options = new DatasetOptions { Seed = 0xC0_45E5, ClusteringKey = ["key"] };
+        DatasetOptions options = new DatasetOptions { Seed = 0xC0_45E5, Layout = new DatasetLayout { SortKey = [LayoutValue.Column("key")] } };
         await using (VortexDataset created = await VortexDataset.CreateAsync(store, schema, options, ct))
         {
         }

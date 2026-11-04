@@ -18,7 +18,6 @@ using System.Threading.Tasks;
 using BenchmarkDotNet.Attributes;
 
 using Vorticity.Expressions;
-using Vorticity.File;
 using Vorticity.Scanning;
 using Vorticity.Sealing;
 
@@ -81,7 +80,12 @@ public class SealedScanBenchmarks
         _session = File switch
         {
             "plain mapped" => VortexSession.Create(_ => { }),
-            "plain positional" => VortexSession.Create(o => o.MapFiles = false),
+            "plain positional" => VortexSession.Create(o =>
+            {
+                // As a sealed file is read, which a session with keys keeps in no shared cache.
+                o.MapFiles = false;
+                o.SegmentCache = new SegmentCache(0);
+            }),
             _ => VortexSession.Create(o => o.Keyring = _keyring),
         };
 

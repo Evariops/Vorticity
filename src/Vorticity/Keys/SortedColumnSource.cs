@@ -20,9 +20,11 @@ namespace Vorticity.Keys;
 /// zone, with no index on disk. Nulls sort below every value and are not entries, so the entries
 /// are the contiguous rows after the null count, which makes rank and select arithmetic rather
 /// than a search. Zone bounds may be widened rather than exact, so a zone that turns out to hold
-/// nothing costs a decode and never an answer.
+/// nothing costs a decode and never an answer. A file whose writer sorted its rows by the column,
+/// nulls last, as a dataset's objects are, is walked the same way, its entries the rows before the
+/// nulls, whatever its statistics say (<see cref="OpenAsync"/> in row order).
 /// </summary>
-internal sealed class SortedColumnSource : IAsyncDisposable
+internal sealed class SortedColumnSource : ISortedEntries
 {
     private readonly VortexFile _file;
     private readonly LayoutTree _tree;
@@ -57,14 +59,17 @@ internal sealed class SortedColumnSource : IAsyncDisposable
     }
 
     /// <summary>The column's comparison domain, which every seek key must be in.</summary>
-    internal FilterLiteralKind KeyKind { get; }
+    public FilterLiteralKind KeyKind { get; }
+
+    /// <summary>A single column's keys are values: no format.</summary>
+    public string? KeyFormat => null;
 
     /// <summary>The non-null rows: every entry, exactly.</summary>
-    internal long EntryCount => _rowCount - _firstRow;
+    public long EntryCount => _rowCount - _firstRow;
 
     /// <summary>The file row an entry came from.</summary>
     /// <param name="entry">A zero-based entry index below <see cref="EntryCount"/>.</param>
-    internal long RowOf(long entry) => _firstRow + entry;
+    public long RowOf(long entry) => _firstRow + entry;
 
     /// <summary>
     /// Opens a source over <paramref name="path"/>, or says why the column cannot have one.
@@ -74,9 +79,14 @@ internal sealed class SortedColumnSource : IAsyncDisposable
     /// <param name="cancellationToken">Cancels the zone-map read.</param>
     /// <param name="known">The column's zone map, when a pruning pass already read it; null to read it.</param>
     /// <param name="metrics">The scan's sink, to which the zone map and the zones this source decodes are added; null when nobody asks.</param>
+    /// <param name="inRowOrder">
+    /// Whether the caller vouches that the file's rows are in the column's key order, its nulls last, as a dataset's writer
+    /// sorts an object: the statistics' word is not asked, and the entries are the rows before the nulls.
+    /// </param>
     /// <returns>The source, or null with the reason it is not available.</returns>
     internal static async ValueTask<(SortedColumnSource? Source, string? Reason)> OpenAsync(
-        VortexFile file, string path, CancellationToken cancellationToken, ZoneColumn? known = null, ScanCounters? metrics = null)
+        VortexFile file, string path, CancellationToken cancellationToken, ZoneColumn? known = null, ScanCounters? metrics = null,
+        bool inRowOrder = false)
     {
         DType schema = file.DType;
         if (schema.IsDefault || schema.Kind != DTypeKind.Struct)
@@ -95,46 +105,58 @@ internal sealed class SortedColumnSource : IAsyncDisposable
             return (null, "the file's schema has no such column");
         }
 
-        if (!file.HasFileStatistics)
-        {
-            return (null, "the file carries no statistics segment, so nothing says the column is sorted");
-        }
-
-        FileStatistics statistics = file.FileStatistics;
-        if (index >= statistics.FieldCount)
-        {
-            return (null, "the statistics segment has no entry for this column");
-        }
-
-        FieldStatistics stats = statistics.GetField(index);
-        if (!stats.TryGetIsSorted(out bool sorted))
-        {
-            return (null, "the file statistics do not state is_sorted for this column");
-        }
-
-        if (!sorted)
-        {
-            return (null, "the file statistics say the column is not sorted");
-        }
-
         DType column = schema.GetField(index);
+        bool statistics = file.HasFileStatistics && index < file.FileStatistics.FieldCount;
+        if (!inRowOrder)
+        {
+            if (!file.HasFileStatistics)
+            {
+                return (null, "the file carries no statistics segment, so nothing says the column is sorted");
+            }
+
+            if (!statistics)
+            {
+                return (null, "the statistics segment has no entry for this column");
+            }
+
+            if (!file.FileStatistics.GetField(index).TryGetIsSorted(out bool sorted))
+            {
+                return (null, "the file statistics do not state is_sorted for this column");
+            }
+
+            if (!sorted)
+            {
+                return (null, "the file statistics say the column is not sorted");
+            }
+        }
+
         if (!TryKeyKind(column, out FilterLiteralKind kind))
         {
             return (null, $"a {column.Kind} column has no key order a cursor can walk");
         }
 
-        // The nulls are the leading rows and are not entries, so the source has to know how many
-        // there are. A non-nullable column has none by construction; a nullable one whose count is
-        // not recorded cannot be walked without finding the boundary by hand, which is a scan.
+        // The nulls are not entries, so the source has to know how many there are: the leading rows of a column the
+        // statistics call sorted, the last ones of a file sorted in row order. A non-nullable column has none by
+        // construction; a nullable one whose count is not recorded cannot be walked without finding the boundary by hand,
+        // which is a scan.
         long firstRow = 0;
+        long endRow = file.RowCount;
         if (column.IsNullable)
         {
-            if (!stats.TryGetStoredNullCount(out ulong nulls))
+            if (!statistics || !file.FileStatistics.GetField(index).TryGetStoredNullCount(out ulong nulls))
             {
                 return (null, "the column is nullable and its null count is not recorded, so where its entries begin is unknown");
             }
 
-            firstRow = (long)Math.Min(nulls, (ulong)file.RowCount);
+            long held = (long)Math.Min(nulls, (ulong)file.RowCount);
+            if (inRowOrder)
+            {
+                endRow -= held;
+            }
+            else
+            {
+                firstRow = held;
+            }
         }
 
         // The zone map is the separator level of the search. It is read the way the pruning pass
@@ -160,7 +182,7 @@ internal sealed class SortedColumnSource : IAsyncDisposable
         FieldMask mask = ScanProjection.Create(builder.Build()).RootMask;
 
         return (
-            new SortedColumnSource(file, tree, field, mask, zones, kind, firstRow, file.RowCount) { Metrics = metrics },
+            new SortedColumnSource(file, tree, field, mask, zones, kind, firstRow, endRow) { Metrics = metrics },
             null);
     }
 
@@ -173,7 +195,7 @@ internal sealed class SortedColumnSource : IAsyncDisposable
     /// </summary>
     /// <param name="held">The scan's segments.</param>
     /// <param name="retained">The scan's decoded chunks.</param>
-    internal void Share(ScanSegments held, RetainedChunks retained)
+    public void Share(ScanSegments held, RetainedChunks retained)
     {
         ArgumentNullException.ThrowIfNull(held);
         ArgumentNullException.ThrowIfNull(retained);
@@ -196,6 +218,8 @@ internal sealed class SortedColumnSource : IAsyncDisposable
     /// <param name="right">The other.</param>
     internal static int Compare(FilterLiteral left, FilterLiteral right) => KeyOrder.Ieee(left, right);
 
+    int ISortedEntries.Compare(FilterLiteral left, FilterLiteral right) => Compare(left, right);
+
     /// <summary>Decodes the zone holding <paramref name="entry"/>, unless it already is.</summary>
     /// <param name="entry">A zero-based entry index below <see cref="EntryCount"/>.</param>
     /// <param name="cancellationToken">Cancels the zone decode this may make.</param>
@@ -204,7 +228,7 @@ internal sealed class SortedColumnSource : IAsyncDisposable
     /// awaiting anything, and an <c>async ValueTask</c> that never suspends allocates nothing,
     /// which is what keeps a step free of allocation.
     /// </remarks>
-    internal ValueTask EnsureEntryAsync(long entry, CancellationToken cancellationToken) =>
+    public ValueTask EnsureEntryAsync(long entry, CancellationToken cancellationToken) =>
         EnsureLoadedAsync(RowOf(entry), cancellationToken);
 
     /// <summary>
@@ -212,7 +236,7 @@ internal sealed class SortedColumnSource : IAsyncDisposable
     /// byte key, as <see cref="FilterLiteral"/> owns its array; <see cref="BytesAt"/> lends it.
     /// </summary>
     /// <param name="entry">A zero-based entry index below <see cref="EntryCount"/>.</param>
-    internal FilterLiteral LoadedKey(long entry) => Literal(RowOf(entry));
+    public FilterLiteral LoadedKey(long entry) => Literal(RowOf(entry));
 
     /// <summary>
     /// The bytes of entry <paramref name="entry"/>, borrowed from the loaded zone and valid until
@@ -220,7 +244,7 @@ internal sealed class SortedColumnSource : IAsyncDisposable
     /// leaves it.
     /// </summary>
     /// <param name="entry">A zero-based entry index below <see cref="EntryCount"/>.</param>
-    internal ReadOnlySpan<byte> BytesAt(long entry)
+    public ReadOnlySpan<byte> BytesAt(long entry)
     {
         long row = RowOf(entry);
         if (_context is null || row < _loadedStart || row >= _loadedEnd)
@@ -245,7 +269,7 @@ internal sealed class SortedColumnSource : IAsyncDisposable
     /// O(log k) comparisons for a key held by k entries, against the two bisections of a bound, each
     /// made where the keys lie: a primitive's values as they are, a string's bytes in place.
     /// </remarks>
-    internal long PastKeyInZone(long entry, bool forward)
+    public long PastKeyInZone(long entry, bool forward)
     {
         CanonicalArena arena = _context!.Canonical;
         CanonicalNode node = arena.GetNode(ComparisonKernels.Unwrap(arena, _column));
@@ -297,13 +321,13 @@ internal sealed class SortedColumnSource : IAsyncDisposable
     /// </summary>
     /// <param name="key">The sought key.</param>
     /// <param name="cancellationToken">Cancels the decodes this makes.</param>
-    internal ValueTask<long> LowerBoundAsync(FilterLiteral key, CancellationToken cancellationToken) =>
+    public ValueTask<long> LowerBoundAsync(FilterLiteral key, CancellationToken cancellationToken) =>
         BoundAsync(new LiteralKey(this, key), strict: false, cancellationToken);
 
     /// <summary>The index of the first entry whose key is strictly after <paramref name="key"/>.</summary>
     /// <param name="key">The sought key.</param>
     /// <param name="cancellationToken">Cancels the decodes this makes.</param>
-    internal ValueTask<long> UpperBoundAsync(FilterLiteral key, CancellationToken cancellationToken) =>
+    public ValueTask<long> UpperBoundAsync(FilterLiteral key, CancellationToken cancellationToken) =>
         BoundAsync(new LiteralKey(this, key), strict: true, cancellationToken);
 
     /// <summary>
@@ -313,7 +337,7 @@ internal sealed class SortedColumnSource : IAsyncDisposable
     /// <param name="lender">A source on an entry, whose keys are bytes.</param>
     /// <param name="strict">Whether the bound is past the key's entries.</param>
     /// <param name="cancellationToken">Cancels the decodes this makes.</param>
-    internal ValueTask<long> BoundOfAsync(KeySource lender, bool strict, CancellationToken cancellationToken) =>
+    public ValueTask<long> BoundOfAsync(KeySource lender, bool strict, CancellationToken cancellationToken) =>
         BoundAsync(new LentKey(this, lender), strict, cancellationToken);
 
     public ValueTask DisposeAsync()

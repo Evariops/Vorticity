@@ -15,10 +15,8 @@ using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Buffers;
-using Vorticity.Columns;
 using Vorticity.Dataset;
 using Vorticity.Expressions;
-using Vorticity.File;
 using Vorticity.IO;
 using Vorticity.Scanning;
 using Vorticity.Tests.Scan;
@@ -236,7 +234,7 @@ public sealed class DatasetSummaryTests
 
         await using MemoryObjectStore store = new MemoryObjectStore();
         await using VortexDataset dataset = await VortexDataset.CreateAsync(
-            store, schema, Options() with { Rule = new FillBoundaryRule(400), ClusteringKey = ["key"] }, ct);
+            store, schema, Options() with { Rule = new FillBoundaryRule(400), Layout = new DatasetLayout { SortKey = [LayoutValue.Column("key")] } }, ct);
         const int objects = 16;
         const int rows = 100;
         await LevelsAsync(dataset, types, schema, objects, rows, step: 2, levelZero: [(401, 20), (2_601, 20)], ct);

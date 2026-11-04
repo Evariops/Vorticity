@@ -1,5 +1,3 @@
-using System;
-using Vorticity;
 using Vorticity.Buffers;
 using Xunit;
 

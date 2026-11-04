@@ -109,6 +109,9 @@ internal static class GroupPredicates
             case InExpr membership:
                 into.Add(membership.Field);
                 break;
+            case TupleInExpr tuples:
+                into.AddRange(tuples.Fields);
+                break;
             case StringMatchExpr match:
                 into.Add(match.Field);
                 break;
@@ -155,7 +158,18 @@ internal static class GroupPredicates
             case NullCheckExpr check:
                 return Changed(check.Field, map, out field) ? new NullCheckExpr(field, check.IsNull) : predicate;
             case InExpr membership:
-                return Changed(membership.Field, map, out field) ? new InExpr(field, membership.Literals) : predicate;
+                return Changed(membership.Field, map, out field) ? new InExpr(field, membership.Literals) { Projects = membership.Projects } : predicate;
+            case TupleInExpr tuples:
+            {
+                FieldExpr[] fields = new FieldExpr[tuples.Arity];
+                bool changed = false;
+                for (int column = 0; column < fields.Length; column++)
+                {
+                    changed |= Changed(tuples.Fields[column], map, out fields[column]);
+                }
+
+                return changed ? tuples.Over(fields) : predicate;
+            }
             case StringMatchExpr match:
                 return Changed(match.Field, map, out field) ? new StringMatchExpr(field, match.Op, match.Pattern, match.Escape) : predicate;
             case ListContainsExpr contains:

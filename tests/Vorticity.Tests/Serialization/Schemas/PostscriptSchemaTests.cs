@@ -1,7 +1,6 @@
 // Round trip and rejection tests for the format's three postscript tables.
 using System;
 using System.Text;
-using Vorticity;
 using Vorticity.Serialization.FlatBuffers;
 using Vorticity.Serialization.Schemas;
 using Xunit;

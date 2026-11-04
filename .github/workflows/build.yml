@@ -504,6 +504,18 @@ jobs:
         env:
           VORTICITY_WRITE_CORPUS: ${{ runner.temp }}/written
 
+      # The objects a dataset's jobs write, each with its twin written plainly, and the partial of a
+      # question over them; the shredded variants we write, each with its twin written whole.
+      - name: Write a dataset's objects and shredded variants with this writer
+        run: |
+          dotnet test --project tests/Vorticity.Tests --no-build -c Release \
+            --filter-method '*WritesDatasetObjectsOutForTheRustCrossCheck*' \
+            --filter-method '*WritesShreddedVariantsOutForTheRustCrossCheck*' \
+            --filter-method '*WritesJobObjectsOutForTheRustCrossCheck*'
+        env:
+          VORTICITY_WRITE_OBJECTS: ${{ runner.temp }}/objects
+          VORTICITY_WRITE_SHREDDED: ${{ runner.temp }}/shredded
+
       # The runner image ships rustup, and its stable can trail the minimum the pinned crates need.
       - name: Update the Rust toolchain
         id: rust
@@ -532,6 +544,15 @@ jobs:
         run: |
           cargo run --release --example verify_written -- \
             ../../tests/Vorticity.Conformance/corpus "$RUNNER_TEMP/written"
+
+      # Object dictionaries, chunks apart, synopses in the index directory, NaN counts in the zone
+      # maps, which the reference prunes with as with its own; a partial's states; shredded variants.
+      - name: Read a dataset's objects and shredded variants with the reference
+        working-directory: tools/conformance-gen
+        run: |
+          cargo run --release --example verify_objects -- "$RUNNER_TEMP/objects"
+          cargo run --release --example scan_files -- "$RUNNER_TEMP/objects/partials"
+          cargo run --release --example verify_shredded -- "$RUNNER_TEMP/shredded"
 
       # A change here is a format change, not a dependency bump: it must be reviewed against the
       # component registry and the conformance corpus regenerated. It is reported as a warning,

@@ -152,7 +152,4 @@ internal sealed class GeospatialStatistics
 
         writer.EndStruct(saved);
     }
-
-    /// <summary>Whether the box bounds the X <paramref name="x"/>, its wrap across the antimeridian taken.</summary>
-    internal bool BoundsX(double x) => XMin <= XMax ? x >= XMin && x <= XMax : x >= XMin || x <= XMax;
 }

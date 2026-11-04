@@ -9,17 +9,13 @@
 // bytes at least the plan's (a segment is asked for once per batch that needs it, the plan counts
 // it once), and values decoded for every row delivered.
 using System;
-using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Buffers;
-using Vorticity.Columns;
 using Vorticity.Compute;
 using Vorticity.Expressions;
-using Vorticity.File;
 using Vorticity.IO;
-using Vorticity.Layouts;
 using Vorticity.Scanning;
 using Vorticity.Types;
 using Vorticity.Writing;
@@ -49,7 +45,7 @@ public sealed class ScanExplainTests
             counting, new VortexOpenOptions { LeaveSourceOpen = true }, CancellationToken.None);
 
         counting.ResetCounters();
-        ScanExplanation plan = await file.ScanBuilder().Project("monotone").Where(narrow).ExplainAsync(ct);
+        ScanExplanation plan = await file.ScanBuilder().Project("monotone").Where(narrow).ExplainAsync(analyze: true, ct);
         int askedToExplain = counting.Requested.Count;
 
         // Nothing but the zone map of the one filtered column, and the plan says what that cost.
@@ -151,7 +147,7 @@ public sealed class ScanExplainTests
             {
                 // The first round reads each column's zone map, the second finds each one kept.
                 VortexExpr equal = Expr.Eq(Expr.Field(names[c]), Expr.Literal(FilterLiteral.From(((long)c * Rows) + 1_500)));
-                ScanExplanation plan = await file.ScanBuilder().Where(equal).ExplainAsync(ct);
+                ScanExplanation plan = await file.ScanBuilder().Where(equal).ExplainAsync(analyze: true, ct);
                 Assert.Equal(1, plan.LiveBlocks);
                 Assert.Equal("zone map", plan.Pruning[0].Structure);
                 Assert.True(
@@ -181,7 +177,7 @@ public sealed class ScanExplainTests
         Task<ScanExplanation>[] plans = new Task<ScanExplanation>[Scans];
         for (int s = 0; s < Scans; s++)
         {
-            plans[s] = Task.Run(async () => await file.ScanBuilder().Project("monotone").Where(narrow).ExplainAsync(ct), ct);
+            plans[s] = Task.Run(async () => await file.ScanBuilder().Project("monotone").Where(narrow).ExplainAsync(analyze: true, ct), ct);
         }
 
         // The first read parked, then every other scan waiting for its decoding: a scan decoding it
@@ -222,9 +218,9 @@ public sealed class ScanExplainTests
         GatedSegmentSource gated = new GatedSegmentSource(MemoryMappedSegmentSource.Open(Corpus.Path(Zoned)), tailReadSize: 8 * 1024);
         await using VortexFile file = await VortexFile.OpenAsync(gated, new VortexOpenOptions(), ct);
         using CancellationTokenSource cancelled = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        Task<ScanExplanation> first = Task.Run(async () => await file.ScanBuilder().Project("monotone").Where(narrow).ExplainAsync(cancelled.Token), ct);
+        Task<ScanExplanation> first = Task.Run(async () => await file.ScanBuilder().Project("monotone").Where(narrow).ExplainAsync(analyze: true, cancelled.Token), ct);
         await ParkedAsync(gated, 1, ct);
-        Task<ScanExplanation> second = Task.Run(async () => await file.ScanBuilder().Project("monotone").Where(narrow).ExplainAsync(ct), ct);
+        Task<ScanExplanation> second = Task.Run(async () => await file.ScanBuilder().Project("monotone").Where(narrow).ExplainAsync(analyze: true, ct), ct);
         await WaitingAsync(file, 1, ct);
         Assert.Equal(1, file.ZoneWaits);
         Assert.Equal(1, gated.Parked);
@@ -317,7 +313,7 @@ public sealed class ScanExplainTests
         Decoders.EnsureRegistered();
 
         await using VortexFile file = await VortexFile.OpenAsync(Corpus.Path(Zoned), CancellationToken.None);
-        ScanExplanation plan = await file.ScanBuilder().Project("monotone").ExplainAsync(ct);
+        ScanExplanation plan = await file.ScanBuilder().Project("monotone").ExplainAsync(analyze: true, ct);
 
         Assert.Equal(plan.Blocks, plan.LiveBlocks);
         Assert.Equal(plan.Splits, plan.LiveSplits);
@@ -326,7 +322,7 @@ public sealed class ScanExplainTests
         Assert.True(plan.BytesToRead > 0 && plan.BytesToRead <= plan.FileBytes);
 
         // Narrowed to a range, the plan narrows with it.
-        ScanExplanation half = await file.ScanBuilder().Project("monotone").Rows(new RowRange(0, 32_768)).ExplainAsync(ct);
+        ScanExplanation half = await file.ScanBuilder().Project("monotone").Rows(new RowRange(0, 32_768)).ExplainAsync(analyze: true, ct);
         Assert.Equal(32_768, half.RowCount);
         Assert.True(half.LiveSplits < plan.LiveSplits);
         Assert.True(half.BytesToRead < plan.BytesToRead);

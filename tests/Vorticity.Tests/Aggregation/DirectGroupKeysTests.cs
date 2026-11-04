@@ -9,7 +9,6 @@ using Vorticity.Aggregating;
 using Vorticity.Arrays;
 using Vorticity.Buffers;
 using Vorticity.Expressions;
-using Vorticity.Layouts;
 using Vorticity.Types;
 using Xunit;
 

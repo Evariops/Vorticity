@@ -11,7 +11,6 @@
 // site, and a caller with a genuinely larger column raises it.
 using System;
 using Vorticity.Arrays;
-using Vorticity.Arrays.Decoders.Compressed;
 using Vorticity.Arrays.Metadata;
 using Vorticity.File;
 using Vorticity.Types;

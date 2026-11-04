@@ -5,10 +5,9 @@ using System.Collections.Generic;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
-using System.Threading;
+using Vorticity.Aggregating;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Compressed;
-using Vorticity.Types;
 
 namespace Vorticity.Writing;
 
@@ -121,17 +120,17 @@ internal sealed class OnPairPlan
         }
 
         ValidityReader valid = ValidityReader.Of(arena, node.Validity);
-        int[] lengths = ArrayPool<int>.Shared.Rent(rows);
+        int[] lengths = WorkArrays.Rent<int>(rows);
         long plain = ViewHeap.Lengths(node, valid, lengths.AsSpan(0, rows));
         if (plain == 0 || plain > int.MaxValue - ViewHeap.Slack)
         {
-            ArrayPool<int>.Shared.Return(lengths);
+            WorkArrays.Return(lengths);
             return null;
         }
 
         int total = (int)plain;
-        byte[] heap = ArrayPool<byte>.Shared.Rent(total + ViewHeap.Slack);
-        int[] starts = ArrayPool<int>.Shared.Rent(rows);
+        byte[] heap = WorkArrays.Rent<byte>(total + ViewHeap.Slack);
+        int[] starts = WorkArrays.Rent<int>(rows);
         Trainer? trainer = null;
         ushort[]? codes = null;
         int[]? codeOffsets = null;
@@ -154,8 +153,8 @@ internal sealed class OnPairPlan
                 }
             }
 
-            codes = ArrayPool<ushort>.Shared.Rent(total);
-            codeOffsets = ArrayPool<int>.Shared.Rent(rows + 1);
+            codes = WorkArrays.Rent<ushort>(total);
+            codeOffsets = WorkArrays.Rent<int>(rows + 1);
 
             // The codes the ceiling leaves room for; a pin's ceiling leaves room for any.
             long room = sizeCeiling - fixedBytes;
@@ -185,19 +184,19 @@ internal sealed class OnPairPlan
             {
                 if (codes is not null)
                 {
-                    ArrayPool<ushort>.Shared.Return(codes);
+                    WorkArrays.Return(codes);
                 }
 
                 if (codeOffsets is not null)
                 {
-                    ArrayPool<int>.Shared.Return(codeOffsets);
+                    WorkArrays.Return(codeOffsets);
                 }
 
-                ArrayPool<int>.Shared.Return(lengths);
+                WorkArrays.Return(lengths);
             }
 
-            ArrayPool<int>.Shared.Return(starts);
-            ArrayPool<byte>.Shared.Return(heap);
+            WorkArrays.Return(starts);
+            WorkArrays.Return(heap);
         }
     }
 
@@ -216,7 +215,7 @@ internal sealed class OnPairPlan
         rental = [];
         if (array.Length > 0)
         {
-            ArrayPool<T>.Shared.Return(array);
+            WorkArrays.Return(array);
         }
     }
 
@@ -310,11 +309,11 @@ internal sealed class OnPairPlan
         {
             int rows = starts.Length;
             long budget = (long)(total * SampleFraction);
-            int[] order = ArrayPool<int>.Shared.Rent(rows);
+            int[] order = WorkArrays.Rent<int>(rows);
             try
             {
                 int selected = SampleOrder(order.AsSpan(0, rows), lengths, budget);
-                Discover(heap, starts, lengths, order.AsSpan(0, selected), budget, total);
+                Discover(heap, starts, lengths, order.AsSpan(0, selected), budget);
                 Sort();
 
                 // The sample again, under the sorted dictionary: what the column's codes are scaled from.
@@ -331,7 +330,7 @@ internal sealed class OnPairPlan
             }
             finally
             {
-                ArrayPool<int>.Shared.Return(order);
+                WorkArrays.Return(order);
             }
         }
 
@@ -368,8 +367,8 @@ internal sealed class OnPairPlan
         /// <summary>The sorted dictionary's rentals, handed to the plan.</summary>
         internal (byte[] Bytes, int Length, int[] Offsets) TakeDictionary()
         {
-            byte[] bytes = ArrayPool<byte>.Shared.Rent(_paddedBytes);
-            int[] offsets = ArrayPool<int>.Shared.Rent(_tokens + 1);
+            byte[] bytes = WorkArrays.Rent<byte>(_paddedBytes);
+            int[] offsets = WorkArrays.Rent<int>(_tokens + 1);
             _bytes.AsSpan(0, _paddedBytes).CopyTo(bytes);
             _offsets.AsSpan(0, _tokens + 1).CopyTo(offsets);
             return (bytes, _paddedBytes, offsets);
@@ -422,7 +421,7 @@ internal sealed class OnPairPlan
         /// tokens counted, and a pair counted as often as the bar becomes a token of its own, which
         /// the scan then carries on from as one token.
         /// </summary>
-        private void Discover(byte[] heap, ReadOnlySpan<int> starts, ReadOnlySpan<int> lengths, ReadOnlySpan<int> order, long budget, int total)
+        private void Discover(byte[] heap, ReadOnlySpan<int> starts, ReadOnlySpan<int> lengths, ReadOnlySpan<int> order, long budget)
         {
             Threshold bar = new Threshold(Capacity - 256, budget);
             for (int i = 0; i < order.Length; i++)
@@ -510,8 +509,8 @@ internal sealed class OnPairPlan
 
             // Laid out afresh in sorted order; the old layout is read through a copy.
             int used = _offsets[tokens];
-            byte[] old = ArrayPool<byte>.Shared.Rent(used);
-            int[] oldOffsets = ArrayPool<int>.Shared.Rent(tokens + 1);
+            byte[] old = WorkArrays.Rent<byte>(used);
+            int[] oldOffsets = WorkArrays.Rent<int>(tokens + 1);
             try
             {
                 _bytes.AsSpan(0, used).CopyTo(old);
@@ -542,8 +541,8 @@ internal sealed class OnPairPlan
             }
             finally
             {
-                ArrayPool<byte>.Shared.Return(old);
-                ArrayPool<int>.Shared.Return(oldOffsets);
+                WorkArrays.Return(old);
+                WorkArrays.Return(oldOffsets);
             }
         }
 

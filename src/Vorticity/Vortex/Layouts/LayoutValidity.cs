@@ -1,7 +1,6 @@
 using System;
 
 using Vorticity.Arrays;
-using Vorticity.Types;
 
 namespace Vorticity.Layouts;
 

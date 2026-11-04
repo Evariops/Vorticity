@@ -4,12 +4,10 @@ using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.IO.Hashing;
 using System.Runtime.CompilerServices;
-using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
-using Vorticity.Buffers;
 using Vorticity.Compute;
 using Vorticity.Indexes;
 using Vorticity.Types;
@@ -31,6 +29,7 @@ internal sealed class KeyIndexBuilder : IndexBuilder
     private readonly bool _utf8;
     private readonly int _segmentEntries;
     private readonly bool _trigrams;
+    private readonly bool _tokens;
     private readonly bool _fold;
 
     /// <summary>Whether the keys are the values' hashes, for hashed postings.</summary>
@@ -38,6 +37,12 @@ internal sealed class KeyIndexBuilder : IndexBuilder
 
     /// <summary>The bytes of a fixed-width value, which a hashed builder's own keys do not share.</summary>
     private readonly int _valueWidth;
+
+    /// <summary>Where a hashed builder hands its hashes when another object holds them, building nothing of its own; null to build.</summary>
+    private readonly IHashTap? _tap;
+
+    /// <summary>The blocks a hashed builder's place spans (<see cref="KeyRunOptions.HashedUnitBlocks"/>); one for every other.</summary>
+    private readonly int _unitBlocks = 1;
 
     private readonly ChunkKeys _spare = new ChunkKeys();
     private readonly List<int> _lastBlock = [];
@@ -59,13 +64,17 @@ internal sealed class KeyIndexBuilder : IndexBuilder
     /// <summary>
     /// A hashed postings builder: the keys are the XXH3-64 of each value's bytes in
     /// <paramref name="values"/>, the bytes a Bloom filter hashes, so a probe hashes a literal as
-    /// both do; each distinct (hash, block) pair is an entry.
+    /// both do; each distinct (hash, unit) pair is an entry, a unit <paramref name="unitBlocks"/> blocks from block 0 on
+    /// (spec C, 5). With <paramref name="tap"/>, each value's hash and unit go there as the rows come, and the builder writes
+    /// nothing.
     /// </summary>
-    internal static KeyIndexBuilder ForHashes(KeyLayout values, int segmentEntries) =>
-        new KeyIndexBuilder(values, segmentEntries);
+    internal static KeyIndexBuilder ForHashes(KeyLayout values, int segmentEntries, IHashTap? tap = null, int unitBlocks = 1) =>
+        new KeyIndexBuilder(values, segmentEntries, tap, unitBlocks);
 
-    private KeyIndexBuilder(KeyLayout values, int segmentEntries)
+    private KeyIndexBuilder(KeyLayout values, int segmentEntries, IHashTap? tap, int unitBlocks)
     {
+        _tap = tap;
+        _unitBlocks = Math.Max(unitBlocks, 1);
         _table = new ChunkKeys();
         _rows = false;
         _layout = KeyRunOptions.HashedLayout;
@@ -80,24 +89,38 @@ internal sealed class KeyIndexBuilder : IndexBuilder
     /// <c>binary</c> because a trigram may cut a UTF-8 code point in two.
     /// </summary>
     internal static KeyIndexBuilder ForTrigrams(bool fold, int segmentEntries) =>
-        new KeyIndexBuilder(fold, segmentEntries);
+        new KeyIndexBuilder(fold, segmentEntries, tokens: false);
 
-    private KeyIndexBuilder(bool fold, int segmentEntries)
+    /// <summary>
+    /// A token postings builder (spec G, 6): the keys are the words of every value (<see cref="Indexes.Tokens"/>), typed
+    /// <c>binary</c> as trigrams are, a word cut to its first bytes possibly cutting a code point.
+    /// </summary>
+    internal static KeyIndexBuilder ForTokens(bool fold, int segmentEntries) =>
+        new KeyIndexBuilder(fold, segmentEntries, tokens: true);
+
+    private KeyIndexBuilder(bool fold, int segmentEntries, bool tokens)
     {
         _table = new ChunkKeys();
         _rows = false;
         _layout = new KeyLayout(KeyShape.Bytes, 0, default);
         _utf8 = false;
         _segmentEntries = segmentEntries;
-        _trigrams = true;
+        _trigrams = !tokens;
+        _tokens = tokens;
         _fold = fold;
     }
 
-    internal string Kind => _trigrams
-        ? IndexKinds.PostingsNgram3
+    /// <summary>Whether the builder hands its hashes to a tap and writes nothing.</summary>
+    internal bool Taps => _tap is not null;
+
+    /// <summary>The blocks a place spans: a unit of hashed postings' (<see cref="KeyRunOptions.HashedUnitBlocks"/>), one otherwise.</summary>
+    internal int UnitBlocks => _unitBlocks;
+
+    internal string Kind => _trigrams ? IndexKinds.PostingsNgram3
+        : _tokens ? IndexKinds.PostingsTokens
         : _hashed ? IndexKinds.PostingsHashed : _rows ? IndexKinds.SortedRuns : IndexKinds.PostingsBlocks;
 
-    /// <summary>Whether trigrams are ASCII-lower-cased.</summary>
+    /// <summary>Whether trigrams or tokens are ASCII-lower-cased.</summary>
     internal bool CaseInsensitive => _fold;
 
     /// <summary>The runs the merge produced when the data ended, in block order.</summary>
@@ -216,6 +239,32 @@ internal sealed class KeyIndexBuilder : IndexBuilder
 
         bool allValid = own.AllValid && wrapper.AllValid;
         int width = _valueWidth;
+        if (_tokens)
+        {
+            if (node.Kind != CanonicalKind.VarBinView)
+            {
+                Abandon($"a token index needs text, and this column is {node.Kind}");
+                return;
+            }
+
+            // Each word of each value, once a value: a word met twice in one value is one entry of its block anyway.
+            Span<byte> word = stackalloc byte[Tokens.Longest];
+            for (int row = start; row < start + count; row++)
+            {
+                if (allValid || (own.IsValid(row) && wrapper.IsValid(row)))
+                {
+                    ReadOnlySpan<byte> value = LiteralReader.ViewAt(node, row);
+                    int at = 0;
+                    while (Tokens.Next(value, ref at, _fold, word, out int length))
+                    {
+                        Note(word[..length], first + row - start);
+                    }
+                }
+            }
+
+            return;
+        }
+
         if (_trigrams)
         {
             if (node.Kind != CanonicalKind.VarBinView)
@@ -265,7 +314,7 @@ internal sealed class KeyIndexBuilder : IndexBuilder
                     {
                         if (_hashed)
                         {
-                            Buckets.Note(constantHash, checked((uint)_block));
+                            Hashed(constantHash);
                             continue;
                         }
 
@@ -344,11 +393,24 @@ internal sealed class KeyIndexBuilder : IndexBuilder
         // Hashed postings place a value's hash at its block, once a block, in its bucket.
         if (_hashed)
         {
-            Buckets.Note(XxHash3.HashToUInt64(key), checked((uint)_block));
+            Hashed(XxHash3.HashToUInt64(key));
             return;
         }
 
         NoteId(Intern(key), row);
+    }
+
+    /// <summary>A value's hash at the open block's unit: in its bucket, or to the tap.</summary>
+    private void Hashed(ulong hash)
+    {
+        uint unit = checked((uint)(_block / _unitBlocks));
+        if (_tap is { } tap)
+        {
+            tap.Note(hash, unit);
+            return;
+        }
+
+        Buckets.Note(hash, unit);
     }
 
     /// <summary>The id of a value's key, its bytes: hashed postings place hashes in their buckets and intern none.</summary>
@@ -377,10 +439,15 @@ internal sealed class KeyIndexBuilder : IndexBuilder
     internal override void CloseBlock()
     {
         _block++;
-        if (_hashed)
+        if (_hashed && _tap is null)
         {
+            // A unit's pairs are told apart across its blocks: a hash is noted once a unit.
             HashedBuckets buckets = Buckets;
-            buckets.CloseBlock();
+            if (_block % _unitBlocks == 0)
+            {
+                buckets.CloseBlock();
+            }
+
             _pairsAtBlockClose.Add(buckets.Pairs);
         }
     }
@@ -400,6 +467,12 @@ internal sealed class KeyIndexBuilder : IndexBuilder
     {
         if (Abandoned is not null)
         {
+            return;
+        }
+
+        if (_hashed && _tap is { } tap)
+        {
+            await tap.ChunkClosedAsync(cancellationToken).ConfigureAwait(false);
             return;
         }
 
@@ -489,7 +562,8 @@ internal sealed class KeyIndexBuilder : IndexBuilder
     /// <summary>
     /// The hashed postings' runs, from the buckets, a bucket sorted at a time in the hashes' order: the run of every chunk but
     /// the last, and the last's of its own when the data ends inside a block, which an append re-opens, as the merge of the
-    /// chunks' runs cuts them. A hash's blocks go to the run whose chunks hold them.
+    /// chunks' runs cuts them. A hash's blocks go to the run whose chunks hold them. Places in units of several blocks make
+    /// one run over the units, which no append re-opens (hashed runs are never absorbed).
     /// </summary>
     private async ValueTask EndHashedAsync(CancellationToken cancellationToken)
     {
@@ -501,11 +575,13 @@ internal sealed class KeyIndexBuilder : IndexBuilder
         RunScratch scratch = Scratch ?? throw new InvalidOperationException("A locating builder needs the writer's scratch.");
         await buckets.SpillAsync(scratch, cancellationToken).ConfigureAwait(false);
         await buckets.RefineAsync(scratch, cancellationToken).ConfigureAwait(false);
-        bool tail = BlockRows > 0 && _row % BlockRows != 0;
+        bool tail = _unitBlocks == 1 && BlockRows > 0 && _row % BlockRows != 0;
         long tailPairs = tail ? buckets.Pairs - PairsBefore(_lastChunkBlock) : 0;
         int mainEnd = tail ? _lastChunkBlock : _lastChunkBlock + _lastChunkBlocks;
+        int firstUnit = _firstChunkBlock / _unitBlocks;
+        int endUnit = (mainEnd + _unitBlocks - 1) / _unitBlocks;
         HashedRunSink? main = !tail || _chunks > 1
-            ? new HashedRunSink(_segmentEntries, _firstChunkBlock, mainEnd - _firstChunkBlock, buckets.Pairs - tailPairs)
+            ? new HashedRunSink(_segmentEntries, firstUnit, endUnit - firstUnit, buckets.Pairs - tailPairs)
             : null;
         HashedRunSink? last = tail ? new HashedRunSink(_segmentEntries, _lastChunkBlock, _lastChunkBlocks, tailPairs) : null;
         uint split = tail ? (uint)_lastChunkBlock : uint.MaxValue;

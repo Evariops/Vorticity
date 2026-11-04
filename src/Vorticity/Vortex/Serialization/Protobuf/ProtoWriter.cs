@@ -420,6 +420,19 @@ internal struct ProtoWriter : IDisposable
         _position += written;
     }
 
+    /// <summary>
+    /// Writes <paramref name="value"/> as its UTF-8 length, a varint, then its UTF-8 bytes, with no tag: a string of a
+    /// region laid out by hand. Transcodes straight into the pooled buffer.
+    /// </summary>
+    public void WriteLengthPrefixedUtf8(string value)
+    {
+        int byteCount = Encoding.UTF8.GetByteCount(value);
+        WriteVarint((uint)byteCount);
+        EnsureCapacity(byteCount);
+        int written = Encoding.UTF8.GetBytes(value.AsSpan(), new Span<byte>(_buffer!, _position, byteCount));
+        _position += written;
+    }
+
     // ---------------------------------------------------------------------------------------
     // Nested messages
     // ---------------------------------------------------------------------------------------

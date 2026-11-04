@@ -12,7 +12,6 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Dataset;
-using Vorticity.IO;
 using Vorticity.Tests.Scan;
 using Xunit;
 
@@ -43,7 +42,7 @@ public sealed partial class DatasetCompositeCompactionTests
         Hop[] rows = Hops(random);
 
         await using MemoryObjectStore store = new MemoryObjectStore();
-        DatasetOptions options = new DatasetOptions { Seed = (ulong)seed, ClusteringKey = ["Source", "Route", "Target"] };
+        DatasetOptions options = new DatasetOptions { Seed = (ulong)seed, Layout = new DatasetLayout { SortKey = [LayoutValue.Column("Source"), LayoutValue.Column("Route"), LayoutValue.Column("Target")] } };
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Hop.Schema, options, ct);
         int objects = 12 + random.Next(30);
         int at = 0;

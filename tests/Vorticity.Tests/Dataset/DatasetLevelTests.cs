@@ -18,9 +18,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Buffers;
-using Vorticity.Columns;
 using Vorticity.Dataset;
-using Vorticity.File;
 using Vorticity.IO;
 using Vorticity.Scanning;
 using Vorticity.Tests.Scan;
@@ -41,7 +39,7 @@ public sealed class DatasetLevelTests
         Template = new CommitHeader
         {
             Version = 1,
-            ClusteringKey = ["k"],
+            Layout = new DatasetLayout { SortKey = [LayoutValue.Column("k")] },
             Chunker = new ChunkerSettings(256, 512, 1_024),
         },
     };
@@ -233,7 +231,7 @@ public sealed class DatasetLevelTests
         Assert.Equal(0, holding.Lag);
         Assert.Equal(8, holding.Objects);
         Assert.Equal([8L], holding.ObjectsByLevel);
-        Assert.False(holding.IsClustered);
+        Assert.False(holding.IsKeyed);
 
         // Three more, and the invariant is violated on purpose. Nothing is refused.
         for (int i = 8; i < 11; i++)

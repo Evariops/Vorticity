@@ -43,9 +43,6 @@ internal sealed class ObjectCache : IAsyncDisposable
     /// <summary>The entries the handle's walks parsed, shared by every version that holds their pages.</summary>
     internal EntryMemo Entries { get; } = new EntryMemo();
 
-    /// <summary>How many objects are open, leased or idle.</summary>
-    internal int Count => _open.Count;
-
     /// <summary>How many open objects a lease holds: none once every read has given its objects back.</summary>
     internal int Leased => _open.Count - _idle.Count;
 
@@ -221,13 +218,13 @@ internal sealed class ObjectCache : IAsyncDisposable
         // is served from its cache to every scan that asks again. An encrypted dataset's object is
         // opened through a sealed reader, its object id checked against the entry's uid.
         // A plain object's regions of indexes, those its table of contents declares and the pages and segments its lookups
-        // name, come from the session's synopsis cache as they do with no open: a lookup through an open object asked the
+        // name, and its data when the cache keeps data, come from the session's synopsis cache as they do with no open: a lookup through an open object asked the
         // store for its fence page and segments at every question.
         ISegmentReader source = await SealedObjectStore.OpenDataAsync(_store, entry.Key, entry.Uid, entry.Bytes, cancellationToken).ConfigureAwait(false);
         try
         {
-            ISegmentReader read = source is ObjectStoreSource && entry.Contents is { } contents
-                ? SynopsisCacheReader.Over(source, _session.Options.SynopsisCache, entry.Uid, contents)
+            ISegmentReader read = source is ObjectStoreSource
+                ? SynopsisCacheReader.Over(source, _session.Options.SynopsisCache, entry.Uid, entry.Contents)
                 : source;
             VortexFile file = await VortexFile.OpenAsync(SessionReader.Wrap(read, _session), OpenOptionsOf(entry, fragments), cancellationToken).ConfigureAwait(false);
             file.Session = _session;
@@ -310,6 +307,21 @@ internal sealed class ObjectCache : IAsyncDisposable
     /// An object's bytes are immutable but its fragments are not, so a new set of fragments is a new
     /// view of the same bytes -- a second open, never a stale handle.
     /// </summary>
+    /// <summary>Whether the object <paramref name="entry"/> names is open on the view its fragments make, or being opened: a rent of it reads nothing more.</summary>
+    internal bool Holds(ObjectEntry entry)
+    {
+        string handle = HandleOf(entry);
+        _gate.Wait();
+        try
+        {
+            return _open.ContainsKey(handle) || _opening.ContainsKey(handle);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
     private static string HandleOf(ObjectEntry entry)
     {
         if (entry.Fragments.Count == 0)
@@ -389,6 +401,13 @@ internal sealed class ObjectLease : IAsyncDisposable
 
     /// <summary>Whether the object was already open, so the lease cost no request.</summary>
     internal bool WasCached { get; }
+
+    /// <summary>
+    /// Whether <see cref="File"/> is a copy of the object written again, the rows in their order but its chunks its own
+    /// (<see cref="LevelZeroMemo"/>), rather than the object as it lies: the regions its entry's table of contents names, its
+    /// marks and its sparse index, lie in the object, not in the copy, which is read whole.
+    /// </summary>
+    internal bool IsCopy { get; init; }
 
     /// <summary>
     /// The fragments left out because their bytes are not what their references say; the file's own

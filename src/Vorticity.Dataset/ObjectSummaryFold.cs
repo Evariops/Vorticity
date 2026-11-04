@@ -19,12 +19,28 @@ internal sealed class ObjectSummaryFold : ISummaryFold
     /// <summary>The first byte of a summary that carries a tally.</summary>
     private const byte Tallied = 0;
 
-    /// <summary>The one instance.</summary>
-    public static ObjectSummaryFold Instance { get; } = new ObjectSummaryFold();
+    // The top of the objects and the fan-out of their merges, which an object's size class is counted under.
+    private readonly long _top;
+    private readonly int _fanout;
 
-    private ObjectSummaryFold()
+    private ObjectSummaryFold(long top, int fanout)
     {
+        _top = top;
+        _fanout = fanout;
     }
+
+    /// <summary>The fold of a dataset of the default layout's top and fan-out.</summary>
+    public static ObjectSummaryFold Instance { get; } = For(null);
+
+    /// <summary>The fold of a dataset of <paramref name="layout"/>, whose top and fan-out size its objects' classes.</summary>
+    public static ObjectSummaryFold For(DatasetLayout? layout)
+    {
+        DatasetLayout sized = layout ?? new DatasetLayout();
+        return new ObjectSummaryFold(sized.ObjectBytes, sized.MergeFanout);
+    }
+
+    /// <summary>The tally of one object, read from its entry's bytes, its size class under this fold's top and fan-out.</summary>
+    internal ObjectTally TallyOf(ReadOnlySpan<byte> entry) => ObjectTally.Of(entry, _top, _fanout);
 
     /// <inheritdoc/>
     /// <remarks>The whole entry, in place: <see cref="Union"/> reads its summaries and its tally out of it.</remarks>
@@ -48,7 +64,7 @@ internal sealed class ObjectSummaryFold : ISummaryFold
             if (leaves)
             {
                 summaries = ObjectEntry.SummaryOf(parts[i]).Span;
-                part = ObjectTally.Of(parts[i].Span);
+                part = TallyOf(parts[i].Span);
             }
             else
             {

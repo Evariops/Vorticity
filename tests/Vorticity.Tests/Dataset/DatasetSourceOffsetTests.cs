@@ -211,7 +211,7 @@ public sealed class DatasetSourceOffsetTests
     }
 
     [Fact]
-    public async Task ADatasetThatCountsSourcesIsWrittenInFormatThree()
+    public async Task ADatasetThatCountsSourcesIsWrittenInTheOneFormat()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
         await using MemoryObjectStore store = new MemoryObjectStore();
@@ -219,11 +219,12 @@ public sealed class DatasetSourceOffsetTests
         await AppendPlainAsync(dataset, 0, 10, ct);
         Assert.Equal(CommitFormat.Version, await FormatAsync(store, dataset.Version, ct));
 
-        // From the first offset on, and for as long as one is counted, a commit of any kind.
+        // From the first offset on, and for as long as one is counted, a commit of any kind, a compaction into level 1
+        // among them, is written in the one format there is.
         await AppendAsync(dataset, Spans, 0, 10, ct);
-        Assert.Equal(CommitFormat.WithSources, await FormatAsync(store, dataset.Version, ct));
-        Assert.NotNull(await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 1, TargetBytesAtLevelOne = 1L << 30 }, ct));
-        Assert.Equal(CommitFormat.WithSources, await FormatAsync(store, dataset.Version, ct));
+        Assert.Equal(CommitFormat.Version, await FormatAsync(store, dataset.Version, ct));
+        Assert.NotNull(await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 1, TargetBytesAtLevelOne = 512L << 10 }, ct));
+        Assert.Equal(CommitFormat.Version, await FormatAsync(store, dataset.Version, ct));
         await dataset.ForgetSourcesAsync([Spans], ct);
         Assert.Equal(CommitFormat.Version, await FormatAsync(store, dataset.Version, ct));
     }
@@ -267,7 +268,7 @@ public sealed class DatasetSourceOffsetTests
         }
     }
 
-    private static DatasetOptions Options() => new DatasetOptions { Seed = 0x50_04CE, ClusteringKey = ["Key"] };
+    private static DatasetOptions Options() => new DatasetOptions { Seed = 0x50_04CE, Layout = new DatasetLayout { SortKey = [LayoutValue.Column("Key")] } };
 
     private static async Task<VortexDataset> CreateAsync(IObjectStore store, CancellationToken ct)
     {

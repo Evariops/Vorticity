@@ -38,7 +38,7 @@ public sealed partial class PruningTests : IDisposable
         Assert.All(rows, e => Assert.True(e.Id >= 90_000));
 
         // The ids climb: every row group below 90 000 is ruled out, ten of them.
-        ScanPlan plan = await file.Scan<Event>().Where(e => e.Id >= 90_000).ExplainAsync(Ct);
+        ScanPlan plan = await file.Scan<Event>().Where(e => e.Id >= 90_000).ExplainAsync(analyze: true, Ct);
         int blocks = (Rows + GroupRows - 1) / GroupRows;
         Assert.Equal(blocks, plan.Blocks);
         Assert.Equal(10, plan.Pruning.Sum(step => step.BlocksPruned));
@@ -57,7 +57,7 @@ public sealed partial class PruningTests : IDisposable
         Scan<Event> scan = file.Scan<Event>().Where(e => e.Id >= 16_384);
         Assert.Equal(Rows - 16_384, await scan.CountAsync(Ct));
         Assert.Equal(0, scan.Metrics.Requests);
-        ScanPlan plan = await file.Scan<Event>().Where(e => e.Id >= 16_384).ExplainAsync(Ct);
+        ScanPlan plan = await file.Scan<Event>().Where(e => e.Id >= 16_384).ExplainAsync(analyze: true, Ct);
         Assert.True(plan.Count.Exact);
         Assert.Equal(Rows - 16_384, plan.Count.Rows);
         Assert.Equal(0, plan.Count.Decoded);
@@ -124,7 +124,7 @@ public sealed partial class PruningTests : IDisposable
         await using ParquetFile file = await ParquetFile.OpenAsync(_path, Ct);
         Scan<Keyed> text = file.Scan<Keyed>().Where(k => k.Key >= "key-090000");
         Assert.Equal(Rows - 90_000, await text.CountAsync(Ct));
-        Assert.Equal(10, (await file.Scan<Keyed>().Where(k => k.Key >= "key-090000").ExplainAsync(Ct)).Pruning.Sum(step => step.BlocksPruned));
+        Assert.Equal(10, (await file.Scan<Keyed>().Where(k => k.Key >= "key-090000").ExplainAsync(analyze: true, Ct)).Pruning.Sum(step => step.BlocksPruned));
 
         // The scores climb but for one NaN, which neither bound takes in and a comparison never selects.
         Scan<Keyed> low = file.Scan<Keyed>().Where(k => k.Score < 100.0);
@@ -190,7 +190,7 @@ public sealed partial class PruningTests : IDisposable
         // The page that holds them, of 8 192 rows, overlaps one batch of as many, four of 3 000.
         Assert.Equal(batchRows > 0 ? 4 : 1, narrow.Metrics.BlocksDecoded);
         Assert.Equal(blocks - narrow.Metrics.BlocksDecoded, narrow.Metrics.BlocksPruned);
-        ScanPlan plan = await file.Scan<Tagged>().Where(t => t.Id >= 50_000 & t.Id < 50_100).With(options).ExplainAsync(Ct);
+        ScanPlan plan = await file.Scan<Tagged>().Where(t => t.Id >= 50_000 & t.Id < 50_100).With(options).ExplainAsync(analyze: true, Ct);
         Assert.Equal(narrow.Metrics.BlocksDecoded, plan.LiveBlocks);
         Assert.Equal(blocks - plan.LiveBlocks, plan.Pruning.Single(step => step.Structure == "page index").BlocksPruned);
         Assert.Equal(plan.Segments, narrow.Metrics.Requests);

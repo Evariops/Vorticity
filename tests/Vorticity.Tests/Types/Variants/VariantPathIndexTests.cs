@@ -44,12 +44,12 @@ public sealed partial class VariantPathIndexTests
             rows.Count(r => r.Attributes["status"]?.AsInt64() is 502 or 4_000),
             await file.Scan<Doc>().Where(r => r.Attributes["status"].AsInt64() == 502 || r.Attributes["status"].AsInt64() == 4_000).CountAsync(Ct));
 
-        ScanPlan integers = await file.Scan<Doc>().Where(r => r.Attributes["status"].AsInt64() == 502).ExplainAsync(Ct);
+        ScanPlan integers = await file.Scan<Doc>().Where(r => r.Attributes["status"].AsInt64() == 502).ExplainAsync(analyze: true, Ct);
         PruningStep bloom = Assert.Single(integers.Pruning, step => step.Structure == "bloom filter");
         Assert.InRange(integers.LiveBlocks, 2, 3);
         Assert.Equal(integers.Blocks - integers.LiveBlocks, bloom.BlocksPruned);
 
-        ScanPlan texts = await file.Scan<Doc>().Where(r => r.Attributes["status"].AsString() == "502").ExplainAsync(Ct);
+        ScanPlan texts = await file.Scan<Doc>().Where(r => r.Attributes["status"].AsString() == "502").ExplainAsync(analyze: true, Ct);
         Assert.DoesNotContain(texts.Pruning, step => step.Structure == "bloom filter" && step.BlocksPruned > 0);
         Assert.Equal(texts.Blocks, texts.LiveBlocks);
     }

@@ -126,8 +126,9 @@ Indexes = IndexPolicy.None
 ```
 
 It was built, 1.40 MB. No scan of the typed surface reads it: `Status == 301 & Score >= 1000` read 49
-of 49 blocks, and `Keys` takes a single column. It is how a dataset's clustering key is written
-([datasets.md](datasets.md)). Without an encoder the key is abandoned, with the reason *no key
+of 49 blocks, and `Keys` takes a single column. A dataset's objects keep no such run: their rows are
+sorted by the dataset's sort key, and each keeps the first key of each granule instead
+([dataset-layout.md](dataset-layout.md)). Without an encoder the key is abandoned, with the reason *no key
 encoder: declare the key with IndexPolicy.ForKey(columns, kind, encoder), e.g. with the RowKeyEncoder
 of Vorticity.RowEncoding*. [row-keys.md](row-keys.md) describes the encoding.
 
@@ -220,6 +221,17 @@ written before takes a fragment that holds it. [dataset-maintenance.md](dataset-
 what it costs and what it buys, and the design is in
 [13-dataset.md](../design/13-dataset.md#64-fragments-in-commit-objects-transient).
 
+A key of a variant column takes a Bloom filter or hashed postings the same way, named as a filter reads
+it:
+
+```csharp
+await dataset.IndexAsync(IndexPolicy.None.Bloom("Attributes['user.id'].AsString()"));
+```
+
+Every job that shreds the key builds it from then on; the objects already written take it when
+compaction rewrites them, and no fragment does. A key whose values are nearly all distinct is better
+declared an identifier (below): its filter weighs as much as the key.
+
 `dataset.IndexAsync(IndexPolicy.Auto)` gives every column its automatic indexes instead, the columns
 you add later with `EvolveSchemaAsync` included. Writers apply it from the next object they write,
 within the budget, and the objects already there take it when compaction rewrites them.
@@ -232,31 +244,36 @@ the dataset is created:
 ```csharp
 DatasetOptions options = new DatasetOptions
 {
-    ClusteringKey = ["At"],
+    Layout = new DatasetLayout
+    {
+        Partition = LayoutValue.Column("At").Truncate(CalendarUnit.Day),
+        SortKey = [LayoutValue.Column("At")],
+    },
     Identifiers = ["RequestId"],
 };
 ```
 
 Every object the dataset writes then carries hashed postings on the column, appends and compactions
-alike, exempt from the index budget as the clustering key's run is. A lookup of one id reads one segment
-of about 44 KiB per object, then only the blocks that hold it, and about one probe in a thousand keeps a
-block that does not. No Bloom filter is tried on an identifier: its values are as many as its rows,
-and a tree of filters loses its upper nodes past what one filter holds.
+alike, exempt from the index budget: a fingerprint of each value and where its rows lie, a unit of
+granules that holds about a mebibyte of the column's values by default, or the granule itself
+(`IdentifierLocation.Granule`) for a dataset whose questions are mostly lookups. Once a partition is
+consolidated, its objects' postings go to the index of the partition, one for its objects together:
+a lookup reads a page of it, then the granules of the object that holds the value, and opens no other.
+About one probe in a thousand keeps a place that does not hold the value. No Bloom filter is tried on
+an identifier: its values are as many as its rows, and a tree of filters loses its upper nodes past
+what one filter holds.
 
-The postings cost about 4 bytes a row when each row holds a value of its own, whatever their order: a
-pair of a fingerprint and a block per row, where a sorted run took 19.5. A value several neighbouring
-rows share costs less, a pair per block and value. Measured on a day's objects:
+On a consolidated day of 600 000 rows, a lookup of one id found its row in five or six dependent steps
+and under 1.1 MB, places at units of granules, and in four or five steps and under 0.8 MB at granules.
+The partition's index takes 2.25 bytes a row, its fingerprints cut as an object's are; an object's own
+postings take 1.9 to 3.3. Declare a column whose values questions look up one at a time, and no other: a column they
+filter or group by is read, its granules pruned by their zone maps, and a key of a variant column they
+filter on is declared shredded, below.
 
-| rows of a day | identifier | postings | a row | share of the object |
-|---|---|---|---|---|
-| 4.32 × 10⁹ requests, ids in the rows' order | `RequestId` | 18.0 GB | 4.17 bytes | 17.6 % |
-| the same, ids of 32 random hexadecimal digits | `RequestId` | 18.0 GB | 4.17 bytes | 11.1 % |
-| 432 × 10⁶ spans | `TraceId`, a dozen spans each | 1.07 GB | 2.48 bytes | 4.9 % |
-| 432 × 10⁶ spans | `SpanId` | 1.58 GB | 3.66 bytes | 7.2 % |
-
-Random ids leave the share lower only because the object itself compresses worse, by 58 %. Declare a
-column whose values questions look up one at a time, and no other: a column they filter or group by
-is answered by the synopses, and a key of a variant column they filter on is declared shredded, below.
+The postings serve aggregations too. A filter that leaves one value out, `r.RequestId != id`, keeps an
+object's counts: the object answers from them, less the rows the postings find holding the value, and
+an object that holds none reads its counts and the postings alone (see
+[How an aggregation is answered](datasets.md#how-an-aggregation-is-answered)).
 
 An identifier may also be a key of a variant column, read as a string or an integer, written as a filter
 writes it:
@@ -281,8 +298,8 @@ ShreddedPaths = ["Attributes['http.response.status_code'].AsInt64()"],
 
 Every compaction then keeps the key in a column of its own, whatever share of the rows holds it, so that
 `r.Attributes["http.response.status_code"].AsInt64() >= 500` reads that column instead of parsing the
-attributes, and the objects' synopses count its values. The class is one of `AsString`, `AsInt64`,
-`AsDouble` and `AsBool`; values of another class at the key stay in the column's residual.
+attributes. The class is one of `AsString`, `AsInt64`, `AsDouble` and `AsBool`; values of another class
+at the key stay in the column's residual.
 
 Appends leave the attributes whole, so a question over the last minutes, which no compaction has
 rewritten yet, still parses them once per query node. A handle opened with `ShredOnAppend = true`
@@ -304,8 +321,8 @@ await dataset.SetShreddedPathsAsync(["Attributes['http.response.status_code'].As
 from then on follows the new lists, the appends of every handle and the compactions of every loop,
 handles opened before the change included. The objects already written stay as they are: a lookup of
 an added identifier reads the rows of an object written before as a scan does, and finds them all the
-same, only slower, until a compaction rewrites that object. A period already sealed is not rewritten
-again, so its objects keep being read that way until the retention lets them go.
+same, only slower, until a compaction rewrites that object. An object no job takes again, such as a
+past day's once its partition is consolidated, keeps being read that way until an expiry drops it.
 
 Each call is checked against the dataset's schema and refused, before anything is committed, with the
 messages a creation gives. It throws `InvalidOperationException` when another writer changed the schema

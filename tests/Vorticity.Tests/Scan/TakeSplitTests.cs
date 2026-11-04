@@ -6,12 +6,9 @@ using System.Threading.Tasks;
 
 using Vorticity.Arrays;
 using Vorticity.Buffers;
-using Vorticity.Columns;
-using Vorticity.File;
 using Vorticity.Scanning;
 using Vorticity.Tests.Writing;
 using Vorticity.Types;
-using Vorticity.Writing;
 using Xunit;
 
 namespace Vorticity.Tests.Scan;
@@ -44,7 +41,7 @@ public sealed class TakeSplitTests
             await using VortexFile file = await VortexFile.OpenAsync(path, ct);
 
             // A split a zone from the first taken row on, five of the eight holding one.
-            ScanExplanation plan = await file.ScanBuilder().Take(Wanted).ExplainAsync(ct);
+            ScanExplanation plan = await file.ScanBuilder().Take(Wanted).ExplainAsync(analyze: true, ct);
             Assert.Equal(8, plan.Splits);
             Assert.Equal(5, plan.LiveSplits);
 

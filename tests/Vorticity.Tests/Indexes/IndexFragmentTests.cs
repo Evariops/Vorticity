@@ -27,7 +27,6 @@ using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Buffers;
-using Vorticity.Columns;
 using Vorticity.Expressions;
 using Vorticity.File;
 using Vorticity.Indexes;
@@ -82,7 +81,7 @@ public sealed class IndexFragmentTests
 
         // A key no row holds: the eight blocks of the range are proven empty, and only them.
         VortexExpr absent = Expr.Eq(Expr.Field("id"), Expr.Literal(FilterLiteral.From(AbsentId())));
-        ScanExplanation plan = await file.ScanBuilder().Where(absent).ExplainAsync(ct);
+        ScanExplanation plan = await file.ScanBuilder().Where(absent).ExplainAsync(analyze: true, ct);
         Assert.Equal(0, Pruned(plan, "zone map"));
         Assert.Equal(8, Pruned(plan, "locating index"));
         Assert.True(
@@ -125,7 +124,7 @@ public sealed class IndexFragmentTests
         }
 
         VortexExpr absent = Expr.Eq(Expr.Field("id"), Expr.Literal(FilterLiteral.From(AbsentId())));
-        Assert.Equal(8, Pruned(await file.ScanBuilder().Where(absent).ExplainAsync(ct), "bloom filter"));
+        Assert.Equal(8, Pruned(await file.ScanBuilder().Where(absent).ExplainAsync(analyze: true, ct), "bloom filter"));
     }
 
     [Fact]
@@ -150,7 +149,7 @@ public sealed class IndexFragmentTests
         // not: the last block's tags start at 1 368, so the zone map takes it first, and the filter
         // takes the nineteen others.
         VortexExpr noTag = Expr.Eq(Expr.Field("tag"), Expr.Literal(FilterLiteral.From(1L)));
-        ScanExplanation plan = await file.ScanBuilder().Where(noTag).ExplainAsync(ct);
+        ScanExplanation plan = await file.ScanBuilder().Where(noTag).ExplainAsync(analyze: true, ct);
         Assert.Equal(1, Pruned(plan, "zone map"));
         Assert.Equal(Blocks - 1, Pruned(plan, "bloom filter"));
         Assert.Equal(0, plan.LiveBlocks);

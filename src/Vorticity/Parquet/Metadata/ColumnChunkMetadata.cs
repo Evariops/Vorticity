@@ -97,52 +97,6 @@ internal struct ColumnStatistics
         int length = reader.ReadBinary().Length;
         return new ByteRange(origin + reader.Position - length, length);
     }
-
-    /// <summary>
-    /// Writes these statistics: the counts as set, and <paramref name="min"/> and
-    /// <paramref name="max"/> as the bounds where <see cref="MinValue"/> and <see cref="MaxValue"/>
-    /// say there are bounds.
-    /// </summary>
-    internal readonly void Write(ref ThriftCompactWriter writer, ReadOnlySpan<byte> min, ReadOnlySpan<byte> max)
-    {
-        short saved = writer.BeginStruct();
-        if (HasNullCount)
-        {
-            writer.WriteI64Field(3, NullCount);
-        }
-
-        if (HasDistinctCount)
-        {
-            writer.WriteI64Field(4, DistinctCount);
-        }
-
-        if (MaxValue.IsPresent)
-        {
-            writer.WriteBinaryField(5, max);
-        }
-
-        if (MinValue.IsPresent)
-        {
-            writer.WriteBinaryField(6, min);
-        }
-
-        if (MaxValue.IsPresent)
-        {
-            writer.WriteBooleanField(7, IsMaxValueExact);
-        }
-
-        if (MinValue.IsPresent)
-        {
-            writer.WriteBooleanField(8, IsMinValueExact);
-        }
-
-        if (HasNanCount)
-        {
-            writer.WriteI64Field(9, NanCount);
-        }
-
-        writer.EndStruct(saved);
-    }
 }
 
 /// <summary>How a column chunk is encrypted, as its <c>crypto_metadata</c> says.</summary>
