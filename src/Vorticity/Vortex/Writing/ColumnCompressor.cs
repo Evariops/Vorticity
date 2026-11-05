@@ -1214,30 +1214,67 @@ internal static class ColumnCompressor
             budget = temporal.EncodedSize;
         }
 
+        // A float's ALP, which the dictionary then has to beat, as an integer's has to beat its bit-packing.
+        bool sizeFirst = chunk.SizeFirst || (!chunk.IsDry && workspace is { SizeFirst: true });
+        AlpPlan? alp = AlpAhead(arena, nodeIndex, in node, target, cascade, in chunk, length, plain, sizeFirst, out bool alpPriced);
         ColumnPlan dictionary = ColumnPlan.Canonical;
         if (Allows(target, "vortex.dict") && !cascade.DictionaryIsDead)
         {
+            long against = alp is { } ahead ? Math.Min(budget, ahead.EncodedSize + DictionaryOverhead) : budget;
             dictionary = chunk.TableServes(length)
-                ? TabledDictionary(node, in chunk, length, budget, Allows(target, "fastlanes.bitpacked"))
-                : Dictionary(arena, node, comparer, length, budget, Allows(target, "fastlanes.bitpacked"));
+                ? TabledDictionary(node, in chunk, length, against, Allows(target, "fastlanes.bitpacked"))
+                : Dictionary(arena, node, comparer, length, against, Allows(target, "fastlanes.bitpacked"));
         }
         if (dictionary.Scheme != ColumnScheme.None)
         {
+            alp?.Release();
             temporal?.Release();
             return Sliceable(in dictionary, arena, nodeIndex, in node, target, workspace?.GranuleRows ?? 0, plain);
         }
 
         if (temporal is not null)
         {
+            alp?.Release();
             return ColumnPlan.ForDateTimeParts(temporal);
         }
 
         if (packed is { } winner)
         {
+            alp?.Release();
             return ColumnPlan.ForBitPacking(winner);
         }
 
-        return Trials(arena, nodeIndex, node, target, plain, cascade.IsValuesChild, cascade.Owner, workspace);
+        return Trials(arena, nodeIndex, node, target, plain, cascade.IsValuesChild, cascade.Owner, workspace, alpPriced, alp);
+    }
+
+    /// <summary>
+    /// A float column's ALP, priced before its dictionary is walked for, so that the dictionary has to beat it as an
+    /// integer's dictionary has to beat its bit-packing; null when it was not priced, or when it does not pay against the
+    /// plain column, which <paramref name="priced"/> tells apart.
+    /// </summary>
+    /// <remarks>
+    /// The dictionary is an exact verdict and goes before the trials, so it used to be held to the plain column alone,
+    /// where ALP, the trial a float column of short decimals takes, writes a fraction of it. Its codes priced at a byte or
+    /// more a row lost there; priced as they pack, they won: the per-encoding corpus's float32 column went out as a
+    /// dictionary on three chunks of four, 2,771,236 bytes where ALP writes 2,130,020, in three times ALP's write. The walk
+    /// held to the plain column also read most of a chunk of measurements before it could prove the dictionary lost, where
+    /// ALP's bytes prove it much sooner.
+    /// <para>
+    /// Only for a dictionary the walk prices. A table that serves is a dictionary that held on the chunk before, whose
+    /// price is arithmetic where ALP's is a pass over the values: a column of a few distinct floats would pay that pass on
+    /// every chunk for a verdict it already has. Not under size first, whose smallest trial displaces a dictionary larger
+    /// than it already, nor for the values child of a scheme, whose trials the owner remembers.
+    /// </para>
+    /// </remarks>
+    private static AlpPlan? AlpAhead(
+        CanonicalArena arena, int nodeIndex, in CanonicalNode node, VortexEdition target, Cascade cascade, in ChunkStats chunk,
+        int length, long plain, bool sizeFirst, out bool priced)
+    {
+        priced = !sizeFirst && !cascade.IsValuesChild
+            && node.Kind == CanonicalKind.Primitive && node.PType.IsFloat()
+            && Allows(target, "vortex.alp") && Allows(target, "vortex.dict") && !cascade.DictionaryIsDead
+            && !chunk.TableServes(length);
+        return priced ? AlpPlan.TryBuild(arena, nodeIndex, plain) : null;
     }
 
     /// <summary>
@@ -1265,14 +1302,16 @@ internal static class ColumnCompressor
     /// what the trials made of its last chunk's values; null for any other column.
     /// </param>
     /// <param name="workspace">The writer's blob workspace, for the zstd trial's encoder; null for one of its own.</param>
+    /// <param name="alpPriced">Whether <see cref="AlpAhead"/> priced ALP already, under the same <paramref name="budget"/>.</param>
+    /// <param name="alp">What it priced, which the trial takes rather than encode the column again; null when ALP did not pay.</param>
     private static ColumnPlan Trials(
         CanonicalArena arena, int nodeIndex, CanonicalNode node, VortexEdition target, long budget,
-        bool gatesOff, ColumnWriter? owner, ArrayBlobWriter.Workspace? workspace)
+        bool gatesOff, ColumnWriter? owner, ArrayBlobWriter.Workspace? workspace, bool alpPriced = false, AlpPlan? alp = null)
     {
         // Values zstd took the chunk before go to zstd alone, when it prices them; every candidate
         // is tried again one chunk in eight, and on every chunk of a size-first write.
         ColumnWriter? remembers = gatesOff && workspace is not { SizeFirst: true } ? owner : null;
-        ColumnPlan plan = Candidates(arena, nodeIndex, node, target, budget, gatesOff, remembers is { ValuesHeldByZstd: true }, workspace, out bool everyCandidate);
+        ColumnPlan plan = Candidates(arena, nodeIndex, node, target, budget, gatesOff, remembers is { ValuesHeldByZstd: true }, workspace, out bool everyCandidate, alpPriced, alp);
         remembers?.NoteValues(plan.Scheme, everyCandidate);
         return plan;
     }
@@ -1284,7 +1323,8 @@ internal static class ColumnCompressor
     /// </summary>
     private static ColumnPlan Candidates(
         CanonicalArena arena, int nodeIndex, CanonicalNode node, VortexEdition target, long budget,
-        bool gatesOff, bool zstdAlone, ArrayBlobWriter.Workspace? workspace, out bool everyCandidate)
+        bool gatesOff, bool zstdAlone, ArrayBlobWriter.Workspace? workspace, out bool everyCandidate,
+        bool alpPriced = false, AlpPlan? alpAhead = null)
     {
         everyCandidate = true;
 
@@ -1297,9 +1337,10 @@ internal static class ColumnCompressor
         // Floats get their own scheme, for the same reason integers get frame of reference: a
         // column of prices or coordinates is a column of short decimals, and the integer they
         // scale to bit-packs where the double never could.
+        // ALP priced ahead of the dictionary is taken as it was priced, under this same ceiling.
         if (node.Kind == CanonicalKind.Primitive && node.PType.IsFloat() && Allows(target, "vortex.alp"))
         {
-            if (AlpPlan.TryBuild(arena, nodeIndex, plain) is { } alp)
+            if ((alpPriced ? alpAhead : AlpPlan.TryBuild(arena, nodeIndex, plain)) is { } alp)
             {
                 return ColumnPlan.ForAlp(alp) with { PredictedBytes = alp.EncodedSize };
             }
@@ -2100,17 +2141,21 @@ internal static class ColumnCompressor
             bestScheme = ColumnScheme.DateTimeParts;
         }
 
-        // The dictionary, against the best so far: it returns a plan only when it beats it.
+        // The dictionary, against the best so far: it returns a plan only when it beats it. A float's against its ALP too,
+        // as an integer's against its bit-packing.
+        AlpPlan? alp = AlpAhead(arena, nodeIndex, in node, target, cascade, in chunk, length, plain, sizeFirst, out bool alpPriced);
         if (Allows(target, "vortex.dict") && !cascade.DictionaryIsDead)
         {
+            long against = alp is { } ahead ? Math.Min(best, ahead.EncodedSize + DictionaryOverhead) : best;
             ColumnPlan dictionary = chunk.TableServes(length)
-                ? TabledDictionary(node, in chunk, length, best, Allows(target, "fastlanes.bitpacked"))
-                : Dictionary(arena, node, comparer, length, best, Allows(target, "fastlanes.bitpacked"));
+                ? TabledDictionary(node, in chunk, length, against, Allows(target, "fastlanes.bitpacked"))
+                : Dictionary(arena, node, comparer, length, against, Allows(target, "fastlanes.bitpacked"));
             if (dictionary.Scheme != ColumnScheme.None)
             {
                 // The runs walked when run-end competes, which the dictionary beat, go back to the pool.
                 walkedRuns.ReleaseCodes();
                 temporal?.Release();
+                alp?.Release();
                 if (sizeFirst && dictionary.PredictedBytes > 0
                     && SmallestTrial(arena, nodeIndex, node, target, dictionary.PredictedBytes, cascade.IsValuesChild, workspace) is { Scheme: not ColumnScheme.None } smaller)
                 {
@@ -2144,6 +2189,11 @@ internal static class ColumnCompressor
             walkedRuns.ReleaseCodes();
         }
 
+        if (bestScheme != ColumnScheme.None)
+        {
+            alp?.Release();
+        }
+
         switch (bestScheme)
         {
             case ColumnScheme.RunEnd:
@@ -2159,7 +2209,7 @@ internal static class ColumnCompressor
             default:
                 return sizeFirst
                     ? SmallestTrial(arena, nodeIndex, node, target, plain, cascade.IsValuesChild, workspace)
-                    : Trials(arena, nodeIndex, node, target, plain, cascade.IsValuesChild, cascade.Owner, workspace);
+                    : Trials(arena, nodeIndex, node, target, plain, cascade.IsValuesChild, cascade.Owner, workspace, alpPriced, alp);
         }
     }
 
