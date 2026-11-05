@@ -482,17 +482,17 @@ positional read when the reads are small and many ([I/O](03-architecture.md#35-i
 in long runs, where the mapping saves much less.
 
 Measured on arm64 under macOS, whose platform library is CryptoKit, over a file of a million rows in the
-page cache (`SealedScanBenchmarks`, a curve of the benchmark host):
+page cache (`SealedScanBenchmarks`, a curve of the benchmark host), on 2026-11-05:
 
 | read | plain, mapped | plain, positional | sealed, 64 KiB frames |
 |---|---|---|---|
-| a scan that decodes and reads every column | 7.7 ms | 7.9 ms | 9.2 ms |
-| an open | 38 µs | 42 µs | 78 µs |
-| an open and one row | 80 µs | 96 µs | 261 µs |
+| a scan that decodes and reads every column | 7.5 ms | 7.7 ms | 9.1 ms |
+| an open | 38 µs | 50 µs | 74 µs |
+| an open and one row | 81 µs | 115 µs | 265 µs |
 
-The cipher costs about a sixth of a scan, and the lost mapping about a thirtieth. Frames of 16 and
-256 KiB scan within 2 % of frames of 64 KiB, and frames of 4 KiB and 1 MiB a fifth slower: the first
-for their calls, the second for the bytes a read decrypts beyond those it wants.
+The cipher adds about a sixth to a scan read positionally, and the lost mapping about a fortieth.
+Frames of 16 and 256 KiB scan within 2 % of frames of 64 KiB, and frames of 4 KiB and 1 MiB a fifth
+slower: the first for their calls, the second for the bytes a read decrypts beyond those it wants.
 A point read pays the most, since it decrypts whole frames around the few segments it needs. The same
 figures on x64, and under Linux and Windows, whose libraries differ, are still to be taken.
 

@@ -155,28 +155,30 @@ is done.
 Where Vorticity is compared with another implementation, the figure is a speedup: the other side's
 time divided by Vorticity's, so anything above 1.00x means Vorticity took less time. The machines
 are an Apple M4 Pro (arm64, 14 cores, macOS) and an AMD Ryzen 9 7950X (x64, 16 cores and 32
-threads, Windows 11). The figures against Rust were measured on 2026-10-14 on the M4 Pro and on
-2026-10-12 on the Ryzen, those for Parquet on 2026-10-12 and those against DuckDB on 2026-10-14, and
-[how it is measured](#how-it-is-measured) says what both sides do.
+threads, Windows 11). The figures against Rust were measured on 2026-11-05 on the M4 Pro, against
+Vortex Rust 0.90.0, and on 2026-10-12 on the Ryzen, against 0.86.1, those for Parquet on 2026-10-12
+and those against DuckDB on 2026-11-05, and [how it is measured](#how-it-is-measured) says what both
+sides do.
 
 ### Against Vortex's Rust implementation
 
-Vortex Rust 0.86.1 and Vorticity, each in its own process, read and write a table of four columns
-and a million rows. On the file Vorticity writes:
+Vortex's Rust implementation and Vorticity, each in its own process, read and write a table of four
+columns and a million rows. On the file Vorticity writes:
 
 | scenario | M4 Pro, 1 core | M4 Pro, 14 cores | 7950X, 1 core | 7950X, 32 threads |
 |---|---:|---:|---:|---:|
-| read every column | 2.22x | 2.35x | 2.91x | 1.63x |
-| read one column of four | 2.89x | 2.59x | 2.74x | 2.08x |
-| filter, 1 % of the rows | 1.38x | 2.72x | 1.27x | 2.40x |
-| filter, half the rows | 2.14x | 2.05x | 2.69x | 1.77x |
-| take 1,000 scattered rows | 1.73x | 1.06x | 1.47x | 1.16x |
-| write the table back out | 2.32x | 1.94x | 2.40x | 1.71x |
+| read every column | 2.09x | 2.23x | 2.91x | 1.63x |
+| read one column of four | 2.58x | 2.60x | 2.74x | 2.08x |
+| filter, 1 % of the rows | 1.17x | 2.55x | 1.27x | 2.40x |
+| filter, half the rows | 2.05x | 1.88x | 2.69x | 1.77x |
+| take 1,000 scattered rows | 1.65x | 1.00x | 1.47x | 1.16x |
+| write the table back out | 2.13x | 1.70x | 2.40x | 1.71x |
 
-Rust keeps the lead in a few places on the M4 Pro: a prefix filter over FSST strings (0.94x) and 10
-of the 61 encodings decoded alone, from 0.86x to 1.00x, mostly columns stored plain or masked. The
-Pcodec files decode in less time there, from 1.07x to 3.59x. On the Ryzen, Vorticity decodes all 61
-encodings in less time, Pcodec files included.
+Rust keeps the lead in a few places on the M4 Pro: a prefix filter over FSST strings (0.83x), a band
+over bit-packed integers (0.91x), 64 rows taken from a Pcodec file with nulls and from an ALP file
+(0.71x and 0.78x), and 10 of the 61 encodings decoded alone, from 0.92x to 1.00x, mostly masked,
+boolean and decimal columns. The Pcodec files decode in less time there, from 1.04x to 3.47x. On the
+Ryzen, Vorticity decodes all 61 encodings in less time, Pcodec files included.
 
 ### Against DuckDB
 
@@ -187,11 +189,11 @@ rows:
 
 | DuckDB reading | one thread | 14 threads |
 |---|---:|---:|
-| its own table, loaded beforehand | 1.43x to 6.14x | 1.18x to 3.61x |
-| the file, through its Vortex extension | 1.57x to 5.81x | 1.38x to 4.44x |
+| its own table, loaded beforehand | 1.42x to 6.15x | 1.17x to 3.66x |
+| the file, through its Vortex extension | 1.56x to 5.70x | 1.38x to 4.10x |
 
 The narrowest lead is db-benchmark's q10 on 14 threads, six keys and nearly a group per row, at
-1.18x. These figures come from the M4 Pro.
+1.17x. These figures come from the M4 Pro.
 
 ### Parquet
 

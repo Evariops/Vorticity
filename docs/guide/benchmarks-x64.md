@@ -1,8 +1,8 @@
 # Benchmarks on x64
 
 This is [the benchmark page](benchmarks.md) on an x64 machine: an AMD Ryzen 9 7950X (Zen 4, 16
-cores and 32 threads, AVX-512) under Windows 11, against the same Vortex Rust 0.86.1 built the same
-way for that machine. The instruments, files, rows and rules are the same as on that page, section
+cores and 32 threads, AVX-512) under Windows 11, against Vortex Rust 0.86.1 built the same way for
+that machine. That page has since been measured against 0.90.0, and this one has not. The instruments, files, rows and rules are the same as on that page, section
 for section. What changes is the processor, the operating system and the file system under the page
 cache. [05-benchmarks.md](../design/05-benchmarks.md) explains what is compared and how each
 instrument measures, and [bench/README.md](../../bench/README.md) how to run them.
@@ -13,8 +13,8 @@ not affiliated with or endorsed by the Vortex project or LF Projects, LLC.
 Rust's ratios on this page belong to this machine. Its `vxbench` is built here, while the ceilings
 that `--ratio-check` and `--throughput --check` enforce are set on the arm64 machine against its own
 build, so the in-process axes, the takes and the writes on this page are measured but held to no
-ceiling. The per-encoding corpus is the generator's current one, the same 61 files as on the arm64
-page. The kernel tables' speedups are computed from the Mean column of their run.
+ceiling. The per-encoding corpus is the generator's, the same 61 files as on the arm64 page, written
+here by 0.86.1. The kernel tables' speedups are computed from the Mean column of their run.
 
 The ground rules:
 

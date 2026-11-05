@@ -801,6 +801,21 @@ internal static class ColumnCompressor
                 * Arrays.Decoders.Compressed.FastLanes.BytesPerBlockPerBit * Math.Max(1, 64 - BitOperations.LeadingZeroCount((ulong)Math.Max(entries - 1, 0)))
             : rows * FsstPlan.IndexPType(entries).ByteWidth();
 
+    /// <summary>
+    /// The most entries whose codes <see cref="CodeBytes"/> prices as those of <paramref name="entries"/>: the last count
+    /// the width that indexes them still holds.
+    /// </summary>
+    private static int CodeWidthHolds(int entries, bool packs)
+    {
+        if (!packs)
+        {
+            return entries <= byte.MaxValue ? byte.MaxValue : entries <= ushort.MaxValue ? ushort.MaxValue : int.MaxValue;
+        }
+
+        int bits = Math.Max(1, 64 - BitOperations.LeadingZeroCount((ulong)Math.Max(entries - 1, 0)));
+        return bits >= 31 ? int.MaxValue : 1 << bits;
+    }
+
     /// <summary>Below this many rows, a column is a candidate only if it is big in bytes.</summary>
     private const int MinimumRows = 64;
 
@@ -1199,30 +1214,67 @@ internal static class ColumnCompressor
             budget = temporal.EncodedSize;
         }
 
+        // A float's ALP, which the dictionary then has to beat, as an integer's has to beat its bit-packing.
+        bool sizeFirst = chunk.SizeFirst || (!chunk.IsDry && workspace is { SizeFirst: true });
+        AlpPlan? alp = AlpAhead(arena, nodeIndex, in node, target, cascade, in chunk, length, plain, sizeFirst, out bool alpPriced);
         ColumnPlan dictionary = ColumnPlan.Canonical;
         if (Allows(target, "vortex.dict") && !cascade.DictionaryIsDead)
         {
+            long against = alp is { } ahead ? Math.Min(budget, ahead.EncodedSize + DictionaryOverhead) : budget;
             dictionary = chunk.TableServes(length)
-                ? TabledDictionary(node, in chunk, length, budget, Allows(target, "fastlanes.bitpacked"))
-                : Dictionary(arena, node, comparer, length, budget, Allows(target, "fastlanes.bitpacked"));
+                ? TabledDictionary(node, in chunk, length, against, Allows(target, "fastlanes.bitpacked"))
+                : Dictionary(arena, node, comparer, length, against, Allows(target, "fastlanes.bitpacked"));
         }
         if (dictionary.Scheme != ColumnScheme.None)
         {
+            alp?.Release();
             temporal?.Release();
             return Sliceable(in dictionary, arena, nodeIndex, in node, target, workspace?.GranuleRows ?? 0, plain);
         }
 
         if (temporal is not null)
         {
+            alp?.Release();
             return ColumnPlan.ForDateTimeParts(temporal);
         }
 
         if (packed is { } winner)
         {
+            alp?.Release();
             return ColumnPlan.ForBitPacking(winner);
         }
 
-        return Trials(arena, nodeIndex, node, target, plain, cascade.IsValuesChild, cascade.Owner, workspace);
+        return Trials(arena, nodeIndex, node, target, plain, cascade.IsValuesChild, cascade.Owner, workspace, alpPriced, alp);
+    }
+
+    /// <summary>
+    /// A float column's ALP, priced before its dictionary is walked for, so that the dictionary has to beat it as an
+    /// integer's dictionary has to beat its bit-packing; null when it was not priced, or when it does not pay against the
+    /// plain column, which <paramref name="priced"/> tells apart.
+    /// </summary>
+    /// <remarks>
+    /// The dictionary is an exact verdict and goes before the trials, so it used to be held to the plain column alone,
+    /// where ALP, the trial a float column of short decimals takes, writes a fraction of it. Its codes priced at a byte or
+    /// more a row lost there; priced as they pack, they won: the per-encoding corpus's float32 column went out as a
+    /// dictionary on three chunks of four, 2,771,236 bytes where ALP writes 2,130,020, in three times ALP's write. The walk
+    /// held to the plain column also read most of a chunk of measurements before it could prove the dictionary lost, where
+    /// ALP's bytes prove it much sooner.
+    /// <para>
+    /// Only for a dictionary the walk prices. A table that serves is a dictionary that held on the chunk before, whose
+    /// price is arithmetic where ALP's is a pass over the values: a column of a few distinct floats would pay that pass on
+    /// every chunk for a verdict it already has. Not under size first, whose smallest trial displaces a dictionary larger
+    /// than it already, nor for the values child of a scheme, whose trials the owner remembers.
+    /// </para>
+    /// </remarks>
+    private static AlpPlan? AlpAhead(
+        CanonicalArena arena, int nodeIndex, in CanonicalNode node, VortexEdition target, Cascade cascade, in ChunkStats chunk,
+        int length, long plain, bool sizeFirst, out bool priced)
+    {
+        priced = !sizeFirst && !cascade.IsValuesChild
+            && node.Kind == CanonicalKind.Primitive && node.PType.IsFloat()
+            && Allows(target, "vortex.alp") && Allows(target, "vortex.dict") && !cascade.DictionaryIsDead
+            && !chunk.TableServes(length);
+        return priced ? AlpPlan.TryBuild(arena, nodeIndex, plain) : null;
     }
 
     /// <summary>
@@ -1250,14 +1302,16 @@ internal static class ColumnCompressor
     /// what the trials made of its last chunk's values; null for any other column.
     /// </param>
     /// <param name="workspace">The writer's blob workspace, for the zstd trial's encoder; null for one of its own.</param>
+    /// <param name="alpPriced">Whether <see cref="AlpAhead"/> priced ALP already, under the same <paramref name="budget"/>.</param>
+    /// <param name="alp">What it priced, which the trial takes rather than encode the column again; null when ALP did not pay.</param>
     private static ColumnPlan Trials(
         CanonicalArena arena, int nodeIndex, CanonicalNode node, VortexEdition target, long budget,
-        bool gatesOff, ColumnWriter? owner, ArrayBlobWriter.Workspace? workspace)
+        bool gatesOff, ColumnWriter? owner, ArrayBlobWriter.Workspace? workspace, bool alpPriced = false, AlpPlan? alp = null)
     {
         // Values zstd took the chunk before go to zstd alone, when it prices them; every candidate
         // is tried again one chunk in eight, and on every chunk of a size-first write.
         ColumnWriter? remembers = gatesOff && workspace is not { SizeFirst: true } ? owner : null;
-        ColumnPlan plan = Candidates(arena, nodeIndex, node, target, budget, gatesOff, remembers is { ValuesHeldByZstd: true }, workspace, out bool everyCandidate);
+        ColumnPlan plan = Candidates(arena, nodeIndex, node, target, budget, gatesOff, remembers is { ValuesHeldByZstd: true }, workspace, out bool everyCandidate, alpPriced, alp);
         remembers?.NoteValues(plan.Scheme, everyCandidate);
         return plan;
     }
@@ -1269,7 +1323,8 @@ internal static class ColumnCompressor
     /// </summary>
     private static ColumnPlan Candidates(
         CanonicalArena arena, int nodeIndex, CanonicalNode node, VortexEdition target, long budget,
-        bool gatesOff, bool zstdAlone, ArrayBlobWriter.Workspace? workspace, out bool everyCandidate)
+        bool gatesOff, bool zstdAlone, ArrayBlobWriter.Workspace? workspace, out bool everyCandidate,
+        bool alpPriced = false, AlpPlan? alpAhead = null)
     {
         everyCandidate = true;
 
@@ -1282,9 +1337,10 @@ internal static class ColumnCompressor
         // Floats get their own scheme, for the same reason integers get frame of reference: a
         // column of prices or coordinates is a column of short decimals, and the integer they
         // scale to bit-packs where the double never could.
+        // ALP priced ahead of the dictionary is taken as it was priced, under this same ceiling.
         if (node.Kind == CanonicalKind.Primitive && node.PType.IsFloat() && Allows(target, "vortex.alp"))
         {
-            if (AlpPlan.TryBuild(arena, nodeIndex, plain) is { } alp)
+            if ((alpPriced ? alpAhead : AlpPlan.TryBuild(arena, nodeIndex, plain)) is { } alp)
             {
                 return ColumnPlan.ForAlp(alp) with { PredictedBytes = alp.EncodedSize };
             }
@@ -1525,22 +1581,51 @@ internal static class ColumnCompressor
         // `codes` is rented for the same reason: it is written before the abandonment test can
         // fire, so allocating it would hand every column that considers a dictionary and refuses
         // one a full row vector to throw away.
-        int capacity = BucketCount(length);
+        //
+        // The tables hold the entries the budget pays for and no more: the bound below gives up at
+        // the first entry past them, its codes priced at nothing. A column the bit-packing takes
+        // affords a few thousand of them where its chunk has tens of thousands of rows, and tables
+        // sized by the rows were filled, then probed, over a hundred kilobytes and more.
+        int entries = (int)Math.Min(length, Math.Max(1, (budget - DictionaryOverhead + minimumEntry - 1) / minimumEntry));
+        int capacity = BucketCount(entries);
         int[] buckets = WorkArrays.Rent<int>(capacity);
-        int[] chain = WorkArrays.Rent<int>(Math.Max(length, 1));
-        int[] firstRows = WorkArrays.Rent<int>(Math.Max(length, 1));
+        int[] chain = WorkArrays.Rent<int>(Math.Max(entries, 1));
+        int[] firstRows = WorkArrays.Rent<int>(Math.Max(entries, 1));
         int[] codes = WorkArrays.Rent<int>(Math.Max(length, 1));
         bool kept = false;
         try
         {
             buckets.AsSpan(0, capacity).Fill(-1);
             int mask = capacity - 1;
-            int distinct = 0;
+
+            // A column of four- or eight-byte values with no null, most of those the walk reads, is walked a word a row.
+            int distinct = node.Kind == CanonicalKind.Primitive && comparer.Mask.AllValid
+                ? node.PType.ByteWidth() switch
+                {
+                    sizeof(ulong) => WalkWords(
+                        MemoryMarshal.Cast<byte, ulong>(node.Values.Span)[..length], entries, buckets, mask, chain, firstRows, codes, minimumEntry, budget, packs),
+                    sizeof(uint) => WalkWords(
+                        MemoryMarshal.Cast<byte, uint>(node.Values.Span)[..length], entries, buckets, mask, chain, firstRows, codes, minimumEntry, budget, packs),
+                    _ => NotWalked,
+                }
+                : NotWalked;
+            if (distinct == Abandoned)
+            {
+                return ColumnPlan.Canonical;
+            }
+
+            // The codes' price only moves when the distinct values pass a power of two, where their width grows: it is
+            // priced again there, not at each new value. The walk of a column of measurements meets a new value nearly
+            // every row, and a call per value was a tenth of its cycles.
+            long codeBytes = 0;
+            int widthHolds = 0;
 
             // Each row's hash is taken before the row ahead of it is looked up: a chain walk whose
             // branch was guessed wrong throws away what came after it, never the hash waiting for it.
-            int next = length > 0 ? comparer.Hash(0) : 0;
-            for (int row = 0; row < length; row++)
+            int end = distinct == NotWalked ? length : 0;
+            distinct = end > 0 ? 0 : Math.Max(distinct, 0);
+            int next = end > 0 ? comparer.Hash(0) : 0;
+            for (int row = 0; row < end; row++)
             {
                 int bucket = next & mask;
                 next = row + 1 < length ? comparer.Hash(row + 1) : 0;
@@ -1571,7 +1656,12 @@ internal static class ColumnCompressor
                     // grows; and `EntriesSize` is at least `distinct * minimumEntry` for every kind
                     // that reaches this line. The final test below is this same expression with the
                     // entries priced exactly.
-                    long codeBytes = CodeBytes(length, distinct, packs);
+                    if (distinct > widthHolds)
+                    {
+                        codeBytes = CodeBytes(length, distinct, packs);
+                        widthHolds = CodeWidthHolds(distinct, packs);
+                    }
+
                     if (codeBytes + ((long)distinct * minimumEntry) + DictionaryOverhead >= budget)
                     {
                         return ColumnPlan.Canonical;
@@ -1607,6 +1697,88 @@ internal static class ColumnCompressor
 
             WorkArrays.Return(chain);
             WorkArrays.Return(buckets);
+        }
+    }
+
+    /// <summary>What <see cref="WalkWords"/> returns when the dictionary provably cannot win.</summary>
+    private const int Abandoned = -1;
+
+    /// <summary>What stands for <see cref="WalkWords"/>'s answer when the column is not one it walks.</summary>
+    private const int NotWalked = -2;
+
+    /// <summary>
+    /// <see cref="Dictionary"/>'s walk over a column of four- or eight-byte values with no null: the same codes, first
+    /// rows and abandonment, each value read as one word, hashed with no call, and compared with the distinct values kept
+    /// beside the chains rather than read again through their first rows.
+    /// </summary>
+    /// <remarks>
+    /// The values are compared by their bits, as the comparer's walk compares them: -0.0 and +0.0 are two entries. Codes
+    /// go out in order of first appearance whatever the hash, so the plan is the comparer's plan. A row cost that walk
+    /// three calls (the comparer's hash, its equality, the read under it) and two dependent loads per candidate, and the
+    /// walk reads thousands of rows of a column the bit-packing then takes: on the per-encoding corpus's table of fifty
+    /// integer columns, the walks were 15 % of the write.
+    /// </remarks>
+    /// <returns>The distinct values, or <see cref="Abandoned"/>.</returns>
+    private static int WalkWords<T>(
+        ReadOnlySpan<T> values, int entries, int[] buckets, int mask, int[] chain, int[] firstRows, int[] codes, int minimumEntry,
+        long budget, bool packs)
+        where T : unmanaged, IBinaryInteger<T>
+    {
+        int length = values.Length;
+        T[] keys = WorkArrays.Rent<T>(Math.Max(entries, 1));
+        try
+        {
+            ulong seed = KeyHash.MixSeed;
+            ref T value = ref MemoryMarshal.GetReference(values);
+            ref int bucketAt = ref MemoryMarshal.GetArrayDataReference(buckets);
+            ref int chainAt = ref MemoryMarshal.GetArrayDataReference(chain);
+            ref T keyAt = ref MemoryMarshal.GetArrayDataReference(keys);
+            int distinct = 0;
+            long codeBytes = 0;
+            int widthHolds = 0;
+
+            // The next row's hash is taken before this row's chain is walked, as the comparer's walk takes it.
+            int next = length > 0 ? (int)KeyHash.SeededMix(ulong.CreateTruncating(value), seed) : 0;
+            for (int row = 0; row < length; row++)
+            {
+                T word = Unsafe.Add(ref value, row);
+                int bucket = next & mask;
+                next = row + 1 < length ? (int)KeyHash.SeededMix(ulong.CreateTruncating(Unsafe.Add(ref value, row + 1)), seed) : 0;
+                int code = Unsafe.Add(ref bucketAt, bucket);
+                while (code >= 0 && Unsafe.Add(ref keyAt, code) != word)
+                {
+                    code = Unsafe.Add(ref chainAt, code);
+                }
+
+                if (code < 0)
+                {
+                    code = distinct++;
+                    Unsafe.Add(ref keyAt, code) = word;
+                    firstRows[code] = row;
+                    Unsafe.Add(ref chainAt, code) = Unsafe.Add(ref bucketAt, bucket);
+                    Unsafe.Add(ref bucketAt, bucket) = code;
+
+                    // The comparer's walk's bound, on the same numbers.
+                    if (distinct > widthHolds)
+                    {
+                        codeBytes = CodeBytes(length, distinct, packs);
+                        widthHolds = CodeWidthHolds(distinct, packs);
+                    }
+
+                    if (codeBytes + ((long)distinct * minimumEntry) + DictionaryOverhead >= budget)
+                    {
+                        return Abandoned;
+                    }
+                }
+
+                codes[row] = code;
+            }
+
+            return distinct;
+        }
+        finally
+        {
+            WorkArrays.Return(keys);
         }
     }
 
@@ -1969,17 +2141,21 @@ internal static class ColumnCompressor
             bestScheme = ColumnScheme.DateTimeParts;
         }
 
-        // The dictionary, against the best so far: it returns a plan only when it beats it.
+        // The dictionary, against the best so far: it returns a plan only when it beats it. A float's against its ALP too,
+        // as an integer's against its bit-packing.
+        AlpPlan? alp = AlpAhead(arena, nodeIndex, in node, target, cascade, in chunk, length, plain, sizeFirst, out bool alpPriced);
         if (Allows(target, "vortex.dict") && !cascade.DictionaryIsDead)
         {
+            long against = alp is { } ahead ? Math.Min(best, ahead.EncodedSize + DictionaryOverhead) : best;
             ColumnPlan dictionary = chunk.TableServes(length)
-                ? TabledDictionary(node, in chunk, length, best, Allows(target, "fastlanes.bitpacked"))
-                : Dictionary(arena, node, comparer, length, best, Allows(target, "fastlanes.bitpacked"));
+                ? TabledDictionary(node, in chunk, length, against, Allows(target, "fastlanes.bitpacked"))
+                : Dictionary(arena, node, comparer, length, against, Allows(target, "fastlanes.bitpacked"));
             if (dictionary.Scheme != ColumnScheme.None)
             {
                 // The runs walked when run-end competes, which the dictionary beat, go back to the pool.
                 walkedRuns.ReleaseCodes();
                 temporal?.Release();
+                alp?.Release();
                 if (sizeFirst && dictionary.PredictedBytes > 0
                     && SmallestTrial(arena, nodeIndex, node, target, dictionary.PredictedBytes, cascade.IsValuesChild, workspace) is { Scheme: not ColumnScheme.None } smaller)
                 {
@@ -2013,6 +2189,11 @@ internal static class ColumnCompressor
             walkedRuns.ReleaseCodes();
         }
 
+        if (bestScheme != ColumnScheme.None)
+        {
+            alp?.Release();
+        }
+
         switch (bestScheme)
         {
             case ColumnScheme.RunEnd:
@@ -2028,7 +2209,7 @@ internal static class ColumnCompressor
             default:
                 return sizeFirst
                     ? SmallestTrial(arena, nodeIndex, node, target, plain, cascade.IsValuesChild, workspace)
-                    : Trials(arena, nodeIndex, node, target, plain, cascade.IsValuesChild, cascade.Owner, workspace);
+                    : Trials(arena, nodeIndex, node, target, plain, cascade.IsValuesChild, cascade.Owner, workspace, alpPriced, alp);
         }
     }
 
