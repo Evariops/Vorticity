@@ -465,6 +465,18 @@ internal sealed class PathTally
         _key.Walk(census.Root, 0, (rows, length) => Add(_key.Span(length), rows, exact: true));
     }
 
+    /// <summary>Adds what <paramref name="other"/> tallied: each path and class's rows, exact where both were.</summary>
+    internal void Merge(PathTally other)
+    {
+        Partial |= other.Partial;
+        foreach (KeyValuePair<byte[], Tallied> path in other._paths)
+        {
+            ref Tallied held = ref CollectionsMarshal.GetValueRefOrAddDefault(_paths, path.Key, out bool exists);
+            held.Rows += path.Value.Rows;
+            held.Exact = exists ? held.Exact && path.Value.Exact : path.Value.Exact;
+        }
+    }
+
     /// <summary>The path and class <paramref name="key"/> names, with its rows added.</summary>
     private void Add(ReadOnlySpan<byte> key, double rows, bool exact)
     {

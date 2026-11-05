@@ -26,6 +26,21 @@ internal sealed record PathsQuestion(PathColumn[] Columns, bool Exact, QueryMemo
 {
     /// <summary>What the question reads, counted as it reads; one for every copy of it.</summary>
     internal PathsReads Reads { get; } = new PathsReads();
+
+    /// <summary>The same question with tallies and reads of its own, for a part of the source answered beside the others.</summary>
+    internal PathsQuestion Alone() =>
+        new PathsQuestion(Array.ConvertAll(Columns, column => new PathColumn(column.Field, new PathTally())), Exact, Memory);
+
+    /// <summary>Adds to this question's tallies and reads what <paramref name="part"/>, one of its <see cref="Alone"/>, counted.</summary>
+    internal void Take(PathsQuestion part)
+    {
+        for (int c = 0; c < Columns.Length; c++)
+        {
+            Columns[c].Tally.Merge(part.Columns[c].Tally);
+        }
+
+        Reads.Add(part.Reads);
+    }
 }
 
 /// <summary>What a question for the paths reads, counted as it reads (<see cref="PathsReading"/>).</summary>
@@ -37,6 +52,17 @@ internal sealed class PathsReads
     internal long EdgeRows;
     internal int Censuses;
     internal long CensusRows;
+
+    /// <summary>Adds what <paramref name="other"/> read.</summary>
+    internal void Add(PathsReads other)
+    {
+        Directories += other.Directories;
+        Unopened += other.Unopened;
+        EdgeGranules += other.EdgeGranules;
+        EdgeRows += other.EdgeRows;
+        Censuses += other.Censuses;
+        CensusRows += other.CensusRows;
+    }
 
     /// <summary>What was read so far.</summary>
     internal PathsReading Reading() => new PathsReading(Directories, Unopened, EdgeGranules, EdgeRows, Censuses, CensusRows);

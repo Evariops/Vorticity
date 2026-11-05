@@ -73,6 +73,33 @@ public sealed partial class VariantPathsTests
     }
 
     /// <summary>
+    /// The objects answered side by side, eight at once, give the answer one at a time gives: each path's rows, estimates
+    /// among them, whether they are exact, and what was read.
+    /// </summary>
+    [Fact]
+    public async Task ObjectsAnsweredSideBySideAnswerAsOneAtATime()
+    {
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using (VortexDataset dataset = await CreateAsync(store))
+        {
+            await FillAsync(dataset, new Random(41));
+        }
+
+        await using VortexSession alone = VortexSession.Create(static options => options.MaxDegreeOfParallelism = 1);
+        await using VortexSession eight = VortexSession.Create(static options => options.MaxDegreeOfParallelism = 8);
+        await using VortexDataset one = await VortexDataset.OpenAsync(store, new DatasetOptions { Session = alone }, Ct);
+        await using VortexDataset many = await VortexDataset.OpenAsync(store, new DatasetOptions { Session = eight }, Ct);
+        foreach ((string name, Func<Probe<Event>, Predicate>? filter, _) in Questions)
+        {
+            VariantPaths serial = await Scan(one, filter).PathsAsync(r => r.Attributes, cancellationToken: Ct);
+            VariantPaths parallel = await Scan(many, filter).PathsAsync(r => r.Attributes, cancellationToken: Ct);
+            Assert.True(serial.Count > 0, name);
+            Assert.Equal(serial.Select(path => (Key(path), path.Rows, path.Exact)), parallel.Select(path => (Key(path), path.Rows, path.Exact)));
+            Assert.Equal((serial.Complete, serial.Reading), (parallel.Complete, parallel.Reading));
+        }
+    }
+
+    /// <summary>
     /// A window of the key, over appended objects and over compacted ones: the granules it cuts are read again and their kept
     /// rows counted, so that every path listed is held by a kept row, every path a kept row holds is listed, and a count said
     /// exact is exact. Keys that are data, a user's score, leave paths in those granules' other rows that the kept rows lack.

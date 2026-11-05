@@ -527,6 +527,39 @@ internal sealed class ScanContext : IDisposable
     internal bool VariantsApart { get; set; }
 
     /// <summary>
+    /// The top-level keys of a shredded variant column a read of it as its shredding holds it decodes, those the column's
+    /// directory names in the rows read; null for every key. Behind the pushed holder, which a scan that sets none never makes.
+    /// </summary>
+    internal Types.Variants.ApartKeys? ApartKeys
+    {
+        get => _pushed?.ApartKeys;
+        set
+        {
+            if (value is not null || _pushed is not null)
+            {
+                (_pushed ??= new Pushed()).ApartKeys = value;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Whether the scan reads a few rows of each chunk it reads, a part of a file's rows read again: a decoder then decodes
+    /// of a child that every range of its node reads whole the part the range reads, where a scan of many ranges of the node
+    /// decodes the child once for all of them. Behind the pushed holder, as <see cref="ApartKeys"/>.
+    /// </summary>
+    internal bool FewRowsOfChunks
+    {
+        get => _pushed is { FewRowsOfChunks: true };
+        set
+        {
+            if (value || _pushed is not null)
+            {
+                (_pushed ??= new Pushed()).FewRowsOfChunks = value;
+            }
+        }
+    }
+
+    /// <summary>
     /// The columns the scan's consumer reads through functions alone, which a split whose zones give their values takes
     /// from them, per scan like <see cref="Metrics"/>; null for none (<see cref="Scanning.ZoneKeyReads"/>).
     /// </summary>
@@ -715,6 +748,8 @@ internal sealed class ScanContext : IDisposable
         internal Layouts.FieldMask Fields;
         internal bool FieldsHonoured;
         internal ulong EncodedFields;
+        internal Types.Variants.ApartKeys? ApartKeys;
+        internal bool FewRowsOfChunks;
     }
 
     private Pushed? _pushed;
@@ -1765,6 +1800,8 @@ internal sealed class ScanContext : IDisposable
         ZoneKeys = null;
         Granules = null;
         VariantsApart = false;
+        ApartKeys = null;
+        FewRowsOfChunks = false;
         Along?.Clear();
         if (_memory is { } memory)
         {

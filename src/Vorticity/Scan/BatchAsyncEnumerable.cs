@@ -591,6 +591,16 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         Lane lane = NewLane(first.File, first.LiveBlocks, first.Metrics, first.KeepEncodings);
         lane.Context.VariantKeys = first.VariantKeys;
         lane.Context.VariantsApart = first.VariantsApart;
+        if (first.ApartKeys is { } apartKeys)
+        {
+            lane.Context.ApartKeys = apartKeys;
+        }
+
+        if (first.FewRowsOfChunks)
+        {
+            lane.Context.FewRowsOfChunks = true;
+        }
+
         lane.Context.ZoneKeys = first.ZoneKeys;
         lane.Context.Granules = _granules is { } geometry
             ? new Indexes.GranulePlans(geometry, first.File, _take, _live, Scanned, lane.Context.GranuleScratch)
@@ -639,6 +649,36 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
                 if (lane is not null)
                 {
                     lane.Context.VariantsApart = value;
+                }
+            }
+        }
+    }
+
+    /// <summary>Tells the lanes they read a few rows of each chunk (<see cref="ScanContext.FewRowsOfChunks"/>).</summary>
+    internal bool FewRowsOfChunks
+    {
+        set
+        {
+            foreach (Lane? lane in _lanes)
+            {
+                if (lane is not null)
+                {
+                    lane.Context.FewRowsOfChunks = value;
+                }
+            }
+        }
+    }
+
+    /// <summary>Tells the lanes which keys of the shredded variant columns they hand back apart to decode.</summary>
+    internal Types.Variants.ApartKeys? ApartKeys
+    {
+        set
+        {
+            foreach (Lane? lane in _lanes)
+            {
+                if (lane is not null)
+                {
+                    lane.Context.ApartKeys = value;
                 }
             }
         }

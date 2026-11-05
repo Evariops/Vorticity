@@ -84,6 +84,52 @@ public sealed class PathCensusMergeTests
         Same(expected.Root, actual.Root, "$");
     }
 
+    /// <summary>
+    /// Censuses that keep the spans of each path's rows in each class, a writer's of an append's rows: the rows cut in slices,
+    /// each counted by a census of a lane cleared after the slice before, and merged in order, make the directory the rows
+    /// counted in order make, byte for byte. Keys come and go along the rows, a key changes class, and slices end within a
+    /// group and within a span.
+    /// </summary>
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    public void SlicesThatKeepTheirSpansMergeIntoTheDirectoryOfTheRowsInOrder(int seed)
+    {
+        const int GroupRows = 64;
+        Random random = new Random(seed);
+        Variant[] rows = new Variant[9_000];
+        for (int i = 0; i < rows.Length; i++)
+        {
+            rows[i] = (i / 700) % 3 != 1
+                ? Row(random, keys: 60)
+                : Variant.Object(("route", Variant.From($"/route/{random.Next(30)}")), ($"burst{i / 700}", Variant.From((long)i)), ("mixed", Variant.From($"t{i % 7}")));
+        }
+
+        int[] cuts = [0, .. Enumerable.Range(0, 5).Select(_ => random.Next(rows.Length)).Order(), rows.Length];
+        PathCensus whole = new PathCensus(stringBoundBytes: 8, groupRows: GroupRows);
+        Count(whole, rows, 0, rows.Length);
+
+        PathCensus merged = new PathCensus(stringBoundBytes: 8, groupRows: GroupRows);
+        Count(merged, rows, cuts[0], cuts[1]);
+        PathCensus lane = new PathCensus(stringBoundBytes: 8, groupRows: GroupRows);
+        Count(lane, [.. Enumerable.Range(0, 500).Select(_ => Row(random, keys: 60, prefix: "old"))], 0, 500);
+        for (int part = 1; part + 1 < cuts.Length; part++)
+        {
+            lane.Clear();
+            Count(lane, rows, cuts[part], cuts[part + 1]);
+            merged.Merge(lane);
+        }
+
+        Assert.Equal(whole.Rows, merged.Rows);
+        Assert.Equal(
+            Convert.ToHexString(Vorticity.Indexes.VariantDirectory.From(whole, null, GroupRows).ToBytes()),
+            Convert.ToHexString(Vorticity.Indexes.VariantDirectory.From(merged, null, GroupRows).ToBytes()));
+        whole.Release();
+        merged.Release();
+        lane.Release();
+    }
+
     /// <summary>A row of a log's attributes: a few keys every row holds, nested objects, lists, texts past the bound, and a key that is data.</summary>
     private static Variant Row(Random random, int keys, string prefix = "k")
     {

@@ -295,7 +295,11 @@ internal sealed class DictDecoder : ArrayDecoder
         int entries = valuesLength;
         int[]? narrowed = null;
         int valuesIndex;
-        if (selective && !keep && produced * NarrowedValues < valuesLength && context.ChildSelectsByRow(in node, 1, dtype))
+        // A scan that reads a few rows of each chunk narrows a range's codes as well, its values reaching an entry through the
+        // frame that holds it: the whole values, decoded once for every range of the chunk, are the chunk's for a range's few.
+        bool fewOfChunk = !selective && !whole && !keep && context.Scan.FewRowsOfChunks && produced * NarrowedValues < valuesLength
+            && !context.ChildRetained(in node, 1) && context.ChildSelectsWithoutFullDecode(in node, 1, dtype);
+        if (fewOfChunk || (selective && !keep && produced * NarrowedValues < valuesLength && context.ChildSelectsByRow(in node, 1, dtype)))
         {
             narrowed = System.Buffers.ArrayPool<int>.Shared.Rent(2 * produced);
             entries = Narrow(codes, codesPType, in codesValidity, produced, valuesLength, narrowed);

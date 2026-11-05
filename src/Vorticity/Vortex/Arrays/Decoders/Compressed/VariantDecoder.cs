@@ -112,6 +112,13 @@ internal sealed class VariantDecoder : ArrayDecoder
         if (context.Scan.VariantsApart)
         {
             // The column's own shredding alone: a key's values of several forms, a variant of its own below, put back as they are.
+            // Of its keys, those the read names alone, a projection the struct of them takes: no row read holds the others.
+            Layouts.FieldMask keys = context.Scan.ApartKeys is { } named && shreddedType.Kind == DTypeKind.Struct
+                && node.GetChild(1).Encoding == ArrayEncodingId.Struct
+                ? named.MaskOf(shreddedType)
+                : Layouts.FieldMask.All;
+            Layouts.FieldMask pushed = keys.IsAll ? keys : context.Scan.ExchangePushedFields(keys);
+            bool honoured = !keys.IsAll && context.Scan.FieldsHonoured;
             int apart;
             context.Scan.VariantsApart = false;
             try
@@ -121,6 +128,11 @@ internal sealed class VariantDecoder : ArrayDecoder
             finally
             {
                 context.Scan.VariantsApart = true;
+                if (!keys.IsAll)
+                {
+                    context.Scan.ExchangePushedFields(pushed);
+                    context.Scan.FieldsHonoured = honoured;
+                }
             }
 
             return ShreddedTree.Group(context, dtype, core, apart, out _);
