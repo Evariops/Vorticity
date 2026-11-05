@@ -390,15 +390,6 @@ internal sealed class StringBounds
                 continue;
             }
 
-            // A row whose view is the valid row's before it holds that row's value, which the bounds hold already: the
-            // rows of a sorted column, which runs of one value make, pass two words a row.
-            if (row > from
-                && Unsafe.ReadUnaligned<Int128>(ref Unsafe.Add(ref viewAt, row * 16)) == Unsafe.ReadUnaligned<Int128>(ref Unsafe.Add(ref viewAt, (row - 1) * 16))
-                && (bits.IsEmpty || CanonicalSupport.BitAt(bits, bitOffset + row - 1)))
-            {
-                continue;
-            }
-
             ReadOnlySpan<byte> view = views.Slice(row * 16, 16);
             int size = BinaryPrimitives.ReadInt32LittleEndian(view);
             ReadOnlySpan<byte> first;
@@ -412,6 +403,11 @@ internal sealed class StringBounds
             }
             else
             {
+                if (SameAsBefore(ref viewAt, bits, bitOffset, row, from))
+                {
+                    continue;
+                }
+
                 return row;
             }
 
@@ -420,7 +416,12 @@ internal sealed class StringBounds
             if ((key < minKey) | ((key == minKey) & (rank < minRank))
                 | (key > maxKey) | ((key == maxKey) & (rank > maxRank)))
             {
-                if (exact && key >= minKey && key <= maxKey && Within(view, size, heap, keep, in _lowRank, in _highRank))
+                // A row whose view is the valid row's before it holds that row's value, which the bounds hold already:
+                // the rows of a sorted column, which runs of one value make, pass two words a row where their key, which
+                // ties a long bound's, cannot settle them. Asked only of a row the key stops: on a column the keys
+                // settle, a test per row whose answer has no pattern cost its bounds a fifth.
+                if (SameAsBefore(ref viewAt, bits, bitOffset, row, from)
+                    || (exact && key >= minKey && key <= maxKey && Within(view, size, heap, keep, in _lowRank, in _highRank)))
                 {
                     continue;
                 }
@@ -431,6 +432,13 @@ internal sealed class StringBounds
 
         return end;
     }
+
+    /// <summary>Whether row <paramref name="row"/>'s view is that of the valid row before it, within the rows from <paramref name="from"/>.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static bool SameAsBefore(ref byte views, ReadOnlySpan<byte> bits, int bitOffset, int row, int from) =>
+        row > from
+        && Unsafe.ReadUnaligned<Int128>(ref Unsafe.Add(ref views, row * 16)) == Unsafe.ReadUnaligned<Int128>(ref Unsafe.Add(ref views, (row - 1) * 16))
+        && (bits.IsEmpty || CanonicalSupport.BitAt(bits, bitOffset + row - 1));
 
     /// <summary>
     /// The rows from <paramref name="row"/> that pass four at a time, each null or of four bytes or
