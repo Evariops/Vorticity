@@ -79,6 +79,7 @@ internal sealed class DistributionSlot<TValue, TResult> : SketchSlot<QuantileSke
         Scratch.Return(ref _values);
         Scratch.Return(ref _clip);
         Scratch.Return(ref _picked);
+        _rows.Release();
     }
 
     internal override void StepRange(in BatchInput input, int start, int end, int group)

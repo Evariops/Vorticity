@@ -129,6 +129,15 @@ internal sealed class BoolSlot<TResult> : RecordSlot<byte, TResult>
 
     internal override byte Seed => 0;
 
+    /// <summary>The masks joined and the words of the batch's values and validity, back to the process's shelf.</summary>
+    private protected override void ReleaseScratch()
+    {
+        _rows.Release();
+        _trues.Release();
+        Scratch.Return(ref _bits);
+        Scratch.Return(ref _validity);
+    }
+
     internal override void StepRange(in BatchInput input, int start, int end, int group)
     {
         ReadOnlySpan<ulong> bits = Load(input, out ReadOnlySpan<ulong> valid);

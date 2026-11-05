@@ -1860,6 +1860,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         Scratch.Return(ref _homes);
         Scratch.Return(ref _left);
         Scratch.Return(ref _values);
+        _entries.Release();
         ReleaseCodes();
 
         // The slabs of the pages of a key numbered by value, each given once, by the page that starts it.

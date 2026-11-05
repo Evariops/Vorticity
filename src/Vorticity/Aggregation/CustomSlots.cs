@@ -17,6 +17,14 @@ internal sealed class CustomSlot<T, TAggregator, TState> : RecordSlot<TState, TS
 
     internal override TState Seed => TAggregator.Seed();
 
+    /// <summary>The values, the masks joined and the window's words, back to the process's shelf.</summary>
+    private protected override void ReleaseScratch()
+    {
+        Scratch.Return(ref _values);
+        _rows.Release();
+        Scratch.Return(ref _clip);
+    }
+
     internal override void StepRange(in BatchInput input, int start, int end, int group)
     {
         ReadOnlySpan<T> values = FixedReader.Values(input.Arena, input.Node, StorageKind.Primitive, ref _values, out ReadOnlySpan<ulong> valid);
@@ -69,6 +77,14 @@ internal sealed class EncodedCustomSlot<T, TAggregator, TState> : RecordSlot<TSt
     private ulong[] _clip = [];
 
     internal override TState Seed => TAggregator.Seed();
+
+    /// <summary>The values, the masks joined and the window's words, back to the process's shelf.</summary>
+    private protected override void ReleaseScratch()
+    {
+        Scratch.Return(ref _values);
+        _rows.Release();
+        Scratch.Return(ref _clip);
+    }
 
     internal override void StepRange(in BatchInput input, int start, int end, int group)
     {

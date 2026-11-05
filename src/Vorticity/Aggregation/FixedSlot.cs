@@ -70,6 +70,14 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : RecordSlot<TStat
 
     internal override TState Seed => _seed;
 
+    /// <summary>The values widened, the masks joined and the dictionary's counts, back to the process's shelf.</summary>
+    private protected override void ReleaseScratch()
+    {
+        _values.Release();
+        _rows.Release();
+        Scratch.Return(ref _counts);
+    }
+
     internal override void StepRange(in BatchInput input, int start, int end, int group)
     {
         TOp op = _op;
@@ -722,6 +730,9 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>, IPairedSl
         _shelf?.Give(_counts);
         _counts = [];
         _groups = 0;
+        _values.Release();
+        _rows.Release();
+        _distinct.Release();
     }
 
     internal override void Ungrouped()

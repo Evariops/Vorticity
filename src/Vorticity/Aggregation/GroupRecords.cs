@@ -374,6 +374,13 @@ internal abstract class RecordSlot<TState, TResult> : AggregateSlot<TResult>
             _array = [];
             _groups = 0;
         }
+
+        ReleaseScratch();
+    }
+
+    /// <summary>Gives the buffers the slot reads its batches through back to the process's shelf; nothing for a slot that keeps none.</summary>
+    private protected virtual void ReleaseScratch()
+    {
     }
 
     internal sealed override int StateBytes => RuntimeHelpers.IsReferenceOrContainsReferences<TState>() ? 0 : Unsafe.SizeOf<TState>();

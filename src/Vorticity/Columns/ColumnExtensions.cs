@@ -536,80 +536,235 @@ public static class ExtensionColumnExtensions
 internal static class Temporal
 {
     internal static DateOnly Date(CanonicalArena arena, int node, VortexType type, int index) =>
-        Dates.Convert(ColumnData.Int64(arena, node, index), type, index);
+        Dates.Of(type).Convert(ColumnData.Int64(arena, node, index), index);
 
     internal static TimeOnly Time(CanonicalArena arena, int node, VortexType type, int index) =>
-        Times.Convert(ColumnData.Int64(arena, node, index), type, index);
+        Times.Of(type).Convert(ColumnData.Int64(arena, node, index), index);
 
     internal static DateTime Timestamp(CanonicalArena arena, int node, VortexType type, int index) =>
-        Timestamps.Convert(ColumnData.Int64(arena, node, index), type, index);
+        Timestamps.Of(type).Convert(ColumnData.Int64(arena, node, index), index);
 
     internal static DateTimeOffset Zoned(CanonicalArena arena, int node, VortexType type, int index) =>
-        Zoneds.Convert(ColumnData.Int64(arena, node, index), type, index);
+        Zoneds.Of(type).Convert(ColumnData.Int64(arena, node, index), index);
 
-    /// <summary>Copies every row of a temporal column, its storage resolved once.</summary>
+    /// <summary>
+    /// Copies every row of a temporal column: its unit and zone read once, its storage's width chosen
+    /// once, where each row switched on the width and read the unit from the type, 2.3 to 4 ns a row.
+    /// </summary>
     internal static void Copy<T, TConvert>(CanonicalArena arena, int node, VortexType type, Span<T> destination)
         where T : struct
-        where TConvert : struct, IConvert<T>
+        where TConvert : struct, IConvert<TConvert, T>
     {
         ColumnData.IntegerStorage stored = ColumnData.Integers(arena, node);
         Span<T> into = ColumnData.Destination(destination, stored.Length);
-        for (int i = 0; i < into.Length; i++)
+        TConvert convert = TConvert.Of(type);
+        switch (stored.PType)
         {
-            into[i] = TConvert.Convert(stored[i], type, i);
+            case PType.I64:
+                Fill(stored.Values<long>(), convert, into);
+                break;
+            case PType.I32:
+                Fill(stored.Values<int>(), convert, into);
+                break;
+            default:
+                for (int i = 0; i < into.Length; i++)
+                {
+                    into[i] = convert.Convert(stored[i], i);
+                }
+
+                break;
         }
     }
 
     /// <summary>Copies every row of a nullable temporal column, a null for a null row.</summary>
     internal static void Copy<T, TConvert>(CanonicalArena arena, int node, VortexType type, Span<T?> destination)
         where T : struct
-        where TConvert : struct, IConvert<T>
+        where TConvert : struct, IConvert<TConvert, T>
     {
         ColumnData.IntegerStorage stored = ColumnData.Integers(arena, node);
         ReadOnlySpan<ulong> valid = ArenaWords.Validity(arena, node);
         Span<T?> into = ColumnData.Destination(destination, stored.Length);
+        TConvert convert = TConvert.Of(type);
+        switch (stored.PType)
+        {
+            case PType.I64:
+                Fill(stored.Values<long>(), valid, convert, into);
+                break;
+            case PType.I32:
+                Fill(stored.Values<int>(), valid, convert, into);
+                break;
+            default:
+                for (int i = 0; i < into.Length; i++)
+                {
+                    into[i] = ColumnData.IsValid(valid, i) ? convert.Convert(stored[i], i) : null;
+                }
+
+                break;
+        }
+    }
+
+    private static void Fill<TStorage, T, TConvert>(ReadOnlySpan<TStorage> values, TConvert convert, Span<T> into)
+        where TStorage : unmanaged, IBinaryInteger<TStorage>
+        where T : struct
+        where TConvert : struct, IConvert<TConvert, T>
+    {
+        values = values[..into.Length];
         for (int i = 0; i < into.Length; i++)
         {
-            into[i] = ColumnData.IsValid(valid, i) ? TConvert.Convert(stored[i], type, i) : null;
+            into[i] = convert.Convert(long.CreateTruncating(values[i]), i);
         }
     }
 
-    /// <summary>One temporal type's conversion from its storage.</summary>
-    internal interface IConvert<T>
+    private static void Fill<TStorage, T, TConvert>(ReadOnlySpan<TStorage> values, ReadOnlySpan<ulong> valid, TConvert convert, Span<T?> into)
+        where TStorage : unmanaged, IBinaryInteger<TStorage>
+        where T : struct
+        where TConvert : struct, IConvert<TConvert, T>
     {
-        static abstract T Convert(long stored, VortexType type, int index);
-    }
-
-    internal readonly struct Dates : IConvert<DateOnly>
-    {
-        public static DateOnly Convert(long stored, VortexType type, int index)
+        values = values[..into.Length];
+        if (valid.IsEmpty)
         {
-            long days = type.Unit == TimeUnit.Milliseconds ? TemporalUnits.FloorDiv(stored, TemporalUnits.MillisecondsPerDay) : stored;
-            return TemporalUnits.TryDate(days, out DateOnly date) ? date : OutOfRange<DateOnly>(index, stored, type);
+            for (int i = 0; i < into.Length; i++)
+            {
+                into[i] = convert.Convert(long.CreateTruncating(values[i]), i);
+            }
+
+            return;
+        }
+
+        for (int i = 0; i < into.Length; i++)
+        {
+            into[i] = ((valid[i >> 6] >> (i & 63)) & 1) != 0 ? convert.Convert(long.CreateTruncating(values[i]), i) : null;
         }
     }
 
-    internal readonly struct Times : IConvert<TimeOnly>
+    /// <summary>One temporal type's conversion from its storage, made once a column from its type.</summary>
+    internal interface IConvert<TSelf, T>
+        where TSelf : struct, IConvert<TSelf, T>
     {
-        public static TimeOnly Convert(long stored, VortexType type, int index) =>
-            TemporalUnits.TryTime(stored, type.Unit ?? TimeUnit.Microseconds, out TimeOnly time) ? time : OutOfRange<TimeOnly>(index, stored, type);
+        /// <summary>The conversion of a column of <paramref name="type"/>, its unit and zone read once.</summary>
+        static abstract TSelf Of(VortexType type);
+
+        /// <summary>The value stored at row <paramref name="index"/>; a value the type does not hold is a malformed file.</summary>
+        T Convert(long stored, int index);
     }
 
-    internal readonly struct Timestamps : IConvert<DateTime>
+    internal readonly struct Dates : IConvert<Dates, DateOnly>
     {
-        public static DateTime Convert(long stored, VortexType type, int index) =>
-            TemporalUnits.TryInstant(stored, type.Unit ?? TimeUnit.Microseconds, out long ticks)
-                ? new DateTime(ticks, type.TimeZone is null ? DateTimeKind.Unspecified : DateTimeKind.Utc)
-                : OutOfRange<DateTime>(index, stored, type);
+        private readonly VortexType _type;
+        private readonly bool _milliseconds;
+
+        private Dates(VortexType type)
+        {
+            _type = type;
+            _milliseconds = type.Unit == TimeUnit.Milliseconds;
+        }
+
+        public static Dates Of(VortexType type) => new Dates(type);
+
+        public DateOnly Convert(long stored, int index)
+        {
+            long days = _milliseconds ? TemporalUnits.FloorDiv(stored, TemporalUnits.MillisecondsPerDay) : stored;
+            return TemporalUnits.TryDate(days, out DateOnly date) ? date : OutOfRange<DateOnly>(index, stored, _type);
+        }
     }
 
-    internal readonly struct Zoneds : IConvert<DateTimeOffset>
+    internal readonly struct Times : IConvert<Times, TimeOnly>
     {
-        public static DateTimeOffset Convert(long stored, VortexType type, int index) =>
-            TemporalUnits.TryInstant(stored, type.Unit ?? TimeUnit.Microseconds, out long ticks)
-            && TemporalUnits.TryZoned(ticks, type.ZoneInfo, out DateTimeOffset value)
+        private readonly VortexType _type;
+        private readonly long _ticksPer;
+        private readonly bool _nanoseconds;
+
+        private Times(VortexType type)
+        {
+            _type = type;
+            (_ticksPer, _nanoseconds) = Scale(type);
+        }
+
+        public static Times Of(VortexType type) => new Times(type);
+
+        public TimeOnly Convert(long stored, int index) =>
+            ToTicks(stored, _ticksPer, _nanoseconds, out long ticks) && (ulong)ticks < TimeSpan.TicksPerDay
+                ? new TimeOnly(ticks)
+                : OutOfRange<TimeOnly>(index, stored, _type);
+    }
+
+    internal readonly struct Timestamps : IConvert<Timestamps, DateTime>
+    {
+        private readonly VortexType _type;
+        private readonly long _ticksPer;
+        private readonly bool _nanoseconds;
+        private readonly DateTimeKind _kind;
+
+        private Timestamps(VortexType type)
+        {
+            _type = type;
+            (_ticksPer, _nanoseconds) = Scale(type);
+            _kind = type.IsZoned ? DateTimeKind.Utc : DateTimeKind.Unspecified;
+        }
+
+        public static Timestamps Of(VortexType type) => new Timestamps(type);
+
+        public DateTime Convert(long stored, int index) =>
+            Instant(stored, _ticksPer, _nanoseconds, out long ticks)
+                ? new DateTime(ticks, _kind)
+                : OutOfRange<DateTime>(index, stored, _type);
+    }
+
+    internal readonly struct Zoneds : IConvert<Zoneds, DateTimeOffset>
+    {
+        private readonly VortexType _type;
+        private readonly TimeZoneInfo _zone;
+        private readonly long _ticksPer;
+        private readonly bool _nanoseconds;
+
+        private Zoneds(VortexType type)
+        {
+            _type = type;
+            _zone = type.ZoneInfo;
+            (_ticksPer, _nanoseconds) = Scale(type);
+        }
+
+        public static Zoneds Of(VortexType type) => new Zoneds(type);
+
+        public DateTimeOffset Convert(long stored, int index) =>
+            Instant(stored, _ticksPer, _nanoseconds, out long ticks) && TemporalUnits.TryZoned(ticks, _zone, out DateTimeOffset value)
                 ? value
-                : OutOfRange<DateTimeOffset>(index, stored, type);
+                : OutOfRange<DateTimeOffset>(index, stored, _type);
+    }
+
+    /// <summary>The ticks in one of a time's or a timestamp's units, and whether it is the nanosecond, finer than a tick.</summary>
+    private static (long TicksPer, bool Nanoseconds) Scale(VortexType type)
+    {
+        TimeUnit unit = type.Unit ?? TimeUnit.Microseconds;
+        return (TemporalUnits.TicksPer(unit), unit == TimeUnit.Nanoseconds);
+    }
+
+    /// <summary><see cref="TemporalUnits.TryToTicks"/> with its unit resolved once (<see cref="Scale"/>).</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static bool ToTicks(long value, long ticksPer, bool nanoseconds, out long ticks)
+    {
+        if (nanoseconds)
+        {
+            ticks = TemporalUnits.FloorDiv(value, 100);
+            return true;
+        }
+
+        long high = Math.BigMul(value, ticksPer, out ticks);
+        return high == ticks >> 63;
+    }
+
+    /// <summary><see cref="TemporalUnits.TryInstant"/> with its unit resolved once (<see cref="Scale"/>).</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static bool Instant(long stored, long ticksPer, bool nanoseconds, out long utcTicks)
+    {
+        if (!ToTicks(stored, ticksPer, nanoseconds, out long ticks) || ticks < -TemporalUnits.UnixEpochTicks || ticks > DateTime.MaxValue.Ticks - TemporalUnits.UnixEpochTicks)
+        {
+            utcTicks = 0;
+            return false;
+        }
+
+        utcTicks = TemporalUnits.UnixEpochTicks + ticks;
+        return true;
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]

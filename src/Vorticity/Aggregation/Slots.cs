@@ -928,6 +928,17 @@ internal struct MaskCache
             _ => _words.AsSpan(0, (input.Rows + 63) >> 6),
         };
     }
+
+    /// <summary>Gives the conjunction's words back to the process's shelf they grew from, its slot done with them.</summary>
+    internal void Release()
+    {
+        if (_words is { Length: > 0 } words)
+        {
+            ArrayShelf.Retained.Give(words);
+        }
+
+        this = default;
+    }
 }
 
 /// <summary>
@@ -1002,6 +1013,22 @@ internal struct CodeSet
         marked.Clear();
         _dirty = true;
         return marked;
+    }
+
+    /// <summary>Gives the table and the list back to the process's shelf they grew from, the slot done with them.</summary>
+    internal void Release()
+    {
+        if (_marked is { Length: > 0 } marked)
+        {
+            ArrayShelf.Retained.Give(marked);
+        }
+
+        if (_met is { Length: > 0 } met)
+        {
+            ArrayShelf.Retained.Give(met);
+        }
+
+        this = default;
     }
 
     private Span<byte> Marks(int entries)

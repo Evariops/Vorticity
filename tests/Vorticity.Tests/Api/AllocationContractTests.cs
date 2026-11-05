@@ -18,7 +18,7 @@ namespace Vorticity.Tests.Api;
 [Trait("Category", "ApiContract")]
 [Collection(nameof(AllocationCollection))]
 [Trait("Category", "RunsAlone")]
-public sealed class AllocationContractTests
+public sealed partial class AllocationContractTests
 {
     /// <summary>Full scans before any measurement: the JIT, its tiers and every lazy static settle.</summary>
     private const int WarmUp = 4;
@@ -45,6 +45,100 @@ public sealed class AllocationContractTests
             allocated == 0,
             string.Create(CultureInfo.InvariantCulture, $"a typed scan allocated {allocated} B over its {batches - 1} batches after the first"));
     }
+
+    /// <summary>
+    /// Instants turned into <see cref="DateTime"/>s cost nothing per batch, a UTC column's as a naive
+    /// one's: whether the type has the zone that decides their kind is read without decoding it, where
+    /// it was decoded for every row, 32 bytes a row.
+    /// </summary>
+    [Fact]
+    public async Task InstantsReadAsDateTimesAllocateNothingPerBatchAfterTheFirst()
+    {
+        ReleaseOnlyCeilings.Require();
+        await using VortexFile file = await VortexFile.OpenAsync(await InstantsAsync(), TestContext.Current.CancellationToken);
+        DateTime[] into = new DateTime[InstantRows];
+        for (int i = 0; i < WarmUp; i++)
+        {
+            await InstantsAsync(file, into);
+        }
+
+        (long batches, long allocated) = await InstantsAsync(file, into);
+        Assert.True(batches > 8, $"the file gave {batches} batches, too few to say anything per batch");
+        Assert.True(
+            allocated == 0,
+            string.Create(CultureInfo.InvariantCulture, $"reading instants allocated {allocated} B over {batches - 1} batches after the first"));
+    }
+
+    /// <summary>Every batch's two columns of instants copied out as <see cref="DateTime"/>s.</summary>
+    /// <returns>The batches, and the bytes allocated after the first one was delivered.</returns>
+    private static async Task<(long Batches, long Allocated)> InstantsAsync(VortexFile file, DateTime[] into)
+    {
+        Scan<Instants>.AsyncEnumerator batches = file.Scan<Instants>().With(Sequential).GetAsyncEnumerator(TestContext.Current.CancellationToken);
+        try
+        {
+            if (!await batches.MoveNextAsync())
+            {
+                return (0, 0);
+            }
+
+            int thread = Environment.CurrentManagedThreadId;
+            long start = GC.GetAllocatedBytesForCurrentThread();
+            long count = 1;
+            long sink = 0;
+            do
+            {
+                Columns<Instants> columns = batches.Current;
+                Span<DateTime> rows = into.AsSpan(0, columns.RowCount);
+                columns.Column<DateTime>(0).CopyTo(rows);
+                sink += rows[^1].Ticks;
+                columns.Column<DateTime>(1).CopyTo(rows);
+                sink += rows[^1].Ticks + columns.Column<DateTime>(0)[0].Ticks;
+                count++;
+            }
+            while (await batches.MoveNextAsync());
+
+            long allocated = GC.GetAllocatedBytesForCurrentThread() - start;
+            Assert.True(thread == Environment.CurrentManagedThreadId, "the scan left the measuring thread, so its count is not the scan's");
+            GC.KeepAlive(sink);
+            return (count - 1, allocated);
+        }
+        finally
+        {
+            await batches.DisposeAsync();
+        }
+    }
+
+    private const int InstantRows = 250_000;
+
+    private static readonly Lazy<Task<string>> InstantsFile = new Lazy<Task<string>>(WriteInstantsAsync);
+
+    private static Task<string> InstantsAsync() => InstantsFile.Value;
+
+    private static async Task<string> WriteInstantsAsync()
+    {
+        // One per run, named by the process, gone when the run ends.
+        string directory = System.IO.Path.Combine(AppContext.BaseDirectory, "contract");
+        System.IO.Directory.CreateDirectory(directory);
+        string path = System.IO.Path.Combine(directory, $"instants-{Environment.ProcessId}.vortex");
+        AppDomain.CurrentDomain.ProcessExit += (_, _) => System.IO.File.Delete(path);
+
+        Instants[] rows = new Instants[InstantRows];
+        DateTime start = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        for (int i = 0; i < rows.Length; i++)
+        {
+            DateTime at = start.AddSeconds(i * 7L);
+            rows[i] = new Instants(at, DateTime.SpecifyKind(at, DateTimeKind.Unspecified));
+        }
+
+        // Small chunks: two instants a row are 16 bytes, so a megabyte would make five batches.
+        await using VortexFileWriter writer = VortexSession.Default.CreateWriter<Instants>(path, new VortexWriteOptions { ChunkTargetBytes = 1 << 17 });
+        await writer.WriteAsync<Instants>(rows, TestContext.Current.CancellationToken);
+        await writer.CompleteAsync(TestContext.Current.CancellationToken);
+        return path;
+    }
+
+    [VortexRecord]
+    internal partial record struct Instants([VortexColumn(TimeZone = "UTC")] DateTime Utc, DateTime Naive);
 
     /// <summary>
     /// A sealed file's batches cost what a plain file's do: the frames decrypted into pooled blocks,

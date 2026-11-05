@@ -382,18 +382,33 @@ public sealed class VortexType : IEquatable<VortexType>, ISpanFormattable, IUtf8
     private TimeZoneInfo? _zone;
 
     /// <summary>The zone of a timestamp, or null for a naive one and any other type.</summary>
+    /// <remarks>Decoded at each call: a test of whether there is one is <see cref="IsZoned"/>.</remarks>
     internal string? TimeZone
     {
         get
         {
-            if (ExtensionId != ExtensionIds.Timestamp || _metadata is not { Length: >= 3 } m)
-            {
-                return null;
-            }
-
-            int length = BinaryPrimitives.ReadUInt16LittleEndian(m.AsSpan(1));
-            return length == 0 || 3 + length > m.Length ? null : Encoding.UTF8.GetString(m, 3, length);
+            int length = ZoneLength();
+            return length == 0 ? null : Encoding.UTF8.GetString(_metadata!, 3, length);
         }
+    }
+
+    /// <summary>
+    /// Whether <see cref="TimeZone"/> is not null, read without decoding it: a conversion asks it of
+    /// every row it turns into a <see cref="DateTime"/>, where the zone decoded was 32 bytes a row of
+    /// a UTC timestamp.
+    /// </summary>
+    internal bool IsZoned => ZoneLength() > 0;
+
+    /// <summary>The length of a timestamp's zone in its metadata; 0 for none, a naive one and any other type.</summary>
+    private int ZoneLength()
+    {
+        if (ExtensionId != ExtensionIds.Timestamp || _metadata is not { Length: >= 3 } m)
+        {
+            return 0;
+        }
+
+        int length = BinaryPrimitives.ReadUInt16LittleEndian(m.AsSpan(1));
+        return 3 + length > m.Length ? 0 : length;
     }
 
     private VortexType Twin()
