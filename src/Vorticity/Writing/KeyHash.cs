@@ -43,6 +43,16 @@ internal static class KeyHash
     internal static ulong Mix(ulong value) => Finish((value * Golden) + Seed);
 
     /// <summary>
+    /// The seed of <see cref="Mix"/>, for a loop to hold: ahead of time, the static is read behind a check that its
+    /// class's constructor ran, at each call.
+    /// </summary>
+    internal static ulong MixSeed => Seed;
+
+    /// <summary><see cref="Mix"/> under the seed a loop holds, <see cref="MixSeed"/>: the same hash.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static ulong SeededMix(ulong value, ulong seed) => Finish((value * Golden) + seed);
+
+    /// <summary>
     /// A value of up to sixteen bytes given as two words -- a string's first and last eight, which
     /// overlap below sixteen, or a view's two words -- with a tag that tells apart values of the
     /// same words: its length.

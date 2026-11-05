@@ -801,6 +801,21 @@ internal static class ColumnCompressor
                 * Arrays.Decoders.Compressed.FastLanes.BytesPerBlockPerBit * Math.Max(1, 64 - BitOperations.LeadingZeroCount((ulong)Math.Max(entries - 1, 0)))
             : rows * FsstPlan.IndexPType(entries).ByteWidth();
 
+    /// <summary>
+    /// The most entries whose codes <see cref="CodeBytes"/> prices as those of <paramref name="entries"/>: the last count
+    /// the width that indexes them still holds.
+    /// </summary>
+    private static int CodeWidthHolds(int entries, bool packs)
+    {
+        if (!packs)
+        {
+            return entries <= byte.MaxValue ? byte.MaxValue : entries <= ushort.MaxValue ? ushort.MaxValue : int.MaxValue;
+        }
+
+        int bits = Math.Max(1, 64 - BitOperations.LeadingZeroCount((ulong)Math.Max(entries - 1, 0)));
+        return bits >= 31 ? int.MaxValue : 1 << bits;
+    }
+
     /// <summary>Below this many rows, a column is a candidate only if it is big in bytes.</summary>
     private const int MinimumRows = 64;
 
@@ -1525,22 +1540,51 @@ internal static class ColumnCompressor
         // `codes` is rented for the same reason: it is written before the abandonment test can
         // fire, so allocating it would hand every column that considers a dictionary and refuses
         // one a full row vector to throw away.
-        int capacity = BucketCount(length);
+        //
+        // The tables hold the entries the budget pays for and no more: the bound below gives up at
+        // the first entry past them, its codes priced at nothing. A column the bit-packing takes
+        // affords a few thousand of them where its chunk has tens of thousands of rows, and tables
+        // sized by the rows were filled, then probed, over a hundred kilobytes and more.
+        int entries = (int)Math.Min(length, Math.Max(1, (budget - DictionaryOverhead + minimumEntry - 1) / minimumEntry));
+        int capacity = BucketCount(entries);
         int[] buckets = WorkArrays.Rent<int>(capacity);
-        int[] chain = WorkArrays.Rent<int>(Math.Max(length, 1));
-        int[] firstRows = WorkArrays.Rent<int>(Math.Max(length, 1));
+        int[] chain = WorkArrays.Rent<int>(Math.Max(entries, 1));
+        int[] firstRows = WorkArrays.Rent<int>(Math.Max(entries, 1));
         int[] codes = WorkArrays.Rent<int>(Math.Max(length, 1));
         bool kept = false;
         try
         {
             buckets.AsSpan(0, capacity).Fill(-1);
             int mask = capacity - 1;
-            int distinct = 0;
+
+            // A column of four- or eight-byte values with no null, most of those the walk reads, is walked a word a row.
+            int distinct = node.Kind == CanonicalKind.Primitive && comparer.Mask.AllValid
+                ? node.PType.ByteWidth() switch
+                {
+                    sizeof(ulong) => WalkWords(
+                        MemoryMarshal.Cast<byte, ulong>(node.Values.Span)[..length], entries, buckets, mask, chain, firstRows, codes, minimumEntry, budget, packs),
+                    sizeof(uint) => WalkWords(
+                        MemoryMarshal.Cast<byte, uint>(node.Values.Span)[..length], entries, buckets, mask, chain, firstRows, codes, minimumEntry, budget, packs),
+                    _ => NotWalked,
+                }
+                : NotWalked;
+            if (distinct == Abandoned)
+            {
+                return ColumnPlan.Canonical;
+            }
+
+            // The codes' price only moves when the distinct values pass a power of two, where their width grows: it is
+            // priced again there, not at each new value. The walk of a column of measurements meets a new value nearly
+            // every row, and a call per value was a tenth of its cycles.
+            long codeBytes = 0;
+            int widthHolds = 0;
 
             // Each row's hash is taken before the row ahead of it is looked up: a chain walk whose
             // branch was guessed wrong throws away what came after it, never the hash waiting for it.
-            int next = length > 0 ? comparer.Hash(0) : 0;
-            for (int row = 0; row < length; row++)
+            int end = distinct == NotWalked ? length : 0;
+            distinct = end > 0 ? 0 : Math.Max(distinct, 0);
+            int next = end > 0 ? comparer.Hash(0) : 0;
+            for (int row = 0; row < end; row++)
             {
                 int bucket = next & mask;
                 next = row + 1 < length ? comparer.Hash(row + 1) : 0;
@@ -1571,7 +1615,12 @@ internal static class ColumnCompressor
                     // grows; and `EntriesSize` is at least `distinct * minimumEntry` for every kind
                     // that reaches this line. The final test below is this same expression with the
                     // entries priced exactly.
-                    long codeBytes = CodeBytes(length, distinct, packs);
+                    if (distinct > widthHolds)
+                    {
+                        codeBytes = CodeBytes(length, distinct, packs);
+                        widthHolds = CodeWidthHolds(distinct, packs);
+                    }
+
                     if (codeBytes + ((long)distinct * minimumEntry) + DictionaryOverhead >= budget)
                     {
                         return ColumnPlan.Canonical;
@@ -1607,6 +1656,88 @@ internal static class ColumnCompressor
 
             WorkArrays.Return(chain);
             WorkArrays.Return(buckets);
+        }
+    }
+
+    /// <summary>What <see cref="WalkWords"/> returns when the dictionary provably cannot win.</summary>
+    private const int Abandoned = -1;
+
+    /// <summary>What stands for <see cref="WalkWords"/>'s answer when the column is not one it walks.</summary>
+    private const int NotWalked = -2;
+
+    /// <summary>
+    /// <see cref="Dictionary"/>'s walk over a column of four- or eight-byte values with no null: the same codes, first
+    /// rows and abandonment, each value read as one word, hashed with no call, and compared with the distinct values kept
+    /// beside the chains rather than read again through their first rows.
+    /// </summary>
+    /// <remarks>
+    /// The values are compared by their bits, as the comparer's walk compares them: -0.0 and +0.0 are two entries. Codes
+    /// go out in order of first appearance whatever the hash, so the plan is the comparer's plan. A row cost that walk
+    /// three calls (the comparer's hash, its equality, the read under it) and two dependent loads per candidate, and the
+    /// walk reads thousands of rows of a column the bit-packing then takes: on the per-encoding corpus's table of fifty
+    /// integer columns, the walks were 15 % of the write.
+    /// </remarks>
+    /// <returns>The distinct values, or <see cref="Abandoned"/>.</returns>
+    private static int WalkWords<T>(
+        ReadOnlySpan<T> values, int entries, int[] buckets, int mask, int[] chain, int[] firstRows, int[] codes, int minimumEntry,
+        long budget, bool packs)
+        where T : unmanaged, IBinaryInteger<T>
+    {
+        int length = values.Length;
+        T[] keys = WorkArrays.Rent<T>(Math.Max(entries, 1));
+        try
+        {
+            ulong seed = KeyHash.MixSeed;
+            ref T value = ref MemoryMarshal.GetReference(values);
+            ref int bucketAt = ref MemoryMarshal.GetArrayDataReference(buckets);
+            ref int chainAt = ref MemoryMarshal.GetArrayDataReference(chain);
+            ref T keyAt = ref MemoryMarshal.GetArrayDataReference(keys);
+            int distinct = 0;
+            long codeBytes = 0;
+            int widthHolds = 0;
+
+            // The next row's hash is taken before this row's chain is walked, as the comparer's walk takes it.
+            int next = length > 0 ? (int)KeyHash.SeededMix(ulong.CreateTruncating(value), seed) : 0;
+            for (int row = 0; row < length; row++)
+            {
+                T word = Unsafe.Add(ref value, row);
+                int bucket = next & mask;
+                next = row + 1 < length ? (int)KeyHash.SeededMix(ulong.CreateTruncating(Unsafe.Add(ref value, row + 1)), seed) : 0;
+                int code = Unsafe.Add(ref bucketAt, bucket);
+                while (code >= 0 && Unsafe.Add(ref keyAt, code) != word)
+                {
+                    code = Unsafe.Add(ref chainAt, code);
+                }
+
+                if (code < 0)
+                {
+                    code = distinct++;
+                    Unsafe.Add(ref keyAt, code) = word;
+                    firstRows[code] = row;
+                    Unsafe.Add(ref chainAt, code) = Unsafe.Add(ref bucketAt, bucket);
+                    Unsafe.Add(ref bucketAt, bucket) = code;
+
+                    // The comparer's walk's bound, on the same numbers.
+                    if (distinct > widthHolds)
+                    {
+                        codeBytes = CodeBytes(length, distinct, packs);
+                        widthHolds = CodeWidthHolds(distinct, packs);
+                    }
+
+                    if (codeBytes + ((long)distinct * minimumEntry) + DictionaryOverhead >= budget)
+                    {
+                        return Abandoned;
+                    }
+                }
+
+                codes[row] = code;
+            }
+
+            return distinct;
+        }
+        finally
+        {
+            WorkArrays.Return(keys);
         }
     }
 
