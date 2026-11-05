@@ -124,7 +124,8 @@ tables of a million rows with six columns, and of fifty columns.
 ## 4. Decoders, per encoding
 
 There is one file per encoding, and per notable shape of one: 61 files of a million rows
-(`bench/gen-throughput.sh`), written by Rust's writer, the same set on both machines' pages. Each
+(`bench/gen-throughput.sh`), the same set on both machines' pages, each written by the Rust writer
+of the release its page names. Each
 side scans each file 12 times in a process of its own, on one core, every value decoded to its plain
 form. A figure is the median of the last 10 scans and of 3 processes, Native AOT against Rust's
 `vxbench` binary, which is what a decoder costs once warm. [Decoding, per
