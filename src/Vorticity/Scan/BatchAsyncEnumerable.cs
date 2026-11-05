@@ -355,8 +355,19 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     private int _free;
     private int _queued;
 
-    /// <summary>The bytes the lanes of the splits in flight may hold together: half what the pool keeps parked across its classes.</summary>
-    private const double InFlightBytes = 128 << 20;
+    /// <summary>
+    /// The bytes the lanes of the splits in flight may hold together: what a share of the pool's size class let them hold
+    /// before the pool's budgets grew with the processors (<see cref="InFlightShare"/> of 64 MiB).
+    /// </summary>
+    /// <remarks>
+    /// Splits decoded further ahead leave the last-level cache before the consumer reads them. Once a class of the pool
+    /// kept 64 MiB a processor the share stopped holding, and 128 MiB of splits were in flight: on a Ryzen 9 7950X (two
+    /// last-level caches of 32 MiB), 32 lanes scanned the taxi trips' Vortex copy in 27.6 ms against 19.2 at 48 MiB, a
+    /// million web hits of 105 columns in 62.0 against 51.9, a nested file in 60.1 against 47.1, the 10 Mi rows of the
+    /// report's table in 16.9 against 16.2, its filters, takes and projections alike. Under 32 MiB the lanes starve: the
+    /// taxi trips took 30.4 ms at 24 MiB.
+    /// </remarks>
+    private const double InFlightBytes = 48 << 20;
 
     /// <summary>The share of what one of the pool's size classes keeps parked that the lanes of the splits in flight may hold together.</summary>
     private const double InFlightShare = 0.75;
