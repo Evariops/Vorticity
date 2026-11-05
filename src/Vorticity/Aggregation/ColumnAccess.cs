@@ -132,6 +132,20 @@ internal struct ValuesCache<TValue>
         return Read(arena, batch, node, kind, out validity);
     }
 
+    /// <summary>
+    /// Gives the copy back to the process's shelf it grew from, its reader done with it, for the next
+    /// query's readers to grow into: a batch of decimals or uuids widened was 1 MiB a reader a query.
+    /// </summary>
+    internal void Release()
+    {
+        if (_values is { Length: > 0 } values)
+        {
+            ArrayShelf.Retained.Give(values);
+        }
+
+        this = default;
+    }
+
     /// <summary>The first read of the node in this batch: the copy retained values had, or a read of the node.</summary>
     [MethodImpl(MethodImplOptions.NoInlining)]
     private ReadOnlySpan<TValue> Read(CanonicalArena arena, long batch, int node, StorageKind kind, out ReadOnlySpan<ulong> validity)

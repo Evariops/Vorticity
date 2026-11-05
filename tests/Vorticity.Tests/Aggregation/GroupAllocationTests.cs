@@ -117,11 +117,12 @@ public sealed partial class GroupAllocationTests
         // The hashed integers' groups, with an extreme of each type a group's state turns into from its
         // storage: an instant, a decimal, a uuid and a date. Each answer is built without a box, from
         // its storage and not through a literal, and the instant's zone is no longer decoded to learn
-        // whether it has one: 154 MB to 2.2 MB at one lane, 170 MB to 18 MB at four. What is left
-        // above the hashed integers is the decimal's and the uuid's, whose states are 16 bytes: 1 MiB
-        // each at one lane, 8 MiB at four.
-        ("typed extremes", 1, GroupCoreReason.None, 2_207_232, ExtremesAsync),
-        ("typed extremes", 4, GroupCoreReason.FirstRows, 18_415_616, ExtremesAsync),
+        // whether it has one: 154 MB to 2.2 MB at one lane, 170 MB to 18 MB at four. The decimal's and
+        // the uuid's batches, widened to 128 bits, are copied into buffers each slot and each key now
+        // gives back to the process's shelf with the rest of its scratch, where every query took them
+        // new, 1 MiB a reader: 2.2 MB to 109 KB at one lane, 18 MB to 1.35 MB at four.
+        ("typed extremes", 1, GroupCoreReason.None, 109_568, ExtremesAsync),
+        ("typed extremes", 4, GroupCoreReason.FirstRows, 1_638_400, ExtremesAsync),
     ];
 
     [Fact]

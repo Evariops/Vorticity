@@ -43,6 +43,15 @@ internal sealed class FixedCardinalitySlot<TValue>(StorageKind kind) : Cardinali
     private MaskCache _rows;
     private ulong[] _clip = [];
 
+    /// <summary>The sketches, then the values widened, the masks joined and the window's words, back to the process's shelf.</summary>
+    internal override void Release()
+    {
+        base.Release();
+        Scratch.Return(ref _values);
+        _rows.Release();
+        Scratch.Return(ref _clip);
+    }
+
     internal override void StepRange(in BatchInput input, int start, int end, int group)
     {
         ReadOnlySpan<TValue> values = FixedReader.Values(input.Arena, input.Node, kind, ref _values, out ReadOnlySpan<ulong> valid);
@@ -108,6 +117,14 @@ internal sealed class BytesCardinalitySlot : CardinalitySlot
 {
     private MaskCache _rows;
     private CodeSet _distinct;
+
+    /// <summary>The sketches, then the masks joined and the codes met, back to the process's shelf.</summary>
+    internal override void Release()
+    {
+        base.Release();
+        _rows.Release();
+        _distinct.Release();
+    }
 
     internal override void StepRange(in BatchInput input, int start, int end, int group)
     {

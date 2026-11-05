@@ -264,6 +264,8 @@ internal sealed class BytesExtremeSlot<TResult> : AggregateSlot<TResult>, IBytes
         _at = [];
         _lengths = [];
         _groups = 0;
+        _rows.Release();
+        _distinct.Release();
     }
 
     internal BytesExtremeSlot(ColumnShape shape, bool max)
@@ -626,6 +628,8 @@ internal sealed class BytesDistinctSlot : AggregateSlot<long>, IPairedSlot
         _next = [];
         _first = [];
         _groups = 0;
+        _rows.Release();
+        _distinct.Release();
     }
 
     internal override void EnsureGroups(int groups)

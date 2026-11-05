@@ -100,6 +100,13 @@ internal sealed class ChosenBySlot<TValue>(bool max, StorageKind kind) : RecordS
 
     internal override ChosenRow<TValue> Seed => new ChosenRow<TValue> { Row = -1 };
 
+    /// <summary>The values widened and the masks joined, back to the process's shelf.</summary>
+    private protected override void ReleaseScratch()
+    {
+        _values.Release();
+        _mask.Release();
+    }
+
     internal override void StepRange(in BatchInput input, int start, int end, int group)
     {
         ReadOnlySpan<TValue> values = _values.Of(input.Arena, input.Batch, input.Node, kind, out ReadOnlySpan<ulong> valid);
