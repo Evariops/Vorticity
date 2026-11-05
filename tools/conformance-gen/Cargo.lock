@@ -1882,9 +1882,9 @@ checksum = "2ee67f1008b1ba2321834326597b8e186293b049a023cdef258527550b9935b4"
 
 [[package]]
 name = "pco"
-version = "1.0.4"
+version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "52f01ab51a847e7002371c2384b2c88f50dd45982cc2764e7997751971f1bfbf"
+checksum = "195dc59a2713f074331d6a5338b22d0795b9fc3f6e304f53b6aa24e3d8cb7d9e"
 dependencies = [
  "better_io",
  "dtype_dispatch",
