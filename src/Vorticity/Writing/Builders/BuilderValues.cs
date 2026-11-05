@@ -13,6 +13,10 @@ internal static class BuilderValues
 {
     private static readonly UInt128[] Pow10 = PowersOfTen128();
     private static readonly ulong[][] Pow10Wide = PowersOfTen256();
+    private static readonly UInt128 MaxOverTen = UInt128.MaxValue / 10;
+
+    /// <summary>The most digits a power of ten in 64 bits has: 10^19.</summary>
+    private const int MaxPow10Digits64 = 19;
 
     internal static void AppendDate(FixedStore store, DateOnly value)
     {
@@ -229,29 +233,12 @@ internal static class BuilderValues
         UInt128 magnitude = ((UInt128)(uint)bits[2] << 64) | ((UInt128)(uint)bits[1] << 32) | (uint)bits[0];
         bool negative = bits[3] < 0;
         int from = (bits[3] >> 16) & 0xFF;
+        if (from != scale)
+        {
+            magnitude = Rescaled(value, magnitude, from, scale, precision);
+        }
+
         UInt128 limit = precision >= Pow10.Length ? UInt128.MaxValue : Pow10[precision];
-        while (from > scale)
-        {
-            (magnitude, UInt128 remainder) = UInt128.DivRem(magnitude, 10);
-            if (remainder != 0)
-            {
-                throw Inexact(value.ToString(System.Globalization.CultureInfo.InvariantCulture), scale);
-            }
-
-            from--;
-        }
-
-        while (from < scale)
-        {
-            if (magnitude > UInt128.MaxValue / 10)
-            {
-                throw Overflow(value.ToString(System.Globalization.CultureInfo.InvariantCulture), precision, scale);
-            }
-
-            magnitude *= 10;
-            from++;
-        }
-
         if (magnitude >= limit)
         {
             throw Overflow(value.ToString(System.Globalization.CultureInfo.InvariantCulture), precision, scale);
@@ -260,21 +247,73 @@ internal static class BuilderValues
         return negative ? -(Int128)magnitude : (Int128)magnitude;
     }
 
+    /// <summary>
+    /// A decimal's magnitude moved from scale <paramref name="from"/> to <paramref name="scale"/>, exactly:
+    /// one division by the power of ten between them, or one multiplication, where a step a digit
+    /// divided by ten through the 128-bit routine (a decimal of scale 1 written at scale 4 paid three).
+    /// Out of line, so a value already at the column's scale runs no more than it did.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static UInt128 Rescaled(decimal value, UInt128 magnitude, int from, int scale, int precision)
+    {
+        if (from > scale)
+        {
+            // Past 10^38 the power exceeds any decimal's 96 bits, so all of it is the remainder.
+            int down = from - scale;
+            (UInt128 quotient, UInt128 remainder) = down < Pow10.Length ? UInt128.DivRem(magnitude, Pow10[down]) : (UInt128.Zero, magnitude);
+            if (remainder != 0)
+            {
+                throw Inexact(value.ToString(System.Globalization.CultureInfo.InvariantCulture), scale);
+            }
+
+            return quotient;
+        }
+
+        int digits = scale - from;
+        if (precision < Pow10.Length)
+        {
+            // The value times 10^digits stays under 10^precision exactly when the value stays under
+            // 10^(precision - digits); past the precision, only zero does.
+            if (digits > precision ? magnitude != 0 : magnitude >= Pow10[precision - digits])
+            {
+                throw Overflow(value.ToString(System.Globalization.CultureInfo.InvariantCulture), precision, scale);
+            }
+
+            return magnitude * Pow10[digits];
+        }
+
+        // A column of more than 38 digits, which only an untyped builder writes a decimal to.
+        for (; digits > 0; digits--)
+        {
+            if (magnitude > MaxOverTen)
+            {
+                throw Overflow(value.ToString(System.Globalization.CultureInfo.InvariantCulture), precision, scale);
+            }
+
+            magnitude *= 10;
+        }
+
+        return magnitude;
+    }
+
     /// <summary>The unscaled value of <paramref name="value"/> at <paramref name="scale"/>, exactly, within <paramref name="precision"/> digits.</summary>
     internal static Int256 Unscaled(VortexDecimal value, int scale, int precision)
     {
         Int256 unscaled = value.Unscaled;
         unscaled.GetMagnitude(out ulong m0, out ulong m1, out ulong m2, out ulong m3);
         int from = value.Scale;
-        while (from > scale)
+
+        // Up to nineteen digits a division, the most a power of ten in 64 bits holds, where a step
+        // a digit divided each limb by ten.
+        for (int digits = from - scale; digits > 0; digits -= MaxPow10Digits64)
         {
-            if (DivRemTen(ref m0, ref m1, ref m2, ref m3) != 0)
+            if (DivRem(ref m0, ref m1, ref m2, ref m3, (ulong)Pow10[Math.Min(digits, MaxPow10Digits64)]) != 0)
             {
                 throw Inexact(value.ToString(), scale);
             }
-
-            from--;
         }
+
+        from = Math.Min(from, scale);
 
         while (from < scale)
         {
@@ -296,20 +335,18 @@ internal static class BuilderValues
         return unscaled.IsNegative ? Int256.Negate(result) : result;
     }
 
-    private static ulong DivRemTen(ref ulong m0, ref ulong m1, ref ulong m2, ref ulong m3)
+    /// <summary>Divides a 256-bit magnitude by <paramref name="divisor"/> in place, from its top limb; returns the remainder.</summary>
+    private static ulong DivRem(ref ulong m0, ref ulong m1, ref ulong m2, ref ulong m3, ulong divisor)
     {
-        UInt128 current = m3;
-        m3 = (ulong)(current / 10);
-        UInt128 remainder = current % 10;
-        current = (remainder << 64) | m2;
-        m2 = (ulong)(current / 10);
-        remainder = current % 10;
-        current = (remainder << 64) | m1;
-        m1 = (ulong)(current / 10);
-        remainder = current % 10;
-        current = (remainder << 64) | m0;
-        m0 = (ulong)(current / 10);
-        return (ulong)(current % 10);
+        (ulong top, ulong carry) = Math.DivRem(m3, divisor);
+        m3 = top;
+        (UInt128 quotient, UInt128 remainder) = UInt128.DivRem(((UInt128)carry << 64) | m2, divisor);
+        m2 = (ulong)quotient;
+        (quotient, remainder) = UInt128.DivRem((remainder << 64) | m1, divisor);
+        m1 = (ulong)quotient;
+        (quotient, remainder) = UInt128.DivRem((remainder << 64) | m0, divisor);
+        m0 = (ulong)quotient;
+        return (ulong)remainder;
     }
 
     private static VortexSchemaException Inexact(string value, int scale) =>
