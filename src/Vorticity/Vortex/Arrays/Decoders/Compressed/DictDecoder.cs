@@ -356,6 +356,12 @@ internal sealed class DictDecoder : ArrayDecoder
     private static int Narrow(
         ReadOnlySpan<byte> codes, PType codesPType, in ValidityReader validity, int rows, int valuesLength, Span<int> scratch)
     {
+        int words = (valuesLength + 63) >> 6;
+        if (words <= rows * SeenWordsPerRow)
+        {
+            return NarrowBySeen(codes, codesPType, in validity, rows, valuesLength, words, scratch);
+        }
+
         Span<int> renumbered = scratch[..rows];
         Span<int> named = scratch.Slice(rows, rows);
         int count = 0;
@@ -393,6 +399,93 @@ internal sealed class DictDecoder : ArrayDecoder
         }
 
         return distinct;
+    }
+
+    /// <summary>
+    /// The words of a bitmap of the entries <see cref="Narrow"/> walks for each row it narrows rather than sorting the rows'
+    /// codes: a word costs a clear, a scan and a rank where a row costs a sort's comparisons and a binary search.
+    /// </summary>
+    private const int SeenWordsPerRow = 8;
+
+    /// <summary>
+    /// <see cref="Narrow"/> by a bitmap of the entries the rows name: each code sets its bit, the set bits ascending are the
+    /// entries, and a row's new code is its bit's rank, the bits set before it.
+    /// </summary>
+    /// <remarks>
+    /// The same entries in the same order and the same codes as sorting the rows' codes and searching each, in a pass over
+    /// the rows and one over the words. The rows of a census's edge narrowed so a chunk's dictionary to the few entries a
+    /// granule reads, and its sort and searches came to a tenth of a window's paths.
+    /// </remarks>
+    private static int NarrowBySeen(
+        ReadOnlySpan<byte> codes, PType codesPType, in ValidityReader validity, int rows, int valuesLength, int words,
+        Span<int> scratch)
+    {
+        Span<int> renumbered = scratch[..rows];
+        Span<int> named = scratch.Slice(rows, rows);
+        ulong[]? rentedSeen = null;
+        int[]? rentedRanks = null;
+        Span<ulong> seen = words <= 256 ? stackalloc ulong[256] : (rentedSeen = System.Buffers.ArrayPool<ulong>.Shared.Rent(words));
+        Span<int> ranks = words <= 256 ? stackalloc int[256] : (rentedRanks = System.Buffers.ArrayPool<int>.Shared.Rent(words));
+        seen = seen[..words];
+        ranks = ranks[..words];
+        try
+        {
+            seen.Clear();
+            for (int row = 0; row < rows; row++)
+            {
+                if (!validity.IsValid(row))
+                {
+                    continue;
+                }
+
+                uint code = RowKernels.CodeAt(codes, codesPType, row);
+                if (code >= (uint)valuesLength)
+                {
+                    ThrowCode(codes, codesPType, row, valuesLength);
+                }
+
+                seen[(int)(code >> 6)] |= 1UL << (int)(code & 63);
+            }
+
+            int distinct = 0;
+            for (int w = 0; w < words; w++)
+            {
+                ranks[w] = distinct;
+                ulong bits = seen[w];
+                while (bits != 0)
+                {
+                    named[distinct++] = (w << 6) + System.Numerics.BitOperations.TrailingZeroCount(bits);
+                    bits &= bits - 1;
+                }
+            }
+
+            for (int row = 0; row < rows; row++)
+            {
+                if (!validity.IsValid(row))
+                {
+                    renumbered[row] = 0;
+                    continue;
+                }
+
+                uint code = RowKernels.CodeAt(codes, codesPType, row);
+                int word = (int)(code >> 6);
+                renumbered[row] = ranks[word] + System.Numerics.BitOperations.PopCount(seen[word] & ((1UL << (int)(code & 63)) - 1));
+            }
+
+            return distinct;
+        }
+        finally
+        {
+            if (rentedSeen is not null)
+            {
+                System.Buffers.ArrayPool<ulong>.Shared.Return(rentedSeen);
+            }
+
+            if (rentedRanks is not null)
+            {
+                System.Buffers.ArrayPool<int>.Shared.Return(rentedRanks);
+            }
+        }
     }
 
     /// <summary>Each row's value through its code, the codes' and the values' nulls combined.</summary>
