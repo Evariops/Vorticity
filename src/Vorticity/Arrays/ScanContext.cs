@@ -167,11 +167,17 @@ internal sealed class ScanContext : IDisposable
     private readonly bool _notesTrees;
 
     /// <summary>Tells the file how large an array tree this context has loaded, for the contexts made after it.</summary>
+    /// <remarks>
+    /// The buffer a new context would grow to for the tree loaded, not the buffer this one holds: a
+    /// pooled context keeps its buffer from one file to the next, and the buffer a file of wide trees
+    /// grew made every new context of a file of small ones start at its size, 4 KiB where 1 KiB
+    /// served, after a scan of uuids.
+    /// </remarks>
     internal void NoteArrayTree()
     {
         if (_notesTrees)
         {
-            _file!.NoteArrayTree(Nodes.TreeCapacity);
+            _file!.NoteArrayTree(ArrayNodeArena.TreeBufferFor(Nodes.TreeLength));
         }
     }
 

@@ -1536,8 +1536,8 @@ public sealed partial class VortexFile : IAsyncDisposable
     /// </summary>
     internal int LargestArrayTree => Volatile.Read(ref _largestArrayTree);
 
-    /// <summary>Records the size of a tree buffer a context grew to.</summary>
-    /// <param name="bytes">The buffer's size.</param>
+    /// <summary>Records the size of an array tree of this file a context loaded.</summary>
+    /// <param name="bytes">The tree's size.</param>
     internal void NoteArrayTree(int bytes)
     {
         int seen = Volatile.Read(ref _largestArrayTree);

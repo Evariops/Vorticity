@@ -237,11 +237,21 @@ internal sealed class ArrayNodeArena
         _nodeBufferIndices = new int[initialNodeCapacity];
         _globalBuffers = new VortexBuffer[initialNodeCapacity];
         _stats = new ArrayStatsRecord[initialNodeCapacity];
-        _tree = AllocateTree(Math.Max(treeCapacity, 256));
+        _tree = AllocateTree(Math.Max(treeCapacity, LeastTree));
     }
+
+    /// <summary>The bytes a tree buffer starts at when no tree of the file is known.</summary>
+    private const int LeastTree = 256;
 
     /// <summary>The bytes the tree buffer holds, grown to the largest tree loaded so far.</summary>
     internal int TreeCapacity => _tree.Length;
+
+    /// <summary>The bytes of the tree loaded last: what that tree needs, whatever trees grew the buffer before it.</summary>
+    internal int TreeLength => _treeLength;
+
+    /// <summary>The bytes a new arena's tree buffer grows to for a tree of <paramref name="length"/>: from its start, doubling.</summary>
+    /// <param name="length">The tree's bytes.</param>
+    internal static int TreeBufferFor(int length) => Grow(LeastTree, length);
 
     /// <summary>Number of serialized nodes currently held.</summary>
     public int NodeCount => _recordCount;
