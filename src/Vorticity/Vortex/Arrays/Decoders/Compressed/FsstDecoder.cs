@@ -325,6 +325,8 @@ internal sealed class FsstDecoder : ArrayDecoder
     }
 
     /// <summary>Marks the rows that hold the pattern, with the offsets typed once, as <see cref="Prefix{T}"/>.</summary>
+    /// <remarks>Not inlined, as <see cref="Match{T}"/> is not.</remarks>
+    [MethodImpl(MethodImplOptions.NoInlining)]
     private static void Contains<T>(
         ReadOnlySpan<byte> raw, ReadOnlySpan<byte> stream, FsstContains pattern,
         in ValidityReader rows, int length, Span<byte> destination)
@@ -743,6 +745,8 @@ internal sealed class FsstDecoder : ArrayDecoder
     }
 
     /// <summary>Marks the rows that start with a prefix, with the offsets typed once, as <see cref="Match{T}"/>.</summary>
+    /// <remarks>Not inlined, as <see cref="Match{T}"/> is not.</remarks>
+    [MethodImpl(MethodImplOptions.NoInlining)]
     private static void Prefix<T>(
         ReadOnlySpan<byte> raw, ReadOnlySpan<byte> stream, in FsstPrefix starts,
         in ValidityReader rows, int length, Span<byte> destination)
@@ -798,6 +802,12 @@ internal sealed class FsstDecoder : ArrayDecoder
     /// <param name="match">The state a matching row takes.</param>
     /// <param name="miss">The state every other valid row takes.</param>
     /// <param name="destination">Receives one state per row.</param>
+    /// <remarks>
+    /// Not inlined: the private static callers that replaced the decoder's overrides took a loop of each offset type in,
+    /// and the method grown so far past the inlining budget called the code slice's <c>SequenceEqual</c> a row, where
+    /// the loop alone inlines it. A prefix over 65,536 rows took 6 % longer for it.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.NoInlining)]
     private static void Match<T>(
         ReadOnlySpan<byte> raw, ReadOnlySpan<byte> stream, ReadOnlySpan<byte> wanted,
         in ValidityReader rows, int length, byte match, byte miss, Span<byte> destination)

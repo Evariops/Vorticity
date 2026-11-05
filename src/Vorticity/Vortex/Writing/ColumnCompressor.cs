@@ -1562,7 +1562,7 @@ internal static class ColumnCompressor
     /// than that budget can never win, whatever the rest of the rows hold.
     /// </remarks>
     private static ColumnPlan Dictionary(
-        CanonicalArena arena, CanonicalNode node, in RowComparer comparer, int length, long budget, bool packs)
+        CanonicalArena arena, CanonicalNode node, in RowComparer comparer, int length, long budget, bool packs, bool words = true)
     {
         int minimumEntry = node.Kind switch
         {
@@ -1598,17 +1598,21 @@ internal static class ColumnCompressor
             buckets.AsSpan(0, capacity).Fill(-1);
             int mask = capacity - 1;
 
-            // A column of four- or eight-byte values with no null, most of those the walk reads, is walked a word a row.
-            int distinct = node.Kind == CanonicalKind.Primitive && comparer.Mask.AllValid
-                ? node.PType.ByteWidth() switch
-                {
-                    sizeof(ulong) => WalkWords(
-                        MemoryMarshal.Cast<byte, ulong>(node.Values.Span)[..length], entries, buckets, mask, chain, firstRows, codes, minimumEntry, budget, packs),
-                    sizeof(uint) => WalkWords(
-                        MemoryMarshal.Cast<byte, uint>(node.Values.Span)[..length], entries, buckets, mask, chain, firstRows, codes, minimumEntry, budget, packs),
-                    _ => NotWalked,
-                }
-                : NotWalked;
+            // A column of four- or eight-byte values, most of those the walk reads, is walked a word a row; one with no null
+            // by a loop that never asks.
+            ValidityMask validity = comparer.Mask;
+            int distinct = !words || node.Kind != CanonicalKind.Primitive ? NotWalked : (node.PType.ByteWidth(), validity.AllValid) switch
+            {
+                (sizeof(ulong), true) => WalkWords<ulong, No>(
+                    MemoryMarshal.Cast<byte, ulong>(node.Values.Span)[..length], in validity, entries, buckets, mask, chain, firstRows, codes, minimumEntry, budget, packs),
+                (sizeof(ulong), false) => WalkWords<ulong, Yes>(
+                    MemoryMarshal.Cast<byte, ulong>(node.Values.Span)[..length], in validity, entries, buckets, mask, chain, firstRows, codes, minimumEntry, budget, packs),
+                (sizeof(uint), true) => WalkWords<uint, No>(
+                    MemoryMarshal.Cast<byte, uint>(node.Values.Span)[..length], in validity, entries, buckets, mask, chain, firstRows, codes, minimumEntry, budget, packs),
+                (sizeof(uint), false) => WalkWords<uint, Yes>(
+                    MemoryMarshal.Cast<byte, uint>(node.Values.Span)[..length], in validity, entries, buckets, mask, chain, firstRows, codes, minimumEntry, budget, packs),
+                _ => NotWalked,
+            };
             if (distinct == Abandoned)
             {
                 return ColumnPlan.Canonical;
@@ -1700,6 +1704,21 @@ internal static class ColumnCompressor
         }
     }
 
+    /// <summary>
+    /// <see cref="Dictionary"/> over a node, its codes priced bit-packed, walked a word a row or by the comparer: the two
+    /// walks a test holds to the same plan.
+    /// </summary>
+    /// <param name="arena">The arena holding the node.</param>
+    /// <param name="nodeIndex">The node to walk.</param>
+    /// <param name="budget">The bytes the dictionary has to come in under.</param>
+    /// <param name="words">Whether a column of four- or eight-byte values is walked a word a row.</param>
+    /// <returns>The plan, or the canonical one when the dictionary does not pay.</returns>
+    internal static ColumnPlan WalkDictionary(CanonicalArena arena, int nodeIndex, long budget, bool words)
+    {
+        CanonicalNode node = arena.GetNode(nodeIndex);
+        return Dictionary(arena, node, new RowComparer(arena, nodeIndex), node.Length, budget, packs: true, words);
+    }
+
     /// <summary>What <see cref="WalkWords"/> returns when the dictionary provably cannot win.</summary>
     private const int Abandoned = -1;
 
@@ -1707,9 +1726,9 @@ internal static class ColumnCompressor
     private const int NotWalked = -2;
 
     /// <summary>
-    /// <see cref="Dictionary"/>'s walk over a column of four- or eight-byte values with no null: the same codes, first
-    /// rows and abandonment, each value read as one word, hashed with no call, and compared with the distinct values kept
-    /// beside the chains rather than read again through their first rows.
+    /// <see cref="Dictionary"/>'s walk over a column of four- or eight-byte values: the same codes, first rows and
+    /// abandonment, each value read as one word, hashed with no call, and compared with the distinct values kept beside
+    /// the chains rather than read again through their first rows.
     /// </summary>
     /// <remarks>
     /// The values are compared by their bits, as the comparer's walk compares them: -0.0 and +0.0 are two entries. Codes
@@ -1717,12 +1736,17 @@ internal static class ColumnCompressor
     /// three calls (the comparer's hash, its equality, the read under it) and two dependent loads per candidate, and the
     /// walk reads thousands of rows of a column the bit-packing then takes: on the per-encoding corpus's table of fifty
     /// integer columns, the walks were 15 % of the write.
+    ///
+    /// The nulls share one code, given at the first of them, as the comparer holds them all equal; they never enter the
+    /// chains. <typeparamref name="TNulls"/> says whether a row may be null, so a column with none walks a loop that never
+    /// asks.
     /// </remarks>
     /// <returns>The distinct values, or <see cref="Abandoned"/>.</returns>
-    private static int WalkWords<T>(
-        ReadOnlySpan<T> values, int entries, int[] buckets, int mask, int[] chain, int[] firstRows, int[] codes, int minimumEntry,
-        long budget, bool packs)
+    private static int WalkWords<T, TNulls>(
+        ReadOnlySpan<T> values, in ValidityMask validity, int entries, int[] buckets, int mask, int[] chain, int[] firstRows,
+        int[] codes, int minimumEntry, long budget, bool packs)
         where T : unmanaged, IBinaryInteger<T>
+        where TNulls : struct, IFlag
     {
         int length = values.Length;
         T[] keys = WorkArrays.Rent<T>(Math.Max(entries, 1));
@@ -1736,6 +1760,7 @@ internal static class ColumnCompressor
             int distinct = 0;
             long codeBytes = 0;
             int widthHolds = 0;
+            int nullCode = -1;
 
             // The next row's hash is taken before this row's chain is walked, as the comparer's walk takes it.
             int next = length > 0 ? (int)KeyHash.SeededMix(ulong.CreateTruncating(value), seed) : 0;
@@ -1744,6 +1769,30 @@ internal static class ColumnCompressor
                 T word = Unsafe.Add(ref value, row);
                 int bucket = next & mask;
                 next = row + 1 < length ? (int)KeyHash.SeededMix(ulong.CreateTruncating(Unsafe.Add(ref value, row + 1)), seed) : 0;
+                if (TNulls.Value && !validity.IsValid(row))
+                {
+                    if (nullCode < 0)
+                    {
+                        nullCode = distinct++;
+                        firstRows[nullCode] = row;
+
+                        // The bound below, at the one code the nulls take.
+                        if (distinct > widthHolds)
+                        {
+                            codeBytes = CodeBytes(length, distinct, packs);
+                            widthHolds = CodeWidthHolds(distinct, packs);
+                        }
+
+                        if (codeBytes + ((long)distinct * minimumEntry) + DictionaryOverhead >= budget)
+                        {
+                            return Abandoned;
+                        }
+                    }
+
+                    codes[row] = nullCode;
+                    continue;
+                }
+
                 int code = Unsafe.Add(ref bucketAt, bucket);
                 while (code >= 0 && Unsafe.Add(ref keyAt, code) != word)
                 {
