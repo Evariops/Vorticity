@@ -282,7 +282,8 @@ internal static class BuilderValues
             return magnitude * Pow10[digits];
         }
 
-        // A column of more than 38 digits, which only an untyped builder writes a decimal to.
+        // A column of more than 38 digits, which no path writes a decimal to (a decimal maps to 28
+        // digits at most): the steps of before, kept so that the conversion stays total.
         for (; digits > 0; digits--)
         {
             if (magnitude > MaxOverTen)
