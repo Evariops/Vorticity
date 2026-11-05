@@ -446,6 +446,10 @@ canary_scan="$corpus/spread-strided-20000000.vortex"
 canary_lanes="$corpus/spread-random-40000000-core2025.10.vortex"
 [ -e "$canary_lanes" ] || canary_lanes="$corpus/spread-random-20000000.vortex"
 [ -e "$canary_lanes" ] || canary_lanes="$corpus/spread-random-4000000.vortex"
+# A corpus with none of them, as an emptied cache leaves it, gets the first of each written: without it,
+# every canary fails and the session measures nothing.
+[ -e "$canary_scan" ] || canary_scan="$(fixture spread-strided-20000000)"
+[ -e "$canary_lanes" ] || canary_lanes="$(fixture spread-random-40000000-core2025.10)"
 standard_scan=""
 standard_lanes=""
 canaries() {
