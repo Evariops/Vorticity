@@ -2914,7 +2914,14 @@ internal static class BlockStatsPass
 
         if (mask.AllValid)
         {
-            int i = FloatLanes(values, ref min, ref max, ref any, ref nans);
+            int i = FloatLanes(values, ref min, ref max, ref any, out bool sawNaN);
+            if (sawNaN)
+            {
+                long counted = NaNs(values[..i]);
+                nans += counted;
+                any |= counted < i;
+            }
+
             for (; i < values.Length; i++)
             {
                 T value = values[i];
@@ -2961,19 +2968,28 @@ internal static class BlockStatsPass
     /// <summary>
     /// The bounds of an all-valid float range, a register at a time: a NaN lane is replaced by the
     /// neutral element -- +∞ for the minimum, -∞ for the maximum -- before `Min` and `Max`, which
-    /// then follow <c>Math.Min</c>'s rule on the two zeros. The NaN lanes are counted into
-    /// <paramref name="nans"/>.
+    /// then follow <c>Math.Min</c>'s rule on the two zeros. <paramref name="sawNaN"/> says whether a
+    /// lane held a NaN, for the caller to count them.
     /// </summary>
     /// <returns>Where the scalar tail starts.</returns>
     /// <remarks>
     /// Two accumulators per extreme, as <see cref="Bounds{T}"/> has, for its reason: the loop is
-    /// latency-bound. Whether any lane held a number is an OR of the self-equality masks, reduced
-    /// once at the end; the NaN lanes are the self-equality masks' clear lanes, subtracted per register
-    /// from a count of every lane.
+    /// latency-bound. Whether a lane held a NaN is an AND of the self-equality masks, reduced once at
+    /// the end; a range without one holds numbers. The caller counts the NaNs, and only in a range
+    /// that holds one, which also says whether it held anything else: a count per register, a mask's
+    /// bits extracted and popped, cost a float64 block's bounds a cycle a value on arm64, which has no
+    /// instruction that extracts them, and a block of measurements has no NaN to count.
+    /// <para>
+    /// No call follows the loop before its accumulators are reduced. arm64 keeps only the low half
+    /// of a vector register across a call, so an accumulator live across one is stored at each
+    /// iteration of the loop that defines it: with the count called here, the two maxima went
+    /// through the stack at every register, and the bounds took three cycles a value.
+    /// </para>
     /// </remarks>
-    private static int FloatLanes<T>(ReadOnlySpan<T> values, ref T min, ref T max, ref bool any, ref long nans)
+    private static int FloatLanes<T>(ReadOnlySpan<T> values, ref T min, ref T max, ref bool any, out bool sawNaN)
         where T : unmanaged, IFloatingPointIeee754<T>
     {
+        sawNaN = false;
         int lanes = Vector128<T>.IsSupported ? Vector128<T>.Count : 0;
         if (!Vector128.IsHardwareAccelerated || lanes == 0 || values.Length < lanes * 2)
         {
@@ -2987,33 +3003,30 @@ internal static class BlockStatsPass
         Vector128<T> lowB = positive;
         Vector128<T> highA = negative;
         Vector128<T> highB = negative;
-        Vector128<T> numbers = Vector128<T>.Zero;
+        Vector128<T> everyNumber = Vector128<T>.AllBitsSet;
         int step = lanes * 2;
         int i = 0;
-        long real = 0;
         for (; i + step <= values.Length; i += step)
         {
             Vector128<T> a = Vector128.LoadUnsafe(ref head, (nuint)i);
             Vector128<T> b = Vector128.LoadUnsafe(ref head, (nuint)(i + lanes));
             Vector128<T> realA = Vector128.Equals(a, a);
             Vector128<T> realB = Vector128.Equals(b, b);
-            numbers |= realA | realB;
-            real += BitOperations.PopCount(realA.ExtractMostSignificantBits()) + BitOperations.PopCount(realB.ExtractMostSignificantBits());
+            everyNumber &= realA & realB;
             lowA = Vector128.Min(lowA, Vector128.ConditionalSelect(realA, a, positive));
             lowB = Vector128.Min(lowB, Vector128.ConditionalSelect(realB, b, positive));
             highA = Vector128.Max(highA, Vector128.ConditionalSelect(realA, a, negative));
             highB = Vector128.Max(highB, Vector128.ConditionalSelect(realB, b, negative));
         }
 
-        nans += i - real;
-        if (numbers == Vector128<T>.Zero)
-        {
-            return i;
-        }
-
-        any = true;
         Vector128<T> low = Vector128.Min(lowA, lowB);
         Vector128<T> high = Vector128.Max(highA, highB);
+
+        // Compared as bits: a lane of every bit set is a NaN, which no float comparison finds equal to itself. A range with
+        // no NaN holds a number; one with a NaN may hold nothing else, which the caller's count says. Its neutral bounds
+        // merge into the extremes as nothing.
+        sawNaN = everyNumber.AsUInt64() != Vector128<ulong>.AllBitsSet;
+        any |= !sawNaN;
         for (int lane = 0; lane < lanes; lane++)
         {
             min = Smaller(min, low.GetElement(lane));
@@ -3021,6 +3034,20 @@ internal static class BlockStatsPass
         }
 
         return i;
+    }
+
+    /// <summary>The NaNs among <paramref name="values"/>, for the rare range <see cref="FloatLanes{T}"/> found one in.</summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static long NaNs<T>(ReadOnlySpan<T> values)
+        where T : unmanaged, IFloatingPointIeee754<T>
+    {
+        long nans = 0;
+        foreach (T value in values)
+        {
+            nans += T.IsNaN(value) ? 1 : 0;
+        }
+
+        return nans;
     }
 
     /// <summary>F16, widened to <see cref="float"/> - exactly, since every Half has one.</summary>
