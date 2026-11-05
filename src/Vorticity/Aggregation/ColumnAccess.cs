@@ -582,12 +582,47 @@ internal static class StorageValues
             return Unsafe.As<VortexDecimal?, T>(ref present);
         }
 
+        // A date, a time, an instant or a duration from its integer storage, a decimal from its
+        // unscaled value, a Guid from its bits: through a literal, each cost a box a group of a
+        // grouped aggregate, and a decimal BigIntegers besides.
+        if (typeof(TValue) == typeof(long) || typeof(TValue) == typeof(int))
+        {
+            long stored = typeof(TValue) == typeof(long) ? Unsafe.As<TValue, long>(ref value) : Unsafe.As<TValue, int>(ref value);
+            if (LiteralValues.TryFromStorage(stored, shape.Type, out T? typed))
+            {
+                return typed!;
+            }
+        }
+
+        if (typeof(TValue) == typeof(Int128) && LiteralValues.Is<decimal, T>())
+        {
+            return LiteralValues.Wrap<decimal, T>(LiteralValues.Decimal(Unsafe.As<TValue, Int128>(ref value), shape.Type));
+        }
+
+        if (typeof(TValue) == typeof(UInt128) && LiteralValues.Is<Guid, T>())
+        {
+            return LiteralValues.Wrap<Guid, T>(LiteralValues.Uuid(Unsafe.As<TValue, UInt128>(ref value)));
+        }
+
         return LiteralValues.ToValue<T>(Literal(value, shape), shape.Type)!;
     }
 
-    /// <summary>Text or binary as <typeparamref name="T"/>, which copies.</summary>
-    internal static T BytesToClr<T>(ReadOnlySpan<byte> value, ColumnShape shape) =>
-        LiteralValues.ToValue<T>(FilterLiteral.From(value), shape.Type)!;
+    /// <summary>Text or binary as <typeparamref name="T"/>, which copies once.</summary>
+    internal static T BytesToClr<T>(ReadOnlySpan<byte> value, ColumnShape shape)
+    {
+        if (typeof(T) == typeof(string))
+        {
+            string text = System.Text.Encoding.UTF8.GetString(value);
+            return Unsafe.As<string, T>(ref text);
+        }
+
+        if (LiteralValues.Is<ReadOnlyMemory<byte>, T>())
+        {
+            return LiteralValues.Wrap<ReadOnlyMemory<byte>, T>(value.ToArray());
+        }
+
+        return LiteralValues.ToValue<T>(FilterLiteral.From(value), shape.Type)!;
+    }
 
     /// <summary>A boolean as <typeparamref name="T"/>.</summary>
     internal static T BoolToClr<T>(bool value, ColumnShape shape)

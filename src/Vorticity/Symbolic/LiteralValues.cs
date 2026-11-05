@@ -1,6 +1,9 @@
 using System;
+using System.Buffers.Binary;
+using System.Diagnostics;
 using System.Globalization;
 using System.Numerics;
+using System.Runtime.CompilerServices;
 using System.Text;
 using Vorticity.Expressions;
 using Vorticity.Types.Numerics;
@@ -22,19 +25,18 @@ internal static class LiteralValues
             return primitive;
         }
 
+        if (TryTyped(literal, column, out T? typed))
+        {
+            return typed;
+        }
+
         ClrShape shape = ClrShape.For<T>.Value;
-        Type core = Nullable.GetUnderlyingType(typeof(T)) ?? typeof(T);
         object value = shape.Kind switch
         {
-            ClrKind.Bool => literal.BoolValue,
-            ClrKind.Signed or ClrKind.Unsigned or ClrKind.Float => Numeric(literal, core),
+            ClrKind.Signed or ClrKind.Unsigned or ClrKind.Float => Numeric(literal, shape.Core),
             ClrKind.String => Encoding.UTF8.GetString(literal.BytesValue),
             ClrKind.Binary => new ReadOnlyMemory<byte>(literal.BytesValue.ToArray()),
-            ClrKind.DateOnly or ClrKind.TimeOnly or ClrKind.DateTime or ClrKind.DateTimeOffset => Temporal(literal, column, shape.Kind),
-            ClrKind.Guid => new Guid(literal.BytesValue, bigEndian: true),
-            ClrKind.Decimal => Decimal(literal, column),
             ClrKind.VortexDecimal => Wide(literal, column),
-            ClrKind.TimeSpan => new TimeSpan(Stored(literal)),
             ClrKind.Integer128 => Integer<Int128>(literal),
             ClrKind.UInteger128 => Integer<UInt128>(literal),
             ClrKind.BigInteger => Unscaled(literal),
@@ -45,32 +47,101 @@ internal static class LiteralValues
     }
 
     /// <summary>
-    /// A key of a primitive type without a box: under the <c>typeof</c> tests the JIT specializes each
-    /// <c>(T)(object)</c> away, so a cursor walking a column of integers reads its keys for free.
+    /// A date, a time, an instant or a duration from its integer storage, nullable or not, without a
+    /// box; false for any other <typeparamref name="T"/>, which the JIT resolves per instantiation.
+    /// </summary>
+    internal static bool TryFromStorage<T>(long stored, VortexType column, out T? value)
+    {
+        if (Is<DateTime, T>()) { value = Wrap<DateTime, T>(Instant(stored, column)); return true; }
+        if (Is<DateTimeOffset, T>()) { value = Wrap<DateTimeOffset, T>(Zoned(stored, column)); return true; }
+        if (Is<DateOnly, T>()) { value = Wrap<DateOnly, T>(Date(stored, column)); return true; }
+        if (Is<TimeOnly, T>()) { value = Wrap<TimeOnly, T>(Time(stored, column)); return true; }
+        if (Is<TimeSpan, T>()) { value = Wrap<TimeSpan, T>(new TimeSpan(stored)); return true; }
+        value = default;
+        return false;
+    }
+
+    /// <summary>An unscaled value as a decimal of the column's scale; the column holds at most 28 digits, as a decimal does.</summary>
+    internal static decimal Decimal(Int128 unscaled, VortexType column)
+    {
+        bool negative = unscaled < 0;
+        UInt128 magnitude = (UInt128)(negative ? -unscaled : unscaled);
+        Debug.Assert(magnitude >> 96 == 0, "A decimal reads a column of at most 28 digits.");
+        return new decimal((int)(uint)magnitude, (int)(uint)(magnitude >> 32), (int)(uint)(magnitude >> 64), negative, (byte)column.Scale);
+    }
+
+    /// <summary>A uuid's bits, read big-endian, as a <see cref="Guid"/>.</summary>
+    internal static Guid Uuid(UInt128 bits)
+    {
+        Span<byte> bytes = stackalloc byte[16];
+        BinaryPrimitives.WriteUInt128BigEndian(bytes, bits);
+        return new Guid(bytes, bigEndian: true);
+    }
+
+    /// <summary>Whether <typeparamref name="T"/> is <typeparamref name="TCore"/> or its <see cref="Nullable{T}"/>, a constant per instantiation.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static bool Is<TCore, T>()
+        where TCore : struct =>
+        typeof(T) == typeof(TCore) || typeof(T) == typeof(TCore?);
+
+    /// <summary><paramref name="value"/> as <typeparamref name="T"/>, which <see cref="Is{TCore, T}"/>: no box.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static T Wrap<TCore, T>(TCore value)
+        where TCore : struct
+    {
+        if (typeof(T) == typeof(TCore))
+        {
+            return Unsafe.As<TCore, T>(ref value);
+        }
+
+        TCore? nullable = value;
+        return Unsafe.As<TCore?, T>(ref nullable);
+    }
+
+    /// <summary>
+    /// A key of a primitive type, nullable or not, without a box: under the <c>typeof</c> tests the JIT
+    /// keeps the one branch of <typeparamref name="T"/>, so a cursor walking a column of integers reads
+    /// its keys for free.
     /// </summary>
     private static bool TryPrimitive<T>(FilterLiteral literal, out T? value)
     {
         long signed = literal.Kind == FilterLiteralKind.Unsigned ? unchecked((long)literal.UnsignedValue) : literal.SignedValue;
         if (literal.Kind is FilterLiteralKind.Signed or FilterLiteralKind.Unsigned)
         {
-            if (typeof(T) == typeof(long)) { value = (T)(object)signed; return true; }
-            if (typeof(T) == typeof(int)) { value = (T)(object)(int)signed; return true; }
-            if (typeof(T) == typeof(short)) { value = (T)(object)(short)signed; return true; }
-            if (typeof(T) == typeof(sbyte)) { value = (T)(object)(sbyte)signed; return true; }
-            if (typeof(T) == typeof(ulong)) { value = (T)(object)unchecked((ulong)signed); return true; }
-            if (typeof(T) == typeof(uint)) { value = (T)(object)(uint)signed; return true; }
-            if (typeof(T) == typeof(ushort)) { value = (T)(object)(ushort)signed; return true; }
-            if (typeof(T) == typeof(byte)) { value = (T)(object)(byte)signed; return true; }
-            if (typeof(T) == typeof(char)) { value = (T)(object)(char)signed; return true; }
-            if (typeof(T) == typeof(nint)) { value = (T)(object)(nint)signed; return true; }
-            if (typeof(T) == typeof(nuint)) { value = (T)(object)unchecked((nuint)(ulong)signed); return true; }
+            if (Is<long, T>()) { value = Wrap<long, T>(signed); return true; }
+            if (Is<int, T>()) { value = Wrap<int, T>((int)signed); return true; }
+            if (Is<short, T>()) { value = Wrap<short, T>((short)signed); return true; }
+            if (Is<sbyte, T>()) { value = Wrap<sbyte, T>((sbyte)signed); return true; }
+            if (Is<ulong, T>()) { value = Wrap<ulong, T>(unchecked((ulong)signed)); return true; }
+            if (Is<uint, T>()) { value = Wrap<uint, T>((uint)signed); return true; }
+            if (Is<ushort, T>()) { value = Wrap<ushort, T>((ushort)signed); return true; }
+            if (Is<byte, T>()) { value = Wrap<byte, T>((byte)signed); return true; }
+            if (Is<char, T>()) { value = Wrap<char, T>((char)signed); return true; }
+            if (Is<nint, T>()) { value = Wrap<nint, T>((nint)signed); return true; }
+            if (Is<nuint, T>()) { value = Wrap<nuint, T>(unchecked((nuint)(ulong)signed)); return true; }
         }
         else if (literal.Kind == FilterLiteralKind.Float)
         {
-            if (typeof(T) == typeof(double)) { value = (T)(object)literal.FloatValue; return true; }
-            if (typeof(T) == typeof(float)) { value = (T)(object)(float)literal.FloatValue; return true; }
+            if (Is<double, T>()) { value = Wrap<double, T>(literal.FloatValue); return true; }
+            if (Is<float, T>()) { value = Wrap<float, T>((float)literal.FloatValue); return true; }
+            if (Is<Half, T>()) { value = Wrap<Half, T>((Half)literal.FloatValue); return true; }
         }
 
+        value = default;
+        return false;
+    }
+
+    /// <summary>A bool, a date, a time, an instant, a duration, a uuid or a decimal, nullable or not, without a box.</summary>
+    private static bool TryTyped<T>(FilterLiteral literal, VortexType column, out T? value)
+    {
+        if (TryFromStorage(Stored(literal), column, out value))
+        {
+            return true;
+        }
+
+        if (Is<Guid, T>()) { value = Wrap<Guid, T>(new Guid(literal.BytesValue, bigEndian: true)); return true; }
+        if (Is<decimal, T>()) { value = Wrap<decimal, T>(Decimal(literal, column)); return true; }
+        if (Is<bool, T>()) { value = Wrap<bool, T>(literal.BoolValue); return true; }
         value = default;
         return false;
     }
@@ -78,26 +149,30 @@ internal static class LiteralValues
     private static long Stored(FilterLiteral literal) =>
         literal.Kind == FilterLiteralKind.Unsigned ? (long)literal.UnsignedValue : literal.SignedValue;
 
-    /// <summary>A stored temporal value as its .NET value; a value outside the .NET type's range is a claim the file cannot make.</summary>
-    private static object Temporal(FilterLiteral literal, VortexType column, ClrKind kind)
-    {
-        long stored = Stored(literal);
-        TimeUnit unit = column.Unit ?? TimeUnit.Microseconds;
-        switch (kind)
-        {
-            case ClrKind.DateOnly when TemporalUnits.TryDate(column.Unit == TimeUnit.Milliseconds ? TemporalUnits.FloorDiv(stored, TemporalUnits.MillisecondsPerDay) : stored, out DateOnly date):
-                return date;
-            case ClrKind.TimeOnly when TemporalUnits.TryTime(stored, unit, out TimeOnly time):
-                return time;
-            case ClrKind.DateTime when TemporalUnits.TryInstant(stored, unit, out long ticks):
-                return new DateTime(ticks, column.TimeZone is null ? DateTimeKind.Unspecified : DateTimeKind.Utc);
-            case ClrKind.DateTimeOffset when TemporalUnits.TryInstant(stored, unit, out long ticks)
-                && TemporalUnits.TryZoned(ticks, column.ZoneInfo, out DateTimeOffset zoned):
-                return zoned;
-            default:
-                throw new VortexFormatException($"The value {stored} of a column of {column} is outside what a {kind} holds.");
-        }
-    }
+    // A stored temporal value as its .NET value; a value outside the .NET type's range is a claim the file cannot make.
+    private static DateOnly Date(long stored, VortexType column) =>
+        TemporalUnits.TryDate(column.Unit == TimeUnit.Milliseconds ? TemporalUnits.FloorDiv(stored, TemporalUnits.MillisecondsPerDay) : stored, out DateOnly date)
+            ? date
+            : throw Outside(stored, column, nameof(DateOnly));
+
+    private static TimeOnly Time(long stored, VortexType column) =>
+        TemporalUnits.TryTime(stored, column.Unit ?? TimeUnit.Microseconds, out TimeOnly time)
+            ? time
+            : throw Outside(stored, column, nameof(TimeOnly));
+
+    private static DateTime Instant(long stored, VortexType column) =>
+        TemporalUnits.TryInstant(stored, column.Unit ?? TimeUnit.Microseconds, out long ticks)
+            ? new DateTime(ticks, column.IsZoned ? DateTimeKind.Utc : DateTimeKind.Unspecified)
+            : throw Outside(stored, column, nameof(DateTime));
+
+    private static DateTimeOffset Zoned(long stored, VortexType column) =>
+        TemporalUnits.TryInstant(stored, column.Unit ?? TimeUnit.Microseconds, out long ticks)
+        && TemporalUnits.TryZoned(ticks, column.ZoneInfo, out DateTimeOffset zoned)
+            ? zoned
+            : throw Outside(stored, column, nameof(DateTimeOffset));
+
+    private static VortexFormatException Outside(long stored, VortexType column, string type) =>
+        new VortexFormatException($"The value {stored} of a column of {column} is outside what a {type} holds.");
 
     private static object Numeric(FilterLiteral literal, Type core)
     {
@@ -140,18 +215,13 @@ internal static class LiteralValues
         throw new VortexFormatException($"The value {unscaled} is outside what a {typeof(TInteger).Name} holds.");
     }
 
-    private static decimal Decimal(FilterLiteral literal, VortexType column)
+    /// <summary>A decimal literal as a decimal: an integer one without a BigInteger, a wide one through it.</summary>
+    private static decimal Decimal(FilterLiteral literal, VortexType column) => literal.Kind switch
     {
-        BigInteger unscaled = Unscaled(literal);
-        bool negative = unscaled.Sign < 0;
-        BigInteger magnitude = BigInteger.Abs(unscaled);
-        return new decimal(
-            (int)(uint)(magnitude & uint.MaxValue),
-            (int)(uint)((magnitude >> 32) & uint.MaxValue),
-            (int)(uint)((magnitude >> 64) & uint.MaxValue),
-            negative,
-            (byte)column.Scale);
-    }
+        FilterLiteralKind.Signed => Decimal((Int128)literal.SignedValue, column),
+        FilterLiteralKind.Unsigned => Decimal((Int128)literal.UnsignedValue, column),
+        _ => Decimal((Int128)Unscaled(literal), column),
+    };
 
     private static VortexDecimal Wide(FilterLiteral literal, VortexType column)
     {

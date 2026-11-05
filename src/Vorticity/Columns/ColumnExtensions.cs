@@ -599,7 +599,7 @@ internal static class Temporal
     {
         public static DateTime Convert(long stored, VortexType type, int index) =>
             TemporalUnits.TryInstant(stored, type.Unit ?? TimeUnit.Microseconds, out long ticks)
-                ? new DateTime(ticks, type.TimeZone is null ? DateTimeKind.Unspecified : DateTimeKind.Utc)
+                ? new DateTime(ticks, type.IsZoned ? DateTimeKind.Utc : DateTimeKind.Unspecified)
                 : OutOfRange<DateTime>(index, stored, type);
     }
 

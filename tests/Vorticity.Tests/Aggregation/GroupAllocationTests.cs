@@ -113,6 +113,15 @@ public sealed partial class GroupAllocationTests
         // Six keys, three texts and three integers, nearly a group a row: tuples of their values.
         ("six keys", 1, GroupCoreReason.None, 108_032, SixAsync),
         ("six keys", 4, GroupCoreReason.FirstRows, 1_638_400, SixAsync),
+
+        // The hashed integers' groups, with an extreme of each type a group's state turns into from its
+        // storage: an instant, a decimal, a uuid and a date. Each answer is built without a box, from
+        // its storage and not through a literal, and the instant's zone is no longer decoded to learn
+        // whether it has one: 154 MB to 2.2 MB at one lane, 170 MB to 18 MB at four. What is left
+        // above the hashed integers is the decimal's and the uuid's, whose states are 16 bytes: 1 MiB
+        // each at one lane, 8 MiB at four.
+        ("typed extremes", 1, GroupCoreReason.None, 2_207_232, ExtremesAsync),
+        ("typed extremes", 4, GroupCoreReason.FirstRows, 18_415_616, ExtremesAsync),
     ];
 
     [Fact]
@@ -211,6 +220,12 @@ public sealed partial class GroupAllocationTests
             lanes,
             6);
 
+    private static Task<(long, GroupCoreReason)> ExtremesAsync(VortexFile file, int lanes) =>
+        CountAsync<WideExtremes>(
+            file.Scan<Row>().GroupBy(r => r.Wide).Select(g => (g.Key, g.Count(), g.Max(r => r.At), g.Min(r => r.Price), g.Max(r => r.Id), g.Min(r => r.Day))),
+            lanes,
+            1);
+
     /// <summary>
     /// Runs <paramref name="query"/> and reads its result as the batches it is, its counts summed: the
     /// rows the groups hold, and the path the groups took.
@@ -262,7 +277,11 @@ public sealed partial class GroupAllocationTests
                 row % 7,
                 Labels[row % 13],
                 Names[row % 97],
-                row);
+                row,
+                Epoch.AddSeconds(row),
+                (row % 100_000) / 100m,
+                new Guid((int)(mixed >> 32), (short)mixed, (short)(mixed >> 16), (byte)row, 1, 2, 3, 4, 5, 6, 7),
+                DateOnly.FromDayNumber(738_000 + (row % 3_000)));
         }
 
         await using VortexFileWriter writer = VortexSession.Default.CreateWriter<Row>(path);
@@ -282,10 +301,27 @@ public sealed partial class GroupAllocationTests
         return texts;
     }
 
+    private static readonly DateTime Epoch = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
 
     [VortexRecord]
-    public partial record struct Row(int Small, string Name, long Wide, int Dense, int Other, string Label, string City, long Value);
+    public partial record struct Row(
+        int Small,
+        string Name,
+        long Wide,
+        int Dense,
+        int Other,
+        string Label,
+        string City,
+        long Value,
+        [VortexColumn(TimeZone = "UTC")] DateTime At,
+        [VortexColumn(Precision = 18, Scale = 2)] decimal Price,
+        Guid Id,
+        DateOnly Day);
+
+    [VortexRecord]
+    public partial record struct WideExtremes(long Key, long Count, DateTime? Latest, decimal? Cheapest, Guid? Highest, DateOnly? First);
 
     [VortexRecord]
     public partial record struct IntTotal(int Key, long Count, long Sum);
