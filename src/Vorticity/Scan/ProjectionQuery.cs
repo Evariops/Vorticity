@@ -266,7 +266,7 @@ internal sealed class ProjectionQuery : ResultQuery
         ProjectedColumn[] columns = new ProjectedColumn[elements.Length];
         for (int i = 0; i < columns.Length; i++)
         {
-            columns[i] = elements[i].Column($"Item{i + 1}");
+            columns[i] = elements[i].Column(TupleNames.Item(i));
         }
 
         return columns;
