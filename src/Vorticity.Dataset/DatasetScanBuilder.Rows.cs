@@ -1516,13 +1516,15 @@ internal sealed partial class DatasetScanBuilder
             // A row taken by its place among the dataset's live rows is at that place among the
             // object's live rows, which the deleted rows before it push further on.
             (int first, int count) = TakenBy(held);
+            ReadOnlySpan<long> taken = take.Span;
             long[] local = new long[count];
             for (int i = 0; i < count; i++)
             {
-                local[i] = deletions.Physical(take[first + i] - held.FirstRow);
+                local[i] = deletions.Physical(taken[first + i] - held.FirstRow);
             }
 
-            return scan.Take(local).WithGranules(GeometryOf(held));
+            // The object's list is its scan's alone, ascending as the dataset's is: read where it lies.
+            return scan.TakeHeld(local).WithGranules(GeometryOf(held));
         }
 
         // The range is the dataset's; the file's is the part of it that falls inside this object, and inside its part.

@@ -792,7 +792,7 @@ internal sealed partial class DatasetScanSource
 
         if (spec.Take is { } take)
         {
-            builder.Take(take);
+            builder.TakeHeld(take);
         }
 
         if (spec.OrderPath is { } order)

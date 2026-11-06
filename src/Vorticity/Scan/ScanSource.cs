@@ -30,7 +30,11 @@ internal sealed record ScanSpec
 
     internal RowRange? Rows { get; init; }
 
-    internal long[]? Take { get; init; }
+    /// <summary>
+    /// The rows asked for by position, or null for every row: held unchanged by whoever made the spec until its scans end,
+    /// so that a source reads a list that ascends without a copy of it.
+    /// </summary>
+    internal ReadOnlyMemory<long>? Take { get; init; }
 
     internal string? OrderPath { get; init; }
 
@@ -392,7 +396,7 @@ internal sealed class FileScanSource : ScanSource, IRowsCapability, IStatisticsC
 
         if (spec.Take is { } take)
         {
-            builder.Take(take);
+            builder.TakeHeld(take);
         }
 
         if (spec.OrderPath is { } order)

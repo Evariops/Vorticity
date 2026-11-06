@@ -1,4 +1,5 @@
 using System;
+using System.Runtime.InteropServices;
 
 namespace Vorticity.Scanning;
 
@@ -37,6 +38,44 @@ internal sealed class RowSelection
     /// <summary>Selects the first <paramref name="count"/> rows of the buffer.</summary>
     /// <param name="count">How many; the caller has sorted, deduplicated and bounded them.</param>
     internal void Reset(int count) => _count = count;
+
+    /// <summary>
+    /// The rows of <paramref name="rows"/>, which their owner holds unchanged while the selection is read: kept where they
+    /// lie when they ascend, each a row of the file, as the engine's own takes hand them; sorted into a copy of their own
+    /// otherwise, as <see cref="Create"/> does.
+    /// </summary>
+    /// <param name="rows">The wanted rows.</param>
+    /// <param name="rowCount">The file's row count.</param>
+    /// <returns>The compiled selection.</returns>
+    /// <exception cref="ArgumentOutOfRangeException">A row is negative or beyond the file.</exception>
+    internal static RowSelection Held(ReadOnlyMemory<long> rows, long rowCount)
+    {
+        if (MemoryMarshal.TryGetArray(rows, out ArraySegment<long> segment) && segment.Offset == 0 && Ascends(rows.Span, rowCount))
+        {
+            return new RowSelection(segment.Array!) { _count = segment.Count };
+        }
+
+        return Create(rows.Span, rowCount);
+    }
+
+    /// <summary>Whether <paramref name="rows"/> ascend strictly, each a row of a file of <paramref name="rowCount"/>.</summary>
+    internal static bool Ascends(ReadOnlySpan<long> rows, long rowCount)
+    {
+        if (rows.Length > 0 && (rows[0] < 0 || rows[^1] >= rowCount))
+        {
+            return false;
+        }
+
+        for (int i = 1; i < rows.Length; i++)
+        {
+            if (rows[i - 1] >= rows[i])
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
 
     /// <summary>Sorts and deduplicates <paramref name="rows"/>, rejecting anything out of range.</summary>
     /// <param name="rows">The wanted rows, in any order.</param>

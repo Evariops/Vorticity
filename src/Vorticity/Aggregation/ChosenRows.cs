@@ -92,23 +92,34 @@ internal sealed class ChosenValues<T>(ChosenColumnNode<T> column) : ChosenValues
         int length = Places(groups, most);
         if (length > _values.Length)
         {
-            // Each value a fetch reads is written, or its group cleared: the arrays come new.
-            int capacity = Scratch.Capacity(length, _values.Length);
-            long element = Unsafe.SizeOf<T>() + sizeof(bool);
-            memory?.Hold(capacity * element, "fetch of the chosen rows");
-            memory?.LetGo(_values.Length * element);
-            _values = new T[capacity];
-            _missing = new bool[capacity];
+            // Each value a fetch reads is written, or its group cleared: the arrays come from the process's
+            // shelf as they are, under the query's memory, and go back to it once the result is built.
+            GiveBack(memory);
+            _values = QueryArrays.Rent<T>(memory, length, "fetch of the chosen rows");
+            _missing = QueryArrays.Rent<bool>(memory, length, "fetch of the chosen rows");
         }
     }
 
     internal override void Release(QueryMemory? memory)
     {
-        memory?.LetGo(_values.Length * (long)(Unsafe.SizeOf<T>() + sizeof(bool)));
-        _values = [];
-        _missing = [];
-        _scratch = [];
+        GiveBack(memory);
+        Scratch.Return(ref _scratch);
         ForgetPlaces();
+    }
+
+    private void GiveBack(QueryMemory? memory)
+    {
+        if (_values.Length > 0)
+        {
+            QueryArrays.Return(memory, _values);
+            _values = [];
+        }
+
+        if (_missing.Length > 0)
+        {
+            QueryArrays.Return(memory, _missing);
+            _missing = [];
+        }
     }
 
     internal override void Clear(int group)
@@ -162,6 +173,8 @@ internal sealed class ChosenResultColumn<T>(string name, VortexType type, Chosen
 
         ElementWriter.Append(store.Leaf, new ReadOnlySpan<T>(_values, start, groups.Length - start));
     }
+
+    internal override void Release() => Scratch.Return(ref _values);
 }
 
 /// <summary>
@@ -324,10 +337,11 @@ internal static class ChosenFetch
     internal static async ValueTask FetchAsync(
         AggregationOutcome outcome, ScanSource source, ScanSpec spec, ScanCounters metrics, ReadOnlyMemory<int> groups, CancellationToken cancellationToken)
     {
-        // What the fetch sorts and reads by, an entry a group and choice — its position, its owner,
-        // its row and group, the take's position — reserved under the result's memory while it runs.
+        // What the take may make of the positions, a long a group and choice, as a dataset's objects each
+        // list their own, reserved under the result's memory while it runs; the arrays the fetch sorts and
+        // reads by are rented under it (QueryArrays), and the take reads the sorted positions in place.
         QueryMemory? memory = outcome.Memory;
-        long scratch = (long)groups.Length * outcome.Plan.ChosenRows.Length * ((3 * sizeof(long)) + (2 * sizeof(int)));
+        long scratch = (long)groups.Length * outcome.Plan.ChosenRows.Length * sizeof(long);
         memory?.Hold(scratch, "fetch of the chosen rows");
         try
         {
@@ -357,8 +371,46 @@ internal static class ChosenFetch
 
         // Each row a group chose, with the choice and the group it serves; a group without a row
         // for a choice has the choice's columns left empty.
-        long[] positions = new long[groups.Length * choices.Length];
-        long[] owners = new long[positions.Length];
+        int entries = groups.Length * choices.Length;
+        long[] positions = QueryArrays.Rent<long>(memory, entries, "fetch of the chosen rows");
+        long[] owners = [];
+        int[] rowOf = [];
+        int[] groupOf = [];
+        try
+        {
+            owners = QueryArrays.Rent<long>(memory, entries, "fetch of the chosen rows");
+            rowOf = QueryArrays.Rent<int>(memory, entries, "fetch of the chosen rows");
+            groupOf = QueryArrays.Rent<int>(memory, entries, "fetch of the chosen rows");
+            await ReadChosenAsync(outcome, source, spec, metrics, groups, chosen, choices, positions, owners, rowOf, groupOf, memory, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            Return(memory, positions);
+            Return(memory, owners);
+            Return(memory, rowOf);
+            Return(memory, groupOf);
+        }
+    }
+
+    private static void Return<T>(QueryMemory? memory, T[] array)
+    {
+        if (array.Length > 0)
+        {
+            QueryArrays.Return(memory, array);
+        }
+    }
+
+    /// <summary>
+    /// The rows <paramref name="groups"/> chose, sorted into one take of the source, and read into the columns of the
+    /// chosen rows: <paramref name="positions"/>, <paramref name="owners"/>, <paramref name="rowOf"/> and
+    /// <paramref name="groupOf"/> are scratch an entry a group and choice long at least.
+    /// </summary>
+    private static async ValueTask ReadChosenAsync(
+        AggregationOutcome outcome, ScanSource source, ScanSpec spec, ScanCounters metrics, ReadOnlyMemory<int> groups,
+        IChosenColumn[] chosen, (IAggregateNode Row, int[] Columns)[] choices, long[] positions, long[] owners, int[] rowOf, int[] groupOf,
+        QueryMemory? memory, CancellationToken cancellationToken)
+    {
         int[] ofChoice = new int[choices.Length + 1];
         int count = 0;
         for (int r = 0; r < choices.Length; r++)
@@ -397,8 +449,6 @@ internal static class ChosenFetch
         }
 
         int[] next = ofChoice[..^1];
-        int[] rowOf = new int[count];
-        int[] groupOf = new int[count];
         int distinct = 0;
         for (int e = 0; e < count; e++)
         {
@@ -423,7 +473,7 @@ internal static class ChosenFetch
             Filter = null,
             MatchesNothing = false,
             Rows = null,
-            Take = positions.AsSpan(0, distinct).ToArray(),
+            Take = positions.AsMemory(0, distinct),
             Projection = mask.Build(),
             OrderPath = null,
             Descending = false,

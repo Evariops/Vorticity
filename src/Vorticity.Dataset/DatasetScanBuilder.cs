@@ -102,7 +102,9 @@ internal sealed partial class DatasetScanBuilder
     private long _from;
     private long _to = long.MaxValue;
     private bool _rowsSet;
-    private long[]? _take;
+
+    // The rows taken by index, ascending and distinct: the builder's own copy, or a list whose owner holds it unchanged.
+    private ReadOnlyMemory<long>? _take;
     private string[]? _orderPaths;
     private bool _descending;
     private DatasetScanCounters? _metrics;
@@ -223,9 +225,29 @@ internal sealed partial class DatasetScanBuilder
                 nameof(rows), wrong, $"Version {_version.Version} of the dataset holds {_version.RowCount} rows.");
         }
 
-        _take = sorted.AsSpan(0, distinct).ToArray();
-        _from = distinct == 0 ? 0 : _take[0];
-        _to = distinct == 0 ? 0 : _take[^1] + 1;
+        return Taking(sorted.AsMemory(0, distinct));
+    }
+
+    /// <summary>
+    /// As <see cref="Take(ReadOnlySpan{long})"/>, for rows their owner holds unchanged until the scan ends: a list that
+    /// ascends, as the engine's own takes hand it, is read where it lies, neither copied nor sorted again.
+    /// </summary>
+    internal DatasetScanBuilder TakeHeld(ReadOnlyMemory<long> rows)
+    {
+        if (_orderPaths is not null || _rowsSet || !RowSelection.Ascends(rows.Span, _version.RowCount))
+        {
+            return Take(rows.Span);
+        }
+
+        return Taking(rows);
+    }
+
+    private DatasetScanBuilder Taking(ReadOnlyMemory<long> rows)
+    {
+        ReadOnlySpan<long> taken = rows.Span;
+        _take = rows;
+        _from = taken.IsEmpty ? 0 : taken[0];
+        _to = taken.IsEmpty ? 0 : taken[^1] + 1;
         return this;
     }
 
@@ -776,15 +798,15 @@ internal sealed partial class DatasetScanBuilder
     /// <summary>Where the object's rows begin and how many there are among the rows the scan takes.</summary>
     private (int First, int Count) TakenBy(in PositionedObject held)
     {
-        long[] take = _take!;
+        ReadOnlySpan<long> take = _take!.Value.Span;
         int first = LowerBound(take, held.FirstRow);
         int end = LowerBound(take, held.FirstRow + held.Entry.Rows);
         return (first, end - first);
     }
 
-    private static int LowerBound(long[] sorted, long value)
+    private static int LowerBound(ReadOnlySpan<long> sorted, long value)
     {
-        int found = Array.BinarySearch(sorted, value);
+        int found = sorted.BinarySearch(value);
         return found >= 0 ? found : ~found;
     }
 
