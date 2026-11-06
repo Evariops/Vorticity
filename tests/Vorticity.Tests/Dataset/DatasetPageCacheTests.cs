@@ -576,21 +576,30 @@ public sealed class DatasetPageCacheTests
     }
 
     // A refresh reads the version after its own while a head asks for the one after that, both at
-    // once: no commit or one in a round trip, where heads alone took one and four.
+    // once: no commit or one in a round trip, where heads alone took one and four. The store holds the
+    // requests of a round until they are all in. A latency could not tell the rounds apart: on a busy
+    // machine the head sometimes went out after the read had come back, and counted as a round of its
+    // own. With twelve test processes on fourteen cores, that was one run in sixteen at 5 ms; with
+    // twenty-four, one in five at 20 ms.
     [Fact]
     public async Task ARefreshSeesNoCommitOrOneInARoundTrip()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
         await using MemoryObjectStore inner = new MemoryObjectStore();
-        await using CountingObjectStore store = new CountingObjectStore(inner);
+        await using RoundStore rounds = new RoundStore(inner);
+        await using CountingObjectStore store = new CountingObjectStore(rounds);
         await using VortexDataset reader = await CreateAsync(store, new DatasetOptions(), 3, ct);
         await using VortexDataset writer = await VortexDataset.OpenAsync(inner, new DatasetOptions(), ct);
 
-        // A latency, so that the read is still on its way when the head goes out.
-        inner.Latency = TimeSpan.FromMilliseconds(5);
-        long[] steps = new long[3];
-        long[] requests = new long[3];
-        for (int commits = 0; commits < 3; commits++)
+        // No commit and one: the read and the head, together. Two: the head finds the second, a head
+        // past it finds nothing, and the second is read.
+        ObjectOperation[][][] plans =
+        [
+            [[ObjectOperation.Read, ObjectOperation.Head]],
+            [[ObjectOperation.Read, ObjectOperation.Head]],
+            [[ObjectOperation.Read, ObjectOperation.Head], [ObjectOperation.Head], [ObjectOperation.Read]],
+        ];
+        for (int commits = 0; commits < plans.Length; commits++)
         {
             for (int i = 0; i < commits; i++)
             {
@@ -598,14 +607,17 @@ public sealed class DatasetPageCacheTests
             }
 
             store.Reset();
-            Assert.Equal(writer.Version, await reader.RefreshAsync(ct));
-            (steps[commits], requests[commits]) = (store.DependentSteps, store.Requests);
-        }
+            rounds.Holding = true;
+            Task<ulong> refresh = reader.RefreshAsync(ct).AsTask();
+            foreach (ObjectOperation[] round in plans[commits])
+            {
+                Assert.Equal(round, await rounds.ReleaseAsync(round.Length, ct));
+            }
 
-        // No commit and one: the read and the head, together. Two: the head finds the second, a head
-        // past it finds nothing, and the second is read.
-        Assert.Equal([1L, 1L, 3L], steps);
-        Assert.Equal([2L, 2L, 4L], requests);
+            Assert.Equal(writer.Version, await refresh.WaitAsync(RoundStore.Patience, ct));
+            rounds.Holding = false;
+            Assert.Equal(plans[commits].Sum(round => round.Length), store.Requests);
+        }
     }
 
     [Theory]
@@ -922,6 +934,87 @@ public sealed class DatasetPageCacheTests
         System.Buffers.Binary.BinaryPrimitives.WriteUInt64BigEndian(key.AsSpan(8), (ulong)(uid >> 64));
         System.Buffers.Binary.BinaryPrimitives.WriteUInt64BigEndian(key.AsSpan(16), (ulong)uid);
         return new DatasetOperation.AddObject(key, entry) { Level = 1 };
+    }
+
+    /// <summary>
+    /// A store that holds each read and head, while <see cref="Holding"/>, until the test lets the round
+    /// go: requests sent without waiting for one another are held together however late a busy thread
+    /// sends the last, and a request sent once an answer is in waits for the next round.
+    /// </summary>
+    private sealed class RoundStore(IObjectStore inner) : ForwardingStore(inner)
+    {
+        /// <summary>How long a round waits for its requests, which only a caller that waits for an answer before it sends the next reaches.</summary>
+        internal static readonly TimeSpan Patience = TimeSpan.FromSeconds(30);
+
+        private readonly object _gate = new object();
+        private readonly SemaphoreSlim _arrived = new SemaphoreSlim(0);
+        private readonly List<ObjectOperation> _held = [];
+        private TaskCompletionSource _release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        /// <summary>Whether reads and heads are held; set it with nothing in flight.</summary>
+        internal bool Holding { get; set; }
+
+        /// <summary>Waits until <paramref name="count"/> requests are held, lets the round go, and returns their kinds, in the enumeration's order.</summary>
+        internal async Task<ObjectOperation[]> ReleaseAsync(int count, CancellationToken cancellationToken)
+        {
+            for (int i = 0; i < count; i++)
+            {
+                if (!await _arrived.WaitAsync(Patience, cancellationToken))
+                {
+                    Assert.Fail($"{i} of the round's {count} requests went out before an answer came back.");
+                }
+            }
+
+            lock (_gate)
+            {
+                ObjectOperation[] round = [.. _held.Order()];
+                _held.Clear();
+                TaskCompletionSource release = _release;
+                _release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                release.SetResult();
+                return round;
+            }
+        }
+
+        public override async ValueTask<ObjectRead> ReadAsync(
+            string key, long offset, Memory<byte> destination, string? ifToken, CancellationToken cancellationToken)
+        {
+            await HoldAsync(ObjectOperation.Read, cancellationToken);
+            return await Inner.ReadAsync(key, offset, destination, ifToken, cancellationToken);
+        }
+
+        public override async ValueTask<ObjectRead> ReadTailAsync(string key, Memory<byte> destination, CancellationToken cancellationToken)
+        {
+            await HoldAsync(ObjectOperation.Read, cancellationToken);
+            return await Inner.ReadTailAsync(key, destination, cancellationToken);
+        }
+
+        public override async ValueTask<ObjectHead?> HeadAsync(string key, CancellationToken cancellationToken)
+        {
+            await HoldAsync(ObjectOperation.Head, cancellationToken);
+            return await Inner.HeadAsync(key, cancellationToken);
+        }
+
+        public override ValueTask DisposeAsync()
+        {
+            _arrived.Dispose();
+            return ValueTask.CompletedTask;
+        }
+
+        private Task HoldAsync(ObjectOperation operation, CancellationToken cancellationToken)
+        {
+            lock (_gate)
+            {
+                if (!Holding)
+                {
+                    return Task.CompletedTask;
+                }
+
+                _held.Add(operation);
+                _arrived.Release();
+                return _release.Task.WaitAsync(cancellationToken);
+            }
+        }
     }
 
     /// <summary>A store that holds back the answer to one put, once the object is in: a writer not told yet.</summary>
