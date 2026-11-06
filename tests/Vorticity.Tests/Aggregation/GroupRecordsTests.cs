@@ -77,6 +77,26 @@ public sealed partial class GroupRecordsTests
     }
 
     /// <summary>
+    /// A state that holds a value of 128 bits, a uuid's extreme, a decimal's sum or the row a decimal
+    /// chose, takes 24 bytes, packed to the eight bytes a record aligns a state to, not 32: a count and
+    /// the maximum of a uuid make a record of 32 bytes, two to a line of cache, where they made 40.
+    /// </summary>
+    [Fact]
+    public void AStateOf128BitsTakesTheBytesItHolds()
+    {
+        Assert.Equal(24, Unsafe.SizeOf<ExtremeState<UInt128>>());
+        Assert.Equal(24, Unsafe.SizeOf<SumState<Int128>>());
+        Assert.Equal(24, Unsafe.SizeOf<SumState<UInt128>>());
+        Assert.Equal(24, Unsafe.SizeOf<ChosenRow<Int128>>());
+
+        AggregateSlot greatest = new FixedSlot<UInt128, ExtremeState<UInt128>, MaxOp<UInt128>, UInt128?>(
+            StorageKind.Uuid, static s => s.Has ? s.Value : null);
+        RecordLayout layout = RecordLayout.Of([new CountSlot<long>(), greatest])!;
+        Assert.Equal([24, 0], layout.Offsets);
+        Assert.Equal(4, layout.Stride);
+    }
+
+    /// <summary>
     /// The records start at a line of cache, so that one of 32 bytes never straddles two: at their
     /// first size on the large object heap, which does not move them, and grown, their states kept,
     /// their capacity doubled with seven words to spare.

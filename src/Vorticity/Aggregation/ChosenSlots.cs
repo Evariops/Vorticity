@@ -1,5 +1,6 @@
 using System;
 using System.Numerics;
+using System.Runtime.InteropServices;
 
 namespace Vorticity.Aggregating;
 
@@ -161,6 +162,8 @@ internal sealed class ChosenBySlot<TValue>(bool max, StorageKind kind) : RecordS
 }
 
 /// <summary>A group's chosen row so far, its position in the source, -1 before any, and the value that chose it.</summary>
+/// <remarks>Packed to eight bytes, as <see cref="ExtremeState{TValue}"/> is: chosen by a decimal, 24 bytes a group, not 32.</remarks>
+[StructLayout(LayoutKind.Sequential, Pack = 8)]
 internal struct ChosenRow<TValue>
     where TValue : unmanaged
 {
