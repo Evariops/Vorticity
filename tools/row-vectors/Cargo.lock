@@ -672,9 +672,9 @@ checksum = "dc33ff2d4973d518d823d61aa239014831e521c75da58e3df4840d3f47749d09"
 
 [[package]]
 name = "rand"
-version = "0.10.2"
+version = "0.10.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c7f5fa3a058cd35567ef9bfa5e75732bee0f9e4c55fa90477bef2dfcdbc4be80"
+checksum = "65c9fb96cbc91e3478eaae79a69fcd3f1ae4ad052e471fe6732fff548984b4af"
 dependencies = [
  "chacha20",
  "getrandom",
@@ -891,7 +891,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 [[package]]
 name = "vortex-array"
 version = "0.1.0"
-source = "git+https://github.com/vortex-data/vortex?tag=0.90.0#6c3ef48e57a4e16d76b6a69b002772df68a90f43"
+source = "git+https://github.com/vortex-data/vortex?tag=0.91.0#7d49b0da06167b1208250e5f6cfb0a1232f4e86f"
 dependencies = [
  "arcref",
  "arrow-buffer",
@@ -935,7 +935,7 @@ dependencies = [
 [[package]]
 name = "vortex-array-macros"
 version = "0.1.0"
-source = "git+https://github.com/vortex-data/vortex?tag=0.90.0#6c3ef48e57a4e16d76b6a69b002772df68a90f43"
+source = "git+https://github.com/vortex-data/vortex?tag=0.91.0#7d49b0da06167b1208250e5f6cfb0a1232f4e86f"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -945,7 +945,7 @@ dependencies = [
 [[package]]
 name = "vortex-buffer"
 version = "0.1.0"
-source = "git+https://github.com/vortex-data/vortex?tag=0.90.0#6c3ef48e57a4e16d76b6a69b002772df68a90f43"
+source = "git+https://github.com/vortex-data/vortex?tag=0.91.0#7d49b0da06167b1208250e5f6cfb0a1232f4e86f"
 dependencies = [
  "allocator-api2",
  "arrow-buffer",
@@ -962,7 +962,7 @@ dependencies = [
 [[package]]
 name = "vortex-compute"
 version = "0.1.0"
-source = "git+https://github.com/vortex-data/vortex?tag=0.90.0#6c3ef48e57a4e16d76b6a69b002772df68a90f43"
+source = "git+https://github.com/vortex-data/vortex?tag=0.91.0#7d49b0da06167b1208250e5f6cfb0a1232f4e86f"
 dependencies = [
  "vortex-buffer",
 ]
@@ -970,7 +970,7 @@ dependencies = [
 [[package]]
 name = "vortex-error"
 version = "0.1.0"
-source = "git+https://github.com/vortex-data/vortex?tag=0.90.0#6c3ef48e57a4e16d76b6a69b002772df68a90f43"
+source = "git+https://github.com/vortex-data/vortex?tag=0.91.0#7d49b0da06167b1208250e5f6cfb0a1232f4e86f"
 dependencies = [
  "arrow-schema",
  "flatbuffers",
@@ -981,7 +981,7 @@ dependencies = [
 [[package]]
 name = "vortex-mask"
 version = "0.1.0"
-source = "git+https://github.com/vortex-data/vortex?tag=0.90.0#6c3ef48e57a4e16d76b6a69b002772df68a90f43"
+source = "git+https://github.com/vortex-data/vortex?tag=0.91.0#7d49b0da06167b1208250e5f6cfb0a1232f4e86f"
 dependencies = [
  "itertools",
  "vortex-buffer",
@@ -991,7 +991,7 @@ dependencies = [
 [[package]]
 name = "vortex-row"
 version = "0.1.0"
-source = "git+https://github.com/vortex-data/vortex?tag=0.90.0#6c3ef48e57a4e16d76b6a69b002772df68a90f43"
+source = "git+https://github.com/vortex-data/vortex?tag=0.91.0#7d49b0da06167b1208250e5f6cfb0a1232f4e86f"
 dependencies = [
  "num-traits",
  "smallvec",
@@ -1005,7 +1005,7 @@ dependencies = [
 [[package]]
 name = "vortex-session"
 version = "0.1.0"
-source = "git+https://github.com/vortex-data/vortex?tag=0.90.0#6c3ef48e57a4e16d76b6a69b002772df68a90f43"
+source = "git+https://github.com/vortex-data/vortex?tag=0.91.0#7d49b0da06167b1208250e5f6cfb0a1232f4e86f"
 dependencies = [
  "arc-swap",
  "lasso",
@@ -1017,7 +1017,7 @@ dependencies = [
 [[package]]
 name = "vortex-utils"
 version = "0.1.0"
-source = "git+https://github.com/vortex-data/vortex?tag=0.90.0#6c3ef48e57a4e16d76b6a69b002772df68a90f43"
+source = "git+https://github.com/vortex-data/vortex?tag=0.91.0#7d49b0da06167b1208250e5f6cfb0a1232f4e86f"
 dependencies = [
  "hashbrown 0.17.1",
 ]
