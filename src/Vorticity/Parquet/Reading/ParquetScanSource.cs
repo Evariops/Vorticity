@@ -449,7 +449,8 @@ internal sealed class ParquetScanSource(ParquetFile file) : StreamScanSource, IR
             TerminalScan.Keep(ref max, bounds.Max, wantMin: false, decimals);
         }
 
-        // Which zero a float's data meets first is the data's to say.
+        // A zero in the bounds hides its sign: Parquet's writers put -0.0 as the least and +0.0 as the greatest whichever
+        // zeros the rows hold, so the rows say which of them are there.
         return !(min.Kind == FilterLiteralKind.Float && min.FloatValue == 0)
             && !(max.Kind == FilterLiteralKind.Float && max.FloatValue == 0);
     }

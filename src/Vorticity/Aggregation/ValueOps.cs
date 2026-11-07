@@ -655,6 +655,22 @@ internal static class ExtremeOps
         typeof(TValue) == typeof(long) || typeof(TValue) == typeof(int) || typeof(TValue) == typeof(short) || typeof(TValue) == typeof(sbyte)
         || typeof(TValue) == typeof(ulong) || typeof(TValue) == typeof(uint) || typeof(TValue) == typeof(ushort) || typeof(TValue) == typeof(byte)
         || typeof(TValue) == typeof(Int128) || typeof(TValue) == typeof(UInt128);
+
+    /// <summary>
+    /// Whether <paramref name="value"/> is a +0.0 that a greatest of -0.0 takes, which equal compares cannot tell: IEEE 754's
+    /// maximum puts +0.0 above -0.0, so that the greatest of zeros of both signs is the same zero whatever their order, the
+    /// cut of the rows and the order of the merges. Never for an integer.
+    /// </summary>
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
+    internal static bool ZeroAbove<TValue>(TValue value, TValue greatest)
+        where TValue : INumber<TValue> =>
+        !Integral<TValue>() && value == greatest && TValue.IsNegative(greatest) && !TValue.IsNegative(value);
+
+    /// <summary>Whether <paramref name="value"/> is a -0.0 that a least of +0.0 takes, as IEEE 754's minimum orders them (<see cref="ZeroAbove"/>).</summary>
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
+    internal static bool ZeroBelow<TValue>(TValue value, TValue least)
+        where TValue : INumber<TValue> =>
+        !Integral<TValue>() && value == least && !TValue.IsNegative(least) && TValue.IsNegative(value);
 }
 
 /// <summary>The smallest value, NaN skipped.</summary>
@@ -670,7 +686,7 @@ internal readonly struct MinOp<TValue> : IValueOp<TValue, ExtremeState<TValue>>
             return;
         }
 
-        if (!state.Has || value < state.Value)
+        if (!state.Has || value < state.Value || ExtremeOps.ZeroBelow(value, state.Value))
         {
             state.Value = value;
             state.Has = true;
@@ -746,7 +762,7 @@ internal readonly struct MaxOp<TValue> : IValueOp<TValue, ExtremeState<TValue>>
             return;
         }
 
-        if (!state.Has || value > state.Value)
+        if (!state.Has || value > state.Value || ExtremeOps.ZeroAbove(value, state.Value))
         {
             state.Value = value;
             state.Has = true;
@@ -823,7 +839,7 @@ internal readonly struct SeededMinOp<TValue> : IValueOp<TValue, TValue>
     public void Add(ref TValue state, TValue value)
     {
         // A state still at NaN takes any number, which a NaN compares false against.
-        if (!TValue.IsNaN(value) && !(state <= value))
+        if (!TValue.IsNaN(value) && (!(state <= value) || ExtremeOps.ZeroBelow(value, state)))
         {
             state = value;
         }
@@ -891,7 +907,7 @@ internal readonly struct SeededMaxOp<TValue> : IValueOp<TValue, TValue>
 
     public void Add(ref TValue state, TValue value)
     {
-        if (!TValue.IsNaN(value) && !(state >= value))
+        if (!TValue.IsNaN(value) && (!(state >= value) || ExtremeOps.ZeroAbove(value, state)))
         {
             state = value;
         }
