@@ -246,7 +246,7 @@ internal sealed class AggregationQuery : ResultQuery
         ResultColumn[] columns = new ResultColumn[nodes.Length];
         for (int i = 0; i < columns.Length; i++)
         {
-            columns[i] = nodes[i].Column($"Item{i + 1}", keys);
+            columns[i] = nodes[i].Column(TupleNames.Item(i), keys);
         }
 
         return columns;

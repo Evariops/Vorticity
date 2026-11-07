@@ -849,7 +849,7 @@ internal sealed class EstimateQuery : ResultQuery
         ResultColumn[] columns = new ResultColumn[nodes.Length + _margins.Length];
         for (int i = 0; i < nodes.Length; i++)
         {
-            columns[i] = _typed is { } record ? nodes[i].Column(record.Record[i], _question.Keys, i, record.Type) : nodes[i].Column($"Item{i + 1}", _question.Keys);
+            columns[i] = _typed is { } record ? nodes[i].Column(record.Record[i], _question.Keys, i, record.Type) : nodes[i].Column(TupleNames.Item(i), _question.Keys);
         }
 
         for (int j = 0; j < _margins.Length; j++)
