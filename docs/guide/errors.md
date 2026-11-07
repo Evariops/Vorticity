@@ -54,7 +54,7 @@ Everything else is plain .NET. An argument out of range is an `ArgumentException
 |---|---|
 | `ObjectStoreException` | the object store refused or failed a request ([object-store.md](object-store.md)) |
 | `ObjectNotFoundException` | a key is not in the store, often because a handle outlived the retention window and should refresh |
-| `TornCommitException` | a writer died mid-commit on `FileObjectStore`, and `VortexDataset.RemoveTornCommitAsync` clears it ([dataset-maintenance.md](dataset-maintenance.md)) |
+| `TornCommitException` | a writer died mid-commit on a `FileObjectStore` over a file system that can neither rename exclusively nor link files, and `VortexDataset.RemoveTornCommitAsync` clears it ([dataset-maintenance.md](dataset-maintenance.md)) |
 | `DatasetIntegrityException` | a safety check found that a change would lose rows, double them or break their order, so nothing was committed. Running the same change again will hit it again |
 | `SourceOffsetConflictException` | a commit declared a source range that does not start where the dataset counts the source up to, so it would leave a gap or overlap a range another writer counted. Nothing was committed, `Recorded` names the offsets, and the handle reads the version that decided it: take up from there ([concurrent-writers.md](concurrent-writers.md)) |
 

@@ -322,10 +322,12 @@ one. On a store where a request costs 30 ms, it is what a job takes. See
 * Compaction commits like any writer, so a concurrent writer can win the race. Check `Outcome`.
   Vacuum deletes only what no retained version references, and deletes nothing until every retained
   version has been walked.
-* A writer that dies mid-commit on `FileObjectStore` leaves an incomplete commit. Every open and
-  every commit then throws `TornCommitException`, which names the version.
-  `VortexDataset.RemoveTornCommitAsync(store)` removes it once no writer holds it, and the dataset
-  reads as the version before.
+* A writer that dies mid-commit on `FileObjectStore` leaves no commit: the store shows a commit only
+  once it is whole. On a file system that can neither rename exclusively nor link files, where the
+  store writes a commit in place, it leaves an incomplete one. Every open and every commit then throws
+  `TornCommitException`, which names the version. `VortexDataset.RemoveTornCommitAsync(store)` removes
+  it, and the dataset reads as the version before. Run it while no writer commits, since a commit
+  still being written can look torn there.
 * A compaction that dies leaves what it wrote, which no version names, and vacuum deletes it like any
   other object. An upload in parts it had started is aborted when the job fails, and one the abort
   could not reach, because the process died, stays in the bucket as parts no object shows. Give the

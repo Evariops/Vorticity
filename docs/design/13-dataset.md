@@ -829,7 +829,11 @@ runs long, a delete takes a batch and reports nothing, and a listing pages by it
 enumerated. Retries, hedging, connection pools and credentials belong to the store library, never to
 the dataset.
 
-Three stores ship. `FileObjectStore` uses the kernel's create-new for put-if-absent, and a crash may
+Three stores ship. `FileObjectStore` writes each commit object beside its key and moves it there
+whole, by a rename the kernel refuses when the key is taken, so a crash leaves nothing under a
+commit's key ([the model of its put](models/file-put/README.md)). Any other object, under a key its
+own, it creates in place with the kernel's create-new. On a file system that can neither rename
+exclusively nor link, a commit is created in place too, and there a crash may
 leave its content short, which the format detects. `MemoryObjectStore` has injectable latency,
 failures and crashes after a put. `CountingObjectStore` is a decorator that counts requests, bytes and
 the dependent steps of the critical path. The contract is a test suite, `ObjectStoreContractTests`,

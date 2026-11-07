@@ -40,6 +40,18 @@ internal static class CommitKey
             $"{Prefix}{inverted.ToString("D20", CultureInfo.InvariantCulture)}{Suffix}");
     }
 
+    /// <summary>
+    /// Whether <paramref name="key"/> names a commit object, at the store's root or under the prefix of
+    /// a location there.
+    /// </summary>
+    public static bool IsCommit(string key)
+    {
+        int length = Prefix.Length + Digits + Suffix.Length;
+        return key.Length >= length
+            && (key.Length == length || key[key.Length - length - 1] == '/')
+            && TryParse(key[^length..], out _);
+    }
+
     /// <summary>The version a commit object's key names, and whether it is one at all.</summary>
     public static bool TryParse(string? key, out ulong version)
     {
