@@ -429,7 +429,9 @@ indexed sum (Demmel and Nguyen, ReproBLAS). All sums share one grid of exponent 
 the unit `2^(27j − 1074)`, and each sum keeps three of them: the bin its largest value calls for and
 the two below, at least 53 bits under that value. A value is split from the top bin down by the
 pre-rounding of an extractor `1.5 · 2^52` units wide, each part being an integer multiple of its
-bin's unit. A bin above a value takes nothing of it, so the value's parts do not depend on when the
+bin's unit, at most `2^26` of them, read off the rounded bits exactly. Z3 proves this for every finite
+double and every bin the extractors cover, and that the three parts sum to the value exactly ([the
+split, proved](models/indexed-sum/README.md)). A bin above a value takes nothing of it, so the value's parts do not depend on when the
 sum's top moved, and each bin is the exact sum of its parts in a `long`. When the top moves up, the
 bins it leaves below the three fall out, as a final top that high would not keep them either. Nothing
 carries from one bin into another, since a later drop would make that depend on the order. The answer
