@@ -18,6 +18,8 @@ code to it. The design documents stay the readable contract and link their model
 | [dataset-commit](dataset-commit/README.md) | the commit by put-if-absent and the rebase of appends, deletes and compactions onto the version that won |
 | [dataset-commit-trace](dataset-commit-trace/README.md) | runs of the real code, every order of a few writers, judged by the model of the commit |
 | [dataset-sources](dataset-sources/README.md) | the offsets that count each entry of a source once, through stale handles and replays after a lost answer |
+| [group-memory](group-memory/README.md) | a group by's lanes under a memory budget: the merge into the retired table reserves its growth, and every lane ends |
+| [dataset-keys](dataset-keys/README.md) | the data keys of an encrypted dataset across rekeys: no version adds an object sealed under a key it replaced |
 | [dataset-lifecycle](dataset-lifecycle/README.md) | the trust span, the commit's guard on old objects and vacuum, against clocks that drift and a listing that lags |
 
 ## Three kinds of configurations

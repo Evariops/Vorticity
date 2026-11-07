@@ -1243,7 +1243,9 @@ and retire at the end of its range. A sketch of each table's keys (HyperLogLog o
 what the shared table lacks of the lane's, and so how much it grows by, a table of keys wider than a
 word filling to six tenths rather than doubling past the budget. Past what the budget grants, or once
 half the groups merged into it came new to it, the lanes' keys being apart, the lanes write their own
-runs.
+runs. The merge reserves that growth when it is decided, so that the lanes still folding cannot take
+the room it saw: the [model of the lanes' memory](models/group-memory/README.md) finds a merge past the
+budget in seven steps without the reservation, and none with it.
 
 At the end every table goes to the scratch, and the result comes back part by part, as a merge in
 parts delivers it. A part is a stretch of every run's sections, merged into a table that grows from a
