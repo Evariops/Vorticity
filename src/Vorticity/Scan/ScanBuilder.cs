@@ -392,6 +392,25 @@ internal sealed class ScanBuilder
     }
 
     /// <summary>
+    /// As <see cref="Take(ReadOnlySpan{long})"/>, for rows their owner holds unchanged until the scan ends: a list that
+    /// ascends, as the engine's own takes hand it, is read where it lies rather than copied.
+    /// </summary>
+    /// <param name="rowIndices">File row indices, in any order.</param>
+    /// <returns>This builder.</returns>
+    internal ScanBuilder TakeHeld(ReadOnlyMemory<long> rowIndices)
+    {
+        if (_rowsSet)
+        {
+            throw new InvalidOperationException(
+                "A scan selects rows by range or by index list, not both.");
+        }
+
+        ThrowIfOrdered(nameof(Take));
+        _take = RowSelection.Held(rowIndices, _file.RowCount);
+        return this;
+    }
+
+    /// <summary>
     /// Delivers the rows in the key order of <paramref name="path"/> instead of file order.
     /// </summary>
     /// <param name="path">The key column, <c>.</c>-separated for a nested field.</param>

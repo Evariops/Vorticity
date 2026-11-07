@@ -249,7 +249,8 @@ internal sealed record LogicalQuery(LogicalSource Source, VortexSchema Schema, L
             Filter = Filter,
             MatchesNothing = MatchesNothing,
             Rows = Range,
-            Take = Positions,
+            // Null for no take: a null array, or a bare null beside a memory, would convert to an empty memory, a take of nothing.
+            Take = Positions is null ? null : (ReadOnlyMemory<long>?)Positions,
             OrderPath = rows?.OrderPath,
             Descending = rows?.Descending ?? false,
             Options = Positions is not null && Filter is null && !MatchesNothing ? Options with { Compact = false } : Options,

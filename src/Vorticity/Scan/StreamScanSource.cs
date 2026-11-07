@@ -464,8 +464,10 @@ internal abstract class StreamScanSource : ScanSource, IRowsCapability, IStatist
                 states[(int)Math.Clamp(range.End - start, 0, rows)..].Fill(Trilean.False);
             }
 
-            if (_spec.Take is { } take)
+            if (_spec.Take is { } asked)
             {
+                ReadOnlySpan<long> take = asked.Span;
+
                 // The positions asked for, sorted: those of this batch are a run of them, after those
                 // of any rows the source left out, which its filter does not select.
                 while (_taken < take.Length && take[_taken] < start)

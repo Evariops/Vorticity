@@ -123,6 +123,15 @@ public sealed partial class GroupAllocationTests
         // new, 1 MiB a reader: 2.2 MB to 109 KB at one lane, 18 MB to 1.35 MB at four.
         ("typed extremes", 1, GroupCoreReason.None, 109_568, ExtremesAsync),
         ("typed extremes", 4, GroupCoreReason.FirstRows, 1_638_400, ExtremesAsync),
+
+        // The hashed integers' groups, with the price of the row of each group's largest value and the
+        // day of its first row: the rows chosen are read after the pass, in one take of the file. The
+        // fetch's positions and the values it reads come from the process's shelf and go back to it, the
+        // take reads the sorted positions where they lie rather than two copies of them, and a column of
+        // chosen values gives its scratch back: 89 MB to 117 KB at one lane. At four lanes, 97 MB to 9 to
+        // 12 MB, most of it the merge's key tables, which the shelf hands back or not depending on what the
+        // tests before it left: not held to a ceiling until it does.
+        ("chosen rows", 1, GroupCoreReason.None, 117_248, ChosenAsync),
     ];
 
     [Fact]
@@ -227,6 +236,12 @@ public sealed partial class GroupAllocationTests
             lanes,
             1);
 
+    private static Task<(long, GroupCoreReason)> ChosenAsync(VortexFile file, int lanes) =>
+        CountAsync<WideChosen>(
+            file.Scan<Row>().GroupBy(r => r.Wide).Select(g => (g.Key, g.Count(), g.MaxBy(r => r.Value).Price, g.First().Day)),
+            lanes,
+            1);
+
     /// <summary>
     /// Runs <paramref name="query"/> and reads its result as the batches it is, its counts summed: the
     /// rows the groups hold, and the path the groups took.
@@ -320,6 +335,9 @@ public sealed partial class GroupAllocationTests
         [VortexColumn(Precision = 18, Scale = 2)] decimal Price,
         Guid Id,
         DateOnly Day);
+
+    [VortexRecord]
+    public partial record struct WideChosen(long Key, long Count, decimal? Richest, DateOnly? First);
 
     [VortexRecord]
     public partial record struct WideExtremes(long Key, long Count, DateTime? Latest, decimal? Cheapest, Guid? Highest, DateOnly? First);
