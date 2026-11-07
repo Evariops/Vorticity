@@ -659,7 +659,9 @@ the clocks and the listing may cost together. The vacuum's clock may run ahead o
 dates it ages objects by. The handle's clock may fall behind its own earlier reading, stepped back or
 paused between a reading and the request it decides. The listing may lag, and a refresh then takes a
 passed version for the latest. A constant offset of the handle's clock from the store's costs
-nothing, since the handle compares two of its own readings.
+nothing, since the handle compares two of its own readings. The [model of the
+lifecycle](models/dataset-lifecycle/README.md) finds this bound: a version created twice one tick
+past it, none at it.
 
 A version whose number a reader already knows, because a writer handed it over, needs no listing at
 all. A commit object's key is a function of its version, so `OpenAsync(store, version)` is the one
@@ -796,8 +798,10 @@ a scan that stops at its first batch opens a single object.
   before the object's first byte leaves, since a store may date an upload by its start, as S3 does.
   The other half of the window is what the vacuum's clock running ahead of the store's, a writer's
   clock falling behind its own earlier reading, and the listing's lag may cost together, as for [the
-  trust span](#83-the-latest-version-in-one-request). Only `commit/` and `data/` are swept, and an
-  imported file belongs to its owner. On a store with retention locks, whatever the lock or a legal hold still keeps
+  trust span](#83-the-latest-version-in-one-request). Without the refusal, the [model of the
+  lifecycle](models/dataset-lifecycle/README.md) publishes a version that names an object vacuum
+  deleted in nine steps. Only `commit/` and `data/` are swept, and an imported file belongs to its
+  owner. On a store with retention locks, whatever the lock or a legal hold still keeps
   is left and reported with the date the first of it may go (`DatasetOptions.LockedStore`, see
   [stores that cannot delete](15-compaction.md#5-stores-that-cannot-delete)). A reader that outlives
   the window gets an `ObjectNotFoundException` naming the version it was reading, never a partial
@@ -1100,6 +1104,12 @@ other than by widening a number or making it nullable ([schema evolution](#13-sc
   delete, and no two objects of a level above 0 sharing a key, in 2.5 million states. The defects it
   is held against, a tree key without the uid, a commit that does not look at its destination again,
   an input checked for its presence alone, each break it in under ten steps.
+- [A model of the lifecycle](models/dataset-lifecycle/README.md), checked by TLC over writers that
+  trust their version, lose races and commit late, a vacuum whose clock runs a tick off, a writer's
+  clock a tick behind and a listing that lags: no version names an object vacuum deleted, and none is
+  created twice, in 4.3 million states. Each assumption taken one tick past its bound breaks it, and
+  `DatasetLateCommitTests` holds the commit to its guard, a vacuum run between a put and its commit
+  included.
 - Sources: four writers take the entries of three sources in any order, through handles many versions
   behind, with commits of two sources at once, replays of a commit whose answer was lost, and
   compactions between them. For each source the ranges applied tile `(0, r]`, and the rows are the

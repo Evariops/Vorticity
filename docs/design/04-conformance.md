@@ -162,5 +162,5 @@ whenever a model changes.
 
 A model proves facts about itself, not about the C#. Each one names the code it mirrors at a commit,
 action by action, and the defects it found each have a test that holds the code to the model: the file
-store's puts (`FileObjectStorePutTests`) and the conditional put whose answers are lost
-(`UploadTests`).
+store's puts (`FileObjectStorePutTests`), the conditional put whose answers are lost (`UploadTests`),
+and the commit that named objects vacuum had deleted (`DatasetLateCommitTests`).

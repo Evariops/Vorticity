@@ -17,6 +17,7 @@ code to it. The design documents stay the readable contract and link their model
 | [file-put](file-put/README.md) | `FileObjectStore`'s creation of a key, the reads that meet it, and the repair of a torn commit |
 | [dataset-commit](dataset-commit/README.md) | the commit by put-if-absent and the rebase of appends, deletes and compactions onto the version that won |
 | [dataset-sources](dataset-sources/README.md) | the offsets that count each entry of a source once, through stale handles and replays after a lost answer |
+| [dataset-lifecycle](dataset-lifecycle/README.md) | the trust span, the commit's guard on old objects and vacuum, against clocks that drift and a listing that lags |
 
 ## Three kinds of configurations
 
