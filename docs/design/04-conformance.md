@@ -4,7 +4,7 @@ A format implementation tested only against itself proves nothing. A round trip 
 writer and reader is self-consistent and can be uniformly wrong. So every claim about bytes is
 anchored in the Rust reference, in both directions. Tests use xUnit v3 on Microsoft.Testing.Platform.
 
-## 1. Four layers
+## 1. Five layers
 
 | layer | question | needs Rust |
 |---|---|---|
@@ -12,6 +12,10 @@ anchored in the Rust reference, in both directions. Tests use xUnit v3 on Micros
 | golden corpus | do we read what Rust wrote, value for value? | when the corpus is generated |
 | cross-check | does Rust read what we write, value for value? | yes, in CI |
 | fuzzing | does malformed input ever escape a clean failure? | no |
+| models | does a protocol across processes and a store hold in every interleaving? | no, Java runs TLC |
+
+The first four are anchored in the Rust reference. The models are not, since the reference has no
+datasets, stores or commits to compare with: [the models](#9-the-models) say what they check instead.
 
 ## 2. Unit and property tests
 
@@ -140,3 +144,23 @@ writer. Files from a 0.36.0 writer itself would need a second, older generator.
 A CI job vendors the upstream schemas again and reports any drift. A change there is a format change,
 reviewed against [90-registry.md](90-registry.md), and the corpus is regenerated with the generator
 pinned to the new version.
+
+## 9. The models
+
+A dataset's correctness rests on protocols that run across processes and over a store: commits that
+race for a version, puts whose answers are lost, files claimed and written by several processes. A
+test draws a few of their interleavings. The models in [models](models/README.md) write those
+protocols in TLA+, and TLC walks every state a small configuration reaches, two writers, three keys,
+three levels, so a defect that needs a precise order of events is found without waiting for the run
+that draws it.
+
+Each model is checked three ways: its positive configuration must hold, each mutation of it
+(`Broken*.cfg`) must be caught, and each race it is about (`Reachability*.cfg`) must be reached, so
+that a model that never reaches its race cannot pass by default. `tools/models.sh` runs them with the
+TLA+ tools it pins, against the exit codes `models/expected-exit-codes.txt` records, and CI runs it
+whenever a model changes.
+
+A model proves facts about itself, not about the C#. Each one names the code it mirrors at a commit,
+action by action, and the defects it found each have a test that holds the code to the model: the file
+store's puts (`FileObjectStorePutTests`) and the conditional put whose answers are lost
+(`UploadTests`).

@@ -110,3 +110,4 @@ top of that:
 | malformed input fails with a clean exception, never a crash, a hang or an unbounded allocation | parser fuzzing in CI and the resource caps ([resource caps](08-semantics.md#6-resource-caps)) |
 | Native AOT and trimming, no reflection | `vxdump` published ahead of time and run over the corpus in CI |
 | the row encoding is byte-identical to Rust's `vortex-row`, and byte order is tuple order | golden vectors and a randomized order property ([the row encoding](04-conformance.md#7-the-row-encoding)) |
+| a store's put-if-absent answers truthfully, its answer lost or not, and a file store shows a commit only whole | the models of the [conditional put](models/conditional-put/README.md) and the [file store's put](models/file-put/README.md), each with the tests that hold the code to it ([the models](04-conformance.md#9-the-models)) |

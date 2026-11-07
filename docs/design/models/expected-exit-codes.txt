@@ -1,0 +1,20 @@
+# The exit code TLC must give for each configuration of the models, checked by tools/models.sh.
+# 0: nothing violated. 12: an invariant violated. 13: a temporal property violated.
+# A Broken* configuration is a mutation the model must catch, a Reachability* one a race it must reach.
+# Format: one `<path of the .cfg>=<exit code>` a line, the path from the repository's root.
+docs/design/models/atomic-put/AtomicPut.cfg=0
+docs/design/models/conditional-put/ConditionalPut.cfg=0
+docs/design/models/conditional-put/BrokenGiveUpAsFailed.cfg=12
+docs/design/models/conditional-put/BrokenNoRecheck.cfg=12
+docs/design/models/conditional-put/ReachabilityLateApply.cfg=12
+docs/design/models/file-put/FilePut.cfg=0
+docs/design/models/file-put/FilePutWithoutLocks.cfg=0
+docs/design/models/file-put/FilePutFallback.cfg=0
+docs/design/models/file-put/BrokenFallbackWithRepair.cfg=12
+docs/design/models/file-put/BrokenClaimCleanup.cfg=12
+docs/design/models/file-put/BrokenClaimExists.cfg=12
+docs/design/models/file-put/BrokenClaimTorn.cfg=12
+docs/design/models/file-put/BrokenClaimWithoutLocks.cfg=12
+docs/design/models/file-put/BrokenMove.cfg=12
+docs/design/models/file-put/ReachabilityLockGap.cfg=12
+docs/design/models/file-put/ReachabilityRacingPublish.cfg=12

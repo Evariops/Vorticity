@@ -60,6 +60,7 @@ the row that matches what moved. Doing more is always allowed, doing less is not
 | indexes, keys, the dataset | the suite, `tests/scalar-pass.sh`, `bench/gate.sh` |
 | a public signature, a visibility, an XML summary | the suite, a Release build with no warning, and the public surface record updated in the same commit |
 | the bench or the tools | `bench/gate.sh`, and the command you touched, once |
+| a protocol a model mirrors, or a model | `tools/models.sh` with `JAVA` set to a Java 11 or later, and the model's README brought to the code (see [the models](docs/design/models/README.md)) |
 | documents and comments only | a Release build, so the `<see cref>` links still resolve |
 
 What each command costs, so you can choose knowingly:

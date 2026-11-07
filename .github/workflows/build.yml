@@ -42,6 +42,7 @@ jobs:
       test: ${{ steps.paths.outputs.test }}
       package: ${{ steps.paths.outputs.package }}
       crosscheck: ${{ steps.paths.outputs.crosscheck }}
+      models: ${{ steps.paths.outputs.models }}
     steps:
       # Two commits and their trees, no file contents: a pull request's merge commit has the base
       # it merges into as its first parent, so the two give exactly what the pull request changes.
@@ -60,7 +61,7 @@ jobs:
           set -euo pipefail
           run_all() {
             echo "$1: every job runs"
-            printf '%s=true\n' test package crosscheck >> "$GITHUB_OUTPUT"
+            printf '%s=true\n' test package crosscheck models >> "$GITHUB_OUTPUT"
             exit 0
           }
           case "$GITHUB_EVENT_NAME" in
@@ -78,10 +79,13 @@ jobs:
           # Renames as a deletion and an addition, so the old path counts as much as the new one.
           paths=$(git diff --name-only --no-renames "$base" HEAD) || run_all "the diff failed"
 
-          test=false package=false crosscheck=false
+          test=false package=false crosscheck=false models=false
           while IFS= read -r path; do
             [ -z "$path" ] && continue
             case "$path" in
+              # The TLA+ models, which live beside the design they back, and the script that checks
+              # them: read by the models job alone, so they come before the documentation's rule.
+              docs/design/models/* | tools/models.sh) models=true ;;
               # Read by no build and no test: the documentation, the repository's own settings, and
               # the Rust tools CI never builds (tools/row-vectors and tools/vxbench-rs are run by
               # hand, their output committed).
@@ -100,16 +104,17 @@ jobs:
               # In the solution the package job builds, and referenced by no test project.
               bench/* | samples/* | tools/vxdump/* | tools/pqdump/* | tools/testimpact/*) package=true ;;
               # The tests, the build's configuration, this workflow, and any path added later.
-              *) test=true package=true crosscheck=true ;;
+              *) test=true package=true crosscheck=true models=true ;;
             esac
           done <<< "$paths"
 
           echo "$paths"
-          echo "test=$test package=$package crosscheck=$crosscheck"
+          echo "test=$test package=$package crosscheck=$crosscheck models=$models"
           {
             echo "test=$test"
             echo "package=$package"
             echo "crosscheck=$crosscheck"
+            echo "models=$models"
           } >> "$GITHUB_OUTPUT"
 
   # The hooks of .pre-commit-config.yaml, run again since a local hook can be skipped, on every
@@ -569,13 +574,33 @@ jobs:
             echo "spec/ matches upstream develop"
           fi
 
+  # The TLA+ models of docs/design/models, checked by tools/models.sh with the TLA+ tools it pins and
+  # verifies: every configuration must give the exit code docs/design/models/expected-exit-codes.txt
+  # records, a mutation caught and a race reached as much as a protocol that holds. The runner's own
+  # Java 21 runs them, nothing else needs installing, and the job runs beside the tests.
+  models:
+    name: model-check the TLA+ models
+    needs: changes
+    if: needs.changes.outputs.models == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check the models
+        run: |
+          set -euo pipefail
+          JAVA="${JAVA_HOME_21_X64:-$JAVA_HOME}/bin/java" bash tools/models.sh
+
   # The check the branch rule requires, by the name the rule gives it: it passes when every job
   # above it the change needs passed, so the rule names one check however the jobs are split. It
   # runs whatever they end as, since a required check that is skipped counts as passed. A job may be
   # skipped only because the changes job ran and said the change does not need it.
   checks:
     name: build, test and cross-check
-    needs: [changes, hooks, test, package, crosscheck]
+    needs: [changes, hooks, test, package, crosscheck, models]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -587,6 +612,7 @@ jobs:
           TEST: ${{ needs.test.result }}/${{ needs.changes.outputs.test }}
           PACKAGE: ${{ needs.package.result }}/${{ needs.changes.outputs.package }}
           CROSSCHECK: ${{ needs.crosscheck.result }}/${{ needs.changes.outputs.crosscheck }}
+          MODELS: ${{ needs.models.result }}/${{ needs.changes.outputs.models }}
         run: |
           if [ "$CHANGES" != success ]; then
             echo "choosing the jobs ended $CHANGES"
@@ -598,7 +624,7 @@ jobs:
             exit 1
           fi
           status=0
-          for job in "test $TEST" "package $PACKAGE" "crosscheck $CROSSCHECK"; do
+          for job in "test $TEST" "package $PACKAGE" "crosscheck $CROSSCHECK" "models $MODELS"; do
             case "${job#* }" in
               success/true) echo "$job: passed" ;;
               skipped/false) echo "$job: not needed" ;;
