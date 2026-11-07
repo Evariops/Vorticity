@@ -89,54 +89,64 @@ internal sealed class RunEndDecoder : ArrayDecoder
 
         int words = Compute.PredicateBits.WordsOf(runCount);
         ulong[] answers = System.Buffers.ArrayPool<ulong>.Shared.Rent(2 * words);
-        byte[] rented = System.Buffers.ArrayPool<byte>.Shared.Rent(2 * runCount);
         try
         {
-            // A state a run: the values' encoding asked first, a dictionary answering on its own values, else the values
-            // decoded, one a run, and judged.
-            Span<byte> states = rented.AsSpan(0, runCount);
+            // A verdict a run, as bits: the values' encoding asked first, a dictionary answering on its own values, else the
+            // values decoded, one a run, judged and packed.
             Compute.PredicateBits runs = new Compute.PredicateBits(answers.AsSpan(0, words), answers.AsSpan(words, words), runCount);
-            if (context.TryEvaluateChild(in node, 1, dtype, runCount, predicate, ref runs))
+            if (!context.TryEvaluateChild(in node, 1, dtype, runCount, predicate, ref runs) && !TryJudgeValues(context, in node, dtype, runCount, predicate, ref runs))
             {
-                for (int run = 0; run < runCount; run++)
-                {
-                    ulong bit = 1UL << (run & 63);
-                    states[run] = (runs.Truth[run >> 6] & bit) != 0 ? Compute.Trilean.True
-                        : runs.Unknown && (runs.Known[run >> 6] & bit) == 0 ? Compute.Trilean.Unknown
-                        : Compute.Trilean.False;
-                }
-            }
-            else
-            {
-                int valuesIndex = context.DecodeChild(in node, 1, dtype, runCount);
-                ValueReader values = ValueReader.Of(context.Canonical, valuesIndex, Id);
-                if (values.Length != runCount)
-                {
-                    CompressedThrow.ChildLength(Id, "values", values.Length, runCount);
-                }
-
-                if (!Compute.ValueVerdicts.TryJudge(context.Canonical, valuesIndex, predicate, states, rented.AsSpan(runCount, runCount)))
-                {
-                    return false;
-                }
+                return false;
             }
 
-            Spread(ends, metadata.EndsPType, runCount, offset, length, states, ref bits);
+            Spread(ends, metadata.EndsPType, runCount, offset, length, runs.Truth, runs.Unknown ? runs.Known : default, ref bits);
             return true;
         }
         finally
         {
-            System.Buffers.ArrayPool<byte>.Shared.Return(rented);
             System.Buffers.ArrayPool<ulong>.Shared.Return(answers);
         }
     }
 
     /// <summary>
-    /// The runs' states over their rows, from the run row 0 falls in: a range set a run selected, and a state a row once a
-    /// run is unknown, which a null value makes.
+    /// The verdicts of the run values decoded, one a run, judged by the comparison kernels (<see cref="Compute.ValueVerdicts"/>)
+    /// and packed into <paramref name="runs"/>; false when they judge no such predicate.
+    /// </summary>
+    private static bool TryJudgeValues(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int runCount, Compute.EncodedPredicate predicate, ref Compute.PredicateBits runs)
+    {
+        int valuesIndex = context.DecodeChild(in node, 1, dtype, runCount);
+        ValueReader values = ValueReader.Of(context.Canonical, valuesIndex, Id);
+        if (values.Length != runCount)
+        {
+            CompressedThrow.ChildLength(Id, "values", values.Length, runCount);
+        }
+
+        byte[] rented = System.Buffers.ArrayPool<byte>.Shared.Rent(2 * runCount);
+        try
+        {
+            Span<byte> states = rented.AsSpan(0, runCount);
+            if (!Compute.ValueVerdicts.TryJudge(context.Canonical, valuesIndex, predicate, states, rented.AsSpan(runCount, runCount)))
+            {
+                return false;
+            }
+
+            runs.FromStates(states);
+            return true;
+        }
+        finally
+        {
+            System.Buffers.ArrayPool<byte>.Shared.Return(rented);
+        }
+    }
+
+    /// <summary>
+    /// The runs' verdicts over their rows, from the run row 0 falls in: <paramref name="truth"/> a bit a run, set for a run
+    /// selected, and <paramref name="known"/> a bit a run, clear for a run unknown, which a null value makes, or empty when
+    /// every run is known. The rows' two bitmaps are written a word at a time, in order, whatever the runs' lengths.
     /// </summary>
     private static void Spread(
-        ReadOnlySpan<byte> ends, PType endsPType, int runCount, int offset, int length, ReadOnlySpan<byte> states,
+        ReadOnlySpan<byte> ends, PType endsPType, int runCount, int offset, int length, ReadOnlySpan<ulong> truth, ReadOnlySpan<ulong> known,
         ref Compute.PredicateBits bits)
     {
         int first = FindRun(ends, endsPType, runCount, (ulong)offset, 0);
@@ -145,57 +155,54 @@ internal sealed class RunEndDecoder : ArrayDecoder
             CompressedThrow.Format($"{Id} row 0 falls outside the {length} rows its runs cover.");
         }
 
-        byte[]? rows = states[first..].Contains(Compute.Trilean.Unknown)
-            ? System.Buffers.ArrayPool<byte>.Shared.Rent(length)
-            : null;
-        try
+        // The ends' type resolved once for the walk, as the checks and a take's searches resolve it.
+        bool unknown = false;
+        int position = endsPType switch
         {
-            bits.Fill(false);
-            Span<byte> spread = rows is null ? default : rows.AsSpan(0, length);
+            PType.U8 => Spread(MemoryMarshal.Cast<byte, byte>(ends)[..runCount], first, (ulong)offset, length, truth, known, bits.Truth, bits.Known, ref unknown),
+            PType.U16 => Spread(MemoryMarshal.Cast<byte, ushort>(ends)[..runCount], first, (ulong)offset, length, truth, known, bits.Truth, bits.Known, ref unknown),
+            PType.U32 => Spread(MemoryMarshal.Cast<byte, uint>(ends)[..runCount], first, (ulong)offset, length, truth, known, bits.Truth, bits.Known, ref unknown),
+            PType.U64 => Spread(MemoryMarshal.Cast<byte, ulong>(ends)[..runCount], first, (ulong)offset, length, truth, known, bits.Truth, bits.Known, ref unknown),
+            _ => throw new System.Diagnostics.UnreachableException($"{Id} run ends are checked unsigned before they are walked."),
+        };
 
-            // The ends' type resolved once for the walk, as the checks and a take's searches resolve it.
-            int position = endsPType switch
-            {
-                PType.U8 => Spread(MemoryMarshal.Cast<byte, byte>(ends)[..runCount], first, (ulong)offset, length, states, spread, ref bits),
-                PType.U16 => Spread(MemoryMarshal.Cast<byte, ushort>(ends)[..runCount], first, (ulong)offset, length, states, spread, ref bits),
-                PType.U32 => Spread(MemoryMarshal.Cast<byte, uint>(ends)[..runCount], first, (ulong)offset, length, states, spread, ref bits),
-                PType.U64 => Spread(MemoryMarshal.Cast<byte, ulong>(ends)[..runCount], first, (ulong)offset, length, states, spread, ref bits),
-                _ => throw new System.Diagnostics.UnreachableException($"{Id} run ends are checked unsigned before they are walked."),
-            };
-
-            if (position != length)
-            {
-                CompressedThrow.Format(
-                    $"{Id} runs cover {position} of {length} rows; the last run end must reach offset + length.");
-            }
-
-            if (rows is not null)
-            {
-                bits.FromStates(spread);
-            }
-        }
-        finally
+        if (position != length)
         {
-            if (rows is not null)
-            {
-                System.Buffers.ArrayPool<byte>.Shared.Return(rows);
-            }
+            CompressedThrow.Format(
+                $"{Id} runs cover {position} of {length} rows; the last run end must reach offset + length.");
         }
+
+        bits.Wrote(unknown);
     }
 
     /// <summary>
-    /// The walk of <see cref="Spread(ReadOnlySpan{byte}, PType, int, int, int, ReadOnlySpan{byte}, ref Compute.PredicateBits)"/>
-    /// from run <paramref name="first"/>: a range set a run selected, or each run's state over its rows into
-    /// <paramref name="spread"/> when it is not empty; the rows covered.
+    /// The walk of <see cref="Spread(ReadOnlySpan{byte}, PType, int, int, int, ReadOnlySpan{ulong}, ReadOnlySpan{ulong}, ref Compute.PredicateBits)"/>
+    /// from run <paramref name="first"/>: the rows' truth and, where some run may be unknown, their known bits, every word
+    /// up to the last row's written, the word a run ends in kept in a register until a run moves past it; the rows covered,
+    /// and <paramref name="unknown"/> set when some row is unknown.
     /// </summary>
+    /// <remarks>
+    /// A run's verdict is two words, all ones or none, masked to its rows: a run of a few rows costs a few instructions and
+    /// no store, where a byte a row filled and packed again cost three passes over the rows and a fill a run (a variant key's
+    /// column of mostly absent values, 41 % of a question filtering on it, 2026-11-08).
+    /// </remarks>
     private static int Spread<TEnd>(
-        ReadOnlySpan<TEnd> ends, int first, ulong offset, int length, ReadOnlySpan<byte> states, Span<byte> spread,
-        ref Compute.PredicateBits bits)
+        ReadOnlySpan<TEnd> ends, int first, ulong offset, int length, ReadOnlySpan<ulong> truth, ReadOnlySpan<ulong> known,
+        Span<ulong> rowsTruth, Span<ulong> rowsKnown, ref bool unknown)
         where TEnd : unmanaged
     {
         ref TEnd start = ref MemoryMarshal.GetReference(ends);
+        ref ulong runTruth = ref MemoryMarshal.GetReference(truth);
+        ref ulong runKnown = ref MemoryMarshal.GetReference(known);
+        ref ulong intoTruth = ref MemoryMarshal.GetReference(rowsTruth);
+        ref ulong intoKnown = ref MemoryMarshal.GetReference(rowsKnown);
+        bool knows = !known.IsEmpty;
+        ulong wordTruth = 0;
+        ulong wordKnown = 0;
+        ulong unknownRuns = 0;
         int position = 0;
-        for (int run = first; run < ends.Length && position < length; run++)
+        int run = first;
+        for (; run < ends.Length && position < length; run++)
         {
             ulong end = End(ref start, run) - offset;
             int endRow = end > (ulong)(uint)length ? length : (int)end;
@@ -204,18 +211,58 @@ internal sealed class RunEndDecoder : ArrayDecoder
                 continue;
             }
 
-            if (!spread.IsEmpty)
+            // The run's verdict as two masks, all ones or none: a 64-bit shift takes its count modulo 64.
+            ulong fillTruth = 0UL - ((Unsafe.Add(ref runTruth, run >> 6) >> run) & 1);
+            ulong fillKnown = knows ? 0UL - ((Unsafe.Add(ref runKnown, run >> 6) >> run) & 1) : ulong.MaxValue;
+            unknownRuns |= ~fillKnown;
+
+            // The word holding row position holds the rows from its first to position already; the run's rows past them.
+            int word = position >> 6;
+            int endWord = endRow >> 6;
+            ulong from = ulong.MaxValue << position;
+            if (endWord == word)
             {
-                spread[position..endRow].Fill(states[run]);
+                ulong mask = from & ((1UL << endRow) - 1);
+                wordTruth |= fillTruth & mask;
+                wordKnown |= fillKnown & mask;
             }
-            else if (states[run] == Compute.Trilean.True)
+            else
             {
-                bits.SetRange(position, endRow - position);
+                Unsafe.Add(ref intoTruth, word) = wordTruth | (fillTruth & from);
+                if (knows)
+                {
+                    Unsafe.Add(ref intoKnown, word) = wordKnown | (fillKnown & from);
+                }
+
+                if (endWord > word + 1)
+                {
+                    rowsTruth[(word + 1)..endWord].Fill(fillTruth);
+                    if (knows)
+                    {
+                        rowsKnown[(word + 1)..endWord].Fill(fillKnown);
+                    }
+                }
+
+                // The rows of the word the run ends in: none when it ends on a word's first row, the shift's count then 0.
+                ulong rest = (1UL << endRow) - 1;
+                wordTruth = fillTruth & rest;
+                wordKnown = fillKnown & rest;
             }
 
             position = endRow;
         }
 
+        // The last word, when the rows end inside one.
+        if ((position & 63) != 0)
+        {
+            Unsafe.Add(ref intoTruth, position >> 6) = wordTruth;
+            if (knows)
+            {
+                Unsafe.Add(ref intoKnown, position >> 6) = wordKnown;
+            }
+        }
+
+        unknown = unknownRuns != 0;
         return position;
     }
 

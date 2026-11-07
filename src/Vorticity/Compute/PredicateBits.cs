@@ -144,6 +144,12 @@ internal ref struct PredicateBits
     }
 
     /// <summary>
+    /// After a kernel that wrote every word of <see cref="Truth"/> itself, and of <see cref="Known"/> where some row may be
+    /// unknown: whether some row is, which <see cref="Known"/> then tells.
+    /// </summary>
+    internal void Wrote(bool unknown) => Unknown = unknown;
+
+    /// <summary>
     /// The answer of a state a row (<see cref="Trilean"/>), for an encoding that answers a value at a time.
     /// </summary>
     internal void FromStates(ReadOnlySpan<byte> states)
