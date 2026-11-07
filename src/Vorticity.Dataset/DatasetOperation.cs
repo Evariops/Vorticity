@@ -18,8 +18,20 @@ internal abstract record DatasetOperation
     /// </summary>
     public DateTimeOffset? FirstPutAt { get; init; }
 
+    /// <summary>
+    /// On an encrypted dataset, how many data keys the committing handle had sealed under when it began the objects the
+    /// operation names that no version names yet (<see cref="SealedObjectStore.KeyGeneration"/>); null when it names
+    /// none. A commit refuses to apply an operation whose objects began before the handle took up the data key of a
+    /// rekey: they may be sealed under the key it replaced, which a full rekey means to retire.
+    /// </summary>
+    public long? KeyGeneration { get; init; }
+
     /// <summary>The earlier of <paramref name="first"/>, null when there is none yet, and <paramref name="next"/>.</summary>
     internal static DateTimeOffset Earlier(DateTimeOffset? first, DateTimeOffset next) =>
+        first is { } known && known < next ? known : next;
+
+    /// <summary>The lower of <paramref name="first"/>, null when there is none yet, and <paramref name="next"/>.</summary>
+    internal static long Lower(long? first, long next) =>
         first is { } known && known < next ? known : next;
 
     /// <summary>Adds one data object to the dataset.</summary>

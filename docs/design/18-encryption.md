@@ -289,8 +289,23 @@ able to unwrap, so objects sealed before stay readable. A dataset changes its da
 by `RekeyAsync`: the commit that does it draws a new data key and is sealed under it, and every writer
 then follows the latest commit. Older objects keep the key they were sealed with until a compaction
 rewrites them, so a full rekey is a rekeying commit, a compaction of every object and a vacuum, whose
-price is a rewrite of the dataset. An application that wants a data key to last a given time rekeys
+price is a rewrite of the dataset. Compaction leaves a level's objects alone once it is the top one,
+so an object compaction will not rewrite is rewritten by the application, its rows read and written
+again through `ReplaceObjectsAsync`. An application that wants a data key to last a given time rekeys
 on that schedule.
+
+A writer seals under the data key of the newest commit it has read, and learns of a rekey when it
+next reads one, which its next commit does. A writer whose objects were begun before then, one in
+flight while another process rekeyed or one idle since before the rekey, has its commit refused with
+`DatasetIntegrityException`, since its objects may be sealed under the key the rekey replaced. Its
+rows are written again, under the new key. Without that refusal such a commit would land after the
+rewrite of every object, and the old key would serve the latest version.
+
+The data key a rekey replaced, and with it the wrapping key that wraps it when that key served the
+dataset alone, can be retired once no object a retained version names is sealed under it: after the
+rekeying commit, the rewrite of every object sealed before it, and a vacuum past the retention
+window, which takes the versions that named the old objects. A writer still in flight then has its
+commit refused, as above, and nothing it wrote under the old key is named.
 
 Destroying a wrapping key makes every object it served unreadable, on any store, including one under a
 retention lock that refuses deletes until a date. That is the one erasure such a store allows. It
@@ -556,6 +571,10 @@ altered frame that no query read.
   the same bits.
 - Ratchets: the same requests and dependent steps for sealed and plain reads, held by the counting
   store, a single call to the key service per data key, and no allocation per batch on a sealed scan.
+- Keys at the edge of the store: after appends, a compaction, a delete, a rekey and more appends, no
+  two sealed objects share a salt, and every object past the rekeying commit is sealed under the new
+  key. A writer whose object lands while another handle rekeys, and a handle idle since before the
+  rekey, each have their commit refused, and the rows written again land under the new key.
 - Throughput: the platform's cipher per frame size, and a sealed scan against a plain one, each measured
   alone on arm64 and on x64, and on each operating system, since each runs another library.
 

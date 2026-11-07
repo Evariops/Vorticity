@@ -87,8 +87,10 @@ internal static class DatasetRollups
             Dictionary<string, RollupEntry> below = rank > 1 ? await RollupsAsync(version, bottom, rank - 1, cancellationToken).ConfigureAwait(false) : [];
             List<DatasetOperation> operations = [];
 
-            // Before the first of the rank's objects is put, which their commit measures their age from.
+            // Before the first of the rank's objects is put, which their commit measures their age from, and the data
+            // keys the handle has sealed under by then.
             DateTimeOffset started = dataset.Options.TimeProvider.GetUtcNow();
+            long generation = dataset.KeyGeneration;
             foreach (Run run in ranks[rank - 1])
             {
                 (int first, int last) = Span(ranks, rank, run);
@@ -106,7 +108,7 @@ internal static class DatasetRollups
                     : await FromRollupsAsync(dataset, version, key, bottom, rank, objects, ranks, run, below, cancellationToken).ConfigureAwait(false);
                 if (written is not null)
                 {
-                    operations.Add(new DatasetOperation.PutRollup(written) { FirstPutAt = started });
+                    operations.Add(new DatasetOperation.PutRollup(written) { FirstPutAt = started, KeyGeneration = generation });
                 }
             }
 

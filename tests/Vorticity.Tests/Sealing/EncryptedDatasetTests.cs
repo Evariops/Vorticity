@@ -261,6 +261,136 @@ public sealed class EncryptedDatasetTests
     }
 
     [Fact]
+    public async Task AWriterInFlightDuringARekeyWritesItsRowsAgainUnderTheNewKey()
+    {
+        // A writer's object lands sealed under the data key it knows; before it commits, another handle rekeys. Committed,
+        // the object would stay under the old key after a full rekey's compaction, and a wrapping key destroyed then would
+        // leave the latest version unreadable: the commit refuses it, and the rows written again go under the new key.
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        using VortexKeyring keyring = SealedObjects.Keyring();
+        await using VortexSession session = Session(keyring);
+        await using MemoryObjectStore inner = new MemoryObjectStore();
+        RekeyingStore store = new RekeyingStore(inner);
+        await using VortexDataset writer = await VortexDataset.CreateAsync(store, Reading.Schema, Encrypted(session), ct);
+        await AppendAsync(writer, 0, ct);
+        await using VortexDataset rekeyer = await VortexDataset.OpenAsync(inner, new DatasetOptions { Session = session }, ct);
+        store.Landed = async () => await rekeyer.RekeyAsync(ct);
+
+        await Assert.ThrowsAsync<DatasetIntegrityException>(async () => await AppendAsync(writer, 1, ct));
+        store.Landed = null;
+        Assert.Equal(rekeyer.Version, (await VortexDataset.OpenAsync(inner, new DatasetOptions { Session = session }, ct)).Version);
+
+        await AppendAsync(writer, 1, ct);
+        Assert.Equal(await NewestKeyAsync(inner, ct), await WrappedKeyOfAsync(inner, await NewestDataAsync(inner, writer, ct), ct));
+        Assert.Equal(2 * Rows, writer.RowCount);
+    }
+
+    [Fact]
+    public async Task AHandleIdleSinceBeforeARekeyLandsNothingUnderTheReplacedKey()
+    {
+        // A handle that read the dataset before the rekey seals under the key it knows until it reads a newer commit,
+        // which its next commit does: that commit refuses what it sealed before, and the next one is under the new key.
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        using VortexKeyring keyring = SealedObjects.Keyring();
+        await using VortexSession session = Session(keyring);
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset first = await VortexDataset.CreateAsync(store, Reading.Schema, Encrypted(session), ct);
+        await AppendAsync(first, 0, ct);
+        await using VortexDataset idle = await VortexDataset.OpenAsync(store, new DatasetOptions { Session = session }, ct);
+        await first.RekeyAsync(ct);
+
+        await Assert.ThrowsAsync<DatasetIntegrityException>(async () => await AppendAsync(idle, 1, ct));
+        await AppendAsync(idle, 1, ct);
+        Assert.Equal(await NewestKeyAsync(store, ct), await WrappedKeyOfAsync(store, await NewestDataAsync(store, idle, ct), ct));
+        Assert.Equal(2L * Rows, await idle.Scan<Reading>().CountAsync(ct));
+    }
+
+    [Fact]
+    public async Task NoTwoSealedObjectsShareASaltAndNoneAfterARekeyTheReplacedKey()
+    {
+        // At the edge of the store, whatever wrote it: appends, a compaction, a delete that marks rows, a rekey, more
+        // appends. No two sealed objects derive their first epoch's key from one salt, and every commit and data object
+        // the store holds past the rekeying commit is sealed under the new key.
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        using VortexKeyring keyring = SealedObjects.Keyring();
+        await using VortexSession session = Session(keyring);
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Reading.Schema, Encrypted(session), ct);
+        for (int i = 0; i < 3; i++)
+        {
+            await AppendAsync(dataset, i, ct);
+        }
+
+        Assert.NotNull(await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 0 }, ct));
+        await dataset.DeleteAsync<Reading>(row => row.Day < 10, ct);
+        List<string> before = [.. await KeysAsync(store, "commit/", ct), .. await KeysAsync(store, "data/", ct)];
+        await dataset.RekeyAsync(ct);
+        byte[] rekeyed = await NewestKeyAsync(store, ct);
+        await AppendAsync(dataset, 3, ct);
+        await AppendAsync(dataset, 4, ct);
+
+        HashSet<string> salts = [];
+        foreach (string key in (string[])[.. await KeysAsync(store, "commit/", ct), .. await KeysAsync(store, "data/", ct)])
+        {
+            byte[] bytes = await AllAsync(store, key, ct);
+            Vorticity.Sealing.SealDescriptor descriptor = Vorticity.Sealing.SealDescriptor.Read(bytes.AsSpan(12, BitConverter.ToInt32(bytes, 8)), out _);
+            Assert.True(salts.Add(Convert.ToHexString(descriptor.Salt)), $"'{key}' shares its salt with another object");
+            if (!before.Contains(key))
+            {
+                Assert.Equal(rekeyed, descriptor.WrappedKey.ToArray());
+            }
+        }
+
+        Assert.True(salts.Count >= 10, $"{salts.Count} sealed objects");
+    }
+
+    /// <summary>The wrapped data key of the newest commit object, the one writers seal under.</summary>
+    private static async Task<byte[]> NewestKeyAsync(IObjectStore store, CancellationToken ct) =>
+        await WrappedKeyOfAsync(store, (await KeysAsync(store, "commit/", ct))[0], ct);
+
+    /// <summary>The key of the data object the handle's latest version added last, by the order of its writes.</summary>
+    private static async Task<string> NewestDataAsync(IObjectStore store, VortexDataset dataset, CancellationToken ct)
+    {
+        List<string> before = [];
+        await using (VortexDataset previous = await VortexDataset.OpenAsync(store, dataset.Version - 1, new DatasetOptions { Session = dataset.Options.Session }, ct))
+        {
+            await foreach (PositionedObject held in previous.ScanBuilder().ObjectsAsync().WithCancellation(ct))
+            {
+                before.Add(held.Entry.Key);
+            }
+        }
+
+        List<string> added = [];
+        await foreach (PositionedObject held in dataset.ScanBuilder().ObjectsAsync().WithCancellation(ct))
+        {
+            if (!before.Contains(held.Entry.Key))
+            {
+                added.Add(held.Entry.Key);
+            }
+        }
+
+        return Assert.Single(added);
+    }
+
+    /// <summary>A store whose <see cref="Landed"/> runs once each data object has landed, before its put returns.</summary>
+    private sealed class RekeyingStore(IObjectStore inner) : Vorticity.Tests.Dataset.ForwardingStore(inner)
+    {
+        public Func<Task>? Landed { get; set; }
+
+        public override async ValueTask<PutOutcome> PutAsync(
+            string key, System.IO.Pipelines.PipeReader content, long length, PutCondition condition, CancellationToken cancellationToken)
+        {
+            PutOutcome outcome = await Inner.PutAsync(key, content, length, condition, cancellationToken);
+            if (Landed is { } landed && key.StartsWith("data/", StringComparison.Ordinal))
+            {
+                await landed();
+            }
+
+            return outcome;
+        }
+    }
+
+    [Fact]
     public async Task VerificationPassesAndFindsATamperedEnvelope()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;

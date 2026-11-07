@@ -407,6 +407,11 @@ internal static class DatasetCommitter
             byte[] bytes = builder.Build(header);
             DateTimeOffset put = options.TimeProvider.GetUtcNow();
             RequireRecentPuts(operations, outcomes, put, DatasetVacuum.WindowOf(template.Retention));
+            if (store is SealedObjectStore { Seals: true } sealedStore)
+            {
+                RequireCurrentKey(operations, outcomes, sealedStore.KeyGeneration);
+            }
+
             DatasetTelemetry.Attempted(options.Kind);
             if (await store.PutIfAbsentAsync(key, bytes, cancellationToken).ConfigureAwait(false)
                 == PutOutcome.Created)
@@ -445,6 +450,28 @@ internal static class DatasetCommitter
                     $"The commit would name objects whose first put began {now - first} ago, half the retention window of " +
                     $"{window} or more: vacuum may have deleted them, and a version that names them would not read. Nothing was " +
                     "committed. Write the rows again in less time, or into a dataset created with a longer RetentionWindow.");
+            }
+        }
+    }
+
+    /// <summary>
+    /// Refuses a commit of an encrypted dataset that would name objects begun before the handle took up the data key of a
+    /// rekey, which it has by now, having read the version it lands on: they may be sealed under the key the rekey
+    /// replaced. A writer seals under the key of the newest commit it read, so a writer in flight during a rekey, or a
+    /// handle idle since before it, would otherwise land objects under the old key after the compaction that a full
+    /// rekey runs to retire it, and a wrapping key destroyed then would leave the latest version unreadable. Only the
+    /// operations that apply count.
+    /// </summary>
+    /// <exception cref="DatasetIntegrityException">An operation that applies began its objects under an older data key.</exception>
+    private static void RequireCurrentKey(IReadOnlyList<DatasetOperation> operations, List<OperationOutcome> outcomes, long current)
+    {
+        for (int i = 0; i < operations.Count; i++)
+        {
+            if (outcomes[i] == OperationOutcome.Applied && operations[i].KeyGeneration is { } began && began < current)
+            {
+                throw new DatasetIntegrityException(
+                    "The commit would name objects begun before the dataset was rekeyed, which may be sealed under the data key " +
+                    "the rekey replaced. Nothing was committed. Write the rows again: they are sealed under the new key.");
             }
         }
     }

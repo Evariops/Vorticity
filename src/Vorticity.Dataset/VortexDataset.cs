@@ -17,10 +17,11 @@ using Vorticity.Types.Variants;
 namespace Vorticity.Dataset;
 
 /// <summary>
-/// A data object that has reached the store, its tree key, what orders it then its uid, the bytes of its data, and when
-/// its writer started it, before a byte of it went to the store (<see cref="ObjectOutput.StartedAt"/>).
+/// A data object that has reached the store, its tree key, what orders it then its uid, the bytes of its data, when its
+/// writer started it, before a byte of it went to the store (<see cref="ObjectOutput.StartedAt"/>), and the data keys
+/// its handle had sealed under then (<see cref="ObjectOutput.KeyGeneration"/>).
 /// </summary>
-internal readonly record struct WrittenObject(ObjectEntry Entry, ReadOnlyMemory<byte> Key, long DataBytes, DateTimeOffset StartedAt);
+internal readonly record struct WrittenObject(ObjectEntry Entry, ReadOnlyMemory<byte> Key, long DataBytes, DateTimeOffset StartedAt, long KeyGeneration);
 
 /// <summary>
 /// A versioned dataset over an object store: immutable Vortex files as its data objects, one commit
@@ -138,6 +139,9 @@ public sealed class VortexDataset : IAsyncDisposable
 
     /// <summary>Where this version's tree pages are read from, for a caller walking the levels.</summary>
     internal IPageSource Pages => Snapshot.Pages;
+
+    /// <summary>How many data keys this handle has sealed under (<see cref="SealedObjectStore.KeyGeneration"/>); 0 for a plain dataset.</summary>
+    internal long KeyGeneration => _store is SealedObjectStore { Seals: true } sealedStore ? sealedStore.KeyGeneration : 0;
 
     /// <summary>The levels of level 0's tree: 0 when it is empty, 1 when one leaf page holds it all.</summary>
     internal int Depth => Snapshot.Levels[0].Depth;
@@ -537,6 +541,13 @@ public sealed class VortexDataset : IAsyncDisposable
     /// keep the key they were sealed with until a compaction rewrites them, so a full rekey is this,
     /// a compaction of every object, and a vacuum.
     /// </summary>
+    /// <remarks>
+    /// A writer learns of the new key when it next reads a commit, which its next commit does: a commit of
+    /// objects begun before then, by a writer in flight or a handle idle since before the rekey, is refused
+    /// with <see cref="DatasetIntegrityException"/>, since they may be sealed under the replaced key, and its
+    /// rows written again go under the new one. The replaced key serves no version once every object sealed
+    /// before the rekey is rewritten and a vacuum has passed the retention window.
+    /// </remarks>
     /// <param name="cancellationToken">Cancels the key's generation and the commit.</param>
     /// <returns>The version the rekeying commit created.</returns>
     /// <exception cref="InvalidOperationException">The dataset is not encrypted.</exception>
@@ -901,6 +912,7 @@ public sealed class VortexDataset : IAsyncDisposable
     {
         RequireConditionalCreation(_store);
         DateTimeOffset started = _options.TimeProvider.GetUtcNow();
+        long generation = KeyGeneration;
         Guid identity = Guid.NewGuid();
         string key = CommitKey.ForData(identity.ToString("N", CultureInfo.InvariantCulture));
         ObjectSegmentSink sink = new ObjectSegmentSink(
@@ -991,7 +1003,7 @@ public sealed class VortexDataset : IAsyncDisposable
         write = write with { HashedUnitBytes = HashedUnitBytes };
 
         // The session's degree and its lanes, which every writer of the session shares.
-        return new ObjectOutput(this, identity, key, sink, VortexFileWriter.Create(sink, schema.DType, write, _options.Session), started);
+        return new ObjectOutput(this, identity, key, sink, VortexFileWriter.Create(sink, schema.DType, write, _options.Session), started, generation);
     }
 
     /// <summary>
@@ -1069,7 +1081,11 @@ public sealed class VortexDataset : IAsyncDisposable
         DatasetOperation[] operations = new DatasetOperation[written.Count];
         for (int i = 0; i < operations.Length; i++)
         {
-            operations[i] = new DatasetOperation.AddObject(written[i].Key, written[i].Entry) { FirstPutAt = written[i].StartedAt };
+            operations[i] = new DatasetOperation.AddObject(written[i].Key, written[i].Entry)
+            {
+                FirstPutAt = written[i].StartedAt,
+                KeyGeneration = written[i].KeyGeneration,
+            };
         }
 
         return operations;
@@ -1476,6 +1492,7 @@ public sealed class VortexDataset : IAsyncDisposable
         List<(int Level, ReadOnlyMemory<byte> Key, ObjectEntry Entry)> outputs = new List<(int, ReadOnlyMemory<byte>, ObjectEntry)>(added.Count);
         long position = added.Count == 0 ? 0 : await EndAsync(cancellationToken).ConfigureAwait(false);
         DateTimeOffset? firstPut = null;
+        long? generation = null;
         for (int i = 0; i < added.Count; i++)
         {
             ObjectDraft draft = added[i] ?? throw new ArgumentNullException(nameof(added));
@@ -1500,6 +1517,7 @@ public sealed class VortexDataset : IAsyncDisposable
                 outputs.Add((0, produced.Key, produced.Entry));
                 position += produced.Entry.Rows;
                 firstPut = DatasetOperation.Earlier(firstPut, produced.StartedAt);
+                generation = DatasetOperation.Lower(generation, produced.KeyGeneration);
             }
         }
 
@@ -1510,7 +1528,7 @@ public sealed class VortexDataset : IAsyncDisposable
 
         DatasetOperation[] operations = inputs.Count == 0 && outputs.Count == 0
             ? []
-            : [new DatasetOperation.ReplaceObjects(inputs, outputs) { Expected = expected, FirstPutAt = firstPut }];
+            : [new DatasetOperation.ReplaceObjects(inputs, outputs) { Expected = expected, FirstPutAt = firstPut, KeyGeneration = generation }];
         CommitResult commit = await CommitAsync(operations, CommitKind.Replace, consumed, null, cancellationToken).ConfigureAwait(false);
         OperationOutcome outcome = commit.Counted ? OperationOutcome.AlreadyThere
             : commit.Outcomes.Count > 0 ? commit.Outcomes[0]
@@ -4086,7 +4104,7 @@ public sealed class VortexDataset : IAsyncDisposable
             .WithTableOfContents(draft.Writer.TableOfContents)
             .WithLastKey(last)
             .WithArrival(draft.Arrival > 0 ? draft.Arrival : Math.Max(_options.TimeProvider.GetUtcNow().ToUnixTimeSeconds(), 1));
-        return new WrittenObject(entry, KeyOf(prefix, entry), draft.Writer.DataBytes, draft.StartedAt);
+        return new WrittenObject(entry, KeyOf(prefix, entry), draft.Writer.DataBytes, draft.StartedAt, draft.KeyGeneration);
     }
 
     /// <summary>

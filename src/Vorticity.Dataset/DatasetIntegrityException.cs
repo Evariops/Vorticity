@@ -7,14 +7,15 @@ namespace Vorticity.Dataset;
 /// was not committed: a compaction whose outputs do not hold its inputs' rows, a delete whose marks
 /// or rewrite do not take the rows its count found, an object meant to be in key order that is not,
 /// a commit that would name objects whose first put began half the retention window ago or more,
-/// which vacuum may have taken.
+/// which vacuum may have taken, or objects of an encrypted dataset begun before it was rekeyed, which
+/// may be sealed under the key the rekey replaced.
 /// </summary>
 /// <remarks>
 /// It says the change cannot be committed as it is, not that another writer went first: the same
 /// change run again meets it again. Most guards find the library, or an object it read, at fault. The
-/// last finds the change too slow for the dataset's retention window, and its rows commit once written
-/// again. The objects the change wrote before the guard tripped are referenced by no version, and
-/// vacuum takes them once they leave the retention window.
+/// last two find the change too slow for the dataset's retention window, or overtaken by a rekey, and
+/// its rows commit once written again. The objects the change wrote before the guard tripped are
+/// referenced by no version, and vacuum takes them once they leave the retention window.
 /// </remarks>
 public sealed class DatasetIntegrityException : VortexException
 {

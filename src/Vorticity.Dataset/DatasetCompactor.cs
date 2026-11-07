@@ -304,10 +304,12 @@ internal static partial class DatasetCompactor
         List<(int Level, ReadOnlyMemory<byte> Key, ObjectEntry Entry)> produced = [];
         List<CompactionInput> filled = [];
         DateTimeOffset? firstPut = null;
+        long? generation = null;
         for (int i = 0; i < (lateOutputs?.Written.Count ?? 0); i++)
         {
             produced.Add((lateOutputs!.Levels[i], lateOutputs.Written[i].Key, lateOutputs.Written[i].Entry));
             firstPut = DatasetOperation.Earlier(firstPut, lateOutputs.Written[i].StartedAt);
+            generation = DatasetOperation.Lower(generation, lateOutputs.Written[i].KeyGeneration);
         }
 
         foreach (ObjectStream outputs in streams)
@@ -318,6 +320,7 @@ internal static partial class DatasetCompactor
                 produced.Add((outputs.Levels[i], written.Key, written.Entry));
                 filled.Add(new CompactionInput(outputs.Levels[i], written.Key, written.Entry));
                 firstPut = DatasetOperation.Earlier(firstPut, written.StartedAt);
+                generation = DatasetOperation.Lower(generation, written.KeyGeneration);
             }
         }
 
@@ -334,6 +337,7 @@ internal static partial class DatasetCompactor
         {
             // The index's object is put after the outputs, which began first: it counts only when there are none.
             firstPut ??= dataset.Options.TimeProvider.GetUtcNow();
+            generation ??= dataset.KeyGeneration;
             using Activity? indexing = DatasetTelemetry.StartCompactionPass("index");
             partitionIndex = await PartitionIndexAsync(dataset, schema, ran, streams, postings, cancellationToken).ConfigureAwait(false);
         }
@@ -347,6 +351,7 @@ internal static partial class DatasetCompactor
             Range = late is null ? job.Range : filled.Count == 0 ? null : LevelRange.Of(job.ToLevel, filled, key),
             PartitionIndex = partitionIndex,
             FirstPutAt = firstPut,
+            KeyGeneration = generation,
         };
 
         CommitResult commit = await dataset

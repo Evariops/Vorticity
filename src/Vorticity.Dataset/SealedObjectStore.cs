@@ -73,6 +73,7 @@ internal sealed class SealedObjectStore : IObjectStore
     private byte[]? _datasetId;
     private KeyName? _current;
     private ulong _currentVersion;
+    private long _keyGeneration;
     private KeyName? _pending;
     private int _disposed;
 
@@ -113,9 +114,27 @@ internal sealed class SealedObjectStore : IObjectStore
             }
 
             _datasetId = id;
-            _current = new KeyName(key.KeyId, key.WrappedKey.ToArray());
+            Adopt(new KeyName(key.KeyId, key.WrappedKey.ToArray()));
             Volatile.Write(ref _kind, Sealed);
         }
+    }
+
+    /// <summary>
+    /// How many data keys this store has sealed under, each one a rekey replaced: the count when an object was started,
+    /// below the count when its commit is put, says the object may be sealed under a key the dataset no longer seals
+    /// with (<see cref="DatasetOperation.KeyGeneration"/>).
+    /// </summary>
+    internal long KeyGeneration => Interlocked.Read(ref _keyGeneration);
+
+    /// <summary>Makes <paramref name="name"/> the key writers seal under, counting a generation when it is another key; under the gate.</summary>
+    private void Adopt(KeyName name)
+    {
+        if (_current is not { } held || held.KeyId != name.KeyId || !held.Wrapped.AsSpan().SequenceEqual(name.Wrapped))
+        {
+            Interlocked.Increment(ref _keyGeneration);
+        }
+
+        _current = name;
     }
 
     /// <summary>Draws the data key the next commit object, and every object after it, is sealed under.</summary>
@@ -361,7 +380,7 @@ internal sealed class SealedObjectStore : IObjectStore
             {
                 if (version > _currentVersion)
                 {
-                    _current = name;
+                    Adopt(name);
                     _currentVersion = version;
                 }
 
@@ -728,7 +747,7 @@ internal sealed class SealedObjectStore : IObjectStore
 
             if (version > _currentVersion)
             {
-                _current = new KeyName(layout.Descriptor.KeyId, layout.Descriptor.WrappedKey.ToArray());
+                Adopt(new KeyName(layout.Descriptor.KeyId, layout.Descriptor.WrappedKey.ToArray()));
                 _currentVersion = version;
             }
         }
