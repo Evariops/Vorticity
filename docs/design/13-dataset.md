@@ -885,7 +885,9 @@ on the partition's column that keeps the values from one on covers whole objects
 by a partition at most. An object's
 bounds are its summaries', which a number and a time have and a text has not: a filter on a text
 covers no object. `DatasetValueRangeTests` counts no read of a data object for an expiry of two days of
-five, and `DatasetUnreadDeleteTests` none for a delete of the hours before a bound.
+five, and `DatasetUnreadDeleteTests` none for a delete of the hours before a bound. The proof that a
+filter covers an object whole is the pruner's, held to its invariant over every small filter and zone
+of edge values ([statistic precision](08-semantics.md#1-statistic-precision-what-inexact-licenses)).
 
 A dataset knows no tenant. An application that keeps the rows of several tenants, sources or retentions
 apart opens a dataset for each, which expires on its own schedule, or lays its rows out as it chooses.

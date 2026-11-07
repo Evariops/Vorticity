@@ -35,6 +35,22 @@ The converse, pruning too little, only costs time. That asymmetry is what makes 
 testable: every filter test runs with pruning and indexes on and off, and the row sets must be equal,
 including over deliberately loose but legal `Inexact` statistics.
 
+The statistics also prove the opposite, and that proof has an invariant of its own:
+
+> A proof that a filter selects every row of an extent must hold of every row it covers.
+
+A delete or an expiry takes an object the proof covers out of the dataset without reading it, and a
+count answers from it without decoding, so a false proof deletes or counts rows the filter does not
+select. A null or a NaN row is selected by no comparison but `!=`, so an extent that may hold one is
+not proven whole by bounds alone. Marks only take rows away, so a proof over an object's physical rows
+holds of its live ones.
+
+`PrunerBoundedTests` holds the pruner to both invariants, and to its counts, on every filter up to two
+predicates over a long, a double and a text column, every zone of up to three rows of a domain of
+edge values, and every way the format allows its statistics to be loosened. The union of two
+summaries, which a node of a dataset's tree is pruned by, and the summaries of an object a delete
+marked are checked to bound the rows they cover.
+
 ## 2. NaN
 
 The reference computes `min` and `max` with `NumericalAggregateOpts::skip_nans()`
