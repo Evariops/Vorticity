@@ -53,7 +53,8 @@ internal sealed record CommitOptions
     /// <summary>
     /// How long after <see cref="KnownAt"/> every version after <see cref="Known"/> is surely still in
     /// the store: half the retention window, since vacuum takes a commit only a window after the next
-    /// one superseded it. Past it the commits are listed. Zero never trusts.
+    /// one superseded it, and the other half is what the clocks and the listing may cost. Past it the
+    /// commits are listed. Zero never trusts.
     /// </summary>
     public TimeSpan TrustSpan { get; init; }
 
@@ -405,6 +406,7 @@ internal static class DatasetCommitter
             string key = CommitKey.For(version);
             byte[] bytes = builder.Build(header);
             DateTimeOffset put = options.TimeProvider.GetUtcNow();
+            RequireRecentPuts(operations, outcomes, put, DatasetVacuum.WindowOf(template.Retention));
             DatasetTelemetry.Attempted(options.Kind);
             if (await store.PutIfAbsentAsync(key, bytes, cancellationToken).ConfigureAwait(false)
                 == PutOutcome.Created)
@@ -422,6 +424,29 @@ internal static class DatasetCommitter
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// Refuses a commit that would name objects whose first put began half the retention window ago or more, by the
+    /// writer's clock. Vacuum deletes an object no version names once it is a window old, by its own clock against the
+    /// store's date, and a version that names an object vacuum took no longer reads. The other half of the window is
+    /// what the vacuum's clock may run ahead of the store's, a writer's clock fall behind its earlier reading, and a
+    /// listing lag, together. Only the operations that apply count: the others name nothing in the version.
+    /// </summary>
+    /// <exception cref="DatasetIntegrityException">An operation that applies began putting its objects too long ago.</exception>
+    private static void RequireRecentPuts(
+        IReadOnlyList<DatasetOperation> operations, List<OperationOutcome> outcomes, DateTimeOffset now, TimeSpan window)
+    {
+        for (int i = 0; i < operations.Count; i++)
+        {
+            if (outcomes[i] == OperationOutcome.Applied && operations[i].FirstPutAt is { } first && now - first >= window / 2)
+            {
+                throw new DatasetIntegrityException(
+                    $"The commit would name objects whose first put began {now - first} ago, half the retention window of " +
+                    $"{window} or more: vacuum may have deleted them, and a version that names them would not read. Nothing was " +
+                    "committed. Write the rows again in less time, or into a dataset created with a longer RetentionWindow.");
+            }
+        }
     }
 
     /// <summary>What a creation is told when the store holds a dataset already.</summary>

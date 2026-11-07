@@ -11,6 +11,17 @@ internal abstract record DatasetOperation
     /// ignores this and says a level per input and per output instead.</summary>
     public int Level { get; init; }
 
+    /// <summary>
+    /// When the writer began putting the objects the operation names that no version names yet, by the clock of the
+    /// handle that commits it; null when it names none. Vacuum takes an object no version names once it is a retention
+    /// window old, so a commit refuses to apply an operation whose objects began half a window ago or more.
+    /// </summary>
+    public DateTimeOffset? FirstPutAt { get; init; }
+
+    /// <summary>The earlier of <paramref name="first"/>, null when there is none yet, and <paramref name="next"/>.</summary>
+    internal static DateTimeOffset Earlier(DateTimeOffset? first, DateTimeOffset next) =>
+        first is { } known && known < next ? known : next;
+
     /// <summary>Adds one data object to the dataset.</summary>
     /// <remarks>
     /// The key must be a function of the object alone: unique, or the add silently replaces another

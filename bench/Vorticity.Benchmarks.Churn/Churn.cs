@@ -55,9 +55,11 @@ internal static class Churn
             // Off, every object a delete or an update touches is rewritten, whatever its size.
             MarkedObjectBytes = options.Marks ? new DatasetOptions().MarkedObjectBytes : long.MaxValue,
             MarkedVectorBytes = options.MarkKiB > 0 ? options.MarkKiB << 10 : new DatasetOptions().MarkedVectorBytes,
-            // Vacuum then takes what the latest version does not reference as soon as it is a
-            // second old, which is what keeps a long run's store from holding every rewrite.
-            RetentionWindow = TimeSpan.FromSeconds(1),
+            // A window past twice any commit's time, half of which a commit allows. The vacuum's clock
+            // runs a window ahead (VacuumAhead), so that it takes what the latest version does not
+            // reference at once, which keeps a long run's store from holding every rewrite: safe here
+            // only because no commit is in flight while it runs.
+            RetentionWindow = VacuumAhead.Window,
             InlineCompactionBytes = options.Compact == CompactionCadence.Inline ? 64L << 20 : 0,
         };
 
@@ -196,7 +198,7 @@ internal static class Churn
             if (options.VacuumEvery > 0 && op % options.VacuumEvery == 0)
             {
                 started = Stopwatch.GetTimestamp();
-                VacuumResult vacuumed = await dataset.VacuumAsync().ConfigureAwait(false);
+                VacuumResult vacuumed = await dataset.VacuumAsync(new VacuumOptions { TimeProvider = VacuumAhead.Instance }).ConfigureAwait(false);
                 window.VacuumMs += Stopwatch.GetElapsedTime(started).TotalMilliseconds;
                 window.Vacuumed += vacuumed.Deleted.Length;
             }
@@ -595,5 +597,18 @@ internal static class Churn
         }
 
         internal readonly record struct Probe(string Name, double Ms, long Requests, int Calls);
+    }
+
+    /// <summary>
+    /// The vacuum's clock, a retention window and a second ahead of the system's: every object no version names is past
+    /// the window, and every superseded version too, so that a vacuum keeps the latest version alone.
+    /// </summary>
+    private sealed class VacuumAhead : TimeProvider
+    {
+        internal static readonly TimeSpan Window = TimeSpan.FromHours(1);
+
+        internal static readonly VacuumAhead Instance = new VacuumAhead();
+
+        public override DateTimeOffset GetUtcNow() => System.GetUtcNow() + Window + TimeSpan.FromSeconds(1);
     }
 }

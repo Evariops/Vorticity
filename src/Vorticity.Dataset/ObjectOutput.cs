@@ -11,14 +11,22 @@ namespace Vorticity.Dataset;
 /// <remarks>Disposing an object that was not sealed abandons it: nothing reaches the store.</remarks>
 internal sealed class ObjectOutput : IAsyncDisposable
 {
-    internal ObjectOutput(VortexDataset owner, Guid identity, string key, ObjectSegmentSink sink, VortexFileWriter writer)
+    internal ObjectOutput(VortexDataset owner, Guid identity, string key, ObjectSegmentSink sink, VortexFileWriter writer, DateTimeOffset startedAt)
     {
         Owner = owner;
         Identity = identity;
         Key = key;
         Sink = sink;
         Writer = writer;
+        StartedAt = startedAt;
     }
+
+    /// <summary>
+    /// When the object was started, by its handle's clock, before a byte of it went to the store: what the commit that
+    /// names it measures its age from (<see cref="DatasetOperation.FirstPutAt"/>), since a store may date an object by
+    /// the start of its upload.
+    /// </summary>
+    internal DateTimeOffset StartedAt { get; }
 
     /// <summary>The key the object will have in the store.</summary>
     internal string Key { get; }

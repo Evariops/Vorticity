@@ -181,10 +181,11 @@ object that holds a delete's vector of positions, or its counts of the rows it m
 same way while a retained version names them, and the rollups a retained version names stay with it.
 
 `VacuumOptions.TimeProvider` is the clock vacuum measures ages against. That is how the sample
-jumps past the window, and how you can test your own retention. It must agree with the store's
-clock, since the ages it compares are the store's timestamps. Deletes go out in batches, two
-requests for twenty-one keys here, and the listings say when each object was written, so none needs
-a head request.
+jumps past the window, and how you can test your own retention, on a store no writer commits to
+meanwhile, since a clock that far ahead takes the objects of a writer in flight. In production it
+must agree with the store's clock, since the ages it compares are the store's timestamps. Deletes go
+out in batches, two requests for twenty-one keys here, and the listings say when each object was
+written, so none needs a head request.
 
 Run a dry run first. `Deleted` lists what would go, commit objects first. `Young` lists the
 unreferenced objects kept because they may belong to a writer still in flight, and `Retained` the
@@ -319,6 +320,15 @@ one. On a store where a request costs 30 ms, it is what a job takes. See
 * A reader that outlives the window loses its objects. Vacuum works from the store's latest version,
   not from yours, so a handle still on an old version may find an object missing.
   `ObjectNotFoundException` then tells it to refresh.
+* A writer has half the window to commit. Vacuum deletes an object no version names once it is a
+  window old, so a commit refuses to name objects whose first put began half the window ago or more,
+  and throws `DatasetIntegrityException` with nothing committed. Write those rows again. A window
+  shorter than twice your longest append, rewrite or compaction job refuses that job every time.
+* The other half of the window is for the clocks and the store's listing. The vacuum's clock may run
+  ahead of the store's, a writer's clock may fall behind its own earlier reading, stepped back or
+  paused mid-commit, and the listing may lag, by half the window at most together. With the default
+  seven days that is three and a half days, far past what synchronised clocks drift. With a window of
+  minutes, it is what you must hold your clocks to.
 * Compaction commits like any writer, so a concurrent writer can win the race. Check `Outcome`.
   Vacuum deletes only what no retained version references, and deletes nothing until every retained
   version has been walked.
