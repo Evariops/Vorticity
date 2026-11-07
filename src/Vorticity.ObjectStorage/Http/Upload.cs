@@ -502,9 +502,16 @@ internal static class Upload
                     return learned;
                 }
 
+                // The head found nothing, but the attempt whose answer was lost may still land after it: a put that
+                // gives up here cannot say it did not land, only that nobody knows (docs/design/models/conditional-put).
                 if (!await transport.RetryAfterAsync(tried, cancellationToken).ConfigureAwait(false))
                 {
-                    throw new ObjectStoreException($"{operation} of '{key}' did not land after {tried} attempts: {lost.Message}", lost.InnerException!);
+                    throw new ObjectStoreException(
+                        $"{operation} of '{key}' lost its answer on each of {tried} attempts, and the head after the last found nothing: the outcome is unknown, since an attempt may still land. {lost.Message}",
+                        lost.InnerException!)
+                    {
+                        OutcomeUnknown = true,
+                    };
                 }
 
                 continue;
