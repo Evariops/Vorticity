@@ -837,7 +837,10 @@ stores this repository ships for S3, Azure and Cloud Storage, are in
 A store must document an atomic creation, reads and heads that see every write that completed, a
 listing in ordinal order whose lag fits in the half window the clocks share ([the
 lifecycle](#10-lifecycle)), a token that changes whenever the bytes under a key change, and ranged
-reads on objects of any size. A store declares what it does
+reads on objects of any size. A creation it answers with `Exists` must have written nothing, not even
+through an earlier attempt whose answer was lost: a writer told `Exists` applies its operations again
+on the version that won, and an append whose object a compaction has moved out of level 0 since would
+land twice ([the model of the commit](models/dataset-commit/README.md)). A store declares what it does
 in one request (`Capabilities`), and a dataset refuses a store that does not list in order. It also
 refuses to write to a store that does not declare an atomic creation (`CreatesConditionally`), since
 two commits of one version would both land there, the second's object over the first's. A reader
@@ -1092,6 +1095,11 @@ other than by widening a number or making it nullable ([schema evolution](#13-sc
   above 0 is key-disjoint and a walk of the key cursor meets every row. Two compactions that write one
   level from two others are also replayed step by step, the second abandoned.
 - The rebase matrix, covering every row of the [rebase table](#82-rebase-by-re-applying-operations).
+- [A model of the commit](models/dataset-commit/README.md), checked by TLC over every interleaving of
+  appenders, deleters and compactions on three levels: no row read twice, lost or brought back after a
+  delete, and no two objects of a level above 0 sharing a key, in 2.5 million states. The defects it
+  is held against, a tree key without the uid, a commit that does not look at its destination again,
+  an input checked for its presence alone, each break it in under ten steps.
 - Sources: four writers take the entries of three sources in any order, through handles many versions
   behind, with commits of two sources at once, replays of a commit whose answer was lost, and
   compactions between them. For each source the ranges applied tile `(0, r]`, and the rows are the

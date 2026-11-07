@@ -1,0 +1,4 @@
+# What TLC writes beside a model when it runs there: its state files, and the trace modules TLC 1.8
+# writes after a violation.
+states/
+*_TTrace_*

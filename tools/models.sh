@@ -18,6 +18,8 @@
 #   JAVA             the java to run, 11 or later (default: java on the PATH)
 #   TLA2TOOLS        a tla2tools.jar to use as it is (default: the pinned one, downloaded and checked)
 #   MODELS_TIMEOUT   seconds a configuration may run (default: 600)
+#   MODELS_DEEP      set to 1 to run the Deep*.cfg configurations too, which take minutes to hours
+#                    and run on demand rather than on every change
 set -euo pipefail
 
 TLA_VERSION=1.7.4
@@ -60,15 +62,19 @@ tools_jar() {
 expected_code() {
   local relative="$1"
   [ -f "$MANIFEST" ] || return 0
-  grep -E "^${relative//./\\.}=[0-9]+$" "$MANIFEST" | head -1 | cut -d= -f2
+  { grep -E "^${relative//./\\.}=[0-9]+$" "$MANIFEST" || true; } | head -1 | cut -d= -f2
 }
 
 # The module a configuration runs against: the only .tla of its directory, or the one named like it.
 module_of() {
   local dir="$1" cfg="$2"
-  local name
+  local name file
   name=$(basename "$cfg" .cfg)
-  local modules=("$dir"/*.tla)
+  local modules=()
+  for file in "$dir"/*.tla; do
+    # A trace a newer TLC writes beside the model after a violation is not one of its modules.
+    case "$file" in *_TTrace_*) ;; *) modules+=("$file") ;; esac
+  done
   if [ "${#modules[@]}" -eq 1 ]; then
     basename "${modules[0]}" .tla
   elif [ -f "$dir/$name.tla" ]; then
@@ -105,6 +111,12 @@ main() {
   jar=$(tools_jar)
   "$JAVA" -version > /dev/null 2>&1 || { echo "no java at '$JAVA': set JAVA to a Java 11 or later" >&2; exit 1; }
 
+  # A TLC from 1.8 on writes a trace module beside the model after each violation unless told not to,
+  # an option the pinned 1.7.4 does not know, since it writes none.
+  local quiet=() usage
+  usage=$("$JAVA" -cp "$jar" tlc2.TLC -help 2>&1 || true)
+  if [[ "$usage" == *noGenerateSpecTE* ]]; then quiet=(-noGenerateSpecTE); fi
+
   local dirs=()
   if [ "$#" -gt 0 ]; then
     for dir in "$@"; do dirs+=("$(cd "$dir" && pwd -P)"); done
@@ -126,6 +138,10 @@ main() {
   for dir in "${dirs[@]}"; do
     for cfg in "$dir"/*.cfg; do
       [ -f "$cfg" ] || continue
+      if [[ "$(basename "$cfg")" == Deep* && "${MODELS_DEEP:-}" != 1 ]]; then
+        echo "SKIP ${cfg#"$ROOT"/}: a deep configuration, run with MODELS_DEEP=1"
+        continue
+      fi
       local relative="${cfg#"$ROOT"/}"
       local module expected code verdict started elapsed out
       module=$(module_of "$dir" "$cfg") || { failures=$((failures + 1)); continue; }
@@ -134,7 +150,7 @@ main() {
       started=$(date +%s)
       code=$(cd "$dir" && run_bounded "$out" "$JAVA" -XX:+UseParallelGC "-DTLA-Library=$library" -cp "$jar" tlc2.TLC \
         -workers 1 -seed 1 -fp 1 -cleanup -metadir "$scratch/states-$(basename "$dir")-$(basename "$cfg" .cfg)" \
-        -config "$(basename "$cfg")" "$module.tla")
+        ${quiet[@]+"${quiet[@]}"} -config "$(basename "$cfg")" "$module.tla")
       elapsed=$(($(date +%s) - started))
       local states depth
       states=$({ grep -E 'distinct states found' "$out" || true; } | tail -1 | sed -E 's/.* ([0-9]+) distinct states found.*/\1 distinct states/')

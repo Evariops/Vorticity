@@ -15,6 +15,7 @@ code to it. The design documents stay the readable contract and link their model
 | [atomic-put](atomic-put/README.md) | the store contract the dataset relies on: a key holds nothing or one whole object, created once |
 | [conditional-put](conditional-put/README.md) | a put-if-absent over HTTP whose answers are lost, settled by the put's id and a head |
 | [file-put](file-put/README.md) | `FileObjectStore`'s creation of a key, the reads that meet it, and the repair of a torn commit |
+| [dataset-commit](dataset-commit/README.md) | the commit by put-if-absent and the rebase of appends, deletes and compactions onto the version that won |
 
 ## Three kinds of configurations
 

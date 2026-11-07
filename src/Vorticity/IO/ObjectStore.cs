@@ -275,7 +275,13 @@ public enum PutOutcome
     /// <summary>The bytes were written.</summary>
     Created = 0,
 
-    /// <summary>The key was taken, and the put asked for it free. Nothing was written.</summary>
+    /// <summary>
+    /// The key was taken, and the put asked for it free. Nothing was written, not even by an earlier
+    /// attempt of this put whose answer was lost: that one is <see cref="Created"/>, or, unknown, an
+    /// <see cref="ObjectStoreException"/> whose <see cref="ObjectStoreException.OutcomeUnknown"/> is true.
+    /// A dataset told <c>Exists</c> applies its commit again on the version that won, and an append whose
+    /// object a compaction has moved since would land twice.
+    /// </summary>
     Exists = 1,
 
     /// <summary>The object no longer had the token the put asked for, or no longer existed. Nothing was written.</summary>
