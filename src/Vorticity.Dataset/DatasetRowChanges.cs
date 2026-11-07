@@ -144,6 +144,7 @@ internal static class DatasetRowChanges
             List<ObjectEntry> expected = [];
             List<(int Level, ReadOnlyMemory<byte> Key, ObjectEntry Entry)> outputs = [];
             DateTimeOffset? firstPut = null;
+            long? generation = null;
             long rows = 0;
             long bytesIn = 0;
             long bytesOut = 0;
@@ -186,6 +187,7 @@ internal static class DatasetRowChanges
                         outputs.Add((held.Level, kept.Key, kept.Entry));
                         bytesOut += kept.Entry.Bytes;
                         firstPut = DatasetOperation.Earlier(firstPut, kept.StartedAt);
+                        generation = DatasetOperation.Lower(generation, kept.KeyGeneration);
                     }
                 }
 
@@ -196,6 +198,7 @@ internal static class DatasetRowChanges
                         outputs.Add((0, written.Key, written.Entry));
                         bytesOut += written.Entry.Bytes;
                         firstPut = DatasetOperation.Earlier(firstPut, written.StartedAt);
+                        generation = DatasetOperation.Lower(generation, written.KeyGeneration);
                     }
                 }
             }
@@ -241,7 +244,7 @@ internal static class DatasetRowChanges
 
             CommitResult commit = await dataset
                 .CommitAsync(
-                    [new DatasetOperation.ReplaceObjects(inputs, outputs) { Expected = expected, FirstPutAt = firstPut }],
+                    [new DatasetOperation.ReplaceObjects(inputs, outputs) { Expected = expected, FirstPutAt = firstPut, KeyGeneration = generation }],
                     kind,
                     consumed,
                     null,

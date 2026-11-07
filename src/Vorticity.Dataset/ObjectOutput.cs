@@ -11,7 +11,8 @@ namespace Vorticity.Dataset;
 /// <remarks>Disposing an object that was not sealed abandons it: nothing reaches the store.</remarks>
 internal sealed class ObjectOutput : IAsyncDisposable
 {
-    internal ObjectOutput(VortexDataset owner, Guid identity, string key, ObjectSegmentSink sink, VortexFileWriter writer, DateTimeOffset startedAt)
+    internal ObjectOutput(
+        VortexDataset owner, Guid identity, string key, ObjectSegmentSink sink, VortexFileWriter writer, DateTimeOffset startedAt, long keyGeneration)
     {
         Owner = owner;
         Identity = identity;
@@ -19,7 +20,14 @@ internal sealed class ObjectOutput : IAsyncDisposable
         Sink = sink;
         Writer = writer;
         StartedAt = startedAt;
+        KeyGeneration = keyGeneration;
     }
+
+    /// <summary>
+    /// How many data keys the dataset's handle had sealed under when the object was started, 0 for a plain dataset: it is
+    /// sealed under that key or a later one (<see cref="DatasetOperation.KeyGeneration"/>).
+    /// </summary>
+    internal long KeyGeneration { get; }
 
     /// <summary>
     /// When the object was started, by its handle's clock, before a byte of it went to the store: what the commit that
