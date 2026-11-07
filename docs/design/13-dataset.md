@@ -589,6 +589,13 @@ version and the creation of the first, and one that finds a version there, or lo
 another, throws rather than taking up the winner's header: two processes that create one dataset
 with two schemas get one dataset and one error, never two handles on one schema.
 
+A creation whose answer the store lost, and whose outcome it cannot tell once its retries are spent,
+throws an `ObjectStoreException` whose `OutcomeUnknown` is true, passed on as it is: the version may
+have landed ([writes whose outcome is unknown](19-object-storage.md#64-timeouts-retries-and-writes-whose-outcome-is-unknown)).
+A writer that declares the source ranges its rows come from makes the commit again and has them
+counted once ([sources and offsets](#84-sources-and-offsets)), and one that declares none may count
+them twice.
+
 ### 8.2 Rebase by re-applying operations
 
 If `N+1` already exists, the writer reads it and applies its logical operations again on that

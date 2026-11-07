@@ -380,8 +380,11 @@ twice. So a conditional put is never retried blindly:
    throttled, or whose body was cut short before its end, was never applied, since a service waits
    for the whole of a body's declared length: it goes again without the head.
 3. If the object carries this put's id, the answer is `Created`. If it carries another id, the answer
-   is `Exists`. If there is no object, the put is sent again. If the head fails too, the store throws
-   an `ObjectStoreException` that says the outcome is unknown, and the caller decides.
+   is `Exists`. If there is no object, the put is sent again while the store's retries allow. If the
+   head fails too, or the retries run out with the key still free, the store throws an
+   `ObjectStoreException` that says the outcome is unknown, and the caller decides: an attempt whose
+   answer was lost may still land after the head that found nothing, so the put cannot say it did not
+   land.
 4. Once an attempt has lost its answer, a later refusal on the condition is checked the same way. A
    slow service may apply the lost attempt after the head that found nothing, and the attempt sent
    again then finds the key taken by this put itself: the head finds its id, and the answer is

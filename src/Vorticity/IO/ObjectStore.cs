@@ -342,7 +342,10 @@ public sealed class ObjectStoreException : VortexException
 
     /// <summary>
     /// Whether a conditional put may have landed without its writer learning it: the answer was lost,
-    /// and the head asked afterwards failed too. The caller decides, since neither outcome is proven.
+    /// and the head asked afterwards failed too, or found nothing when the retries ran out while an
+    /// attempt could still land. The caller decides, since neither outcome is proven. A dataset's
+    /// commit passes it on: a writer whose source ranges the commit declares can make it again and
+    /// have its rows counted once, and one that declares none may count them twice.
     /// </summary>
     public bool OutcomeUnknown { get; init; }
 

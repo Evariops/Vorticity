@@ -64,6 +64,25 @@ public sealed class UploadTests : IDisposable
     }
 
     [Fact]
+    public async Task APutWhoseLastAttemptMayStillLandSaysItsOutcomeIsUnknown()
+    {
+        // The one attempt the budget allows loses its answer, and lands only after the head that found
+        // nothing. The put cannot know it landed, and says the outcome is unknown, where it once said the
+        // put did not land: a caller told that would append its rows again.
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        using S3Emulator emulator = new S3Emulator();
+        emulator.LandsLate = request => request.Method == HttpMethod.Put;
+        await using S3ObjectStore store = Store(emulator, transport: new StoreTransportOptions { RetryBaseDelay = TimeSpan.Zero, MaxAttempts = 1 });
+
+        byte[] content = Bytes(100, 9);
+        ObjectStoreException unknown = await Assert.ThrowsAsync<ObjectStoreException>(
+            async () => await store.PutIfAbsentAsync("commit/1", content, ct));
+        Assert.True(unknown.OutcomeUnknown);
+        Assert.Equal(["PUT /commit/1", "HEAD /commit/1"], emulator.Log);
+        Assert.Equal(content, emulator.BytesOf(Bucket, "commit/1"));
+    }
+
+    [Fact]
     public async Task APutBoundToGoWholeIsBoundedInMemoryAndSpooledOnDiskWhenAsked()
     {
         // R2 takes a condition only on a whole put: past the ceiling a put would hold in memory, it is
