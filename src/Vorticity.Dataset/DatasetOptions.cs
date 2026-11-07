@@ -65,6 +65,14 @@ public sealed record DatasetOptions
     /// How long a superseded version stays readable before vacuum may delete what only it
     /// references; zero, the default, means seven days.
     /// </summary>
+    /// <remarks>
+    /// Vacuum also deletes an object no version names once it is a window old, so a commit refuses to
+    /// name objects whose first put began half the window ago or more, and throws
+    /// <see cref="DatasetIntegrityException"/>: the window must be longer than twice the longest append,
+    /// rewrite or compaction job. The other half is what the clocks and the store's listing may cost
+    /// together: the vacuum's clock running ahead of the store's, a writer's clock falling behind its
+    /// own earlier reading, and the listing's lag.
+    /// </remarks>
     public TimeSpan RetentionWindow { get; init; }
 
     /// <summary>How many superseded versions vacuum keeps whatever their age; none by default.</summary>

@@ -316,7 +316,9 @@ public sealed partial class DatasetRollupsTests
         SheetObjectBytes = 0,
         ContentsObjectBytes = 0,
         RollupFanout = 2,
-        RetentionWindow = TimeSpan.FromSeconds(1),
+
+        // Inside the hour the vacuum's clock runs ahead, and past twice any job's time, half of which a commit allows.
+        RetentionWindow = TimeSpan.FromMinutes(10),
     };
 
     /// <summary>The clock of a vacuum run past the retention window.</summary>

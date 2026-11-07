@@ -634,10 +634,10 @@ to use a coordinator, in the exception's own words.
 ### 8.3 The latest version in one request
 
 Commit keys sort newest first, so the first key a listing of `commit/` yields is the whole discovery,
-and the listing stops after one page. That needs a strongly consistent listing, which S3 has offered
-since 2020 and which [the store abstraction](#11-the-store-abstraction) requires of any store. A
-reader that wants to read its own writes is handed the version by its writer. There is no hint
-object.
+and the listing stops after one page. That wants a strongly consistent listing, which S3 has offered
+since 2020. A listing that lags finds a passed version, which costs a commit a rebase, and [the store
+abstraction](#11-the-store-abstraction) bounds its lag. A reader that wants to read its own writes is
+handed the version by its writer. There is no hint object.
 
 A handle that knows its version was the latest less than half a retention window ago asks for the
 versions after it instead. Every one of them was created after that moment, and vacuum only takes a
@@ -654,8 +654,12 @@ nothing is new, the read of an absent key, which the stores bill as a head. Past
 the handle lists. Below the
 window the commits are not contiguous: vacuum keeps an old commit object whose pages a retained
 version still names and removes the unnamed ones after it, so a handle that took the gap above its
-own version for the end would read it as the latest and commit on it. The handle's clock therefore
-has to agree with the store's to within the other half window, as a vacuum's already must.
+own version for the end would read it as the latest and commit on it. The other half window is what
+the clocks and the listing may cost together. The vacuum's clock may run ahead of the store's, whose
+dates it ages objects by. The handle's clock may fall behind its own earlier reading, stepped back or
+paused between a reading and the request it decides. The listing may lag, and a refresh then takes a
+passed version for the latest. A constant offset of the handle's clock from the store's costs
+nothing, since the handle compares two of its own readings.
 
 A version whose number a reader already knows, because a writer handed it over, needs no listing at
 all. A commit object's key is a function of its version, so `OpenAsync(store, version)` is the one
@@ -785,8 +789,15 @@ a scan that stops at its first batch opens a single object.
   deletes the unmarked commit objects and data objects older than the retention window, seven days by
   default (`DatasetOptions.RetentionWindow`), always keeping the latest version. What ages is the
   moment a version was superseded, by the store's own clock. An unreferenced object younger than the
-  window may belong to a writer in flight and is kept, which means a writer must commit within the
-  window. Only `commit/` and `data/` are swept, and an imported file belongs to its owner. On a store with retention locks, whatever the lock or a legal hold still keeps
+  window may belong to a writer in flight and is kept. A commit therefore refuses to name objects
+  whose first put began half the window ago or more, by the writer's clock, and throws
+  `DatasetIntegrityException` with nothing committed: the writer writes those rows again. The window
+  must be longer than twice the longest append, rewrite or compaction job. The writer measures from
+  before the object's first byte leaves, since a store may date an upload by its start, as S3 does.
+  The other half of the window is what the vacuum's clock running ahead of the store's, a writer's
+  clock falling behind its own earlier reading, and the listing's lag may cost together, as for [the
+  trust span](#83-the-latest-version-in-one-request). Only `commit/` and `data/` are swept, and an
+  imported file belongs to its owner. On a store with retention locks, whatever the lock or a legal hold still keeps
   is left and reported with the date the first of it may go (`DatasetOptions.LockedStore`, see
   [stores that cannot delete](15-compaction.md#5-stores-that-cannot-delete)). A reader that outlives
   the window gets an `ObjectNotFoundException` naming the version it was reading, never a partial
@@ -824,8 +835,9 @@ stores this repository ships for S3, Azure and Cloud Storage, are in
 | `ListAsync(prefix, startAfter)` yields each object with its head | the latest version, in one page ([the latest version](#83-the-latest-version-in-one-request)), and vacuum's ages, with no head per object |
 
 A store must document an atomic creation, reads and heads that see every write that completed, a
-listing in ordinal order that lags by less than the retention window, a token that changes whenever
-the bytes under a key change, and ranged reads on objects of any size. A store declares what it does
+listing in ordinal order whose lag fits in the half window the clocks share ([the
+lifecycle](#10-lifecycle)), a token that changes whenever the bytes under a key change, and ranged
+reads on objects of any size. A store declares what it does
 in one request (`Capabilities`), and a dataset refuses a store that does not list in order. It also
 refuses to write to a store that does not declare an atomic creation (`CreatesConditionally`), since
 two commits of one version would both land there, the second's object over the first's. A reader

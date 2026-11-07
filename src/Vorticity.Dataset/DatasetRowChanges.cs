@@ -143,6 +143,7 @@ internal static class DatasetRowChanges
             List<(int Level, ReadOnlyMemory<byte> Key)> inputs = [];
             List<ObjectEntry> expected = [];
             List<(int Level, ReadOnlyMemory<byte> Key, ObjectEntry Entry)> outputs = [];
+            DateTimeOffset? firstPut = null;
             long rows = 0;
             long bytesIn = 0;
             long bytesOut = 0;
@@ -184,6 +185,7 @@ internal static class DatasetRowChanges
                     {
                         outputs.Add((held.Level, kept.Key, kept.Entry));
                         bytesOut += kept.Entry.Bytes;
+                        firstPut = DatasetOperation.Earlier(firstPut, kept.StartedAt);
                     }
                 }
 
@@ -193,6 +195,7 @@ internal static class DatasetRowChanges
                     {
                         outputs.Add((0, written.Key, written.Entry));
                         bytesOut += written.Entry.Bytes;
+                        firstPut = DatasetOperation.Earlier(firstPut, written.StartedAt);
                     }
                 }
             }
@@ -238,7 +241,7 @@ internal static class DatasetRowChanges
 
             CommitResult commit = await dataset
                 .CommitAsync(
-                    [new DatasetOperation.ReplaceObjects(inputs, outputs) { Expected = expected }],
+                    [new DatasetOperation.ReplaceObjects(inputs, outputs) { Expected = expected, FirstPutAt = firstPut }],
                     kind,
                     consumed,
                     null,
