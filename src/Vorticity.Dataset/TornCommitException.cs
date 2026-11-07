@@ -8,8 +8,10 @@ namespace Vorticity.Dataset;
 /// </summary>
 /// <remarks>
 /// The newest commit left short by a writer that died keeps every reader and writer of the dataset
-/// out until <see cref="VortexDataset.RemoveTornCommitAsync"/> removes it; the dataset then reads as
-/// the version before it, and the next commit takes the number again.
+/// out until <see cref="VortexDataset.RemoveTornCommitAsync"/> removes it. The dataset then reads as
+/// the version before it, and the next commit takes the number again. A <see cref="FileObjectStore"/>
+/// shows a commit only once whole and leaves no such commit, except on a file system that can neither
+/// rename exclusively nor link files, where it claims the key before it writes.
 /// </remarks>
 public sealed class TornCommitException : VortexException
 {

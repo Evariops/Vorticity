@@ -255,8 +255,12 @@ the service throttled, or whose body was cut short, was never applied, and goes 
 is lost after its body was sent, the store asks the object's head, whose metadata carries the put's
 id: the put created the object, another writer did, or nothing is there and the put goes again. A
 refusal that follows such a loss is checked the same way, since a slow service may apply the lost
-attempt after the head, and the put then finds the key taken by itself. When the head fails too, the
-store throws an `ObjectStoreException` whose `OutcomeUnknown` is true, and the caller decides.
+attempt after the head, and the put then finds the key taken by itself. When the head fails too, or
+the retries run out while the key is still free, the store throws an `ObjectStoreException` whose
+`OutcomeUnknown` is true, and the caller decides: a lost attempt may still land after the last head. A
+dataset's commit passes that exception on, so a writer that may append its rows twice declares the
+source ranges they come from, which make a replay count them once ([sources and
+offsets](../design/13-dataset.md#84-sources-and-offsets)).
 
 A put of bytes already in memory, `PutAsync(key, ReadOnlySequence<byte>, condition)`, sends them
 where they lie and sends them again from there. A put read from a stream holds what a retry needs, a

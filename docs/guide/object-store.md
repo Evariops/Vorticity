@@ -90,15 +90,24 @@ await using CountingObjectStore counting = new CountingObjectStore(memory);   //
 ```
 
 `FileObjectStore` maps keys to files under a root directory. Its `Durable` option flushes every put
-to the device before returning, for a store that is the system of record. Claiming a key is atomic
-there, by the kernel's exclusive creation, so the store declares `CreatesConditionally`. Writing the
-content is not atomic, so a process that dies mid-put leaves a short object under a
-taken key, which the format detects when the object is read. A read that meets a put still in
-progress waits for it. A commit left short throws `TornCommitException`, which names its version,
-and `VortexDataset.RemoveTornCommitAsync` removes it. A put without a condition writes a temporary
-file and renames it over the key, so a reader sees the old object or the new one. No file system
+to the device before returning, for a store that is the system of record. A commit object, the key a
+dataset's writers race for, is written to a file beside its key under a name no key can have, and
+shown only once whole, by a rename the kernel refuses when the key is taken. So the store declares
+`CreatesConditionally`, a reader meets a commit whole or not at all, and a process that dies
+mid-commit leaves nothing under its key. The file it leaves beside the key goes at the first listing a
+day later. Any other object is created by the kernel's exclusive creation of its key and written in
+place, since its key is its own and nothing reads it before a commit names it: a process that dies
+mid-put leaves a short object no version names, which vacuum deletes. A put without a condition
+renames its file over the key, so a reader sees the old object or the new one. No file system
 compares and renames in one step across processes, so a put on a token throws `NotSupportedException`
 there.
+
+On a file system that can neither rename exclusively nor link files, such as FAT, exFAT or some
+network shares, a commit is claimed and written in place too. A read that meets such a commit waits
+for it, and a process that dies mid-commit there leaves a short commit under a taken key, which
+throws `TornCommitException`, naming its version, and `VortexDataset.RemoveTornCommitAsync` removes
+it. Run that repair only while no writer commits to the dataset, since it can take a commit being
+written for a torn one.
 
 `MemoryObjectStore` is a test double with hooks for exercising your own error paths. `Fails` refuses
 a chosen operation, `CrashesAfterPut` throws after a put has landed (so the object exists but its

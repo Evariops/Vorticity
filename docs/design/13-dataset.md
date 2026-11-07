@@ -589,6 +589,13 @@ version and the creation of the first, and one that finds a version there, or lo
 another, throws rather than taking up the winner's header: two processes that create one dataset
 with two schemas get one dataset and one error, never two handles on one schema.
 
+A creation whose answer the store lost, and whose outcome it cannot tell once its retries are spent,
+throws an `ObjectStoreException` whose `OutcomeUnknown` is true, passed on as it is: the version may
+have landed ([writes whose outcome is unknown](19-object-storage.md#64-timeouts-retries-and-writes-whose-outcome-is-unknown)).
+A writer that declares the source ranges its rows come from makes the commit again and has them
+counted once ([sources and offsets](#84-sources-and-offsets)), and one that declares none may count
+them twice.
+
 ### 8.2 Rebase by re-applying operations
 
 If `N+1` already exists, the writer reads it and applies its logical operations again on that
@@ -829,7 +836,11 @@ runs long, a delete takes a batch and reports nothing, and a listing pages by it
 enumerated. Retries, hedging, connection pools and credentials belong to the store library, never to
 the dataset.
 
-Three stores ship. `FileObjectStore` uses the kernel's create-new for put-if-absent, and a crash may
+Three stores ship. `FileObjectStore` writes each commit object beside its key and moves it there
+whole, by a rename the kernel refuses when the key is taken, so a crash leaves nothing under a
+commit's key. Any other object, under a key its own, it creates in place with the kernel's
+create-new. On a file system that can neither rename
+exclusively nor link, a commit is created in place too, and there a crash may
 leave its content short, which the format detects. `MemoryObjectStore` has injectable latency,
 failures and crashes after a put. `CountingObjectStore` is a decorator that counts requests, bytes and
 the dependent steps of the critical path. The contract is a test suite, `ObjectStoreContractTests`,
