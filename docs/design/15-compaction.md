@@ -121,7 +121,9 @@ job that empties level 0 into the first level that can hold it and one that push
 level 1 into the same level may share none, and only that look keeps the level key-disjoint.
 A tiered job names its partition's objects alone, and the planner gives no two jobs one partition.
 Correctness never depends on who runs the job, so every driver below is safe against every other one
-and against every writer. What they differ in is who waits for the work, and how much of it is wasted.
+and against every writer. The [model of the commit](models/dataset-commit/README.md) runs compactions
+beside appends and deletes in every order it reaches, and no row is lost, doubled or brought back. What
+the drivers differ in is who waits for the work, and how much of it is wasted.
 
 | driver | who pays | the bounds | what goes wrong |
 |---|---|---|---|

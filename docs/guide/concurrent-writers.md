@@ -46,7 +46,9 @@ and its handle moves to the version that counts them. B, still on its own commit
 offset again, overlaps A's range: the exception names the offset recorded, `Recorded`, and B's
 handle reads the version that decided it, so B takes up from there. However the writers interleave,
 the ranges that applied tile the source from 0 without a gap or an overlap, because an offset moves
-only by a commit whose range starts exactly at it, and the store orders the commits.
+only by a commit whose range starts exactly at it, and the store orders the commits. A [model of the
+offsets](../design/models/dataset-sources/README.md) checks it over every order two writers can take,
+replays included.
 
 A writer whose answer was lost, or that restarts not knowing it committed, replays the same range
 and gets `AlreadyThere`. Act on a commit, by sending a notification for instance, only when it is
