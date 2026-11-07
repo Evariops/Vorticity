@@ -18,6 +18,8 @@
 #   JAVA             the java to run, 11 or later (default: java on the PATH)
 #   TLA2TOOLS        a tla2tools.jar to use as it is (default: the pinned one, downloaded and checked)
 #   MODELS_TIMEOUT   seconds a configuration may run (default: 600)
+#   MODELS_JOBS      how many configurations run at once, each a TLC with one worker (default: the
+#                    processors online)
 #   MODELS_DEEP      set to 1 to run the Deep*.cfg configurations too, which take minutes to hours
 #                    and run on demand rather than on every change
 set -euo pipefail
@@ -106,14 +108,84 @@ run_bounded() {
   echo "$code"
 }
 
+# Checks one configuration and writes what it found to <report>, with <report>.failed beside it when
+# the configuration did not give its expected verdict. Runs in the background, beside other checks.
+check() {
+  local dir="$1" cfg="$2" report="$3"
+  local relative="${cfg#"$ROOT"/}" name module expected code verdict started elapsed out states depth
+  name="$(basename "$dir")-$(basename "$cfg" .cfg)"
+  if ! module=$(module_of "$dir" "$cfg" 2> "$report"); then
+    : > "$report.failed"
+    return
+  fi
+  expected=$(expected_code "$relative")
+  out="$scratch/$name.out"
+  # TLC extracts the standard modules it parses into the temporary directory, where two runs side by
+  # side would overwrite each other's while they read them: each run has a directory of its own.
+  mkdir -p "$scratch/tmp-$name"
+  started=$(date +%s)
+  code=$(cd "$dir" && run_bounded "$out" "$JAVA" -XX:+UseParallelGC "-Djava.io.tmpdir=$scratch/tmp-$name" \
+    "-DTLA-Library=$library" -cp "$jar" tlc2.TLC -workers 1 -seed 1 -fp 1 -cleanup -metadir "$scratch/states-$name" \
+    ${quiet[@]+"${quiet[@]}"} -config "$(basename "$cfg")" "$module.tla")
+  elapsed=$(($(date +%s) - started))
+  states=$({ grep -E 'distinct states found' "$out" || true; } | tail -1 | sed -E 's/.* ([0-9]+) distinct states found.*/\1 distinct states/')
+  depth=$({ grep -E 'depth of the complete state graph search is' "$out" || true; } | tail -1 | sed -E 's/.* is ([0-9]+)\./, depth \1/')
+  states="$states$depth"
+  if [ -n "$expected" ]; then
+    if [ "$code" = "$expected" ]; then verdict=PASS; else verdict=FAIL; fi
+  else
+    case "$code" in
+      0 | 10 | 11 | 12 | 13 | 14) verdict=PASS ;;
+      timeout) verdict=WARN ;;
+      *) verdict=FAIL ;;
+    esac
+  fi
+  {
+    echo "$verdict $relative: exit $code${expected:+ (expected $expected)}, ${states:-no states}, ${elapsed}s"
+    if [ "$verdict" = FAIL ]; then
+      { grep -E 'Error|violated|Exception|Parse' "$out" || true; } | head -10 | sed 's/^/    /'
+    fi
+  } > "$report"
+  if [ "$verdict" = FAIL ]; then : > "$report.failed"; fi
+}
+
+# Waits for the check <pid>, when there is one, prints its report and counts it if it failed.
+report() {
+  local pid="$1" report="$2" cfg="$3"
+  if [ -n "$pid" ]; then wait "$pid" || true; fi
+  if [ -s "$report" ]; then
+    cat "$report"
+  else
+    echo "FAIL ${cfg#"$ROOT"/}: the check stopped without a report"
+    : > "$report.failed"
+  fi
+  if [ -f "$report.failed" ]; then failures=$((failures + 1)); fi
+}
+
+# Frees the slot of every check that ended, then prints the reports of those that ended in the order
+# the configurations were found, up to the first still running.
+reap() {
+  local i
+  for ((i = printed; i < started; i++)); do
+    if [ "${ended[i]}" = 0 ] && ! kill -0 "${pids[i]}" 2> /dev/null; then
+      ended[i]=1
+      running=$((running - 1))
+    fi
+  done
+  while [ "$printed" -lt "$started" ] && [ "${ended[printed]}" = 1 ]; do
+    report "${pids[printed]}" "${reports[printed]}" "${cfgs[printed]}"
+    printed=$((printed + 1))
+  done
+}
+
 main() {
-  local jar
   jar=$(tools_jar)
   "$JAVA" -version > /dev/null 2>&1 || { echo "no java at '$JAVA': set JAVA to a Java 11 or later" >&2; exit 1; }
 
   # A TLC from 1.8 on writes a trace module beside the model after each violation unless told not to,
   # an option the pinned 1.7.4 does not know, since it writes none.
-  local quiet=() usage
+  local usage
+  quiet=()
   usage=$("$JAVA" -cp "$jar" tlc2.TLC -help 2>&1 || true)
   if [[ "$usage" == *noGenerateSpecTE* ]]; then quiet=(-noGenerateSpecTE); fi
 
@@ -127,50 +199,44 @@ main() {
   fi
 
   # Every model directory is on the library path, so that one model can INSTANCE another's module.
-  local library=""
+  library=""
   for dir in "$MODELS"/*/; do library="${library:+$library:}${dir%/}"; done
 
-  local scratch failures=0
   scratch=$(mktemp -d)
   # shellcheck disable=SC2064 # the directory is known now, and the variable is gone at exit
   trap "rm -rf '$scratch'" EXIT
 
+  # The configurations run side by side, each a TLC with one worker, so that each run stays the same
+  # run however many there are; their reports come out in the order the configurations were found.
+  local jobs
+  jobs=${MODELS_JOBS:-$(getconf _NPROCESSORS_ONLN 2> /dev/null || echo 2)}
+  pids=() reports=() cfgs=() ended=() started=0 printed=0 running=0 failures=0
   for dir in "${dirs[@]}"; do
     for cfg in "$dir"/*.cfg; do
       [ -f "$cfg" ] || continue
+      reports[started]="$scratch/$started.report"
+      cfgs[started]="$cfg"
       if [[ "$(basename "$cfg")" == Deep* && "${MODELS_DEEP:-}" != 1 ]]; then
-        echo "SKIP ${cfg#"$ROOT"/}: a deep configuration, run with MODELS_DEEP=1"
-        continue
-      fi
-      local relative="${cfg#"$ROOT"/}"
-      local module expected code verdict started elapsed out
-      module=$(module_of "$dir" "$cfg") || { failures=$((failures + 1)); continue; }
-      expected=$(expected_code "$relative")
-      out="$scratch/$(basename "$dir")-$(basename "$cfg" .cfg).out"
-      started=$(date +%s)
-      code=$(cd "$dir" && run_bounded "$out" "$JAVA" -XX:+UseParallelGC "-DTLA-Library=$library" -cp "$jar" tlc2.TLC \
-        -workers 1 -seed 1 -fp 1 -cleanup -metadir "$scratch/states-$(basename "$dir")-$(basename "$cfg" .cfg)" \
-        ${quiet[@]+"${quiet[@]}"} -config "$(basename "$cfg")" "$module.tla")
-      elapsed=$(($(date +%s) - started))
-      local states depth
-      states=$({ grep -E 'distinct states found' "$out" || true; } | tail -1 | sed -E 's/.* ([0-9]+) distinct states found.*/\1 distinct states/')
-      depth=$({ grep -E 'depth of the complete state graph search is' "$out" || true; } | tail -1 | sed -E 's/.* is ([0-9]+)\./, depth \1/')
-      states="$states$depth"
-      if [ -n "$expected" ]; then
-        if [ "$code" = "$expected" ]; then verdict=PASS; else verdict=FAIL; fi
+        echo "SKIP ${cfg#"$ROOT"/}: a deep configuration, run with MODELS_DEEP=1" > "${reports[started]}"
+        pids[started]=""
+        ended[started]=1
       else
-        case "$code" in
-          0 | 10 | 11 | 12 | 13 | 14) verdict=PASS ;;
-          timeout) verdict=WARN ;;
-          *) verdict=FAIL ;;
-        esac
+        while [ "$running" -ge "$jobs" ]; do
+          reap
+          if [ "$running" -ge "$jobs" ]; then sleep 0.2; fi
+        done
+        check "$dir" "$cfg" "${reports[started]}" &
+        pids[started]=$!
+        ended[started]=0
+        running=$((running + 1))
       fi
-      echo "$verdict $relative: exit $code${expected:+ (expected $expected)}, ${states:-no states}, ${elapsed}s"
-      if [ "$verdict" = FAIL ]; then
-        failures=$((failures + 1))
-        { grep -E 'Error|violated|Exception|Parse' "$out" || true; } | head -10 | sed 's/^/    /'
-      fi
+      started=$((started + 1))
     done
+  done
+
+  while [ "$printed" -lt "$started" ]; do
+    reap
+    if [ "$printed" -lt "$started" ]; then sleep 0.2; fi
   done
 
   if [ "$failures" -gt 0 ]; then

@@ -43,8 +43,11 @@ JAVA=/path/to/java tools/models.sh docs/design/models/file-put
 
 The script downloads the pinned `tla2tools.jar` (1.7.4, the last stable release, from the TLA+
 project's own releases) into the user's cache, checks its SHA-256 on every run, and runs each
-configuration with `-workers 1 -seed 1 -fp 1`, so that a run is the same run everywhere. It needs Java
-11 or later. On macOS, `brew install openjdk@21` installs one, which the script can be given by its path
+configuration with `-workers 1 -seed 1 -fp 1`, so that a run is the same run everywhere. The
+configurations run side by side, as many at once as the machine has processors unless `MODELS_JOBS`
+says otherwise, each with a temporary directory of its own, where TLC extracts the standard modules it
+parses. The `Deep*.cfg` configurations, which take minutes each, run only with `MODELS_DEEP=1`. It needs
+Java 11 or later. On macOS, `brew install openjdk@21` installs one, which the script can be given by its path
 without linking it into the system. A configuration whose code differs from the manifest fails the
 run, and so does a timeout of one the manifest lists. CI runs every model when one of them, the
 manifest or the script changes.
