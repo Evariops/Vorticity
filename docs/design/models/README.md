@@ -16,6 +16,7 @@ code to it. The design documents stay the readable contract and link their model
 | [conditional-put](conditional-put/README.md) | a put-if-absent over HTTP whose answers are lost, settled by the put's id and a head |
 | [file-put](file-put/README.md) | `FileObjectStore`'s creation of a key, the reads that meet it, and the repair of a torn commit |
 | [dataset-commit](dataset-commit/README.md) | the commit by put-if-absent and the rebase of appends, deletes and compactions onto the version that won |
+| [dataset-sources](dataset-sources/README.md) | the offsets that count each entry of a source once, through stale handles and replays after a lost answer |
 
 ## Three kinds of configurations
 

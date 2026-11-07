@@ -29,3 +29,7 @@ docs/design/models/dataset-commit/BrokenPhantomExists.cfg=12
 docs/design/models/dataset-commit/ReachabilityCrossLevel.cfg=12
 docs/design/models/dataset-commit/ReachabilityMarkUnderJob.cfg=12
 docs/design/models/dataset-commit/ReachabilityAbandon.cfg=12
+docs/design/models/dataset-sources/DatasetSources.cfg=0
+docs/design/models/dataset-sources/BrokenJudgeOnce.cfg=12
+docs/design/models/dataset-sources/BrokenVerdictOnHeld.cfg=12
+docs/design/models/dataset-sources/ReachabilityReplay.cfg=12
