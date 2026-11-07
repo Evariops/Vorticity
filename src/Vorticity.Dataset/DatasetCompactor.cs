@@ -303,9 +303,11 @@ internal static partial class DatasetCompactor
         // The late rows' objects go back to level 0, the others to the destination, past every object there they met.
         List<(int Level, ReadOnlyMemory<byte> Key, ObjectEntry Entry)> produced = [];
         List<CompactionInput> filled = [];
+        DateTimeOffset? firstPut = null;
         for (int i = 0; i < (lateOutputs?.Written.Count ?? 0); i++)
         {
             produced.Add((lateOutputs!.Levels[i], lateOutputs.Written[i].Key, lateOutputs.Written[i].Entry));
+            firstPut = DatasetOperation.Earlier(firstPut, lateOutputs.Written[i].StartedAt);
         }
 
         foreach (ObjectStream outputs in streams)
@@ -315,6 +317,7 @@ internal static partial class DatasetCompactor
                 WrittenObject written = outputs.Written[i];
                 produced.Add((outputs.Levels[i], written.Key, written.Entry));
                 filled.Add(new CompactionInput(outputs.Levels[i], written.Key, written.Entry));
+                firstPut = DatasetOperation.Earlier(firstPut, written.StartedAt);
             }
         }
 
@@ -329,6 +332,8 @@ internal static partial class DatasetCompactor
         DatasetOperation.PartitionIndexChange? partitionIndex = null;
         if (postings is not null)
         {
+            // The index's object is put after the outputs, which began first: it counts only when there are none.
+            firstPut ??= dataset.Options.TimeProvider.GetUtcNow();
             using Activity? indexing = DatasetTelemetry.StartCompactionPass("index");
             partitionIndex = await PartitionIndexAsync(dataset, schema, ran, streams, postings, cancellationToken).ConfigureAwait(false);
         }
@@ -341,6 +346,7 @@ internal static partial class DatasetCompactor
             // Apart, the outputs take over the part of the destination they fill alone, which no object it holds may meet.
             Range = late is null ? job.Range : filled.Count == 0 ? null : LevelRange.Of(job.ToLevel, filled, key),
             PartitionIndex = partitionIndex,
+            FirstPutAt = firstPut,
         };
 
         CommitResult commit = await dataset

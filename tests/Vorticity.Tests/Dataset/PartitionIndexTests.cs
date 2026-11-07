@@ -47,7 +47,9 @@ public sealed partial class PartitionIndexTests
             },
             ContentsObjectBytes = 0,
             Identifiers = [nameof(Row.Sequence)],
-            RetentionWindow = TimeSpan.FromSeconds(1),
+
+            // Inside the hour the vacuum's clock runs ahead, and past twice any job's time, half of which a commit allows.
+            RetentionWindow = TimeSpan.FromMinutes(10),
         }, Ct);
         List<Row> all = [];
         await AppendAsync(dataset, random, all, appends: 6, rows: 15_000, days: 2);

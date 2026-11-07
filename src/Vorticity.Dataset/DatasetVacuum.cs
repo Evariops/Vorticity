@@ -13,7 +13,10 @@ public sealed record VacuumOptions
 {
     /// <summary>
     /// The clock the window counts against; the system's by default. It must agree with the
-    /// store's, since the ages it compares are the store's timestamps.
+    /// store's, since the ages it compares are the store's timestamps: ahead of it by less than half
+    /// the window, less what a writer's clock may fall behind and the store's listing may lag. A clock
+    /// set ahead on purpose, to see what a later vacuum takes, is for a store no writer commits to
+    /// meanwhile, since it takes the objects of a writer in flight.
     /// </summary>
     public TimeProvider TimeProvider { get; init; } = TimeProvider.System;
 
@@ -69,10 +72,12 @@ public sealed record VacuumResult
 /// Deletes what no version inside the retention window references, and never runs by itself. Ages
 /// are the store's timestamps, not a header's, since writers' clocks need not agree; and nothing is
 /// deleted until every retained version is marked, because a missed mark would delete a live
-/// object. A writer or reader that outlives the window loses its objects. A listing that lags, as a
-/// store may let it, by less than the window costs a dataset freshness and never a version. A store
-/// may date an object written in parts by the start of its upload, as S3 does, so the window must also
-/// outlast the longest upload.
+/// object. A reader that outlives the window loses its objects, and a writer whose objects began
+/// half the window ago or more refuses to commit them, since it may have lost them. A store may date
+/// an object written in parts by the start of its upload, as S3 does, so a writer measures from before
+/// its first byte leaves. The vacuum's clock running ahead of the store's, a writer's clock falling
+/// behind its own earlier reading, and a listing that lags, as a store may let it, must stay within
+/// the other half window together, or a version may name an object vacuum took.
 /// </summary>
 internal static class DatasetVacuum
 {

@@ -17,9 +17,10 @@ using Vorticity.Types.Variants;
 namespace Vorticity.Dataset;
 
 /// <summary>
-/// A data object that has reached the store, and its tree key: what orders it, then its uid.
+/// A data object that has reached the store, its tree key, what orders it then its uid, the bytes of its data, and when
+/// its writer started it, before a byte of it went to the store (<see cref="ObjectOutput.StartedAt"/>).
 /// </summary>
-internal readonly record struct WrittenObject(ObjectEntry Entry, ReadOnlyMemory<byte> Key, long DataBytes = 0);
+internal readonly record struct WrittenObject(ObjectEntry Entry, ReadOnlyMemory<byte> Key, long DataBytes, DateTimeOffset StartedAt);
 
 /// <summary>
 /// A versioned dataset over an object store: immutable Vortex files as its data objects, one commit
@@ -899,6 +900,7 @@ public sealed class VortexDataset : IAsyncDisposable
         bool countsPaths = false)
     {
         RequireConditionalCreation(_store);
+        DateTimeOffset started = _options.TimeProvider.GetUtcNow();
         Guid identity = Guid.NewGuid();
         string key = CommitKey.ForData(identity.ToString("N", CultureInfo.InvariantCulture));
         ObjectSegmentSink sink = new ObjectSegmentSink(
@@ -989,7 +991,7 @@ public sealed class VortexDataset : IAsyncDisposable
         write = write with { HashedUnitBytes = HashedUnitBytes };
 
         // The session's degree and its lanes, which every writer of the session shares.
-        return new ObjectOutput(this, identity, key, sink, VortexFileWriter.Create(sink, schema.DType, write, _options.Session));
+        return new ObjectOutput(this, identity, key, sink, VortexFileWriter.Create(sink, schema.DType, write, _options.Session), started);
     }
 
     /// <summary>
@@ -1067,7 +1069,7 @@ public sealed class VortexDataset : IAsyncDisposable
         DatasetOperation[] operations = new DatasetOperation[written.Count];
         for (int i = 0; i < operations.Length; i++)
         {
-            operations[i] = new DatasetOperation.AddObject(written[i].Key, written[i].Entry);
+            operations[i] = new DatasetOperation.AddObject(written[i].Key, written[i].Entry) { FirstPutAt = written[i].StartedAt };
         }
 
         return operations;
@@ -1473,6 +1475,7 @@ public sealed class VortexDataset : IAsyncDisposable
 
         List<(int Level, ReadOnlyMemory<byte> Key, ObjectEntry Entry)> outputs = new List<(int, ReadOnlyMemory<byte>, ObjectEntry)>(added.Count);
         long position = added.Count == 0 ? 0 : await EndAsync(cancellationToken).ConfigureAwait(false);
+        DateTimeOffset? firstPut = null;
         for (int i = 0; i < added.Count; i++)
         {
             ObjectDraft draft = added[i] ?? throw new ArgumentNullException(nameof(added));
@@ -1496,6 +1499,7 @@ public sealed class VortexDataset : IAsyncDisposable
             {
                 outputs.Add((0, produced.Key, produced.Entry));
                 position += produced.Entry.Rows;
+                firstPut = DatasetOperation.Earlier(firstPut, produced.StartedAt);
             }
         }
 
@@ -1506,7 +1510,7 @@ public sealed class VortexDataset : IAsyncDisposable
 
         DatasetOperation[] operations = inputs.Count == 0 && outputs.Count == 0
             ? []
-            : [new DatasetOperation.ReplaceObjects(inputs, outputs) { Expected = expected }];
+            : [new DatasetOperation.ReplaceObjects(inputs, outputs) { Expected = expected, FirstPutAt = firstPut }];
         CommitResult commit = await CommitAsync(operations, CommitKind.Replace, consumed, null, cancellationToken).ConfigureAwait(false);
         OperationOutcome outcome = commit.Counted ? OperationOutcome.AlreadyThere
             : commit.Outcomes.Count > 0 ? commit.Outcomes[0]
@@ -4082,7 +4086,7 @@ public sealed class VortexDataset : IAsyncDisposable
             .WithTableOfContents(draft.Writer.TableOfContents)
             .WithLastKey(last)
             .WithArrival(draft.Arrival > 0 ? draft.Arrival : Math.Max(_options.TimeProvider.GetUtcNow().ToUnixTimeSeconds(), 1));
-        return new WrittenObject(entry, KeyOf(prefix, entry), draft.Writer.DataBytes);
+        return new WrittenObject(entry, KeyOf(prefix, entry), draft.Writer.DataBytes, draft.StartedAt);
     }
 
     /// <summary>
