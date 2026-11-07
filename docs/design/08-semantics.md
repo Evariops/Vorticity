@@ -55,6 +55,11 @@ The reference computes `min` and `max` with `NumericalAggregateOpts::skip_nans()
 * Therefore a zone with `max <= 10` may be pruned for `x > 10` even when `nan_count > 0`, because the
   NaN rows would not have matched anyway. This is only sound given the two facts above, and it is
   written down here so it is not rediscovered by guesswork.
+* The least and the greatest of a column skip NaN and order -0.0 below +0.0, as IEEE 754's minimum and
+  maximum do, although the two compare equal in a filter. The greatest of zeros of both signs is
+  therefore +0.0 and the least -0.0 whatever the order of the rows, the cut of a parallel scan or the
+  order in which parts merge. Kept as equal, the first one met would win, and a question would give
+  either zero depending on its degree.
 
 ## 3. Three-valued logic
 

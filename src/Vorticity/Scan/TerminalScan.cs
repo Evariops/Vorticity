@@ -1071,9 +1071,26 @@ internal sealed class TerminalScan
         return type.Kind == DTypeKind.Decimal;
     }
 
-    /// <summary>Whether <paramref name="candidate"/> is strictly better than <paramref name="best"/>, in the filter's order.</summary>
-    private static bool Beats(FilterLiteral candidate, FilterLiteral best, bool wantMin) =>
-        ZonePruner.TryCompare(candidate, best, out int order) && (wantMin ? order < 0 : order > 0);
+    /// <summary>
+    /// Whether <paramref name="candidate"/> is strictly better than <paramref name="best"/>, in the filter's order, and for
+    /// zeros of both signs, which compare equal there, in IEEE 754's minimum and maximum: -0.0 the least, +0.0 the
+    /// greatest, as the aggregates take them, whatever the order of the zones.
+    /// </summary>
+    private static bool Beats(FilterLiteral candidate, FilterLiteral best, bool wantMin)
+    {
+        if (!ZonePruner.TryCompare(candidate, best, out int order))
+        {
+            return false;
+        }
+
+        if (order != 0)
+        {
+            return wantMin ? order < 0 : order > 0;
+        }
+
+        return candidate.Kind == FilterLiteralKind.Float && best.Kind == FilterLiteralKind.Float
+            && double.IsNegative(candidate.FloatValue) == wantMin && double.IsNegative(best.FloatValue) != wantMin;
+    }
 
     /// <summary>Best first: ascending for a minimum, descending for a maximum.</summary>
     private static int Order(FilterLiteral a, FilterLiteral b, bool wantMin)

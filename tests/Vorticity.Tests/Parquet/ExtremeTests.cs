@@ -66,13 +66,14 @@ public sealed partial class ExtremeTests : IDisposable
     [Fact]
     public async Task ReadsTheRowsForAFloatsZero()
     {
-        // Which zero comes first is the rows' to say: -0 sorts below +0 in the bounds, and ties in the data.
+        // A zero in the bounds does not say which zeros the rows hold, so the rows answer. They hold +0 before -0, and the least
+        // of zeros of both signs is -0 whatever their order, as IEEE 754's minimum takes it.
         Measure[] rows = await WriteAsync(withZero: true);
         await using ParquetFile file = await ParquetFile.OpenAsync(_path, Ct);
         Scan<Measure> scan = file.Scan<Measure>();
         double min = await scan.MinAsync(p => p.Score, Ct);
         Assert.Equal(0.0, min);
-        Assert.False(double.IsNegative(min));
+        Assert.True(double.IsNegative(min));
         Assert.True(scan.Metrics.Requests > 0);
     }
 

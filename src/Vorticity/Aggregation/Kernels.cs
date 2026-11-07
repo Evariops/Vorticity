@@ -501,18 +501,19 @@ internal static class ExtremeKernels
 
             for (int lane = 0; lane < Vector<T>.Count; lane++)
             {
-                if (acc[lane] < best)
+                if (acc[lane] < best || ExtremeOps.ZeroBelow(acc[lane], best))
                 {
                     best = acc[lane];
                 }
             }
         }
 
-        // A NaN compares false with everything, so the scalar tail skips it without a test.
+        // A NaN compares false with everything, so the scalar tail skips it without a test. -0.0 is below +0.0, as
+        // Vector.Min and IEEE 754's minimum order them, so the least of zeros does not depend on where they lie.
         for (; i < values.Length; i++)
         {
             T value = values[i];
-            if (value < best)
+            if (value < best || ExtremeOps.ZeroBelow(value, best))
             {
                 best = value;
             }
@@ -549,7 +550,7 @@ internal static class ExtremeKernels
 
             for (int lane = 0; lane < Vector<T>.Count; lane++)
             {
-                if (acc[lane] > best)
+                if (acc[lane] > best || ExtremeOps.ZeroAbove(acc[lane], best))
                 {
                     best = acc[lane];
                 }
@@ -559,7 +560,7 @@ internal static class ExtremeKernels
         for (; i < values.Length; i++)
         {
             T value = values[i];
-            if (value > best)
+            if (value > best || ExtremeOps.ZeroAbove(value, best))
             {
                 best = value;
             }

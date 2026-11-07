@@ -3,6 +3,7 @@ using System.Buffers.Binary;
 using System.Numerics;
 using System.Runtime.InteropServices;
 using Vorticity.Arrays;
+using Vorticity.Aggregating;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Types;
 using Vorticity.Types.Numerics;
@@ -13,8 +14,9 @@ namespace Vorticity.Compute;
 /// Finds the row holding a column's smallest or largest value. The answer is a row rather than a
 /// value, so a single pass copies nothing per candidate and the caller reads that one row when it
 /// is over. The order is the one a filter compares with: floats follow IEEE 754, so a NaN is
-/// neither the minimum nor the maximum and is skipped, and -0.0 and 0.0 tie so the first of them
-/// stays.
+/// neither the minimum nor the maximum and is skipped. Zeros of both signs, which compare equal,
+/// are ordered as IEEE 754's minimum and maximum order them, -0.0 below +0.0, so that the zero
+/// found is the same whatever the order of the rows.
 /// </summary>
 internal static class Extremes
 {
@@ -216,7 +218,9 @@ internal static class Extremes
 
     /// <summary>
     /// The loop, monomorphised per value type: C#'s own <c>&lt;</c> and <c>&gt;</c>, so that a
-    /// NaN compares false against everything and is skipped by name rather than ordered.
+    /// NaN compares false against everything and is skipped by name rather than ordered. A zero that
+    /// ties the best so far takes its place when its sign makes it the lesser or the greater, a test
+    /// the compiler drops for integers.
     /// </summary>
     private static bool Best<T>(
         ReadOnlySpan<byte> bytes, ValidityMask mask, ReadOnlySpan<int> rows, bool listed, bool wantMin, out int bestRow)
@@ -241,7 +245,10 @@ internal static class Extremes
                 continue;
             }
 
-            if (bestRow < 0 || (wantMin ? value < best : value > best))
+            if (bestRow < 0
+                || (wantMin
+                    ? value < best || ExtremeOps.ZeroBelow(value, best)
+                    : value > best || ExtremeOps.ZeroAbove(value, best)))
             {
                 best = value;
                 bestRow = row;
