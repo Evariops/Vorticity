@@ -362,7 +362,10 @@ Once no job is due, the background loop sums the counts of the deepest level's o
 where the partition changes, a rollup of rank 1 each, then runs of as many rollups a rank up,
 each summed from what its children keep, with no row read. The tree of rollups lies beside the levels,
 and the header carries its root (field 26). A commit that puts or takes away an object takes away
-every rollup whose range holds a key it changes, which a later call sums again.
+every rollup whose range holds a key it changes, which a later call sums again. A rollup's own commit
+puts it only over what its range holds as it was summed, by a fingerprint of the level's entries. The
+[model of the rollups](models/dataset-rollups/README.md) finds a stale rollup in four steps when either
+rule is left out, and none with both.
 
 A question takes a whole rollup, from the highest rank down, when the union of its objects' summaries
 proves the filter and the constant keys as one object's would, and its totals carry what the question

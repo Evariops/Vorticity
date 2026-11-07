@@ -17,6 +17,7 @@ code to it. The design documents stay the readable contract and link their model
 | [file-put](file-put/README.md) | `FileObjectStore`'s creation of a key, the reads that meet it, and the repair of a torn commit |
 | [dataset-commit](dataset-commit/README.md) | the commit by put-if-absent and the rebase of appends, deletes and compactions onto the version that won |
 | [dataset-commit-trace](dataset-commit-trace/README.md) | runs of the real code, every order of a few writers, judged by the model of the commit |
+| [dataset-rollups](dataset-rollups/README.md) | the rollups over the deepest level stay true: dropped when stale, taken away by a change under them |
 | [dataset-sources](dataset-sources/README.md) | the offsets that count each entry of a source once, through stale handles and replays after a lost answer |
 | [indexed-sum](indexed-sum/README.md) | not TLA+ but Z3: the split of every double into an indexed sum's bins is exact, on demand |
 | [group-memory](group-memory/README.md) | a group by's lanes under a memory budget: the merge into the retired table reserves its growth, and every lane ends |
