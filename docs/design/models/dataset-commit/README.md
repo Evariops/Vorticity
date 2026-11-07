@@ -12,7 +12,9 @@ Three kinds of actors run beside one another over three levels.
 
 - Appenders add one row each, in an object of their own in level 0, under a key they pick.
 - Deleters mark the rows of one key in every object that holds a live one, as one replacement whose
-  inputs are the entries they read, and plan again when it is abandoned.
+  inputs are the entries they read, and plan again when it is abandoned. An object whose every row
+  left is of that key goes out whole, unmarked, as the code takes it: the [runs of the
+  code](../dataset-commit-trace/README.md) showed it, which a model that only marked rejected.
 - Compactors empty level 0 into a level above, with the objects of that level it overlaps, or push an
   object of a level into the next, moving it whole when nothing there overlaps it and it holds no marks.
 
@@ -26,7 +28,10 @@ Above level 0, a level's objects must not share a key. The rebase rules are the 
 ## What it does not claim
 
 Index fragments, schema changes, the index policy, rollups and partition indexes are left out, and so
-are the trees' pages, which the fuzzer and the tree's oracles hold. An object holds its rows' keys as a
+are the trees' pages, which the fuzzer and the tree's oracles hold. So are a delete that rewrites an
+object once its marks would pass its share (`DatasetOptions.MarkedShare`), a purge of marks, and a
+level 0 object moved whole rather than merged: jobs of the code this model does not plan, which the
+runs of the code turn off. An object holds its rows' keys as a
 range, a key is an integer, and an object written by a merge holds the live rows of its inputs. Sources
 and their offsets are a model of their own. The store is the contract of
 [the atomic put](../atomic-put/README.md): a creation succeeds only on a free key, and answers `Exists`
@@ -46,7 +51,7 @@ only when another writer created it, which the stores of this repository are eac
 | configuration | purpose |
 |---|---|
 | `DatasetCommit.cfg` | two appenders and a compactor running two jobs, a seeded object in level 1, writers that may die once their put landed |
-| `DatasetCommitDeletes.cfg` | an appender, a deleter and a compactor running two jobs |
+| `DatasetCommitDeletes.cfg` | two appenders, a deleter and a compactor running two jobs, so that a job merges an object of two keys a delete marks, writers that do not die |
 | `DatasetCommitRace.cfg` | an appender and two compactors, one job each, over a seeded level 1 |
 | `DatasetCommitAll.cfg` | two appenders, a deleter and a compactor running two jobs |
 | `BrokenUidInKey.cfg` | a tree key without the object's uid. Must violate `NoLostRow` |
@@ -59,16 +64,16 @@ only when another writer created it, which the stores of this repository are eac
 
 ## Correspondence
 
-Modelled at commit 3da99dca.
+Modelled at commit 36983254.
 
 | action | code |
 |---|---|
 | `PlanAppend` | an append's object, its key ending with its uid (`DatasetOperation.AddObject`) |
-| `PlanDelete` | `DatasetRowChanges.RunAsync`: the entries read and re-marked as one `ReplaceObjects` with `Expected` |
+| `PlanDelete` | `DatasetRowChanges.RunAsync`: the entries read and re-marked as one `ReplaceObjects` with `Expected`, an object whose rows left it takes all going whole (`DatasetRowChanges.cs:161-165`, `:305-308`) |
 | `PlanCompaction` | `CompactionPlan`: level 0 emptied into a level with what it overlaps, or an object pushed up, moved whole when it can be |
-| `Read` | the latest version an attempt builds on (`DatasetCommitter.cs:206-236`) |
-| `Put` | `ApplyAsync` on that version (`:903-1100`), then the conditional creation (`:404-421`), a lost race sending the writer to read again |
-| `Apply` | the rules of `AddObject` (`:937-950`) and `ReplaceObjects` (`:996-1065`), `ForeignAsync` for the destination's range (`:1436-1463`) |
+| `Read` | the latest version an attempt builds on (`DatasetCommitter.cs:207-237`) |
+| `Put` | `ApplyAsync` on that version (`:928-1125`), then the conditional creation (`:405-423`), a lost race sending the writer to read again |
+| `Apply` | the rules of `AddObject` (`:962-975`) and `ReplaceObjects` (`:1021-1090`), `ForeignAsync` for the destination's range (`:1461-1488`) |
 
 ## TLC evidence
 
@@ -80,16 +85,16 @@ actor of each step.
 | configuration | result | distinct states | depth | time |
 |---|---|---:|---:|---:|
 | `DatasetCommit.cfg` | no error | 28 714 | 19 | 1 s |
-| `DatasetCommitDeletes.cfg` | no error | 17 214 | 19 | 1 s |
+| `DatasetCommitDeletes.cfg` | no error | 437 403 | 26 | 10 s |
 | `DatasetCommitRace.cfg` | no error | 4 755 | 15 | 1 s |
-| `DatasetCommitAll.cfg` | no error | 2 511 232 | 26 | 45 s |
+| `DatasetCommitAll.cfg` | no error | 2 218 128 | 26 | 38 s |
 | `BrokenUidInKey.cfg` | `NoLostRow` violated | 18 | 7 | |
 | `BrokenNoRewalk.cfg` | `KeyDisjoint` violated | 912 | 10 | |
-| `BrokenNoExpected.cfg` | `NoResurrection` violated | 255 | 7 | |
+| `BrokenNoExpected.cfg` | `NoResurrection` violated | 133 142 | 16 | 3 s |
 | `BrokenPhantomExists.cfg` | `NoDuplicate` violated | 117 | 9 | |
 | `ReachabilityCrossLevel.cfg` | `NoCrossLevelRace` violated | 95 | 6 | |
-| `ReachabilityMarkUnderJob.cfg` | `NoMarkUnderJob` violated | 94 | 5 | |
-| `ReachabilityAbandon.cfg` | `NoAbandon` violated | 463 | 7 | |
+| `ReachabilityMarkUnderJob.cfg` | `NoMarkUnderJob` violated | 198 737 | 14 | 3 s |
+| `ReachabilityAbandon.cfg` | `NoAbandon` violated | 453 | 7 | |
 
 With two compactors as well, `DatasetCommitAll.cfg` passed ten gigabytes and fifteen minutes before it
 was stopped, so it keeps one.
@@ -104,10 +109,12 @@ The traces of the mutations:
   version. `c1` commits, then `c2`: the two jobs share no input, so neither is abandoned for a missing
   one, and level 2 holds two objects of key 2. The second look at the destination's range at commit is
   what the code does since the race was found.
-- `BrokenNoExpected.cfg`: `PlanDelete("d1")` plans to mark the row of key 2 in level 1's object, then
-  `PlanCompaction("c1")` plans to push that object, unmarked, into level 2. The delete commits, then the
-  job, whose input is still there: it moves the entry it read, without the mark, and the deleted row is
-  back.
+- `BrokenNoExpected.cfg`: `a1` appends a row of key 1 and `a2` one of key 2, and `c1`'s first job merges
+  level 0 with level 1's seed into one object of both keys. `PlanDelete("d1")` plans to mark the row of
+  key 1 in it, then `PlanCompaction("c1")` plans its second job on that object, unmarked. The delete
+  commits, then the job, whose input is still there: it carries on the entry it read, without the
+  mark, and the deleted row is back. It takes two appenders and two jobs since a delete marks only an
+  object of two keys, and takes an object of one key out whole.
 - `BrokenPhantomExists.cfg`: `a1`'s append lands, and the store answers `Exists` as if another writer had
   taken the version. Before `a1` reads again, `c1` empties level 0 into a level above. `a1` applies its
   append to that version, finds no entry of its uid in level 0, and adds its object a second time.

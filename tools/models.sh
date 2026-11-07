@@ -60,17 +60,32 @@ tools_jar() {
   echo "$jar"
 }
 
-# The exit code the manifest records for a configuration, or nothing when it is unlisted.
+# The exit code the manifest records for a configuration, or, for a directory outside the models such as
+# the traces a test writes, the one an expected-exit-codes.txt of its own records by file name; nothing
+# when it is unlisted.
 expected_code() {
-  local relative="$1"
-  [ -f "$MANIFEST" ] || return 0
-  { grep -E "^${relative//./\\.}=[0-9]+$" "$MANIFEST" || true; } | head -1 | cut -d= -f2
+  local relative="$1" cfg="$2"
+  local local_manifest
+  local_manifest="$(dirname "$cfg")/expected-exit-codes.txt"
+  if [ -f "$MANIFEST" ] && grep -qE "^${relative//./\\.}=[0-9]+$" "$MANIFEST"; then
+    { grep -E "^${relative//./\\.}=[0-9]+$" "$MANIFEST" || true; } | head -1 | cut -d= -f2
+  elif [ -f "$local_manifest" ] && [ "$local_manifest" != "$MANIFEST" ]; then
+    local name
+    name=$(basename "$cfg")
+    { grep -E "^${name//./\\.}=[0-9]+$" "$local_manifest" || true; } | head -1 | cut -d= -f2
+  fi
 }
 
-# The module a configuration runs against: the only .tla of its directory, or the one named like it.
+# The module a configuration runs against: the one its first line names (`\* module: Name`), the only
+# .tla of its directory, or the one named like it.
 module_of() {
   local dir="$1" cfg="$2"
-  local name file
+  local name file named
+  named=$(head -1 "$cfg" | sed -nE 's/^\\\* module: ([A-Za-z0-9_]+)[[:space:]]*$/\1/p')
+  if [ -n "$named" ]; then
+    echo "$named"
+    return
+  fi
   name=$(basename "$cfg" .cfg)
   local modules=()
   for file in "$dir"/*.tla; do
@@ -118,7 +133,7 @@ check() {
     : > "$report.failed"
     return
   fi
-  expected=$(expected_code "$relative")
+  expected=$(expected_code "$relative" "$cfg")
   out="$scratch/$name.out"
   # TLC extracts the standard modules it parses into the temporary directory, where two runs side by
   # side would overwrite each other's while they read them: each run has a directory of its own.

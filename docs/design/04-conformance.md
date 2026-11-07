@@ -164,3 +164,12 @@ A model proves facts about itself, not about the C#. Each one names the code it 
 action by action, and the defects it found each have a test that holds the code to the model: the file
 store's puts (`FileObjectStorePutTests`), the conditional put whose answers are lost (`UploadTests`),
 and the commit that named objects vacuum had deleted (`DatasetLateCommitTests`).
+
+The commit is also held to its model the other way round. `DatasetScheduleTests` runs the model's
+scenarios on the real dataset in every order its writers' plans and puts can take, a store holding
+each put until a scheduler releases it, and checks the model's properties on every version. Each run's
+versions, read back from the store in the model's terms, then go to TLC, which accepts a run only if the
+model can create those versions in that order ([runs of the code](models/dataset-commit-trace/README.md)).
+The first such check found the model rejecting most runs with a delete: the code takes an object out
+whole when a delete takes every row left in it, where the model only marked rows. The model was wrong
+there, and was corrected.

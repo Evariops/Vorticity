@@ -1103,7 +1103,12 @@ other than by widening a number or making it nullable ([schema evolution](#13-sc
   appenders, deleters and compactions on three levels: no row read twice, lost or brought back after a
   delete, and no two objects of a level above 0 sharing a key, in 2.5 million states. The defects it
   is held against, a tree key without the uid, a commit that does not look at its destination again,
-  an input checked for its presence alone, each break it in under ten steps.
+  an input checked for its presence alone, each break it in under twenty steps.
+- Every order of a few writers, on the real code: a store holds each commit's put until a scheduler
+  releases it, and the model's scenarios run once per order, 881 orders over three scenarios in a few
+  seconds, the model's properties checked on every version. Each distinct run, read back in the
+  model's terms, is a behaviour of the model by TLC ([runs of the
+  code](models/dataset-commit-trace/README.md)).
 - [A model of the lifecycle](models/dataset-lifecycle/README.md), checked by TLC over writers that
   trust their version, lose races and commit late, a vacuum whose clock runs a tick off, a writer's
   clock a tick behind and a listing that lags: no version names an object vacuum deleted, and none is

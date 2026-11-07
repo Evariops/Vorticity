@@ -94,7 +94,7 @@ Init == /\ history = <<FirstTree>>
 Collides(y, e) == IF UidInKey THEN y.uid = e.uid ELSE y.lo = e.lo
 
 \* An operation re-applied to a version's tree: the tree it leaves, and what the operation decided
-\* (ApplyAsync, DatasetCommitter.cs:903-1100).
+\* (ApplyAsync, DatasetCommitter.cs:928-1125).
 Apply(t, o) ==
     IF o.kind = "add"
     THEN LET e == o.entry IN
@@ -142,14 +142,18 @@ Plans(c, t) ==
     (IF t[0] = {} THEN {} ELSE {EmptyLevelZero(c, t, d) : d \in 1..MaxLevel})
     \cup UNION {{PushUp(c, t, l, x) : x \in t[l]} : l \in 1..(MaxLevel - 1)}
 
-\* A delete of the rows of key k: each object that holds a live one, its entry re-marked (DatasetRowChanges).
+\* A delete of the rows of key k: each object that holds a live one, its entry re-marked, or taken out
+\* whole when the delete takes every row it still holds (DatasetRowChanges.cs:161-165 and :305-308, the
+\* case its bounds prove included, Covers at :102-106). A delete that rewrites an object
+\* whose marks would pass its share is left out: the tests that hold the code to this model mark always.
 Marks(e, k) == {r \in Live(e) : rowKey[r] = k}
 
 Deletion(t, k) ==
-    LET targets == {i \in Entries(t) : Marks(i[2], k) # {}} IN
-    [kind |-> "replace", inputs |-> targets,
-     outputs |-> {<<i[1], [i[2] EXCEPT !.marked = @ \cup Marks(i[2], k)]>> : i \in targets},
-     range |-> NoRange, src |-> MaxLevel + 1, erases |-> UNION {Marks(i[2], k) : i \in targets}]
+    LET targets == {i \in Entries(t) : Marks(i[2], k) # {}}
+        whole(i) == Marks(i[2], k) = Live(i[2])
+    IN [kind |-> "replace", inputs |-> targets,
+        outputs |-> {<<i[1], [i[2] EXCEPT !.marked = @ \cup Marks(i[2], k)]>> : i \in {j \in targets : ~whole(j)}},
+        range |-> NoRange, src |-> MaxLevel + 1, erases |-> UNION {Marks(i[2], k) : i \in targets}]
 
 (* ------------------------------ the actors ------------------------------ *)
 
@@ -183,7 +187,7 @@ PlanCompaction(c) ==
             /\ UNCHANGED <<op, jobs>>
     /\ UNCHANGED <<history, rowKey, Keep>>
 
-\* LatestAsync: the version the attempt builds on (DatasetCommitter.cs:206-236).
+\* LatestAsync: the version the attempt builds on (DatasetCommitter.cs:207-237).
 Read(x) ==
     /\ pc[x] = "read"
     /\ base' = [base EXCEPT ![x] = Len(history)]
@@ -211,7 +215,7 @@ Again(x) ==
     /\ UNCHANGED acked
 
 \* The operation re-applied on the version read, then the conditional creation of the next one
-\* (DatasetCommitter.cs:278-421).
+\* (DatasetCommitter.cs:279-423).
 Put(x) ==
     /\ pc[x] = "put"
     /\ LET r == Apply(history[base[x]], op[x]) IN

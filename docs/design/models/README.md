@@ -16,6 +16,7 @@ code to it. The design documents stay the readable contract and link their model
 | [conditional-put](conditional-put/README.md) | a put-if-absent over HTTP whose answers are lost, settled by the put's id and a head |
 | [file-put](file-put/README.md) | `FileObjectStore`'s creation of a key, the reads that meet it, and the repair of a torn commit |
 | [dataset-commit](dataset-commit/README.md) | the commit by put-if-absent and the rebase of appends, deletes and compactions onto the version that won |
+| [dataset-commit-trace](dataset-commit-trace/README.md) | runs of the real code, every order of a few writers, judged by the model of the commit |
 | [dataset-sources](dataset-sources/README.md) | the offsets that count each entry of a source once, through stale handles and replays after a lost answer |
 | [dataset-lifecycle](dataset-lifecycle/README.md) | the trust span, the commit's guard on old objects and vacuum, against clocks that drift and a listing that lags |
 
@@ -33,6 +34,11 @@ Every model has configurations of three kinds, each a `.cfg` file beside its mod
 
 [expected-exit-codes.txt](expected-exit-codes.txt) records the exit code TLC must give for each
 configuration: 0 when nothing is violated, 12 for an invariant violated, 13 for a temporal property.
+
+The runs of the code that [dataset-commit-trace](dataset-commit-trace/README.md) judges invert the
+reading: `Run*.cfg` must reach the end of a run, a violation that says the model follows it, and
+`Rejected*.cfg` must not. A configuration whose module is not the only one of its directory names it on
+its first line, `\* module: DatasetCommitTrace`.
 
 ## Running them
 
