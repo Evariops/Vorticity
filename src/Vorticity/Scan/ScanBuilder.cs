@@ -645,7 +645,7 @@ internal sealed class ScanBuilder
         }
 
         return _variantKeys is not null || filtered is not null || zoned is not null
-            ? new KeyedBatches(scan, batches, _file, _variantKeys, filtered, zoned, _granules is not null, _filter, _metrics)
+            ? new KeyedBatches(scan, batches, _file, _variantKeys, filtered, zoned, _granules is not null, _filter, _metrics, _question)
             : scan;
     }
 
@@ -739,14 +739,14 @@ internal sealed class ScanBuilder
     private sealed class KeyedBatches(
         IAsyncEnumerable<RecordBatch> scan, BatchAsyncEnumerable batches, VortexFile file,
         IReadOnlyDictionary<string, string[]>? keys, IReadOnlyDictionary<string, string[]>? filtered,
-        ZoneKeyReads.Request? zoned, bool byGranules, VortexExpr? filter, ScanCounters? metrics)
+        ZoneKeyReads.Request? zoned, bool byGranules, VortexExpr? filter, ScanCounters? metrics, Indexes.QuestionReads? question)
         : IAsyncEnumerable<RecordBatch>
     {
         public async IAsyncEnumerator<RecordBatch> GetAsyncEnumerator(CancellationToken cancellationToken = default)
         {
             if (keys is not null || filtered is not null)
             {
-                batches.VariantKeys ??= await Indexes.VariantKeyReads.LoadAsync(file, keys, filtered, cancellationToken).ConfigureAwait(false);
+                batches.VariantKeys ??= await Indexes.VariantKeyReads.LoadAsync(file, keys, filtered, cancellationToken, question).ConfigureAwait(false);
             }
 
             if (zoned is not null)

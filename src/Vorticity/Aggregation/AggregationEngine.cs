@@ -509,11 +509,9 @@ internal sealed class AggregationPlan
     /// </summary>
     internal bool Tuples { get; set; } = true;
 
-    // Whether a tuple holds the key (null before it is asked), and the layout of each run's tuples, keyed
-    // by the run's memory: its long texts numbered once for the run, the same in every lane, and dropped
-    // with it.
+    // Whether a tuple holds the key (null before it is asked); the layout of each run's tuples is kept by the run's memory:
+    // its long texts numbered once for the run, the same in every lane, and dropped with it.
     private bool? _tuplesFit;
-    private readonly System.Runtime.CompilerServices.ConditionalWeakTable<QueryMemory, TupleLayout> _tupleLayouts = new();
 
     /// <summary>
     /// The layout of the key's tuples for the run <paramref name="run"/> counts, the same for every lane of
@@ -528,7 +526,9 @@ internal sealed class AggregationPlan
             return null;
         }
 
-        return run is null ? Aggregating.TupleLayout.Of(Keys, memory: null) : _tupleLayouts.GetValue(run, memory => Aggregating.TupleLayout.Of(Keys, memory)!);
+        return run is null
+            ? Aggregating.TupleLayout.Of(Keys, memory: null)
+            : run.StateOf(this, static (plan, memory) => Aggregating.TupleLayout.Of(((AggregationPlan)plan).Keys, memory)!);
     }
 
     /// <summary>
@@ -1769,6 +1769,8 @@ internal sealed class AggregationPartition
         Scratch.Return(ref _componentRows);
         Scratch.Return(ref _followMap);
         Scratch.Return(ref _followComponents);
+        _ranges.Release();
+        _componentRanges.Release();
     }
 
     /// <summary>

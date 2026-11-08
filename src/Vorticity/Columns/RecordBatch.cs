@@ -36,6 +36,9 @@ public sealed class RecordBatch : IDisposable
     // allocating one per batch; see Rebind.
     private ScanContext? _context;
     private CanonicalArena _arena;
+
+    /// <summary>The arena a disposed copy points at in place of the one it gave back: empty, and never written.</summary>
+    private static readonly CanonicalArena Released = new CanonicalArena(1);
     private int _root;
     private DType _schema;
     private int _rowCount;
@@ -233,7 +236,7 @@ public sealed class RecordBatch : IDisposable
     {
         // As many records as the source holds, which a batch's copy takes about, up to the 64 a wide
         // batch would grow to anyway: a narrow batch of many, a scan's, then costs a few hundred bytes.
-        CanonicalArena owned = new CanonicalArena(Math.Clamp(source.NodeCount, 8, 64), (session ?? VortexSession.Default).Options.EnginePool);
+        CanonicalArena owned = OwnedArenas.Rent(Math.Clamp(source.NodeCount, 8, 64), (session ?? VortexSession.Default).Options.EnginePool);
         try
         {
             int root = owned.CopyFrom(source, node);
@@ -251,6 +254,7 @@ public sealed class RecordBatch : IDisposable
         catch
         {
             owned.Reset();
+            OwnedArenas.Return(owned);
             throw;
         }
     }
@@ -682,7 +686,13 @@ public sealed class RecordBatch : IDisposable
             }
             else
             {
-                _arena.Reset();
+                // A copy's arena, the only batch that owns one with no context: kept for the next copy, which this batch,
+                // disposed but perhaps still held, no longer reaches; held, it kept the next copy's blocks from their
+                // finalizers when that copy was dropped undisposed.
+                CanonicalArena arena = _arena;
+                arena.Reset();
+                _arena = Released;
+                OwnedArenas.Return(arena);
             }
         }
     }

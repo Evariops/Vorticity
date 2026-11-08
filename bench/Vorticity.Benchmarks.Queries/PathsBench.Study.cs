@@ -32,7 +32,7 @@ internal static partial class PathsBench
             {
                 Scan<SlowRequest> slowest = dataset.Scan<GeneratedRequest>().With(options).OrderByDescending(r => r.DurationNs)
                     .Select(r => (r.At, r.Service, r.DurationNs, r.RequestId)).Take(100).As<SlowRequest>();
-                return new Asking(slowest.ToBatchesAsync().GetAsyncEnumerator(), () => slowest.Metrics);
+                return new Asking(slowest.ToBatchesAsync().GetAsyncEnumerator(), () => slowest.Metrics) { Owned = true };
             }),
             Asked<GeneratedRequest>("requests", "T6 p99 of duration per service and hour, 7 days, within 5.9 %", scan => scan.Where(r => r.At >= requestsWeek).GroupBy(r => (r.Service, r.At.Truncate(CalendarUnit.Hour))).Select(g => (g.Key.Service, g.Key.Item2, g.Quantile(r => r.DurationNs, 0.99, 0.059)))),
             Asked<GeneratedRequest>("requests", "T7 the same within 1 %", scan => scan.Where(r => r.At >= requestsWeek).GroupBy(r => (r.Service, r.At.Truncate(CalendarUnit.Hour))).Select(g => (g.Key.Service, g.Key.Item2, g.Quantile(r => r.DurationNs, 0.99)))),

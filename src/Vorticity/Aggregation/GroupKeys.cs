@@ -50,16 +50,43 @@ internal sealed class GroupRanges
 
         if (Count == _starts.Length)
         {
-            int grown = Math.Max(16, Count * 2);
-            Array.Resize(ref _starts, grown);
-            Array.Resize(ref _ends, grown);
-            Array.Resize(ref _groups, grown);
+            Grow();
         }
 
         _starts[Count] = start;
         _ends[Count] = end;
         _groups[Count] = group;
         Count++;
+    }
+
+    /// <summary>
+    /// Gives the arrays back to the process's shelf, their partition done with them, for the next query's ranges: grown
+    /// by doubling at every query, a batch of many runs made them anew, 7 % of what the services under 5xx allocated
+    /// (2026-11-08).
+    /// </summary>
+    internal void Release()
+    {
+        Scratch.Return(ref _starts);
+        Scratch.Return(ref _ends);
+        Scratch.Return(ref _groups);
+        Count = 0;
+    }
+
+    /// <summary>The arrays twice as long at least, from the process's shelf, the ranges copied and the old ones given back.</summary>
+    private void Grow()
+    {
+        int length = Scratch.Capacity(Math.Max(16, Count + 1), _starts.Length);
+        _starts = Moved(_starts, length);
+        _ends = Moved(_ends, length);
+        _groups = Moved(_groups, length);
+    }
+
+    private int[] Moved(int[] array, int length)
+    {
+        int[] grown = ArrayShelf.Retained.Take<int>(length, zeroed: false);
+        array.AsSpan(0, Count).CopyTo(grown);
+        ArrayShelf.Retained.Give(array);
+        return grown;
     }
 }
 

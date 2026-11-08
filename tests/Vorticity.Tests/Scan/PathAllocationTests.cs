@@ -425,8 +425,8 @@ public sealed class PathAllocationTests
         // and on a column of many chunks of many-bin tables a few hundred kilobytes a chunk.
         ("scan, vortex.pco", "encodings/pco", 2_944, FullScan),
         // A node's frames go through one ManagedCompressions.Zstd decompressor rather than one each,
-        // and the decompressor is the process's, taken by the scan's context and given back when it
-        // is disposed, so a warm scan builds none: its tables and buffers are 160 KB at least.
+        // and the decompressor is the process's, taken for each decode and given back after it,
+        // so a warm scan builds none: its tables and buffers are 160 KB at least.
         ("scan, vortex.zstd", "encodings/zstd", 2_944, FullScan),
         // The tail an open reads is 64 KiB, which puts this file's tail at an offset the mapping can
         // lend as it is: the open holds a 48-byte owner of the view where it would copy the tail.

@@ -63,10 +63,10 @@ internal sealed class VariantKeyReads
     /// </summary>
     internal static async ValueTask<VariantKeyReads?> LoadAsync(
         VortexFile file, IReadOnlyDictionary<string, string[]>? columns, IReadOnlyDictionary<string, string[]>? filtered,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, QuestionReads? question = null)
     {
-        VariantKeyReads? scan = columns is null ? null : await LoadAsync(file, columns, cancellationToken).ConfigureAwait(false);
-        if (filtered is null || await LoadAsync(file, filtered, cancellationToken).ConfigureAwait(false) is not { } alone)
+        VariantKeyReads? scan = columns is null ? null : await LoadAsync(file, columns, cancellationToken, question).ConfigureAwait(false);
+        if (filtered is null || await LoadAsync(file, filtered, cancellationToken, question).ConfigureAwait(false) is not { } alone)
         {
             return scan;
         }
@@ -161,7 +161,27 @@ internal sealed class VariantKeyReads
     /// reader read by keys; null when none does.
     /// </summary>
     internal static async ValueTask<VariantKeyReads?> LoadAsync(
-        VortexFile file, IReadOnlyDictionary<string, string[]> columns, CancellationToken cancellationToken)
+        VortexFile file, IReadOnlyDictionary<string, string[]> columns, CancellationToken cancellationToken, QuestionReads? question = null)
+    {
+        // A question's scans of an object read the same columns by the same keys: the reads its first made.
+        if (question is null)
+        {
+            return await ReadAsync(file, columns, question: null, cancellationToken).ConfigureAwait(false);
+        }
+
+        if (question.TryGetKeyReads(file, columns, out VariantKeyReads? kept))
+        {
+            return kept;
+        }
+
+        VariantKeyReads? read = await ReadAsync(file, columns, question, cancellationToken).ConfigureAwait(false);
+        question.KeepKeyReads(file, columns, read);
+        return read;
+    }
+
+    /// <summary>The reads as <see cref="LoadAsync(VortexFile, IReadOnlyDictionary{string, string[]}, CancellationToken, QuestionReads?)"/> says, made from the file's path maps.</summary>
+    private static async ValueTask<VariantKeyReads?> ReadAsync(
+        VortexFile file, IReadOnlyDictionary<string, string[]> columns, QuestionReads? question, CancellationToken cancellationToken)
     {
         DType schema = file.DType;
         if (schema.Kind != DTypeKind.Struct || !file.HasIndexDirectory)
@@ -176,7 +196,7 @@ internal sealed class VariantKeyReads
         {
             int field = schema.IndexOfField(name);
             if (field < 0 || schema.GetField(field).Kind != DTypeKind.Variant
-                || await VariantPathMap.ReadAsync(file, field, wanted, cancellationToken).ConfigureAwait(false) is not { } map)
+                || await VariantPathMap.ReadAsync(file, field, wanted, cancellationToken, question).ConfigureAwait(false) is not { } map)
             {
                 continue;
             }
@@ -208,7 +228,7 @@ internal sealed class VariantKeyReads
             // Keys no chunk shreds lie in the residuals alone: each chunk is read for its residual, found where the
             // map's own keys lie in it.
             if (map.Chunks.Count > 0 && !AnyShredded(map, wanted)
-                && await VariantPathMap.ReadAsync(file, field, wanted: null, cancellationToken).ConfigureAwait(false) is { } shredded)
+                && await VariantPathMap.ReadAsync(file, field, wanted: null, cancellationToken, question).ConfigureAwait(false) is { } shredded)
             {
                 chunks.AddRange(Residuals(shredded));
                 foreach (string key in wanted)
@@ -473,9 +493,11 @@ internal sealed class VariantKeyReads
             : null;
     }
 
-    /// <summary>Whether two dtypes are the same shape, names, nesting and nullability alike.</summary>
-    private static bool SameShape(DType left, DType right) =>
-        string.Equals(DTypeFormatter.Format(left), DTypeFormatter.Format(right), StringComparison.Ordinal);
+    /// <summary>
+    /// Whether two dtypes are the same shape, names, nesting and nullability alike: their structural equality, an index's
+    /// in the one arena that interns both, where both were formatted as texts at every chunk of every scan.
+    /// </summary>
+    private static bool SameShape(DType left, DType right) => left.Equals(right);
 
     /// <summary>
     /// One key of a chunk: its name, its range and tree, the dtype the chunk shredded it as, and its typed

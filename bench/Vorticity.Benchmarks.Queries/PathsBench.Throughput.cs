@@ -212,6 +212,7 @@ internal static partial class PathsBench
             Console.Out.Flush();
 
             double cpu = ProcessCpu.Milliseconds();
+            (int Gen0, int Gen1, int Gen2, long Allocated, TimeSpan Paused) gcBefore = GcNow();
             long begin = Stopwatch.GetTimestamp();
             long until = begin + (long)(settings.QpsSeconds * Stopwatch.Frequency);
             List<(int Question, double Milliseconds)>[] latencies = new List<(int, double)>[clients];
@@ -236,6 +237,7 @@ internal static partial class PathsBench
             await Task.WhenAll(running);
             double seconds = (Stopwatch.GetTimestamp() - begin) / (double)Stopwatch.Frequency;
             double busy = (ProcessCpu.Milliseconds() - cpu) / 1000.0;
+            (int Gen0, int Gen1, int Gen2, long Allocated, TimeSpan Paused) gcAfter = GcNow();
             double[] all = [.. latencies.SelectMany(times => times).Select(time => time.Milliseconds).Order()];
             long requests = sets.Values.Sum(set => set.Store.Requests);
             long bytes = sets.Values.Sum(set => set.Store.BytesRead);
@@ -243,6 +245,12 @@ internal static partial class PathsBench
             Console.WriteLine(string.Create(
                 CultureInfo.InvariantCulture,
                 $"{name,-10} {clients,7} {all.Length,7} {all.Length / seconds,9:F1} {Percentile(all, 0.5),9:F1} {Percentile(all, 0.99),9:F1} {requests / seconds,9:F0} {bytes / seconds / 1e6,8:F1} {busy / seconds,6:F1}"));
+
+            // The collections the phase made, by generation, the bytes it allocated a question and a second, and the share of
+            // its time the collector paused the process.
+            Console.WriteLine(string.Create(
+                CultureInfo.InvariantCulture,
+                $"  gc: {gcAfter.Gen0 - gcBefore.Gen0} gen0, {gcAfter.Gen1 - gcBefore.Gen1} gen1, {gcAfter.Gen2 - gcBefore.Gen2} gen2 ({(gcAfter.Gen0 - gcBefore.Gen0) / seconds:F1}/s); {(gcAfter.Allocated - gcBefore.Allocated) / 1e3 / Math.Max(all.Length, 1):F1} KB a question, {(gcAfter.Allocated - gcBefore.Allocated) / 1e6 / seconds:F0} MB/s; paused {(gcAfter.Paused - gcBefore.Paused).TotalMilliseconds / 10 / seconds:F1} % of the time; {Vorticity.Arrays.ScanContexts.Shared.MostLent} scan contexts out at once"));
 
             // A cache that shares a root says what it read from the directories of the others, and what it kept itself.
             if (sharedRoot is not null && session.Options.SynopsisCache is { } shared)
@@ -285,6 +293,10 @@ internal static partial class PathsBench
         }
     }
 
+    /// <summary>The collections made so far by generation, the bytes allocated and the time the collector paused the process.</summary>
+    private static (int Gen0, int Gen1, int Gen2, long Allocated, TimeSpan Paused) GcNow() =>
+        (GC.CollectionCount(0), GC.CollectionCount(1), GC.CollectionCount(2), GC.GetTotalAllocatedBytes(precise: false), GC.GetTotalPauseDuration());
+
     /// <summary>
     /// Deletes the cache directory <paramref name="cache"/>, if any, once its files are closed: a view a finalizer has not
     /// yet released keeps one open a moment, so a refused delete waits for the finalizers and tries again, then says so.
@@ -319,6 +331,10 @@ internal static partial class PathsBench
         {
             while (await asking.Batches.MoveNextAsync())
             {
+                if (asking.Owned)
+                {
+                    asking.Batches.Current.Dispose();
+                }
             }
         }
     }

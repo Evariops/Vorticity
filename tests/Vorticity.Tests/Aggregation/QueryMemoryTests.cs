@@ -19,6 +19,45 @@ public sealed partial class QueryMemoryTests
 {
     private const int Rows = 400_000;
 
+    [Fact]
+    public void WhatAnOwnerKeepsForAQueryIsMadeOnceAndIsTheOwnersAlone()
+    {
+        // The layout of a group by's tuples is kept this way, the same for each lane of a run, where a weak table keyed by
+        // the run made a finalizable container a plan.
+        using QueryMemory memory = new QueryMemory(new QueryMemoryBudget(1 << 20));
+        object first = new object();
+        object second = new object();
+        object third = new object();
+        int made = 0;
+        Func<object, QueryMemory, object> make = (owner, kept) =>
+        {
+            made++;
+            Assert.Same(memory, kept);
+            return new List<object> { owner };
+        };
+
+        object ofFirst = memory.StateOf(first, make);
+        object ofSecond = memory.StateOf(second, make);
+        object ofThird = memory.StateOf(third, make);
+        Assert.Same(ofFirst, memory.StateOf(first, make));
+        Assert.Same(ofSecond, memory.StateOf(second, make));
+        Assert.Same(ofThird, memory.StateOf(third, make));
+        Assert.Equal(3, made);
+        Assert.Same(first, ((List<object>)ofFirst)[0]);
+        Assert.Same(second, ((List<object>)ofSecond)[0]);
+        Assert.Same(third, ((List<object>)ofThird)[0]);
+
+        // Each query its own.
+        using QueryMemory other = new QueryMemory(new QueryMemoryBudget(1 << 20));
+        Func<object, QueryMemory, object> makeOther = (owner, kept) =>
+        {
+            made++;
+            return new List<object> { owner };
+        };
+        Assert.NotSame(ofFirst, other.StateOf(first, makeOther));
+        Assert.Equal(4, made);
+    }
+
     [Theory]
     [InlineData(1)]
     [InlineData(14)]

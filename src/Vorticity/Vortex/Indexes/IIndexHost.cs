@@ -33,6 +33,36 @@ internal interface IIndexHost
 }
 
 /// <summary>
+/// A context to decode the payloads of an origin's runs in, lent until the lease is disposed: one of the process's pool of
+/// metadata contexts over an open file's own encodings (<see cref="ScanContexts.Metadata"/>), given back to it; any other
+/// made for the lease and disposed with it.
+/// </summary>
+internal readonly struct IndexContext(ScanContext context, bool pooled) : System.IDisposable
+{
+    /// <summary>The context.</summary>
+    internal ScanContext Context { get; } = context;
+
+    /// <summary>A context to decode the payloads of the runs of <paramref name="origin"/> of <paramref name="file"/> in.</summary>
+    internal static IndexContext Of(IIndexHost file, int origin) =>
+        file is VortexFile open && open.DecodesOverOwnEncodings(origin)
+            ? new IndexContext(ScanContexts.Metadata.Rent(open), pooled: true)
+            : new IndexContext(file.CreateIndexContext(origin), pooled: false);
+
+    /// <summary>Gives the context back to the pool, or disposes it.</summary>
+    public void Dispose()
+    {
+        if (pooled)
+        {
+            ScanContexts.Metadata.Return(Context);
+        }
+        else
+        {
+            Context.Dispose();
+        }
+    }
+}
+
+/// <summary>
 /// The indexes of a file read with no open: its directory, already read from the region its table of
 /// contents names, and its own regions, decoded over the encodings the contents list. Index fragments
 /// another commit attached are not the file's and are not read here.

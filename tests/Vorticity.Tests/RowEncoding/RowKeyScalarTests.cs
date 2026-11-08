@@ -64,6 +64,48 @@ public sealed class RowKeyScalarTests
     }
 
     [Fact]
+    public void AKeysFirstTextReadsIntoAnArrayGivenAsTheLiteralReadsIt()
+    {
+        // A granule's runs of a text of many values read each run's text this way, into the key's array, where each made an
+        // array of its own: empty, null, under a block, at its edges and over several of its 32 bytes, followed by more.
+        DTypeArena types = new DTypeArena();
+        RowSortField ascending = new RowSortField(descending: false, nullsFirst: true);
+        Random random = new Random(20261108);
+        byte[] into = [];
+        foreach (DType dtype in (DType[])[types.Utf8(Nullability.Nullable), types.Binary(Nullability.Nullable)])
+        {
+            Assert.True(RowEncoder.KeysBytes(dtype));
+            foreach (int length in (int[])[-1, 0, 1, 7, 31, 32, 33, 63, 64, 65, 200])
+            {
+                byte[] value = new byte[Math.Max(length, 0)];
+                random.NextBytes(value);
+                FilterLiteral literal = length < 0 ? FilterLiteral.Null : FilterLiteral.From(value.AsSpan());
+                byte[] key = new byte[RowEncoder.ValueLength(literal, dtype) + 9];
+                int written = RowEncoder.WriteValue(literal, dtype, ascending, key);
+                random.NextBytes(key.AsSpan(written));
+
+                Assert.Equal(length, RowEncoder.ReadFirstBytes(key, ref into));
+                if (length >= 0)
+                {
+                    Assert.True(into.AsSpan(0, length).SequenceEqual(value));
+                    Assert.True(RowEncoder.ReadFirstValue(key, dtype).BytesValue.SequenceEqual(value));
+                }
+                else
+                {
+                    Assert.Equal(FilterLiteralKind.Null, RowEncoder.ReadFirstValue(key, dtype).Kind);
+                }
+
+                // An array as long as the text takes it with nothing made.
+                long before = GC.GetAllocatedBytesForCurrentThread();
+                RowEncoder.ReadFirstBytes(key, ref into);
+                Assert.Equal(0, GC.GetAllocatedBytesForCurrentThread() - before);
+            }
+        }
+
+        Assert.False(RowEncoder.KeysBytes(types.Primitive(PType.I64, Nullability.Nullable)));
+    }
+
+    [Fact]
     public void AKeyOfATupleIsItsRowAcrossTheColumns()
     {
         Random random = new Random(20260928);

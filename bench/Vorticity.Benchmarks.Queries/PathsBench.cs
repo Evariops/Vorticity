@@ -466,6 +466,9 @@ internal static partial class PathsBench
     private sealed record Asking(IAsyncEnumerator<RecordBatch> Batches, Func<ScanMetrics> Metrics)
     {
         internal Func<ValueTask<ScanPlan>>? Explain { get; init; }
+
+        /// <summary>Whether each batch is the caller's, who disposes it (a scan's <c>ToBatchesAsync</c>), rather than lent until the next.</summary>
+        internal bool Owned { get; init; }
     }
 
     private static Question Asked<TRecord>(string set, string name, Func<Scan<TRecord>, Aggregation> ask, bool align = false)
@@ -499,7 +502,7 @@ internal static partial class PathsBench
         new Question(set, name, false, (dataset, options) =>
         {
             Scan<TRecord> scan = ask(dataset.Scan<TRecord>().With(options));
-            return new Asking(scan.ToBatchesAsync().GetAsyncEnumerator(), () => scan.Metrics);
+            return new Asking(scan.ToBatchesAsync().GetAsyncEnumerator(), () => scan.Metrics) { Owned = true };
         });
 
     /// <summary>
@@ -747,6 +750,11 @@ internal static partial class PathsBench
                     long taken = Stopwatch.GetTimestamp();
                     digest.Add(batch);
                     digesting += Stopwatch.GetTimestamp() - taken;
+                }
+
+                if (asking.Owned)
+                {
+                    batch.Dispose();
                 }
             }
         }

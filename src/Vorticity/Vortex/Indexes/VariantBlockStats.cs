@@ -322,24 +322,29 @@ internal readonly record struct BlockBound(int Block, long Values, long Low, lon
 /// Under the index budget, those that narrow their blocks least go first.
 /// </para>
 /// </remarks>
-internal sealed class VariantBlockStats
+internal sealed class VariantBlockStats : IDisposable
 {
     private const byte Version = 1;
 
     // The regions of statistics built to be written, a key's each, encoded once.
     private readonly byte[][]? _regions;
 
-    internal VariantBlockStats(IReadOnlyList<(string Key, PathClass Class)> keys, IReadOnlyList<BlockBound[]> blocks)
+    // Whether the blocks read lie in arrays rented for them, which the statistics give back when they are disposed: read
+    // at each scan's pruning and dropped after it, where arrays of their own outlived it, 10 % of what the mix of questions
+    // kept past a collection (2026-11-08).
+    private bool _rented;
+
+    internal VariantBlockStats(IReadOnlyList<(string Key, PathClass Class)> keys, ReadOnlyMemory<BlockBound>[] blocks, bool rented = false)
     {
         Keys = keys;
         Blocks = blocks;
+        _rented = rented;
     }
 
     /// <summary>Statistics built to be written: the keys and classes, and each one's region (<see cref="KeyBytes"/>).</summary>
     private VariantBlockStats(IReadOnlyList<(string Key, PathClass Class)> keys, byte[][] regions)
     {
-        BlockBound[][] none = new BlockBound[regions.Length][];
-        Array.Fill(none, []);
+        ReadOnlyMemory<BlockBound>[] none = new ReadOnlyMemory<BlockBound>[regions.Length];
         Keys = keys;
         Blocks = none;
         _regions = regions;
@@ -352,7 +357,25 @@ internal sealed class VariantBlockStats
     /// Per key and class, its blocks that hold a value in the file's order, each its count and bounds; empty for a region
     /// not read, and for statistics built to be written, which hold their regions instead.
     /// </summary>
-    internal IReadOnlyList<BlockBound[]> Blocks { get; }
+    internal IReadOnlyList<ReadOnlyMemory<BlockBound>> Blocks { get; }
+
+    /// <summary>Gives the arrays of the blocks read back to the pool: no block is read after.</summary>
+    public void Dispose()
+    {
+        if (!_rented)
+        {
+            return;
+        }
+
+        _rented = false;
+        foreach (ReadOnlyMemory<BlockBound> blocks in Blocks)
+        {
+            if (System.Runtime.InteropServices.MemoryMarshal.TryGetArray(blocks, out ArraySegment<BlockBound> array) && array.Array is { Length: > 0 } rented)
+            {
+                System.Buffers.ArrayPool<BlockBound>.Shared.Return(rented, clearArray: true);
+            }
+        }
+    }
 
     /// <summary>Which of the keys and classes is <paramref name="key"/> of <paramref name="class"/>, or -1.</summary>
     internal int IndexOf(string key, PathClass @class)
@@ -459,7 +482,7 @@ internal sealed class VariantBlockStats
     /// A block is a struct of its number, count and bounds in one array, where it was an entry of a path directory of its
     /// own, a record of ten fields, read at every question: 15 % of what a question on a log attribute allocated (2026-11-08).
     /// </remarks>
-    internal static BlockBound[]? KeyFrom(ReadOnlySpan<byte> bytes)
+    internal static ReadOnlyMemory<BlockBound>? KeyFrom(ReadOnlySpan<byte> bytes)
     {
         if (ZstdRegion.Rent(bytes, Version, out int length) is not { } plain)
         {
@@ -475,9 +498,10 @@ internal sealed class VariantBlockStats
                 return null;
             }
 
-            BlockBound[] blocks = new BlockBound[(int)count];
+            // Rented, at least as long: the statistics give it back when they are disposed.
+            BlockBound[] blocks = count == 0 ? [] : System.Buffers.ArrayPool<BlockBound>.Shared.Rent((int)count);
             int block = 0;
-            for (int i = 0; i < blocks.Length; i++)
+            for (int i = 0; i < (int)count; i++)
             {
                 block = checked(block + (int)reader.ReadVarint());
                 long values = checked((long)reader.ReadVarint());
@@ -489,7 +513,17 @@ internal sealed class VariantBlockStats
                 blocks[i] = new BlockBound(block, values, low, high, min, max);
             }
 
-            return reader.End ? blocks : null;
+            if (reader.End)
+            {
+                return blocks.AsMemory(0, (int)count);
+            }
+
+            if (blocks.Length != 0)
+            {
+                System.Buffers.ArrayPool<BlockBound>.Shared.Return(blocks, clearArray: true);
+            }
+
+            return null;
         }
         catch (Exception malformed) when (malformed is VortexFormatException or OverflowException)
         {
@@ -504,7 +538,9 @@ internal sealed class VariantBlockStats
     /// <summary>
     /// The block statistics of the variant column at top-level field <paramref name="field"/> of
     /// <paramref name="file"/>, their regions read for the keys and classes <paramref name="wanted"/>
-    /// only; null when the file carries none, or they do not decode.
+    /// only; null when the file carries none, or they do not decode. Their blocks lie in rented arrays, which the caller
+    /// gives back by disposing them once its pruning is done: read again at each scan, they die with it, where kept for
+    /// the question's other scans they outlived its collections.
     /// </summary>
     internal static async ValueTask<(VariantBlockStats? Stats, int Segments, long Bytes)> ReadAsync(
         VortexFile file, int field, IReadOnlyList<(string Key, PathClass Class)> wanted, CancellationToken cancellationToken)
@@ -527,7 +563,7 @@ internal sealed class VariantBlockStats
             // The keys wanted the statistics hold, alone: the options name every key the column's statistics keep, and each
             // made a string at every question allocated more than the statistics read.
             (string, PathClass)[] keys = new (string, PathClass)[found.Count];
-            BlockBound[][] blocks = new BlockBound[found.Count][];
+            ReadOnlyMemory<BlockBound>[] blocks = new ReadOnlyMemory<BlockBound>[found.Count];
             if (found.Count == 0)
             {
                 return (new VariantBlockStats(keys, blocks), 0, 0);
@@ -549,13 +585,14 @@ internal sealed class VariantBlockStats
                 ReadOnlySpan<byte> region = requests.GetBuffer(k).Span;
                 if (!run.Payload[found[k].Place].Holds(region) || KeyFrom(region) is not { } read)
                 {
+                    new VariantBlockStats(keys, blocks, rented: true).Dispose();
                     return (null, requests.Count, bytes);
                 }
 
                 blocks[k] = read;
             }
 
-            return (new VariantBlockStats(keys, blocks), requests.Count, bytes);
+            return (new VariantBlockStats(keys, blocks, rented: true), requests.Count, bytes);
         }
 
         return (null, 0, 0);

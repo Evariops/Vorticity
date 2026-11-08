@@ -71,6 +71,49 @@ public sealed partial class VariantBlockStatsTests
     }
 
     /// <summary>
+    /// Statistics read lend their blocks from rented arrays, given back when they are disposed: read again after, the same
+    /// blocks, whatever the arrays held before; disposed twice, given back once.
+    /// </summary>
+    [Fact]
+    public async Task StatisticsGiveTheirBlocksBackAndReadTheSameAgain()
+    {
+        await using VortexFile file = await OpenAsync(await WriteAsync(Rows()));
+        int field = file.DType.IndexOfField(nameof(Doc.Attributes));
+        (string, PathClass)[] keys = [("status", PathClass.Integer), ("route", PathClass.String)];
+        List<BlockBound[]> first = [];
+        for (int round = 0; round < 3; round++)
+        {
+            (VariantBlockStats? stats, int read, _) = await VariantBlockStats.ReadAsync(file, field, keys, Ct);
+            Assert.NotNull(stats);
+            Assert.True(read > 0);
+            for (int k = 0; k < stats.Blocks.Count; k++)
+            {
+                BlockBound[] blocks = stats.Blocks[k].ToArray();
+                Assert.NotEmpty(blocks);
+                if (round == 0)
+                {
+                    first.Add(blocks);
+                }
+                else
+                {
+                    Assert.Equal(first[k].Length, blocks.Length);
+                    for (int b = 0; b < blocks.Length; b++)
+                    {
+                        BlockBound was = first[k][b];
+                        BlockBound now = blocks[b];
+                        Assert.Equal((was.Block, was.Values, was.Low, was.High), (now.Block, now.Values, now.Low, now.High));
+                        Assert.Equal(was.MinText, now.MinText);
+                        Assert.Equal(was.MaxText, now.MaxText);
+                    }
+                }
+            }
+
+            stats.Dispose();
+            stats.Dispose();
+        }
+    }
+
+    /// <summary>
     /// Statistics regular enough to compress past a thousand times their frame are read back: a flag that alternates
     /// from block to block over sixteen thousand blocks of four rows, whose region zstd squeezes to a few dozen bytes,
     /// refutes the blocks that hold it false, where a reader that took such a body for a forged one pruned none.

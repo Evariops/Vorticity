@@ -112,6 +112,9 @@ public sealed partial class VortexFile : IIndexHost
             ? new ScanContext(ids.ToArray(), ReadOptions)
             : new ScanContext(this, ScanContext.MetadataCapacity);
 
+    /// <summary>Whether the payloads of the runs of <paramref name="origin"/> decode over the file's own encoding table, not a fragment's.</summary>
+    internal bool DecodesOverOwnEncodings(int origin) => OriginOf(origin).Encodings is null;
+
     private IndexOrigin OriginOf(int origin) =>
         (_indexState ?? throw new InvalidOperationException("A run is read before the directory that lists it."))
         .Origins[origin];

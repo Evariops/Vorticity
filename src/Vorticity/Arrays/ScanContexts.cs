@@ -12,9 +12,11 @@ namespace Vorticity.Arrays;
 /// </summary>
 /// <remarks>
 /// A context comes back recycled, holding nothing of the scan or the file it served, and is bound
-/// to the next scan's file when it is taken. The bound of <see cref="Shared"/> is what a take on a
-/// lane per processor holds, three contexts a lane, and never less than a few scans at once hold,
-/// a lane each; a context past it is disposed. A context keeps the arrays its widest batch grew,
+/// to the next scan's file when it is taken. <see cref="Shared"/> keeps what a take on a lane per
+/// processor holds, three contexts a lane, and never less than a few scans at once hold, a lane
+/// each; or, up to its ceiling, as many as the scans took at once since it last let them go, which
+/// many questions side by side, a lane each, take past the first bound; a context past what it
+/// keeps is disposed. A context keeps the arrays its widest batch grew,
 /// a few hundred bytes a column, so what a swept pool keeps goes after a collection of the oldest
 /// generation once no scan has taken a context over a minute, and when the machine's memory load
 /// is high.
@@ -24,9 +26,19 @@ internal sealed class ScanContexts : ISweptAfterCollections
     /// <summary>How long no scan takes a context before a sweep lets the kept ones go.</summary>
     internal const long IdleMilliseconds = 60_000;
 
-    private readonly ScanContext?[] _contexts;
+    private ScanContext?[] _contexts;
     private readonly Lock _gate = new Lock();
     private int _count;
+
+    // The contexts kept whatever the scans took, the most kept however many they took at once, the contexts taken and not
+    // given back, and the most of them out at once since the pool last let its contexts go: what it keeps.
+    private readonly int _floor;
+    private readonly int _ceiling;
+
+    // Whether the contexts made are a reader of metadata's, small and noting no tree size: an index's payloads decoded.
+    private readonly bool _metadata;
+    private int _lent;
+    private int _mostLent;
 
     /// <summary>Whether a scan took a context since the last sweep.</summary>
     private bool _taken;
@@ -39,12 +51,52 @@ internal sealed class ScanContexts : ISweptAfterCollections
     /// <summary>A pool that keeps up to <paramref name="capacity"/> contexts.</summary>
     /// <param name="capacity">The most contexts kept.</param>
     internal ScanContexts(int capacity)
+        : this(capacity, capacity)
     {
-        _contexts = new ScanContext?[capacity];
     }
 
-    /// <summary>The pool every scan takes its contexts from.</summary>
-    internal static ScanContexts Shared { get; } = new ScanContexts(Math.Max(16, 3 * Environment.ProcessorCount)).Swept();
+    /// <summary>
+    /// A pool that keeps up to <paramref name="floor"/> contexts, or as many as the scans took at once since it last let them
+    /// go, up to <paramref name="ceiling"/>.
+    /// </summary>
+    /// <param name="floor">The contexts kept whatever the scans took.</param>
+    /// <param name="ceiling">The most contexts kept.</param>
+    /// <param name="metadata">Whether the contexts made read metadata (<see cref="Metadata"/>).</param>
+    internal ScanContexts(int floor, int ceiling, bool metadata = false)
+    {
+        _metadata = metadata;
+        _floor = floor;
+        _ceiling = Math.Max(floor, ceiling);
+        _contexts = new ScanContext?[floor];
+    }
+
+    /// <summary>
+    /// The pool every scan takes its contexts from: three contexts a processor, or as many as the scans took at once, up to
+    /// 32 a processor. Each lane of a scan takes one, and so does each split it reads ahead: 32 questions at one lane each
+    /// over a short store held more than the three a processor, every lane past them making a context and the pool
+    /// disposing it when it came back, 300 KB a question (2026-11-08).
+    /// </summary>
+    internal static ScanContexts Shared { get; } =
+        new ScanContexts(Math.Max(16, 3 * Environment.ProcessorCount), Math.Max(64, 32 * Environment.ProcessorCount)).Swept();
+
+    /// <summary>
+    /// The pool the readers of a file's indexes take their contexts from, contexts of metadata: a Bloom filter's nodes or a
+    /// key index's pages decoded, a context made and disposed for each read of an origin's payloads before (2026-11-08).
+    /// </summary>
+    internal static ScanContexts Metadata { get; } =
+        new ScanContexts(Math.Max(16, Environment.ProcessorCount), Math.Max(64, 8 * Environment.ProcessorCount), metadata: true).Swept();
+
+    /// <summary>The most contexts the scans took at once since the pool last let its contexts go, for tests and the bench.</summary>
+    internal int MostLent
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _mostLent;
+            }
+        }
+    }
 
     /// <summary>The contexts kept, for tests: a pool in use answers from under the caller's feet.</summary>
     internal int Count
@@ -68,17 +120,12 @@ internal sealed class ScanContexts : ISweptAfterCollections
         ScanContext? context = null;
         lock (_gate)
         {
-            _taken = true;
-            if (_count > 0)
-            {
-                context = _contexts[--_count];
-                _contexts[_count] = null;
-            }
+            context = Take();
         }
 
         if (context is null)
         {
-            return ScanContext.Pooled(file);
+            return _metadata ? new ScanContext(file, ScanContext.MetadataCapacity) : ScanContext.Pooled(file);
         }
 
         context.Rebind(file);
@@ -96,12 +143,7 @@ internal sealed class ScanContexts : ISweptAfterCollections
         ScanContext? context = null;
         lock (_gate)
         {
-            _taken = true;
-            if (_count > 0)
-            {
-                context = _contexts[--_count];
-                _contexts[_count] = null;
-            }
+            context = Take();
         }
 
         if (context is null)
@@ -120,14 +162,40 @@ internal sealed class ScanContexts : ISweptAfterCollections
         context.Recycle();
         lock (_gate)
         {
-            if (_count < _contexts.Length)
+            // A context made elsewhere and given back counts no taking.
+            _lent = Math.Max(0, _lent - 1);
+            if (_count < Math.Max(_floor, _mostLent))
             {
+                if (_count == _contexts.Length)
+                {
+                    Array.Resize(ref _contexts, Math.Min(2 * _contexts.Length, _ceiling));
+                }
+
                 _contexts[_count++] = context;
                 return;
             }
         }
 
         context.Dispose();
+    }
+
+    /// <summary>A context kept, or null for none; the takings counted. Under the gate.</summary>
+    private ScanContext? Take()
+    {
+        _taken = true;
+        if (++_lent > _mostLent)
+        {
+            _mostLent = Math.Min(_lent, _ceiling);
+        }
+
+        if (_count == 0)
+        {
+            return null;
+        }
+
+        ScanContext context = _contexts[--_count]!;
+        _contexts[_count] = null;
+        return context;
     }
 
     /// <summary>This pool, swept after each collection of the oldest generation for as long as it lives.</summary>
@@ -169,6 +237,13 @@ internal sealed class ScanContexts : ISweptAfterCollections
                 ScanContext context = _contexts[--_count]!;
                 _contexts[_count] = null;
                 context.Dispose();
+            }
+
+            // The takings of before forgotten: the pool keeps its floor until scans take more at once again.
+            _mostLent = _lent;
+            if (_contexts.Length > _floor)
+            {
+                _contexts = new ScanContext?[_floor];
             }
         }
     }

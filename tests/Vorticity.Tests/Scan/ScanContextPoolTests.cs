@@ -174,6 +174,87 @@ public sealed class ScanContextPoolTests
     }
 
     [Fact]
+    public async Task APoolKeepsAsManyContextsAsTheScansTookAtOnceUpToItsCeiling()
+    {
+        Decoders.EnsureRegistered();
+        await using VortexFile file = await VortexFile.OpenAsync(Corpus.Path(Zoned), CancellationToken.None);
+
+        // Past its floor, as many as were out at once: the next as many takings find them.
+        ScanContexts pool = new ScanContexts(2, 8);
+        List<ScanContext> taken = [];
+        for (int i = 0; i < 5; i++)
+        {
+            taken.Add(pool.Rent(file));
+        }
+
+        Assert.Equal(5, pool.MostLent);
+        foreach (ScanContext context in taken)
+        {
+            pool.Return(context);
+        }
+
+        Assert.Equal(5, pool.Count);
+        List<ScanContext> again = [];
+        for (int i = 0; i < 5; i++)
+        {
+            again.Add(pool.Rent(file));
+            Assert.Contains(again[i], taken);
+        }
+
+        foreach (ScanContext context in again)
+        {
+            pool.Return(context);
+        }
+
+        // Never past its ceiling.
+        taken.Clear();
+        for (int i = 0; i < 12; i++)
+        {
+            taken.Add(pool.Rent(file));
+        }
+
+        Assert.Equal(8, pool.MostLent);
+        foreach (ScanContext context in taken)
+        {
+            pool.Return(context);
+        }
+
+        Assert.Equal(8, pool.Count);
+
+        // Let go, it forgets the takings of before, and keeps its floor.
+        pool.TrimIdle(1_000, everything: true);
+        Assert.Equal(0, pool.Count);
+        Assert.Equal(0, pool.MostLent);
+        taken.Clear();
+        for (int i = 0; i < 3; i++)
+        {
+            taken.Add(pool.Rent(file));
+        }
+
+        foreach (ScanContext context in taken)
+        {
+            pool.Return(context);
+        }
+
+        Assert.Equal(3, pool.Count);
+
+        // A pool of one bound keeps no more than it.
+        ScanContexts bounded = new ScanContexts(4);
+        taken.Clear();
+        for (int i = 0; i < 6; i++)
+        {
+            taken.Add(bounded.Rent(file));
+        }
+
+        foreach (ScanContext context in taken)
+        {
+            bounded.Return(context);
+        }
+
+        Assert.Equal(4, bounded.Count);
+    }
+
+    [Fact]
     public async Task APoolNoScanTookFromOverAMinuteLetsItsContextsGo()
     {
         Decoders.EnsureRegistered();

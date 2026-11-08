@@ -1275,10 +1275,28 @@ internal sealed partial class ColumnChunkReader : IDisposable
     }
 
     /// <summary>
-    /// The context's ZSTD decompressor for a chunk of ZSTD pages, null for any other codec: a context
-    /// rents one when first asked, and a scan's fields decode side by side, each in a context of its own.
+    /// A page's bytes decompressed into all of <paramref name="destination"/>; a ZSTD page by a decompressor of the
+    /// process's, taken for it alone: a scan's fields decode side by side, and one a context kept was one a context parked in
+    /// the pool held.
     /// </summary>
-    private ZstdDecompressor? ZstdOf(ScanContext context) => _codec == CompressionCodec.Zstd ? context.Zstd : null;
+    private void DecompressPage(ReadOnlySpan<byte> source, Span<byte> destination)
+    {
+        if (_codec != CompressionCodec.Zstd)
+        {
+            PageCodecs.Decompress(_codec, source, destination, zstd: null);
+            return;
+        }
+
+        ZstdDecompressor zstd = ZstdDecoders.Rent();
+        try
+        {
+            PageCodecs.Decompress(_codec, source, destination, zstd);
+        }
+        finally
+        {
+            ZstdDecoders.Return(zstd);
+        }
+    }
 
     /// <summary>
     /// <paramref name="size"/> bytes of <paramref name="source"/> decompressed: the block a lane
@@ -1299,7 +1317,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
         try
         {
             Counters?.AddDecompression();
-            PageCodecs.Decompress(_codec, source, values.WritableSpan, ZstdOf(context));
+            DecompressPage(source, values.WritableSpan);
         }
         catch
         {
@@ -2619,7 +2637,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
                 try
                 {
                     Counters?.AddDecompression();
-                    PageCodecs.Decompress(_codec, body.Span, values.WritableSpan, ZstdOf(context));
+                    DecompressPage(body.Span, values.WritableSpan);
                 }
                 catch
                 {

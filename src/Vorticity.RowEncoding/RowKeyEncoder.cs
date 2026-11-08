@@ -454,23 +454,65 @@ public static partial class RowEncoder
             return FilterLiteral.Null;
         }
 
+        byte[] value = new byte[FirstBytesLength(key, out int full, out int last)];
+        CopyFirstBytes(key, full, last, value);
+
+        // The literal over the array made for it: From would copy it again.
+        return FilterLiteral.Owning(value);
+    }
+
+    /// <summary>Whether a value of <paramref name="dtype"/> reads as bytes, a text's or a binary's (<see cref="ReadFirstBytes(ReadOnlySpan{byte}, ref byte[])"/>).</summary>
+    internal static bool KeysBytes(DType dtype) => Storage(dtype).Kind is DTypeKind.Utf8 or DTypeKind.Binary;
+
+    /// <summary>
+    /// The bytes of the first value of an ascending row-encoded key, a text or a binary, written at the start of
+    /// <paramref name="into"/>, grown to hold them: their count, or -1 for a null. What <see cref="ReadFirstValue"/> reads
+    /// of such a value, with no array of its own: a granule's runs of a text of many values read one a run.
+    /// </summary>
+    internal static int ReadFirstBytes(ReadOnlySpan<byte> key, ref byte[] into)
+    {
+        if (key[0] == RowSentinels.VarEmpty(RowSortField.Ascending))
+        {
+            return 0;
+        }
+
+        if (key[0] != RowSentinels.VarNonEmpty(RowSortField.Ascending))
+        {
+            return -1;
+        }
+
+        int length = FirstBytesLength(key, out int full, out int last);
+        if (into.Length < length)
+        {
+            into = new byte[Math.Max(length, 2 * into.Length)];
+        }
+
+        CopyFirstBytes(key, full, last, into);
+        return length;
+    }
+
+    /// <summary>The length of a key's first value, a text's or a binary's, not empty: its <paramref name="full"/> blocks, and the <paramref name="last"/> bytes of the last.</summary>
+    private static int FirstBytesLength(ReadOnlySpan<byte> key, out int full, out int last)
+    {
         const byte Continuation = 0xFF;
-        int full = 0;
+        full = 0;
         while (key[1 + (full * RowWidths.VarBlockTotal) + RowWidths.VarBlockData] == Continuation)
         {
             full++;
         }
 
-        int last = key[1 + (full * RowWidths.VarBlockTotal) + RowWidths.VarBlockData];
-        byte[] value = new byte[(full * RowWidths.VarBlockData) + last];
+        last = key[1 + (full * RowWidths.VarBlockTotal) + RowWidths.VarBlockData];
+        return (full * RowWidths.VarBlockData) + last;
+    }
+
+    /// <summary>Copies a key's first value, of <paramref name="full"/> blocks and <paramref name="last"/> bytes, out of its blocks into <paramref name="into"/>.</summary>
+    private static void CopyFirstBytes(ReadOnlySpan<byte> key, int full, int last, Span<byte> into)
+    {
         for (int block = 0; block <= full; block++)
         {
             int length = block < full ? RowWidths.VarBlockData : last;
-            key.Slice(1 + (block * RowWidths.VarBlockTotal), length).CopyTo(value.AsSpan(block * RowWidths.VarBlockData));
+            key.Slice(1 + (block * RowWidths.VarBlockTotal), length).CopyTo(into[(block * RowWidths.VarBlockData)..]);
         }
-
-        // The literal over the array made for it: From would copy it again.
-        return FilterLiteral.Owning(value);
     }
 
     /// <summary>

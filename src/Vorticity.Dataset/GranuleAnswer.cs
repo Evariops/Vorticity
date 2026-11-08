@@ -1893,7 +1893,11 @@ internal sealed class GranuleAnswer
                 return false;
             }
 
-            values.Current[k] = given[k].Component < 0 ? columns[place].ConstantOf(granule, rows) : null;
+            // A key the prefix gives stands as its last run decoded it, which TryStand sets anew or keeps.
+            if (given[k].Component < 0)
+            {
+                values.Stand(k, columns[place].ConstantOf(granule, rows));
+            }
         }
 
         int first = states.Count;
@@ -1918,7 +1922,7 @@ internal sealed class GranuleAnswer
                     }
                 }
 
-                same &= ReferenceEquals(values.Current[k], values.Previous[k]);
+                same &= values.Same(k);
             }
 
             if (same)
@@ -1930,8 +1934,7 @@ internal sealed class GranuleAnswer
             int row = states.Add(values.Runs.RowsOf(r));
             for (int k = 0; k < given.Length; k++)
             {
-                states.SetKey(row, k, values.Current[k]);
-                values.Previous[k] = values.Current[k];
+                values.Settle(states, row, k);
             }
         }
 
@@ -1948,7 +1951,15 @@ internal sealed class GranuleAnswer
     {
         private readonly byte[]?[] _bytes = new byte[]?[keys];
         private readonly int[] _lengths = new int[keys];
-        private readonly byte[]?[] _stands = new byte[]?[keys];
+
+        // Each key's group in the run read, as its column stores the value that stands for it: its bytes at the start of
+        // an array of the key's, made once and grown, their count or -1 for a null; and a number that changes with the
+        // group, as it stood in the run read and in the run before it. A text's group decodes into the array, where an
+        // array a run made the run's text (6.7 % of what the mix of questions allocated, 2026-11-08).
+        private readonly byte[][] _current = NewArrays(keys);
+        private readonly int[] _currentLength = new int[keys];
+        private readonly int[] _version = new int[keys];
+        private readonly int[] _previous = new int[keys];
 
         // The end of each value of the run's key up to the last a key takes, found once a run (Bound): the keys' values
         // are each found from the key's start, which walked it twice a key a run, 1.35 million values a question of the
@@ -1966,22 +1977,59 @@ internal sealed class GranuleAnswer
             return last < 0 ? 0 : skip + last + 1;
         }
 
+        private static byte[][] NewArrays(int keys)
+        {
+            byte[][] arrays = new byte[keys][];
+            for (int k = 0; k < keys; k++)
+            {
+                arrays[k] = [];
+            }
+
+            return arrays;
+        }
+
         /// <summary>The runs.</summary>
         internal GranuleKeyRuns Runs { get; } = runs;
-
-        /// <summary>Each key's group in the run read, as its column stores the value that stands for it.</summary>
-        internal byte[]?[] Current { get; } = new byte[]?[keys];
-
-        /// <summary>Each key's group in the run before it, of the same granule or the one before.</summary>
-        internal byte[]?[] Previous { get; } = new byte[]?[keys];
 
         /// <summary>The ends of the values of the run's key <paramref name="run"/> that the keys take; false when one's width is unknown.</summary>
         internal bool Bound(ReadOnlySpan<byte> run) => tree.Ends(run, _ends);
 
+        /// <summary>Sets key <paramref name="k"/>'s group to <paramref name="value"/>, as its column stores it; null for a null.</summary>
+        internal void Stand(int k, byte[]? value)
+        {
+            if (value is null)
+            {
+                _currentLength[k] = -1;
+            }
+            else
+            {
+                if (_current[k].Length < value.Length)
+                {
+                    _current[k] = new byte[Math.Max(value.Length, 2 * _current[k].Length)];
+                }
+
+                value.CopyTo(_current[k], 0);
+                _currentLength[k] = value.Length;
+            }
+
+            _version[k]++;
+        }
+
+        /// <summary>Whether key <paramref name="k"/>'s group in the run read is the one it stood in the run before it.</summary>
+        internal bool Same(int k) => _version[k] == _previous[k];
+
+        /// <summary>Sets row <paramref name="row"/>'s key <paramref name="k"/> of <paramref name="states"/> to its group in the run read, which then stands as the run before the next.</summary>
+        internal void Settle(GranuleStateRows states, int row, int k)
+        {
+            int length = _currentLength[k];
+            states.SetKey(row, k, length < 0 ? null : _current[k].AsSpan(0, length), isNull: length < 0);
+            _previous[k] = _version[k];
+        }
+
         /// <summary>
-        /// Sets <see cref="Current"/>'s <paramref name="k"/>th to the group of <paramref name="key"/> in the run of key
-        /// <paramref name="run"/>, from the component <paramref name="given"/> names: its value as <paramref name="column"/>
-        /// stores it, or the one standing for its class; false when it reads as none, or a class straddles two groups. The
+        /// Sets key <paramref name="k"/>'s group to the one of <paramref name="key"/> in the run of key <paramref name="run"/>,
+        /// from the component <paramref name="given"/> names: its value as <paramref name="column"/> stores it, or the one
+        /// standing for its class; false, the group as it stood, when it reads as none, or a class straddles two groups. The
         /// run's ends are <see cref="Bound"/>'s.
         /// </summary>
         internal bool TryStand(int k, ReadOnlySpan<byte> run, (int Component, ValueFunction? Of) given, FieldExpr key, GranuleColumn column)
@@ -1989,32 +2037,44 @@ internal sealed class GranuleAnswer
             int position = skip + given.Component;
             int at = position == 0 ? 0 : _ends[position - 1];
             ReadOnlySpan<byte> bytes = run[at.._ends[position]];
+
+            // The component the run before decoded: the group stands as it did.
             if (_bytes[k] is { } held && bytes.SequenceEqual(held.AsSpan(0, _lengths[k])))
             {
-                Current[k] = _stands[k];
                 return true;
             }
 
-            FilterLiteral literal = RowEncoder.ReadFirstValue(run[at..], tree.TypeAt(position));
-            byte[]? stands;
-            if (given.Of is not { } function)
+            DType type = tree.TypeAt(position);
+            if (given.Of is null && column.KeysBytes && RowEncoder.KeysBytes(type))
             {
-                stands = literal.Kind == FilterLiteralKind.Null ? null : column.KeyOf(literal);
-                if (stands is null && literal.Kind != FilterLiteralKind.Null)
+                // A text or a binary, which its column keys by its bytes: decoded into the key's array.
+                _currentLength[k] = RowEncoder.ReadFirstBytes(run[at..], ref _current[k]);
+                _version[k]++;
+            }
+            else
+            {
+                FilterLiteral literal = RowEncoder.ReadFirstValue(run[at..], type);
+                byte[]? stands;
+                if (given.Of is not { } function)
+                {
+                    stands = literal.Kind == FilterLiteralKind.Null ? null : column.KeyOf(literal);
+                    if (stands is null && literal.Kind != FilterLiteralKind.Null)
+                    {
+                        return false;
+                    }
+                }
+                else if (key is not FunctionFieldExpr coarser || !ValueFunction.TryInteger(literal, out Int128 value) || value < long.MinValue || value > long.MaxValue
+                    || (stands = StandsFor(coarser, function, (long)value, column)) is null)
                 {
                     return false;
                 }
-            }
-            else if (key is not FunctionFieldExpr coarser || !ValueFunction.TryInteger(literal, out Int128 value) || value < long.MinValue || value > long.MaxValue
-                || (stands = StandsFor(coarser, function, (long)value, column)) is null)
-            {
-                return false;
+
+                Stand(k, stands);
             }
 
             byte[] kept = _bytes[k] ?? new byte[16];
             _lengths[k] = SortedRows.Keep(ref kept, bytes);
             _bytes[k] = kept;
-            Current[k] = _stands[k] = stands;
             return true;
         }
     }
@@ -2191,6 +2251,9 @@ internal sealed class GranuleColumn(string path, DType dtype, GranuleStats? stat
         return key is FunctionFieldExpr && Stats is { } stats && stats.Nulls[granule] == 0 && Bounds(granule) is ({ } least, { } greatest)
             && CountsAnswer.Image(key, least) is { } low && CountsAnswer.Image(key, greatest) is { } high && KeyCursor.Compare(low, high) == 0;
     }
+
+    /// <summary>Whether the column keys its values by their bytes, a text's or a binary's, as they are.</summary>
+    internal bool KeysBytes => _keyed && _layout.Shape == KeyShape.Bytes;
 
     /// <summary>The bytes the column stores <paramref name="value"/> as, a key's; null for a column no key holds, or a value it does not.</summary>
     internal byte[]? KeyOf(FilterLiteral value)
