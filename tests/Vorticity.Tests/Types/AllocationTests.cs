@@ -281,28 +281,19 @@ public sealed class AllocationTests
     }
 
     /// <summary>
-    /// A scan's context makes each scan's arena from what the last one needed, so that the same
-    /// scan again grows nothing. What it needed includes a dtype built a second time: its children
-    /// and names are written out before the arena finds the first and rolls them back.
+    /// A scan's context keeps its arena from scan to scan, so that the same scan again grows
+    /// nothing: the dtypes it holds derived again, a dtype built a second time included, whose
+    /// children and names are written out before the arena finds the first and rolls them back,
+    /// allocate nothing.
     /// </summary>
     [Fact]
-    public void AnArenaShapedLikeAnotherDerivesTheSameWithoutGrowing()
+    public void AnArenaDerivesWhatItHoldsAgainWithoutGrowing()
     {
-        DTypeArena first = new(4);
-        Derive(first);
-        Derive(first);
-        DTypeArenaShape shape = first.Shape;
+        DTypeArena arena = new(4);
+        Derive(arena);
+        Derive(arena);
 
-        long alone = Measure(() => Consume(new DTypeArena(in shape)));
-        long derived = Measure(() =>
-        {
-            DTypeArena arena = new(in shape);
-            Derive(arena);
-            Derive(arena);
-            Consume(arena);
-        });
-
-        Assert.Equal(alone, derived);
+        Assert.Equal(0, Measure(() => Derive(arena)));
 
         static void Derive(DTypeArena arena)
         {

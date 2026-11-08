@@ -329,4 +329,30 @@ public sealed class ProjectionTests
             Assert.Equal("strs", batch.GetFieldName(1));
         }
     }
+
+    /// <summary>
+    /// A question's scans of the files of one schema share the schema they project: each scan of an object projected its own
+    /// into an arena made for it. Two opens of one file, two masks of the same field built apart, one projection; another
+    /// field, another.
+    /// </summary>
+    [Fact]
+    public async Task AQuestionProjectsTheSchemaOfFilesOfOneSchemaOnce()
+    {
+        await using VortexFile first = await VortexFile.OpenAsync(Corpus.Path("types/struct_field_names"), CancellationToken.None);
+        await using VortexFile second = await VortexFile.OpenAsync(Corpus.Path("types/struct_field_names"), CancellationToken.None);
+        DType a = first.LayoutTree.Root.DType;
+        DType b = second.LayoutTree.Root.DType;
+        Assert.NotSame(a.Arena, b.Arena);
+
+        Vorticity.Indexes.QuestionReads question = new Vorticity.Indexes.QuestionReads();
+        ScanProjection keep = ScanProjection.Create(FieldMask.Single(0));
+        DType one = question.Projected(keep, a);
+        DType again = question.Projected(ScanProjection.Create(FieldMask.Single(0)), b);
+        Assert.Same(one.Arena, again.Arena);
+        Assert.Equal(one.NodeIndex, again.NodeIndex);
+        Assert.Equal(keep.ProjectedSchema(b, new DTypeArena()), again);
+
+        DType other = question.Projected(ScanProjection.Create(FieldMask.Single(1)), a);
+        Assert.NotEqual(one, other);
+    }
 }

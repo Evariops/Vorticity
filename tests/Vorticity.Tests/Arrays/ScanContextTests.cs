@@ -44,6 +44,28 @@ public sealed class ScanContextTests
         Assert.Same(scan.Scalars, scan.Decode.Scalars);
     }
 
+    /// <summary>
+    /// A context keeps its arena of dtypes from scan to scan, where it only grows: a dtype one scan derived, which a batch
+    /// its caller owns may carry, stays readable after the next scan derived beside it, and is found again.
+    /// </summary>
+    [Fact]
+    public void AContextKeepsItsDTypesFromScanToScan()
+    {
+        using ScanContext scan = new ScanContext(Ids);
+        DTypeArena arena = scan.Types;
+        DType first = arena.Struct(["a"], [arena.Primitive(PType.I64, Nullability.NonNullable)], Nullability.NonNullable);
+
+        scan.RebindDetached(scan.Options);
+        Assert.Same(arena, scan.Types);
+        DType utf8 = scan.Types.Utf8(Nullability.Nullable);
+        DType again = scan.Types.Struct(["a"], [scan.Types.Primitive(PType.I64, Nullability.NonNullable)], Nullability.NonNullable);
+
+        Assert.Equal(DTypeKind.Struct, first.Kind);
+        Assert.Equal(1, first.FieldCount);
+        Assert.Equal(first.NodeIndex, again.NodeIndex);
+        Assert.NotEqual(first.NodeIndex, utf8.NodeIndex);
+    }
+
     [Fact]
     public void TheEncodingTableIsResolvedOnceAndAddressableByTheWireIndex()
     {

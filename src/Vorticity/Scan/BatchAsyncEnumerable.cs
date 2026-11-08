@@ -59,6 +59,7 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
     /// Whether to deliver the plan's splits last one first, for a descending walk. It asks for
     /// <paramref name="degree"/> one, because the order is the point and lanes do not keep one.
     /// </param>
+    /// <param name="question">The question the scan is one of, whose scans of files of one schema share its projection; null for none.</param>
     internal BatchAsyncEnumerable(
         VortexFile file,
         LayoutTree tree,
@@ -69,7 +70,8 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
         VortexExpr? filter,
         RowSelection? take,
         ScanCounters? metrics,
-        bool reverse = false)
+        bool reverse = false,
+        Indexes.QuestionReads? question = null)
     {
         if (reverse && degree != 1)
         {
@@ -94,10 +96,10 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
         //
         // It is the keep projection's schema, not the read projection's: a filter's own columns are
         // dropped before the batch is produced, so they were never part of what a caller was
-        // promised.
+        // promised. A question's scans of the files of one schema share theirs (QuestionReads.Projected).
         _schema = keep.IsAll
             ? tree.Root.DType
-            : keep.ProjectedSchema(tree.Root.DType, new DTypeArena());
+            : question?.Projected(keep, tree.Root.DType) ?? keep.ProjectedSchema(tree.Root.DType, new DTypeArena());
     }
 
     /// <summary>The schema every batch of this scan carries.</summary>

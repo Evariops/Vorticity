@@ -72,32 +72,6 @@ internal struct DTypeNameEntry
 }
 
 /// <summary>
-/// How much of each of its arrays an arena filled: the size a later arena doing the same work
-/// starts at, so that it grows none of them.
-/// </summary>
-internal readonly struct DTypeArenaShape
-{
-    internal readonly int Nodes;
-    internal readonly int Children;
-    internal readonly int FieldNames;
-    internal readonly int TypeIds;
-    internal readonly int Meta;
-    internal readonly int Names;
-    internal readonly int NameBytes;
-
-    internal DTypeArenaShape(int nodes, int children, int fieldNames, int typeIds, int meta, int names, int nameBytes)
-    {
-        Nodes = nodes;
-        Children = children;
-        FieldNames = fieldNames;
-        TypeIds = typeIds;
-        Meta = meta;
-        Names = names;
-        NameBytes = nameBytes;
-    }
-}
-
-/// <summary>
 /// Arena of DType nodes. A <see cref="DType"/> is a (arena, index) handle, so a wide schema
 /// produces no objects beyond this arena's own growable arrays: the nodes themselves, and beside
 /// them the child indices, the struct and union field-name handles, the union type ids, the
@@ -198,63 +172,6 @@ internal sealed class DTypeArena
         _nameBytes = [];
         _nameEntries = [];
         _nameBuckets = NoNameBuckets;
-    }
-
-    /// <summary>Creates an empty arena whose arrays hold what <paramref name="shape"/> says, each allocated only when it is not empty.</summary>
-    /// <param name="shape">What an earlier arena doing the same work filled.</param>
-    internal DTypeArena(in DTypeArenaShape shape)
-    {
-        int cap = Math.Max(shape.Nodes, 4);
-        _nodes = new DTypeNode[cap];
-        _nodeBuckets = new int[NextPowerOfTwo(cap * 2)];
-        _children = shape.Children == 0 ? [] : new int[shape.Children];
-        _fieldNames = shape.FieldNames == 0 ? [] : new int[shape.FieldNames];
-        _typeIds = shape.TypeIds == 0 ? [] : new byte[shape.TypeIds];
-        _meta = shape.Meta == 0 ? [] : new byte[shape.Meta];
-        _nameBytes = shape.NameBytes == 0 ? [] : new byte[shape.NameBytes];
-        _nameEntries = shape.Names == 0 ? [] : new DTypeNameEntry[shape.Names];
-        _nameBuckets = shape.Names == 0 ? NoNameBuckets : new int[NextPowerOfTwo(shape.Names * 2)];
-    }
-
-    /// <summary>How much of each array this arena has needed.</summary>
-    /// <remarks>
-    /// A composite dtype is written out before the arena looks for it and rolled back when it
-    /// finds it, so each array needs room for one node beyond what it keeps: the widest it holds,
-    /// since a node found is one of them.
-    /// </remarks>
-    internal DTypeArenaShape Shape
-    {
-        get
-        {
-            int children = 0;
-            int fieldNames = 0;
-            int typeIds = 0;
-            int meta = 0;
-            for (int i = 0; i < _nodeCount; i++)
-            {
-                ref readonly DTypeNode n = ref _nodes[i];
-                children = Math.Max(children, n.ChildCount);
-                meta = Math.Max(meta, n.MetaLength);
-                if (n.Kind is DTypeKind.Struct or DTypeKind.Union)
-                {
-                    fieldNames = Math.Max(fieldNames, n.ChildCount);
-                }
-
-                if (n.Kind == DTypeKind.Union)
-                {
-                    typeIds = Math.Max(typeIds, n.ChildCount);
-                }
-            }
-
-            return new DTypeArenaShape(
-                _nodeCount,
-                _childCount + children,
-                _fieldNameCount + fieldNames,
-                _typeIdCount + typeIds,
-                _metaCount + meta,
-                _nameCount,
-                _nameByteCount);
-        }
     }
 
     /// <summary>Number of distinct nodes currently held. Structurally equal nodes share one entry.</summary>

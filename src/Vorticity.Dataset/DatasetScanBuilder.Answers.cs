@@ -278,7 +278,7 @@ internal sealed partial class DatasetScanBuilder
     /// </summary>
     private async ValueTask<long> LiveCountAsync(VortexFile file, PositionedObject held, VortexExpr filter, CancellationToken cancellationToken)
     {
-        ScanBuilder scan = Of(file, held, filter, null, canonical: false).WithGranules(GeometryOf(held));
+        ScanBuilder scan = Of(file, held, filter, null, canonical: false).WithGranules(GeometryOf(file));
         return _take is null && held.Entry.HasDeletions
             ? await scan.CountExcludingAsync(held.Entry.Deletions, cancellationToken).ConfigureAwait(false)
             : await scan.CountAsync(cancellationToken).ConfigureAwait(false);
@@ -287,7 +287,7 @@ internal sealed partial class DatasetScanBuilder
     /// <summary>Whether <paramref name="filter"/> keeps a live row of an object, the first one found answering.</summary>
     private async ValueTask<bool> LiveAnyAsync(VortexFile file, PositionedObject held, VortexExpr filter, CancellationToken cancellationToken)
     {
-        ScanBuilder scan = Of(file, held, filter, null, canonical: false).WithGranules(GeometryOf(held));
+        ScanBuilder scan = Of(file, held, filter, null, canonical: false).WithGranules(GeometryOf(file));
         return _take is null && held.Entry.HasDeletions
             ? await scan.AnyExcludingAsync(held.Entry.Deletions, cancellationToken).ConfigureAwait(false)
             : await scan.AnyAsync(cancellationToken).ConfigureAwait(false);

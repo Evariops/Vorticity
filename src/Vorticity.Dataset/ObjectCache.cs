@@ -16,12 +16,19 @@ namespace Vorticity.Dataset;
 /// side for different objects, and a rent that finds its object being opened waits for that open
 /// rather than starting another.
 /// </summary>
+/// <remarks>
+/// The gate is a lock held for the dictionaries' work alone, never across an await: opens and closes
+/// run outside it. Every rent and return of every question takes it, some 30 s of waiting in a 15 s run
+/// at 32 clients when it was a semaphore, waited for asynchronously by those and synchronously by
+/// <see cref="Holds"/>, whose blocked threads could hold up the continuation of the waiter the
+/// semaphore had passed to (2026-11-08).
+/// </remarks>
 internal sealed class ObjectCache : IAsyncDisposable
 {
     private readonly IObjectStore _store;
     private readonly int _capacity;
     private readonly VortexSession _session;
-    private readonly SemaphoreSlim _gate = new SemaphoreSlim(1, 1);
+    private readonly Lock _gate = new Lock();
     private readonly Dictionary<string, Held> _open = new Dictionary<string, Held>(StringComparer.Ordinal);
     private readonly Dictionary<string, Task<Held>> _opening = new Dictionary<string, Task<Held>>(StringComparer.Ordinal);
     private readonly LinkedList<string> _idle = new LinkedList<string>();
@@ -85,10 +92,10 @@ internal sealed class ObjectCache : IAsyncDisposable
         string handle = HandleOf(entry);
         while (true)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             TaskCompletionSource<Held>? mine = null;
             Task<Held>? theirs;
-            await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
-            try
+            lock (_gate)
             {
                 ObjectDisposedException.ThrowIf(_disposed, this);
                 if (_open.TryGetValue(handle, out Held? held))
@@ -110,10 +117,6 @@ internal sealed class ObjectCache : IAsyncDisposable
                     mine = new TaskCompletionSource<Held>(TaskCreationOptions.RunContinuationsAsynchronously);
                     _opening[handle] = mine.Task;
                 }
-            }
-            finally
-            {
-                _gate.Release();
             }
 
             if (mine is not null)
@@ -144,14 +147,9 @@ internal sealed class ObjectCache : IAsyncDisposable
         }
         catch (Exception failure)
         {
-            await _gate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
-            try
+            lock (_gate)
             {
                 _opening.Remove(handle);
-            }
-            finally
-            {
-                _gate.Release();
             }
 
             opening.TrySetException(failure);
@@ -159,8 +157,7 @@ internal sealed class ObjectCache : IAsyncDisposable
         }
 
         bool disposed;
-        await _gate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
-        try
+        lock (_gate)
         {
             _opening.Remove(handle);
             disposed = _disposed;
@@ -170,10 +167,6 @@ internal sealed class ObjectCache : IAsyncDisposable
                 // order every time would close, at each open, the idle object it rents next.
                 _open[handle] = held;
             }
-        }
-        finally
-        {
-            _gate.Release();
         }
 
         if (disposed)
@@ -238,14 +231,14 @@ internal sealed class ObjectCache : IAsyncDisposable
     }
 
     /// <summary>Gives a lease back; the object stays open until something else needs the room.</summary>
-    internal async ValueTask ReturnAsync(string key)
+    internal ValueTask ReturnAsync(string key)
     {
-        await _gate.WaitAsync().ConfigureAwait(false);
-        try
+        List<Held>? closing;
+        lock (_gate)
         {
             if (!_open.TryGetValue(key, out Held? held))
             {
-                return;
+                return ValueTask.CompletedTask;
             }
 
             held.Leases--;
@@ -254,19 +247,16 @@ internal sealed class ObjectCache : IAsyncDisposable
                 held.Idle = _idle.AddLast(key);
             }
 
-            await EvictAsync().ConfigureAwait(false);
+            closing = Evict();
         }
-        finally
-        {
-            _gate.Release();
-        }
+
+        return closing is null ? ValueTask.CompletedTask : CloseAsync(closing);
     }
 
     public async ValueTask DisposeAsync()
     {
         Task[] opening;
-        await _gate.WaitAsync().ConfigureAwait(false);
-        try
+        lock (_gate)
         {
             if (_disposed)
             {
@@ -276,30 +266,19 @@ internal sealed class ObjectCache : IAsyncDisposable
             _disposed = true;
             opening = [.. _opening.Values];
         }
-        finally
-        {
-            _gate.Release();
-        }
 
-        // An open under way publishes nothing once the cache is disposed: it closes what it opened,
-        // and needs the gate until it has.
+        // An open under way publishes nothing once the cache is disposed: it closes what it opened
+        // before its rents hear of it.
         await Task.WhenAll(opening).ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
-        await _gate.WaitAsync().ConfigureAwait(false);
-        try
+        List<Held> open;
+        lock (_gate)
         {
-            foreach (Held held in _open.Values)
-            {
-                await CloseAsync(held).ConfigureAwait(false);
-            }
-
+            open = [.. _open.Values];
             _open.Clear();
             _idle.Clear();
         }
-        finally
-        {
-            _gate.Release();
-            _gate.Dispose();
-        }
+
+        await CloseAsync(open).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -311,14 +290,9 @@ internal sealed class ObjectCache : IAsyncDisposable
     internal bool Holds(ObjectEntry entry)
     {
         string handle = HandleOf(entry);
-        _gate.Wait();
-        try
+        lock (_gate)
         {
             return _open.ContainsKey(handle) || _opening.ContainsKey(handle);
-        }
-        finally
-        {
-            _gate.Release();
         }
     }
 
@@ -339,20 +313,32 @@ internal sealed class ObjectCache : IAsyncDisposable
     }
 
     /// <summary>
-    /// Closes idle objects, oldest first, until the cache is within its capacity. A cache full of
-    /// leased objects stays over capacity rather than close a file someone is reading: the capacity
+    /// Takes idle objects out, oldest first, until the cache is within its capacity, under the gate:
+    /// those to close, which the caller closes once it has let the gate go; null for none. A cache full
+    /// of leased objects stays over capacity rather than close a file someone is reading: the capacity
     /// is a target, and making it a hard limit would trade bounded memory for unbounded latency.
     /// </summary>
-    private async ValueTask EvictAsync()
+    private List<Held>? Evict()
     {
+        List<Held>? closing = null;
         while (_open.Count > _capacity && _idle.First is { } oldest)
         {
             _idle.RemoveFirst();
             if (_open.Remove(oldest.Value, out Held? held))
             {
                 held.Idle = null;
-                await CloseAsync(held).ConfigureAwait(false);
+                (closing ??= []).Add(held);
             }
+        }
+
+        return closing;
+    }
+
+    private static async ValueTask CloseAsync(List<Held> closing)
+    {
+        foreach (Held held in closing)
+        {
+            await CloseAsync(held).ConfigureAwait(false);
         }
     }
 
@@ -415,6 +401,20 @@ internal sealed class ObjectLease : IAsyncDisposable
     /// </summary>
     internal IReadOnlyList<string> FragmentRefusals { get; init; } = [];
 
+    // The question that keeps what it reads of the file while this lease lasts, told when it ends.
+    private Indexes.QuestionReads? _question;
+
+    /// <summary>
+    /// Makes <paramref name="question"/> keep what it reads of <see cref="File"/> until this lease is given back, and no longer
+    /// (<see cref="Indexes.QuestionReads.Hold"/>): this lease.
+    /// </summary>
+    internal ObjectLease HeldBy(Indexes.QuestionReads question)
+    {
+        question.Hold(File);
+        _question = question;
+        return this;
+    }
+
     public ValueTask DisposeAsync()
     {
         if (_returned)
@@ -423,6 +423,7 @@ internal sealed class ObjectLease : IAsyncDisposable
         }
 
         _returned = true;
+        _question?.Release(File);
         return _giveBack();
     }
 }

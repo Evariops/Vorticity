@@ -170,6 +170,35 @@ The limit is the cores, not the process. Over a 10 Gb/s link, the mixed question
 second from 16 clients on, the link full at about 1 GB/s. Size the clients of a process to its
 physical cores, or to its link when its questions read the store.
 
+## The garbage collector
+
+Which garbage collector the host runs matters as much as its cores. Measured with the paths bench's
+throughput run (`--qps`) over a warm mix of 11 questions on a short store, four hours of spans and
+logs, each question at one lane, on the same 16-core machine:
+
+| clients | workstation GC, q/s | time paused | server GC, q/s | time paused |
+|---|---|---|---|---|
+| 8 | 571-599 | 5 % | 517-527 | 1 % |
+| 16 | 804-824 | 10-11 % | 908-914 | 2 % |
+| 32 | 742-749 | 16-17 % | 856-864 | 3 % |
+
+The workstation collector, a console app's default, collects the youngest generation on one thread
+while every other thread waits. The more questions in flight, the longer each one lasts, the more of
+what it holds is still alive at a collection, and the longer every thread waits: past 16 questions at
+once on 16 cores, the throughput falls. The server collector, an ASP.NET Core app's default, collects
+on every core and pauses the process a fraction as long.
+
+* Run the server collector in a process that answers many questions at once:
+  `<ServerGarbageCollection>true</ServerGarbageCollection>` in the project, or `DOTNET_gcServer=1`.
+  Since .NET 9 it sizes its heaps to the load.
+* Keep the questions a process runs at once near its physical cores when they read local or cached
+  data, with a semaphore or a concurrency limiter (`System.Threading.RateLimiting`): 16 at once answered
+  more than 32 under both collectors. Questions that wait on a remote store want more in flight to hide
+  its latency.
+* A host that keeps the workstation collector can give its youngest generation a larger budget:
+  `DOTNET_GCgen0size=0x8000000` (128 MiB) answered 900 questions a second at 16 clients and 829 at 32,
+  paused 3 % and 7 % of the time.
+
 ## Prefetch
 
 `ScanOptions.Prefetch` is the number of batches decoded ahead of the loop, 1 by default, so that
