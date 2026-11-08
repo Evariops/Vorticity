@@ -182,7 +182,7 @@ internal static class ZonePruningPlan
         if (keysRead is not null && !live.IsEmpty)
         {
             before = Counted(live, scope);
-            (int read, long readBytes) = await RefineByKeysAsync(file, filter, keysRead, live, question, cancellationToken).ConfigureAwait(false);
+            (int read, long readBytes) = await RefineByKeysAsync(file, filter, keysRead, live, cancellationToken).ConfigureAwait(false);
             Scanning.ScanCounters.Note(metrics, read, readBytes);
             if (read > 0)
             {
@@ -490,51 +490,69 @@ internal static class ZonePruningPlan
     /// </summary>
     private static async ValueTask<(int Segments, long Bytes)> RefineByKeysAsync(
         VortexFile file, VortexExpr filter, Dictionary<string, List<(string Key, Types.Variants.PathClass Class)>> keys, BlockMask live,
-        Indexes.QuestionReads? question, CancellationToken cancellationToken)
+        CancellationToken cancellationToken)
     {
         KeyStats? stats = null;
         int segments = 0;
         long bytes = 0;
-        foreach ((string column, List<(string Key, Types.Variants.PathClass Class)> wanted) in keys)
+
+        // The statistics read, their blocks in rented arrays, given back once the blocks are judged.
+        List<Indexes.VariantBlockStats>? held = null;
+        try
         {
-            int field = file.DType.Kind == DTypeKind.Struct ? file.DType.IndexOfField(column) : -1;
-            if (field < 0)
+            foreach ((string column, List<(string Key, Types.Variants.PathClass Class)> wanted) in keys)
             {
-                continue;
-            }
-
-            (Indexes.VariantBlockStats? read, int count, long readBytes) =
-                await Indexes.VariantBlockStats.ReadAsync(file, field, wanted, cancellationToken, question).ConfigureAwait(false);
-            segments += count;
-            bytes += readBytes;
-            if (read is null)
-            {
-                continue;
-            }
-
-            foreach ((string key, Types.Variants.PathClass @class) in wanted)
-            {
-                if (read.IndexOf(key, @class) is int at and >= 0)
+                int field = file.DType.Kind == DTypeKind.Struct ? file.DType.IndexOfField(column) : -1;
+                if (field < 0)
                 {
-                    (stats ??= new KeyStats()).Add(column, key, @class, read.Blocks[at]);
+                    continue;
+                }
+
+                (Indexes.VariantBlockStats? read, int count, long readBytes) =
+                    await Indexes.VariantBlockStats.ReadAsync(file, field, wanted, cancellationToken).ConfigureAwait(false);
+                segments += count;
+                bytes += readBytes;
+                if (read is null)
+                {
+                    continue;
+                }
+
+                (held ??= []).Add(read);
+
+                foreach ((string key, Types.Variants.PathClass @class) in wanted)
+                {
+                    if (read.IndexOf(key, @class) is int at and >= 0)
+                    {
+                        (stats ??= new KeyStats()).Add(column, key, @class, read.Blocks[at]);
+                    }
+                }
+            }
+
+            if (stats is null)
+            {
+                return (segments, bytes);
+            }
+
+            for (int block = 0; block < live.BlockCount; block++)
+            {
+                if (live.IsLive(block) && !BlockMayMatch(filter, stats, block))
+                {
+                    live.Kill(block);
+                }
+            }
+
+            return (segments, bytes);
+        }
+        finally
+        {
+            if (held is not null)
+            {
+                foreach (Indexes.VariantBlockStats read in held)
+                {
+                    read.Dispose();
                 }
             }
         }
-
-        if (stats is null)
-        {
-            return (segments, bytes);
-        }
-
-        for (int block = 0; block < live.BlockCount; block++)
-        {
-            if (live.IsLive(block) && !BlockMayMatch(filter, stats, block))
-            {
-                live.Kill(block);
-            }
-        }
-
-        return (segments, bytes);
     }
 
     /// <summary>
@@ -558,18 +576,18 @@ internal static class ZonePruningPlan
     /// </summary>
     private sealed class KeyStats
     {
-        private readonly Dictionary<(string Column, string Key, Types.Variants.PathClass Class), Indexes.BlockBound[]> _byKey = [];
-        private readonly Dictionary<VariantFieldExpr, (Types.Variants.PathClass Class, Indexes.BlockBound[]? Blocks)> _byPath =
-            new Dictionary<VariantFieldExpr, (Types.Variants.PathClass, Indexes.BlockBound[]?)>(ReferenceEqualityComparer.Instance);
+        private readonly Dictionary<(string Column, string Key, Types.Variants.PathClass Class), ReadOnlyMemory<Indexes.BlockBound>> _byKey = [];
+        private readonly Dictionary<VariantFieldExpr, (Types.Variants.PathClass Class, ReadOnlyMemory<Indexes.BlockBound>? Blocks)> _byPath =
+            new Dictionary<VariantFieldExpr, (Types.Variants.PathClass, ReadOnlyMemory<Indexes.BlockBound>?)>(ReferenceEqualityComparer.Instance);
 
-        internal void Add(string column, string key, Types.Variants.PathClass @class, Indexes.BlockBound[] blocks) => _byKey[(column, key, @class)] = blocks;
+        internal void Add(string column, string key, Types.Variants.PathClass @class, ReadOnlyMemory<Indexes.BlockBound> blocks) => _byKey[(column, key, @class)] = blocks;
 
         /// <summary>The blocks of the key <paramref name="path"/> reads, and its class; null blocks when the statistics do not cover it.</summary>
-        internal (Types.Variants.PathClass Class, Indexes.BlockBound[]? Blocks) Of(VariantFieldExpr path)
+        internal (Types.Variants.PathClass Class, ReadOnlyMemory<Indexes.BlockBound>? Blocks) Of(VariantFieldExpr path)
         {
-            if (!_byPath.TryGetValue(path, out (Types.Variants.PathClass Class, Indexes.BlockBound[]? Blocks) found))
+            if (!_byPath.TryGetValue(path, out (Types.Variants.PathClass Class, ReadOnlyMemory<Indexes.BlockBound>? Blocks) found))
             {
-                found = KeyOf(path) is { } key && _byKey.TryGetValue((path.Column.Path, key.Key, key.Class), out Indexes.BlockBound[]? blocks)
+                found = KeyOf(path) is { } key && _byKey.TryGetValue((path.Column.Path, key.Key, key.Class), out ReadOnlyMemory<Indexes.BlockBound> blocks)
                     ? (key.Class, blocks)
                     : (default, null);
                 _byPath[path] = found;
@@ -625,12 +643,13 @@ internal static class ZonePruningPlan
     {
         holds = false;
         entry = default;
-        (@class, Indexes.BlockBound[]? blocks) = stats.Of(path);
-        if (blocks is null)
+        (@class, ReadOnlyMemory<Indexes.BlockBound>? held) = stats.Of(path);
+        if (held is not { } memory)
         {
             return false;
         }
 
+        ReadOnlySpan<Indexes.BlockBound> blocks = memory.Span;
         int low = 0;
         int high = blocks.Length - 1;
         while (low <= high)

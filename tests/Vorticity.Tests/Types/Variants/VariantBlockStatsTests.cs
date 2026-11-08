@@ -71,33 +71,46 @@ public sealed partial class VariantBlockStatsTests
     }
 
     /// <summary>
-    /// Statistics asked again by the same question for the same keys, in any order: the ones the question kept, nothing
-    /// read; for other keys, or by another question, read again.
+    /// Statistics read lend their blocks from rented arrays, given back when they are disposed: read again after, the same
+    /// blocks, whatever the arrays held before; disposed twice, given back once.
     /// </summary>
     [Fact]
-    public async Task AQuestionKeepsTheStatisticsItReadForItsOtherScans()
+    public async Task StatisticsGiveTheirBlocksBackAndReadTheSameAgain()
     {
         await using VortexFile file = await OpenAsync(await WriteAsync(Rows()));
         int field = file.DType.IndexOfField(nameof(Doc.Attributes));
-        QuestionReads question = new QuestionReads();
-        (VariantBlockStats? first, int read, _) = await VariantBlockStats.ReadAsync(
-            file, field, [("status", PathClass.Integer), ("route", PathClass.String)], Ct, question);
-        Assert.NotNull(first);
-        Assert.True(read > 0);
+        (string, PathClass)[] keys = [("status", PathClass.Integer), ("route", PathClass.String)];
+        List<BlockBound[]> first = [];
+        for (int round = 0; round < 3; round++)
+        {
+            (VariantBlockStats? stats, int read, _) = await VariantBlockStats.ReadAsync(file, field, keys, Ct);
+            Assert.NotNull(stats);
+            Assert.True(read > 0);
+            for (int k = 0; k < stats.Blocks.Count; k++)
+            {
+                BlockBound[] blocks = stats.Blocks[k].ToArray();
+                Assert.NotEmpty(blocks);
+                if (round == 0)
+                {
+                    first.Add(blocks);
+                }
+                else
+                {
+                    Assert.Equal(first[k].Length, blocks.Length);
+                    for (int b = 0; b < blocks.Length; b++)
+                    {
+                        BlockBound was = first[k][b];
+                        BlockBound now = blocks[b];
+                        Assert.Equal((was.Block, was.Values, was.Low, was.High), (now.Block, now.Values, now.Low, now.High));
+                        Assert.Equal(was.MinText, now.MinText);
+                        Assert.Equal(was.MaxText, now.MaxText);
+                    }
+                }
+            }
 
-        (VariantBlockStats? again, int readAgain, long bytesAgain) = await VariantBlockStats.ReadAsync(
-            file, field, [("route", PathClass.String), ("status", PathClass.Integer)], Ct, question);
-        Assert.Same(first, again);
-        Assert.Equal((0, 0L), (readAgain, bytesAgain));
-
-        (VariantBlockStats? other, int readOther, _) = await VariantBlockStats.ReadAsync(file, field, [("status", PathClass.Integer)], Ct, question);
-        Assert.NotSame(first, other);
-        Assert.True(readOther > 0);
-
-        (VariantBlockStats? next, int readNext, _) = await VariantBlockStats.ReadAsync(
-            file, field, [("status", PathClass.Integer), ("route", PathClass.String)], Ct, new QuestionReads());
-        Assert.NotSame(first, next);
-        Assert.Equal(read, readNext);
+            stats.Dispose();
+            stats.Dispose();
+        }
     }
 
     /// <summary>

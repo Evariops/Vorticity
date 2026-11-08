@@ -42,12 +42,11 @@ internal sealed class QuestionReads
         }
     }
 
-    // The path maps and the block statistics of the question's columns, by file, column and the keys read: the two scans of
-    // an object a question reads by its filter, then its rows kept, each read them again, a question of a flag of the log
-    // attributes 24 of each over 12 objects, their regions decompressed (2026-11-08). The keys are a set: the scans name
-    // them in their own orders.
+    // The path maps of the question's columns, by file, column and the keys read: the two scans of an object a question reads
+    // by its filter, then its rows kept, each read them again, a question of a flag of the log attributes 24 over 12 objects,
+    // their regions decompressed (2026-11-08). The keys are a set: the scans name them in their own orders. The block
+    // statistics are not kept: read for a scan's pruning alone, they die with it, in arrays rented for them.
     private Dictionary<Read<string>, VariantPathMap?>? _pathMaps;
-    private Dictionary<Read<(string Key, Types.Variants.PathClass Class)>, VariantBlockStats?>? _blockStats;
 
     /// <summary>The path map of column <paramref name="field"/> of <paramref name="file"/> for the keys <paramref name="wanted"/> (every key under null) the question read, if any.</summary>
     internal bool TryGetPathMap(VortexFile file, int field, IReadOnlyCollection<string>? wanted, out VariantPathMap? map) =>
@@ -56,16 +55,6 @@ internal sealed class QuestionReads
     /// <summary>Keeps <paramref name="map"/>, the path map of column <paramref name="field"/> of <paramref name="file"/> for <paramref name="wanted"/>, for the question's other scans.</summary>
     internal void KeepPathMap(VortexFile file, int field, IReadOnlyCollection<string>? wanted, VariantPathMap? map) =>
         Keep(ref _pathMaps, new Read<string>(file, field, wanted), map);
-
-    /// <summary>The block statistics of column <paramref name="field"/> of <paramref name="file"/> for the keys <paramref name="wanted"/> the question read, if any.</summary>
-    internal bool TryGetBlockStats(
-        VortexFile file, int field, IReadOnlyCollection<(string Key, Types.Variants.PathClass Class)> wanted, out VariantBlockStats? stats) =>
-        TryGet(ref _blockStats, new Read<(string Key, Types.Variants.PathClass Class)>(file, field, wanted), out stats);
-
-    /// <summary>Keeps <paramref name="stats"/>, the block statistics of column <paramref name="field"/> of <paramref name="file"/> for <paramref name="wanted"/>, for the question's other scans.</summary>
-    internal void KeepBlockStats(
-        VortexFile file, int field, IReadOnlyCollection<(string Key, Types.Variants.PathClass Class)> wanted, VariantBlockStats? stats) =>
-        Keep(ref _blockStats, new Read<(string Key, Types.Variants.PathClass Class)>(file, field, wanted), stats);
 
     // The chunks of a file a scan reads its variant columns' keys by, by the columns and their keys: made again at each scan
     // of an object, their keys, chunks and dtypes, from the maps the question keeps.
