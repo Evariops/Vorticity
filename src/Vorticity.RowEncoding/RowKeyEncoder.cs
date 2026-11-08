@@ -469,7 +469,8 @@ public static partial class RowEncoder
             key.Slice(1 + (block * RowWidths.VarBlockTotal), length).CopyTo(value.AsSpan(block * RowWidths.VarBlockData));
         }
 
-        return FilterLiteral.From(value);
+        // The literal over the array made for it: From would copy it again.
+        return FilterLiteral.Owning(value);
     }
 
     /// <summary>

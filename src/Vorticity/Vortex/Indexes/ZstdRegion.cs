@@ -48,6 +48,27 @@ internal static class ZstdRegion
     }
 
     /// <summary>
+    /// The body of region <paramref name="bytes"/> in an array of its own, of its exact length, which a reader keeps and
+    /// slices; null as <see cref="Rent"/> says.
+    /// </summary>
+    internal static byte[]? Decode(ReadOnlySpan<byte> bytes, ulong version)
+    {
+        if (Rent(bytes, version, out int length) is not { } rented)
+        {
+            return null;
+        }
+
+        try
+        {
+            return rented.AsSpan(0, length).ToArray();
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(rented);
+        }
+    }
+
+    /// <summary>
     /// The body of region <paramref name="bytes"/>, its first <paramref name="length"/> bytes of an array of the shared pool,
     /// which the caller gives back; null when the region is at another version than <paramref name="version"/>, claims a
     /// body longer than zstd's most expansion of its frame (<see cref="ZstdDecoders.MostExpansion"/>), which no frame

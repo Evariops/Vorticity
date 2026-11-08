@@ -1,5 +1,8 @@
 using System;
+using System.Collections.Generic;
 using Vorticity.Arrays;
+using Vorticity.Arrays.Decoders.Compressed;
+using Vorticity.Expressions;
 using Vorticity.Types;
 using Xunit;
 
@@ -211,6 +214,95 @@ public sealed class RunEndDecoderTests
         {
             Assert.Equal(Math.Min(i / 7, runs - 1), decoded[i]);
         }
+    }
+
+    /// <summary>
+    /// A predicate the runs answer, spread over their rows a 64-bit word at a time: the rows it selects and the rows it
+    /// knows are those the rows' values say under three-valued logic, a null run unknown, over runs of one row to a few
+    /// words, ends on and off the words' edges, and a slice of the runs that starts and stops inside them.
+    /// </summary>
+    [Fact]
+    public void ARunsVerdictsSpreadOverTheirRowsAsTheRowsSay()
+    {
+        Random random = new Random(1108);
+        int answered = 0;
+        for (int round = 0; round < 400; round++)
+        {
+            // Runs of 1 to 5 rows mostly, now and then of 60 to 200, a value in 1..3 or null for each.
+            List<uint> ends = [];
+            List<int> values = [];
+            List<bool> valid = [];
+            uint end = 0;
+            int runs = random.Next(1, 40);
+            for (int run = 0; run < runs; run++)
+            {
+                end += (uint)(random.Next(8) == 0 ? random.Next(60, 200) : random.Next(1, 6));
+                ends.Add(end);
+                values.Add(random.Next(1, 4));
+                valid.Add(round % 5 == 0 || random.Next(3) != 0);
+            }
+
+            int offset = random.Next(0, (int)ends[0]);
+            int length = random.Next(1, (int)end - offset + 1);
+            TestNode root = new TestNode("vortex.runend")
+                .WithMetadata(TestMetadata.RunEnd(PType.U32, (ulong)runs, (ulong)offset))
+                .WithChild(new TestNode("vortex.primitive").WithBuffer(0))
+                .WithChild(new TestNode("vortex.primitive").WithBuffer(1).WithChild(new TestNode("vortex.bool").WithBuffer(2)));
+            using DecodeHarness harness = DecodeHarness.Load(
+                root, TestBuffers.UInt32([.. ends]), TestBuffers.Int32([.. values]), TestBuffers.Bitmap([.. valid]));
+            DType i32 = harness.Types.Primitive(PType.I32, Nullability.Nullable);
+
+            (ComparisonOp Op, int Value)[] predicates = [(ComparisonOp.Equal, 2), (ComparisonOp.NotEqual, 2), (ComparisonOp.Greater, 1)];
+            foreach ((ComparisonOp op, int value) in predicates)
+            {
+                ulong[] truth = new ulong[Vorticity.Compute.PredicateBits.WordsOf(length)];
+                ulong[] known = new ulong[truth.Length];
+                Vorticity.Compute.PredicateBits bits = new Vorticity.Compute.PredicateBits(truth, known, length);
+                ArrayNode node = harness.Scan.Nodes.Root;
+                if (!RunEndDecoder.Instance.TryEvaluate(
+                    harness.Scan.Decode, in node, i32, length, Vorticity.Compute.EncodedPredicate.Compare(op, FilterLiteral.From((long)value)), ref bits))
+                {
+                    // A node of as many runs as rows has nothing to spare, and is declined.
+                    Assert.True(runs >= length, $"round {round}: {runs} runs over {length} rows declined");
+                    continue;
+                }
+
+                answered++;
+                bool anyUnknown = false;
+                int at = 0;
+                for (int row = 0; row < length; row++)
+                {
+                    while (ends[at] <= (uint)(offset + row))
+                    {
+                        at++;
+                    }
+
+                    bool isKnown = valid[at];
+                    bool selected = isKnown && op switch
+                    {
+                        ComparisonOp.Equal => values[at] == value,
+                        ComparisonOp.NotEqual => values[at] != value,
+                        _ => values[at] > value,
+                    };
+
+                    anyUnknown |= !isKnown;
+                    string where = $"round {round}, {op} {value}, row {row} of {length}, offset {offset}";
+                    Assert.True(selected == ((truth[row >> 6] >> row & 1) != 0), where);
+                    if (bits.Unknown)
+                    {
+                        Assert.True(isKnown == ((known[row >> 6] >> row & 1) != 0), where);
+                    }
+                }
+
+                Assert.Equal(anyUnknown, bits.Unknown);
+                if ((length & 63) != 0)
+                {
+                    Assert.Equal(0UL, truth[^1] >> length);
+                }
+            }
+        }
+
+        Assert.True(answered >= 900, $"{answered} of 1200 predicates answered");
     }
 
     private static TestNode Node(byte[] metadata) =>

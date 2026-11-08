@@ -295,6 +295,13 @@ internal sealed class ChunkBlockBounds
 }
 
 /// <summary>
+/// One block's values of a shredded key in a file's block statistics: the block, its values counted, and their bounds as the
+/// key's class holds them, a number's least and greatest, a boolean's values seen, or a text's least and greatest cut to the
+/// bound, the greatest null when none is above every text.
+/// </summary>
+internal readonly record struct BlockBound(int Block, long Values, long Low, long High, byte[]? MinText, byte[]? MaxText);
+
+/// <summary>
 /// The block statistics of a variant column's shredded keys: per key and class, for each block of the
 /// file that holds a value of it, the count and bounds of those values, what a zone map gives a
 /// declared column. An entry of the index directory, <see cref="IndexKinds.VariantBlocks"/>, on the
@@ -322,7 +329,7 @@ internal sealed class VariantBlockStats
     // The regions of statistics built to be written, a key's each, encoded once.
     private readonly byte[][]? _regions;
 
-    internal VariantBlockStats(IReadOnlyList<(string Key, PathClass Class)> keys, IReadOnlyList<(int Block, PathEntry Entry)[]> blocks)
+    internal VariantBlockStats(IReadOnlyList<(string Key, PathClass Class)> keys, IReadOnlyList<BlockBound[]> blocks)
     {
         Keys = keys;
         Blocks = blocks;
@@ -331,7 +338,7 @@ internal sealed class VariantBlockStats
     /// <summary>Statistics built to be written: the keys and classes, and each one's region (<see cref="KeyBytes"/>).</summary>
     private VariantBlockStats(IReadOnlyList<(string Key, PathClass Class)> keys, byte[][] regions)
     {
-        (int Block, PathEntry Entry)[][] none = new (int, PathEntry)[regions.Length][];
+        BlockBound[][] none = new BlockBound[regions.Length][];
         Array.Fill(none, []);
         Keys = keys;
         Blocks = none;
@@ -345,7 +352,7 @@ internal sealed class VariantBlockStats
     /// Per key and class, its blocks that hold a value in the file's order, each its count and bounds; empty for a region
     /// not read, and for statistics built to be written, which hold their regions instead.
     /// </summary>
-    internal IReadOnlyList<(int Block, PathEntry Entry)[]> Blocks { get; }
+    internal IReadOnlyList<BlockBound[]> Blocks { get; }
 
     /// <summary>Which of the keys and classes is <paramref name="key"/> of <paramref name="class"/>, or -1.</summary>
     internal int IndexOf(string key, PathClass @class)
@@ -447,8 +454,12 @@ internal sealed class VariantBlockStats
         }
     }
 
-    /// <summary>The blocks of a key of <paramref name="class"/> its region <paramref name="bytes"/> holds, or null when they do not decode.</summary>
-    internal static (int Block, PathEntry Entry)[]? KeyFrom(ReadOnlySpan<byte> bytes, string key, PathClass @class)
+    /// <summary>The blocks of a key its region <paramref name="bytes"/> holds, or null when they do not decode.</summary>
+    /// <remarks>
+    /// A block is a struct of its number, count and bounds in one array, where it was an entry of a path directory of its
+    /// own, a record of ten fields, read at every question: 15 % of what a question on a log attribute allocated (2026-11-08).
+    /// </remarks>
+    internal static BlockBound[]? KeyFrom(ReadOnlySpan<byte> bytes)
     {
         if (ZstdRegion.Rent(bytes, Version, out int length) is not { } plain)
         {
@@ -464,8 +475,7 @@ internal sealed class VariantBlockStats
                 return null;
             }
 
-            string[] path = [key];
-            (int, PathEntry)[] blocks = new (int, PathEntry)[(int)count];
+            BlockBound[] blocks = new BlockBound[(int)count];
             int block = 0;
             for (int i = 0; i < blocks.Length; i++)
             {
@@ -476,7 +486,7 @@ internal sealed class VariantBlockStats
                 ulong flags = reader.ReadVarint();
                 byte[]? min = (flags & 1) != 0 ? reader.ReadLengthDelimited().ToArray() : null;
                 byte[]? max = (flags & 2) != 0 ? reader.ReadLengthDelimited().ToArray() : null;
-                blocks[i] = (block, new PathEntry(path, @class, values, PathPlace.Typed, low, high, false, min, max));
+                blocks[i] = new BlockBound(block, values, low, high, min, max);
             }
 
             return reader.End ? blocks : null;
@@ -509,56 +519,97 @@ internal sealed class VariantBlockStats
         foreach (IndexEntry entry in directory.Entries)
         {
             if (entry.Kind != IndexKinds.VariantBlocks || entry.ColumnPath is not [uint column] || column != (uint)field
-                || entry.Runs is not [IndexRun run] || OptionsFrom(entry.Options) is not { } keys || run.Payload.Count != keys.Length)
+                || entry.Runs is not [IndexRun run] || WantedFrom(entry.Options, wanted, run.Payload.Count) is not { } found)
             {
                 continue;
             }
 
-            (int, PathEntry)[][] blocks = new (int, PathEntry)[keys.Length][];
-            using Vorticity.IO.SegmentRequestSet requests = new Vorticity.IO.SegmentRequestSet(run.Payload.Count);
-            int[] slots = new int[keys.Length];
-            long bytes = 0;
-            for (int key = 0; key < keys.Length; key++)
-            {
-                blocks[key] = [];
-                IndexSegment region = run.Payload[key];
-                // By index: a foreach over the list boxes its enumerator, once for each key of the object.
-                bool asked = false;
-                for (int w = 0; w < wanted.Count; w++)
-                {
-                    asked |= wanted[w].Class == keys[key].Class && string.Equals(wanted[w].Key, keys[key].Key, StringComparison.Ordinal);
-                }
-
-                slots[key] = asked ? requests.Add(new Vorticity.Serialization.Schemas.SegmentSpec(region.Offset, region.Length, region.AlignmentExponent, 0, 0)) : -1;
-                bytes += asked ? region.Length : 0;
-            }
-
-            if (requests.Count == 0)
+            // The keys wanted the statistics hold, alone: the options name every key the column's statistics keep, and each
+            // made a string at every question allocated more than the statistics read.
+            (string, PathClass)[] keys = new (string, PathClass)[found.Count];
+            BlockBound[][] blocks = new BlockBound[found.Count][];
+            if (found.Count == 0)
             {
                 return (new VariantBlockStats(keys, blocks), 0, 0);
             }
 
-            await file.Segments.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
-            for (int key = 0; key < keys.Length; key++)
+            using Vorticity.IO.SegmentRequestSet requests = new Vorticity.IO.SegmentRequestSet(found.Count);
+            long bytes = 0;
+            for (int k = 0; k < found.Count; k++)
             {
-                if (slots[key] < 0)
-                {
-                    continue;
-                }
+                keys[k] = (found[k].Key, found[k].Class);
+                IndexSegment region = run.Payload[found[k].Place];
+                requests.Add(new Vorticity.Serialization.Schemas.SegmentSpec(region.Offset, region.Length, region.AlignmentExponent, 0, 0));
+                bytes += region.Length;
+            }
 
-                ReadOnlySpan<byte> region = requests.GetBuffer(slots[key]).Span;
-                if (!run.Payload[key].Holds(region) || KeyFrom(region, keys[key].Key, keys[key].Class) is not { } read)
+            await file.Segments.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
+            for (int k = 0; k < found.Count; k++)
+            {
+                ReadOnlySpan<byte> region = requests.GetBuffer(k).Span;
+                if (!run.Payload[found[k].Place].Holds(region) || KeyFrom(region) is not { } read)
                 {
                     return (null, requests.Count, bytes);
                 }
 
-                blocks[key] = read;
+                blocks[k] = read;
             }
 
             return (new VariantBlockStats(keys, blocks), requests.Count, bytes);
         }
 
         return (null, 0, 0);
+    }
+
+    /// <summary>
+    /// The keys of <paramref name="wanted"/> the options <paramref name="bytes"/> hold, each its place among them, in their
+    /// order there, compared by their bytes as they lie; null when the options do not decode, or name other than
+    /// <paramref name="regions"/> keys.
+    /// </summary>
+    private static List<(string Key, PathClass Class, int Place)>? WantedFrom(
+        ReadOnlySpan<byte> bytes, IReadOnlyList<(string Key, PathClass Class)> wanted, int regions)
+    {
+        try
+        {
+            ProtoReader reader = new ProtoReader(bytes);
+            if (reader.ReadVarint() != Version)
+            {
+                return null;
+            }
+
+            ulong count = reader.ReadVarint();
+            if (count > (ulong)bytes.Length || count != (ulong)regions)
+            {
+                return null;
+            }
+
+            List<(string, PathClass, int)> found = [];
+            for (int place = 0; place < (int)count; place++)
+            {
+                ReadOnlySpan<byte> key = reader.ReadLengthDelimited();
+                ulong @class = reader.ReadVarint();
+                if (@class > (ulong)PathClass.Other)
+                {
+                    return null;
+                }
+
+                // By index: a foreach over the list boxes its enumerator, once for each key of the object.
+                for (int w = 0; w < wanted.Count; w++)
+                {
+                    if (wanted[w].Class == (PathClass)@class && Buffers.ByteKeys.SameText(key, wanted[w].Key))
+                    {
+                        found.Add((wanted[w].Key, (PathClass)@class, place));
+                        break;
+                    }
+                }
+            }
+
+            return reader.End ? found : null;
+        }
+        catch (VortexFormatException)
+        {
+            return null;
+        }
     }
 
     /// <summary>

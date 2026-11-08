@@ -28,7 +28,7 @@ internal static class VariantPathReader
         ArgumentNullException.ThrowIfNull(context);
         ArgumentNullException.ThrowIfNull(file);
         ArgumentNullException.ThrowIfNull(chunk);
-        DType dtype = DTypeProtobuf.Read(chunk.DType, context.Types);
+        DType dtype = DTypeProtobuf.Read(chunk.DType.Span, context.Types);
         Buffers.VortexBuffer segment = default;
         if (chunk.Length > 0)
         {
@@ -37,7 +37,7 @@ internal static class VariantPathReader
             segment = context.Segments.GetBuffer(slot);
         }
 
-        context.Decode.LoadBlob(chunk.Tree, segment);
+        context.Decode.LoadBlob(chunk.Tree.Span, segment);
         ArrayNode root = context.Nodes.Root;
         return (context.Decode.DecodeRoot(in root, dtype, checked((int)chunk.Rows)), dtype);
     }

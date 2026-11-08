@@ -488,7 +488,7 @@ internal static class ZonePruningPlan
         VortexFile file, VortexExpr filter, Dictionary<string, List<(string Key, Types.Variants.PathClass Class)>> keys, BlockMask live,
         CancellationToken cancellationToken)
     {
-        Dictionary<(string Column, string Key, Types.Variants.PathClass Class), (int Block, Indexes.PathEntry Entry)[]>? stats = null;
+        KeyStats? stats = null;
         int segments = 0;
         long bytes = 0;
         foreach ((string column, List<(string Key, Types.Variants.PathClass Class)> wanted) in keys)
@@ -512,7 +512,7 @@ internal static class ZonePruningPlan
             {
                 if (read.IndexOf(key, @class) is int at and >= 0)
                 {
-                    (stats ??= [])[(column, key, @class)] = read.Blocks[at];
+                    (stats ??= new KeyStats()).Add(column, key, @class, read.Blocks[at]);
                 }
             }
         }
@@ -538,36 +538,61 @@ internal static class ZonePruningPlan
     /// block statistics in <paramref name="stats"/>: a key they cover with no entry for the block holds
     /// no value of its class there.
     /// </summary>
-    private static bool BlockMayMatch(
-        VortexExpr filter, Dictionary<(string Column, string Key, Types.Variants.PathClass Class), (int Block, Indexes.PathEntry Entry)[]> stats, int block) =>
+    private static bool BlockMayMatch(VortexExpr filter, KeyStats stats, int block) =>
         VariantFilters.MayMatch(filter, new BlockJudge(stats, block));
 
     /// <summary>The block statistics' answer for one fenced predicate in one block.</summary>
-    private readonly struct BlockJudge(
-        Dictionary<(string Column, string Key, Types.Variants.PathClass Class), (int Block, Indexes.PathEntry Entry)[]> stats, int block) : IFencedJudge
+    private readonly struct BlockJudge(KeyStats stats, int block) : IFencedJudge
     {
         public bool MayMatch(VortexExpr predicate) => BlockMayMatchFenced(predicate, stats, block);
     }
 
+    /// <summary>
+    /// The block statistics of the keys a filter reads, by column, key and class; and by the path of a predicate that reads
+    /// one, found the first time a block's judge asks for it: the judge asks each path of each predicate at every live block,
+    /// which hashed the column's name and the key's each time.
+    /// </summary>
+    private sealed class KeyStats
+    {
+        private readonly Dictionary<(string Column, string Key, Types.Variants.PathClass Class), Indexes.BlockBound[]> _byKey = [];
+        private readonly Dictionary<VariantFieldExpr, (Types.Variants.PathClass Class, Indexes.BlockBound[]? Blocks)> _byPath =
+            new Dictionary<VariantFieldExpr, (Types.Variants.PathClass, Indexes.BlockBound[]?)>(ReferenceEqualityComparer.Instance);
+
+        internal void Add(string column, string key, Types.Variants.PathClass @class, Indexes.BlockBound[] blocks) => _byKey[(column, key, @class)] = blocks;
+
+        /// <summary>The blocks of the key <paramref name="path"/> reads, and its class; null blocks when the statistics do not cover it.</summary>
+        internal (Types.Variants.PathClass Class, Indexes.BlockBound[]? Blocks) Of(VariantFieldExpr path)
+        {
+            if (!_byPath.TryGetValue(path, out (Types.Variants.PathClass Class, Indexes.BlockBound[]? Blocks) found))
+            {
+                found = KeyOf(path) is { } key && _byKey.TryGetValue((path.Column.Path, key.Key, key.Class), out Indexes.BlockBound[]? blocks)
+                    ? (key.Class, blocks)
+                    : (default, null);
+                _byPath[path] = found;
+            }
+
+            return found;
+        }
+    }
+
     /// <summary>Whether block <paramref name="block"/> may hold a row matching the fenced <paramref name="predicate"/>, by <paramref name="stats"/>.</summary>
-    private static bool BlockMayMatchFenced(
-        VortexExpr predicate, Dictionary<(string Column, string Key, Types.Variants.PathClass Class), (int Block, Indexes.PathEntry Entry)[]> stats, int block)
+    private static bool BlockMayMatchFenced(VortexExpr predicate, KeyStats stats, int block)
     {
         switch (predicate)
         {
             case ComparisonExpr { Field: VariantFieldExpr path } comparison:
-                return Entry(path, stats, block, out Indexes.PathEntry? entry) is not true
-                    || (entry is not null && Indexes.VariantDirectory.Within(entry, comparison.Op, comparison.Value));
+                return !Entry(path, stats, block, out Types.Variants.PathClass @class, out bool holds, out Indexes.BlockBound entry)
+                    || (holds && Within(@class, entry, comparison.Op, comparison.Value));
             case InExpr { Field: VariantFieldExpr path } membership:
             {
-                if (Entry(path, stats, block, out Indexes.PathEntry? member) is not true)
+                if (!Entry(path, stats, block, out Types.Variants.PathClass memberClass, out bool memberHolds, out Indexes.BlockBound member))
                 {
                     return true;
                 }
 
                 foreach (FilterLiteral literal in membership.Literals)
                 {
-                    if (member is not null && Indexes.VariantDirectory.Within(member, ComparisonOp.Equal, literal))
+                    if (memberHolds && Within(memberClass, member, ComparisonOp.Equal, literal))
                     {
                         return true;
                     }
@@ -577,19 +602,27 @@ internal static class ZonePruningPlan
             }
 
             case NullCheckExpr { Field: VariantFieldExpr path, IsNull: false }:
-                return Entry(path, stats, block, out Indexes.PathEntry? held) is not true || held is not null;
+                return !Entry(path, stats, block, out _, out bool held, out _) || held;
             default:
                 return true;
         }
     }
 
-    /// <summary>Whether the statistics cover <paramref name="path"/>, and its entry for <paramref name="block"/>, null when the block holds none of its values.</summary>
+    /// <summary>Whether a value of <paramref name="class"/> within <paramref name="entry"/>'s bounds may compare to <paramref name="value"/> by <paramref name="op"/>.</summary>
+    private static bool Within(Types.Variants.PathClass @class, in Indexes.BlockBound entry, ComparisonOp op, FilterLiteral value) =>
+        Indexes.VariantDirectory.Within(@class, entry.Low, entry.High, nans: false, entry.MinText, entry.MaxText, op, value);
+
+    /// <summary>
+    /// Whether the statistics cover <paramref name="path"/>; and when they do, whether block <paramref name="block"/> holds
+    /// values of it (<paramref name="holds"/>), <paramref name="entry"/> then its bounds, and the key's class.
+    /// </summary>
     private static bool Entry(
-        VariantFieldExpr path, Dictionary<(string Column, string Key, Types.Variants.PathClass Class), (int Block, Indexes.PathEntry Entry)[]> stats,
-        int block, out Indexes.PathEntry? entry)
+        VariantFieldExpr path, KeyStats stats, int block, out Types.Variants.PathClass @class, out bool holds, out Indexes.BlockBound entry)
     {
-        entry = null;
-        if (KeyOf(path) is not { } key || !stats.TryGetValue((path.Column.Path, key.Key, key.Class), out (int Block, Indexes.PathEntry Entry)[]? blocks))
+        holds = false;
+        entry = default;
+        (@class, Indexes.BlockBound[]? blocks) = stats.Of(path);
+        if (blocks is null)
         {
             return false;
         }
@@ -602,7 +635,8 @@ internal static class ZonePruningPlan
             int at = blocks[middle].Block;
             if (at == block)
             {
-                entry = blocks[middle].Entry;
+                entry = blocks[middle];
+                holds = true;
                 break;
             }
 

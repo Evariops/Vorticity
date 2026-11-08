@@ -57,6 +57,63 @@ public sealed class SegmentCacheTests
         }
     }
 
+    /// <summary>
+    /// A set whose every segment the cache holds reads nothing and waits for no read in flight: completed where it is
+    /// asked, with every permit of the session's reads taken by others and its source untouched.
+    /// </summary>
+    [Fact]
+    public async Task ASetTheCacheServesWholeTakesNoPermitAndReadsNothing()
+    {
+        byte[] content = Pattern(40_000);
+        using TempFile file = new TempFile(content);
+        SegmentCache cache = new SegmentCache(1 << 20);
+        await using VortexSession session = VortexSession.Create(options =>
+        {
+            options.SegmentCache = cache;
+            options.MaxConcurrentReads = 1;
+        });
+        CountingSegmentSource source = new CountingSegmentSource(new FileSegmentSource(file.Path_));
+        ISegmentReader reader = SessionReader.Wrap(source, session);
+        try
+        {
+            using (SegmentRequestSet first = new SegmentRequestSet())
+            {
+                for (int i = 0; i < 3; i++)
+                {
+                    first.Add(Spec((ulong)(i * 8_192), 1_000));
+                }
+
+                await reader.ReadManyAsync(first, CancellationToken.None);
+            }
+
+            long requests = source.Requests;
+            await session.ReadGate.WaitAsync(TestContext.Current.CancellationToken);
+            try
+            {
+                using SegmentRequestSet again = new SegmentRequestSet();
+                for (int i = 0; i < 3; i++)
+                {
+                    again.Add(Spec((ulong)(i * 8_192), 1_000));
+                }
+
+                ValueTask read = reader.ReadManyAsync(again, CancellationToken.None);
+                Assert.True(read.IsCompletedSuccessfully);
+                await read;
+                Assert.True(again.IsPopulated);
+                Assert.Equal(requests, source.Requests);
+                Assert.True(again.GetBuffer(2).Span.SequenceEqual(content.AsSpan(16_384, 1_000)));
+            }
+            finally
+            {
+                session.ReadGate.Release();
+            }
+        }
+        finally
+        {
+            await reader.DisposeAsync();
+        }
+    }
+
     [Fact]
     public async Task ASlotFilledBeforeTheReadIsNotKept()
     {

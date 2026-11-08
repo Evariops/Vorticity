@@ -22,7 +22,7 @@ namespace Vorticity.Indexes;
 /// <param name="Rows">The chunk's rows.</param>
 /// <param name="DType">The path's dtype in the chunk, a message of the format's dtype: its typed column's, or a variant's when it kept values of its own.</param>
 /// <param name="Tree">The path's <c>Array</c> FlatBuffer, its buffers counted from <paramref name="Offset"/>.</param>
-internal sealed record PathChunk(ulong Offset, uint Length, byte AlignmentExponent, long FirstRow, long Rows, byte[] DType, byte[] Tree)
+internal sealed record PathChunk(ulong Offset, uint Length, byte AlignmentExponent, long FirstRow, long Rows, ReadOnlyMemory<byte> DType, ReadOnlyMemory<byte> Tree)
 {
     internal long EndRow => FirstRow + Rows;
 }
@@ -54,19 +54,64 @@ internal sealed class VariantPathMap
 
     internal VariantPathMap(IReadOnlyList<string> encodings, IReadOnlyList<string> keys, IReadOnlyList<PathChunk[]> chunks)
     {
-        Encodings = encodings;
-        Keys = keys;
+        _encodings = encodings;
+        _keys = keys;
+        Chunks = chunks;
+        _wanted = [];
+    }
+
+    /// <summary>A map read from a file: its options kept as they lie, the keys wanted found among them by their bytes.</summary>
+    private VariantPathMap(byte[] options, (string Key, int Place)[] wanted, IReadOnlyList<PathChunk[]> chunks)
+    {
+        _options = options;
+        _wanted = wanted;
         Chunks = chunks;
     }
 
+    // A map read keeps its options' bytes and makes strings of them only when asked for every key or encoding: a question
+    // asks a key or two of each object, and the names of every key and encoding made at each one were a quarter of what a
+    // question on a log attribute allocated (2026-11-08).
+    private readonly byte[]? _options;
+    private IReadOnlyList<string>? _encodings;
+    private IReadOnlyList<string>? _keys;
+    private readonly (string Key, int Place)[] _wanted;
+
     /// <summary>The array encodings of the file, in the order the trees name them.</summary>
-    internal IReadOnlyList<string> Encodings { get; }
+    internal IReadOnlyList<string> Encodings => _encodings ??= OptionsFrom(_options)!.Value.Encodings;
 
     /// <summary>The shredded keys of the column, in their order in its tree.</summary>
-    internal IReadOnlyList<string> Keys { get; }
+    internal IReadOnlyList<string> Keys => _keys ??= OptionsFrom(_options)!.Value.Keys;
 
     /// <summary>Per key, its chunks in row order; empty for a region not read yet.</summary>
     internal IReadOnlyList<PathChunk[]> Chunks { get; }
+
+    /// <summary>The place among <see cref="Keys"/> of <paramref name="key"/>, the last of equal ones; -1 for none.</summary>
+    /// <remarks>A key the read wanted, found or not, is answered from the walk of the options, with no string made of the others.</remarks>
+    internal int IndexOf(string key)
+    {
+        for (int w = 0; w < _wanted.Length; w++)
+        {
+            if (string.Equals(_wanted[w].Key, key, StringComparison.Ordinal))
+            {
+                return _wanted[w].Place;
+            }
+        }
+
+        return LastIndexOf(Keys, key);
+    }
+
+    private static int LastIndexOf(IReadOnlyList<string> keys, string key)
+    {
+        for (int i = keys.Count - 1; i >= 0; i--)
+        {
+            if (string.Equals(keys[i], key, StringComparison.Ordinal))
+            {
+                return i;
+            }
+        }
+
+        return -1;
+    }
 
     /// <summary>The entry's options: the encodings, then the keys, each its length and its bytes, behind a version byte.</summary>
     internal byte[] OptionBytes()
@@ -106,9 +151,9 @@ internal sealed class VariantPathMap
                 writer.WriteVarint(chunk.Length);
                 writer.WriteVarint(chunk.AlignmentExponent);
                 writer.WriteVarint((ulong)chunk.DType.Length);
-                writer.WriteRawBytes(chunk.DType);
+                writer.WriteRawBytes(chunk.DType.Span);
                 writer.WriteVarint((ulong)chunk.Tree.Length);
-                writer.WriteRawBytes(chunk.Tree);
+                writer.WriteRawBytes(chunk.Tree.Span);
             }
 
             return writer.WrittenSpan.ToArray();
@@ -117,6 +162,71 @@ internal sealed class VariantPathMap
         {
             writer.Dispose();
         }
+    }
+
+    /// <summary>
+    /// The places among the keys the options <paramref name="bytes"/> hold of each of <paramref name="wanted"/>'s keys, the last
+    /// of equal ones, -1 for a key they lack, compared by their bytes as they lie; and the count of their keys. Null when the
+    /// options do not decode.
+    /// </summary>
+    private static ((string Key, int Place)[] Wanted, int Keys)? WantedFrom(ReadOnlySpan<byte> bytes, IReadOnlyCollection<string>? wanted)
+    {
+        try
+        {
+            ProtoReader reader = new ProtoReader(bytes);
+            if (reader.ReadVarint() != Version || !Skip(ref reader, bytes.Length))
+            {
+                return null;
+            }
+
+            (string Key, int Place)[] found = wanted is null ? [] : new (string, int)[wanted.Count];
+            int w = 0;
+            foreach (string key in wanted ?? [])
+            {
+                found[w++] = (key, -1);
+            }
+
+            ulong count = reader.ReadVarint();
+            if (count > (ulong)bytes.Length)
+            {
+                return null;
+            }
+
+            for (int place = 0; place < (int)count; place++)
+            {
+                ReadOnlySpan<byte> key = reader.ReadLengthDelimited();
+                for (int k = 0; k < found.Length; k++)
+                {
+                    if (Buffers.ByteKeys.SameText(key, found[k].Key))
+                    {
+                        found[k].Place = place;
+                    }
+                }
+            }
+
+            return reader.End ? (found, (int)count) : null;
+        }
+        catch (VortexFormatException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>Steps over a list of strings as <see cref="Strings(ref ProtoWriter, IReadOnlyList{string})"/> writes it; false when it does not decode.</summary>
+    private static bool Skip(ref ProtoReader reader, int bound)
+    {
+        ulong count = reader.ReadVarint();
+        if (count > (ulong)bound)
+        {
+            return false;
+        }
+
+        for (ulong i = 0; i < count; i++)
+        {
+            reader.ReadLengthDelimited();
+        }
+
+        return true;
     }
 
     /// <summary>The encodings and keys the options <paramref name="bytes"/> hold, or null when they do not decode.</summary>
@@ -141,28 +251,19 @@ internal sealed class VariantPathMap
     }
 
     /// <summary>The chunks a key's region <paramref name="bytes"/> holds, or null when they do not decode.</summary>
-    internal static PathChunk[]? KeyFrom(ReadOnlySpan<byte> bytes)
-    {
-        if (ZstdRegion.Rent(bytes, Version, out int length) is not { } body)
-        {
-            return null;
-        }
+    internal static PathChunk[]? KeyFrom(ReadOnlySpan<byte> bytes) =>
+        ZstdRegion.Decode(bytes, Version) is { } body ? BodyFrom(body) : null;
 
-        try
-        {
-            return BodyFrom(body.AsSpan(0, length));
-        }
-        finally
-        {
-            System.Buffers.ArrayPool<byte>.Shared.Return(body);
-        }
-    }
-
-    /// <summary>The chunks a key's body holds, or null when they do not decode.</summary>
-    private static PathChunk[]? BodyFrom(ReadOnlySpan<byte> bytes)
+    /// <summary>
+    /// The chunks a key's body holds, each chunk's dtype and tree slices of the body, which they keep: two arrays a chunk
+    /// copied out of a body given back to the pool were a twentieth of what the mix of questions allocated (2026-11-08).
+    /// Null when they do not decode.
+    /// </summary>
+    private static PathChunk[]? BodyFrom(byte[] body)
     {
         try
         {
+            ReadOnlySpan<byte> bytes = body;
             ProtoReader reader = new ProtoReader(bytes);
             ulong count = reader.ReadVarint();
             if (count > (ulong)bytes.Length)
@@ -178,8 +279,8 @@ internal sealed class VariantPathMap
                 ulong offset = reader.ReadVarint();
                 uint length = checked((uint)reader.ReadVarint());
                 byte alignment = checked((byte)reader.ReadVarint());
-                byte[] dtype = reader.ReadLengthDelimited().ToArray();
-                byte[] tree = reader.ReadLengthDelimited().ToArray();
+                ReadOnlyMemory<byte> dtype = Slice(body, reader.ReadLengthDelimited(), reader.Remaining);
+                ReadOnlyMemory<byte> tree = Slice(body, reader.ReadLengthDelimited(), reader.Remaining);
                 chunks[i] = new PathChunk(offset, length, alignment, first, rows, dtype, tree);
             }
 
@@ -191,13 +292,17 @@ internal sealed class VariantPathMap
         }
     }
 
+    /// <summary>The place of <paramref name="field"/>, which ends <paramref name="remaining"/> bytes before the end of <paramref name="body"/>, as a slice of it.</summary>
+    private static ReadOnlyMemory<byte> Slice(byte[] body, ReadOnlySpan<byte> field, int remaining) =>
+        body.AsMemory(body.Length - remaining - field.Length, field.Length);
+
     /// <summary>
     /// The map of the variant column at top-level field <paramref name="field"/> of <paramref name="file"/>,
-    /// its regions read for the keys <paramref name="wanted"/> only; null when the file carries none,
-    /// or one that does not decode.
+    /// its regions read for the keys <paramref name="wanted"/> only, or for every key under null; null when
+    /// the file carries none, or one that does not decode.
     /// </summary>
     internal static async ValueTask<VariantPathMap?> ReadAsync(
-        VortexFile file, int field, IReadOnlyCollection<string> wanted, CancellationToken cancellationToken)
+        VortexFile file, int field, IReadOnlyCollection<string>? wanted, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(file);
         IndexDirectory? directory = await file.ReadIndexDirectoryAsync(cancellationToken).ConfigureAwait(false);
@@ -209,26 +314,35 @@ internal sealed class VariantPathMap
         foreach (IndexEntry entry in directory.Entries)
         {
             if (entry.Kind != IndexKinds.VariantPaths || entry.ColumnPath is not [uint column] || column != (uint)field
-                || entry.Runs is not [IndexRun run] || OptionsFrom(entry.Options) is not { } options
-                || run.Payload.Count != options.Keys.Length)
+                || entry.Runs is not [IndexRun run] || entry.Options is not { } optionBytes || WantedFrom(optionBytes, wanted) is not { } options
+                || run.Payload.Count != options.Keys)
             {
                 continue;
             }
 
-            PathChunk[][] chunks = new PathChunk[options.Keys.Length][];
-            using Vorticity.IO.SegmentRequestSet requests = new Vorticity.IO.SegmentRequestSet(run.Payload.Count);
-            int[] slots = new int[options.Keys.Length];
-            for (int key = 0; key < options.Keys.Length; key++)
+            // The regions of the keys wanted alone, or of every key, each read once, and none of the options made strings.
+            PathChunk[][] chunks = new PathChunk[options.Keys][];
+            Array.Fill(chunks, []);
+            using Vorticity.IO.SegmentRequestSet requests = new Vorticity.IO.SegmentRequestSet(Math.Max(1, wanted is null ? options.Keys : options.Wanted.Length));
+            int[] slots = new int[options.Keys];
+            Array.Fill(slots, -1);
+            for (int key = 0; wanted is null && key < options.Keys; key++)
             {
-                chunks[key] = [];
                 IndexSegment region = run.Payload[key];
-                slots[key] = wanted.Contains(options.Keys[key])
-                    ? requests.Add(new Vorticity.Serialization.Schemas.SegmentSpec(region.Offset, region.Length, region.AlignmentExponent, 0, 0))
-                    : -1;
+                slots[key] = requests.Add(new Vorticity.Serialization.Schemas.SegmentSpec(region.Offset, region.Length, region.AlignmentExponent, 0, 0));
+            }
+
+            foreach ((_, int place) in options.Wanted)
+            {
+                if (place >= 0 && slots[place] < 0)
+                {
+                    IndexSegment region = run.Payload[place];
+                    slots[place] = requests.Add(new Vorticity.Serialization.Schemas.SegmentSpec(region.Offset, region.Length, region.AlignmentExponent, 0, 0));
+                }
             }
 
             await file.Segments.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
-            for (int key = 0; key < options.Keys.Length; key++)
+            for (int key = 0; key < options.Keys; key++)
             {
                 if (slots[key] < 0)
                 {
@@ -244,7 +358,7 @@ internal sealed class VariantPathMap
                 chunks[key] = read;
             }
 
-            return new VariantPathMap(options.Encodings, options.Keys, chunks);
+            return new VariantPathMap(optionBytes, options.Wanted, chunks);
         }
 
         return null;

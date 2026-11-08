@@ -679,16 +679,22 @@ internal static partial class PathsBench
                 int asks = 0;
                 double milliseconds = 0;
                 long allocated = 0;
+                List<double> each = [];
                 while (Stopwatch.GetTimestamp() < until)
                 {
                     Measured again = await MeasureAsync(store, dataset, question, options, !settings.NoDigest);
                     asks++;
                     milliseconds += again.Milliseconds;
                     allocated += again.Allocated;
+                    each.Add(again.Milliseconds);
                 }
 
+                // The median and the tenth percentile beside the mean: an A/B of two builds reads the median, which a few
+                // asks slowed by the machine move less.
+                each.Sort();
                 Console.WriteLine(string.Create(
-                    CultureInfo.InvariantCulture, $"    loop: {asks} asks, {milliseconds / asks:F3} ms and {allocated / (double)asks / 1e3:F1} KB allocated each"));
+                    CultureInfo.InvariantCulture,
+                    $"    loop: {asks} asks, {milliseconds / asks:F3} ms and {allocated / (double)asks / 1e3:F1} KB allocated each, median {each[each.Count / 2]:F3} ms, p10 {each[each.Count / 10]:F3} ms"));
             }
 
             return (cold, warm[warm.Count / 2]);

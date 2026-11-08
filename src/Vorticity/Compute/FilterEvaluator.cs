@@ -828,13 +828,11 @@ internal sealed class FilterEvaluator
         byte[] answers = ArrayPool<byte>.Shared.Rent(open);
         try
         {
-            // The open rows are few, so the search skips a vector of decided states at a time.
+            // The open rows, found in one pass of vector compares: a search from each to the next cost a call a row, 8 % of a
+            // question of one service's routes under 5xx (2026-11-08).
             Span<int> at = places.AsSpan(0, open);
-            for (int i = 0, n = 0; n < open; n++)
-            {
-                i += states[i..].IndexOfAnyExcept(decided);
-                at[n] = i++;
-            }
+            int found = RowIndices.Except(states, decided, at);
+            System.Diagnostics.Debug.Assert(found == open, "The states hold as many open rows as counted.");
 
             // Where each open row is in the batch: its place, or the batch row the selection had
             // there when this node already evaluates a selection.

@@ -266,7 +266,7 @@ public sealed partial class AllocationContractTests
     {
         ReleaseOnlyCeilings.Require();
         SamplingSource source = new SamplingSource(await ContractFile.PathAsync());
-        await using VortexFile file = await VortexSession.Default.OpenAsync(source, cancellationToken: TestContext.Current.CancellationToken);
+        await using VortexFile file = await Uncached.Session.OpenAsync(source, cancellationToken: TestContext.Current.CancellationToken);
 
         Func<Scan<Reading>> all = () => file.Scan<Reading>().With(Sequential);
         Func<Scan<Reading>> filtered = () => file.Scan<Reading>().With(Sequential).Where(r => r.Celsius > 30.0);
@@ -308,7 +308,7 @@ public sealed partial class AllocationContractTests
     {
         ReleaseOnlyCeilings.Require();
         SamplingSource source = new SamplingSource(await SortedNames.PathAsync());
-        await using VortexFile file = await VortexSession.Default.OpenAsync(source, cancellationToken: TestContext.Current.CancellationToken);
+        await using VortexFile file = await Uncached.Session.OpenAsync(source, cancellationToken: TestContext.Current.CancellationToken);
 
         Func<Scan<SortedName>> all = () => file.Scan<SortedName>().With(Sequential);
         (string Sink, Func<Scan<SortedName>> Scan, Func<Scan<SortedName>, Task> Run)[] sinks =

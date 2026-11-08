@@ -104,11 +104,13 @@ internal sealed class SessionReader : ISegmentReader, Indexes.IIndexRegionReader
         {
             if (_cache is not null)
             {
+                int filled = 0;
                 for (int slot = 0; slot < requests.Count; slot++)
                 {
                     if (requests.IsFilled(slot))
                     {
                         (held ??= Marks(requests.Count))[slot] = true;
+                        filled++;
                         continue;
                     }
 
@@ -126,7 +128,16 @@ internal sealed class SessionReader : ISegmentReader, Indexes.IIndexRegionReader
 
                         requests.NoteCacheHit();
                         (held ??= Marks(requests.Count))[slot] = true;
+                        filled++;
                     }
+                }
+
+                // Every slot held already or served by the cache: nothing is left to read, so no permit of the reads in
+                // flight is taken and no reader below walks the set. A warm question's sets are all such.
+                if (filled == requests.Count)
+                {
+                    requests.Complete();
+                    return;
                 }
             }
 
