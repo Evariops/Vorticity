@@ -11,8 +11,8 @@ only runs at build time, and `PrivateAssets` keeps it out of whatever your proje
 
 ```xml
 <ItemGroup>
-  <PackageReference Include="Vorticity" Version="0.5.1" />
-  <PackageReference Include="Vorticity.Generators" Version="0.5.1" PrivateAssets="all" />
+  <PackageReference Include="Vorticity" Version="0.11.1" />
+  <PackageReference Include="Vorticity.Generators" Version="0.11.1" PrivateAssets="all" />
 </ItemGroup>
 ```
 
