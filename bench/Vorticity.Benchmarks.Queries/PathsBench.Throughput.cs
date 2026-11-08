@@ -250,7 +250,7 @@ internal static partial class PathsBench
             // its time the collector paused the process.
             Console.WriteLine(string.Create(
                 CultureInfo.InvariantCulture,
-                $"  gc: {gcAfter.Gen0 - gcBefore.Gen0} gen0, {gcAfter.Gen1 - gcBefore.Gen1} gen1, {gcAfter.Gen2 - gcBefore.Gen2} gen2 ({(gcAfter.Gen0 - gcBefore.Gen0) / seconds:F1}/s); {(gcAfter.Allocated - gcBefore.Allocated) / 1e3 / Math.Max(all.Length, 1):F1} KB a question, {(gcAfter.Allocated - gcBefore.Allocated) / 1e6 / seconds:F0} MB/s; paused {(gcAfter.Paused - gcBefore.Paused).TotalMilliseconds / 10 / seconds:F1} % of the time"));
+                $"  gc: {gcAfter.Gen0 - gcBefore.Gen0} gen0, {gcAfter.Gen1 - gcBefore.Gen1} gen1, {gcAfter.Gen2 - gcBefore.Gen2} gen2 ({(gcAfter.Gen0 - gcBefore.Gen0) / seconds:F1}/s); {(gcAfter.Allocated - gcBefore.Allocated) / 1e3 / Math.Max(all.Length, 1):F1} KB a question, {(gcAfter.Allocated - gcBefore.Allocated) / 1e6 / seconds:F0} MB/s; paused {(gcAfter.Paused - gcBefore.Paused).TotalMilliseconds / 10 / seconds:F1} % of the time; {Vorticity.Arrays.ScanContexts.Shared.MostLent} scan contexts out at once"));
 
             // A cache that shares a root says what it read from the directories of the others, and what it kept itself.
             if (sharedRoot is not null && session.Options.SynopsisCache is { } shared)
