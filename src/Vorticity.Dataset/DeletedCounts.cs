@@ -138,6 +138,14 @@ internal sealed class DeletedCounts
             }
         }
 
+        // Every entry left with rows, each group one entry in its place, as a value left out of a question leaves them: the
+        // copy is the counts, its groups the object's, where copying it again and numbering its groups anew doubled what a
+        // question of every row but one request's allocated (2026-11-08).
+        if (Untouched(counts, words, width))
+        {
+            return new ColumnCounts(counts.MeasureFields, counts.Kinds, counts.Groups, words);
+        }
+
         // The entries left with rows, their groups numbered again.
         List<CountGroup> groups = new List<CountGroup>(counts.Groups.Length);
         int kept = 0;
@@ -152,6 +160,26 @@ internal sealed class DeletedCounts
         }
 
         return new ColumnCounts(counts.MeasureFields, counts.Kinds, [.. groups], words.AsSpan(0, kept * width).ToArray());
+    }
+
+    /// <summary>Whether <paramref name="words"/>, of <paramref name="counts"/>' groups, keep each group one entry in its place, with rows, and nothing past them.</summary>
+    private static bool Untouched(ColumnCounts counts, long[] words, int width)
+    {
+        CountGroup[] groups = counts.Groups;
+        if (words.Length != groups.Length * width)
+        {
+            return false;
+        }
+
+        for (int g = 0; g < groups.Length; g++)
+        {
+            if (groups[g].FirstEntry != g || groups[g].Entries != 1 || words[g * width] <= 0)
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     /// <summary>The entry of the group of <paramref name="kind"/>, of <paramref name="value"/> for a value; -1 for none.</summary>
