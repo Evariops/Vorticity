@@ -43,8 +43,8 @@ internal abstract class StateTable
     /// </summary>
     protected abstract void FillWords(Span<long> into, int start, int word);
 
-    /// <summary>The bytes of row <paramref name="row"/>'s key <paramref name="key"/>, as its column stores them; null for a null.</summary>
-    protected abstract byte[]? KeyOf(int row, int key);
+    /// <summary>The bytes of row <paramref name="row"/>'s key <paramref name="key"/>, as its column stores them; false for a null.</summary>
+    protected abstract bool KeyOf(int row, int key, out ReadOnlySpan<byte> value);
 
     /// <summary>The sketch of row <paramref name="row"/>'s measure <paramref name="measure"/>, as it encodes; false for none.</summary>
     protected abstract bool SketchOf(int row, int measure, out ReadOnlySpan<byte> sketch);
@@ -57,9 +57,7 @@ internal abstract class StateTable
             return SketchOf(row, column, out value);
         }
 
-        byte[]? bytes = KeyOf(row, column);
-        value = bytes;
-        return bytes is not null;
+        return KeyOf(row, column, out value);
     }
 
     /// <summary>The batch of states of rows <c>[start, start + count)</c>, built in <paramref name="arena"/>, its rows counted from <paramref name="firstRow"/>.</summary>
@@ -210,6 +208,13 @@ internal sealed class GranuleStateRows(GranuleAnswer answer)
     private readonly int _width = answer.Width;
     private readonly int _measures = answer.Measures.Length;
     private byte[]?[] _values = ArrayPool<byte[]?>.Shared.Rent(16 * answer.KeyFields.Length);
+
+    // The keys set from their bytes (SetKey of a span), copied one after another into a rented array, each one's place a
+    // word of its row's: its start, shifted, and its length; -1 for none. A granule's runs of a text of many values set one
+    // a run, where each made an array of its own.
+    private long[] _placed = ArrayPool<long>.Shared.Rent(16 * answer.KeyFields.Length);
+    private byte[] _heap = [];
+    private int _heapUsed;
     private long[] _words = ArrayPool<long>.Shared.Rent(16 * answer.Width);
 
     // Each row's histogram of each measure, a granule's statistics' own bytes; empty for none.
@@ -224,18 +229,51 @@ internal sealed class GranuleStateRows(GranuleAnswer answer)
     {
         Grow(ref _words, (_count + 1) * _width);
         Grow(ref _values, (_count + 1) * _keys);
+        Grow(ref _placed, (_count + 1) * _keys);
         Grow(ref _sketches, (_count + 1) * _measures);
         int row = _count++;
         Span<long> words = Words(row);
         words.Clear();
         words[0] = rows;
         _values.AsSpan(row * _keys, _keys).Clear();
+        _placed.AsSpan(row * _keys, _keys).Fill(-1);
         _sketches.AsSpan(row * _measures, _measures).Clear();
         return row;
     }
 
     /// <summary>Sets row <paramref name="row"/>'s key <paramref name="key"/> to <paramref name="value"/>, as its column stores it.</summary>
-    internal void SetKey(int row, int key, byte[]? value) => _values[(row * _keys) + key] = value;
+    internal void SetKey(int row, int key, byte[]? value)
+    {
+        _values[(row * _keys) + key] = value;
+        _placed[(row * _keys) + key] = -1;
+    }
+
+    /// <summary>Sets row <paramref name="row"/>'s key <paramref name="key"/> to a copy of <paramref name="value"/>, as its column stores it, or to a null.</summary>
+    internal void SetKey(int row, int key, ReadOnlySpan<byte> value, bool isNull)
+    {
+        _values[(row * _keys) + key] = null;
+        if (isNull)
+        {
+            _placed[(row * _keys) + key] = -1;
+            return;
+        }
+
+        if (_heap.Length - _heapUsed < value.Length)
+        {
+            byte[] grown = ArrayPool<byte>.Shared.Rent(Math.Max(_heapUsed + value.Length, Math.Max(1024, 2 * _heap.Length)));
+            _heap.AsSpan(0, _heapUsed).CopyTo(grown);
+            if (_heap.Length != 0)
+            {
+                ArrayPool<byte>.Shared.Return(_heap);
+            }
+
+            _heap = grown;
+        }
+
+        value.CopyTo(_heap.AsSpan(_heapUsed));
+        _placed[(row * _keys) + key] = ((long)_heapUsed << 32) | (uint)value.Length;
+        _heapUsed += value.Length;
+    }
 
     /// <summary>Sets row <paramref name="row"/>'s sketch of measure <paramref name="measure"/> to <paramref name="sketch"/>, a histogram as it encodes.</summary>
     internal void SetSketch(int row, int measure, ReadOnlyMemory<byte> sketch) => _sketches[(row * _measures) + measure] = sketch;
@@ -251,6 +289,13 @@ internal sealed class GranuleStateRows(GranuleAnswer answer)
     {
         ArrayPool<long>.Shared.Return(_words);
         ArrayPool<byte[]?>.Shared.Return(_values, clearArray: true);
+        ArrayPool<long>.Shared.Return(_placed);
+        if (_heap.Length != 0)
+        {
+            ArrayPool<byte>.Shared.Return(_heap);
+        }
+
+        (_placed, _heap, _heapUsed) = ([], [], 0);
         ArrayPool<ReadOnlyMemory<byte>>.Shared.Return(_sketches, clearArray: true);
         (_words, _values, _sketches, _count) = ([], [], [], 0);
     }
@@ -279,7 +324,18 @@ internal sealed class GranuleStateRows(GranuleAnswer answer)
     }
 
     /// <inheritdoc/>
-    protected override byte[]? KeyOf(int row, int key) => _values[(row * _keys) + key];
+    protected override bool KeyOf(int row, int key, out ReadOnlySpan<byte> value)
+    {
+        if (_values[(row * _keys) + key] is { } bytes)
+        {
+            value = bytes;
+            return true;
+        }
+
+        long placed = _placed[(row * _keys) + key];
+        value = placed < 0 ? default : _heap.AsSpan((int)(placed >> 32), (int)(uint)placed);
+        return placed >= 0;
+    }
 
     /// <inheritdoc/>
     protected override bool SketchOf(int row, int measure, out ReadOnlySpan<byte> sketch)

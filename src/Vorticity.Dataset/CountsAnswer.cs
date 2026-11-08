@@ -903,7 +903,12 @@ internal sealed class StateRows : StateTable
     }
 
     /// <inheritdoc/>
-    protected override byte[]? KeyOf(int row, int key) => _constants[key] ?? ValueOf(_entries[row]);
+    protected override bool KeyOf(int row, int key, out ReadOnlySpan<byte> value)
+    {
+        byte[]? bytes = _constants[key] ?? ValueOf(_entries[row]);
+        value = bytes;
+        return bytes is not null;
+    }
 
     /// <inheritdoc/>
     protected override bool SketchOf(int row, int measure, out ReadOnlySpan<byte> sketch)
