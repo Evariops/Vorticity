@@ -577,18 +577,27 @@ internal sealed class VariantDirectory
     }
 
     /// <summary>Whether a value between <paramref name="entry"/>'s bounds may compare to <paramref name="value"/> by <paramref name="op"/>.</summary>
-    internal static bool Within(PathEntry entry, ComparisonOp op, FilterLiteral value)
+    internal static bool Within(PathEntry entry, ComparisonOp op, FilterLiteral value) =>
+        Within(entry.Class, entry.Low, entry.High, entry.NaNs, entry.MinText, entry.MaxText, op, value);
+
+    /// <summary>
+    /// Whether a value of <paramref name="class"/> between <paramref name="lowest"/> and <paramref name="highest"/>, a number's
+    /// bounds as its class holds them, or <paramref name="minText"/> and <paramref name="maxText"/>, a text's, may compare to
+    /// <paramref name="value"/> by <paramref name="op"/>.
+    /// </summary>
+    internal static bool Within(
+        PathClass @class, long lowest, long highest, bool nans, byte[]? minText, byte[]? maxText, ComparisonOp op, FilterLiteral value)
     {
         if (op == ComparisonOp.NotEqual)
         {
             return true;
         }
 
-        switch (entry.Class)
+        switch (@class)
         {
             case PathClass.Integer or PathClass.Timestamp when value.Kind == FilterLiteralKind.Signed:
-                return Ordered(entry.Low.CompareTo(value.SignedValue), entry.High.CompareTo(value.SignedValue), op);
-            case PathClass.Double when !entry.NaNs && value.Kind is FilterLiteralKind.Float or FilterLiteralKind.Signed:
+                return Ordered(lowest.CompareTo(value.SignedValue), highest.CompareTo(value.SignedValue), op);
+            case PathClass.Double when !nans && value.Kind is FilterLiteralKind.Float or FilterLiteralKind.Signed:
             {
                 double literal = value.Kind == FilterLiteralKind.Float ? value.FloatValue : value.SignedValue;
                 if (double.IsNaN(literal))
@@ -597,16 +606,16 @@ internal sealed class VariantDirectory
                 }
 
                 return Ordered(
-                    BitConverter.Int64BitsToDouble(entry.Low).CompareTo(literal), BitConverter.Int64BitsToDouble(entry.High).CompareTo(literal), op);
+                    BitConverter.Int64BitsToDouble(lowest).CompareTo(literal), BitConverter.Int64BitsToDouble(highest).CompareTo(literal), op);
             }
 
             case PathClass.Boolean when value.Kind == FilterLiteralKind.Bool && op == ComparisonOp.Equal:
-                return (entry.Low & (value.BoolValue ? 2 : 1)) != 0;
-            case PathClass.String when value.Kind == FilterLiteralKind.Bytes && entry.MinText is { } min:
+                return (lowest & (value.BoolValue ? 2 : 1)) != 0;
+            case PathClass.String when value.Kind == FilterLiteralKind.Bytes && minText is { } min:
             {
                 // The least bound is at or below every text; the greatest, when there is one, above or at.
                 int low = min.AsSpan().SequenceCompareTo(value.BytesValue);
-                int high = entry.MaxText is { } max ? max.AsSpan().SequenceCompareTo(value.BytesValue) : 1;
+                int high = maxText is { } max ? max.AsSpan().SequenceCompareTo(value.BytesValue) : 1;
                 return op switch
                 {
                     ComparisonOp.Equal => low <= 0 && high >= 0,
