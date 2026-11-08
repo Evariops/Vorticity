@@ -386,6 +386,10 @@ internal sealed partial class DatasetScanBuilder
     private PartitionLocates? LocatesOf(VortexExpr filter, List<int> columns) =>
         _question is { } question ? question.LocatesOf(filter, columns) : PartitionLocates.Of(_dataset, _version, filter, columns);
 
+    /// <summary>The pruning of the key by <paramref name="filter"/>: the question's, which its pieces share, or the scan's own.</summary>
+    private KeyPruning? KeyPruningOf(VortexExpr? filter) =>
+        _question is { } question ? question.KeyPruningOf(filter) : KeyPruning.Of(_version.Schema, filter);
+
     /// <summary>The top-level columns the scan's filter reads but the key's first, by name, which a sort key led by it would narrow; found once.</summary>
     private List<string> FilterColumns()
     {
@@ -822,7 +826,7 @@ internal sealed partial class DatasetScanBuilder
     private IAsyncEnumerable<PositionedObject> WalkAsync(CancellationToken cancellationToken, bool granules = false)
     {
         IAsyncEnumerable<PositionedObject> walk = _version.WalkAsync(Pruner(), _from, _to, _considers ? _metrics : null, cancellationToken);
-        KeyPruning? pruning = granules && _summaries && _indexes && _take is null ? KeyPruning.Of(_version.Schema, _filter) : null;
+        KeyPruning? pruning = granules && _summaries && _indexes && _take is null ? KeyPruningOf(_filter) : null;
         if (pruning is not null)
         {
             walk = KeyHeldAsync(walk, pruning, cancellationToken);

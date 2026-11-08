@@ -540,7 +540,7 @@ internal sealed partial class DatasetScanBuilder
         }
 
         // The objects the walk keeps, less those whose keys the filter refutes, as a read of rows passes them over.
-        KeyPruning? keys = _summaries && _indexes && _take is null ? KeyPruning.Of(_version.Schema, _filter) : null;
+        KeyPruning? keys = _summaries && _indexes && _take is null ? KeyPruningOf(_filter) : null;
         Queue<(Planned Unit, Task<(List<(int First, int End)> Ranges, Indexes.GranuleGrid Grid)?> Reading)>? reading = null;
         await foreach (PositionedObject held in _version.WalkAsync(
             Pruner(), _from, _to, read && _considers ? _metrics : null, cancellationToken, rollups is null ? null : rollups.Covers).ConfigureAwait(false))

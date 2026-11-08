@@ -50,6 +50,35 @@ internal sealed partial class DatasetScanSource
     /// <summary>The lookup of the partitions' indexes made for <see cref="Filter"/>; null where none answers it.</summary>
     private sealed record Locates(VortexExpr Filter, PartitionLocates? Lookup);
 
+    // The pruning of the key for the filter the question's scans ask it with, made by the first that asks.
+    private KeyPrunings? _keyPruning;
+
+    /// <summary>
+    /// The pruning of the dataset's key by <paramref name="filter"/> (<see cref="KeyPruning.Of"/>), one for every scan of the
+    /// question that asks it with the question's filter: the granules it keeps of an object, searched once in the object's
+    /// sparse index, serve the cuts of the question's pieces and each piece after them. Each piece made its own, which kept
+    /// what it searched for itself alone: at 32 lanes, the late status codes searched each object's index thirteen times as
+    /// often as at one (2026-11-08).
+    /// </summary>
+    internal KeyPruning? KeyPruningOf(VortexExpr? filter)
+    {
+        if (filter is null)
+        {
+            return null;
+        }
+
+        if (Volatile.Read(ref _keyPruning) is { } held && ReferenceEquals(held.Filter, filter))
+        {
+            return held.Pruning;
+        }
+
+        KeyPrunings made = new KeyPrunings(filter, KeyPruning.Of(_version.Schema, filter));
+        return Interlocked.CompareExchange(ref _keyPruning, made, null) is { } raced && ReferenceEquals(raced.Filter, filter) ? raced.Pruning : made.Pruning;
+    }
+
+    /// <summary>The pruning of the key made for <see cref="Filter"/>; null where the dataset's key prunes nothing by it.</summary>
+    private sealed record KeyPrunings(VortexExpr Filter, KeyPruning? Pruning);
+
     /// <summary>What the question's scans read of its objects' indexes, for its other scans (<see cref="Indexes.QuestionReads"/>); made at the first.</summary>
     internal Indexes.QuestionReads Reads => LazyInitializer.EnsureInitialized(ref _reads);
 
@@ -391,7 +420,7 @@ internal sealed partial class DatasetScanSource
         DatasetScanBuilder planner = Builder(spec, null);
         List<(PositionedObject Held, RowRange Rows)> objects = [];
         long total = 0;
-        KeyPruning? pruning = spec.Options.UseStatistics && spec.Options.UseIndexes ? KeyPruning.Of(_version.Schema, spec.Filter) : null;
+        KeyPruning? pruning = spec.Options.UseStatistics && spec.Options.UseIndexes ? KeyPruningOf(spec.Filter) : null;
         CountsAnswer? answer = spec.Answering?.States is { } request && spec.Options.UseSynopses
             && await _version.KeepsCountsAsync(cancellationToken).ConfigureAwait(false)
             ? CountsAnswer.Of(request, spec.Filter, _version)
@@ -597,7 +626,7 @@ internal sealed partial class DatasetScanSource
         SummaryPruner? pruner = pass.Options.UseStatistics && pass.Filter is { } filter ? new SummaryPruner(Compute.FunctionFieldExpr.Ranges(filter)) : null;
         long from = pass.Rows?.Start ?? 0;
         long to = pass.Rows?.End ?? long.MaxValue;
-        KeyPruning? pruning = pass.Options.UseStatistics && pass.Options.UseIndexes ? KeyPruning.Of(_version.Schema, pass.Filter) : null;
+        KeyPruning? pruning = pass.Options.UseStatistics && pass.Options.UseIndexes ? KeyPruningOf(pass.Filter) : null;
         DatasetScanBuilder planner = Builder(pass, null);
         List<Task<RowRange[]>> objects = [];
         await foreach (PositionedObject held in _version.WalkAsync(pruner, from, to, null, cancellationToken).ConfigureAwait(false))
