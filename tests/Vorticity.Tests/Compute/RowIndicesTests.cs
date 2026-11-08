@@ -50,6 +50,53 @@ public sealed class RowIndicesTests
         }
     }
 
+    /// <summary>
+    /// The rows not decided, as a filter's conjunction asks its open rows of the verdicts so far: in order, as many as asked
+    /// and never a slot past them, whatever the decided state and however few or many the open rows are.
+    /// </summary>
+    [Fact]
+    public void TheOpenStatesAreFoundInOrderUpToTheRoomGiven()
+    {
+        Random random = new Random(3);
+        foreach (int rows in Lengths)
+        {
+            foreach (int density in Densities)
+            {
+                foreach (byte decided in new[] { Trilean.False, Trilean.True })
+                {
+                    byte[] states = new byte[rows];
+                    int open = 0;
+                    for (int i = 0; i < rows; i++)
+                    {
+                        states[i] = random.Next(100) < density
+                            ? (random.Next(2) == 0 ? Trilean.Unknown : (byte)(Trilean.True + Trilean.False - decided))
+                            : decided;
+                        open += states[i] != decided ? 1 : 0;
+                    }
+
+                    foreach (int room in new[] { open, open / 2 })
+                    {
+                        int[] indices = new int[room + 16];
+                        indices.AsSpan(room).Fill(-7);
+                        int count = RowIndices.Except(states, decided, indices.AsSpan(0, room));
+
+                        Assert.Equal(room, count);
+                        int expected = 0;
+                        for (int i = 0; i < rows && expected < room; i++)
+                        {
+                            if (states[i] != decided)
+                            {
+                                Assert.Equal(i, indices[expected++]);
+                            }
+                        }
+
+                        Assert.All(indices[room..], sentinel => Assert.Equal(-7, sentinel));
+                    }
+                }
+            }
+        }
+    }
+
     [Fact]
     public void TheSetAndValidBitsAreSelectedInOrder()
     {

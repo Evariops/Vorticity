@@ -71,6 +71,65 @@ internal static class RowIndices
     }
 
     /// <summary>
+    /// The first rows whose state is not <paramref name="decided"/>, ascending, as many as <paramref name="indices"/> holds:
+    /// a vector of states compared at a time, its open rows taken a set bit at a time, which a filter's open rows, few
+    /// among decided ones, cost once each where a search from each one to the next paid a call and a vector's setup a row.
+    /// </summary>
+    /// <param name="states">One state per row.</param>
+    /// <param name="decided">The state of the rows passed over.</param>
+    /// <param name="indices">Room for the rows wanted, written up to its length and never past it.</param>
+    /// <returns>How many rows were written: <paramref name="indices"/>' length, or fewer when the states hold fewer open rows.</returns>
+    internal static int Except(ReadOnlySpan<byte> states, byte decided, Span<int> indices)
+    {
+        int rows = states.Length;
+        int wanted = indices.Length;
+        ref byte from = ref MemoryMarshal.GetReference(states);
+        ref int into = ref MemoryMarshal.GetReference(indices);
+        int count = 0;
+        int row = 0;
+        if (Vector512.IsHardwareAccelerated)
+        {
+            Vector512<byte> same = Vector512.Create(decided);
+            for (; row <= rows - 64 && count < wanted; row += 64)
+            {
+                ulong open = ~Vector512.Equals(Vector512.LoadUnsafe(ref from, (nuint)row), same).ExtractMostSignificantBits();
+                count = Open(open, row, ref into, count, wanted);
+            }
+        }
+        else if (Vector128.IsHardwareAccelerated)
+        {
+            Vector128<byte> same = Vector128.Create(decided);
+            for (; row <= rows - 16 && count < wanted; row += 16)
+            {
+                uint open = ~Vector128.Equals(Vector128.LoadUnsafe(ref from, (nuint)row), same).ExtractMostSignificantBits() & 0xFFFF;
+                count = Open(open, row, ref into, count, wanted);
+            }
+        }
+
+        for (; row < rows && count < wanted; row++)
+        {
+            if (Unsafe.Add(ref from, row) != decided)
+            {
+                Unsafe.Add(ref into, count++) = row;
+            }
+        }
+
+        return count;
+    }
+
+    /// <summary>The rows of <paramref name="open"/>'s set bits from <paramref name="row"/>, a bit at a time, up to <paramref name="wanted"/> in all.</summary>
+    private static int Open(ulong open, int row, ref int into, int count, int wanted)
+    {
+        while (open != 0 && count < wanted)
+        {
+            Unsafe.Add(ref into, count++) = row + BitOperations.TrailingZeroCount(open);
+            open &= open - 1;
+        }
+
+        return count;
+    }
+
+    /// <summary>
     /// The rows whose bit is set in <paramref name="bits"/> and, unless <paramref name="allValid"/>,
     /// in <paramref name="validity"/> too.
     /// </summary>
