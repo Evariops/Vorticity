@@ -233,7 +233,7 @@ public sealed class RecordBatch : IDisposable
     {
         // As many records as the source holds, which a batch's copy takes about, up to the 64 a wide
         // batch would grow to anyway: a narrow batch of many, a scan's, then costs a few hundred bytes.
-        CanonicalArena owned = new CanonicalArena(Math.Clamp(source.NodeCount, 8, 64), (session ?? VortexSession.Default).Options.EnginePool);
+        CanonicalArena owned = OwnedArenas.Rent(Math.Clamp(source.NodeCount, 8, 64), (session ?? VortexSession.Default).Options.EnginePool);
         try
         {
             int root = owned.CopyFrom(source, node);
@@ -251,6 +251,7 @@ public sealed class RecordBatch : IDisposable
         catch
         {
             owned.Reset();
+            OwnedArenas.Return(owned);
             throw;
         }
     }
@@ -682,7 +683,9 @@ public sealed class RecordBatch : IDisposable
             }
             else
             {
+                // A copy's arena, the only batch that owns one with no context: kept for the next copy.
                 _arena.Reset();
+                OwnedArenas.Return(_arena);
             }
         }
     }

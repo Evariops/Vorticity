@@ -558,6 +558,9 @@ internal partial class CanonicalArena
 
     private readonly AlignedBufferPool _pool;
 
+    /// <summary>The pool the arena rents its blocks from.</summary>
+    internal AlignedBufferPool Pool => _pool;
+
     /// <summary>Creates an arena backed by <see cref="AlignedBufferPool.Shared"/>.</summary>
     /// <param name="initialCapacity">Hint for the record array's initial size. Must be positive.</param>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="initialCapacity"/> is not positive.</exception>
