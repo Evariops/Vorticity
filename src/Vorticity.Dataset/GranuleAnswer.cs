@@ -2141,6 +2141,14 @@ internal sealed class GranuleColumn(string path, DType dtype, GranuleStats? stat
     /// <summary>The bytes the column stores <paramref name="value"/> as, a key's; null for a column no key holds, or a value it does not.</summary>
     internal byte[]? KeyOf(FilterLiteral value)
     {
+        // A text's key is its bytes, the literal's whole array: kept as it is rather than copied, which a granule's runs of a
+        // text of many values did at every value (with the literal's own copy, 15 % of what the mix of questions allocated,
+        // 2026-11-08).
+        if (_keyed && _layout.Shape == KeyShape.Bytes && value.OwnedBytes is { } bytes)
+        {
+            return bytes;
+        }
+
         Span<byte> scratch = stackalloc byte[sizeof(ulong)];
         Span<byte> zero = stackalloc byte[sizeof(ulong)];
         return _keyed && _layout.TryEncode(value, scratch, out ReadOnlySpan<byte> key, zero, out _) ? key.ToArray() : null;

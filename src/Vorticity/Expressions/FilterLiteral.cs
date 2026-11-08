@@ -109,6 +109,12 @@ internal readonly struct FilterLiteral : IEquatable<FilterLiteral>
     public static FilterLiteral From(ReadOnlySpan<byte> value) =>
         new FilterLiteral(FilterLiteralKind.Bytes, 0, value.ToArray());
 
+    /// <summary>A byte-string constant over <paramref name="value"/> itself, which the caller made for it and never changes after.</summary>
+    internal static FilterLiteral Owning(byte[] value) => new FilterLiteral(FilterLiteralKind.Bytes, 0, value);
+
+    /// <summary>The array a byte string holds its bytes in, which no one changes; null for another kind.</summary>
+    internal byte[]? OwnedBytes => Kind == FilterLiteralKind.Bytes ? _bytes : null;
+
     /// <inheritdoc/>
     public bool Equals(FilterLiteral other)
     {

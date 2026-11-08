@@ -270,7 +270,9 @@ internal static class UnpaddedKeys
         byte[] value = new byte[bytes];
         bytes = 0;
         Unescape(key, 1, value, ref bytes);
-        return FilterLiteral.From(value);
+
+        // The literal over the array made for it: From would copy it again.
+        return FilterLiteral.Owning(value);
     }
 
     /// <summary>
