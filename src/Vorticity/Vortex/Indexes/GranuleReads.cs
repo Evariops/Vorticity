@@ -232,13 +232,13 @@ internal sealed class GranulePlans(
             return false;
         }
 
-        (long Start, long Length)[] layout = ArrayBlobReader.BufferLayout(part.Tree, out long regionLength);
+        (long Start, long Length)[] layout = ArrayBlobReader.BufferLayout(part.Tree.Span, out long regionLength);
         if (regionLength <= 0 || regionLength > part.Length)
         {
             return false;
         }
 
-        ArrayBlobReader.LoadLayout(_nodes, part.Tree, file.ResolvedArrayEncodings);
+        ArrayBlobReader.LoadLayout(_nodes, part.Tree.Span, file.ResolvedArrayEncodings);
         ArrayNode root = _nodes.Root;
         int start = checked((int)rows.Start);
         int count = checked((int)Math.Min(rows.Length, chunkRows - rows.Start));

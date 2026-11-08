@@ -87,7 +87,7 @@ public sealed partial class VariantPathMapTests
         DTypeArena types = new DTypeArena();
         Assert.Equal(
             [DTypeKind.Primitive, DTypeKind.Primitive, DTypeKind.Variant, DTypeKind.Primitive, DTypeKind.Primitive, DTypeKind.Primitive],
-            statuses.Chunks[statuses.Keys.ToList().IndexOf("status")].Select(chunk => Vorticity.Types.Serialization.DTypeProtobuf.Read(chunk.DType, types).Kind));
+            statuses.Chunks[statuses.Keys.ToList().IndexOf("status")].Select(chunk => Vorticity.Types.Serialization.DTypeProtobuf.Read(chunk.DType.Span, types).Kind));
     }
 
     /// <summary>A key's rows as the documents say: its value of the key's class, a variant of any value where the chunk kept other classes, null where it is missing.</summary>

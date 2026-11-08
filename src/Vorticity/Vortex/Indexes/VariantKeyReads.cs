@@ -418,7 +418,7 @@ internal sealed class VariantKeyReads
             DType? typed = null;
             foreach (PathChunk part in map.Chunks[keys[k]])
             {
-                DType shape = DTypeProtobuf.Read(part.DType, types);
+                DType shape = DTypeProtobuf.Read(part.DType.Span, types);
                 DType own = shape.Kind == DTypeKind.Variant ? NestedTyped(part, types) ?? default : shape;
                 if (own.IsDefault || (typed is { } known && !SameShape(known, own)))
                 {
@@ -467,7 +467,7 @@ internal sealed class VariantKeyReads
     private static DType? NestedTyped(PathChunk part, DTypeArena types)
     {
         int budget = VortexLimits.MaxFlatBufferTables;
-        ArrayView view = ArrayView.Root(part.Tree, ref budget);
+        ArrayView view = ArrayView.Root(part.Tree.Span, ref budget);
         return Arrays.Metadata.VariantMetadata.Read(view.Root_.Metadata).ShreddedDType is { } bytes
             ? DTypeProtobuf.Read(bytes, types)
             : null;
@@ -549,7 +549,7 @@ internal sealed class VariantKeyReads
                 }
 
                 Buffers.VortexBuffer segment = part.Length > 0 ? context.Segments.GetBuffer(context.Segments.Add(Spec(part))) : default;
-                context.Decode.LoadBlob(part.Tree, segment);
+                context.Decode.LoadBlob(part.Tree.Span, segment);
                 ArrayNode root = context.Nodes.Root;
                 ArrayDecoder decoder = ArrayDecoderTable.Require(context, root.Encoding, root.EncodingSpecIndex);
                 return decoder.EvaluatesWithoutFullDecode && decoder.TryEvaluate(context.Decode, in root, key.Shape, Rows, predicate, ref bits);
@@ -746,7 +746,7 @@ internal sealed class VariantKeyReads
                     }
                 }
 
-                context.Decode.LoadBlob(part.Tree, segment);
+                context.Decode.LoadBlob(part.Tree.Span, segment);
                 ArrayNode root = context.Nodes.Root;
                 int metadata;
                 int values;

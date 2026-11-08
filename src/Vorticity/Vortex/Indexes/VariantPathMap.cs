@@ -22,7 +22,7 @@ namespace Vorticity.Indexes;
 /// <param name="Rows">The chunk's rows.</param>
 /// <param name="DType">The path's dtype in the chunk, a message of the format's dtype: its typed column's, or a variant's when it kept values of its own.</param>
 /// <param name="Tree">The path's <c>Array</c> FlatBuffer, its buffers counted from <paramref name="Offset"/>.</param>
-internal sealed record PathChunk(ulong Offset, uint Length, byte AlignmentExponent, long FirstRow, long Rows, byte[] DType, byte[] Tree)
+internal sealed record PathChunk(ulong Offset, uint Length, byte AlignmentExponent, long FirstRow, long Rows, ReadOnlyMemory<byte> DType, ReadOnlyMemory<byte> Tree)
 {
     internal long EndRow => FirstRow + Rows;
 }
@@ -151,9 +151,9 @@ internal sealed class VariantPathMap
                 writer.WriteVarint(chunk.Length);
                 writer.WriteVarint(chunk.AlignmentExponent);
                 writer.WriteVarint((ulong)chunk.DType.Length);
-                writer.WriteRawBytes(chunk.DType);
+                writer.WriteRawBytes(chunk.DType.Span);
                 writer.WriteVarint((ulong)chunk.Tree.Length);
-                writer.WriteRawBytes(chunk.Tree);
+                writer.WriteRawBytes(chunk.Tree.Span);
             }
 
             return writer.WrittenSpan.ToArray();
@@ -251,28 +251,19 @@ internal sealed class VariantPathMap
     }
 
     /// <summary>The chunks a key's region <paramref name="bytes"/> holds, or null when they do not decode.</summary>
-    internal static PathChunk[]? KeyFrom(ReadOnlySpan<byte> bytes)
-    {
-        if (ZstdRegion.Rent(bytes, Version, out int length) is not { } body)
-        {
-            return null;
-        }
+    internal static PathChunk[]? KeyFrom(ReadOnlySpan<byte> bytes) =>
+        ZstdRegion.Decode(bytes, Version) is { } body ? BodyFrom(body) : null;
 
-        try
-        {
-            return BodyFrom(body.AsSpan(0, length));
-        }
-        finally
-        {
-            System.Buffers.ArrayPool<byte>.Shared.Return(body);
-        }
-    }
-
-    /// <summary>The chunks a key's body holds, or null when they do not decode.</summary>
-    private static PathChunk[]? BodyFrom(ReadOnlySpan<byte> bytes)
+    /// <summary>
+    /// The chunks a key's body holds, each chunk's dtype and tree slices of the body, which they keep: two arrays a chunk
+    /// copied out of a body given back to the pool were a twentieth of what the mix of questions allocated (2026-11-08).
+    /// Null when they do not decode.
+    /// </summary>
+    private static PathChunk[]? BodyFrom(byte[] body)
     {
         try
         {
+            ReadOnlySpan<byte> bytes = body;
             ProtoReader reader = new ProtoReader(bytes);
             ulong count = reader.ReadVarint();
             if (count > (ulong)bytes.Length)
@@ -288,8 +279,8 @@ internal sealed class VariantPathMap
                 ulong offset = reader.ReadVarint();
                 uint length = checked((uint)reader.ReadVarint());
                 byte alignment = checked((byte)reader.ReadVarint());
-                byte[] dtype = reader.ReadLengthDelimited().ToArray();
-                byte[] tree = reader.ReadLengthDelimited().ToArray();
+                ReadOnlyMemory<byte> dtype = Slice(body, reader.ReadLengthDelimited(), reader.Remaining);
+                ReadOnlyMemory<byte> tree = Slice(body, reader.ReadLengthDelimited(), reader.Remaining);
                 chunks[i] = new PathChunk(offset, length, alignment, first, rows, dtype, tree);
             }
 
@@ -300,6 +291,10 @@ internal sealed class VariantPathMap
             return null;
         }
     }
+
+    /// <summary>The place of <paramref name="field"/>, which ends <paramref name="remaining"/> bytes before the end of <paramref name="body"/>, as a slice of it.</summary>
+    private static ReadOnlyMemory<byte> Slice(byte[] body, ReadOnlySpan<byte> field, int remaining) =>
+        body.AsMemory(body.Length - remaining - field.Length, field.Length);
 
     /// <summary>
     /// The map of the variant column at top-level field <paramref name="field"/> of <paramref name="file"/>,
