@@ -150,7 +150,15 @@ public sealed class QueryMemoryBudget
                 return true;
             }
 
-            return Collect(bytes) is long after && TryAdd(ref _reserved, bytes, after);
+            if (Collect(bytes) is long after)
+            {
+                return TryAdd(ref _reserved, bytes, after);
+            }
+
+            // No collection would help, by the state read now: one another thread observed since may have left room the
+            // reads above did not see.
+            Observe();
+            return TryAdd(ref _reserved, bytes, Available());
         }
 
         if (!TryAdd(ref _reserved, bytes, _ceiling))
@@ -341,9 +349,22 @@ public sealed class QueryMemoryBudget
             return;
         }
 
+        // What the queries let go is in the heap or already taken: never more than the heap holds past what lived at the
+        // last full collection and what the tables hold. Bytes given back that the heap never held, a lane's working memory
+        // admitted and its reads ahead, counted all the same, and 15.7 GB of them piled up between two full collections at
+        // 16 clients under a gen0 budget of 128 MiB, for a heap of 1.3 GB: the queries were left nothing, and a query was
+        // refused the 64 KiB of a lane (2026-11-08).
         GCMemoryInfo ephemeral = GC.GetGCMemoryInfo(GCKind.Ephemeral);
-        long held = ephemeral.HeapSizeBytes - ephemeral.FragmentedBytes - Volatile.Read(ref _measured) - Volatile.Read(ref _pending);
-        Volatile.Write(ref _rest, rest with { Ephemeral = any, Uncertain = Math.Max(0, held - rest.Live) });
+        long inHeap = ephemeral.HeapSizeBytes - ephemeral.FragmentedBytes - Volatile.Read(ref _measured);
+        long most = Math.Max(0, inHeap - rest.Live);
+        long pending = Volatile.Read(ref _pending);
+        if (pending > most)
+        {
+            Interlocked.Add(ref _pending, most - pending);
+            pending = most;
+        }
+
+        Volatile.Write(ref _rest, rest with { Ephemeral = any, Uncertain = Math.Max(0, inHeap - pending - rest.Live) });
     }
 
     /// <summary>

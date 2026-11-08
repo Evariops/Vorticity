@@ -242,6 +242,30 @@ public sealed partial class SharedBudgetTests
         return path;
     }
 
+    /// <summary>
+    /// What the queries let go between two full collections counts with the rest of the process until the next one, never
+    /// past what the heap holds: a query's working memory admitted and given back again and again, which the heap never
+    /// held, left the process's budget nothing to grant until a full collection, and refused a lane its 64 KiB under load
+    /// (2026-11-08). After a collection of the youngest generation, the budget grants it again.
+    /// </summary>
+    [Fact]
+    public void WhatTheQueriesLetGoNeverCountsPastWhatTheHeapHolds()
+    {
+        QueryMemoryBudget process = new QueryMemoryBudget(64L << 30, process: null);
+        Assert.True(process.TryReserve(1));
+        process.Release(1);
+        using QueryMemory memory = new QueryMemory(process);
+        for (int i = 0; i < 128; i++)
+        {
+            memory.Measure(1L << 30);
+            memory.Measure(-(1L << 30));
+        }
+
+        GC.Collect(0, GCCollectionMode.Forced, blocking: true);
+        Assert.True(process.CanReserve(64 * 1024), $"{process.CeilingBytes:N0} bytes left to the queries");
+        Assert.True(process.CeilingBytes > 32L << 30, $"{process.CeilingBytes:N0} bytes left to the queries");
+    }
+
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
 
     [VortexRecord]
