@@ -97,6 +97,52 @@ internal sealed class QueryMemory : IDisposable
     /// <summary>The most bytes the query held of its budget at once.</summary>
     internal long Peak => Volatile.Read(ref _peak);
 
+    // What a plan keeps for this query alone (the layout of its key's tuples, its long texts numbered once for every lane),
+    // dropped with the query: the first owner's in place, any other's in a list made for it.
+    private object? _stateOwner;
+    private object? _state;
+    private System.Collections.Generic.List<(object Owner, object State)>? _moreStates;
+
+    /// <summary>
+    /// What <paramref name="owner"/> keeps for this query, made by <paramref name="make"/> the first time it is asked for, the
+    /// same for every lane after, and dropped with the query: a table keyed by the query would make a weak table's container
+    /// a question, and its finalizer.
+    /// </summary>
+    internal T StateOf<T>(object owner, Func<object, QueryMemory, T> make)
+        where T : class
+    {
+        lock (this)
+        {
+            if (ReferenceEquals(_stateOwner, owner))
+            {
+                return (T)_state!;
+            }
+
+            if (_moreStates is { } more)
+            {
+                foreach ((object kept, object state) in more)
+                {
+                    if (ReferenceEquals(kept, owner))
+                    {
+                        return (T)state;
+                    }
+                }
+            }
+
+            T made = make(owner, this);
+            if (_stateOwner is null)
+            {
+                (_stateOwner, _state) = (owner, made);
+            }
+            else
+            {
+                (_moreStates ??= []).Add((owner, made));
+            }
+
+            return made;
+        }
+    }
+
     /// <summary>The ceiling of the query's budget, as it stands.</summary>
     internal long Ceiling => _budget.CeilingBytes;
 
