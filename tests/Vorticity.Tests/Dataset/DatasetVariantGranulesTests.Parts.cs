@@ -81,4 +81,33 @@ public sealed partial class DatasetVariantGranulesTests
 
         Assert.True(objects > 0);
     }
+
+    /// <summary>
+    /// An object's path map asked again by the same question for the same keys, in any order: the one the question kept;
+    /// for other keys, or by another question, read again (the block statistics: <c>VariantBlockStatsTests</c>).
+    /// </summary>
+    [Fact]
+    public async Task AQuestionKeepsThePathMapsItReadForItsOtherScans()
+    {
+        await using MemoryObjectStore memory = new MemoryObjectStore();
+        await using CountingObjectStore store = new CountingObjectStore(memory);
+        _ = await WrittenAsync(store);
+        await using VortexDataset dataset = await VortexDataset.OpenAsync(store, new DatasetOptions { ContentsObjectBytes = 0, SheetObjectBytes = 0 }, Ct);
+        int attributes = dataset.Snapshot.Schema.DType.IndexOfField(nameof(Call.Attributes));
+        int maps = 0;
+        await foreach (PositionedObject held in dataset.ScanBuilder().ObjectsAsync(Ct))
+        {
+            await using ObjectLease lease = await dataset.RentAsync(held.Entry, Ct);
+            QuestionReads question = new QuestionReads();
+            if (await VariantPathMap.ReadAsync(lease.File, attributes, ["code", "route"], Ct, question) is { } map)
+            {
+                maps++;
+                Assert.Same(map, await VariantPathMap.ReadAsync(lease.File, attributes, ["route", "code"], Ct, question));
+                Assert.NotSame(map, await VariantPathMap.ReadAsync(lease.File, attributes, ["code"], Ct, question));
+                Assert.NotSame(map, await VariantPathMap.ReadAsync(lease.File, attributes, ["code", "route"], Ct, new QuestionReads()));
+            }
+        }
+
+        Assert.True(maps > 0);
+    }
 }

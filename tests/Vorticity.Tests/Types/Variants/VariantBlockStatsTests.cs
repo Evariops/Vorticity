@@ -71,6 +71,36 @@ public sealed partial class VariantBlockStatsTests
     }
 
     /// <summary>
+    /// Statistics asked again by the same question for the same keys, in any order: the ones the question kept, nothing
+    /// read; for other keys, or by another question, read again.
+    /// </summary>
+    [Fact]
+    public async Task AQuestionKeepsTheStatisticsItReadForItsOtherScans()
+    {
+        await using VortexFile file = await OpenAsync(await WriteAsync(Rows()));
+        int field = file.DType.IndexOfField(nameof(Doc.Attributes));
+        QuestionReads question = new QuestionReads();
+        (VariantBlockStats? first, int read, _) = await VariantBlockStats.ReadAsync(
+            file, field, [("status", PathClass.Integer), ("route", PathClass.String)], Ct, question);
+        Assert.NotNull(first);
+        Assert.True(read > 0);
+
+        (VariantBlockStats? again, int readAgain, long bytesAgain) = await VariantBlockStats.ReadAsync(
+            file, field, [("route", PathClass.String), ("status", PathClass.Integer)], Ct, question);
+        Assert.Same(first, again);
+        Assert.Equal((0, 0L), (readAgain, bytesAgain));
+
+        (VariantBlockStats? other, int readOther, _) = await VariantBlockStats.ReadAsync(file, field, [("status", PathClass.Integer)], Ct, question);
+        Assert.NotSame(first, other);
+        Assert.True(readOther > 0);
+
+        (VariantBlockStats? next, int readNext, _) = await VariantBlockStats.ReadAsync(
+            file, field, [("status", PathClass.Integer), ("route", PathClass.String)], Ct, new QuestionReads());
+        Assert.NotSame(first, next);
+        Assert.Equal(read, readNext);
+    }
+
+    /// <summary>
     /// Statistics regular enough to compress past a thousand times their frame are read back: a flag that alternates
     /// from block to block over sixteen thousand blocks of four rows, whose region zstd squeezes to a few dozen bytes,
     /// refutes the blocks that hold it false, where a reader that took such a body for a forged one pruned none.
