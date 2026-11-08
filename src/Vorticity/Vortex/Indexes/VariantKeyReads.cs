@@ -163,6 +163,26 @@ internal sealed class VariantKeyReads
     internal static async ValueTask<VariantKeyReads?> LoadAsync(
         VortexFile file, IReadOnlyDictionary<string, string[]> columns, CancellationToken cancellationToken, QuestionReads? question = null)
     {
+        // A question's scans of an object read the same columns by the same keys: the reads its first made.
+        if (question is null)
+        {
+            return await ReadAsync(file, columns, question: null, cancellationToken).ConfigureAwait(false);
+        }
+
+        if (question.TryGetKeyReads(file, columns, out VariantKeyReads? kept))
+        {
+            return kept;
+        }
+
+        VariantKeyReads? read = await ReadAsync(file, columns, question, cancellationToken).ConfigureAwait(false);
+        question.KeepKeyReads(file, columns, read);
+        return read;
+    }
+
+    /// <summary>The reads as <see cref="LoadAsync(VortexFile, IReadOnlyDictionary{string, string[]}, CancellationToken, QuestionReads?)"/> says, made from the file's path maps.</summary>
+    private static async ValueTask<VariantKeyReads?> ReadAsync(
+        VortexFile file, IReadOnlyDictionary<string, string[]> columns, QuestionReads? question, CancellationToken cancellationToken)
+    {
         DType schema = file.DType;
         if (schema.Kind != DTypeKind.Struct || !file.HasIndexDirectory)
         {

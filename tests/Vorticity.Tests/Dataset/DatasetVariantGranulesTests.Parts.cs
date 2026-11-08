@@ -95,6 +95,7 @@ public sealed partial class DatasetVariantGranulesTests
         await using VortexDataset dataset = await VortexDataset.OpenAsync(store, new DatasetOptions { ContentsObjectBytes = 0, SheetObjectBytes = 0 }, Ct);
         int attributes = dataset.Snapshot.Schema.DType.IndexOfField(nameof(Call.Attributes));
         int maps = 0;
+        int keyed = 0;
         await foreach (PositionedObject held in dataset.ScanBuilder().ObjectsAsync(Ct))
         {
             await using ObjectLease lease = await dataset.RentAsync(held.Entry, Ct);
@@ -106,8 +107,20 @@ public sealed partial class DatasetVariantGranulesTests
                 Assert.NotSame(map, await VariantPathMap.ReadAsync(lease.File, attributes, ["code"], Ct, question));
                 Assert.NotSame(map, await VariantPathMap.ReadAsync(lease.File, attributes, ["code", "route"], Ct, new QuestionReads()));
             }
+
+            // The reads by keys made of them, the same for the same columns and keys in another order.
+            Dictionary<string, string[]> columns = new() { [nameof(Call.Attributes)] = ["code", "route"] };
+            if (await VariantKeyReads.LoadAsync(lease.File, columns, Ct, question) is { } reads)
+            {
+                keyed++;
+                Dictionary<string, string[]> again = new() { [nameof(Call.Attributes)] = ["route", "code"] };
+                Assert.Same(reads, await VariantKeyReads.LoadAsync(lease.File, again, Ct, question));
+                Assert.NotSame(reads, await VariantKeyReads.LoadAsync(lease.File, new Dictionary<string, string[]> { [nameof(Call.Attributes)] = ["code"] }, Ct, question));
+                Assert.NotSame(reads, await VariantKeyReads.LoadAsync(lease.File, columns, Ct, new QuestionReads()));
+            }
         }
 
         Assert.True(maps > 0);
+        Assert.True(keyed > 0);
     }
 }

@@ -67,6 +67,96 @@ internal sealed class QuestionReads
         VortexFile file, int field, IReadOnlyCollection<(string Key, Types.Variants.PathClass Class)> wanted, VariantBlockStats? stats) =>
         Keep(ref _blockStats, new Read<(string Key, Types.Variants.PathClass Class)>(file, field, wanted), stats);
 
+    // The chunks of a file a scan reads its variant columns' keys by, by the columns and their keys: made again at each scan
+    // of an object, their keys, chunks and dtypes, from the maps the question keeps.
+    private Dictionary<KeyedColumns, VariantKeyReads?>? _keyReads;
+
+    /// <summary>The reads of <paramref name="file"/>'s columns by the keys <paramref name="columns"/> names the question made, if any.</summary>
+    internal bool TryGetKeyReads(VortexFile file, IReadOnlyDictionary<string, string[]> columns, out VariantKeyReads? reads)
+    {
+        reads = null;
+        if (Volatile.Read(ref _keyReads) is not { } kept)
+        {
+            return false;
+        }
+
+        lock (kept)
+        {
+            return kept.TryGetValue(new KeyedColumns(file, columns), out reads);
+        }
+    }
+
+    /// <summary>Keeps <paramref name="reads"/>, the reads of <paramref name="file"/>'s columns by the keys <paramref name="columns"/> names, for the question's other scans.</summary>
+    internal void KeepKeyReads(VortexFile file, IReadOnlyDictionary<string, string[]> columns, VariantKeyReads? reads)
+    {
+        Dictionary<KeyedColumns, VariantKeyReads?> kept = Volatile.Read(ref _keyReads) ?? Interlocked.CompareExchange(ref _keyReads, [], null) ?? _keyReads!;
+        lock (kept)
+        {
+            kept.TryAdd(new KeyedColumns(file, columns), reads);
+        }
+    }
+
+    /// <summary>A file's columns read by some of their keys: the same when the file is, and each column with the same set of keys.</summary>
+    private readonly struct KeyedColumns(VortexFile file, IReadOnlyDictionary<string, string[]> columns) : IEquatable<KeyedColumns>
+    {
+        private readonly VortexFile _file = file;
+        private readonly IReadOnlyDictionary<string, string[]> _columns = columns;
+
+        public bool Equals(KeyedColumns other)
+        {
+            if (!ReferenceEquals(_file, other._file) || _columns.Count != other._columns.Count)
+            {
+                return false;
+            }
+
+            // A dictionary the scan builder made, walked by its own enumerator, which an interface would box.
+            if (_columns is Dictionary<string, string[]> mine)
+            {
+                foreach ((string column, string[] keys) in mine)
+                {
+                    if (!Same(column, keys, other._columns))
+                    {
+                        return false;
+                    }
+                }
+
+                return true;
+            }
+
+            foreach ((string column, string[] keys) in _columns)
+            {
+                if (!Same(column, keys, other._columns))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        private static bool Same(string column, string[] keys, IReadOnlyDictionary<string, string[]> other)
+        {
+            if (!other.TryGetValue(column, out string[]? theirs) || theirs.Length != keys.Length)
+            {
+                return false;
+            }
+
+            foreach (string key in keys)
+            {
+                if (Array.IndexOf(theirs, key) < 0)
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        public override bool Equals(object? obj) => obj is KeyedColumns other && Equals(other);
+
+        public override int GetHashCode() => HashCode.Combine(System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(_file), _columns.Count);
+    }
+
     private static bool TryGet<TKey, TValue>(ref Dictionary<Read<TKey>, TValue?>? reads, Read<TKey> read, out TValue? value)
         where TValue : class
     {
