@@ -1769,6 +1769,8 @@ internal sealed class AggregationPartition
         Scratch.Return(ref _componentRows);
         Scratch.Return(ref _followMap);
         Scratch.Return(ref _followComponents);
+        _ranges.Release();
+        _componentRanges.Release();
     }
 
     /// <summary>

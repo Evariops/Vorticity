@@ -553,6 +553,7 @@ internal sealed class PackedKeys<TKey> : GroupKeys
         for (int p = 0; p < _ids.Length; p++)
         {
             Scratch.Return(ref _ids[p]);
+            _partRanges[p].Release();
         }
 
         Scratch.Return(ref _slots);
