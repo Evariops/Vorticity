@@ -140,7 +140,7 @@ internal sealed class ArrayShelf : ISweptAfterCollections
     /// whichever is less, and while queries run, up to the most one of them held lately
     /// (<see cref="Expect"/>); of small ones, a quarter of the first again, apart, so that a query whose
     /// large arrays its budget does not hold still finds its small ones, and while queries run, what they
-    /// gave back lately past it, up to the first. Its large arrays count in the
+    /// gave back lately past it, up to the first, and past that the room the large ones leave empty. Its large arrays count in the
     /// process's budget as the queries' tables do, and go when a query needs their room
     /// (<see cref="Relieve"/>). Back to its budget after two seconds with no query, and swept after
     /// collections: emptied when no query took from it since the last, or when the machine's memory load
@@ -221,11 +221,12 @@ internal sealed class ArrayShelf : ISweptAfterCollections
 
     /// <summary>
     /// A query needs room the process's budget refused: the shelf's large arrays all go to the collector,
-    /// which the budget then asks for. A cache, not a holder: never in a query's way.
+    /// which the budget then asks for, and the small arrays it kept in their room. A cache, not a holder:
+    /// never in a query's way.
     /// </summary>
     internal void Relieve()
     {
-        if (!_governed || Volatile.Read(ref _held) == Volatile.Read(ref _heldSmall))
+        if (!_governed || (Volatile.Read(ref _held) == Volatile.Read(ref _heldSmall) && Volatile.Read(ref _heldSmall) <= SmallBudget))
         {
             return;
         }
@@ -234,6 +235,10 @@ internal sealed class ArrayShelf : ISweptAfterCollections
         {
             Volatile.Write(ref _expected, 0);
             Evict(long.MaxValue, ref _large, kept: null, before: long.MaxValue);
+            if (Borrowed is long borrowed and > 0)
+            {
+                Evict(borrowed, ref _small, kept: null, before: long.MaxValue);
+            }
         }
     }
 
@@ -798,6 +803,21 @@ internal sealed class ArrayShelf : ISweptAfterCollections
     }
 
     /// <summary>
+    /// The room the arrays of <paramref name="pile"/>'s kind have on the shelf, under the lock. The process's shelf lends
+    /// its small arrays the room its large ones leave empty, past their own budget, and its large arrays have their
+    /// budget less what the small ones borrowed of it: at 32 clients the small arrays' budget stayed full, 84 MB of them
+    /// refused in 15 s and made again, the windows of quantile sketches first, while the large arrays held 38 MB of their
+    /// 268 (2026-11-08).
+    /// </summary>
+    private long RoomOf(Pile pile) =>
+        pile.Small
+            ? SmallBudget + (_governed ? Math.Max(0, LargeBudget - (_held - _heldSmall)) : 0)
+            : LargeBudget - Borrowed;
+
+    /// <summary>The bytes the process's small arrays hold past their own budget, of the large arrays' room, under the lock.</summary>
+    private long Borrowed => _governed ? Math.Max(0, _heldSmall - SmallBudget) : 0;
+
+    /// <summary>
     /// An array of elements of <paramref name="type"/>, <paramref name="elementBytes"/> each, on the shelf,
     /// within its budget: whether it kept it. Past the budget, the arrays of the lengths taken or given
     /// least recently go first, those last used before <paramref name="before"/> only: a shelf full of
@@ -824,8 +844,15 @@ internal sealed class ArrayShelf : ISweptAfterCollections
 
             Touch(pile);
             _active = true;
-            long budget = pile.Small ? SmallBudget : LargeBudget;
+            long budget = RoomOf(pile);
             long held = pile.Small ? _heldSmall : _held - _heldSmall;
+            if (!pile.Small && Borrowed is long borrowed and > 0 && held + pile.Bytes > budget)
+            {
+                // A large array takes back first the room small ones borrowed of its budget.
+                Evict(Math.Min(borrowed, held + pile.Bytes - budget), ref _small, kept: null, before: long.MaxValue);
+                budget = RoomOf(pile);
+            }
+
             if (held + pile.Bytes > budget)
             {
                 // Short of room: what goes for it, or it, the next query of its kind makes again.

@@ -125,16 +125,19 @@ public sealed partial class SharedBudgetTests
     }
 
     /// <summary>
-    /// A shelf kept as the process's, a megabyte and a quarter of it for small arrays: a query gives back twice that
-    /// quarter of them, and half goes; once it ends, the next keeps them all, up to the megabyte; idle, the shelf comes back
-    /// to its quarter. Kept to their quarter, the small arrays of a quantile per service and hour over a week at 32 lanes,
-    /// its lanes' sketches and its parts' at once, were made again at every ask, 34 MB of them.
+    /// A shelf kept as the process's, a megabyte and a quarter of it for small arrays, its large arrays' megabyte taken:
+    /// a query gives back twice that quarter of them, and half goes; once it ends, the next keeps them all, up to the
+    /// megabyte; idle, the shelf comes back to its quarter. Kept to their quarter, the small arrays of a quantile per
+    /// service and hour over a week at 32 lanes, its lanes' sketches and its parts' at once, were made again at every ask,
+    /// 34 MB of them.
     /// </summary>
     [Fact]
     public void TheProcesssShelfKeepsTheSmallArraysQueriesLatelyGaveBackPastItsQuarter()
     {
         const long Budget = 1L << 20;
         ArrayShelf shelf = ArrayShelf.Governed(Budget);
+        long[] large = new long[Budget / sizeof(long)];
+        shelf.Give(large);
         const int Arrays = 64;
         long bytes = Arrays * 1024L * sizeof(long);
         Assert.Equal(Budget / 2, bytes);
@@ -143,7 +146,7 @@ public sealed partial class SharedBudgetTests
             shelf.Give(array);
         }
 
-        Assert.Equal(Budget / 4, shelf.Held);
+        Assert.Equal(Budget + (Budget / 4), shelf.Held);
 
         // The query ends: the next keeps what this one found no room for.
         shelf.Expect(0);
@@ -152,7 +155,7 @@ public sealed partial class SharedBudgetTests
             shelf.Give(array);
         }
 
-        Assert.Equal(bytes, shelf.Held);
+        Assert.Equal(Budget + bytes, shelf.Held);
 
         // Idle: the first tick finds the shelf used since the last, the next two find it idle and bring it back.
         for (int tick = 0; tick < 3; tick++)
@@ -160,11 +163,37 @@ public sealed partial class SharedBudgetTests
             shelf.Tick();
         }
 
-        Assert.Equal(Budget / 4, shelf.Held);
+        Assert.Equal(Budget + (Budget / 4), shelf.Held);
+        Assert.Same(large, shelf.Take<long>(large.Length, zeroed: false));
     }
 
     /// <summary>
-    /// A shelf kept as the process's, a quarter of a megabyte for small arrays, given a thousand arrays of a thousand lengths:
+    /// The process's shelf lends its small arrays the room its large ones leave empty, past their quarter, and a large array
+    /// given back takes that room back first. Kept to their quarter, the small arrays of the warm mix at 32 clients, the
+    /// windows of quantile sketches first, were refused and made again, 84 MB of them in 15 s, while the large arrays held
+    /// 38 MB of their 268.
+    /// </summary>
+    [Fact]
+    public void TheProcesssShelfLendsItsSmallArraysTheRoomItsLargeOnesLeave()
+    {
+        const long Budget = 1L << 20;
+        ArrayShelf shelf = ArrayShelf.Governed(Budget);
+        for (int i = 0; i < 64; i++)
+        {
+            shelf.Give(new long[2048]);
+        }
+
+        Assert.Equal(Budget, shelf.Held);
+
+        long[] large = new long[Budget / sizeof(long)];
+        shelf.Give(large);
+        Assert.Equal(Budget + (Budget / 4), shelf.Held);
+        Assert.Same(large, shelf.Take<long>(large.Length, zeroed: false));
+    }
+
+    /// <summary>
+    /// A shelf kept as the process's, a quarter of a megabyte for small arrays and the megabyte its large ones leave empty,
+    /// given a thousand arrays of a thousand lengths:
     /// past its budget, each one given lets the oldest go, and the piles it empties leave the order an eviction walks, which
     /// holds those that keep an array alone. Left in it, every eviction walked past the emptied ones: a quantile within 1 %
     /// per service and hour (T7), asked after another's sketches filled the shelf, took 2.5 s where it takes 0.25.
@@ -178,8 +207,9 @@ public sealed partial class SharedBudgetTests
             shelf.Give(new long[length]);
         }
 
+        // A quarter of a megabyte their own, and the megabyte the large arrays leave empty.
         long held = shelf.Held;
-        Assert.InRange(held, 1L << 17, 1L << 18);
+        Assert.InRange(held, 1L << 20, (1L << 20) + (1L << 18));
         Assert.InRange(shelf.OrderedSmallPiles, 1, (int)(held / (1_000 * sizeof(long))) + 1);
     }
 
