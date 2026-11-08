@@ -285,6 +285,33 @@ internal sealed class SummaryPruner
         return must;
     }
 
+    /// <summary>
+    /// <see cref="MayMatch"/> and, when a row may match, <see cref="MustMatch"/> of the same summaries, which the pruner is set
+    /// to once for both: a granule asked both questions set it twice, each column's summary looked up by name each time.
+    /// </summary>
+    /// <param name="summaries">What is known about the columns, in any order.</param>
+    /// <param name="rows">How many rows the summaries cover.</param>
+    /// <param name="must">Whether the predicate selects every row; false when none may match.</param>
+    /// <returns>Whether a row the predicate selects can lie behind the summaries.</returns>
+    public bool Judge(IReadOnlyList<ColumnSummary> summaries, long rows, out bool must)
+    {
+        must = false;
+        if (summaries is null || summaries.Count == 0 || rows <= 0 || _paths.Count == 0)
+        {
+            return true;
+        }
+
+        if (Pruner(summaries, rows) is not { } scratch)
+        {
+            return true;
+        }
+
+        bool may = scratch.Pruner.MayMatch(new RowRange(0, rows));
+        must = may && scratch.Pruner.MustMatch(new RowRange(0, rows));
+        Return(scratch);
+        return may;
+    }
+
     // A pruner over one zone of each column the predicate reads, set to the summaries of each question and given back
     // after it: a cache of one, so that the questions asked of extents one after another, of every granule of an object,
     // make no pruner; a lane that finds it taken makes its own.

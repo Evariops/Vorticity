@@ -94,6 +94,132 @@ internal sealed class GranuleAnswer
     // for the planner's count. A bound on another column, whose values a granule holds in any order, varies like any.
     private int[] _ranged = [];
 
+    // The places among Fields of the keys' and the measures' columns, and whether the filter reads each field: found once
+    // (Placed), where a granule looked each up in its loops.
+    private FieldPlaces? _placing;
+
+    private FieldPlaces Placed => _placing ??= new FieldPlaces(this);
+
+    /// <summary>The places among <see cref="Fields"/> of the keys' columns, of the measures' columns, and the fields each filter reads.</summary>
+    private sealed class FieldPlaces
+    {
+        internal FieldPlaces(GranuleAnswer answer)
+        {
+            int[] fields = answer.Fields;
+            Keys = Array.ConvertAll(answer.KeyFields, field => Array.IndexOf(fields, field));
+            Measures = Array.ConvertAll(answer.Measures, measure => Array.IndexOf(fields, measure.Field));
+            int[] filtered = answer._filtered;
+            int[] filteredWhole = answer._filteredWhole;
+            Filtered = Array.ConvertAll(fields, field => Array.IndexOf(filtered, field) >= 0);
+            FilteredWhole = Array.ConvertAll(fields, field => Array.IndexOf(filteredWhole, field) >= 0);
+        }
+
+        /// <summary>The place of each key's column, by the key's.</summary>
+        internal int[] Keys { get; }
+
+        /// <summary>The place of each measure's column, by the measure's.</summary>
+        internal int[] Measures { get; }
+
+        /// <summary>Whether the filter less a value left out reads each field, by the field's place.</summary>
+        internal bool[] Filtered { get; }
+
+        /// <summary>Whether the whole filter reads each field, by the field's place.</summary>
+        internal bool[] FilteredWhole { get; }
+    }
+
+    /// <summary>
+    /// A pruner as the granules of one object ask it: the places among the granules' columns of those it reads that the
+    /// object keeps statistics of by granule, and the object's summaries of the others it reads. A granule's summaries are
+    /// those alone, where it listed every column's and the object's, a 72-byte summary copied with three write barriers each,
+    /// and the pruner looked each up by name (22 % of a question of the distinct hosts by region, 2026-11-08).
+    /// </summary>
+    private sealed class Judging
+    {
+        private Judging(SummaryPruner pruner, int[] own, List<ColumnSummary> held)
+        {
+            Pruner = pruner;
+            Own = own;
+            _held = held.Count;
+
+            // The object's summaries first, set once; a granule's own after them, set at each granule.
+            Judged = held;
+            for (int o = 0; o < own.Length; o++)
+            {
+                Judged.Add(default);
+            }
+        }
+
+        private readonly int _held;
+
+        /// <summary>The pruner.</summary>
+        internal SummaryPruner Pruner { get; }
+
+        /// <summary>The places of the columns it reads that the granules describe, in their order.</summary>
+        internal int[] Own { get; }
+
+        /// <summary>
+        /// The summaries a granule is judged by, those of <see cref="Summaries"/>' last granule: the object's first, whose
+        /// columns no granule describes, then the granule's own, which a value of a varying column replaces in place.
+        /// </summary>
+        internal List<ColumnSummary> Judged { get; }
+
+        /// <summary>The judging of <paramref name="pruner"/> over an object's granule <paramref name="columns"/> and <paramref name="summaries"/>; null for none.</summary>
+        internal static Judging? Of(SummaryPruner? pruner, GranuleColumn[] columns, ObjectSummaries summaries)
+        {
+            if (pruner is null)
+            {
+                return null;
+            }
+
+            IReadOnlyList<string> paths = pruner.Paths;
+            List<int> own = [];
+            for (int i = 0; i < columns.Length; i++)
+            {
+                if (columns[i].Stats is not null && Reads(paths, columns[i].Path))
+                {
+                    own.Add(i);
+                }
+            }
+
+            List<ColumnSummary> held = [];
+            IReadOnlyList<ColumnSummary> objects = summaries.Columns;
+            for (int c = 0; c < objects.Count; c++)
+            {
+                string path = objects[c].Path;
+                if (Reads(paths, path) && !own.Exists(place => string.Equals(columns[place].Path, path, StringComparison.Ordinal)))
+                {
+                    held.Add(objects[c]);
+                }
+            }
+
+            return new Judging(pruner, [.. own], held);
+        }
+
+        /// <summary>The summaries granule <paramref name="granule"/> is judged by (<see cref="Judged"/>), its own set from its <paramref name="columns"/>.</summary>
+        internal List<ColumnSummary> Summaries(int granule, GranuleColumn[] columns)
+        {
+            for (int o = 0; o < Own.Length; o++)
+            {
+                Judged[_held + o] = columns[Own[o]].SummaryOf(granule)!.Value;
+            }
+
+            return Judged;
+        }
+
+        private static bool Reads(IReadOnlyList<string> paths, string path)
+        {
+            for (int p = 0; p < paths.Count; p++)
+            {
+                if (string.Equals(paths[p], path, StringComparison.Ordinal))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+    }
+
     private GranuleAnswer(
         CountsAnswer counts, DatasetSchema version, PathCosts costs, VortexExpr? filter, (int Field, FieldExpr Key)[] keys, List<int> measured,
         List<VariantFieldExpr>? measuredPaths, int leading, int[] prefixed, int granuleRows, int sketchBits, (int Key, int Component, ValueFunction Of)[] runKeys,
@@ -1344,7 +1470,7 @@ internal sealed class GranuleAnswer
         // by a mask of them (DatasetScanBuilder.UnsettledPart), a run between two no part more: bridged, two hours of four
         // services by service and hour read 2.37 MB, where the granules left and the statistics hold 0.51, the rows 3.04.
         GranuleStateRows states = new GranuleStateRows(this);
-        List<ColumnSummary> judged = new List<ColumnSummary>(Fields.Length + summaries.Columns.Count);
+        Judging? judging = Judging.Of(judge, described, summaries);
         PrefixValues? prefixRuns = _prefixAt >= 0 && _prefixAt < alike.Length && alike[_prefixAt] is { IsPrefix: true } prefix && _schema.Tree is { } tree
             ? new PrefixValues(prefix, tree, _schema.Partitioned ? 1 : 0, KeyFields.Length, _prefixKeys)
             : null;
@@ -1354,6 +1480,7 @@ internal sealed class GranuleAnswer
         bool[] answers = new bool[any.Count];
         bool[]? wholly = holding is null ? null : new bool[any.Count];
         SummaryPruner? whole = _excluding?.Whole;
+        Judging? wholeJudging = null;
         int touched = 0;
 
         // Without deletions no bridge changes which granules are answered: the states a granule answered adds are kept
@@ -1367,8 +1494,8 @@ internal sealed class GranuleAnswer
             wholly?[b] = placed;
             int mark = states.Count;
             answers[b] = first >= part.Start && first + any.Rows[b] <= part.End && deletions.DeletedIn(first, first + any.Rows[b]) == 0
-                && (placed ? whole is not null && SettleGranule(b, any.Rows[b], described, alike, summaries, judged, states, whole, prefixRuns)
-                    : SettleGranule(b, any.Rows[b], described, alike, summaries, judged, states, judge, prefixRuns));
+                && (placed ? whole is not null && SettleGranule(b, any.Rows[b], described, alike, states, wholeJudging ??= Judging.Of(whole, described, summaries), prefixRuns)
+                    : SettleGranule(b, any.Rows[b], described, alike, states, judging, prefixRuns));
             if (!keep || !answers[b])
             {
                 states.Truncate(keep ? mark : 0);
@@ -1390,7 +1517,7 @@ internal sealed class GranuleAnswer
             {
                 if (!keep)
                 {
-                    SettleGranule(b, rows, described, alike, summaries, judged, states, wholly?[b] == true ? whole : judge, prefixRuns);
+                    SettleGranule(b, rows, described, alike, states, wholly?[b] == true ? wholeJudging ??= Judging.Of(whole, described, summaries) : judging, prefixRuns);
                 }
 
                 settled++;
@@ -1490,58 +1617,40 @@ internal sealed class GranuleAnswer
 
     /// <summary>
     /// Settles granule <paramref name="granule"/> of <paramref name="rows"/> rows into <paramref name="states"/>: true when its
-    /// statistics answer it under <paramref name="judge"/>, its rows of states added, none when they prove the filter selects
+    /// statistics answer it under <paramref name="judging"/>, its rows of states added, none when they prove the filter selects
     /// no row of it. Where more of the keys' columns vary than its statistics answer, the runs of the prefix
     /// <paramref name="values"/> reads may answer it run by run (<see cref="AddPrefixRuns"/>).
     /// </summary>
     private bool SettleGranule(
-        int granule, long rows, GranuleColumn[] columns, GranuleKeyRuns?[] runs, ObjectSummaries summaries, List<ColumnSummary> judged, GranuleStateRows states,
-        SummaryPruner? judge, PrefixValues? values)
+        int granule, long rows, GranuleColumn[] columns, GranuleKeyRuns?[] runs, GranuleStateRows states, Judging? judging, PrefixValues? values)
     {
-        // The granule's summaries: each column's own, the object's for the columns the granule keeps none of.
-        judged.Clear();
-        foreach (GranuleColumn column in columns)
-        {
-            if (column.SummaryOf(granule) is { } own)
-            {
-                judged.Add(own);
-            }
-        }
-
-        // By place rather than through the list's enumerator, which an interface boxes: a granule asks it of each column.
-        int kept = judged.Count;
-        IReadOnlyList<ColumnSummary> held = summaries.Columns;
-        for (int c = 0; c < held.Count; c++)
-        {
-            if (IndexOf(judged, kept, held[c].Path) < 0)
-            {
-                judged.Add(held[c]);
-            }
-        }
-
-        if (judge is { } filter && !filter.MayMatch(judged, rows))
+        // The granule's summaries of the columns the filter reads, its own and the object's for those it keeps none of; both
+        // questions asked of them at once.
+        bool whole = true;
+        if (judging is not null && !judging.Pruner.Judge(judging.Summaries(granule, columns), rows, out whole))
         {
             return true;
         }
 
-        bool whole = judge is not { } proving || proving.MustMatch(judged, rows);
-        int[] filtered = _excluding is { } excluding && ReferenceEquals(judge, excluding.Whole) ? _filteredWhole : _filtered;
+        FieldPlaces placed = Placed;
+        bool[] filtered = _excluding is { } excluding && ReferenceEquals(judging?.Pruner, excluding.Whole) ? placed.FilteredWhole : placed.Filtered;
 
         // The column that varies: a key's column that holds more than one group, or, under a filter the granule's summaries
         // do not prove, a column it reads that holds more than one value; at most one, which lists its values, or whose key
         // takes its groups from a component's values over the granule, under a filter proven.
         int varying = -1;
         int byRuns = -1;
-        for (int i = 0; i < Fields.Length; i++)
+        int[] fields = Fields;
+        for (int i = 0; i < fields.Length; i++)
         {
             bool varies = !KeysHoldOneGroup(i, columns[i], granule, rows)
-                || (!whole && Array.IndexOf(filtered, Fields[i]) >= 0 && !columns[i].HoldsOneValue(granule, rows));
+                || (!whole && filtered[i] && !columns[i].HoldsOneValue(granule, rows));
             if (!varies)
             {
                 continue;
             }
 
-            int run = whole && !columns[i].Lists(granule) ? RunOf(Fields[i], runs) : -1;
+            int run = whole && !columns[i].Lists(granule) ? RunOf(fields[i], runs) : -1;
             if (varying >= 0 || !CountsOnly || !(columns[i].Lists(granule) || run >= 0))
             {
                 return whole && values is not null && AddPrefixRuns(granule, rows, columns, values, states);
@@ -1561,9 +1670,22 @@ internal sealed class GranuleAnswer
             return AddRuns(granule, rows, varying, columns, runs[byRuns]!, _runKeys[byRuns], states);
         }
 
-        // Each of its values, and its nulls, judged apart: the column's summary replaced by the value's.
+        return AddValues(granule, rows, varying, columns, states, judging);
+    }
+
+    /// <summary>
+    /// The rows of states of granule <paramref name="granule"/> of <paramref name="rows"/> rows, whose column at
+    /// <paramref name="varying"/> lists its values: each of them, and its nulls, judged apart, the column's summary replaced by
+    /// the value's; false when the filter is not proven over one. Apart from <see cref="SettleGranule"/>, whose frame its
+    /// summaries and literals would widen, which the JIT zeroes at every call.
+    /// </summary>
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private bool AddValues(int granule, long rows, int varying, GranuleColumn[] columns, GranuleStateRows states, Judging? judging)
+    {
         GranuleColumn x = columns[varying];
-        int at = IndexOf(judged, judged.Count, x.Path);
+        List<ColumnSummary>? judged = judging?.Judged;
+        int at = judged is null ? -1 : IndexOf(judged, judged.Count, x.Path);
+        int[] keyPlaces = Placed.Keys;
         (ReadOnlyMemory<int> ids, ReadOnlyMemory<long> counted) = x.Stats!.ValuesOf(granule);
         for (int v = 0; v <= ids.Length; v++)
         {
@@ -1579,21 +1701,28 @@ internal sealed class GranuleAnswer
                 return false;
             }
 
-            judged[at] = x.SummaryOfValue(v < ids.Length ? x.LiteralOf(ids.Span[v]) : null, taken);
-            if (judge is { } each && !each.MayMatch(judged, taken))
+            if (judging is not null)
             {
-                continue;
-            }
+                if (at >= 0)
+                {
+                    judged![at] = x.SummaryOfValue(v < ids.Length ? x.LiteralOf(ids.Span[v]) : null, taken);
+                }
 
-            if (judge is { } proven && !proven.MustMatch(judged, taken))
-            {
-                return false;
+                if (!judging.Pruner.Judge(judged!, taken, out bool proven))
+                {
+                    continue;
+                }
+
+                if (!proven)
+                {
+                    return false;
+                }
             }
 
             int row = states.Add(taken);
-            for (int k = 0; k < KeyFields.Length; k++)
+            for (int k = 0; k < keyPlaces.Length; k++)
             {
-                int place = Array.IndexOf(Fields, KeyFields[k]);
+                int place = keyPlaces[k];
                 states.SetKey(row, k, place == varying ? value : columns[place].ConstantOf(granule, rows));
             }
         }
@@ -1644,6 +1773,7 @@ internal sealed class GranuleAnswer
         }
 
         int first = states.Count;
+        int[] keyPlaces = Placed.Keys;
         for (int v = 0; v < values.Length; v++)
         {
             if (StandsFor(function, run.Of, values.Span[v], columns[varying]) is not { } stands)
@@ -1653,9 +1783,9 @@ internal sealed class GranuleAnswer
             }
 
             int row = states.Add(counted.Span[v]);
-            for (int k = 0; k < KeyFields.Length; k++)
+            for (int k = 0; k < keyPlaces.Length; k++)
             {
-                int place = Array.IndexOf(Fields, KeyFields[k]);
+                int place = keyPlaces[k];
                 states.SetKey(row, k, place == varying ? stands : columns[place].ConstantOf(granule, rows));
             }
         }
@@ -1700,9 +1830,10 @@ internal sealed class GranuleAnswer
         }
 
         // The keys the prefix does not give, one group each over the granule.
+        int[] keyPlaces = Placed.Keys;
         for (int k = 0; k < given.Length; k++)
         {
-            int place = Array.IndexOf(Fields, KeyFields[k]);
+            int place = keyPlaces[k];
             if (given[k].Component < 0 && !columns[place].HoldsOneGroup(granule, rows, _keys[k].Key))
             {
                 return false;
@@ -1726,7 +1857,7 @@ internal sealed class GranuleAnswer
             {
                 if (given[k].Component >= 0)
                 {
-                    if (!values.TryStand(k, key, given[k], _keys[k].Key, columns[Array.IndexOf(Fields, KeyFields[k])]))
+                    if (!values.TryStand(k, key, given[k], _keys[k].Key, columns[keyPlaces[k]]))
                     {
                         states.Truncate(first);
                         return false;
@@ -1868,18 +1999,18 @@ internal sealed class GranuleAnswer
     /// </summary>
     private bool AddWhole(int granule, long rows, GranuleColumn[] columns, GranuleStateRows states)
     {
+        FieldPlaces placed = Placed;
         int row = states.Add(rows);
-        for (int k = 0; k < KeyFields.Length; k++)
+        for (int k = 0; k < placed.Keys.Length; k++)
         {
-            int place = Array.IndexOf(Fields, KeyFields[k]);
-            states.SetKey(row, k, columns[place].ConstantOf(granule, rows));
+            states.SetKey(row, k, columns[placed.Keys[k]].ConstantOf(granule, rows));
         }
 
         int word = 1;
         for (int m = 0; m < Measures.Length; m++)
         {
-            (_, int field, bool floats, bool sketch) = Measures[m];
-            GranuleColumn column = columns[Array.IndexOf(Fields, field)];
+            (_, _, bool floats, bool sketch) = Measures[m];
+            GranuleColumn column = columns[placed.Measures[m]];
             if (!column.MeasureInto(granule, floats, states.Words(row).Slice(word, MeasureLayout.Words(floats))))
             {
                 return false;
