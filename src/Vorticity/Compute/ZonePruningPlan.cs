@@ -182,7 +182,7 @@ internal static class ZonePruningPlan
         if (keysRead is not null && !live.IsEmpty)
         {
             before = Counted(live, scope);
-            (int read, long readBytes) = await RefineByKeysAsync(file, filter, keysRead, live, cancellationToken).ConfigureAwait(false);
+            (int read, long readBytes) = await RefineByKeysAsync(file, filter, keysRead, live, question, cancellationToken).ConfigureAwait(false);
             Scanning.ScanCounters.Note(metrics, read, readBytes);
             if (read > 0)
             {
@@ -486,7 +486,7 @@ internal static class ZonePruningPlan
     /// </summary>
     private static async ValueTask<(int Segments, long Bytes)> RefineByKeysAsync(
         VortexFile file, VortexExpr filter, Dictionary<string, List<(string Key, Types.Variants.PathClass Class)>> keys, BlockMask live,
-        CancellationToken cancellationToken)
+        Indexes.QuestionReads? question, CancellationToken cancellationToken)
     {
         KeyStats? stats = null;
         int segments = 0;
@@ -500,7 +500,7 @@ internal static class ZonePruningPlan
             }
 
             (Indexes.VariantBlockStats? read, int count, long readBytes) =
-                await Indexes.VariantBlockStats.ReadAsync(file, field, wanted, cancellationToken).ConfigureAwait(false);
+                await Indexes.VariantBlockStats.ReadAsync(file, field, wanted, cancellationToken, question).ConfigureAwait(false);
             segments += count;
             bytes += readBytes;
             if (read is null)

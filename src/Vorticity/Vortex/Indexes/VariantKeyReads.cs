@@ -63,10 +63,10 @@ internal sealed class VariantKeyReads
     /// </summary>
     internal static async ValueTask<VariantKeyReads?> LoadAsync(
         VortexFile file, IReadOnlyDictionary<string, string[]>? columns, IReadOnlyDictionary<string, string[]>? filtered,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, QuestionReads? question = null)
     {
-        VariantKeyReads? scan = columns is null ? null : await LoadAsync(file, columns, cancellationToken).ConfigureAwait(false);
-        if (filtered is null || await LoadAsync(file, filtered, cancellationToken).ConfigureAwait(false) is not { } alone)
+        VariantKeyReads? scan = columns is null ? null : await LoadAsync(file, columns, cancellationToken, question).ConfigureAwait(false);
+        if (filtered is null || await LoadAsync(file, filtered, cancellationToken, question).ConfigureAwait(false) is not { } alone)
         {
             return scan;
         }
@@ -161,7 +161,7 @@ internal sealed class VariantKeyReads
     /// reader read by keys; null when none does.
     /// </summary>
     internal static async ValueTask<VariantKeyReads?> LoadAsync(
-        VortexFile file, IReadOnlyDictionary<string, string[]> columns, CancellationToken cancellationToken)
+        VortexFile file, IReadOnlyDictionary<string, string[]> columns, CancellationToken cancellationToken, QuestionReads? question = null)
     {
         DType schema = file.DType;
         if (schema.Kind != DTypeKind.Struct || !file.HasIndexDirectory)
@@ -176,7 +176,7 @@ internal sealed class VariantKeyReads
         {
             int field = schema.IndexOfField(name);
             if (field < 0 || schema.GetField(field).Kind != DTypeKind.Variant
-                || await VariantPathMap.ReadAsync(file, field, wanted, cancellationToken).ConfigureAwait(false) is not { } map)
+                || await VariantPathMap.ReadAsync(file, field, wanted, cancellationToken, question).ConfigureAwait(false) is not { } map)
             {
                 continue;
             }
@@ -208,7 +208,7 @@ internal sealed class VariantKeyReads
             // Keys no chunk shreds lie in the residuals alone: each chunk is read for its residual, found where the
             // map's own keys lie in it.
             if (map.Chunks.Count > 0 && !AnyShredded(map, wanted)
-                && await VariantPathMap.ReadAsync(file, field, wanted: null, cancellationToken).ConfigureAwait(false) is { } shredded)
+                && await VariantPathMap.ReadAsync(file, field, wanted: null, cancellationToken, question).ConfigureAwait(false) is { } shredded)
             {
                 chunks.AddRange(Residuals(shredded));
                 foreach (string key in wanted)

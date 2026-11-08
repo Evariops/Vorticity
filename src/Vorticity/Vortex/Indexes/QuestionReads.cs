@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Threading;
 
@@ -39,5 +40,134 @@ internal sealed class QuestionReads
         {
             kept.TryAdd((file, field, paths), directory);
         }
+    }
+
+    // The path maps and the block statistics of the question's columns, by file, column and the keys read: the two scans of
+    // an object a question reads by its filter, then its rows kept, each read them again, a question of a flag of the log
+    // attributes 24 of each over 12 objects, their regions decompressed (2026-11-08). The keys are a set: the scans name
+    // them in their own orders.
+    private Dictionary<Read<string>, VariantPathMap?>? _pathMaps;
+    private Dictionary<Read<(string Key, Types.Variants.PathClass Class)>, VariantBlockStats?>? _blockStats;
+
+    /// <summary>The path map of column <paramref name="field"/> of <paramref name="file"/> for the keys <paramref name="wanted"/> (every key under null) the question read, if any.</summary>
+    internal bool TryGetPathMap(VortexFile file, int field, IReadOnlyCollection<string>? wanted, out VariantPathMap? map) =>
+        TryGet(ref _pathMaps, new Read<string>(file, field, wanted), out map);
+
+    /// <summary>Keeps <paramref name="map"/>, the path map of column <paramref name="field"/> of <paramref name="file"/> for <paramref name="wanted"/>, for the question's other scans.</summary>
+    internal void KeepPathMap(VortexFile file, int field, IReadOnlyCollection<string>? wanted, VariantPathMap? map) =>
+        Keep(ref _pathMaps, new Read<string>(file, field, wanted), map);
+
+    /// <summary>The block statistics of column <paramref name="field"/> of <paramref name="file"/> for the keys <paramref name="wanted"/> the question read, if any.</summary>
+    internal bool TryGetBlockStats(
+        VortexFile file, int field, IReadOnlyCollection<(string Key, Types.Variants.PathClass Class)> wanted, out VariantBlockStats? stats) =>
+        TryGet(ref _blockStats, new Read<(string Key, Types.Variants.PathClass Class)>(file, field, wanted), out stats);
+
+    /// <summary>Keeps <paramref name="stats"/>, the block statistics of column <paramref name="field"/> of <paramref name="file"/> for <paramref name="wanted"/>, for the question's other scans.</summary>
+    internal void KeepBlockStats(
+        VortexFile file, int field, IReadOnlyCollection<(string Key, Types.Variants.PathClass Class)> wanted, VariantBlockStats? stats) =>
+        Keep(ref _blockStats, new Read<(string Key, Types.Variants.PathClass Class)>(file, field, wanted), stats);
+
+    private static bool TryGet<TKey, TValue>(ref Dictionary<Read<TKey>, TValue?>? reads, Read<TKey> read, out TValue? value)
+        where TValue : class
+    {
+        value = null;
+        if (Volatile.Read(ref reads) is not { } kept)
+        {
+            return false;
+        }
+
+        lock (kept)
+        {
+            return kept.TryGetValue(read, out value);
+        }
+    }
+
+    private static void Keep<TKey, TValue>(ref Dictionary<Read<TKey>, TValue?>? reads, Read<TKey> read, TValue? value)
+        where TValue : class
+    {
+        Dictionary<Read<TKey>, TValue?> kept = Volatile.Read(ref reads) ?? Interlocked.CompareExchange(ref reads, [], null) ?? reads!;
+        lock (kept)
+        {
+            kept.TryAdd(read, value);
+        }
+    }
+
+    /// <summary>What a scan read of a column of a file for some of its keys, null for every one: the same read when the file, the column and the set of keys are.</summary>
+    private readonly struct Read<TKey>(VortexFile file, int field, IReadOnlyCollection<TKey>? keys) : IEquatable<Read<TKey>>
+    {
+        private readonly VortexFile _file = file;
+        private readonly int _field = field;
+        private readonly IReadOnlyCollection<TKey>? _keys = keys;
+
+        public bool Equals(Read<TKey> other)
+        {
+            if (!ReferenceEquals(_file, other._file) || _field != other._field)
+            {
+                return false;
+            }
+
+            if (_keys is null || other._keys is null)
+            {
+                return _keys is null && other._keys is null;
+            }
+
+            if (_keys.Count != other._keys.Count)
+            {
+                return false;
+            }
+
+            // A few keys a column: each sought among the other's, by their places when both are lists, an array's or a
+            // list's, whose enumerators an interface would box.
+            if (_keys is IReadOnlyList<TKey> mine && other._keys is IReadOnlyList<TKey> theirs)
+            {
+                for (int i = 0; i < mine.Count; i++)
+                {
+                    if (!Holds(theirs, mine[i]))
+                    {
+                        return false;
+                    }
+                }
+
+                return true;
+            }
+
+            foreach (TKey key in _keys)
+            {
+                bool found = false;
+                foreach (TKey their in other._keys)
+                {
+                    if (EqualityComparer<TKey>.Default.Equals(key, their))
+                    {
+                        found = true;
+                        break;
+                    }
+                }
+
+                if (!found)
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        private static bool Holds(IReadOnlyList<TKey> keys, TKey key)
+        {
+            for (int i = 0; i < keys.Count; i++)
+            {
+                if (EqualityComparer<TKey>.Default.Equals(keys[i], key))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        public override bool Equals(object? obj) => obj is Read<TKey> other && Equals(other);
+
+        // The file, the column and the count of keys: the keys' order is no part of it.
+        public override int GetHashCode() => HashCode.Combine(System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(_file), _field, _keys?.Count ?? -1);
     }
 }

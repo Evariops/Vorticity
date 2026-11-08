@@ -504,9 +504,31 @@ internal sealed class VariantBlockStats
     /// <summary>
     /// The block statistics of the variant column at top-level field <paramref name="field"/> of
     /// <paramref name="file"/>, their regions read for the keys and classes <paramref name="wanted"/>
-    /// only; null when the file carries none, or they do not decode.
+    /// only; null when the file carries none, or they do not decode. Under <paramref name="question"/>, statistics the
+    /// question read for these keys already are the ones it read, no segment read again: the scans of an object's passes
+    /// and parts each read them, their regions decompressed and their blocks made.
     /// </summary>
     internal static async ValueTask<(VariantBlockStats? Stats, int Segments, long Bytes)> ReadAsync(
+        VortexFile file, int field, IReadOnlyList<(string Key, PathClass Class)> wanted, CancellationToken cancellationToken,
+        QuestionReads? question = null)
+    {
+        if (question is null)
+        {
+            return await ReadCoreAsync(file, field, wanted, cancellationToken).ConfigureAwait(false);
+        }
+
+        if (question.TryGetBlockStats(file, field, wanted, out VariantBlockStats? kept))
+        {
+            return (kept, 0, 0);
+        }
+
+        (VariantBlockStats? Stats, int Segments, long Bytes) read = await ReadCoreAsync(file, field, wanted, cancellationToken).ConfigureAwait(false);
+        question.KeepBlockStats(file, field, wanted, read.Stats);
+        return read;
+    }
+
+    /// <summary>The statistics as <see cref="ReadAsync"/> says, read from the file.</summary>
+    private static async ValueTask<(VariantBlockStats? Stats, int Segments, long Bytes)> ReadCoreAsync(
         VortexFile file, int field, IReadOnlyList<(string Key, PathClass Class)> wanted, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(file);

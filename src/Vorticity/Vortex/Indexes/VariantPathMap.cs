@@ -301,7 +301,30 @@ internal sealed class VariantPathMap
     /// its regions read for the keys <paramref name="wanted"/> only, or for every key under null; null when
     /// the file carries none, or one that does not decode.
     /// </summary>
+    /// <remarks>
+    /// Under <paramref name="question"/>, a map the question read for these keys already is the one it read: the scans of an
+    /// object's passes and parts each read it again, its regions decompressed and its chunks made.
+    /// </remarks>
     internal static async ValueTask<VariantPathMap?> ReadAsync(
+        VortexFile file, int field, IReadOnlyCollection<string>? wanted, CancellationToken cancellationToken, QuestionReads? question = null)
+    {
+        if (question is null)
+        {
+            return await ReadCoreAsync(file, field, wanted, cancellationToken).ConfigureAwait(false);
+        }
+
+        if (question.TryGetPathMap(file, field, wanted, out VariantPathMap? kept))
+        {
+            return kept;
+        }
+
+        VariantPathMap? read = await ReadCoreAsync(file, field, wanted, cancellationToken).ConfigureAwait(false);
+        question.KeepPathMap(file, field, wanted, read);
+        return read;
+    }
+
+    /// <summary>The map as <see cref="ReadAsync"/> says, read from the file.</summary>
+    private static async ValueTask<VariantPathMap?> ReadCoreAsync(
         VortexFile file, int field, IReadOnlyCollection<string>? wanted, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(file);
