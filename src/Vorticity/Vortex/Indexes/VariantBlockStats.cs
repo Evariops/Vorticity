@@ -509,56 +509,97 @@ internal sealed class VariantBlockStats
         foreach (IndexEntry entry in directory.Entries)
         {
             if (entry.Kind != IndexKinds.VariantBlocks || entry.ColumnPath is not [uint column] || column != (uint)field
-                || entry.Runs is not [IndexRun run] || OptionsFrom(entry.Options) is not { } keys || run.Payload.Count != keys.Length)
+                || entry.Runs is not [IndexRun run] || WantedFrom(entry.Options, wanted, run.Payload.Count) is not { } found)
             {
                 continue;
             }
 
-            (int, PathEntry)[][] blocks = new (int, PathEntry)[keys.Length][];
-            using Vorticity.IO.SegmentRequestSet requests = new Vorticity.IO.SegmentRequestSet(run.Payload.Count);
-            int[] slots = new int[keys.Length];
-            long bytes = 0;
-            for (int key = 0; key < keys.Length; key++)
-            {
-                blocks[key] = [];
-                IndexSegment region = run.Payload[key];
-                // By index: a foreach over the list boxes its enumerator, once for each key of the object.
-                bool asked = false;
-                for (int w = 0; w < wanted.Count; w++)
-                {
-                    asked |= wanted[w].Class == keys[key].Class && string.Equals(wanted[w].Key, keys[key].Key, StringComparison.Ordinal);
-                }
-
-                slots[key] = asked ? requests.Add(new Vorticity.Serialization.Schemas.SegmentSpec(region.Offset, region.Length, region.AlignmentExponent, 0, 0)) : -1;
-                bytes += asked ? region.Length : 0;
-            }
-
-            if (requests.Count == 0)
+            // The keys wanted the statistics hold, alone: the options name every key the column's statistics keep, and each
+            // made a string at every question allocated more than the statistics read.
+            (string, PathClass)[] keys = new (string, PathClass)[found.Count];
+            (int, PathEntry)[][] blocks = new (int, PathEntry)[found.Count][];
+            if (found.Count == 0)
             {
                 return (new VariantBlockStats(keys, blocks), 0, 0);
             }
 
-            await file.Segments.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
-            for (int key = 0; key < keys.Length; key++)
+            using Vorticity.IO.SegmentRequestSet requests = new Vorticity.IO.SegmentRequestSet(found.Count);
+            long bytes = 0;
+            for (int k = 0; k < found.Count; k++)
             {
-                if (slots[key] < 0)
-                {
-                    continue;
-                }
+                keys[k] = (found[k].Key, found[k].Class);
+                IndexSegment region = run.Payload[found[k].Place];
+                requests.Add(new Vorticity.Serialization.Schemas.SegmentSpec(region.Offset, region.Length, region.AlignmentExponent, 0, 0));
+                bytes += region.Length;
+            }
 
-                ReadOnlySpan<byte> region = requests.GetBuffer(slots[key]).Span;
-                if (!run.Payload[key].Holds(region) || KeyFrom(region, keys[key].Key, keys[key].Class) is not { } read)
+            await file.Segments.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
+            for (int k = 0; k < found.Count; k++)
+            {
+                ReadOnlySpan<byte> region = requests.GetBuffer(k).Span;
+                if (!run.Payload[found[k].Place].Holds(region) || KeyFrom(region, found[k].Key, found[k].Class) is not { } read)
                 {
                     return (null, requests.Count, bytes);
                 }
 
-                blocks[key] = read;
+                blocks[k] = read;
             }
 
             return (new VariantBlockStats(keys, blocks), requests.Count, bytes);
         }
 
         return (null, 0, 0);
+    }
+
+    /// <summary>
+    /// The keys of <paramref name="wanted"/> the options <paramref name="bytes"/> hold, each its place among them, in their
+    /// order there, compared by their bytes as they lie; null when the options do not decode, or name other than
+    /// <paramref name="regions"/> keys.
+    /// </summary>
+    private static List<(string Key, PathClass Class, int Place)>? WantedFrom(
+        ReadOnlySpan<byte> bytes, IReadOnlyList<(string Key, PathClass Class)> wanted, int regions)
+    {
+        try
+        {
+            ProtoReader reader = new ProtoReader(bytes);
+            if (reader.ReadVarint() != Version)
+            {
+                return null;
+            }
+
+            ulong count = reader.ReadVarint();
+            if (count > (ulong)bytes.Length || count != (ulong)regions)
+            {
+                return null;
+            }
+
+            List<(string, PathClass, int)> found = [];
+            for (int place = 0; place < (int)count; place++)
+            {
+                ReadOnlySpan<byte> key = reader.ReadLengthDelimited();
+                ulong @class = reader.ReadVarint();
+                if (@class > (ulong)PathClass.Other)
+                {
+                    return null;
+                }
+
+                // By index: a foreach over the list boxes its enumerator, once for each key of the object.
+                for (int w = 0; w < wanted.Count; w++)
+                {
+                    if (wanted[w].Class == (PathClass)@class && Buffers.ByteKeys.SameText(key, wanted[w].Key))
+                    {
+                        found.Add((wanted[w].Key, (PathClass)@class, place));
+                        break;
+                    }
+                }
+            }
+
+            return reader.End ? found : null;
+        }
+        catch (VortexFormatException)
+        {
+            return null;
+        }
     }
 
     /// <summary>

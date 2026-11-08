@@ -207,8 +207,8 @@ internal sealed class VariantKeyReads
 
             // Keys no chunk shreds lie in the residuals alone: each chunk is read for its residual, found where the
             // map's own keys lie in it.
-            if (map.Keys.Count > 0 && !AnyShredded(map, wanted)
-                && await VariantPathMap.ReadAsync(file, field, map.Keys, cancellationToken).ConfigureAwait(false) is { } shredded)
+            if (map.Chunks.Count > 0 && !AnyShredded(map, wanted)
+                && await VariantPathMap.ReadAsync(file, field, wanted: null, cancellationToken).ConfigureAwait(false) is { } shredded)
             {
                 chunks.AddRange(Residuals(shredded));
                 foreach (string key in wanted)
@@ -265,12 +265,9 @@ internal sealed class VariantKeyReads
     {
         foreach (string key in wanted)
         {
-            for (int i = 0; i < map.Keys.Count; i++)
+            if (map.IndexOf(key) >= 0)
             {
-                if (string.Equals(map.Keys[i], key, StringComparison.Ordinal))
-                {
-                    return true;
-                }
+                return true;
             }
         }
 
@@ -281,11 +278,11 @@ internal sealed class VariantKeyReads
     private static HashSet<long> Shredding(VariantPathMap map, string[] wanted)
     {
         HashSet<long> rows = [];
-        for (int i = 0; i < map.Keys.Count; i++)
+        foreach (string key in wanted)
         {
-            if (Array.IndexOf(wanted, map.Keys[i]) >= 0)
+            if (map.IndexOf(key) is int at and >= 0)
             {
-                foreach (PathChunk part in map.Chunks[i])
+                foreach (PathChunk part in map.Chunks[at])
                 {
                     rows.Add(part.FirstRow);
                 }
@@ -385,15 +382,7 @@ internal sealed class VariantKeyReads
         int[] keys = new int[wanted.Length];
         for (int k = 0; k < wanted.Length; k++)
         {
-            keys[k] = -1;
-            for (int i = 0; i < map.Keys.Count; i++)
-            {
-                if (string.Equals(map.Keys[i], wanted[k], StringComparison.Ordinal))
-                {
-                    keys[k] = i;
-                }
-            }
-
+            keys[k] = map.IndexOf(wanted[k]);
             if (keys[k] < 0)
             {
                 return null;
