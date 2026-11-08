@@ -283,7 +283,8 @@ internal sealed class BloomPruner
         foreach ((int origin, IndexBatches<(Tree Tree, int Slot)>.Batch batch) in batches.ByOrigin)
         {
             await ReadAsync(file, origin, batch.Requests, cancellationToken).ConfigureAwait(false);
-            using ScanContext context = file.CreateIndexContext(origin);
+            using IndexContext lease = IndexContext.Of(file, origin);
+            ScanContext context = lease.Context;
             foreach ((Tree tree, int slot) in batch.Wanted)
             {
                 VortexBuffer bytes = batch.Requests.GetBuffer(slot);
@@ -371,7 +372,8 @@ internal sealed class BloomPruner
         foreach ((int origin, IndexBatches<(Tree Tree, long Index, BloomNode Parent, int Slot)>.Batch batch) in batches.ByOrigin)
         {
             await ReadAsync(file, origin, batch.Requests, cancellationToken).ConfigureAwait(false);
-            using ScanContext context = file.CreateIndexContext(origin);
+            using IndexContext lease = IndexContext.Of(file, origin);
+            ScanContext context = lease.Context;
             foreach ((Tree tree, long index, BloomNode parent, int slot) in batch.Wanted)
             {
                 VortexBuffer bytes = batch.Requests.GetBuffer(slot);
@@ -409,6 +411,7 @@ internal sealed class BloomPruner
     /// </summary>
     private static uint[]? Decode(ScanContext context, VortexBuffer segment, int expected)
     {
+        // The words' dtype is the same for every region, made once rather than in an arena of its own a region.
         if (expected <= 0)
         {
             return null;
@@ -418,10 +421,8 @@ internal sealed class BloomPruner
         {
             context.ResetBatch();
             context.Decode.LoadBlob(segment);
-            DTypeArena types = new DTypeArena();
-            DType u32 = types.Primitive(PType.U32, Nullability.NonNullable);
             ArrayNode root = context.Nodes.Root;
-            int node = context.Decode.DecodeRoot(in root, u32, expected);
+            int node = context.Decode.DecodeRoot(in root, Words, expected);
             CanonicalNode array = context.Canonical.GetNode(node);
             if (array.Kind != CanonicalKind.Primitive || array.PType != PType.U32 || array.Length != expected)
             {
@@ -435,6 +436,9 @@ internal sealed class BloomPruner
             return null;
         }
     }
+
+    /// <summary>The dtype of a region's words: an array of u32 no row leaves null.</summary>
+    private static readonly DType Words = new DTypeArena().Primitive(PType.U32, Nullability.NonNullable);
 
     private static bool AnyLive(BlockMask live, long start, long end) => live.AnyLiveBlocks(start, end);
 

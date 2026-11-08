@@ -385,7 +385,8 @@ internal sealed class KeyIndexPruner
             Segments += Scanning.ScanCounters.Unread(requests, reader, out long bytes);
             Bytes += bytes;
             await reader.ReadRegionsAsync(requests, batch.Regions, cancellationToken).ConfigureAwait(false);
-            using ScanContext context = file.CreateIndexContext(origin);
+            using IndexContext lease = IndexContext.Of(file, origin);
+            ScanContext context = lease.Context;
             foreach ((Column column, Run run, Fence fence, int low, int high, int[] slots) in batch.Wanted)
             {
                 context.ResetBatch();

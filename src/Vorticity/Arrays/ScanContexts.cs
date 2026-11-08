@@ -34,6 +34,9 @@ internal sealed class ScanContexts : ISweptAfterCollections
     // given back, and the most of them out at once since the pool last let its contexts go: what it keeps.
     private readonly int _floor;
     private readonly int _ceiling;
+
+    // Whether the contexts made are a reader of metadata's, small and noting no tree size: an index's payloads decoded.
+    private readonly bool _metadata;
     private int _lent;
     private int _mostLent;
 
@@ -58,8 +61,10 @@ internal sealed class ScanContexts : ISweptAfterCollections
     /// </summary>
     /// <param name="floor">The contexts kept whatever the scans took.</param>
     /// <param name="ceiling">The most contexts kept.</param>
-    internal ScanContexts(int floor, int ceiling)
+    /// <param name="metadata">Whether the contexts made read metadata (<see cref="Metadata"/>).</param>
+    internal ScanContexts(int floor, int ceiling, bool metadata = false)
     {
+        _metadata = metadata;
         _floor = floor;
         _ceiling = Math.Max(floor, ceiling);
         _contexts = new ScanContext?[floor];
@@ -73,6 +78,13 @@ internal sealed class ScanContexts : ISweptAfterCollections
     /// </summary>
     internal static ScanContexts Shared { get; } =
         new ScanContexts(Math.Max(16, 3 * Environment.ProcessorCount), Math.Max(64, 32 * Environment.ProcessorCount)).Swept();
+
+    /// <summary>
+    /// The pool the readers of a file's indexes take their contexts from, contexts of metadata: a Bloom filter's nodes or a
+    /// key index's pages decoded, a context made and disposed for each read of an origin's payloads before (2026-11-08).
+    /// </summary>
+    internal static ScanContexts Metadata { get; } =
+        new ScanContexts(Math.Max(16, Environment.ProcessorCount), Math.Max(64, 8 * Environment.ProcessorCount), metadata: true).Swept();
 
     /// <summary>The most contexts the scans took at once since the pool last let its contexts go, for tests and the bench.</summary>
     internal int MostLent
@@ -113,7 +125,7 @@ internal sealed class ScanContexts : ISweptAfterCollections
 
         if (context is null)
         {
-            return ScanContext.Pooled(file);
+            return _metadata ? new ScanContext(file, ScanContext.MetadataCapacity) : ScanContext.Pooled(file);
         }
 
         context.Rebind(file);
