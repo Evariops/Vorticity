@@ -100,7 +100,7 @@ public sealed class ScanContextPoolTests
 
         // A dtype the scan derived, which a batch its caller owns may hold.
         DTypeArena types = context.Types;
-        types.Primitive(PType.I32, Nullability.NonNullable);
+        DType derived = types.Primitive(PType.I32, Nullability.NonNullable);
         context.LiveBlocks = new BlockMask(first.RowCount, 1024);
         context.Metrics = new ScanCounters();
         context.KeepEncodings = true;
@@ -131,7 +131,10 @@ public sealed class ScanContextPoolTests
                 Assert.True(again.PushedFields.IsAll);
                 Assert.False(again.HasSelection);
                 Assert.Equal(0, again.Batch);
-                Assert.NotSame(types, again.Types);
+
+                // The arena of dtypes stays, where the dtype the last scan derived is still read.
+                Assert.Same(types, again.Types);
+                Assert.Equal(PType.I32, derived.PType);
             }
 
             Assert.Same(second, again.File);
@@ -300,19 +303,24 @@ public sealed class ScanContextPoolTests
         pool.Return(again);
     }
 
-    /// <summary>A pool makes each scan of a detached context an arena of dtypes of its own.</summary>
+    /// <summary>
+    /// A detached context keeps its arena of dtypes from scan to scan: a dtype the last scan derived, which a batch its caller
+    /// owns may hold, is still read, and the next scan finds it rather than make it again.
+    /// </summary>
     [Fact]
-    public void ADetachedContextMakesEachScanAnArenaOfTypesOfItsOwn()
+    public void ADetachedContextKeepsItsArenaOfTypesFromScanToScan()
     {
         VortexReadOptions options = new();
         ScanContexts fresh = new ScanContexts(4);
         ScanContext other = fresh.RentDetached(options);
         DTypeArena first = other.Types;
-        first.Primitive(PType.I64, Nullability.NonNullable);
+        DType derived = first.Primitive(PType.I64, Nullability.NonNullable);
         fresh.Return(other);
         ScanContext next = fresh.RentDetached(options);
         Assert.Same(other, next);
-        Assert.NotSame(first, next.Types);
+        Assert.Same(first, next.Types);
+        Assert.Equal(PType.I64, derived.PType);
+        Assert.Equal(derived.NodeIndex, next.Types.Primitive(PType.I64, Nullability.NonNullable).NodeIndex);
         fresh.Return(next);
     }
 

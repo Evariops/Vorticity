@@ -209,17 +209,16 @@ internal sealed class ScanContext : IDisposable
     /// DType built here compares equal to the schema's. It is not cleared per batch: the arena
     /// deduplicates, and the set of derivable dtypes is bounded by the schema's shape.
     /// <para>
-    /// It is made by the first dtype the scan derives, since most scans derive none, and at the
-    /// size the last scan of this context filled: a context serving the same scans over and over
-    /// grows it at none of their batches.
+    /// It is made by the first dtype a scan of the context derives, and kept with the context from
+    /// scan to scan, where it only grows: no node is changed or cleared, so a dtype a batch carries
+    /// past its scan, a copy the caller owns, stays readable while later scans derive beside it,
+    /// which only one scan at a time does. Made anew at each scan, the contexts' arenas were some 7 %
+    /// of what the warm mix at 32 clients left its collections to copy (2026-11-08).
     /// </para>
     /// </remarks>
-    public DTypeArena Types => _types ??= new DTypeArena(in _typesShape);
+    public DTypeArena Types => _types ??= new DTypeArena();
 
     private DTypeArena? _types;
-
-    /// <summary>What the last arena of this context filled.</summary>
-    private DTypeArenaShape _typesShape;
 
     /// <summary>
     /// The batch's scalar store. Cleared by <see cref="ResetBatch"/>, so a
@@ -1722,13 +1721,11 @@ internal sealed class ScanContext : IDisposable
 
     /// <summary>
     /// Readies a context a scan gave back for a scan of <paramref name="file"/>: the file's
-    /// encoding table and read options, and no dtype arena until the scan derives a dtype.
+    /// encoding table and read options, and the dtype arena the last scans derived into (<see cref="Types"/>).
     /// </summary>
     /// <remarks>
-    /// The dtype arena is the one thing not kept once it holds a node. A batch its caller owns may
-    /// hold dtypes the last scan derived, which a cleared arena would make throw; leaving the arena
-    /// to them keeps them valid. The node and canonical arenas, the scalars, the segment set and
-    /// the zstd decoder were reset when the context came back, and keep the capacity they grew to.
+    /// The node and canonical arenas, the scalars, the segment set and the zstd decoder were reset
+    /// when the context came back, and keep the capacity they grew to.
     /// </remarks>
     /// <param name="file">The file the next scan reads.</param>
     internal void Rebind(VortexFile file)
@@ -1746,11 +1743,7 @@ internal sealed class ScanContext : IDisposable
             _arrayEncodings[i] = file.GetArrayEncoding(i);
         }
 
-        if (_types is { NodeCount: not 0 } types)
-        {
-            _typesShape = types.Shape;
-            _types = null;
-        }
+        KeepTypes();
     }
 
     /// <summary>
@@ -1758,16 +1751,27 @@ internal sealed class ScanContext : IDisposable
     /// a context made over an explicit encoding table, which a reader of another format decodes into.
     /// </summary>
     /// <param name="options">The read options the next scan decodes under.</param>
-    /// <remarks>
-    /// The next scan makes an arena of dtypes of its own, at the shape of the last one's: the batches of a scan may outlive
-    /// its context, and no later scan mutates an arena under a dtype it handed out.
-    /// </remarks>
     internal void RebindDetached(VortexReadOptions options)
     {
         Options = options;
-        if (_types is { NodeCount: > 0 } types)
+        KeepTypes();
+    }
+
+    /// <summary>The nodes past which a context starts another arena of dtypes, having met many schemas.</summary>
+    private const int MostTypeNodes = 1024;
+
+    /// <summary>The names past which a context starts another arena of dtypes.</summary>
+    private const int MostTypeNames = 4096;
+
+    /// <summary>
+    /// Keeps the arena of dtypes for the next scan, unless the schemas the context met have filled it past
+    /// <see cref="MostTypeNodes"/> nodes or <see cref="MostTypeNames"/> names: the dtypes of an arena let go stay
+    /// readable through the batches that hold them.
+    /// </summary>
+    private void KeepTypes()
+    {
+        if (_types is { } types && (types.NodeCount > MostTypeNodes || types.NameCount > MostTypeNames))
         {
-            _typesShape = types.Shape;
             _types = null;
         }
     }
