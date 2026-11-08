@@ -106,12 +106,34 @@ internal sealed class GranuleAnswer
         internal FieldPlaces(GranuleAnswer answer)
         {
             int[] fields = answer.Fields;
-            Keys = Array.ConvertAll(answer.KeyFields, field => Array.IndexOf(fields, field));
-            Measures = Array.ConvertAll(answer.Measures, measure => Array.IndexOf(fields, measure.Field));
-            int[] filtered = answer._filtered;
-            int[] filteredWhole = answer._filteredWhole;
-            Filtered = Array.ConvertAll(fields, field => Array.IndexOf(filtered, field) >= 0);
-            FilteredWhole = Array.ConvertAll(fields, field => Array.IndexOf(filteredWhole, field) >= 0);
+            Keys = new int[answer.KeyFields.Length];
+            for (int k = 0; k < Keys.Length; k++)
+            {
+                Keys[k] = Array.IndexOf(fields, answer.KeyFields[k]);
+            }
+
+            Measures = new int[answer.Measures.Length];
+            for (int m = 0; m < Measures.Length; m++)
+            {
+                Measures[m] = Array.IndexOf(fields, answer.Measures[m].Field);
+            }
+
+            Filtered = Reading(fields, answer._filtered);
+
+            // The whole filter reads the same columns but under a value left out of a column no identifier is.
+            FilteredWhole = answer._filteredWhole.AsSpan().SequenceEqual(answer._filtered) ? Filtered : Reading(fields, answer._filteredWhole);
+        }
+
+        /// <summary>Whether <paramref name="filtered"/> holds each of <paramref name="fields"/>, by the field's place.</summary>
+        private static bool[] Reading(int[] fields, int[] filtered)
+        {
+            bool[] reads = new bool[fields.Length];
+            for (int i = 0; i < fields.Length; i++)
+            {
+                reads[i] = Array.IndexOf(filtered, fields[i]) >= 0;
+            }
+
+            return reads;
         }
 
         /// <summary>The place of each key's column, by the key's.</summary>
@@ -171,28 +193,60 @@ internal sealed class GranuleAnswer
                 return null;
             }
 
+            // Counted, then made at their lengths, with no lambda: each object a question settles makes these, and a list grown
+            // by doubling and a closure a summary cost a question of counts by service 800 bytes more than the list they replace.
             IReadOnlyList<string> paths = pruner.Paths;
-            List<int> own = [];
+            int owned = 0;
             for (int i = 0; i < columns.Length; i++)
+            {
+                owned += columns[i].Stats is not null && Reads(paths, columns[i].Path) ? 1 : 0;
+            }
+
+            int[] own = owned == 0 ? [] : new int[owned];
+            for (int i = 0, o = 0; i < columns.Length; i++)
             {
                 if (columns[i].Stats is not null && Reads(paths, columns[i].Path))
                 {
-                    own.Add(i);
+                    own[o++] = i;
                 }
             }
 
-            List<ColumnSummary> held = [];
             IReadOnlyList<ColumnSummary> objects = summaries.Columns;
+            int heldCount = 0;
             for (int c = 0; c < objects.Count; c++)
             {
-                string path = objects[c].Path;
-                if (Reads(paths, path) && !own.Exists(place => string.Equals(columns[place].Path, path, StringComparison.Ordinal)))
+                heldCount += Held(paths, columns, own, objects[c].Path) ? 1 : 0;
+            }
+
+            List<ColumnSummary> held = new List<ColumnSummary>(heldCount + own.Length);
+            for (int c = 0; c < objects.Count; c++)
+            {
+                if (Held(paths, columns, own, objects[c].Path))
                 {
                     held.Add(objects[c]);
                 }
             }
 
-            return new Judging(pruner, [.. own], held);
+            return new Judging(pruner, own, held);
+        }
+
+        /// <summary>Whether the pruner reads <paramref name="path"/> and none of the granules' columns at <paramref name="own"/> describes it: the object's summary judges it.</summary>
+        private static bool Held(IReadOnlyList<string> paths, GranuleColumn[] columns, int[] own, string path)
+        {
+            if (!Reads(paths, path))
+            {
+                return false;
+            }
+
+            foreach (int place in own)
+            {
+                if (string.Equals(columns[place].Path, path, StringComparison.Ordinal))
+                {
+                    return false;
+                }
+            }
+
+            return true;
         }
 
         /// <summary>The summaries granule <paramref name="granule"/> is judged by (<see cref="Judged"/>), its own set from its <paramref name="columns"/>.</summary>
