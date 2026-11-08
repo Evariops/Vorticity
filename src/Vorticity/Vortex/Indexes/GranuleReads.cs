@@ -15,11 +15,18 @@ namespace Vorticity.Indexes;
 /// </summary>
 internal sealed class GranuleGeometry
 {
-    private readonly Dictionary<ulong, (ChunkGeometry Geometry, int GranuleRows, long FirstRow)> _chunks;
+    // The chunks by the offset of their segment, in its order, searched by halves: one array an object, made at its length,
+    // where a dictionary grown by doubling made its entries several times an object of a question (5 % of what the mix of
+    // questions allocated, 2026-11-08).
+    private readonly Chunk[] _chunks;
+    private readonly int _count;
 
-    private GranuleGeometry(Dictionary<ulong, (ChunkGeometry Geometry, int GranuleRows, long FirstRow)> chunks, long requestBytes)
+    private readonly record struct Chunk(ulong Offset, ChunkGeometry Geometry, int GranuleRows, long FirstRow);
+
+    private GranuleGeometry(Chunk[] chunks, int count, long requestBytes)
     {
         _chunks = chunks;
+        _count = count;
         RequestBytes = requestBytes;
     }
 
@@ -35,10 +42,26 @@ internal sealed class GranuleGeometry
     /// </summary>
     internal bool TryGet(ulong offset, out ChunkGeometry geometry, out int granuleRows, out long firstRow)
     {
-        if (_chunks.TryGetValue(offset, out (ChunkGeometry Geometry, int GranuleRows, long FirstRow) chunk))
+        int low = 0;
+        int high = _count - 1;
+        while (low <= high)
         {
-            (geometry, granuleRows, firstRow) = chunk;
-            return true;
+            int middle = (low + high) >>> 1;
+            ulong at = _chunks[middle].Offset;
+            if (at == offset)
+            {
+                (_, geometry, granuleRows, firstRow) = _chunks[middle];
+                return true;
+            }
+
+            if (at < offset)
+            {
+                low = middle + 1;
+            }
+            else
+            {
+                high = middle - 1;
+            }
         }
 
         (geometry, granuleRows, firstRow) = (default, 0, 0);
@@ -59,65 +82,109 @@ internal sealed class GranuleGeometry
             return null;
         }
 
-        Dictionary<ulong, (ChunkGeometry Geometry, int GranuleRows, long FirstRow)>? chunks = null;
-        List<LayoutNode> leaves = [];
-        ReadOnlySpan<SegmentSpec> specs = tree.File.SegmentSpecs;
+        // The leaves counted first, the chunks then placed in an array of that length.
+        int count = 0;
         for (int field = 0; field < marks.Count && field < root.ChildCount; field++)
         {
-            if (marks[field] is not { } column)
+            if (marks[field] is { } column && LeafCount(root.GetChild(field)) == column.Chunks.Length)
             {
-                continue;
-            }
-
-            leaves.Clear();
-            if (!Leaves(root.GetChild(field), leaves) || leaves.Count != column.Chunks.Length)
-            {
-                continue;
-            }
-
-            long first = 0;
-            for (int c = 0; c < leaves.Count; c++)
-            {
-                ReadOnlySpan<uint> segments = leaves[c].Segments;
-                if (segments.Length == 1 && segments[0] < (uint)specs.Length)
-                {
-                    (chunks ??= [])[specs[(int)segments[0]].Offset] = (column.Chunks[c], column.GranuleRows, first);
-                }
-
-                first += leaves[c].RowCount;
+                count += column.Chunks.Length;
             }
         }
 
-        return chunks is null ? null : new GranuleGeometry(chunks, requestBytes);
+        if (count == 0)
+        {
+            return null;
+        }
+
+        Chunk[] chunks = new Chunk[count];
+        int placed = 0;
+        ReadOnlySpan<SegmentSpec> specs = tree.File.SegmentSpecs;
+        for (int field = 0; field < marks.Count && field < root.ChildCount; field++)
+        {
+            if (marks[field] is { } column && LeafCount(root.GetChild(field)) == column.Chunks.Length)
+            {
+                int c = 0;
+                long first = 0;
+                Place(root.GetChild(field), column, specs, chunks, ref placed, ref c, ref first);
+            }
+        }
+
+        if (placed == 0)
+        {
+            return null;
+        }
+
+        // A segment two chunks name, which no writer makes, keeps one of them.
+        Span<Chunk> sorted = chunks.AsSpan(0, placed);
+        sorted.Sort(static (left, right) => left.Offset.CompareTo(right.Offset));
+        return new GranuleGeometry(chunks, placed, requestBytes);
     }
 
     /// <summary>
     /// The flat chunks of a column's layout, in the order its writer wrote them: under its zones, under its chunking, its codes
-    /// under an object dictionary; false for a layout of another shape.
+    /// under an object dictionary; -1 for a layout of another shape.
     /// </summary>
-    private static bool Leaves(LayoutNode node, List<LayoutNode> into)
+    private static int LeafCount(LayoutNode node)
     {
         switch (node.Encoding)
         {
             case LayoutEncodingId.Flat:
-                into.Add(node);
-                return true;
+                return 1;
             case LayoutEncodingId.Chunked:
+                int count = 0;
                 for (int c = 0; c < node.ChildCount; c++)
                 {
-                    if (!Leaves(node.GetChild(c), into))
+                    int leaves = LeafCount(node.GetChild(c));
+                    if (leaves < 0)
                     {
-                        return false;
+                        return -1;
                     }
+
+                    count += leaves;
                 }
 
-                return true;
+                return count;
             case LayoutEncodingId.Dict when node.ChildCount == 2:
-                return Leaves(node.GetChild(1), into);
+                return LeafCount(node.GetChild(1));
             case LayoutEncodingId.Zoned or LayoutEncodingId.Stats when node.ChildCount >= 1:
-                return Leaves(node.GetChild(0), into);
+                return LeafCount(node.GetChild(0));
             default:
-                return false;
+                return -1;
+        }
+    }
+
+    /// <summary>
+    /// Places the flat chunks of a column's layout that <see cref="LeafCount"/> counts, the <paramref name="c"/>th on, each
+    /// of one segment paired with its marks' chunk and its first row, <paramref name="first"/> the rows of the chunks before.
+    /// </summary>
+    private static void Place(LayoutNode node, ColumnMarks column, ReadOnlySpan<SegmentSpec> specs, Chunk[] into, ref int placed, ref int c, ref long first)
+    {
+        switch (node.Encoding)
+        {
+            case LayoutEncodingId.Flat:
+                ReadOnlySpan<uint> segments = node.Segments;
+                if (segments.Length == 1 && segments[0] < (uint)specs.Length)
+                {
+                    into[placed++] = new Chunk(specs[(int)segments[0]].Offset, column.Chunks[c], column.GranuleRows, first);
+                }
+
+                first += node.RowCount;
+                c++;
+                return;
+            case LayoutEncodingId.Chunked:
+                for (int child = 0; child < node.ChildCount; child++)
+                {
+                    Place(node.GetChild(child), column, specs, into, ref placed, ref c, ref first);
+                }
+
+                return;
+            case LayoutEncodingId.Dict:
+                Place(node.GetChild(1), column, specs, into, ref placed, ref c, ref first);
+                return;
+            default:
+                Place(node.GetChild(0), column, specs, into, ref placed, ref c, ref first);
+                return;
         }
     }
 }
