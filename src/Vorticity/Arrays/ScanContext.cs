@@ -952,16 +952,6 @@ internal sealed class ScanContext : IDisposable
     /// <summary>The table of retained chunks, created at the first claim; a context running alone reads a few columns.</summary>
     private RetainedChunks Retained => _retained ??= RetainedChunks.Create(columns: 3, lanes: 1);
 
-    private ZstdDecompressor? _zstd;
-
-    /// <summary>
-    /// The zstd decompressor this context decompresses its frames with, a dictionary's included,
-    /// taken from the process's at the first and given back when the context is disposed: its
-    /// tables and buffers are costly to build, and a scan meets an array once per window of it, not
-    /// once.
-    /// </summary>
-    internal ZstdDecompressor Zstd => _zstd ??= ZstdDecoders.Rent();
-
     /// <summary>The retained decode for <paramref name="key"/>, if one is published; no claim is made.</summary>
     /// <param name="key">From <see cref="SegmentKey"/>, <see cref="LayoutKey"/> or <see cref="ChildKey"/>.</param>
     /// <param name="arena">The arena holding it. The caller may borrow from this until eviction.</param>
@@ -1851,12 +1841,6 @@ internal sealed class ScanContext : IDisposable
         if (_ownsRetained)
         {
             _retained?.Dispose();
-        }
-
-        if (_zstd is { } zstd)
-        {
-            _zstd = null;
-            ZstdDecoders.Return(zstd);
         }
 
         Segments.Dispose();

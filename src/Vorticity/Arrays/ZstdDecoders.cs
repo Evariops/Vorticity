@@ -4,15 +4,17 @@ using ManagedCompressions.Zstd;
 namespace Vorticity.Arrays;
 
 /// <summary>
-/// The zstd decompressors scan contexts decompress their frames with, kept from one context to the
-/// next: a decompressor's tables and buffers are 160 KB, and 1.4 MB once it has decoded a frame of
-/// several blocks, which a scan built once per context, so once per scan and per lane, where the
-/// next scan needed the same.
+/// The zstd decompressors the decoders decompress their frames with, each taken for one decode and
+/// given back after it: a decompressor's tables and buffers are 160 KB, and 1.4 MB once it has
+/// decoded a frame of several blocks, which a scan built once per context, so once per scan and per
+/// lane, where the next scan needed the same. A decompressor a scan's context kept for its life went
+/// with the context to the pool of contexts, every context parked holding one: 405 MB for the 459
+/// contexts 32 questions at once kept (2026-11-08).
 /// </summary>
 /// <remarks>
 /// A decompressor decodes whole frames, one per call, each with the dictionary it is given, so
-/// nothing of one scan reaches the next. The bound is what a few scans at once hold, a lane each; a
-/// decompressor past it is left to the collector.
+/// nothing of one decode reaches the next. The bound is what the decodes running at once hold, one a
+/// processor; a decompressor past it is left to the collector.
 /// </remarks>
 internal static class ZstdDecoders
 {
@@ -34,7 +36,7 @@ internal static class ZstdDecoders
     private static readonly Lock Gate = new Lock();
     private static int _count;
 
-    /// <summary>A decompressor an earlier context gave back, or a new one when none waits.</summary>
+    /// <summary>A decompressor an earlier decode gave back, or a new one when none waits.</summary>
     internal static ZstdDecompressor Rent()
     {
         lock (Gate)
@@ -50,7 +52,7 @@ internal static class ZstdDecoders
         return new ZstdDecompressor();
     }
 
-    /// <summary>Keeps <paramref name="decoder"/> for a later context, or lets it go past the bound.</summary>
+    /// <summary>Keeps <paramref name="decoder"/> for a later decode, or lets it go past the bound.</summary>
     internal static void Return(ZstdDecompressor decoder)
     {
         lock (Gate)

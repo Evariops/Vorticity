@@ -102,41 +102,49 @@ internal sealed class ZstdBuffersDecoder : ArrayDecoder
         // Decompressed into the canonical arena, which is the only writable memory a decoder may
         // have and is released with the batch.
         //
-        // The context's decompressor, reused across every buffer of every node the scan meets: a
-        // new one would build its tables and literal buffer for every buffer.
+        // A decompressor of the process's, reused across every buffer of the node and given back after: a new one would
+        // build its tables and literal buffer for every buffer, and one a context kept was one a context parked in the pool
+        // held, 160 KB to 1.4 MB each.
         int firstBuffer = -1;
-        ZstdDecompressor reused = context.Scan.Zstd;
-        for (int i = 0; i < buffers; i++)
+        ZstdDecompressor reused = ZstdDecoders.Rent();
+        try
         {
-            long size = sizes[i];
-            if (size < 0 || size > context.Options.MaxDecompressedBytes)
+            for (int i = 0; i < buffers; i++)
             {
-                CompressedThrow.Format(
-                    $"{Id}'s buffer {i} declares {size} bytes, above the " +
-                    $"{context.Options.MaxDecompressedBytes}-byte decompression ceiling.");
-            }
-
-            int alignment = alignments[i] <= 0 ? 1 : alignments[i];
-            context.ChargeBatch((int)size);
-            VortexBuffer destination = context.Canonical.Allocate(
-                (int)size, alignment, out Span<byte> writable);
-
-            if (size != 0)
-            {
-                System.Buffers.OperationStatus status =
-                    reused.Decompress(node.GetBuffer(i).Span, writable, out _, out int written);
-                if (status != System.Buffers.OperationStatus.Done || written != (int)size)
+                long size = sizes[i];
+                if (size < 0 || size > context.Options.MaxDecompressedBytes)
                 {
-                    CompressedThrow.Format($"{Id}'s buffer {i} did not decompress to its declared {size} bytes.");
+                    CompressedThrow.Format(
+                        $"{Id}'s buffer {i} declares {size} bytes, above the " +
+                        $"{context.Options.MaxDecompressedBytes}-byte decompression ceiling.");
+                }
+
+                int alignment = alignments[i] <= 0 ? 1 : alignments[i];
+                context.ChargeBatch((int)size);
+                VortexBuffer destination = context.Canonical.Allocate(
+                    (int)size, alignment, out Span<byte> writable);
+
+                if (size != 0)
+                {
+                    System.Buffers.OperationStatus status =
+                        reused.Decompress(node.GetBuffer(i).Span, writable, out _, out int written);
+                    if (status != System.Buffers.OperationStatus.Done || written != (int)size)
+                    {
+                        CompressedThrow.Format($"{Id}'s buffer {i} did not decompress to its declared {size} bytes.");
+                    }
+                }
+
+                node.Arena.AddGlobalBuffer(destination);
+                int slot = node.Arena.AddNodeBufferIndex(node.Arena.GlobalBufferCount - 1);
+                if (i == 0)
+                {
+                    firstBuffer = slot;
                 }
             }
-
-            node.Arena.AddGlobalBuffer(destination);
-            int slot = node.Arena.AddNodeBufferIndex(node.Arena.GlobalBufferCount - 1);
-            if (i == 0)
-            {
-                firstBuffer = slot;
-            }
+        }
+        finally
+        {
+            ZstdDecoders.Return(reused);
         }
 
         // The inner metadata is a sub-span of the tree, so the synthetic record addresses it the way

@@ -531,43 +531,51 @@ internal sealed class ZstdDecoder : ArrayDecoder
             dictionary = raw.Span;
         }
 
-        // The context's decompressor, with the dictionary or without: it reads the dictionary where
-        // the node has it, and builds its tables once for the frames and decodes that give the same.
-        ZstdDecompressor decoder = context.Scan.Zstd;
+        // A decompressor of the process's for this decode alone, with the dictionary or without: it reads the dictionary
+        // where the node has it, and builds its tables once for the frames and decodes that give the same. One a context
+        // kept was one a context parked in the pool held, 160 KB to 1.4 MB each.
+        ZstdDecompressor decoder = ZstdDecoders.Rent();
         int written = 0;
-        for (int i = 0; i < usedFrames; i++)
+        try
         {
-            ReadOnlySpan<byte> frame = node.GetBuffer(firstBuffer + i).Span;
-            RequireDeclaredContentSize(frame, frames[firstFrame + i].UncompressedSize, firstFrame + i);
-
-            // Bounded by what is left of the planned total, so a frame that expands further
-            // than advertised is refused by the decoder rather than overrunning. The last frame may
-            // be planned short of its content, as far as the last value wanted: only its start is
-            // decoded then.
-            Span<byte> region = destination[written..];
-            int produced;
-            System.Buffers.OperationStatus status = frames[firstFrame + i].UncompressedSize > (ulong)region.Length
-                ? decoder.DecompressPrefix(frame, region, dictionary, out produced)
-                : decoder.Decompress(frame, region, dictionary, out _, out produced);
-            if (status != System.Buffers.OperationStatus.Done)
+            for (int i = 0; i < usedFrames; i++)
             {
-                CompressedThrow.Format(
-                    $"{Id} frame {firstFrame + i} did not decompress into the {region.Length} bytes its " +
-                    "metadata left for it.");
-            }
+                ReadOnlySpan<byte> frame = node.GetBuffer(firstBuffer + i).Span;
+                RequireDeclaredContentSize(frame, frames[firstFrame + i].UncompressedSize, firstFrame + i);
 
-            // The ASCII sweep runs here rather than over the finished heap. The frames
-            // partition the stream, written back to back from 0 with sizes summing to `total`,
-            // so "every frame is ASCII" and "the heap is ASCII" say the same thing and the
-            // guarantee handed to `BuildViews` is untouched. Testing each region right after
-            // it is written keeps the bytes in cache instead of paying a second pass over the
-            // whole heap.
-            if (scanAscii && allAscii)
-            {
-                allAscii = Ascii.IsValid(region[..produced]);
-            }
+                // Bounded by what is left of the planned total, so a frame that expands further
+                // than advertised is refused by the decoder rather than overrunning. The last frame may
+                // be planned short of its content, as far as the last value wanted: only its start is
+                // decoded then.
+                Span<byte> region = destination[written..];
+                int produced;
+                System.Buffers.OperationStatus status = frames[firstFrame + i].UncompressedSize > (ulong)region.Length
+                    ? decoder.DecompressPrefix(frame, region, dictionary, out produced)
+                    : decoder.Decompress(frame, region, dictionary, out _, out produced);
+                if (status != System.Buffers.OperationStatus.Done)
+                {
+                    CompressedThrow.Format(
+                        $"{Id} frame {firstFrame + i} did not decompress into the {region.Length} bytes its " +
+                        "metadata left for it.");
+                }
 
-            written += produced;
+                // The ASCII sweep runs here rather than over the finished heap. The frames
+                // partition the stream, written back to back from 0 with sizes summing to `total`,
+                // so "every frame is ASCII" and "the heap is ASCII" say the same thing and the
+                // guarantee handed to `BuildViews` is untouched. Testing each region right after
+                // it is written keeps the bytes in cache instead of paying a second pass over the
+                // whole heap.
+                if (scanAscii && allAscii)
+                {
+                    allAscii = Ascii.IsValid(region[..produced]);
+                }
+
+                written += produced;
+            }
+        }
+        finally
+        {
+            ZstdDecoders.Return(decoder);
         }
 
         if (written != total)
