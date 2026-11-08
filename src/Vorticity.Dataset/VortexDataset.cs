@@ -2957,7 +2957,7 @@ public sealed class VortexDataset : IAsyncDisposable
         // The Bloom filters where no locating index answers: postings place a value's rows, the filters only refuse blocks,
         // a round trip a level, which a lookup that postings answer would pay for nothing.
         Indexes.KeyIndexPruner? keys = blockRows <= 0 ? null : await Indexes.KeyIndexPruner.BuildAsync(host, filter, blockRows, cancellationToken).ConfigureAwait(false);
-        Indexes.BloomPruner? blooms = blockRows <= 0 || keys is not null ? null : await Indexes.BloomPruner.BuildAsync(host, filter, blockRows, cancellationToken).ConfigureAwait(false);
+        using Indexes.BloomPruner? blooms = blockRows <= 0 || keys is not null ? null : await Indexes.BloomPruner.BuildAsync(host, filter, blockRows, cancellationToken).ConfigureAwait(false);
         if (keys is null && blooms is null)
         {
             return null;

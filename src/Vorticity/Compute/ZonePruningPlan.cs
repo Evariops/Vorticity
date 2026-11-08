@@ -132,7 +132,7 @@ internal static class ZonePruningPlan
             }
         }
 
-        Indexes.BloomPruner? blooms = indexes && blockRows > 0
+        using Indexes.BloomPruner? blooms = indexes && blockRows > 0
             ? await Indexes.BloomPruner.BuildAsync(file, filter, blockRows, cancellationToken).ConfigureAwait(false)
             : null;
         Dictionary<string, List<(string Key, Types.Variants.PathClass Class)>>? keysRead = indexes && blockRows > 0 ? KeysRead(filter) : null;
@@ -238,10 +238,14 @@ internal static class ZonePruningPlan
                 _ => ((VortexExpr?)null, (VortexExpr?)null, (FieldExpr?)null),
             };
 
+            if (excluded is null || found is null || field is null)
+            {
+                continue;
+            }
+
             // The filters are read where they weigh less than the column whose blocks they would spare.
-            if (excluded is null || found is null || field is null
-                || await Indexes.BloomPruner.BuildAsync(file, found, blockRows, cancellationToken).ConfigureAwait(false) is not { } blooms
-                || blooms.PayloadBytes >= ColumnBytes(file, tree, field))
+            using Indexes.BloomPruner? blooms = await Indexes.BloomPruner.BuildAsync(file, found, blockRows, cancellationToken).ConfigureAwait(false);
+            if (blooms is null || blooms.PayloadBytes >= ColumnBytes(file, tree, field))
             {
                 continue;
             }

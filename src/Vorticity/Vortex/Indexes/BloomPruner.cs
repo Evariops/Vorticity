@@ -40,9 +40,15 @@ namespace Vorticity.Indexes;
 /// out. Not asking only leaves blocks live: it changes the speed, never the rows.
 /// </para>
 /// </remarks>
-internal sealed class BloomPruner
+internal sealed class BloomPruner : IDisposable
 {
     private readonly VortexExpr _filter;
+
+    // The words of the roots, nodes and leaves read, carved one after another from arrays rented for the pruner and given
+    // back when it is disposed: each node's words were an array of their own (27 KB a question of the mix, 2026-11-08).
+    private uint[] _slab = [];
+    private int _slabUsed;
+    private List<uint[]>? _spent;
     private readonly Dictionary<string, Column> _columns;
 
     /// <summary>Each question of the filter a column's filters answer, by reference.</summary>
@@ -201,7 +207,7 @@ internal sealed class BloomPruner
             return true;
         }
 
-        BloomPruner? pruner = await BuildAsync(file, filter, blockRows, cancellationToken).ConfigureAwait(false);
+        using BloomPruner? pruner = await BuildAsync(file, filter, blockRows, cancellationToken).ConfigureAwait(false);
         if (pruner is null)
         {
             return true;
@@ -288,10 +294,10 @@ internal sealed class BloomPruner
             foreach ((Tree tree, int slot) in batch.Wanted)
             {
                 VortexBuffer bytes = batch.Requests.GetBuffer(slot);
-                uint[]? words = tree.Run.Payload[0].Holds(bytes.Span)
-                    ? Decode(context, bytes, BloomTreeRun.RootWords(tree.Run.OptionBytes))
-                    : null;
-                tree.Root = words is null ? null : ParseRoot(words, tree.Run);
+                int expected = BloomTreeRun.RootWords(tree.Run.OptionBytes);
+                uint[] words = [];
+                int start = tree.Run.Payload[0].Holds(bytes.Span) ? Decode(context, bytes, expected, out words) : -1;
+                tree.Root = start < 0 ? null : ParseRoot(words, start, expected, tree.Run);
             }
         }
 
@@ -308,21 +314,21 @@ internal sealed class BloomPruner
     }
 
     /// <summary>A root, checked against its own header and its run: it covers at least the run's blocks.</summary>
-    private static BloomNode? ParseRoot(uint[] words, IndexRun run)
+    private static BloomNode? ParseRoot(uint[] words, int start, int length, IndexRun run)
     {
-        if (words.Length < BloomNode.HeaderWords)
+        if (length < BloomNode.HeaderWords)
         {
             return null;
         }
 
-        int level = (int)((words[0] >> 8) & 0xFF);
-        long leaves = words[1];
+        int level = (int)((words[start] >> 8) & 0xFF);
+        long leaves = words[start + 1];
         if (leaves < run.BlockCount || leaves == 0 || level != BloomNode.LevelFor(leaves))
         {
             return null;
         }
 
-        return BloomNode.TryRead(words, 0, words.Length, level, leaves, out BloomNode? root) ? root : null;
+        return BloomNode.TryRead(words, start, length, level, leaves, out BloomNode? root) ? root : null;
     }
 
     /// <summary>
@@ -384,12 +390,13 @@ internal sealed class BloomPruner
                     total += child;
                 }
 
-                uint[]? words = parent.Children!.Value.Holds(bytes.Span) && total <= int.MaxValue
-                    ? Decode(context, bytes, (int)total)
-                    : null;
-                if (words is not null)
+                uint[] words = [];
+                int start = parent.Children!.Value.Holds(bytes.Span) && total <= int.MaxValue
+                    ? Decode(context, bytes, (int)total, out words)
+                    : -1;
+                if (start >= 0)
                 {
-                    tree.Adopt(level, index, parent, words);
+                    tree.Adopt(level, index, parent, words, start);
                 }
             }
         }
@@ -406,15 +413,16 @@ internal sealed class BloomPruner
     }
 
     /// <summary>
-    /// A region's words, copied out of the segment, or <see langword="null"/> when the payload is
-    /// not the u32 array of the length its parent declares.
+    /// A region's words, copied out of the segment into <paramref name="words"/> from the place returned, or -1 when the
+    /// payload is not the u32 array of the length its parent declares.
     /// </summary>
-    private static uint[]? Decode(ScanContext context, VortexBuffer segment, int expected)
+    private int Decode(ScanContext context, VortexBuffer segment, int expected, out uint[] words)
     {
+        words = [];
         // The words' dtype is the same for every region, made once rather than in an arena of its own a region.
         if (expected <= 0)
         {
-            return null;
+            return -1;
         }
 
         try
@@ -426,15 +434,56 @@ internal sealed class BloomPruner
             CanonicalNode array = context.Canonical.GetNode(node);
             if (array.Kind != CanonicalKind.Primitive || array.PType != PType.U32 || array.Length != expected)
             {
-                return null;
+                return -1;
             }
 
-            return array.Values.Cast<uint>()[..expected].ToArray();
+            int start = Carve(expected, out words);
+            array.Values.Cast<uint>()[..expected].CopyTo(words.AsSpan(start, expected));
+            return start;
         }
         catch (VortexFormatException)
         {
-            return null;
+            return -1;
         }
+    }
+
+    /// <summary>The place of <paramref name="length"/> words in <paramref name="words"/>, an array of the pruner's, which holds them until it is disposed.</summary>
+    private int Carve(int length, out uint[] words)
+    {
+        if (_slab.Length - _slabUsed < length)
+        {
+            if (_slab.Length != 0)
+            {
+                (_spent ??= []).Add(_slab);
+            }
+
+            _slab = ArrayPool<uint>.Shared.Rent(Math.Max(length, Math.Max(1024, 2 * _slab.Length)));
+            _slabUsed = 0;
+        }
+
+        words = _slab;
+        int start = _slabUsed;
+        _slabUsed += length;
+        return start;
+    }
+
+    /// <summary>Gives the arrays of the words read back to the pool: no node or leaf of the pruner is asked after.</summary>
+    public void Dispose()
+    {
+        if (_slab.Length != 0)
+        {
+            ArrayPool<uint>.Shared.Return(_slab);
+        }
+
+        if (_spent is { } spent)
+        {
+            foreach (uint[] slab in spent)
+            {
+                ArrayPool<uint>.Shared.Return(slab);
+            }
+        }
+
+        (_slab, _slabUsed, _spent) = ([], 0, null);
     }
 
     /// <summary>The dtype of a region's words: an array of u32 no row leaves null.</summary>
@@ -917,11 +966,12 @@ internal sealed class BloomPruner
         /// <param name="level">The children's level.</param>
         /// <param name="index">The parent's index at the level above.</param>
         /// <param name="parent">The parent.</param>
-        /// <param name="words">The children's words, concatenated.</param>
-        internal void Adopt(int level, long index, BloomNode parent, uint[] words)
+        /// <param name="words">The children's words, concatenated, from <paramref name="start"/>.</param>
+        /// <param name="start">Where the children's words begin.</param>
+        internal void Adopt(int level, long index, BloomNode parent, uint[] words, int start)
         {
             ReadOnlySpan<uint> sizes = parent.ChildWords;
-            int at = 0;
+            int at = start;
             for (int child = 0; child < sizes.Length; child++)
             {
                 int length = (int)sizes[child];
