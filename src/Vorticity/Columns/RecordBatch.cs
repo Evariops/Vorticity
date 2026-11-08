@@ -36,6 +36,9 @@ public sealed class RecordBatch : IDisposable
     // allocating one per batch; see Rebind.
     private ScanContext? _context;
     private CanonicalArena _arena;
+
+    /// <summary>The arena a disposed copy points at in place of the one it gave back: empty, and never written.</summary>
+    private static readonly CanonicalArena Released = new CanonicalArena(1);
     private int _root;
     private DType _schema;
     private int _rowCount;
@@ -683,9 +686,13 @@ public sealed class RecordBatch : IDisposable
             }
             else
             {
-                // A copy's arena, the only batch that owns one with no context: kept for the next copy.
-                _arena.Reset();
-                OwnedArenas.Return(_arena);
+                // A copy's arena, the only batch that owns one with no context: kept for the next copy, which this batch,
+                // disposed but perhaps still held, no longer reaches; held, it kept the next copy's blocks from their
+                // finalizers when that copy was dropped undisposed.
+                CanonicalArena arena = _arena;
+                arena.Reset();
+                _arena = Released;
+                OwnedArenas.Return(arena);
             }
         }
     }
