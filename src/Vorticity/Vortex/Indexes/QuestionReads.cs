@@ -1,5 +1,8 @@
 using System;
 using System.Collections.Generic;
+using Vorticity.Layouts;
+using Vorticity.Scanning;
+using Vorticity.Types;
 
 namespace Vorticity.Indexes;
 
@@ -211,6 +214,42 @@ internal sealed class QuestionReads
         lock (this)
         {
             (_geometries ??= new Dictionary<VortexFile, GranuleGeometry?>(ReferenceEqualityComparer.Instance)).TryAdd(file, geometry);
+        }
+    }
+
+    // The schemas the question's scans project, by the file's schema and the fields kept: each scan of an object projected its
+    // own into an arena made for it, two a filtered object, some 4.5 % of what the warm mix at 32 clients left its
+    // collections to copy (2026-11-08). Projected into an arena of the question's, which only grows: a schema handed out stays
+    // readable while the next is projected beside it.
+    private (DType Root, FieldMask Keep, DType Projected)[]? _projections;
+    private int _projectedCount;
+    private DTypeArena? _projectionTypes;
+
+    /// <summary>
+    /// The schema <paramref name="keep"/> projects of <paramref name="root"/>, a file's schema: the one the question projected
+    /// for a file of the same schema and the same fields, or projected now.
+    /// </summary>
+    internal DType Projected(in ScanProjection keep, DType root)
+    {
+        lock (this)
+        {
+            for (int i = 0; i < _projectedCount; i++)
+            {
+                ref (DType Root, FieldMask Keep, DType Projected) seen = ref _projections![i];
+                if (seen.Keep.SameAs(keep.RootMask) && seen.Root.Equals(root))
+                {
+                    return seen.Projected;
+                }
+            }
+
+            DType projected = keep.ProjectedSchema(root, _projectionTypes ??= new DTypeArena());
+            if (_projections is null || _projectedCount == _projections.Length)
+            {
+                Array.Resize(ref _projections, Math.Max(2, 2 * _projectedCount));
+            }
+
+            _projections[_projectedCount++] = (root, keep.RootMask, projected);
+            return projected;
         }
     }
 

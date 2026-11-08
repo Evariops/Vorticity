@@ -176,6 +176,46 @@ internal readonly struct FieldMask
 
     internal static FieldMask Subset(FieldMaskNode node) =>
         node.Count == 0 ? Empty : new FieldMask(KindSubset, node);
+
+    /// <summary>
+    /// Whether <paramref name="other"/> keeps the same fields at every depth, built apart: the scans of one question each
+    /// build their own. Two masks that keep the same fields in two forms, one field as a subset of one, are told apart.
+    /// </summary>
+    internal bool SameAs(in FieldMask other)
+    {
+        if (_kind != other._kind)
+        {
+            return false;
+        }
+
+        switch (_kind)
+        {
+            case KindSingle:
+                return _field == other._field;
+            case KindSubset:
+                if (ReferenceEquals(_node, other._node))
+                {
+                    return true;
+                }
+
+                if (!_node!.Fields.SequenceEqual(other._node!.Fields))
+                {
+                    return false;
+                }
+
+                for (int i = 0; i < _node.Count; i++)
+                {
+                    if (!_node.ChildAt(i).SameAs(other._node.ChildAt(i)))
+                    {
+                        return false;
+                    }
+                }
+
+                return true;
+            default:
+                return true;
+        }
+    }
 }
 
 /// <summary>One level of a subset <see cref="FieldMask"/>: the wanted field indices and their subtrees.</summary>

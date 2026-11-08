@@ -776,7 +776,7 @@ internal sealed class ScanBuilder
         SplitPlan plan = SplitPlan.Compute(tree, rows, read.RootMask, cap, _windowRows);
 
         batches = new BatchAsyncEnumerable(
-            _file, tree, read, keep, plan, _reverse ? 1 : _degree, _filter, _take, _metrics, _reverse && _orderPath is null)
+            _file, tree, read, keep, plan, _reverse ? 1 : _degree, _filter, _take, _metrics, _reverse && _orderPath is null, _question)
         {
             Prefetch = _prefetch,
             Compact = _compact,
