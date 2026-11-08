@@ -79,7 +79,10 @@ internal sealed partial class DatasetScanSource
     /// <summary>The pruning of the key made for <see cref="Filter"/>; null where the dataset's key prunes nothing by it.</summary>
     private sealed record KeyPrunings(VortexExpr Filter, KeyPruning? Pruning);
 
-    /// <summary>What the question's scans read of its objects' indexes, for its other scans (<see cref="Indexes.QuestionReads"/>); made at the first.</summary>
+    /// <summary>
+    /// What the question's scans read of its objects' indexes, for its other scans while a lease holds the object
+    /// (<see cref="Indexes.QuestionReads"/>); made at the first.
+    /// </summary>
     internal Indexes.QuestionReads Reads => LazyInitializer.EnsureInitialized(ref _reads);
 
     private Indexes.QuestionReads? _reads;

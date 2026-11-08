@@ -53,7 +53,8 @@ internal sealed partial class DatasetScanBuilder
 
     /// <summary>
     /// A lease of <paramref name="held"/>: for a scan that reads keys of variant columns, an object of level 0
-    /// through the node's memo of it shredded in memory, which parses its keys once; the object itself otherwise.
+    /// through the node's memo of it shredded in memory, which parses its keys once; the object itself otherwise. The
+    /// question keeps what its scans read of the object until the last of its leases is given back (<see cref="Reads"/>).
     /// </summary>
     private async ValueTask<ObjectLease> RentAsync(PositionedObject held, CancellationToken cancellationToken)
     {
@@ -76,7 +77,7 @@ internal sealed partial class DatasetScanBuilder
             }
         }
 
-        return lease;
+        return lease.HeldBy(Reads);
     }
 
     private bool _memoChecked;
@@ -705,8 +706,9 @@ internal sealed partial class DatasetScanBuilder
     private async ValueTask GeometryAsync(
         VortexFile file, PositionedObject held, Task<Indexes.ColumnMarks?[]>? marks, CancellationToken cancellationToken, bool judged = false)
     {
-        // A copy written again in memory has chunks of its own, which the object's marks do not describe.
-        if (!WantsGeometry(held) || Copied(held.Entry.Uid))
+        // A copy written again in memory has chunks of its own, which the object's marks do not describe. The question's
+        // scans that hold the file share the geometry one of them read.
+        if (!WantsGeometry(held) || Copied(held.Entry.Uid) || Reads.TryGetGeometry(file, out _))
         {
             return;
         }
@@ -719,8 +721,8 @@ internal sealed partial class DatasetScanBuilder
             byField[fields[i]] = read[i];
         }
 
-        LazyInitializer.EnsureInitialized(ref _geometries)[held.Entry.Uid] =
-            ColumnsOfFile(file, held.Entry) ? Indexes.GranuleGeometry.Of(file.LayoutTree, byField, _version.Costs.Profile.RequestBytes) : null;
+        Reads.KeepGeometry(
+            file, ColumnsOfFile(file, held.Entry) ? Indexes.GranuleGeometry.Of(file.LayoutTree, byField, _version.Costs.Profile.RequestBytes) : null);
     }
 
     /// <summary>
@@ -742,12 +744,11 @@ internal sealed partial class DatasetScanBuilder
     }
 
     /// <summary>
-    /// Whether a read of the object <paramref name="held"/> may read parts of its chunks by their granules, whose geometry
-    /// it has not read yet: one that keeps its marks and is larger than what a request is worth at the store's profile.
+    /// Whether a read of the object <paramref name="held"/> may read parts of its chunks by their granules: one that keeps
+    /// its marks and is larger than what a request is worth at the store's profile.
     /// </summary>
     private bool WantsGeometry(in PositionedObject held) =>
-        held.Entry.Contents is { Marks.Count: > 0 } && !(_geometries?.ContainsKey(held.Entry.Uid) ?? false)
-        && held.Entry.Bytes > _version.Costs.Profile.RequestBytes;
+        held.Entry.Contents is { Marks.Count: > 0 } && held.Entry.Bytes > _version.Costs.Profile.RequestBytes;
 
     /// <summary>The granules of <paramref name="held"/> a part reads alone (<see cref="_unsettled"/>); null for every one.</summary>
     private ulong[]? UnsettledOf(in PositionedObject held) =>
@@ -773,13 +774,12 @@ internal sealed partial class DatasetScanBuilder
     /// <summary>Whether <paramref name="file"/> holds the version's own columns in their places, which the marks name by place.</summary>
     private bool ColumnsOfFile(VortexFile file, ObjectEntry entry) => _version.Schema.ColumnsOf(file.DType, entry.Key) is null;
 
-    /// <summary>The geometry <see cref="GeometryAsync"/> read for the object <paramref name="held"/>; null before, or for none.</summary>
-    private Indexes.GranuleGeometry? GeometryOf(in PositionedObject held) =>
-        _geometries is { } known && known.TryGetValue(held.Entry.Uid, out Indexes.GranuleGeometry? geometry) ? geometry : null;
-
-    // The geometry of each object a scan of a part of read, by its identity: the lanes that read the parts of one object,
-    // and the parts of the scan, share it. Made at the first such object.
-    private System.Collections.Concurrent.ConcurrentDictionary<UInt128, Indexes.GranuleGeometry?>? _geometries;
+    /// <summary>
+    /// The geometry <see cref="GeometryAsync"/> read for the object open as <paramref name="file"/>, which the question keeps
+    /// while a lease holds the object; null before, or for none.
+    /// </summary>
+    private Indexes.GranuleGeometry? GeometryOf(VortexFile file) =>
+        Reads.TryGetGeometry(file, out Indexes.GranuleGeometry? geometry) ? geometry : null;
 
     /// <summary>One object's rows as the dataset's, its lease held until the last is read.</summary>
     private async IAsyncEnumerable<RecordBatch> RowsAsync(
@@ -855,7 +855,7 @@ internal sealed partial class DatasetScanBuilder
                 // The object's own scan, which every object of the version's schema with no row marked is read by, rebased
                 // into one view for the whole object.
                 RecordBatch? view = null;
-                ScanBuilder scan = Of(lease.File, held).WithGranules(GeometryOf(held));
+                ScanBuilder scan = Of(lease.File, held).WithGranules(GeometryOf(lease.File));
                 if (UnsettledOf(held) is { } only)
                 {
                     scan = scan.WithGranuleMask(Masked(lease.File, only)
@@ -937,7 +937,7 @@ internal sealed partial class DatasetScanBuilder
         DeletionVector deletions = held.Entry.Deletions;
         ScanBuilder? scan = held.Entry.HasDeletions
             ? null
-            : Of(file, held).WithPruned(settling.Live).WithMaxBatchRows(BlockBatch(settling.Live)).WithGranules(GeometryOf(held));
+            : Of(file, held).WithPruned(settling.Live).WithMaxBatchRows(BlockBatch(settling.Live)).WithGranules(GeometryOf(file));
         using QueryMemory? ahead = scan is null ? null : ReadsAhead(scan, file);
         IAsyncEnumerable<RecordBatch> rows = scan?.ExecuteAsync()
             ?? LiveAsync(file, held, _filter, _mask, held.FirstRow, _options.Compact, reshaped: false, cancellationToken, pruned: settling.Live);
@@ -1065,8 +1065,8 @@ internal sealed partial class DatasetScanBuilder
             // The rest for the rows kept by their places, which reads the granules that hold them alone and decodes only their
             // blocks of 1 024 that do (spec C, 3); or the granules that hold them, whole, the filter judged again.
             ScanBuilder second = first.ByPlaces
-                ? Configure(file.ScanBuilder(), null, _mask, canonical: false).Take(first.Rows).WithGranules(GeometryOf(held))
-                : Of(file, held).WithGranuleMask(Masked(file, first.Granules)).WithGranules(GeometryOf(held));
+                ? Configure(file.ScanBuilder(), null, _mask, canonical: false).Take(first.Rows).WithGranules(GeometryOf(file))
+                : Of(file, held).WithGranuleMask(Masked(file, first.Granules)).WithGranules(GeometryOf(file));
             using QueryMemory? reads = ReadsAhead(second, file);
             await foreach (RecordBatch batch in second.ExecuteAsync().WithCancellation(cancellationToken).ConfigureAwait(false))
             {
@@ -1077,7 +1077,7 @@ internal sealed partial class DatasetScanBuilder
         }
 
         // Every column at once, from the granules a kept row may lie in.
-        ScanBuilder scan = Of(file, held).WithGranuleMask(granted).WithGranules(GeometryOf(held));
+        ScanBuilder scan = Of(file, held).WithGranuleMask(granted).WithGranules(GeometryOf(file));
         bool notes = whole && predicate != default && !_options.Compact && !_dataset.Predicates.Wide(held.Entry.Uid, predicate);
         ulong[]? noted = notes ? new ulong[(granules + 63) / 64] : null;
         ulong[]? blocked = notes ? new ulong[(blocks + 63) / 64] : null;
@@ -1279,7 +1279,7 @@ internal sealed partial class DatasetScanBuilder
             for (int p = 0; p < parts.Length; p++)
             {
                 ScanBuilder scan = Of(file, held, filter, FieldMask.Empty, canonical: false, within: parts[p])
-                    .WithCompaction(false).WithGranuleMask(granted).WithGranules(GeometryOf(held)).WithVariantKeys(keys);
+                    .WithCompaction(false).WithGranuleMask(granted).WithGranules(GeometryOf(file)).WithVariantKeys(keys);
                 await foreach (RecordBatch batch in scan.ExecuteAsync().WithCancellation(cancellationToken).ConfigureAwait(false))
                 {
                     ReadOnlySpan<ulong> words = batch.SelectionWords;
@@ -1524,7 +1524,7 @@ internal sealed partial class DatasetScanBuilder
             }
 
             // The object's list is its scan's alone, ascending as the dataset's is: read where it lies.
-            return scan.TakeHeld(local).WithGranules(GeometryOf(held));
+            return scan.TakeHeld(local).WithGranules(GeometryOf(file));
         }
 
         // The range is the dataset's; the file's is the part of it that falls inside this object, and inside its part.
@@ -1544,7 +1544,7 @@ internal sealed partial class DatasetScanBuilder
         if (lower > 0 || upper < held.Entry.PhysicalRows)
         {
             // A part of the object: the granules of the part alone, where its geometry is known (spec C, 2).
-            scan.Rows(new RowRange(lower, Math.Max(upper, lower))).WithGranules(GeometryOf(held));
+            scan.Rows(new RowRange(lower, Math.Max(upper, lower))).WithGranules(GeometryOf(file));
         }
 
         return scan;
@@ -1584,7 +1584,7 @@ internal sealed partial class DatasetScanBuilder
         bool deselect = !compact && _positionsUnread;
         ScanBuilder scan = Of(file, held, filter, mask, canonical: reshaped || !deselect, within).WithCompaction(false);
         IAsyncEnumerable<RecordBatch> rows =
-            (pruned is null ? scan : scan.WithPruned(pruned).WithMaxBatchRows(BlockBatch(pruned)).WithGranules(GeometryOf(held))).ExecuteAsync();
+            (pruned is null ? scan : scan.WithPruned(pruned).WithMaxBatchRows(BlockBatch(pruned)).WithGranules(GeometryOf(file))).ExecuteAsync();
         return deselect
             ? LiveRows.DeselectedAsync(rows, held.Entry.Deletions, baseRow, cancellationToken)
             : LiveRows.WithoutDeletedAsync(rows, held.Entry.Deletions, compact, baseRow, cancellationToken);

@@ -415,6 +415,20 @@ internal sealed class ObjectLease : IAsyncDisposable
     /// </summary>
     internal IReadOnlyList<string> FragmentRefusals { get; init; } = [];
 
+    // The question that keeps what it reads of the file while this lease lasts, told when it ends.
+    private Indexes.QuestionReads? _question;
+
+    /// <summary>
+    /// Makes <paramref name="question"/> keep what it reads of <see cref="File"/> until this lease is given back, and no longer
+    /// (<see cref="Indexes.QuestionReads.Hold"/>): this lease.
+    /// </summary>
+    internal ObjectLease HeldBy(Indexes.QuestionReads question)
+    {
+        question.Hold(File);
+        _question = question;
+        return this;
+    }
+
     public ValueTask DisposeAsync()
     {
         if (_returned)
@@ -423,6 +437,7 @@ internal sealed class ObjectLease : IAsyncDisposable
         }
 
         _returned = true;
+        _question?.Release(File);
         return _giveBack();
     }
 }

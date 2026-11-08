@@ -372,8 +372,9 @@ internal sealed partial class DatasetScanBuilder
     private DatasetScanSource? _question;
 
     /// <summary>
-    /// What the question's scans read of its objects' indexes, kept for its other scans and dropped with it: the question's,
-    /// or, for a scan asked of no question, its own, which the parts it cuts share.
+    /// What the question's scans read of its objects' indexes and their granules' geometry, kept for its other scans while a
+    /// lease holds the object (<see cref="RentAsync"/>) and dropped with the last: the question's, or, for a scan asked of no
+    /// question, its own, which the parts it cuts share.
     /// </summary>
     private Indexes.QuestionReads Reads => _question?.Reads ?? LazyInitializer.EnsureInitialized(ref _reads);
 
@@ -754,7 +755,6 @@ internal sealed partial class DatasetScanBuilder
             _readAhead = _readAhead,
             _readAheadGranted = _readAheadGranted,
             _settles = _settles,
-            _geometries = LazyInitializer.EnsureInitialized(ref _geometries),
             _question = _question,
             _reads = _question is null ? LazyInitializer.EnsureInitialized(ref _reads) : null,
         };
