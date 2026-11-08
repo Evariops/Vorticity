@@ -473,9 +473,11 @@ internal sealed class VariantKeyReads
             : null;
     }
 
-    /// <summary>Whether two dtypes are the same shape, names, nesting and nullability alike.</summary>
-    private static bool SameShape(DType left, DType right) =>
-        string.Equals(DTypeFormatter.Format(left), DTypeFormatter.Format(right), StringComparison.Ordinal);
+    /// <summary>
+    /// Whether two dtypes are the same shape, names, nesting and nullability alike: their structural equality, an index's
+    /// in the one arena that interns both, where both were formatted as texts at every chunk of every scan.
+    /// </summary>
+    private static bool SameShape(DType left, DType right) => left.Equals(right);
 
     /// <summary>
     /// One key of a chunk: its name, its range and tree, the dtype the chunk shredded it as, and its typed
