@@ -63,6 +63,15 @@ internal static class Trilean
             }
         }
 
+        if (Vector256.IsHardwareAccelerated)
+        {
+            Vector256<byte> table = Vector256.Create(NotTable);
+            for (; i <= values.Length - Vector256<byte>.Count; i += Vector256<byte>.Count)
+            {
+                Vector256.ShuffleNative(table, Vector256.LoadUnsafe(ref a0, (nuint)i)).StoreUnsafe(ref a0, (nuint)i);
+            }
+        }
+
         if (Vector128.IsHardwareAccelerated)
         {
             for (; i <= values.Length - Vector128<byte>.Count; i += Vector128<byte>.Count)
@@ -133,6 +142,17 @@ internal static class Trilean
                 Vector512<byte> a = Vector512.LoadUnsafe(ref a0, (nuint)i);
                 Vector512<byte> b = Vector512.LoadUnsafe(ref b0, (nuint)i);
                 Vector512.ShuffleNative(wide, (a << 2) | b).StoreUnsafe(ref a0, (nuint)i);
+            }
+        }
+
+        if (Vector256.IsHardwareAccelerated)
+        {
+            Vector256<byte> wide = Vector256.Create(table);
+            for (; i <= left.Length - Vector256<byte>.Count; i += Vector256<byte>.Count)
+            {
+                Vector256<byte> a = Vector256.LoadUnsafe(ref a0, (nuint)i);
+                Vector256<byte> b = Vector256.LoadUnsafe(ref b0, (nuint)i);
+                Vector256.ShuffleNative(wide, (a << 2) | b).StoreUnsafe(ref a0, (nuint)i);
             }
         }
 
@@ -210,6 +230,19 @@ internal static class Trilean
             {
                 ulong word = Vector512.Equals(Vector512.LoadUnsafe(ref from, (nuint)w << 6), wanted)
                     .ExtractMostSignificantBits() ^ flip;
+                Unsafe.Add(ref into, w) = word;
+                count += BitOperations.PopCount(word);
+            }
+        }
+        else if (Vector256.IsHardwareAccelerated)
+        {
+            Vector256<byte> wanted = Vector256.Create(state);
+            for (; w < full; w++)
+            {
+                ref byte at = ref Unsafe.Add(ref from, (nint)w << 6);
+                ulong word = Vector256.Equals(Vector256.LoadUnsafe(ref at), wanted).ExtractMostSignificantBits()
+                    | ((ulong)Vector256.Equals(Vector256.LoadUnsafe(ref at, 32), wanted).ExtractMostSignificantBits() << 32);
+                word ^= flip;
                 Unsafe.Add(ref into, w) = word;
                 count += BitOperations.PopCount(word);
             }
