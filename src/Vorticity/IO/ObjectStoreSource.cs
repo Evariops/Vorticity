@@ -63,6 +63,9 @@ internal sealed class ObjectStoreSource : ISegmentReader
         _givenLength = length;
         _options = options ?? store.CostProfile.ReadOptions;
         _ownsStore = ownsStore;
+        _hash = length >= 0
+            ? HashCode.Combine(System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(store), StringComparer.Ordinal.GetHashCode(key), length)
+            : System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(this);
     }
 
     /// <summary>
@@ -78,13 +81,18 @@ internal sealed class ObjectStoreSource : ISegmentReader
             && string.Equals(other._key, _key, StringComparison.Ordinal));
 
     /// <inheritdoc/>
-    public override int GetHashCode() => _givenLength >= 0
-        ? HashCode.Combine(System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(_store), StringComparer.Ordinal.GetHashCode(_key), _givenLength)
-        : System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(this);
+    /// <remarks>
+    /// Worked out once, as the source is made: a session's cache hashes the source at every lookup of each segment, under
+    /// its lock, and the key's characters were hashed again every time.
+    /// </remarks>
+    public override int GetHashCode() => _hash;
 
     // The length the caller gave, -1 for none: what equality reads, since the length learned later would
     // change the hash of a key already kept.
     private readonly long _givenLength;
+
+    // What GetHashCode answers: of the store, the key and the length given, or of the reader itself when no length is.
+    private readonly int _hash;
 
     /// <summary>
     /// The object's token as of the first answer that gave it, or null before any. A caller holding a

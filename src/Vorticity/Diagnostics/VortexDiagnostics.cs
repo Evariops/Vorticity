@@ -107,9 +107,9 @@ internal static class VortexTelemetry
         }
     }
 
-    internal static void CacheHit() => CacheHits.Add(1);
+    internal static void CacheHit(int count) => CacheHits.Add(count);
 
-    internal static void CacheMiss() => CacheMisses.Add(1);
+    internal static void CacheMiss(int count) => CacheMisses.Add(count);
 
     internal static void Written(long bytes) => WriteBytes.Add(bytes);
 
