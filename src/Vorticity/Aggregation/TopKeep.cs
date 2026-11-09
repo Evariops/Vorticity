@@ -116,7 +116,7 @@ internal sealed class TopKeep : IDisposable
         int placeNode = arena.AddPrimitive(_placeType, count, Validity.NonNullable, PType.I64, placesBuffer);
         Span<int> children = [values, placeNode];
         int root = arena.AddStruct(_dtype, count, Validity.NonNullable, children);
-        StoreRows.Append(_store, arena, root);
+        StoreRows.Append(_store, arena, root, validated: true);
         _store.Commit();
         Reserve();
         if (_store.Rows >= (2 * _keep) + LeastSlack)
@@ -173,7 +173,7 @@ internal sealed class TopKeep : IDisposable
         places.Release();
         int gathered = CanonicalFilter.Apply(_arena, root, _rows.AsSpan(0, kept));
         (StructStore store, CanonicalArena arena) = Create();
-        StoreRows.Append(store, _arena, gathered);
+        StoreRows.Append(store, _arena, gathered, validated: true);
         store.Commit();
         if (kept == _keep)
         {
@@ -195,7 +195,7 @@ internal sealed class TopKeep : IDisposable
         VortexSessionOptions options = _session.Options;
         _edgeStore = (StructStore)ColumnStores.Create(_dtype, options.EnginePool, options.Extensions);
         _edgeArena = new CanonicalArena(8, options.EnginePool);
-        StoreRows.Append(_edgeStore, arena, CanonicalFilter.Apply(arena, root, [row]));
+        StoreRows.Append(_edgeStore, arena, CanonicalFilter.Apply(arena, root, [row]), validated: true);
         _edgeStore.Commit();
         _edgeRoot = _edgeStore.Build(_edgeArena, 1);
         CanonicalNode edge = _edgeArena.GetNode(_edgeRoot);

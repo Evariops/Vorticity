@@ -250,7 +250,7 @@ internal sealed class ChosenRows(VortexType type) : ChosenValues
         }
 
         int start = _store!.Rows;
-        StoreRows.Append(_store, batch.Arena, CanonicalFilter.Apply(batch.Arena, node, _picked.AsSpan(0, groups.Length)));
+        StoreRows.Append(_store, batch.Arena, CanonicalFilter.Apply(batch.Arena, node, _picked.AsSpan(0, groups.Length)), validated: true);
         Kept();
         for (int i = 0; i < groups.Length; i++)
         {
@@ -274,7 +274,7 @@ internal sealed class ChosenRows(VortexType type) : ChosenValues
 
         _arena!.ResetKeepingBlocks();
         int root = _store!.Build(_arena, _store.Rows);
-        StoreRows.Append(into, _arena, CanonicalFilter.Apply(_arena, root, _picked.AsSpan(0, groups.Length)));
+        StoreRows.Append(into, _arena, CanonicalFilter.Apply(_arena, root, _picked.AsSpan(0, groups.Length)), validated: true);
     }
 
     /// <summary>The store's row a group without a row takes, added on the first ask of a fetch.</summary>

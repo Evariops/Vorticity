@@ -15,8 +15,19 @@ namespace Vorticity.Writing;
 internal static class StoreRows
 {
     /// <summary>Appends every row of <paramref name="node"/> to <paramref name="store"/>, a store of the node's type.</summary>
+    /// <param name="store">The store.</param>
+    /// <param name="arena">The arena holding the node.</param>
+    /// <param name="node">The node.</param>
+    /// <param name="validated">
+    /// Whether the node's texts are known to be UTF-8, as a result's are, its decoders having checked them as they read
+    /// them: they are not checked again. Rows a caller brings, as an ingestion's, are.
+    /// </param>
+    /// <remarks>
+    /// A column is copied whole where its store takes it so, its validity taken at once and its null rows' values zeroed
+    /// after, as an append of each row would have left them: a column of integers with nulls was copied a row at a time.
+    /// </remarks>
     /// <exception cref="NotSupportedException">The node is of a kind a result does not hold: a map.</exception>
-    internal static void Append(ColumnStore store, CanonicalArena arena, int node)
+    internal static void Append(ColumnStore store, CanonicalArena arena, int node, bool validated = false)
     {
         while (arena.RecordRef(node).Kind == CanonicalKind.Extension)
         {
@@ -37,40 +48,12 @@ internal static class StoreRows
                 AppendFixed(fixedStore, arena, node, rows, valid);
                 return;
             case BoolStore bools:
-            {
-                ReadOnlySpan<ulong> bits = ArenaWords.Bits(arena, node);
-                for (int row = 0; row < rows; row++)
-                {
-                    if (!IsValid(valid, row))
-                    {
-                        bools.AppendNull();
-                    }
-                    else
-                    {
-                        bools.Append(((bits[row >> 6] >> (row & 63)) & 1) != 0);
-                    }
-                }
-
+                bools.AppendBits(ArenaWords.Bits(arena, node), rows, valid);
                 return;
-            }
 
             case VarBinStore bytes:
-            {
-                Aggregating.BytesBlock block = Aggregating.BytesBlock.Canonical(arena, node, out _);
-                for (int row = 0; row < rows; row++)
-                {
-                    if (!IsValid(valid, row))
-                    {
-                        bytes.AppendNull();
-                    }
-                    else
-                    {
-                        bytes.Append(block[row]);
-                    }
-                }
-
+                bytes.AppendBlock(Aggregating.BytesBlock.Canonical(arena, node, out _), valid, validated);
                 return;
-            }
 
             case FixedListStore list when list.Elements is FixedStore elements:
             {
@@ -94,7 +77,7 @@ internal static class StoreRows
             }
 
             case ListStore list when arena.RecordRef(node).Kind == CanonicalKind.ListView:
-                AppendLists(list, arena, node, rows, valid);
+                AppendLists(list, arena, node, rows, valid, validated);
                 return;
 
             case StructStore structure:
@@ -104,7 +87,7 @@ internal static class StoreRows
                 int first = structure.Rows;
                 for (int i = 0; i < structure.Children.Length; i++)
                 {
-                    Append(structure.Children[i], arena, arena.GetNode(node).GetFieldIndex(i));
+                    Append(structure.Children[i], arena, arena.GetNode(node).GetFieldIndex(i), validated);
                 }
 
                 structure.AppendedWhole(first, rows, valid);
@@ -121,7 +104,7 @@ internal static class StoreRows
     /// in their order, gathered from wherever the view names them into one node and appended whole, then each row closed
     /// over its count of them; a null row holds none.
     /// </summary>
-    private static void AppendLists(ListStore list, CanonicalArena arena, int node, int rows, ReadOnlySpan<ulong> valid)
+    private static void AppendLists(ListStore list, CanonicalArena arena, int node, int rows, ReadOnlySpan<ulong> valid, bool validated)
     {
         // Everything is read off the node before the gathering appends records: a node read across that append is a
         // use-after-move. The spans are over buffers, which do not move.
@@ -155,7 +138,7 @@ internal static class StoreRows
                 }
             }
 
-            Append(list.Elements, arena, CanonicalFilter.Apply(arena, elements, indices.AsSpan(0, total)));
+            Append(list.Elements, arena, CanonicalFilter.Apply(arena, elements, indices.AsSpan(0, total)), validated);
             list.AppendLists(counts.AsSpan(0, rows), valid);
         }
         finally
@@ -174,34 +157,36 @@ internal static class StoreRows
         ref readonly CanonicalRecord record = ref arena.RecordRef(node);
         ReadOnlySpan<byte> values = ColumnData.Values(arena, node);
         int width = record.Kind == CanonicalKind.Decimal ? DecimalStorage.ByteWidth(record.Storage) : record.PType.ByteWidth();
-        if (width == store.Width && valid.IsEmpty)
+        if (width == store.Width)
         {
-            store.AppendBytes(values[..(rows * width)]);
+            store.AppendBytes(values[..(rows * width)], valid);
             return;
         }
 
+        // A decimal of another width, a row at a time: a null row's zeroed slot appended in its place, and the validity
+        // taken at the end.
+        int first = store.Count;
         Span<byte> wide = stackalloc byte[Int256.ByteCount];
         for (int row = 0; row < rows; row++)
         {
             if (!IsValid(valid, row))
             {
-                store.AppendNull();
-                continue;
-            }
-
-            ReadOnlySpan<byte> value = values.Slice(row * width, width);
-            if (width == store.Width)
-            {
-                store.AppendBytes(value);
+                store.AppendDefault();
                 continue;
             }
 
             // A decimal stored narrower or wider than the store's width: its value sign-extended,
             // then its low bytes, which hold it at the store's precision.
+            ReadOnlySpan<byte> value = values.Slice(row * width, width);
             byte fill = (value[^1] & 0x80) != 0 ? (byte)0xFF : (byte)0;
             wide.Fill(fill);
             value.CopyTo(wide);
             store.AppendBytes(wide[..store.Width]);
+        }
+
+        if (!valid.IsEmpty)
+        {
+            store.AppendedValidity(first, valid, rows);
         }
     }
 

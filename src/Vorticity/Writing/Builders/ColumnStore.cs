@@ -130,6 +130,13 @@ internal abstract unsafe class ColumnStore
     }
 
     /// <summary>
+    /// The validity of <paramref name="count"/> rows appended from <paramref name="row"/>, each with the value or the null
+    /// slot it holds already, taken from <paramref name="words"/> at once: what a column copied whole marks its null rows by,
+    /// where a null appended a row at a time marked its bit each time.
+    /// </summary>
+    internal void AppendedValidity(int row, ReadOnlySpan<ulong> words, int count) => CopyValidity(row, words, count);
+
+    /// <summary>
     /// Takes the validity of <paramref name="count"/> rows from <paramref name="row"/> out of
     /// <paramref name="words"/>, least significant bit first; allocates nothing when they are all valid.
     /// </summary>
