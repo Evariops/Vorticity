@@ -2,6 +2,7 @@ using System;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.Arm;
 using System.Runtime.Intrinsics.X86;
 
 namespace Vorticity.Compute;
@@ -29,6 +30,44 @@ internal readonly struct WordBytes
 
     /// <summary>Whether this machine spreads words: 512-bit vectors and AVX-512BW.</summary>
     internal static bool IsAccelerated => Vector512.IsHardwareAccelerated && Avx512BW.IsSupported;
+
+    /// <summary>
+    /// Whether this machine spreads words sixteen bits at a time where it does not with 512-bit vectors: a byte shuffle of
+    /// 128 bits, SSSE3's <c>pshufb</c> on x64 or the table lookup <c>tbl</c> on ARM64.
+    /// </summary>
+    internal static bool IsAccelerated128 => Vector128.IsHardwareAccelerated && (Ssse3.IsSupported || AdvSimd.Arm64.IsSupported);
+
+    /// <summary>
+    /// The 64 rows of verdicts <paramref name="held"/> holds as a <see cref="Trilean"/> a row from <paramref name="into"/>:
+    /// true where its bit is set, false where clear, unknown where the bit of <paramref name="unknown"/> is set, which the
+    /// caller has cleared in <paramref name="held"/>. Four shuffles of sixteen rows, where AVX-512 is not
+    /// (<see cref="IsAccelerated128"/>).
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static void Store128(ulong held, ulong unknown, ref byte into)
+    {
+        Vector128<byte> index = Vector128.Create((byte)0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1);
+        Vector128<byte> bit = Vector128.Create((byte)1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128);
+        for (int k = 0; k < 4; k++)
+        {
+            Vector128<byte> ones = Vector128.Min(Spread128((ushort)(held >> (16 * k)), index) & bit, Vector128<byte>.One);
+            if (unknown != 0)
+            {
+                Vector128<byte> nulls = Vector128.Min(Spread128((ushort)(unknown >> (16 * k)), index) & bit, Vector128<byte>.One);
+                ones |= nulls + nulls;
+            }
+
+            ones.StoreUnsafe(ref into, (nuint)(16 * k));
+        }
+    }
+
+    /// <summary>Byte <c>j</c> of the result the byte of <paramref name="bits"/> holding bit <c>j</c>, by <paramref name="index"/>.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static Vector128<byte> Spread128(ushort bits, Vector128<byte> index)
+    {
+        Vector128<byte> pair = Vector128.Create(bits).AsByte();
+        return Ssse3.IsSupported ? Ssse3.Shuffle(pair, index) : AdvSimd.Arm64.VectorTableLookup(pair, index);
+    }
 
     /// <summary>The shuffle and the bit masks, loaded once for a loop.</summary>
     internal static WordBytes Create() => new WordBytes(
