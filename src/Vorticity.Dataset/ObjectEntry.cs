@@ -122,6 +122,12 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
     /// <summary>The index fragments attached to it, in the order they were attached.</summary>
     public IReadOnlyList<PageReference> Fragments { get; }
 
+    /// <summary>
+    /// What the handle's cache of open objects keeps it under, made at its first rent (<see cref="ObjectCache"/>): its key,
+    /// followed by its fragments' hashes. A rent of an object with fragments built that string again at every rent.
+    /// </summary>
+    internal string? OpenHandle { get; set; }
+
     /// <summary>Its bounded summaries.</summary>
     public ObjectSummaries Summaries { get; }
 

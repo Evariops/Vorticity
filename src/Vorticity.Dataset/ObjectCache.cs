@@ -31,7 +31,10 @@ internal sealed class ObjectCache : IAsyncDisposable
     private readonly Lock _gate = new Lock();
     private readonly Dictionary<string, Held> _open = new Dictionary<string, Held>(StringComparer.Ordinal);
     private readonly Dictionary<string, Task<Held>> _opening = new Dictionary<string, Task<Held>>(StringComparer.Ordinal);
-    private readonly LinkedList<string> _idle = new LinkedList<string>();
+    // The objects no lease holds, oldest first: linked through the objects themselves, so that one going idle makes no node.
+    private Held? _idleOldest;
+    private Held? _idleNewest;
+    private int _idleCount;
     private bool _disposed;
 
     internal ObjectCache(IObjectStore store, int capacity, VortexSession? session = null)
@@ -51,7 +54,7 @@ internal sealed class ObjectCache : IAsyncDisposable
     internal EntryMemo Entries { get; } = new EntryMemo();
 
     /// <summary>How many open objects a lease holds: none once every read has given its objects back.</summary>
-    internal int Leased => _open.Count - _idle.Count;
+    internal int Leased => _open.Count - _idleCount;
 
     /// <summary>
     /// <see cref="OpenOptions"/> with the index fragments an object's entry names, which the dataset
@@ -102,13 +105,12 @@ internal sealed class ObjectCache : IAsyncDisposable
                 {
                     Hits++;
                     held.Leases++;
-                    if (held.Idle is { } node)
+                    if (held.IsIdle)
                     {
-                        _idle.Remove(node);
-                        held.Idle = null;
+                        Unidle(held);
                     }
 
-                    return new ObjectLease(this, handle, held.File, cached: true) { FragmentRefusals = held.FragmentRefusals };
+                    return new ObjectLease(this, held, cached: true);
                 }
 
                 if (!_opening.TryGetValue(handle, out theirs))
@@ -143,7 +145,7 @@ internal sealed class ObjectCache : IAsyncDisposable
         Held held;
         try
         {
-            held = await OpenHeldAsync(entry, pages, cancellationToken).ConfigureAwait(false);
+            held = await OpenHeldAsync(entry, pages, handle, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception failure)
         {
@@ -178,11 +180,11 @@ internal sealed class ObjectCache : IAsyncDisposable
         }
 
         opening.TrySetResult(held);
-        return new ObjectLease(this, handle, held.File, cached: false) { FragmentRefusals = held.FragmentRefusals };
+        return new ObjectLease(this, held, cached: false);
     }
 
     /// <summary>Opens an object with the index fragments its entry names, leased once to the caller.</summary>
-    private async ValueTask<Held> OpenHeldAsync(ObjectEntry entry, CommitPageSource pages, CancellationToken cancellationToken)
+    private async ValueTask<Held> OpenHeldAsync(ObjectEntry entry, CommitPageSource pages, string handle, CancellationToken cancellationToken)
     {
         // A fragment whose bytes are not what its reference says is left out rather than fatal: an
         // index claims nothing it cannot prove, and the object answers exactly without it. A missing
@@ -221,7 +223,7 @@ internal sealed class ObjectCache : IAsyncDisposable
                 : source;
             VortexFile file = await VortexFile.OpenAsync(SessionReader.Wrap(read, _session), OpenOptionsOf(entry, fragments), cancellationToken).ConfigureAwait(false);
             file.Session = _session;
-            return new Held(file, source) { Leases = 1, FragmentRefusals = refused };
+            return new Held(file, source, handle) { Leases = 1, FragmentRefusals = refused };
         }
         catch
         {
@@ -230,27 +232,77 @@ internal sealed class ObjectCache : IAsyncDisposable
         }
     }
 
-    /// <summary>Gives a lease back; the object stays open until something else needs the room.</summary>
-    internal ValueTask ReturnAsync(string key)
+    /// <summary>
+    /// Gives a lease of <paramref name="held"/> back; the object stays open until something else needs the room. The lease
+    /// holds the object itself: no lookup by its handle, no closure over it, and no node to make as it goes idle.
+    /// </summary>
+    internal ValueTask ReturnAsync(Held held)
     {
         List<Held>? closing;
         lock (_gate)
         {
-            if (!_open.TryGetValue(key, out Held? held))
+            // An object the cache let go, once disposed, is closed already.
+            if (held.Gone)
             {
                 return ValueTask.CompletedTask;
             }
 
             held.Leases--;
-            if (held.Leases <= 0 && held.Idle is null)
+            if (held.Leases <= 0 && !held.IsIdle)
             {
-                held.Idle = _idle.AddLast(key);
+                Idle(held);
             }
 
             closing = Evict();
         }
 
         return closing is null ? ValueTask.CompletedTask : CloseAsync(closing);
+    }
+
+    /// <summary>Puts <paramref name="held"/> at the newest end of the idle objects, under the gate.</summary>
+    private void Idle(Held held)
+    {
+        held.IsIdle = true;
+        held.IdleOlder = _idleNewest;
+        held.IdleNewer = null;
+        if (_idleNewest is { } newest)
+        {
+            newest.IdleNewer = held;
+        }
+        else
+        {
+            _idleOldest = held;
+        }
+
+        _idleNewest = held;
+        _idleCount++;
+    }
+
+    /// <summary>Takes <paramref name="held"/> out of the idle objects, under the gate.</summary>
+    private void Unidle(Held held)
+    {
+        if (held.IdleOlder is { } older)
+        {
+            older.IdleNewer = held.IdleNewer;
+        }
+        else
+        {
+            _idleOldest = held.IdleNewer;
+        }
+
+        if (held.IdleNewer is { } newer)
+        {
+            newer.IdleOlder = held.IdleOlder;
+        }
+        else
+        {
+            _idleNewest = held.IdleOlder;
+        }
+
+        held.IdleOlder = null;
+        held.IdleNewer = null;
+        held.IsIdle = false;
+        _idleCount--;
     }
 
     public async ValueTask DisposeAsync()
@@ -274,8 +326,18 @@ internal sealed class ObjectCache : IAsyncDisposable
         lock (_gate)
         {
             open = [.. _open.Values];
+            foreach (Held held in open)
+            {
+                held.Gone = true;
+                held.IdleOlder = null;
+                held.IdleNewer = null;
+                held.IsIdle = false;
+            }
+
             _open.Clear();
-            _idle.Clear();
+            _idleOldest = null;
+            _idleNewest = null;
+            _idleCount = 0;
         }
 
         await CloseAsync(open).ConfigureAwait(false);
@@ -303,13 +365,21 @@ internal sealed class ObjectCache : IAsyncDisposable
             return entry.Key;
         }
 
+        // Kept on the entry, which the walks share: the same string whichever rent makes it first.
+        if (entry.OpenHandle is { } known)
+        {
+            return known;
+        }
+
         StringBuilder handle = new StringBuilder(entry.Key);
         foreach (PageReference fragment in entry.Fragments)
         {
             handle.Append('#').Append(fragment.Hash.ToString("x32", CultureInfo.InvariantCulture));
         }
 
-        return handle.ToString();
+        string made = handle.ToString();
+        entry.OpenHandle = made;
+        return made;
     }
 
     /// <summary>
@@ -321,14 +391,12 @@ internal sealed class ObjectCache : IAsyncDisposable
     private List<Held>? Evict()
     {
         List<Held>? closing = null;
-        while (_open.Count > _capacity && _idle.First is { } oldest)
+        while (_open.Count > _capacity && _idleOldest is { } oldest)
         {
-            _idle.RemoveFirst();
-            if (_open.Remove(oldest.Value, out Held? held))
-            {
-                held.Idle = null;
-                (closing ??= []).Add(held);
-            }
+            Unidle(oldest);
+            _open.Remove(oldest.Handle);
+            oldest.Gone = true;
+            (closing ??= []).Add(oldest);
         }
 
         return closing;
@@ -348,15 +416,29 @@ internal sealed class ObjectCache : IAsyncDisposable
         await held.Source.DisposeAsync().ConfigureAwait(false);
     }
 
-    private sealed class Held(VortexFile file, ISegmentReader source)
+    /// <summary>One open object: its file, its reader, its handle, its leases, and its place among the idle objects.</summary>
+    internal sealed class Held(VortexFile file, ISegmentReader source, string handle)
     {
         internal VortexFile File { get; } = file;
 
         internal ISegmentReader Source { get; } = source;
 
+        /// <summary>What the cache keeps it under (<see cref="HandleOf"/>).</summary>
+        internal string Handle { get; } = handle;
+
         internal int Leases { get; set; }
 
-        internal LinkedListNode<string>? Idle { get; set; }
+        /// <summary>Whether no lease holds it, which puts it among the idle objects.</summary>
+        internal bool IsIdle { get; set; }
+
+        /// <summary>The idle object that went idle before it, or null.</summary>
+        internal Held? IdleOlder { get; set; }
+
+        /// <summary>The idle object that went idle after it, or null.</summary>
+        internal Held? IdleNewer { get; set; }
+
+        /// <summary>Whether the cache let it go, evicted or disposed: a lease given back after has nothing to return to.</summary>
+        internal bool Gone { get; set; }
 
         internal IReadOnlyList<string> FragmentRefusals { get; init; } = [];
     }
@@ -365,13 +447,19 @@ internal sealed class ObjectCache : IAsyncDisposable
 /// <summary>One borrowing of an open data object.</summary>
 internal sealed class ObjectLease : IAsyncDisposable
 {
-    private readonly Func<ValueTask> _giveBack;
+    private readonly Func<ValueTask>? _giveBack;
+    private readonly ObjectCache? _cache;
+    private readonly ObjectCache.Held? _held;
     private bool _returned;
 
-    /// <summary>A lease of the object <paramref name="key"/> names, open as <paramref name="file"/>, which disposing gives back to <paramref name="cache"/>.</summary>
-    internal ObjectLease(ObjectCache cache, string key, VortexFile file, bool cached)
-        : this(file, cached, () => cache.ReturnAsync(key))
+    /// <summary>A lease of the object <paramref name="cache"/> holds open as <paramref name="held"/>, which disposing gives back.</summary>
+    internal ObjectLease(ObjectCache cache, ObjectCache.Held held, bool cached)
     {
+        File = held.File;
+        WasCached = cached;
+        FragmentRefusals = held.FragmentRefusals;
+        _cache = cache;
+        _held = held;
     }
 
     /// <summary>A lease of <paramref name="file"/>, which disposing gives back through <paramref name="giveBack"/>.</summary>
@@ -424,6 +512,6 @@ internal sealed class ObjectLease : IAsyncDisposable
 
         _returned = true;
         _question?.Release(File);
-        return _giveBack();
+        return _cache is not null ? _cache.ReturnAsync(_held!) : _giveBack!();
     }
 }
