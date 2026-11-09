@@ -27,7 +27,7 @@ internal sealed partial class DatasetScanBuilder
     internal async ValueTask TallyPathsAsync(PathsQuestion question, CancellationToken cancellationToken)
     {
         KeyRange? range = CountRange();
-        int degree = _options.DegreeOfParallelism > 0 ? _options.DegreeOfParallelism : _dataset.Session.Options.MaxDegreeOfParallelism;
+        int degree = ScanDegree;
         if (degree <= 1)
         {
             await foreach (PositionedObject held in WalkAsync(cancellationToken, granules: true).ConfigureAwait(false))

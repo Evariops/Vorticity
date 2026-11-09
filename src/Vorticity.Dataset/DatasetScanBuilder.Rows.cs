@@ -27,8 +27,7 @@ internal sealed partial class DatasetScanBuilder
     /// </summary>
     private QueryMemory? ReadsAhead(ScanBuilder scan, VortexFile file)
     {
-        int degree = _options.DegreeOfParallelism > 0 ? _options.DegreeOfParallelism : _dataset.Session.Options.MaxDegreeOfParallelism;
-        if (_readAheadGranted || degree > 1 || _options.Prefetch > 1 || _take is not null || _orderPaths is not null
+        if (_readAheadGranted || ScanDegree > 1 || _options.Prefetch > 1 || _take is not null || _orderPaths is not null
             || file.Source.CostsNoRoundTrip || scan.LargestSplitBytes() is not (> 0 and var split))
         {
             return null;
@@ -1430,6 +1429,21 @@ internal sealed partial class DatasetScanBuilder
         }
     }
 
+    private void RecordSkipped()
+    {
+        if (_metrics is { } metrics)
+        {
+            // An extreme's lanes judge objects at once.
+            lock (metrics)
+            {
+                metrics.ObjectsSkipped++;
+            }
+        }
+    }
+
+    /// <summary>The scan's degree of parallelism: its options' when they set one, the session's otherwise.</summary>
+    private int ScanDegree => _options.DegreeOfParallelism > 0 ? _options.DegreeOfParallelism : _dataset.Session.Options.MaxDegreeOfParallelism;
+
     /// <summary>
     /// How an object answers for the version's columns: null when it holds exactly them, the case of
     /// every object written since the schema last changed, whose own scan then serves unchanged.
@@ -1619,12 +1633,9 @@ internal sealed partial class DatasetScanBuilder
             scan.WithMaxBatchRows(_options.BatchRows);
         }
 
-        int degree = _options.DegreeOfParallelism > 0
-            ? _options.DegreeOfParallelism
-            : _dataset.Session.Options.MaxDegreeOfParallelism;
         scan.WithPruning(_options.UseStatistics)
             .WithIndexes(_indexes)
-            .WithDegreeOfParallelism(Math.Max(degree, 1))
+            .WithDegreeOfParallelism(Math.Max(ScanDegree, 1))
             .WithPrefetch(_options.Prefetch)
             .WithCompaction(_options.Compact)
             .WithEncodings(!canonical && _keepEncodings, !canonical && _sinkDecodes);
