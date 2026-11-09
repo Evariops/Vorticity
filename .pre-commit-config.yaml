@@ -4,7 +4,9 @@ repos:
   - repo: https://github.com/betterleaks/betterleaks
     rev: v1.10.0
     hooks:
+      # Since 1.10, betterleaks reads .betterleaks.toml only when --config names it.
       - id: betterleaks
+        args: [--config=.betterleaks.toml]
   - repo: https://github.com/zizmorcore/zizmor-pre-commit
     rev: v1.32.0
     hooks:

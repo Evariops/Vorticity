@@ -131,7 +131,8 @@ jobs:
 
       # A pull request's commits since its base, a push's since the commit it moved the branch from,
       # and the whole history otherwise. The version matches the betterleaks rev in
-      # .pre-commit-config.yaml.
+      # .pre-commit-config.yaml. Since 1.10, betterleaks reads .betterleaks.toml only when --config
+      # names it, and without its allowlist it takes the constants of hash functions for secrets.
       - name: betterleaks over the commits the change brings
         env:
           EVENT: ${{ github.event_name }}
@@ -145,7 +146,7 @@ jobs:
             push) if [[ "$BEFORE" =~ ^0+$ ]]; then range=HEAD; else range="$BEFORE..HEAD"; fi ;;
             *) range=HEAD ;;
           esac
-          "$(go env GOPATH)/bin/betterleaks" git --no-banner --redact --verbose --log-opts="$range" .
+          "$(go env GOPATH)/bin/betterleaks" git --no-banner --redact --verbose --config .betterleaks.toml --log-opts="$range" .
 
       # The version matches the zizmor-pre-commit rev in .pre-commit-config.yaml.
       - name: zizmor, pedantic
