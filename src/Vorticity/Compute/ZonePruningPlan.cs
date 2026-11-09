@@ -587,8 +587,11 @@ internal static class ZonePruningPlan
         {
             if (!_byPath.TryGetValue(path, out (Types.Variants.PathClass Class, ReadOnlyMemory<Indexes.BlockBound>? Blocks) found))
             {
+                // The blocks typed nullable in the branch that finds them: typed as memory, the other branch's null took the
+                // conversion from an array and became an empty memory, a key the statistics leave out held in no block, which
+                // refuted every block of a filter that reads it beside a key they cover.
                 found = KeyOf(path) is { } key && _byKey.TryGetValue((path.Column.Path, key.Key, key.Class), out ReadOnlyMemory<Indexes.BlockBound> blocks)
-                    ? (key.Class, blocks)
+                    ? (key.Class, (ReadOnlyMemory<Indexes.BlockBound>?)blocks)
                     : (default, null);
                 _byPath[path] = found;
             }

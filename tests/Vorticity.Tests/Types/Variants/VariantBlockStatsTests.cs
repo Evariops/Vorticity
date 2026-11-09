@@ -71,6 +71,29 @@ public sealed partial class VariantBlockStatsTests
     }
 
     /// <summary>
+    /// A filter on a key that keeps statistics and on one that keeps none, the route and the duration: the route's refute
+    /// the blocks of other routes, and the duration, which no statistics describe, refutes none. The statistics' blocks
+    /// lent as memory, a key they leave out was taken for a key held in no block, and refuted every block: a filter on a
+    /// key that narrows its blocks and on a key of one value over the whole file answered no row (Vorticity 0.11.1).
+    /// </summary>
+    [Fact]
+    public async Task AKeyWithoutStatisticsRefutesNoBlockBesideOneWithThem()
+    {
+        Doc[] rows = Rows();
+        await using VortexFile file = await OpenAsync(await WriteAsync(rows));
+        int expected = rows.Count(r => r.Attributes["route"]?.AsString() == "/r/1" && r.Attributes["duration"]?.AsInt64() >= 0);
+        Assert.Equal(500, expected);
+        foreach (bool routeFirst in (bool[])[true, false])
+        {
+            Scan<Doc> scan = routeFirst
+                ? file.Scan<Doc>().Where(r => r.Attributes["route"].AsString() == "/r/1" && r.Attributes["duration"].AsInt64() >= 0)
+                : file.Scan<Doc>().Where(r => r.Attributes["duration"].AsInt64() >= 0 && r.Attributes["route"].AsString() == "/r/1");
+            Assert.Equal(5, (await scan.ExplainAsync(analyze: true, Ct)).LiveBlocks);
+            Assert.Equal(expected, await scan.CountAsync(Ct));
+        }
+    }
+
+    /// <summary>
     /// Statistics read lend their blocks from rented arrays, given back when they are disposed: read again after, the same
     /// blocks, whatever the arrays held before; disposed twice, given back once.
     /// </summary>
