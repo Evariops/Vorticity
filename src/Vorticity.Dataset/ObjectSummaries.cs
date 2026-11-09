@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Runtime.InteropServices;
 using System.Text;
 using Vorticity.Expressions;
 using Vorticity.Scanning;
@@ -309,9 +310,55 @@ internal sealed class ObjectSummaries : IEquatable<ObjectSummaries>
             return None;
         }
 
+        ColumnSummary[] found = new ColumnSummary[wanted.Count];
+        int kept = Read(value, null, 0, wanted, found);
+        if (kept == 0)
+        {
+            return None;
+        }
+
+        if (kept < found.Length)
+        {
+            Array.Resize(ref found, kept);
+        }
+
+        return new ObjectSummaries(found);
+    }
+
+    /// <summary>
+    /// <see cref="Of(ReadOnlySpan{byte}, SummaryColumns)"/> into <paramref name="into"/>, a buffer a walk keeps for every
+    /// node it passes: nothing is allocated, a text bound being a view of the array under <paramref name="value"/> rather
+    /// than a copy, so what it sets is good while those bytes are, for the question asked of them there and then.
+    /// </summary>
+    /// <param name="value">Encoded summaries.</param>
+    /// <param name="wanted">The columns to read.</param>
+    /// <param name="into">Room for a summary of each column <paramref name="wanted"/> names.</param>
+    /// <returns>How many summaries it set, from the first of <paramref name="into"/>.</returns>
+    /// <exception cref="CommitFormatException">The bytes are not a node's summaries.</exception>
+    internal static int Read(ReadOnlyMemory<byte> value, SummaryColumns wanted, Span<ColumnSummary> into)
+    {
+        ArgumentNullException.ThrowIfNull(wanted);
+        ArgumentOutOfRangeException.ThrowIfLessThan(into.Length, wanted.Count, nameof(into));
+        return MemoryMarshal.TryGetArray(value, out ArraySegment<byte> segment) && segment.Array is { } array
+            ? Read(value.Span, array, segment.Offset, wanted, into)
+            : Read(value.Span, null, 0, wanted, into);
+    }
+
+    /// <summary>
+    /// The summaries of the columns <paramref name="wanted"/> names into <paramref name="into"/>, every other column skipped
+    /// where it lies; a text bound a view of <paramref name="array"/>, where <paramref name="value"/> starts at
+    /// <paramref name="origin"/>, or a copy without one.
+    /// </summary>
+    private static int Read(ReadOnlySpan<byte> value, byte[]? array, int origin, SummaryColumns wanted, Span<ColumnSummary> into)
+    {
+        if (value.IsEmpty || wanted.Count == 0)
+        {
+            return 0;
+        }
+
         int at = 0;
         int count = Length(ReadVarint(value, ref at), value.Length);
-        ColumnSummary[]? found = null;
+        int room = Math.Min(count, wanted.Count);
         int kept = 0;
         for (int i = 0; i < count; i++)
         {
@@ -341,16 +388,15 @@ internal sealed class ObjectSummaries : IEquatable<ObjectSummaries>
                 continue;
             }
 
-            FilterLiteral min = (flags & HasMinFlag) != 0 ? ReadLiteral(value, ref at) : default;
-            FilterLiteral max = (flags & HasMaxFlag) != 0 ? ReadLiteral(value, ref at) : default;
+            FilterLiteral min = (flags & HasMinFlag) != 0 ? ReadLiteral(value, ref at, array, origin) : default;
+            FilterLiteral max = (flags & HasMaxFlag) != 0 ? ReadLiteral(value, ref at, array, origin) : default;
             long nulls = (flags & HasNullsFlag) != 0 ? NullCount(ReadVarint(value, ref at)) : 0;
-            found ??= new ColumnSummary[Math.Min(count, wanted.Count)];
-            if (kept == found.Length)
+            if (kept == room)
             {
                 throw new CommitFormatException("A node summarises one column twice.");
             }
 
-            found[kept++] = new ColumnSummary(
+            into[kept++] = new ColumnSummary(
                 wanted.PathAt(match),
                 min,
                 (flags & HasMinFlag) != 0,
@@ -366,17 +412,7 @@ internal sealed class ObjectSummaries : IEquatable<ObjectSummaries>
             throw new CommitFormatException($"A node's summaries have {value.Length - at} bytes left over.");
         }
 
-        if (found is null)
-        {
-            return None;
-        }
-
-        if (kept < found.Length)
-        {
-            Array.Resize(ref found, kept);
-        }
-
-        return new ObjectSummaries(found);
+        return kept;
     }
 
     /// <summary>Moves past a bound the flags say is there.</summary>
@@ -546,7 +582,10 @@ internal sealed class ObjectSummaries : IEquatable<ObjectSummaries>
         _ => 0,
     };
 
-    internal static FilterLiteral ReadLiteral(ReadOnlySpan<byte> value, ref int at)
+    internal static FilterLiteral ReadLiteral(ReadOnlySpan<byte> value, ref int at) => ReadLiteral(value, ref at, null, 0);
+
+    /// <summary>A bound, its bytes a view of <paramref name="array"/> (where <paramref name="value"/> starts at <paramref name="origin"/>) when one is given, a copy otherwise.</summary>
+    private static FilterLiteral ReadLiteral(ReadOnlySpan<byte> value, ref int at, byte[]? array, int origin)
     {
         if (at >= value.Length)
         {
@@ -572,7 +611,7 @@ internal sealed class ObjectSummaries : IEquatable<ObjectSummaries>
                     throw new CommitFormatException("A byte bound runs past its bytes.");
                 }
 
-                FilterLiteral literal = FilterLiteral.From(value.Slice(at, length));
+                FilterLiteral literal = array is null ? FilterLiteral.From(value.Slice(at, length)) : FilterLiteral.View(array, origin + at, length);
                 at += length;
                 return literal;
             case FilterLiteralKind.Signed:
@@ -650,5 +689,41 @@ internal sealed class SummaryColumns
         }
 
         return -1;
+    }
+}
+
+/// <summary>
+/// The summaries a walk asks of each node it passes, read out of the node's bytes into one buffer the walk keeps: a node
+/// costs no allocation, where a list, an object and a copy of each text bound were made for each one.
+/// </summary>
+/// <remarks>
+/// What <see cref="Of"/> returns is good until its next call, and its text bounds are views of the bytes it was given: a
+/// walk asks one question of them there and then. One walk's reader, never shared between walks.
+/// </remarks>
+internal sealed class SummaryReader
+{
+    private readonly ColumnSummary[] _buffer;
+
+    /// <summary>A reader of the columns <paramref name="paths"/> names.</summary>
+    internal SummaryReader(IReadOnlyList<string> paths)
+    {
+        Wanted = new SummaryColumns(paths);
+        _buffer = new ColumnSummary[Wanted.Count];
+    }
+
+    /// <summary>The columns it reads.</summary>
+    internal SummaryColumns Wanted { get; }
+
+    /// <summary>The summaries of the wanted columns among encoded ones, an entry's.</summary>
+    /// <exception cref="CommitFormatException">The bytes are not a node's summaries.</exception>
+    internal ReadOnlySpan<ColumnSummary> Of(ReadOnlyMemory<byte> summaries) =>
+        _buffer.AsSpan(0, ObjectSummaries.Read(summaries, Wanted, _buffer));
+
+    /// <summary>The summaries of the wanted columns an internal entry's summary carries, behind its tally.</summary>
+    /// <exception cref="CommitFormatException">The bytes are not a page's summary.</exception>
+    internal ReadOnlySpan<ColumnSummary> OfNode(ReadOnlyMemory<byte> summary)
+    {
+        int behind = ObjectSummaryFold.SummariesOf(summary.Span, out _).Length;
+        return Of(summary[(summary.Length - behind)..]);
     }
 }

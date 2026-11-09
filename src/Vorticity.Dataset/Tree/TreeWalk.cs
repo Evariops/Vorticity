@@ -30,33 +30,43 @@ internal sealed class TreeWalk : IAsyncDisposable
     private readonly Func<InternalEntry, bool>? _descend;
     private readonly CancellationToken _cancellationToken;
     private readonly PageReference _root;
+    private readonly EntryMemo? _memo;
 
     /// <summary>The walk's future, its top last: pages to read and subtrees ruled out.</summary>
     private readonly List<Pending> _stack = [];
 
-    private IReadOnlyList<TreeEntry>? _leaf;
-    private int _next;
+    // The leaf page being walked, read where it lies, and the place of the step's entry in it.
+    private TreePage.LeafReader _leaf;
+    private bool _inLeaf;
+    private int _index;
+    private ObjectEntry?[]? _slots;
 
     // The ruled-out step, which Expand pushes back.
     private Pending _subtree;
 
     /// <summary>
     /// A walk of <paramref name="tree"/> that keeps out of a subtree when
-    /// <paramref name="descend"/> says false of its entry; a null test reads every subtree.
+    /// <paramref name="descend"/> says false of its entry; a null test reads every subtree. The entries
+    /// <see cref="Object"/> parses are kept in <paramref name="memo"/>.
     /// </summary>
-    internal TreeWalk(DatasetTree tree, IPageSource source, Func<InternalEntry, bool>? descend, CancellationToken cancellationToken)
+    internal TreeWalk(
+        DatasetTree tree, IPageSource source, Func<InternalEntry, bool>? descend, CancellationToken cancellationToken, EntryMemo? memo = null)
     {
         ArgumentNullException.ThrowIfNull(tree);
         ArgumentNullException.ThrowIfNull(source);
         _source = source;
         _descend = descend;
         _cancellationToken = cancellationToken;
+        _memo = memo;
         _root = tree.Root;
         if (!tree.IsEmpty)
         {
             _stack.Add(new Pending(null, 0, tree.Depth, RuledOut: false));
         }
     }
+
+    /// <summary>The object the step's entry holds, parsed once a page for as long as the page lives.</summary>
+    internal ObjectEntry Object => EntryMemo.Of(_slots, _index, Entry.Value);
 
     /// <summary>Whether the step is a subtree ruled out, rather than an entry.</summary>
     internal bool IsRuledOut { get; private set; }
@@ -78,14 +88,20 @@ internal sealed class TreeWalk : IAsyncDisposable
     {
         while (true)
         {
-            if (_leaf is not null && _next < _leaf.Count)
+            if (_inLeaf)
             {
-                IsRuledOut = false;
-                Entry = _leaf[_next++];
-                return true;
+                if (_leaf.TryRead(out TreeEntry entry))
+                {
+                    IsRuledOut = false;
+                    Entry = entry;
+                    _index++;
+                    return true;
+                }
+
+                _inLeaf = false;
+                _slots = null;
             }
 
-            _leaf = null;
             if (_stack.Count == 0)
             {
                 return false;
@@ -117,8 +133,10 @@ internal sealed class TreeWalk : IAsyncDisposable
             ReadOnlyMemory<byte> bytes = top.Read is { } read ? await read.ConfigureAwait(false) : top.Bytes;
             if (top.Level == 1)
             {
-                _leaf = TreePage.ReadLeaf(bytes);
-                _next = 0;
+                _leaf = new TreePage.LeafReader(bytes);
+                _inLeaf = true;
+                _index = -1;
+                _slots = _memo?.SlotsOf(bytes, _leaf.Count);
                 continue;
             }
 

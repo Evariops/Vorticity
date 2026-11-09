@@ -1,4 +1,5 @@
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.IO.Hashing;
 using System.Threading;
@@ -223,23 +224,19 @@ internal sealed record DatasetTree(PageReference Root, int Depth, long Entries, 
             return null;
         }
 
+        // Each page is read where it lies, up to the entry the search stops at.
         PageReference reference = Root;
         for (int level = Depth; level > 1; level--)
         {
-            IReadOnlyList<InternalEntry> page = TreePage.ReadInternal(
-                await source.ReadPageAsync(reference, cancellationToken).ConfigureAwait(false));
-            int child = Descend(page, key.Span);
-            if (child < 0)
+            if (!TryDescend(await source.ReadPageAsync(reference, cancellationToken).ConfigureAwait(false), key.Span, out reference))
             {
                 return null;
             }
-
-            reference = page[child].Child;
         }
 
-        IReadOnlyList<TreeEntry> leaf = TreePage.ReadLeaf(
+        TreePage.LeafReader leaf = new TreePage.LeafReader(
             await source.ReadPageAsync(reference, cancellationToken).ConfigureAwait(false));
-        foreach (TreeEntry entry in leaf)
+        while (leaf.TryRead(out TreeEntry entry))
         {
             int order = TreePage.Compare(entry.Key.Span, key.Span);
             if (order == 0)
@@ -271,48 +268,59 @@ internal sealed record DatasetTree(PageReference Root, int Depth, long Entries, 
             return null;
         }
 
+        // Each page is read where it lies, up to the entry the search stops at.
         PageReference reference = Root;
         bool wrapped = false;
         for (int level = Depth; level > 1; level--)
         {
-            IReadOnlyList<InternalEntry> page = TreePage.ReadInternal(
+            TreePage.InternalReader page = new TreePage.InternalReader(
                 await source.ReadPageAsync(reference, cancellationToken).ConfigureAwait(false));
-            int child = 0;
-            while (!wrapped && child < page.Count && TreePage.Compare(page[child].MaxKey.Span, key.Span) <= 0)
+            PageReference? past = null;
+            PageReference first = default;
+            for (int child = 0; page.TryRead(out InternalEntry entry); child++)
             {
-                child++;
+                first = child == 0 ? entry.Child : first;
+                if (wrapped || TreePage.Compare(entry.MaxKey.Span, key.Span) > 0)
+                {
+                    past = entry.Child;
+                    break;
+                }
             }
 
-            if (child == page.Count)
+            if (past is null)
             {
                 // Only the top page can hold no child past the key: one below was entered for
                 // holding a larger one.
-                if (!wrap)
+                if (!wrap || page.Count == 0)
                 {
                     return null;
                 }
 
                 wrapped = true;
-                child = 0;
+                past = first;
             }
 
-            reference = page[child].Child;
+            reference = past.Value;
         }
 
-        IReadOnlyList<TreeEntry> leaf = TreePage.ReadLeaf(
+        TreePage.LeafReader leaf = new TreePage.LeafReader(
             await source.ReadPageAsync(reference, cancellationToken).ConfigureAwait(false));
-        if (!wrapped)
+        TreeEntry? head = null;
+        while (leaf.TryRead(out TreeEntry entry))
         {
-            foreach (TreeEntry entry in leaf)
+            head ??= entry;
+            if (wrapped)
             {
-                if (TreePage.Compare(entry.Key.Span, key.Span) > 0)
-                {
-                    return entry;
-                }
+                break;
+            }
+
+            if (TreePage.Compare(entry.Key.Span, key.Span) > 0)
+            {
+                return entry;
             }
         }
 
-        return wrap ? leaf[0] : null;
+        return wrap ? head : null;
     }
 
     /// <summary>
@@ -384,6 +392,34 @@ internal sealed record DatasetTree(PageReference Root, int Depth, long Entries, 
         Func<InternalEntry, bool>? descend,
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
     {
+        await foreach (PositionedLeaf leaf in WalkLeavesAsync(source, from, to, descend, cancellationToken).ConfigureAwait(false))
+        {
+            TreePage.LeafReader reader = new TreePage.LeafReader(leaf.Page);
+            long row = leaf.FirstRow;
+            while (reader.TryRead(out TreeEntry entry))
+            {
+                if (row < to && row + entry.Rows > from)
+                {
+                    yield return new PositionedEntry(entry, row);
+                }
+
+                row += entry.Rows;
+            }
+        }
+    }
+
+    /// <summary>
+    /// The leaf pages <see cref="WalkAsync"/> reads the entries of, in key order, each with the first row in the dataset
+    /// of its first entry: a page may hold entries outside <c>[from, to)</c>, which a caller passes over. A caller that
+    /// reads the entries where they lie takes one step of this walk a page, rather than one of an enumerator an entry.
+    /// </summary>
+    public async IAsyncEnumerable<PositionedLeaf> WalkLeavesAsync(
+        IPageSource source,
+        long from,
+        long to,
+        Func<InternalEntry, bool>? descend,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
+    {
         ArgumentNullException.ThrowIfNull(source);
         ArgumentOutOfRangeException.ThrowIfNegative(from);
         if (IsEmpty || to <= from)
@@ -395,13 +431,16 @@ internal sealed record DatasetTree(PageReference Root, int Depth, long Entries, 
         // ahead: one dependent round trip per window rather than one per page. The window is
         // bounded so that a walk which stops early has read at most a window more than it used.
         // A page the source holds in hand is taken as it lies, where a read was a task a page.
-        List<(PageReference Reference, int Level, long Row, bool Fetched, ReadOnlyMemory<byte> Bytes, Task<ReadOnlyMemory<byte>>? Read)> stack =
-            [(Root, Depth, 0, false, default, null)];
+        // The stack is a rented array and an internal page is read where it lies: a walk grew a
+        // list of 88-byte steps to its widest page's width, and made a list of each internal page.
+        Step[] stack = ArrayPool<Step>.Shared.Rent(StackStart);
+        int count = 0;
+        stack[count++] = new Step(Root, Depth, 0);
         try
         {
-            while (stack.Count > 0)
+            while (count > 0)
             {
-                for (int ahead = stack.Count - 1; ahead >= Math.Max(0, stack.Count - PrefetchWindow); ahead--)
+                for (int ahead = count - 1; ahead >= Math.Max(0, count - PrefetchWindow); ahead--)
                 {
                     if (!stack[ahead].Fetched)
                     {
@@ -412,58 +451,80 @@ internal sealed record DatasetTree(PageReference Root, int Depth, long Entries, 
                     }
                 }
 
-                (_, int level, long row, _, ReadOnlyMemory<byte> inHand, Task<ReadOnlyMemory<byte>>? read) = stack[^1];
-                stack.RemoveAt(stack.Count - 1);
-                ReadOnlyMemory<byte> bytes = read is null ? inHand : await read.ConfigureAwait(false);
-                if (level == 1)
+                Step top = stack[--count];
+                stack[count] = default;
+                ReadOnlyMemory<byte> bytes = top.Read is { } read ? await read.ConfigureAwait(false) : top.Bytes;
+                if (top.Level == 1)
                 {
-                    foreach (TreeEntry entry in TreePage.ReadLeaf(bytes))
-                    {
-                        if (row < to && row + entry.Rows > from)
-                        {
-                            yield return new PositionedEntry(entry, row);
-                        }
-
-                        row += entry.Rows;
-                    }
-
+                    yield return new PositionedLeaf(bytes, top.Row);
                     continue;
                 }
 
-                // Pushed in reverse so that popping walks the children in key order; each child's
-                // first row is then reached by subtracting from the page's end, which needs no
-                // array to hold the offsets in.
-                IReadOnlyList<InternalEntry> page = TreePage.ReadInternal(bytes);
-                long at = row;
-                for (int i = 0; i < page.Count; i++)
+                // Pushed in key order and then turned over, so that popping walks the children in
+                // key order, each with its first row counted on from the page's.
+                int first = count;
+                TreePage.InternalReader children = new TreePage.InternalReader(bytes);
+                long start = top.Row;
+                while (children.TryRead(out InternalEntry child))
                 {
-                    at += page[i].Rows;
-                }
-
-                for (int i = page.Count - 1; i >= 0; i--)
-                {
-                    long start = at - page[i].Rows;
-                    if (start < to && at > from && (descend is null || descend(page[i])))
+                    if (start < to && start + child.Rows > from && (descend is null || descend(child)))
                     {
-                        stack.Add((page[i].Child, level - 1, start, false, default, null));
+                        if (count == stack.Length)
+                        {
+                            stack = Grown(stack, count);
+                        }
+
+                        stack[count++] = new Step(child.Child, top.Level - 1, start);
                     }
 
-                    at = start;
+                    start += child.Rows;
                 }
+
+                Array.Reverse(stack, first, count - first);
             }
         }
         finally
         {
             // A walk stopped early leaves reads in flight: each is observed, so that one that fails
             // after nobody wants it is not an unobserved exception.
-            foreach ((_, _, _, _, _, Task<ReadOnlyMemory<byte>>? pending) in stack)
+            for (int i = 0; i < count; i++)
             {
-                _ = pending?.ContinueWith(
+                _ = stack[i].Read?.ContinueWith(
                     static read => read.Exception, CancellationToken.None,
                     TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
                     TaskScheduler.Default);
             }
+
+            // Every step past the count was cleared as it was taken.
+            Array.Clear(stack, 0, count);
+            ArrayPool<Step>.Shared.Return(stack);
         }
+    }
+
+    /// <summary>The steps a walk's stack is rented with: a few pages' children, most walks' widest.</summary>
+    private const int StackStart = 64;
+
+    /// <summary>A stack twice as long holding the first <paramref name="count"/> steps of <paramref name="stack"/>, which goes back to the pool cleared.</summary>
+    private static Step[] Grown(Step[] stack, int count)
+    {
+        Step[] grown = ArrayPool<Step>.Shared.Rent(stack.Length * 2);
+        Array.Copy(stack, grown, count);
+        Array.Clear(stack, 0, count);
+        ArrayPool<Step>.Shared.Return(stack);
+        return grown;
+    }
+
+    /// <summary>
+    /// A page a walk has yet to read: where it lies, its level above the leaves and the first row under it; once fetched,
+    /// its bytes in hand or the read of them.
+    /// </summary>
+    private readonly record struct Step(PageReference Reference, int Level, long Row)
+    {
+        internal bool Fetched { get; init; }
+
+        internal ReadOnlyMemory<byte> Bytes { get; init; }
+
+        internal Task<ReadOnlyMemory<byte>>? Read { get; init; }
     }
 
     /// <summary>
@@ -674,25 +735,27 @@ internal sealed record DatasetTree(PageReference Root, int Depth, long Entries, 
     }
 
     /// <summary>
-    /// The child whose range holds the key. A linear walk and not a binary search, because the
-    /// boundary rule keeps an internal page to a few dozen entries.
+    /// The child of the internal page <paramref name="page"/> whose range holds the key: the last whose smallest key is
+    /// not past it, or the first when every one is; false for a page of none. A linear walk where the entries lie and not
+    /// a binary search, because the boundary rule keeps an internal page to a few dozen entries.
     /// </summary>
-    private static int Descend(IReadOnlyList<InternalEntry> page, ReadOnlySpan<byte> key)
+    private static bool TryDescend(ReadOnlyMemory<byte> page, ReadOnlySpan<byte> key, out PageReference child)
     {
-        int child = -1;
-        for (int i = 0; i < page.Count; i++)
+        TreePage.InternalReader entries = new TreePage.InternalReader(page);
+        bool any = false;
+        child = default;
+        while (entries.TryRead(out InternalEntry entry))
         {
-            if (TreePage.Compare(page[i].MinKey.Span, key) <= 0)
-            {
-                child = i;
-            }
-            else
+            if (any && TreePage.Compare(entry.MinKey.Span, key) > 0)
             {
                 break;
             }
+
+            child = entry.Child;
+            any = true;
         }
 
-        return child < 0 ? (page.Count > 0 ? 0 : -1) : child;
+        return any;
     }
 
     /// <summary>Accumulates entries, cuts where the rule says, and writes the pages.</summary>
