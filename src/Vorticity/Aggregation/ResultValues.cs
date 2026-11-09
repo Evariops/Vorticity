@@ -216,8 +216,11 @@ internal static class ResultValues
                 continue;
             }
 
+            // Wrapped, never reinterpreted: a nullable memory is 8 bytes longer than a memory, its flag first, so a memory
+            // read as one took its flag from the array's address and its array from the value's index and length, and the
+            // first value of a nullable binary column a reader touched crashed the process.
             ReadOnlyMemory<byte> bytes = ColumnData.IsValid(valid, i) ? ColumnData.Bytes(arena, node, i).ToArray() : default;
-            into[i] = Unsafe.As<ReadOnlyMemory<byte>, T>(ref bytes);
+            into[i] = LiteralValues.Wrap<ReadOnlyMemory<byte>, T>(bytes);
         }
     }
 
