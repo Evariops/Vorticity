@@ -26,10 +26,11 @@ namespace Vorticity.Scanning;
 /// the same loop with the first step already done.
 /// </para>
 /// <para>
-/// One context, one split at a time: a terminal has no batch to hand out, so it runs on a single
-/// lane whatever the degree of parallelism, and its memory bound holds by construction. It reads
-/// and decodes exactly as the batch enumerator does, take push-down included, so it cannot count a
-/// row the materialized scan would not return.
+/// One context, one split at a time a lane: a count over the scan's degree of parallelism decodes the
+/// splits the zone maps leave undecided on that many lanes, which share the segments they read, and
+/// its memory bound is a split a lane; the other terminals run on one lane. It reads and decodes
+/// exactly as the batch enumerator does, take push-down included, so it cannot count a row the
+/// materialized scan would not return.
 /// </para>
 /// </remarks>
 internal sealed class TerminalScan
@@ -59,6 +60,9 @@ internal sealed class TerminalScan
     /// <summary>The geometry of the chunks the count may read a part of by their granules; null for none.</summary>
     private readonly Indexes.GranuleGeometry? _granules;
 
+    /// <summary>The lanes a count decodes its undecided splits on.</summary>
+    private readonly int _degree;
+
     internal TerminalScan(
         VortexFile file,
         LayoutTree tree,
@@ -74,8 +78,10 @@ internal sealed class TerminalScan
         bool indexes = true,
         IRowExclusion? excluded = null,
         IReadOnlyDictionary<string, string[]>? variantKeys = null,
-        Indexes.GranuleGeometry? granules = null)
+        Indexes.GranuleGeometry? granules = null,
+        int degree = 1)
     {
+        _degree = Math.Max(degree, 1);
         _excluded = excluded;
         _variantKeys = variantKeys;
         _granules = granules;
@@ -233,7 +239,13 @@ internal sealed class TerminalScan
 
         long total = 0;
         long blockRows = Math.Max(live?.BlockRows ?? SplitPlan.NaturalBatchRows(_tree), 1);
-        using ScanContext context = new ScanContext(_file);
+        if (_degree > 1 && groups is null)
+        {
+            return await LanesAsync(plan, live, zones, blockRows, stopAtFirst, cancellationToken).ConfigureAwait(false);
+        }
+
+        using LentContext lent = new LentContext(ScanContexts.Shared.Rent(_file));
+        ScanContext context = lent.Context;
         context.LiveBlocks = live;
         context.Metrics = _metrics;
         // The count reads a chunk by its granules as the batches would: those of the rows it counts that hold a live block.
@@ -298,6 +310,255 @@ internal sealed class TerminalScan
         }
 
         return total;
+    }
+
+    /// <summary>
+    /// The count's loop on <see cref="_degree"/> lanes. The splits the zone maps decide are counted here, as the plan's walk
+    /// meets them; those they leave undecided are decoded and counted by lanes of their own, each with its own context, which
+    /// take the next window's run of splits in turn and share the segments they read: a segment another lane is reading is
+    /// waited for, not read again. The memory bound is a window a lane. A count on one lane decoded every split of a large
+    /// file one after the other, whatever the scan's degree.
+    /// </summary>
+    private async ValueTask<long> LanesAsync(
+        SplitPlan plan, BlockMask? live, ZonePruner? zones, long blockRows, bool stopAtFirst, CancellationToken cancellationToken)
+    {
+        long total = 0;
+        using ScanSegments held = new ScanSegments(_degree);
+        Decodes decodes = new Decodes(plan, held, blockRows, live);
+        List<RowRange> undecided = [];
+        SplitCursor cursor = plan.CreateCursor();
+        while (cursor.TryNext(out RowRange split))
+        {
+            if (_take is not null && !_take.Touches(split))
+            {
+                continue;
+            }
+
+            _metrics?.AddBlocksPruned(decodes.Pruned.Add(split, _take, live, alive: false));
+            if (live is not null && !live.AnyLive(split))
+            {
+                continue;
+            }
+
+            long blocks = (split.Length + blockRows - 1) / blockRows;
+            if (zones is not null && TryProve(zones, split, out long proven))
+            {
+                Diagnostics.VortexEventSource.Counted(blocks, 0);
+                total += proven;
+                if (stopAtFirst && total > 0)
+                {
+                    return total;
+                }
+
+                continue;
+            }
+
+            Diagnostics.VortexEventSource.Counted(0, blocks);
+            undecided.Add(split);
+        }
+
+        if (undecided.Count == 0)
+        {
+            return total;
+        }
+
+        // The filter's variant columns read as a scan reads them, the keys' reads loaded once for every lane.
+        Indexes.VariantKeyReads? keys = _variantKeys is null
+            ? null
+            : await Indexes.VariantKeyReads.LoadAsync(_file, _variantKeys, cancellationToken).ConfigureAwait(false);
+        int capacity = (int)Math.Min(plan.MaxRows, int.MaxValue);
+
+        // The undecided splits in runs of one window each: a chunk larger than a split is decoded a window at a time, so a
+        // lane takes a whole run and decodes its window once, where lanes taking splits in turn waited for one of them to
+        // decode the window they all wanted, then decoded the next one each.
+        List<int> runs = [];
+        long window = -1;
+        for (int i = 0; i < undecided.Count; i++)
+        {
+            plan.WindowOf(undecided[i].Start, out int lead, out _);
+            if (undecided[i].Start - lead != window)
+            {
+                window = undecided[i].Start - lead;
+                runs.Add(i);
+            }
+        }
+
+        runs.Add(undecided.Count);
+        LaneWork work = new LaneWork(runs.Count - 1, undecided.Count, stopAtFirst);
+        using CancellationTokenSource stop = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        Task[] running = new Task[Math.Min(_degree, runs.Count - 1)];
+        for (int l = 0; l < running.Length; l++)
+        {
+            running[l] = Task.Run(LaneAsync, CancellationToken.None);
+        }
+
+        // No lane throws: each keeps its failure in the work's state, the first of them thrown here.
+        await Task.WhenAll(running).ConfigureAwait(false);
+        if (work.Failure is { } failed && !work.Found)
+        {
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Throw(failed);
+        }
+
+        return total + work.Counted;
+
+        async Task LaneAsync()
+        {
+            ScanContext context = ScanContexts.Shared.Rent(_file);
+            context.LiveBlocks = live;
+            context.Metrics = _metrics;
+            context.Granules = _granules is { } geometry ? new Indexes.GranulePlans(geometry, _file, _take, live, _rows, context.GranuleScratch) : null;
+            context.VariantKeys = keys;
+            Lane lane = new Lane();
+            byte[] states = ArrayPool<byte>.Shared.Rent(Math.Max(capacity, 1));
+            try
+            {
+                for (int run = work.Take(); run >= 0; run = work.Take())
+                {
+                    for (int i = runs[run]; i < runs[run + 1]; i++)
+                    {
+                        lane.Start(i);
+                        long rows = await DecodeAndCountAsync(context, decodes, undecided[i], states, stop.Token, lane).ConfigureAwait(false);
+
+                        // The segments no split from the first one still uncounted asked for, dropped: the splits finish out of
+                        // order, so the floor is the first unfinished one, never this one, whose own may serve a lane behind it.
+                        if (work.Done(i) is int floor and >= 0)
+                        {
+                            held.Release(Lane.FirstBatch(floor));
+                        }
+
+                        if (work.Add(rows))
+                        {
+                            await stop.CancelAsync().ConfigureAwait(false);
+                            return;
+                        }
+
+                        if (work.Ended)
+                        {
+                            return;
+                        }
+                    }
+                }
+            }
+            catch (Exception failure)
+            {
+                if (work.Fail(failure))
+                {
+                    await stop.CancelAsync().ConfigureAwait(false);
+                }
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(states);
+                ScanContexts.Shared.Return(context);
+            }
+        }
+    }
+
+    /// <summary>
+    /// The runs of splits the lanes of a count take in turn, the rows they counted, the first split not counted yet, and how
+    /// the count ended.
+    /// </summary>
+    private sealed class LaneWork(int runs, int splits, bool stopAtFirst)
+    {
+        private readonly bool[] _done = new bool[splits];
+        private readonly Lock _gate = new Lock();
+        private int _floor;
+        private int _next = -1;
+        private long _counted;
+        private int _ended;
+
+        /// <summary>Marks split <paramref name="split"/> counted; the first split not counted yet when that moved it, else -1.</summary>
+        internal int Done(int split)
+        {
+            lock (_gate)
+            {
+                _done[split] = true;
+                int before = _floor;
+                while (_floor < _done.Length && _done[_floor])
+                {
+                    _floor++;
+                }
+
+                return _floor != before ? _floor : -1;
+            }
+        }
+
+        /// <summary>The rows the lanes counted.</summary>
+        internal long Counted => Interlocked.Read(ref _counted);
+
+        /// <summary>Whether a lane found a row a count that stops at the first asked for.</summary>
+        internal bool Found => Volatile.Read(ref _ended) == 1;
+
+        /// <summary>The first failure of a lane, unless a row was found first.</summary>
+        internal Exception? Failure { get; private set; }
+
+        /// <summary>Whether a lane found the row a count that stops at its first asked for, or failed.</summary>
+        internal bool Ended => Volatile.Read(ref _ended) != 0;
+
+        /// <summary>The next run to count, or -1 once none is left or the count has ended.</summary>
+        internal int Take()
+        {
+            if (Ended)
+            {
+                return -1;
+            }
+
+            int next = Interlocked.Increment(ref _next);
+            return next < runs ? next : -1;
+        }
+
+        /// <summary>Adds a split's rows; true when that ends a count that stops at its first row.</summary>
+        internal bool Add(long rows)
+        {
+            if (rows == 0)
+            {
+                return false;
+            }
+
+            Interlocked.Add(ref _counted, rows);
+            return stopAtFirst && Interlocked.CompareExchange(ref _ended, 1, 0) == 0;
+        }
+
+        /// <summary>Records a lane's failure; false when the count had already ended, the failure then being for nothing.</summary>
+        internal bool Fail(Exception failure)
+        {
+            if (Interlocked.CompareExchange(ref _ended, 2, 0) != 0)
+            {
+                return false;
+            }
+
+            Failure = failure;
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// A context the process's pool lends (<see cref="ScanContexts"/>), given back as the terminal ends: a terminal made a
+    /// context of its own, 23 KB, at every count, which a dataset's count paid at every object it opened.
+    /// </summary>
+    private readonly struct LentContext(ScanContext context) : IDisposable
+    {
+        internal ScanContext Context { get; } = context;
+
+        public void Dispose() => ScanContexts.Shared.Return(Context);
+    }
+
+    /// <summary>
+    /// One lane of a count: the split it decodes, whose reads are numbered in the order of the plan's walk, two for each
+    /// split, the encoding's and the decode's; and the waiter it parks while another lane reads a segment it needs.
+    /// </summary>
+    private sealed class Lane : SegmentWaiter
+    {
+        private long _batch;
+
+        /// <summary>The number of the first read of the <paramref name="split"/>-th split of the walk.</summary>
+        internal static long FirstBatch(int split) => (long)split * 2;
+
+        /// <summary>Starts the <paramref name="split"/>-th split of the walk.</summary>
+        internal void Start(int split) => _batch = FirstBatch(split);
+
+        /// <summary>The number of the lane's next read of its split.</summary>
+        internal long NextBatch() => _batch++;
     }
 
     /// <summary>
@@ -405,16 +666,16 @@ internal sealed class TerminalScan
     /// else one decode, one evaluation, one count, no copy.
     /// </summary>
     private async ValueTask<long> DecodeAndCountAsync(
-        ScanContext context, Decodes decodes, RowRange split, byte[] states, CancellationToken cancellationToken)
+        ScanContext context, Decodes decodes, RowRange split, byte[] states, CancellationToken cancellationToken, Lane? lane = null)
     {
-        if (Pushable() is { } pushable && await PushedCountAsync(context, decodes, split, pushable, cancellationToken).ConfigureAwait(false) is long pushed)
+        if (Pushable() is { } pushable && await PushedCountAsync(context, decodes, split, pushable, cancellationToken, lane).ConfigureAwait(false) is long pushed)
         {
             return pushed;
         }
 
         try
         {
-            int root = await ReadAndExecuteAsync(context, decodes, split, _mask, cancellationToken).ConfigureAwait(false);
+            int root = await ReadAndExecuteAsync(context, decodes, split, _mask, cancellationToken, lane: lane).ConfigureAwait(false);
             return CountTrue(context, root, states, split.Start);
         }
         finally
@@ -450,7 +711,7 @@ internal sealed class TerminalScan
     /// when the encoding declined, which no split asks again.
     /// </summary>
     private async ValueTask<long?> PushedCountAsync(
-        ScanContext context, Decodes decodes, RowRange split, BatchAsyncEnumerator.PushPlan pushable, CancellationToken cancellationToken)
+        ScanContext context, Decodes decodes, RowRange split, BatchAsyncEnumerator.PushPlan pushable, CancellationToken cancellationToken, Lane? lane = null)
     {
         byte[] name = pushable.Field.SegmentsUtf8[0];
         DType root = _tree.Root.DType;
@@ -466,7 +727,7 @@ internal sealed class TerminalScan
         PushedVariantKey? savedKey = context.ExchangePushedKey(pushable.Key);
         try
         {
-            int answer = await ReadAndExecuteAsync(context, decodes, split, only, cancellationToken, answered: true).ConfigureAwait(false);
+            int answer = await ReadAndExecuteAsync(context, decodes, split, only, cancellationToken, answered: true, lane).ConfigureAwait(false);
             if (!context.PredicateAnswered)
             {
                 _pushDeclined = true;
@@ -525,15 +786,23 @@ internal sealed class TerminalScan
     /// in canonical form, unless its column's encoding <paramref name="answered"/> a predicate offered it.
     /// </summary>
     private async ValueTask<int> ReadAndExecuteAsync(
-        ScanContext context, Decodes decodes, RowRange split, FieldMask mask, CancellationToken cancellationToken, bool answered = false)
+        ScanContext context, Decodes decodes, RowRange split, FieldMask mask, CancellationToken cancellationToken, bool answered = false,
+        Lane? lane = null)
     {
-        long batch = decodes.Next++;
+        long batch = lane is null ? decodes.Next++ : lane.NextBatch();
         SplitExecution.Window(context, decodes.Plan, split);
         SplitExecution.Register(context, _tree, in mask, split, _take);
         VortexFile.FillFromTail(_file.Segments, context.Segments);
-        decodes.Held.Claim(context.Segments, batch, waiter: null);
         try
         {
+            // A lane that needs a segment another lane is reading reads what it claimed itself, then waits for the rest.
+            while (decodes.Held.Claim(context.Segments, batch, lane))
+            {
+                await decodes.Held.ReadOwnAsync(context.Segments, batch, _file.Segments, context.OwnSegments(), _metrics, cancellationToken)
+                    .ConfigureAwait(false);
+                await lane!.ReadByOthersAsync().ConfigureAwait(false);
+            }
+
             if (ScanCounters.Note(_metrics, context.Segments))
             {
                 await _file.Segments.ReadManyAsync(context.Segments, cancellationToken).ConfigureAwait(false);
@@ -550,12 +819,21 @@ internal sealed class TerminalScan
         }
 
         decodes.Held.Publish(context.Segments, batch);
-        decodes.Held.Release(batch);
+        if (lane is null)
+        {
+            // Lanes release at their floor (LanesAsync), past which every split is counted.
+            decodes.Held.Release(batch);
+        }
+
         ScanCounters.Served(_metrics, context.Segments);
         int root = SplitExecution.Execute(context, _tree, in mask, split, _take);
         if (_metrics is not null && !(answered && context.PredicateAnswered) && ScanCounters.Decoded(context.Canonical, root))
         {
-            _metrics.AddBlocksDecoded(decodes.Decoded.Add(split, _take, decodes.Live));
+            // The lanes of a count tally the blocks they decode in one tally.
+            lock (decodes)
+            {
+                _metrics.AddBlocksDecoded(decodes.Decoded.Add(split, _take, decodes.Live));
+            }
         }
 
         return root;
@@ -736,9 +1014,12 @@ internal sealed class TerminalScan
                 continue;
             }
 
+            // A split whose rows the filter may keep only some of is bounded by its zones all the same: the extreme of the
+            // rows kept is at or inside the extreme of all of them. So it is a candidate too, weighed against the best before
+            // it is decoded, where every such split was decoded: a largest key under a filter on another column decoded
+            // every split of the file for the one its last split held.
             bool everyRowQualifies = _filter is null || (zones is not null && zones.MustMatch(split));
-            if (column is not null && everyRowQualifies &&
-                TryZoneBound(column, split, wantMin, out FilterLiteral bound, out bool exact))
+            if (column is not null && TryZoneBound(column, split, wantMin, out FilterLiteral bound, out bool exact))
             {
                 if (bound.Kind == FilterLiteralKind.Null)
                 {
@@ -746,7 +1027,7 @@ internal sealed class TerminalScan
                     continue;
                 }
 
-                if (exact)
+                if (exact && everyRowQualifies)
                 {
                     Keep(ref best, bound, wantMin);
                 }
@@ -790,7 +1071,8 @@ internal sealed class TerminalScan
         // readers a mask of exactly its split, so that the restricted decode materializes the split
         // and not the chunk around it: on a single-chunk file, one block instead of the whole
         // column, which is the point of deciding from the bounds at all.
-        using ScanContext context = new ScanContext(_file);
+        using LentContext lent = new LentContext(ScanContexts.Shared.Rent(_file));
+        ScanContext context = lent.Context;
         BlockMask scope = new BlockMask(_tree.Root.RowCount, SplitPlan.NaturalBatchRows(_tree));
         context.LiveBlocks = scope;
         context.Metrics = _metrics;

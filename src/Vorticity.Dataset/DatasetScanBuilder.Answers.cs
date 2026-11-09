@@ -366,6 +366,7 @@ internal sealed partial class DatasetScanBuilder
         FanOutState state = new FanOutState();
         List<Task> running = [];
         Exception? walkFailure = null;
+        _fannedOut = true;
         try
         {
             IAsyncEnumerable<PositionedObject> walk = objects is null ? WalkAsync(stop.Token, granules: true) : ListedAsync(objects);
@@ -402,6 +403,7 @@ internal sealed partial class DatasetScanBuilder
 
         // No lane throws: each keeps its failure in the state.
         await Task.WhenAll(running).ConfigureAwait(false);
+        _fannedOut = false;
         if (state.Stopped)
         {
             return true;

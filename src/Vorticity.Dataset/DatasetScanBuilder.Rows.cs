@@ -1445,6 +1445,12 @@ internal sealed partial class DatasetScanBuilder
     private int ScanDegree => _options.DegreeOfParallelism > 0 ? _options.DegreeOfParallelism : _dataset.Session.Options.MaxDegreeOfParallelism;
 
     /// <summary>
+    /// Whether objects are answered side by side, a lane each (<see cref="FanOutAsync"/>): an object's scan then runs on its
+    /// one lane, where its count on the scan's degree would have put that many lanes under each of the degree's objects.
+    /// </summary>
+    private bool _fannedOut;
+
+    /// <summary>
     /// How an object answers for the version's columns: null when it holds exactly them, the case of
     /// every object written since the schema last changed, whose own scan then serves unchanged.
     /// </summary>
@@ -1635,7 +1641,7 @@ internal sealed partial class DatasetScanBuilder
 
         scan.WithPruning(_options.UseStatistics)
             .WithIndexes(_indexes)
-            .WithDegreeOfParallelism(Math.Max(ScanDegree, 1))
+            .WithDegreeOfParallelism(_fannedOut ? 1 : Math.Max(ScanDegree, 1))
             .WithPrefetch(_options.Prefetch)
             .WithCompaction(_options.Compact)
             .WithEncodings(!canonical && _keepEncodings, !canonical && _sinkDecodes);

@@ -1830,7 +1830,7 @@ internal sealed class ScanBuilder
             ? _variantKeys ?? Indexes.VariantKeyReads.Of([], _filter)
             : null;
         return new TerminalScan(
-            _file, tree, _filter, rows, wholeFile, cap, read, _take, _prune, _tiers, _metrics, _indexes, excluded, keys, _granules);
+            _file, tree, _filter, rows, wholeFile, cap, read, _take, _prune, _tiers, _metrics, _indexes, excluded, keys, _granules, _degree);
     }
 
     /// <summary>The projection of exactly the fields a filter reads, plus one.</summary>

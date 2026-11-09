@@ -112,8 +112,11 @@ public sealed class ScanTerminalTests
 
         foreach ((bool prune, TerminalTiers tiers) in Configurations)
         {
-            Assert.Equal(expected, await Build(file, filter, "none").WithPruning(prune).WithTiers(tiers).CountAsync(ct));
-            Assert.Equal(expected > 0, await Build(file, filter, "none").WithPruning(prune).WithTiers(tiers).AnyAsync(ct));
+            foreach (int degree in (int[])[1, 4])
+            {
+                Assert.Equal(expected, await Build(file, filter, "none").WithPruning(prune).WithTiers(tiers).WithDegreeOfParallelism(degree).CountAsync(ct));
+                Assert.Equal(expected > 0, await Build(file, filter, "none").WithPruning(prune).WithTiers(tiers).WithDegreeOfParallelism(degree).AnyAsync(ct));
+            }
         }
     }
 
@@ -131,8 +134,11 @@ public sealed class ScanTerminalTests
 
         foreach ((bool prune, TerminalTiers tiers) in Configurations)
         {
-            Assert.Equal(expected, await Build(file, filter, selection).WithPruning(prune).WithTiers(tiers).CountAsync(ct));
-            Assert.True(await Build(file, filter, selection).WithPruning(prune).WithTiers(tiers).AnyAsync(ct));
+            foreach (int degree in (int[])[1, 4])
+            {
+                Assert.Equal(expected, await Build(file, filter, selection).WithPruning(prune).WithTiers(tiers).WithDegreeOfParallelism(degree).CountAsync(ct));
+                Assert.True(await Build(file, filter, selection).WithPruning(prune).WithTiers(tiers).WithDegreeOfParallelism(degree).AnyAsync(ct));
+            }
         }
     }
 
