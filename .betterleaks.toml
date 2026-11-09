@@ -1,4 +1,5 @@
 # betterleaks' default rules, read by the hook and by CI, with what they mistake for secrets here.
+# Both name this file with --config: since 1.10, betterleaks no longer reads it on its own.
 [extend]
 useDefault = true
 
