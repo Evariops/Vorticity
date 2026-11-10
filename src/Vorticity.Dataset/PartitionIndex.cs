@@ -4,6 +4,7 @@ using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.IO.Hashing;
 using System.Numerics;
+using System.Runtime.CompilerServices;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -80,6 +81,9 @@ internal sealed class PartitionIndex
     private readonly Covered[] _objects;
     private readonly Entry[] _entries;
 
+    // The objects' ranks by uid, made by the first lookup that asks (RankOf).
+    private Dictionary<UInt128, int>? _ranks;
+
     private PartitionIndex(Covered[] objects, Entry[] entries)
     {
         _objects = objects;
@@ -88,6 +92,27 @@ internal sealed class PartitionIndex
 
     /// <summary>The objects the index was written for, by rank.</summary>
     internal IReadOnlyList<Covered> Objects => _objects;
+
+    /// <summary>
+    /// The rank of the object of uid <paramref name="uid"/>, -1 when the index was not written for it: by a table of the
+    /// objects' uids the first lookup that asks makes, kept with the directory a handle's cache holds, where each lookup of
+    /// each partition made one.
+    /// </summary>
+    internal int RankOf(UInt128 uid)
+    {
+        return (Volatile.Read(ref _ranks) ?? Made()).TryGetValue(uid, out int rank) ? rank : -1;
+
+        Dictionary<UInt128, int> Made()
+        {
+            Dictionary<UInt128, int> ranks = new Dictionary<UInt128, int>(_objects.Length);
+            for (int rank = 0; rank < _objects.Length; rank++)
+            {
+                ranks[_objects[rank].Uid] = rank;
+            }
+
+            return Interlocked.CompareExchange(ref _ranks, ranks, null) ?? ranks;
+        }
+    }
 
     /// <summary>The entry of kind <paramref name="kind"/> of the column named <paramref name="name"/>, or null when the index holds none.</summary>
     internal Entry? Of(string name, EntryKind kind)
@@ -204,12 +229,43 @@ internal sealed class PartitionIndex
         }
 
         /// <summary>
-        /// Adds to <paramref name="into"/> the rank and block of every posting of <paramref name="hash"/>, a whole hash, in
-        /// <paramref name="page"/>, the bytes of <paramref name="at"/>: the gaps unpacked a stride at a time up to the first
-        /// past it, then the places of those that hold it.
+        /// Where each stride of the postings of <paramref name="page"/>, the bytes of <paramref name="at"/>, starts: the hash
+        /// of the posting before its first, the page's first hash for the first. A lookup that holds them begins at the stride
+        /// its hash lies in (<see cref="Find"/>), where it summed the gaps from the page's first: half a page of 64 KiB,
+        /// 4.2 µs a lookup, for one of a month's thirty pages a value.
         /// </summary>
         /// <exception cref="VortexFormatException">The page does not decode.</exception>
-        internal void Find(ReadOnlySpan<byte> page, Page at, ulong hash, List<(int Rank, uint Block)> into)
+        [SkipLocalsInit]
+        internal ulong[] Restarts(ReadOnlySpan<byte> page, Page at)
+        {
+            int count = Arrays(page, out int gapBits, out _, out ReadOnlySpan<byte> gaps, out _);
+            ulong[] restarts = new ulong[(count + Stride - 1) / Stride];
+            Span<uint> values = stackalloc uint[Stride];
+            ulong running = at.FirstHash;
+            for (int stride = 0; stride < restarts.Length; stride++)
+            {
+                restarts[stride] = running;
+                int start = stride * Stride;
+                Span<uint> held = values[..Math.Min(Stride, count - start)];
+                BitPacking.Unpack32(gaps[(int)BitPacking.PackedBytes(start, gapBits)..], gapBits, held);
+                foreach (uint gap in held)
+                {
+                    running += gap;
+                }
+            }
+
+            return restarts;
+        }
+
+        /// <summary>
+        /// Adds to <paramref name="into"/> the rank and block of every posting of <paramref name="hash"/>, a whole hash, in
+        /// <paramref name="page"/>, the bytes of <paramref name="at"/>: the gaps unpacked a stride at a time up to the first
+        /// past it, from the stride it lies in when <paramref name="restarts"/> says where each starts
+        /// (<see cref="Restarts"/>), from the first otherwise; then the places of those that hold it.
+        /// </summary>
+        /// <exception cref="VortexFormatException">The page does not decode.</exception>
+        [SkipLocalsInit]
+        internal void Find(ReadOnlySpan<byte> page, Page at, ulong hash, List<(int Rank, uint Block)> into, ReadOnlySpan<ulong> restarts = default)
         {
             ulong cut = Cut(hash);
             if (cut < at.FirstHash)
@@ -220,9 +276,32 @@ internal sealed class PartitionIndex
             int count = Arrays(page, out int gapBits, out int placeBits, out ReadOnlySpan<byte> gaps, out ReadOnlySpan<byte> places);
             Span<uint> values = stackalloc uint[Stride];
             ulong running = at.FirstHash;
+            int from = 0;
+            if (restarts.Length == (count + Stride - 1) / Stride)
+            {
+                // The last stride the posting before whose first hashes below the cut: none before it holds the cut.
+                int lo = 0;
+                int hi = restarts.Length;
+                while (lo < hi)
+                {
+                    int middle = lo + ((hi - lo) >> 1);
+                    if (restarts[middle] < cut)
+                    {
+                        lo = middle + 1;
+                    }
+                    else
+                    {
+                        hi = middle;
+                    }
+                }
+
+                int stride = Math.Max(lo - 1, 0);
+                (from, running) = (stride * Stride, restarts[stride]);
+            }
+
             int first = -1;
             int end = -1;
-            for (int start = 0; start < count && end < 0; start += Stride)
+            for (int start = from; start < count && end < 0; start += Stride)
             {
                 int length = Math.Min(Stride, count - start);
                 Span<uint> stride = values[..length];

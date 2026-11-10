@@ -103,14 +103,13 @@ internal sealed class PartitionLookup
     internal async ValueTask<(uint[] Blocks, int BlockRows)?> BlocksAsync(PositionedObject held, CancellationToken cancellationToken)
     {
         Partition? known = await LoadingAsync(held, cancellationToken).ConfigureAwait(false);
-        if (known is null || !known.Entry.Covers(held.Entry.Uid) || !known.Ranks.TryGetValue(held.Entry.Uid, out int rank)
+        if (known is null || known.RankOf(held.Entry.Uid) is not (>= 0 and int rank)
             || !known.Postings.Covers(rank) || known.Index.Objects[rank].Rows != held.Entry.PhysicalRows)
         {
             return null;
         }
 
-        return (known.Blocks.TryGetValue(rank, out SortedSet<uint>? blocks) ? [.. blocks] : [],
-            known.Index.Objects[rank].BlockRows * known.Postings.UnitBlocks);
+        return (known.BlocksOf(rank), known.Index.Objects[rank].BlockRows * known.Postings.UnitBlocks);
     }
 
     /// <summary>
@@ -183,25 +182,18 @@ internal sealed class PartitionLookup
             return null;
         }
 
-        ISegmentReader reader = await SealedObjectStore.OpenDataAsync(_dataset.Store, entry.ObjectKey, entry.Uid, entry.Bytes, cancellationToken).ConfigureAwait(false);
-        await using (reader.ConfigureAwait(false))
+        PartitionPostings.OpenedIndex opened = await PartitionPostings.OpenCachedAsync(
+            _dataset.Store, entry, _dataset.PartitionIndexes, cancellationToken).ConfigureAwait(false);
+        await using (opened.ConfigureAwait(false))
         {
-            using PartitionPostings.OpenedIndex opened = await PartitionPostings.OpenCachedAsync(
-                reader, entry.ObjectKey, entry.Uid, _dataset.PartitionIndexes, cancellationToken).ConfigureAwait(false);
             PartitionIndex index = opened.Index;
             if (index.Of(_identifier, PartitionIndex.EntryKind.Postings) is not { } postings)
             {
                 return null;
             }
 
-            Dictionary<UInt128, int> ranks = new Dictionary<UInt128, int>(index.Objects.Count);
-            for (int rank = 0; rank < index.Objects.Count; rank++)
-            {
-                ranks[index.Objects[rank].Uid] = rank;
-            }
-
-            Dictionary<int, SortedSet<uint>> blocks = [];
             List<(int Rank, uint Block)> found = [];
+            List<ulong>? placed = null;
             foreach (ulong hash in _hashes)
             {
                 int at = postings.PageOf(hash);
@@ -217,27 +209,80 @@ internal sealed class PartitionLookup
                 }
 
                 found.Clear();
-                postings.Find(opened.Page, held, hash, found);
+                postings.Find(opened.Page, held, hash, found, opened.Restarts(postings, held));
                 foreach ((int rank, uint block) in found)
                 {
-                    if (!blocks.TryGetValue(rank, out SortedSet<uint>? of))
-                    {
-                        blocks[rank] = of = [];
-                    }
-
-                    of.Add(block);
+                    (placed ??= []).Add(((ulong)(uint)rank << 32) | block);
                 }
             }
 
-            return new Partition(entry, index, postings, ranks, blocks);
+            return new Partition(index, postings, entry.RanksIn(index), Placed(placed));
         }
     }
 
-    /// <summary>A partition's index as the lookup read it: its entry, its directory, the identifier's postings, the objects' ranks, the blocks found by rank.</summary>
-    private sealed record Partition(
-        PartitionIndexEntry Entry,
-        PartitionIndex Index,
-        PartitionIndex.Entry Postings,
-        Dictionary<UInt128, int> Ranks,
-        Dictionary<int, SortedSet<uint>> Blocks);
+    /// <summary>The postings found, each a rank and a block, ascending and each once.</summary>
+    private static ulong[] Placed(List<ulong>? placed)
+    {
+        if (placed is null)
+        {
+            return [];
+        }
+
+        placed.Sort();
+        int kept = 0;
+        for (int i = 0; i < placed.Count; i++)
+        {
+            if (kept == 0 || placed[i] != placed[kept - 1])
+            {
+                placed[kept++] = placed[i];
+            }
+        }
+
+        return [.. System.Runtime.InteropServices.CollectionsMarshal.AsSpan(placed)[..kept]];
+    }
+
+    /// <summary>
+    /// A partition's index as the lookup read it: its directory, the identifier's postings, the ranks the version's entry
+    /// covers, a bit a rank, and the postings found of the values sought, a rank and a block each, ascending.
+    /// </summary>
+    private sealed class Partition(PartitionIndex index, PartitionIndex.Entry postings, ulong[] covered, ulong[] placed)
+    {
+        /// <summary>The index's directory.</summary>
+        internal PartitionIndex Index => index;
+
+        /// <summary>The identifier's postings.</summary>
+        internal PartitionIndex.Entry Postings => postings;
+
+        /// <summary>The rank of the object of uid <paramref name="uid"/>, -1 when the version's entry does not cover it.</summary>
+        internal int RankOf(UInt128 uid)
+        {
+            int rank = index.RankOf(uid);
+            return rank >= 0 && (covered[rank >> 6] & (1UL << (rank & 63))) != 0 ? rank : -1;
+        }
+
+        /// <summary>The blocks of the object of rank <paramref name="rank"/> that hold a value sought, ascending.</summary>
+        internal uint[] BlocksOf(int rank)
+        {
+            int from = Array.BinarySearch(placed, (ulong)(uint)rank << 32);
+            from = from >= 0 ? from : ~from;
+            int to = from;
+            while (to < placed.Length && placed[to] >> 32 == (uint)rank)
+            {
+                to++;
+            }
+
+            if (to == from)
+            {
+                return [];
+            }
+
+            uint[] blocks = new uint[to - from];
+            for (int i = 0; i < blocks.Length; i++)
+            {
+                blocks[i] = (uint)placed[from + i];
+            }
+
+            return blocks;
+        }
+    }
 }

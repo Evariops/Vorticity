@@ -182,6 +182,37 @@ public sealed partial class PartitionIndexTests
                     Assert.True(found.Contains((rank, (uint)place)), $"Sequence {value} of day {day} is not placed at rank {rank}, place {place}");
                 }
             }
+
+            // A lookup that knows where each stride of a page starts begins at the stride its hash lies in: the postings it
+            // finds are those found from the page's first, for the hashes about every stride's start and a sample of the
+            // others, held or not.
+            int shift = 64 - sequence.HashBits;
+            foreach (PartitionIndex.Page at in sequence.Pages)
+            {
+                using Vorticity.Buffers.SegmentOwner owner = await reader.ReadAsync(
+                    new Vorticity.Serialization.Schemas.SegmentSpec((ulong)at.Offset, (uint)at.Length, 0, 0, 0), Ct);
+                List<PartitionIndex.Posting> postings = [];
+                sequence.Decode(owner.Buffer.Span, at, postings);
+                ulong[] restarts = sequence.Restarts(owner.Buffer.Span, at);
+                Assert.Equal((postings.Count + 1023) / 1024, restarts.Length);
+                for (int i = 0; i < postings.Count; i++)
+                {
+                    if (i % 1024 is not (0 or 1 or 1023) && i % 61 != 0)
+                    {
+                        continue;
+                    }
+
+                    foreach (ulong cut in (ulong[])[postings[i].Hash, postings[i].Hash + 1])
+                    {
+                        List<(int Rank, uint Block)> fromFirst = [];
+                        List<(int Rank, uint Block)> resumed = [];
+                        sequence.Find(owner.Buffer.Span, at, cut << shift, fromFirst);
+                        sequence.Find(owner.Buffer.Span, at, cut << shift, resumed, restarts);
+                        Assert.True(cut != postings[i].Hash || fromFirst.Count > 0, $"posting {i} of a page of day {day} is not found");
+                        Assert.Equal(fromFirst, resumed);
+                    }
+                }
+            }
         }
 
         Assert.True(!purged || levelOne.Keys.Any(uid => !entries.Any(entry => entry.Covers(uid))), "no object left the coverage");

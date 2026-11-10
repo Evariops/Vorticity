@@ -146,7 +146,8 @@ internal sealed class PartitionLocates
             }
         }
 
-        if (known is null || !known.Entry.Covers(held.Entry.Uid) || !known.Ranks.TryGetValue(held.Entry.Uid, out int rank))
+        int rank = known is null ? -1 : known.Index.RankOf(held.Entry.Uid);
+        if (rank < 0 || (known!.Covered[rank >> 6] & (1UL << (rank & 63))) == 0)
         {
             return null;
         }
@@ -166,7 +167,7 @@ internal sealed class PartitionLocates
                 return null;
             }
 
-            sources[c] = new Found(granules, column.Granules.TryGetValue(rank, out Dictionary<ulong, List<uint>>? byHash) ? byHash : null);
+            sources[c] = new Found(granules, column.Of(rank));
         }
 
         return sources;
@@ -184,20 +185,14 @@ internal sealed class PartitionLocates
             return null;
         }
 
-        ISegmentReader reader = await SealedObjectStore.OpenDataAsync(_dataset.Store, entry.ObjectKey, entry.Uid, entry.Bytes, cancellationToken).ConfigureAwait(false);
-        await using (reader.ConfigureAwait(false))
+        PartitionPostings.OpenedIndex opened = await PartitionPostings.OpenCachedAsync(
+            _dataset.Store, entry, _dataset.PartitionIndexes, cancellationToken).ConfigureAwait(false);
+        await using (opened.ConfigureAwait(false))
         {
-            using PartitionPostings.OpenedIndex opened = await PartitionPostings.OpenCachedAsync(
-                reader, entry.ObjectKey, entry.Uid, _dataset.PartitionIndexes, cancellationToken).ConfigureAwait(false);
             PartitionIndex index = opened.Index;
-            Dictionary<UInt128, int> ranks = new Dictionary<UInt128, int>(index.Objects.Count);
-            for (int rank = 0; rank < index.Objects.Count; rank++)
-            {
-                ranks[index.Objects[rank].Uid] = rank;
-            }
-
             Column?[] columns = new Column?[_fields.Length];
             List<(int Rank, uint Block)> found = [];
+            List<Spot> spots = [];
             for (int c = 0; c < columns.Length; c++)
             {
                 if (index.Of(_version.Schema.Columns[_fields[c]].Name, PartitionIndex.EntryKind.Locate) is not { } located)
@@ -205,7 +200,7 @@ internal sealed class PartitionLocates
                     continue;
                 }
 
-                Dictionary<int, Dictionary<ulong, List<uint>>> granules = [];
+                spots.Clear();
                 foreach (ulong hash in _hashes[c])
                 {
                     int at = located.PageOf(hash);
@@ -221,62 +216,97 @@ internal sealed class PartitionLocates
                     }
 
                     found.Clear();
-                    located.Find(opened.Page, held, hash, found);
+                    located.Find(opened.Page, held, hash, found, opened.Restarts(located, held));
                     foreach ((int rank, uint granule) in found)
                     {
-                        if (!granules.TryGetValue(rank, out Dictionary<ulong, List<uint>>? byHash))
-                        {
-                            granules[rank] = byHash = [];
-                        }
-
-                        if (!byHash.TryGetValue(hash, out List<uint>? of))
-                        {
-                            byHash[hash] = of = [];
-                        }
-
-                        of.Add(granule);
+                        spots.Add(new Spot(rank, hash, granule));
                     }
                 }
 
-                columns[c] = new Column(located, granules);
+                spots.Sort();
+                columns[c] = new Column(located, [.. spots]);
             }
 
-            return new Partition(entry, index, ranks, columns);
+            return new Partition(index, entry.RanksIn(index), columns);
         }
     }
 
-    /// <summary>A partition's index as the lookup read it: its entry, its directory, the objects' ranks, and each column sought, by its place in the walk's order.</summary>
-    private sealed record Partition(PartitionIndexEntry Entry, PartitionIndex Index, Dictionary<UInt128, int> Ranks, Column?[] Columns);
+    /// <summary>
+    /// A partition's index as the lookup read it: its directory, the ranks the version's entry covers, a bit a rank, and each
+    /// column sought, by its place in the walk's order.
+    /// </summary>
+    private sealed record Partition(PartitionIndex Index, ulong[] Covered, Column?[] Columns);
 
-    /// <summary>A located column of a partition's index: its entry, and the granules of the values sought, by object rank and value hash.</summary>
-    private sealed record Column(PartitionIndex.Entry Entry, Dictionary<int, Dictionary<ulong, List<uint>>> Granules);
+    /// <summary>A granule of an object where a value sought lies: the object's rank, the value's hash, the granule.</summary>
+    private readonly record struct Spot(int Rank, ulong Hash, uint Granule) : IComparable<Spot>
+    {
+        public int CompareTo(Spot other) =>
+            Rank != other.Rank ? Rank.CompareTo(other.Rank) : Hash != other.Hash ? Hash.CompareTo(other.Hash) : Granule.CompareTo(other.Granule);
+    }
+
+    /// <summary>A located column of a partition's index: its entry, and where the values sought lie, by object rank and value hash.</summary>
+    private sealed record Column(PartitionIndex.Entry Entry, Spot[] Spots)
+    {
+        /// <summary>Where the values sought lie in the object of rank <paramref name="rank"/>.</summary>
+        internal ReadOnlyMemory<Spot> Of(int rank)
+        {
+            int lo = 0;
+            int hi = Spots.Length;
+            while (lo < hi)
+            {
+                int middle = lo + ((hi - lo) >> 1);
+                if (Spots[middle].Rank < rank)
+                {
+                    lo = middle + 1;
+                }
+                else
+                {
+                    hi = middle;
+                }
+            }
+
+            int end = lo;
+            while (end < Spots.Length && Spots[end].Rank == rank)
+            {
+                end++;
+            }
+
+            return Spots.AsMemory(lo, end - lo);
+        }
+    }
 
     /// <summary>
     /// Where the values sought lie in one object, by their hashes, as its partition's index says: a hash it does not hold
     /// lies nowhere there; it tells no prefix.
     /// </summary>
-    private sealed class Found(int granules, Dictionary<ulong, List<uint>>? byHash) : IValueGranules
+    private sealed class Found(int granules, ReadOnlyMemory<Spot> spots) : IValueGranules
     {
         public int Granules => granules;
 
         public void OrValue(ReadOnlySpan<byte> value, Span<ulong> into)
         {
-            if (byHash is null || !byHash.TryGetValue(XxHash3.HashToUInt64(value), out List<uint>? held))
+            if (spots.IsEmpty)
             {
                 return;
             }
 
-            foreach (uint granule in held)
+            ulong hash = XxHash3.HashToUInt64(value);
+            foreach (Spot spot in spots.Span)
             {
-                if (granule == PartitionIndex.Everywhere)
+                if (spot.Hash != hash)
+                {
+                    continue;
+                }
+
+                if (spot.Granule == PartitionIndex.Everywhere)
                 {
                     Arrays.Decoders.Canonical.BitmapKernels.FillRange(System.Runtime.InteropServices.MemoryMarshal.AsBytes(into), 0, granules, true);
                     return;
                 }
 
-                if (granule < (uint)granules)
+                if (spot.Granule < (uint)granules)
                 {
-                    into[(int)(granule >> 6)] |= 1UL << (int)(granule & 63);
+                    into[(int)(spot.Granule >> 6)] |= 1UL << (int)(spot.Granule & 63);
                 }
             }
         }
