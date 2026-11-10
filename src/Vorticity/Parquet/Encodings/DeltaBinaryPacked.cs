@@ -72,6 +72,99 @@ internal static class DeltaBinaryPacked
         return new Header((int)block, (int)miniblocks, (int)count, first, position);
     }
 
+    /// <summary>
+    /// The values of a miniblock: each of <paramref name="deltas"/> and <paramref name="minimum"/> added to the value before,
+    /// from <paramref name="last"/>, into <paramref name="destination"/>; the last value. Eight a vector where vectors are
+    /// the machine's, their prefix sums in three shifted adds and the last of the eight carried.
+    /// </summary>
+    internal static uint RunningSums(ReadOnlySpan<uint> deltas, uint minimum, uint last, Span<int> destination)
+    {
+        int i = 0;
+        ref uint delta = ref MemoryMarshal.GetReference(deltas);
+        ref int into = ref MemoryMarshal.GetReference(destination);
+        if (Vector256.IsHardwareAccelerated && deltas.Length >= Vector256<uint>.Count)
+        {
+            Vector256<uint> carry = Vector256.Create(last);
+            Vector256<uint> step = Vector256.Create(minimum);
+            Vector256<uint> one = Vector256.Create(0u, ~0u, ~0u, ~0u, ~0u, ~0u, ~0u, ~0u);
+            Vector256<uint> two = Vector256.Create(0u, 0u, ~0u, ~0u, ~0u, ~0u, ~0u, ~0u);
+            Vector256<uint> four = Vector256.Create(0u, 0u, 0u, 0u, ~0u, ~0u, ~0u, ~0u);
+            for (; i <= deltas.Length - Vector256<uint>.Count; i += Vector256<uint>.Count)
+            {
+                Vector256<uint> x = Vector256.LoadUnsafe(ref delta, (nuint)i) + step;
+                x += Vector256.Shuffle(x, Vector256.Create(0u, 0, 1, 2, 3, 4, 5, 6)) & one;
+                x += Vector256.Shuffle(x, Vector256.Create(0u, 0, 0, 1, 2, 3, 4, 5)) & two;
+                x += Vector256.Shuffle(x, Vector256.Create(0u, 0, 0, 0, 0, 1, 2, 3)) & four;
+                x += carry;
+                x.AsInt32().StoreUnsafe(ref into, (nuint)i);
+                carry = Vector256.Shuffle(x, Vector256.Create(7u));
+            }
+
+            last = carry.ToScalar();
+        }
+        else if (Vector128.IsHardwareAccelerated && deltas.Length >= Vector128<uint>.Count)
+        {
+            // Four a vector, as ARM64's are.
+            Vector128<uint> carry = Vector128.Create(last);
+            Vector128<uint> step = Vector128.Create(minimum);
+            Vector128<uint> one = Vector128.Create(0u, ~0u, ~0u, ~0u);
+            Vector128<uint> two = Vector128.Create(0u, 0u, ~0u, ~0u);
+            for (; i <= deltas.Length - Vector128<uint>.Count; i += Vector128<uint>.Count)
+            {
+                Vector128<uint> x = Vector128.LoadUnsafe(ref delta, (nuint)i) + step;
+                x += Vector128.Shuffle(x, Vector128.Create(0u, 0, 1, 2)) & one;
+                x += Vector128.Shuffle(x, Vector128.Create(0u, 0, 0, 1)) & two;
+                x += carry;
+                x.AsInt32().StoreUnsafe(ref into, (nuint)i);
+                carry = Vector128.Shuffle(x, Vector128.Create(3u));
+            }
+
+            last = carry.ToScalar();
+        }
+
+        for (; i < deltas.Length; i++)
+        {
+            last += minimum + Unsafe.Add(ref delta, i);
+            Unsafe.Add(ref into, i) = (int)last;
+        }
+
+        return last;
+    }
+
+    /// <summary><see cref="RunningSums(ReadOnlySpan{uint}, uint, uint, Span{int})"/> of 64-bit values, four a vector.</summary>
+    internal static ulong RunningSums(ReadOnlySpan<ulong> deltas, ulong minimum, ulong last, Span<long> destination)
+    {
+        int i = 0;
+        ref ulong delta = ref MemoryMarshal.GetReference(deltas);
+        ref long into = ref MemoryMarshal.GetReference(destination);
+        if (Vector256.IsHardwareAccelerated && deltas.Length >= Vector256<ulong>.Count)
+        {
+            Vector256<ulong> carry = Vector256.Create(last);
+            Vector256<ulong> step = Vector256.Create(minimum);
+            Vector256<ulong> one = Vector256.Create(0UL, ~0UL, ~0UL, ~0UL);
+            Vector256<ulong> two = Vector256.Create(0UL, 0UL, ~0UL, ~0UL);
+            for (; i <= deltas.Length - Vector256<ulong>.Count; i += Vector256<ulong>.Count)
+            {
+                Vector256<ulong> x = Vector256.LoadUnsafe(ref delta, (nuint)i) + step;
+                x += Vector256.Shuffle(x, Vector256.Create(0UL, 0, 1, 2)) & one;
+                x += Vector256.Shuffle(x, Vector256.Create(0UL, 0, 0, 1)) & two;
+                x += carry;
+                x.AsInt64().StoreUnsafe(ref into, (nuint)i);
+                carry = Vector256.Shuffle(x, Vector256.Create(3UL));
+            }
+
+            last = carry.ToScalar();
+        }
+
+        for (; i < deltas.Length; i++)
+        {
+            last += minimum + Unsafe.Add(ref delta, i);
+            Unsafe.Add(ref into, i) = (long)last;
+        }
+
+        return last;
+    }
+
     /// <summary>Decodes INT32 values into all of <paramref name="destination"/>; the bytes the encoding took.</summary>
     /// <exception cref="ParquetFormatException">The encoding is malformed, or holds another number of values.</exception>
     internal static int Decode32(ReadOnlySpan<byte> data, Span<int> destination)
@@ -152,12 +245,7 @@ internal static class DeltaBinaryPacked
                         // their fast path past the miniblock's last byte.
                         Span<uint> block = deltas[..take];
                         BitPacking.Unpack32(data[position..], width, block);
-                        ref uint delta = ref MemoryMarshal.GetReference(block);
-                        for (int i = 0; i < take; i++)
-                        {
-                            last += minimum + Unsafe.Add(ref delta, i);
-                            Unsafe.Add(ref into, i) = (int)last;
-                        }
+                        last = RunningSums(block, minimum, last, destination.Slice(done, take));
                     }
 
                     position += bytes;
@@ -248,13 +336,7 @@ internal static class DeltaBinaryPacked
                     {
                         Span<ulong> block = deltas[..take];
                         BitPacking.Unpack64(data[position..], width, block);
-                        ref ulong delta = ref MemoryMarshal.GetReference(block);
-                        ref long first = ref MemoryMarshal.GetReference(into);
-                        for (int i = 0; i < take; i++)
-                        {
-                            last += minimum + Unsafe.Add(ref delta, i);
-                            Unsafe.Add(ref first, i) = (long)last;
-                        }
+                        last = RunningSums(block, minimum, last, into);
                     }
 
                     position += bytes;
