@@ -245,6 +245,9 @@ public sealed class FileObjectStore : IObjectStore
         }
     }
 
+    /// <summary>The bytes past which a read waits for its file asynchronously; below, it reads in place.</summary>
+    private const int SmallRead = 64 << 10;
+
     /// <summary>
     /// Reads <paramref name="destination"/> from <paramref name="offset"/> of the file <paramref name="handle"/> opened, of
     /// <paramref name="size"/> bytes under <paramref name="token"/>, or its last bytes with <paramref name="tail"/>.
@@ -265,9 +268,9 @@ public sealed class FileObjectStore : IObjectStore
         int read = 0;
         while (read < available)
         {
-            int got = await RandomAccess
-                .ReadAsync(handle, destination[read..available], offset + read, cancellationToken)
-                .ConfigureAwait(false);
+            int got = available <= SmallRead
+                ? RandomAccess.Read(handle, destination.Span[read..available], offset + read)
+                : await RandomAccess.ReadAsync(handle, destination[read..available], offset + read, cancellationToken).ConfigureAwait(false);
             if (got == 0)
             {
                 throw new ObjectStoreException(
