@@ -85,7 +85,16 @@ internal sealed class DistinctPairs<TValue>
     }
 
     /// <summary>Adds the pair (<paramref name="group"/>, <paramref name="value"/>); whether it was new.</summary>
-    internal bool Add(int group, TValue value)
+    internal bool Add(int group, TValue value) => Add(group, value, chained: true);
+
+    /// <summary>
+    /// Adds the pair (<paramref name="group"/>, <paramref name="value"/>) to a table that only counts them, its groups' chains
+    /// not kept: no room for them asked (<see cref="EnsureGroups"/>), and no pair of it walked by its group after; whether it
+    /// was new.
+    /// </summary>
+    internal bool AddCounted(int group, TValue value) => Add(group, value, chained: false);
+
+    private bool Add(int group, TValue value, bool chained)
     {
         // The tags first: a new pair, every row of a count of
         // distinct values that are distinct, reads no pair of its chain, each a miss to memory.
@@ -122,8 +131,17 @@ internal sealed class DistinctPairs<TValue>
             pairs = _pairs;
         }
 
-        pairs[_count] = new Pair { Value = value, Group = group, Next = _first[group] };
-        _first[group] = ++_count;
+        if (chained)
+        {
+            pairs[_count] = new Pair { Value = value, Group = group, Next = _first[group] };
+            _first[group] = ++_count;
+        }
+        else
+        {
+            pairs[_count] = new Pair { Value = value, Group = group };
+            ++_count;
+        }
+
         tags[at] = tag;
         _slots[at] = _count;
         if (_count * 2 > tags.Length)
@@ -239,14 +257,23 @@ internal sealed class DistinctPairs<TValue>
     /// hash under its group's target <c>map[g]</c>: the same pair in every lane falls in one part.
     /// </summary>
     /// <returns>The pairs' numbers, part after part, and where each part's start, then the end.</returns>
-    internal (int[] Placed, int[] Starts) Cut(ReadOnlySpan<int> map, int shift, int parts)
+    internal (int[] Placed, int[] Starts) Cut(ReadOnlySpan<int> map, int shift, int parts) => Cut(map, shift, parts, byGroup: false);
+
+    /// <summary>
+    /// <see cref="Cut(ReadOnlySpan{int}, int, int)"/> with <paramref name="byGroup"/>, a pair's part the top bits of its group's
+    /// target alone: every pair of a group, from every lane, falls in one part, which owns the group.
+    /// </summary>
+    internal (int[] Placed, int[] Starts) Cut(ReadOnlySpan<int> map, int shift, int parts, bool byGroup)
     {
         int[] partOf = GC.AllocateUninitializedArray<int>(_count);
         int[] starts = new int[parts + 1];
         Pair[] pairs = _pairs;
         for (int number = 0; number < _count; number++)
         {
-            int part = (int)(DistinctEntry<TValue>.Hash(map[pairs[number].Group], pairs[number].Value) >> shift);
+            int target = map[pairs[number].Group];
+            int part = byGroup
+                ? (int)(((ulong)(uint)target * Spreading) >> shift)
+                : (int)(DistinctEntry<TValue>.Hash(target, pairs[number].Value) >> shift);
             partOf[number] = part;
             starts[part + 1]++;
         }

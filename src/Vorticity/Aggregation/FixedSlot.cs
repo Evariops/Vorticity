@@ -997,10 +997,54 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>, IPairedSl
             all[p] = ((FixedDistinctSlot<TValue>)slots[p])._pairs;
         }
 
-        // Each lane's pairs placed by part, then each part's pairs from every lane made distinct.
+        // Each lane's pairs placed by part, then each part's pairs from every lane made distinct. With many more groups than
+        // parts, a part owns its groups whole, every lane's pairs of them, and counts them where the slot keeps them: no
+        // count of every group a part, a gigabyte at a million groups and 128 parts, nor a sum of them all.
         int shift = 64 - BitOperations.Log2((uint)parts);
+        bool byGroup = groups >= parts * GroupsPerPart;
         (int[] Placed, int[] Starts)[] cuts = new (int[], int[])[all.Length];
-        await SideBySide.RunAsync(all.Length, p => cuts[p] = all[p].Cut(maps[p], shift, parts), degree, cancellationToken).ConfigureAwait(false);
+        await SideBySide.RunAsync(all.Length, p => cuts[p] = all[p].Cut(maps[p], shift, parts, byGroup), degree, cancellationToken).ConfigureAwait(false);
+        if (byGroup)
+        {
+            EnsureGroups(groups);
+            Array.Clear(_counts, 0, groups);
+            long[] owned = _counts;
+            await SideBySide.RunAsync(
+                parts,
+                part =>
+                {
+                    DistinctPairs<TValue> distinct = new DistinctPairs<TValue>();
+                    for (int p = 0; p < all.Length; p++)
+                    {
+                        (int[] placed, int[] starts) = cuts[p];
+                        int[] map = maps[p];
+                        DistinctPairs<TValue> lane = all[p];
+                        for (int i = starts[part]; i < starts[part + 1]; i++)
+                        {
+                            int group = map[lane.GroupAt(placed[i])];
+                            if (distinct.AddCounted(group, lane.ValueAt(placed[i])))
+                            {
+                                owned[group]++;
+                            }
+                        }
+                    }
+
+                    // The part's table, held until its pairs are counted.
+                    long bytes = distinct.Footprint;
+                    if (memory is not null && !memory.TryGrow(bytes))
+                    {
+                        throw memory.Exceeded("merge of a distinct count", groups, bytes);
+                    }
+
+                    memory?.Shrink(bytes);
+                    memory?.Discard(bytes);
+                },
+                degree,
+                cancellationToken).ConfigureAwait(false);
+            ReleasePairs(groups);
+            return;
+        }
+
         long[][] counts = new long[parts][];
         await SideBySide.RunAsync(
             parts,
@@ -1048,7 +1092,15 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>, IPairedSl
             }
         }
 
-        // The pairs are counted: let go, their arrays given back.
+        ReleasePairs(groups);
+    }
+
+    /// <summary>The groups a part of a merge owns at least on average for the parts to be cut by group (<see cref="MergeInPartsAsync"/>).</summary>
+    private const int GroupsPerPart = 16;
+
+    /// <summary>The pairs, counted: let go, their arrays given back, a table for <paramref name="groups"/> groups made.</summary>
+    private void ReleasePairs(int groups)
+    {
         _pairs.Release();
         _pairs = new DistinctPairs<TValue>();
         _pairs.Govern(_shelf);
