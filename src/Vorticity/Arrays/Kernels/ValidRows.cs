@@ -139,6 +139,7 @@ internal static class ValidRows
         int bitOffset = mask.BitOffset;
         int next = 0;
         bool expands = Expands<T>();
+        bool permutes = !expands && Avx2.IsSupported && Unsafe.SizeOf<T>() is 4 or 8;
         Compute.WordBytes spread = expands ? Compute.WordBytes.Create() : default;
         for (int row = 0; row < length; row += 64)
         {
@@ -172,6 +173,12 @@ internal static class ValidRows
             if (expands && span == 64 && next + 64 <= values.Length)
             {
                 next = Expanded(values, ref MemoryMarshal.GetReference(rows[row..]), word, next, spread);
+                continue;
+            }
+
+            if (permutes && span == 64 && next + 64 <= values.Length)
+            {
+                next = Permuted(values, ref MemoryMarshal.GetReference(rows[row..]), word, next);
                 continue;
             }
 
@@ -230,6 +237,63 @@ internal static class ValidRows
         }
 
         return next;
+    }
+
+    /// <summary>
+    /// One mixed word's rows on AVX2, which has no <c>vpexpand</c>: eight rows of four bytes or four of eight a step, the
+    /// next values loaded whole and permuted onto the rows whose bits are set by an index vector the bits pick from a
+    /// table, zero elsewhere, and the cursor moved on by the bits' count. A row at a time, the scatter took a word's every
+    /// row.
+    /// </summary>
+    /// <returns>The next value after the word.</returns>
+    /// <remarks>The caller has checked that 64 values can be read from <paramref name="next"/>, as for <see cref="Expanded"/>.</remarks>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static int Permuted<T>(ReadOnlySpan<T> values, ref T rows, ulong word, int next)
+        where T : unmanaged
+    {
+        ref uint value = ref Unsafe.As<T, uint>(ref MemoryMarshal.GetReference(values));
+        ref uint target = ref Unsafe.As<T, uint>(ref rows);
+        int perStep = Unsafe.SizeOf<T>() == 4 ? 8 : 4;
+        int words = Unsafe.SizeOf<T>() / sizeof(uint);
+        ref int table = ref MemoryMarshal.GetArrayDataReference(Unsafe.SizeOf<T>() == 4 ? PermutationsOf4 : PermutationsOf8);
+        for (int step = 0; step < 64 / perStep; step++)
+        {
+            int bits = (int)(word >> (step * perStep)) & ((1 << perStep) - 1);
+            Vector256<int> order = Vector256.LoadUnsafe(ref table, (nuint)(bits * 8));
+            Vector256<uint> dense = Vector256.LoadUnsafe(ref value, (nuint)(next * words));
+            Vector256<uint> laid = Avx2.PermuteVar8x32(dense, order.AsUInt32()) & Vector256.GreaterThanOrEqual(order, Vector256<int>.Zero).AsUInt32();
+            laid.StoreUnsafe(ref target, (nuint)(step * 8));
+            next += BitOperations.PopCount((uint)bits);
+        }
+
+        return next;
+    }
+
+    /// <summary>For each byte of eight rows' bits, the index of the dense 4-byte value each row takes, -1 for a null row.</summary>
+    private static readonly int[] PermutationsOf4 = Permutations(8, 1);
+
+    /// <summary>For each nibble of four rows' bits, the indices of the two halves of the 8-byte value each row takes, -1 for a null row's.</summary>
+    private static readonly int[] PermutationsOf8 = Permutations(4, 2);
+
+    private static int[] Permutations(int rows, int halves)
+    {
+        int[] table = new int[(1 << rows) * 8];
+        for (int bits = 0; bits < 1 << rows; bits++)
+        {
+            int taken = 0;
+            for (int row = 0; row < rows; row++)
+            {
+                bool set = ((bits >> row) & 1) != 0;
+                for (int half = 0; half < halves; half++)
+                {
+                    table[(bits * 8) + (row * halves) + half] = set ? (taken * halves) + half : -1;
+                }
+
+                taken += set ? 1 : 0;
+            }
+        }
+
+        return table;
     }
 
     /// <summary>
