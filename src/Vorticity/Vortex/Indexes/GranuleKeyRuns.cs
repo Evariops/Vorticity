@@ -329,6 +329,9 @@ internal sealed class GranuleKeyRuns
         private long _describedRows;
         private long _singleRows;
 
+        /// <summary>Whether granule <paramref name="granule"/> is the open one and holds more runs than it lists: it takes no more.</summary>
+        internal bool Over(long granule) => _open == granule && _over;
+
         /// <summary>Adds <paramref name="rows"/> rows of the run of key <paramref name="key"/> to granule <paramref name="granule"/>, the open one or one after it.</summary>
         internal void Add(long granule, ReadOnlySpan<byte> key, long rows)
         {
