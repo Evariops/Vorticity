@@ -45,6 +45,19 @@ internal static class XxHash3Fixed
         return Avalanche64(keyed);
     }
 
+    /// <summary>
+    /// The hash of a three-byte input whose bytes are the low three of <paramref name="trigram"/>, the first the lowest:
+    /// <see cref="Hash1To3"/> at three bytes, from a trigram a rolling window keeps in a word.
+    /// </summary>
+    /// <param name="trigram">The three bytes, as the low 24 bits of a little-endian word.</param>
+    /// <returns>The hash.</returns>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static ulong Hash3(uint trigram)
+    {
+        uint combined = ((trigram & 0xFF) << 16) | ((trigram & 0xFF00) << 16) | (trigram >> 16) | (3u << 8);
+        return Avalanche64(combined ^ (ulong)(Secret0 ^ Secret4));
+    }
+
     /// <summary>The hash of a four-byte input (<c>len_4to8</c> at 4).</summary>
     /// <param name="value">The four bytes, as their little-endian word.</param>
     /// <returns>The hash.</returns>

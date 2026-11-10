@@ -28,10 +28,14 @@ internal static class Trigrams
     {
         for (int i = 0; i < Length; i++)
         {
-            byte b = trigram[i];
-            destination[i] = fold && b is >= (byte)'A' and <= (byte)'Z' ? (byte)(b | 0x20) : b;
+            destination[i] = Folded(trigram[i], fold);
         }
     }
+
+    /// <summary>A byte of a trigram, ASCII-lower-cased when <paramref name="fold"/>, as <see cref="Copy"/> folds each.</summary>
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
+    internal static byte Folded(byte value, bool fold) =>
+        fold && value is >= (byte)'A' and <= (byte)'Z' ? (byte)(value | 0x20) : value;
 
     /// <summary>
     /// The distinct trigrams a string predicate requires of a matching value, or none when it claims

@@ -54,6 +54,12 @@ internal sealed class BloomBuilder : IndexBuilder
     /// <summary>The recent hashes a string column's rows are checked against, a power of two.</summary>
     private const int RecentHashes = 1024;
 
+    /// <summary>
+    /// The bits of the table of trigrams a text column's values met lately in the open block, 256 KiB, each held with the
+    /// block's mark above its 24 bits, 0 the empty slot.
+    /// </summary>
+    private const int RecentTrigramBits = 16;
+
     /// <summary>The recent views a string column's rows are checked against before their bytes are read: 32 sets of two.</summary>
     private const int RecentViews = 64;
 
@@ -79,6 +85,10 @@ internal sealed class BloomBuilder : IndexBuilder
 
     private int _generationFirst;
     private long _rawBytes;
+
+    // The trigrams a text column's values met lately, made at the first trigram, and the open block's mark above them.
+    private uint[]? _recentTrigrams;
+    private uint _trigramMark = 1u << 24;
     private uint[]? _generationBlockWords;
     private int _generationBlockWordCount;
     private int _blocks;
@@ -417,6 +427,8 @@ internal sealed class BloomBuilder : IndexBuilder
                 Span<byte> trigram = stackalloc byte[Trigrams.Length];
                 Span<ulong> hashes = stackalloc ulong[CheckStride];
                 Span<ulong> recent = stackalloc ulong[RecentHashes];
+                Span<uint> recentTrigrams = _recentTrigrams ??= Aggregating.ArrayShelf.Retained.Take<uint>(1 << RecentTrigramBits, zeroed: true);
+                uint mark = _trigramMark;
                 Span<ulong> seen = stackalloc ulong[2 * RecentViews];
                 ReadOnlySpan<byte> views = node.Views.Span;
                 ReadOnlySpan<VortexBuffer> buffers = node.DataBuffers;
@@ -433,10 +445,43 @@ internal sealed class BloomBuilder : IndexBuilder
                         }
 
                         ReadOnlySpan<byte> value = ValueAt(views, buffers, row);
-                        for (int i = 0; i + Trigrams.Length <= value.Length; i++)
+                        if (hash != BloomHash.XxHash3)
                         {
-                            Trigrams.Copy(value.Slice(i, Trigrams.Length), fold, trigram);
-                            if (Fresh(recent, SplitBlockBloom.Hash(trigram, hash), hashes, ref gathered))
+                            for (int i = 0; i + Trigrams.Length <= value.Length; i++)
+                            {
+                                Trigrams.Copy(value.Slice(i, Trigrams.Length), fold, trigram);
+                                if (Fresh(recent, SplitBlockBloom.Hash(trigram, hash), hashes, ref gathered))
+                                {
+                                    block.AddRange(hashes);
+                                    gathered = 0;
+                                }
+                            }
+
+                            continue;
+                        }
+
+                        // The trigram a window of three bytes rolled over the value, each byte folded once, and checked
+                        // against the trigrams the block met lately before it is hashed: a value's words recur, and each
+                        // recurring trigram was copied, hashed and only then found met. A trigram met is held with the
+                        // block's mark above its 24 bits, so that the next block, marked anew, meets none of them.
+                        if (value.Length < Trigrams.Length)
+                        {
+                            continue;
+                        }
+
+                        uint key = ((uint)Trigrams.Folded(value[0], fold) << 8) | ((uint)Trigrams.Folded(value[1], fold) << 16);
+                        for (int i = Trigrams.Length - 1; i < value.Length; i++)
+                        {
+                            key = (key >> 8) | ((uint)Trigrams.Folded(value[i], fold) << 16);
+                            ref uint met = ref recentTrigrams[(int)((key * 0x9E37_79B1u) >> (32 - RecentTrigramBits))];
+                            if (met == (key | mark))
+                            {
+                                continue;
+                            }
+
+                            met = key | mark;
+                            hashes[gathered++] = XxHash3Fixed.Hash3(key);
+                            if (gathered == hashes.Length)
                             {
                                 block.AddRange(hashes);
                                 gathered = 0;
@@ -655,6 +700,14 @@ internal sealed class BloomBuilder : IndexBuilder
     {
         int block = _blocks++;
         _blockRawStart = _rawBytes;
+
+        // The next block's trigrams are met afresh: a mark of their own, the table emptied once the 255 marks are spent.
+        _trigramMark += 1u << 24;
+        if (_trigramMark == 0)
+        {
+            _recentTrigrams?.AsSpan().Clear();
+            _trigramMark = 1u << 24;
+        }
         if (Abandoned is not null)
         {
             NoteFilterBlocks(block, 0);
@@ -954,6 +1007,12 @@ internal sealed class BloomBuilder : IndexBuilder
         {
             ArrayPool<uint>.Shared.Return(_generationBlockWords);
             _generationBlockWords = null;
+        }
+
+        if (_recentTrigrams is { } recent)
+        {
+            Aggregating.ArrayShelf.Retained.Give(recent);
+            _recentTrigrams = null;
         }
     }
 }
