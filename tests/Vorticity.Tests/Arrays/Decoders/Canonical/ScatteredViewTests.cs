@@ -55,6 +55,55 @@ public sealed class ScatteredViewTests
         Assert.Throws<VortexFormatException>(() => Validate(heap, views));
     }
 
+    // Values in row order past ASCII are swept as UTF-8 in one pass, and each value's edges are checked to fall where a
+    // character does: a span that is UTF-8 whole may still cut a character between two values, or between a value and the
+    // bytes beside it, and each such value is refused.
+    [Fact]
+    public void ValuesInRowOrderPastAsciiAreAccepted()
+    {
+        byte[] heap = Heap(valueBytes: 24, gap: 2, out byte[] views);
+        Encoding.UTF8.GetBytes("é€").CopyTo(heap, (57 * 26) + 10);
+        Encoding.UTF8.GetBytes("é").CopyTo(heap, (130 * 26) + 22);
+
+        Validate(heap, views);
+    }
+
+    [Fact]
+    public void AValueThatEndsInsideACharacterIsRefused()
+    {
+        // "é" is C3 A9: its first byte ends value 57, its second begins the gap after it.
+        byte[] heap = Heap(valueBytes: 24, gap: 2, out byte[] views);
+        heap[(57 * 26) + 23] = 0xC3;
+        heap[(57 * 26) + 24] = 0xA9;
+
+        Assert.Throws<VortexFormatException>(() => Validate(heap, views));
+    }
+
+    [Fact]
+    public void AValueThatBeginsInsideACharacterIsRefused()
+    {
+        // The first byte of "é" ends the gap before value 58, its second begins the value (and its prefix).
+        byte[] heap = Heap(valueBytes: 24, gap: 2, out byte[] views);
+        heap[(58 * 26) - 1] = 0xC3;
+        heap[58 * 26] = 0xA9;
+        views[(58 * CanonicalSupport.ViewSize) + 4] = 0xA9;
+
+        Assert.Throws<VortexFormatException>(() => Validate(heap, views));
+    }
+
+    [Fact]
+    public void TwoValuesThatShareACharacterAreRefused()
+    {
+        // "€" is E2 82 AC: value 57 ends with its first two bytes, value 58 begins with its last; the span is UTF-8 whole.
+        byte[] heap = Heap(valueBytes: 24, gap: 0, out byte[] views);
+        heap[(57 * 24) + 22] = 0xE2;
+        heap[(57 * 24) + 23] = 0x82;
+        heap[58 * 24] = 0xAC;
+        views[(58 * CanonicalSupport.ViewSize) + 4] = 0xAC;
+
+        Assert.Throws<VortexFormatException>(() => Validate(heap, views));
+    }
+
     private static void Validate(byte[] heap, byte[] views)
     {
         unsafe
