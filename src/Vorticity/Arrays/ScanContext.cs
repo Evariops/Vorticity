@@ -1757,6 +1757,35 @@ internal sealed class ScanContext : IDisposable
         KeepTypes();
     }
 
+    /// <summary>
+    /// Readies a context made over an encoding table (the constructor of ids), given back by a read, for the next read over
+    /// <paramref name="arrayEncodingIds"/>: the ids resolved again only when they are not the ones the context holds, as the
+    /// objects of one dataset share theirs.
+    /// </summary>
+    internal void RebindEncodings(ReadOnlySpan<string> arrayEncodingIds)
+    {
+        Options = VortexReadOptions.Default;
+        KeepTypes();
+        if (arrayEncodingIds.SequenceEqual(_arrayEncodingIds))
+        {
+            return;
+        }
+
+        int count = arrayEncodingIds.Length;
+        _arrayEncodings = count == 0 ? [] : new ArrayEncodingId[count];
+        _arrayEncodingIds = count == 0 ? [] : new string[count];
+        Span<byte> scratch = stackalloc byte[64];
+        for (int i = 0; i < count; i++)
+        {
+            string id = arrayEncodingIds[i] ?? throw new ArgumentNullException(nameof(arrayEncodingIds));
+            _arrayEncodingIds[i] = id;
+            int byteCount = Encoding.UTF8.GetByteCount(id);
+            Span<byte> utf8 = byteCount <= scratch.Length ? scratch : new byte[byteCount];
+            int written = Encoding.UTF8.GetBytes(id, utf8);
+            _arrayEncodings[i] = EncodingRegistry.ResolveArray(utf8[..written]);
+        }
+    }
+
     /// <summary>The nodes past which a context starts another arena of dtypes, having met many schemas.</summary>
     private const int MostTypeNodes = 1024;
 

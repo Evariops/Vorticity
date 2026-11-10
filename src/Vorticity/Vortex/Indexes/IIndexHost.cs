@@ -37,23 +37,28 @@ internal interface IIndexHost
 /// metadata contexts over an open file's own encodings (<see cref="ScanContexts.Metadata"/>), given back to it; any other
 /// made for the lease and disposed with it.
 /// </summary>
-internal readonly struct IndexContext(ScanContext context, bool pooled) : System.IDisposable
+internal readonly struct IndexContext(ScanContext context, ScanContexts? pool) : System.IDisposable
 {
     /// <summary>The context.</summary>
     internal ScanContext Context { get; } = context;
 
-    /// <summary>A context to decode the payloads of the runs of <paramref name="origin"/> of <paramref name="file"/> in.</summary>
-    internal static IndexContext Of(IIndexHost file, int origin) =>
-        file is VortexFile open && open.DecodesOverOwnEncodings(origin)
-            ? new IndexContext(ScanContexts.Metadata.Rent(open), pooled: true)
-            : new IndexContext(file.CreateIndexContext(origin), pooled: false);
+    /// <summary>
+    /// A context to decode the payloads of the runs of <paramref name="origin"/> of <paramref name="file"/> in: the metadata
+    /// pool's over an open file's own encodings, the footerless pool's over the encodings an object's contents list.
+    /// </summary>
+    internal static IndexContext Of(IIndexHost file, int origin) => file switch
+    {
+        VortexFile open when open.DecodesOverOwnEncodings(origin) => new IndexContext(ScanContexts.Metadata.Rent(open), ScanContexts.Metadata),
+        FooterlessIndexes footerless => new IndexContext(ScanContexts.Footerless.RentEncodings(footerless.Encodings), ScanContexts.Footerless),
+        _ => new IndexContext(file.CreateIndexContext(origin), null),
+    };
 
-    /// <summary>Gives the context back to the pool, or disposes it.</summary>
+    /// <summary>Gives the context back to its pool, or disposes it.</summary>
     public void Dispose()
     {
-        if (pooled)
+        if (pool is not null)
         {
-            ScanContexts.Metadata.Return(Context);
+            pool.Return(Context);
         }
         else
         {
@@ -82,4 +87,7 @@ internal sealed class FooterlessIndexes(ISegmentReader source, DType schema, Ind
         : throw new VortexFormatException($"A run of origin {origin} lies in an index fragment, which a read with no open does not have.");
 
     public ScanContext CreateIndexContext(int origin) => new ScanContext(encodings);
+
+    /// <summary>The encodings the contents list, which the payloads of the runs decode over.</summary>
+    internal string[] Encodings => encodings;
 }
