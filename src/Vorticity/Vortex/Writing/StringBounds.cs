@@ -363,14 +363,17 @@ internal sealed class StringBounds
         // does, comes back here a row at a time, and would pay for a group it never passes.
         uint low = (uint)(minKey >> 32);
         uint high = (uint)(maxKey >> 32);
-        bool lanes = Vector512.IsHardwareAccelerated && Avx512BW.IsSupported && high > low && high - low > 1;
+        bool wide = Vector512.IsHardwareAccelerated && Avx512BW.IsSupported;
+        bool lanes = (wide || Avx2.IsSupported) && high > low && high - low > 1;
         int scalarUntil = row + 16;
         int backoff = 4;
         for (; row < end; row++)
         {
             if (lanes && row >= scalarUntil)
             {
-                int settled = SettledGroups(views, bits, bitOffset, row, end, low, high);
+                int settled = wide
+                    ? SettledGroups(views, bits, bitOffset, row, end, low, high)
+                    : SettledGroups256(views, bits, bitOffset, row, end, low, high);
                 if (settled != row)
                 {
                     backoff = 4;
@@ -484,6 +487,48 @@ internal sealed class StringBounds
         }
 
         return row;
+    }
+
+    /// <summary>
+    /// <see cref="SettledGroups"/> where AVX2 is and AVX-512 is not: the four views two 256-bit registers of two, each
+    /// shuffled inside its 128-bit lanes as the 512-bit register's are, their masks put side by side as its one.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static int SettledGroups256(
+        ReadOnlySpan<byte> views, ReadOnlySpan<byte> bits, int bitOffset, int row, int end, uint low, uint high)
+    {
+        ref uint words = ref Unsafe.As<byte, uint>(ref MemoryMarshal.GetReference(views));
+        Vector256<uint> lowPrefix = Vector256.Create(low);
+        Vector256<uint> highPrefix = Vector256.Create(high);
+        Vector256<byte> prefixBytes = Vector256.Create(PrefixBytes, PrefixBytes);
+        for (; row <= end - 4; row += 4)
+        {
+            uint inside = Inside(Vector256.LoadUnsafe(ref words, (nuint)(row * 4)), prefixBytes, lowPrefix, highPrefix)
+                | (Inside(Vector256.LoadUnsafe(ref words, (nuint)((row * 4) + 8)), prefixBytes, lowPrefix, highPrefix) << 8);
+            uint passed = inside >> 1;
+            if (!bits.IsEmpty)
+            {
+                uint valid = (uint)BitWords.Load(bits, bitOffset + row) & 0xF;
+                passed |= ~((valid & 1) | ((valid & 2) << 3) | ((valid & 4) << 6) | ((valid & 8) << 9));
+            }
+
+            if ((passed & 0x1111) != 0x1111)
+            {
+                break;
+            }
+        }
+
+        return row;
+
+        // Two views' lanes: the prefix lane of each, 1 and 5, set where the view holds four bytes or more whose first four
+        // lie strictly between the bounds' prefixes.
+        static uint Inside(Vector256<uint> two, Vector256<byte> prefixBytes, Vector256<uint> lowPrefix, Vector256<uint> highPrefix)
+        {
+            Vector256<uint> prefix = Avx2.Shuffle(two.AsByte(), prefixBytes).AsUInt32();
+            Vector256<uint> lengths = Avx2.Shuffle(two, 0);
+            return (Vector256.GreaterThanOrEqual(lengths, Vector256.Create(4u))
+                & Vector256.GreaterThan(prefix, lowPrefix) & Vector256.LessThan(prefix, highPrefix)).ExtractMostSignificantBits();
+        }
     }
 
     /// <summary>
