@@ -118,6 +118,38 @@ public sealed class RowTwoPassTests
         Assert.Equal(offsets, keys.Offsets.ToArray());
     }
 
+    /// <summary>
+    /// Keys encoded into the keys of another batch, a stream's, are those a new encoding gives: of more rows and longer
+    /// texts than the keys held, which grow, then of fewer and shorter, which the buffers hold; nothing of the keys before
+    /// is read past what the new ones hold.
+    /// </summary>
+    [Fact]
+    public void KeysEncodedIntoAnotherBatchsAreThoseANewEncodingGives()
+    {
+        using RowFixture fixture = new RowFixture();
+        int[] small = EveryPath(fixture, out RowSortField[] fields);
+        Random random = new Random(2026_11_11);
+        byte[]?[] texts = [.. Enumerable.Range(0, 3_000).Select(i => i % 17 == 0 ? null : System.Text.Encoding.UTF8.GetBytes(new string('k', random.Next(0, 80))))];
+        int text = fixture.VarBin(texts);
+        int number = fixture.Primitive<long>(PType.I64, [.. Enumerable.Range(0, 3_000).Select(_ => random.NextInt64())]);
+        int few = fixture.VarBin([RowTestHelp.Utf8("x"), null]);
+        int fewNumbers = fixture.Primitive<long>(PType.I64, [7, -7]);
+        RowSortField[] two = [RowSortField.Ascending, new RowSortField(descending: true, nullsFirst: true)];
+
+        using RowKeys stream = RowEncoder.Encode(fixture.Arena, small, fields);
+        foreach ((int[] columns, RowSortField[] order) in ((int[], RowSortField[])[])[([text, number], two), ([few, fewNumbers], two), (small, fields)])
+        {
+            using RowKeys fresh = RowEncoder.Encode(fixture.Arena, columns, order);
+            Assert.Same(stream, RowEncoder.Encode(fixture.Arena, columns, order, stream));
+            Assert.Equal(fresh.RowCount, stream.RowCount);
+            Assert.Equal(fresh.TotalBytes, stream.TotalBytes);
+            Assert.Equal(fresh.Elements.ToArray(), stream.Elements.ToArray());
+            Assert.Equal(fresh.Sizes.ToArray(), stream.Sizes.ToArray());
+            Assert.Equal(fresh.Offsets.ToArray(), stream.Offsets.ToArray());
+            Assert.Throws<ArgumentOutOfRangeException>(() => stream.Row(fresh.RowCount).Length);
+        }
+    }
+
     /// <summary>Encoding is deterministic: the same input twice gives the same bytes.</summary>
     [Fact]
     public void EncodingTheSameInputTwiceGivesTheSameBytes()

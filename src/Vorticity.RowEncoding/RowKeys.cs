@@ -21,8 +21,8 @@ public sealed class RowKeys : IEncodedKeys
     private byte[]? _elements;
     private int[]? _offsets;
     private int[]? _sizes;
-    private readonly int _rowCount;
-    private readonly int _totalBytes;
+    private int _rowCount;
+    private int _totalBytes;
 
     internal RowKeys(byte[] elements, int[] offsets, int[] sizes, int rowCount, int totalBytes)
     {
@@ -306,6 +306,38 @@ public sealed class RowKeys : IEncodedKeys
     {
         byte[] elements = Live();
         return elements.AsSpan(_offsets![left], _sizes![left]).SequenceEqual(elements.AsSpan(_offsets[right], _sizes[right]));
+    }
+
+    /// <summary>
+    /// Room for the keys of <paramref name="rowCount"/> rows, the keys held let go: each row's size and start, its buffers
+    /// kept where they are large enough, else rented larger, the smaller given back. Every span handed out becomes invalid.
+    /// </summary>
+    internal (int[] Sizes, int[] Offsets) Rows(int rowCount)
+    {
+        _ = Live();
+        Grow(ref _sizes!, rowCount);
+        Grow(ref _offsets!, rowCount);
+        (_rowCount, _totalBytes) = (0, 0);
+        return (_sizes, _offsets);
+    }
+
+    /// <summary>Room for <paramref name="totalBytes"/> bytes of keys, after <see cref="Rows"/>.</summary>
+    internal byte[] Bytes(int totalBytes)
+    {
+        Grow(ref _elements!, totalBytes);
+        return _elements;
+    }
+
+    /// <summary>Holds the keys of <paramref name="rowCount"/> rows, <paramref name="totalBytes"/> bytes, written in the room made.</summary>
+    internal void Hold(int rowCount, int totalBytes) => (_rowCount, _totalBytes) = (rowCount, totalBytes);
+
+    private static void Grow<T>(ref T[] rented, int length)
+    {
+        if (rented.Length < Math.Max(length, 1))
+        {
+            WorkArrays.Return(rented);
+            rented = WorkArrays.Rent<T>(Math.Max(length, rented.Length * 2));
+        }
     }
 
     /// <summary>Returns the pooled buffers. Every span handed out becomes invalid.</summary>

@@ -114,6 +114,23 @@ internal sealed class SortKey
     }
 
     /// <summary>
+    /// The keys of every row of <paramref name="batch"/>, row-encoded into <paramref name="into"/>, a stream's keys of its
+    /// batch before, which no longer holds them; new ones when null. The caller disposes them at the stream's end.
+    /// </summary>
+    /// <exception cref="ArgumentException">A source names no column of the batch.</exception>
+    internal RowKeys Encode(RecordBatch batch, RowKeys? into)
+    {
+        if (into is null)
+        {
+            return Encode(batch);
+        }
+
+        Span<int> nodes = _sources.Length <= 32 ? stackalloc int[_sources.Length] : new int[_sources.Length];
+        Components(batch, nodes);
+        return RowEncoder.Encode(batch.Arena, nodes, _fields, into);
+    }
+
+    /// <summary>
     /// The nodes of the batch's values of each source, in its arena: a column's own node, or a node of the function's
     /// values over it; extensions unwrapped to the storage the encoding orders.
     /// </summary>
