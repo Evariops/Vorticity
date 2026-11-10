@@ -68,6 +68,9 @@ internal sealed class ShreddedVariant
     private byte[] _scratch = [];
     private int _used;
 
+    /// <summary>The bytes the last batch's values took, which the next one's scratch is rented at.</summary>
+    private int _lastUsed;
+
     /// <summary>The fields and offsets of the objects and arrays being written, the innermost last.</summary>
     private int[] _stack = new int[64];
     private int _top;
@@ -121,6 +124,18 @@ internal sealed class ShreddedVariant
     }
 
     /// <summary>
+    /// The plan of a variant whose group is of <paramref name="group"/>, as a decode of <paramref name="scan"/> compiled it
+    /// last (<see cref="ShreddedPlans"/>): a plan made for every batch, its shredded keys' names and groups, was 270 KB a
+    /// batch of 8,192 rows of 200 shredded keys.
+    /// </summary>
+    /// <exception cref="VortexFormatException">The group is not shaped as the standard says.</exception>
+    /// <exception cref="VortexUnsupportedException">A typed column is of a type no variant type matches.</exception>
+    internal static ShreddedVariant For(ScanContext scan, DType group) => (scan.ShreddedPlans ??= new ShreddedPlans()).Take(scan.Types, group);
+
+    /// <summary>Whether the plan writes slices now, which another decode may not interleave with.</summary>
+    private bool _busy;
+
+    /// <summary>
     /// The variant node of the group node <paramref name="group"/>: a struct of the rows' metadata
     /// and of their values, which wears <paramref name="variant"/> and is valid where the group is.
     /// </summary>
@@ -166,11 +181,14 @@ internal sealed class ShreddedVariant
     /// </summary>
     internal void BeginSlices()
     {
+        _busy = true;
         _used = 0;
         _top = 0;
         if (_scratch.Length == 0)
         {
-            _scratch = WorkArrays.Rent<byte>(256);
+            // As large as the last batch's values, which a plan kept from a batch to the next knows: doubled from 256 bytes,
+            // each batch copied its values eleven times over and took its last array from the shelf.
+            _scratch = WorkArrays.Rent<byte>(Math.Max(256, _lastUsed));
         }
     }
 
@@ -231,7 +249,45 @@ internal sealed class ShreddedVariant
         }
 
         _scratch = [];
+        _lastUsed = _used;
         _used = 0;
+        _busy = false;
+    }
+
+    /// <summary>
+    /// The plans of a context's shredded variants, kept from a batch to the next: a few, a scan's shredded columns, each by
+    /// the group's type and the arena of types it was compiled with, unless that arena was cleared since.
+    /// </summary>
+    internal sealed class ShreddedPlans
+    {
+        private const int Kept = 4;
+
+        private readonly ShreddedVariant?[] _plans = new ShreddedVariant?[Kept];
+        private readonly DType[] _groups = new DType[Kept];
+        private readonly DTypeArena?[] _arenas = new DTypeArena?[Kept];
+        private readonly int[] _generations = new int[Kept];
+        private int _next;
+
+        /// <summary>The plan for <paramref name="group"/> compiled with <paramref name="types"/>, compiled now when none is kept or the one kept writes slices.</summary>
+        internal ShreddedVariant Take(DTypeArena types, DType group)
+        {
+            for (int i = 0; i < Kept; i++)
+            {
+                if (_plans[i] is { } kept && ReferenceEquals(_arenas[i], types) && _generations[i] == types.Generation && _groups[i] == group)
+                {
+                    return kept._busy ? Compile(VortexTypes.FromDType(group), types) : kept;
+                }
+            }
+
+            ShreddedVariant plan = Compile(VortexTypes.FromDType(group), types);
+            int at = _next;
+            _next = (at + 1) % Kept;
+            _plans[at] = plan;
+            _groups[at] = group;
+            _arenas[at] = types;
+            _generations[at] = types.Generation;
+            return plan;
+        }
     }
 
     /// <summary>Each row's view into <paramref name="into"/>, its value written into the scratch where the row is rebuilt.</summary>

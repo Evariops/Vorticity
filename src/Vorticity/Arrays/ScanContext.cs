@@ -227,6 +227,12 @@ internal sealed class ScanContext : IDisposable
     private DTypeArena? _types;
 
     /// <summary>
+    /// The plans of the shredded variants this context's decodes put back together, which the next batch's decodes take
+    /// again (<see cref="Types.Variants.ShreddedVariant.For"/>); each kept with the arena of <see cref="Types"/> it was made in.
+    /// </summary>
+    internal Types.Variants.ShreddedVariant.ShreddedPlans? ShreddedPlans;
+
+    /// <summary>
     /// The batch's scalar store. Cleared by <see cref="ResetBatch"/>, so a
     /// <see cref="ScalarValue"/> read out of one batch is meaningless in the next - the same
     /// lifetime rule the arenas follow.

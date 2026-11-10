@@ -61,6 +61,31 @@ public sealed partial class ShreddedVariantWriteTests
     }
 
     /// <summary>
+    /// Two columns shredded alike, whose rows a scan puts back together by one plan kept from a batch to the next and
+    /// from a column to the other, read back every document, over chunks of 512 rows on one lane or four.
+    /// </summary>
+    [Theory]
+    [InlineData(7, 1)]
+    [InlineData(8, 4)]
+    public async Task TwoColumnsShreddedAlikeReadBackEveryDocument(int seed, int degree)
+    {
+        Random random = new Random(seed);
+        Doc[] rows = [.. Enumerable.Range(0, 3_000).Select(i => new Doc(i, Document(random), random.Next(10) == 0 ? null : Document(random)))];
+        VariantShredding alike = Shredding(random);
+        List<Doc> read = await RoundTripAsync(rows, new() { [nameof(Doc.Attributes)] = alike, [nameof(Doc.Extra)] = alike }, degree);
+        Assert.Equal(rows.Length, read.Count);
+        for (int i = 0; i < rows.Length; i++)
+        {
+            Assert.True(rows[i].Attributes.Equals(read[i].Attributes), $"row {i}: {rows[i].Attributes.ToJson()} read as {read[i].Attributes.ToJson()}");
+            Assert.Equal(rows[i].Extra is null, read[i].Extra is null);
+            if (rows[i].Extra is { } extra)
+            {
+                Assert.True(extra.Equals(read[i].Extra!.Value), $"row {i}: {extra.ToJson()} read as {read[i].Extra!.Value.ToJson()}");
+            }
+        }
+    }
+
+    /// <summary>
     /// Integers of the four widths under one shredded key go to one 64-bit column, and come back at
     /// that width, equal in value; a key without a shredding keeps its width in the residual.
     /// </summary>
