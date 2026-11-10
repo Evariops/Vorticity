@@ -1331,6 +1331,11 @@ internal sealed class KeyIndexPruner
                     return LookupHashes(context, requests, slots, run, fence, low, high, entries);
                 }
 
+                if (Sampled(context, requests, slots, run, low, high, entries, blockRows) is bool answered)
+                {
+                    return answered;
+                }
+
                 int keys = Decode(context, requests.GetBuffer(slots[0]), _keyType, entries);
                 CanonicalNode keyNode = context.Canonical.GetNode(keys);
                 if (!Fits(keyNode, entries))
@@ -1468,22 +1473,67 @@ internal sealed class KeyIndexPruner
             }
         }
 
+        /// <summary>
+        /// Marks the blocks of a key's rows <c>[lo, hi)</c>, which the run holds ascending: a block each, the rows past it
+        /// in the same block passed over by a search for the first row of the next one, where each row took a division
+        /// and a marking (IN-06). A key of many rows in few blocks costs its blocks, not its rows.
+        /// </summary>
         private void MarkRows(
             int literal, int lo, int hi, ReadOnlySpan<uint> rows, ulong firstBlock, long blockRows)
         {
-            for (int e = lo; e < hi; e++)
+            for (int e = lo; e < hi;)
             {
-                Present(literal, firstBlock + (ulong)(rows[e] / blockRows));
+                ulong block = rows[e] / (ulong)blockRows;
+                Present(literal, firstBlock + block);
+                e = FirstAtOrPast(rows, e + 1, hi, (block + 1) * (ulong)blockRows);
             }
         }
 
+        /// <inheritdoc cref="MarkRows(int, int, int, ReadOnlySpan{uint}, ulong, long)"/>
         private void MarkRows(
             int literal, int lo, int hi, ReadOnlySpan<ulong> rows, ulong firstBlock, long blockRows)
         {
-            for (int e = lo; e < hi; e++)
+            for (int e = lo; e < hi;)
             {
-                Present(literal, firstBlock + (rows[e] / (ulong)blockRows));
+                ulong block = rows[e] / (ulong)blockRows;
+                Present(literal, firstBlock + block);
+                e = FirstAtOrPast(rows, e + 1, hi, (block + 1) * (ulong)blockRows);
             }
+        }
+
+        /// <summary>
+        /// The first of <c>[from, to)</c> whose row is at or past <paramref name="row"/>, <paramref name="to"/> for none, the
+        /// rows ascending: the next few looked at in turn, then a halving search, since the next block's first row is most
+        /// often the next one.
+        /// </summary>
+        private static int FirstAtOrPast<T>(ReadOnlySpan<T> rows, int from, int to, ulong row)
+            where T : unmanaged, IBinaryInteger<T>
+        {
+            int step = Math.Min(to, from + 4);
+            for (; from < step; from++)
+            {
+                if (ulong.CreateTruncating(rows[from]) >= row)
+                {
+                    return from;
+                }
+            }
+
+            int low = from;
+            int high = to;
+            while (low < high)
+            {
+                int middle = (int)(((uint)low + (uint)high) >> 1);
+                if (ulong.CreateTruncating(rows[middle]) >= row)
+                {
+                    high = middle;
+                }
+                else
+                {
+                    low = middle + 1;
+                }
+            }
+
+            return low;
         }
 
         private void Present(int literal, ulong block)
@@ -1659,6 +1709,105 @@ internal sealed class KeyIndexPruner
             context.Decode.LoadBlob(segment);
             ArrayNode root = context.Nodes.Root;
             return context.Decode.DecodeRoot(in root, dtype, length);
+        }
+
+        /// <summary>The entries between two of every 1,024th key a sampled lookup decodes (<see cref="Sampled"/>).</summary>
+        private const int SampleStride = 1_024;
+
+        /// <summary>
+        /// One segment's lookup by samples, when it asks few keys of many entries: every 1,024th key decoded, then for each
+        /// key asked the one stretch of entries the samples leave it, and of the rows or postings the entries it holds
+        /// alone, where the segment's every key, and every row or posting, was decoded for a key or two (IN-01 a). Null
+        /// when the lookup asks too many keys for it, which a whole decode then answers.
+        /// </summary>
+        /// <returns>Whether the segment made sense, or null.</returns>
+        private bool? Sampled(ScanContext context, SegmentRequestSet requests, int[] slots, Run run, int low, int high, int entries, long blockRows)
+        {
+            // A key's stretch is two samples apart at most: a whole decode reads every entry, the samples a sixteenth of
+            // a stretch each, so a lookup of a few keys of a segment of many stretches is the one worth it.
+            if (!_rows || entries < 8 * SampleStride || (long)(high - low) * 8 * SampleStride > entries)
+            {
+                return null;
+            }
+
+            int samples = (entries + SampleStride - 1) / SampleStride;
+            int[] wanted = ArrayPool<int>.Shared.Rent(samples);
+            try
+            {
+                for (int i = 0; i < samples; i++)
+                {
+                    wanted[i] = i * SampleStride;
+                }
+
+                context.Decode.LoadBlob(requests.GetBuffer(slots[0]));
+                ArrayNode root = context.Nodes.Root;
+                CanonicalNode sample = context.Canonical.GetNode(context.Decode.DecodeRootSelected(in root, _keyType, entries, wanted.AsSpan(0, samples), keepEncoding: false));
+                if (!Fits(sample, samples))
+                {
+                    return false;
+                }
+
+                // Each key's entries: past the last sample below it, and before the first above it.
+                _matches.Clear();
+                for (int k = low; k < high; k++)
+                {
+                    (int literal, byte[] key, ulong _) = Asked.Sorted[k];
+                    (int below, int above) = Range(sample, key);
+                    int start = Math.Max(below - 1, 0) * SampleStride;
+                    int end = (int)Math.Min((long)above * SampleStride, entries);
+                    if (end <= start)
+                    {
+                        continue;
+                    }
+
+                    root = context.Nodes.Root;
+                    CanonicalNode stretch = context.Canonical.GetNode(context.Decode.DecodeRootRange(in root, _keyType, entries, start, end - start, keepEncoding: false));
+                    if (!Fits(stretch, end - start))
+                    {
+                        return false;
+                    }
+
+                    (int first, int last) = Range(stretch, key);
+                    if (last > first)
+                    {
+                        _matches.Add((literal, start + first, start + last));
+                    }
+                }
+
+                return _matches.Count == 0 || SampledRows(context, requests, slots, run, entries, blockRows);
+            }
+            finally
+            {
+                ArrayPool<int>.Shared.Return(wanted);
+            }
+        }
+
+        /// <summary>The rows of the entries <see cref="Sampled"/> matched, decoded match by match and marked.</summary>
+        private bool SampledRows(ScanContext context, SegmentRequestSet requests, int[] slots, Run run, int entries, long blockRows)
+        {
+            bool wide = run.Table.WideRows;
+            PType width = wide ? PType.U64 : PType.U32;
+            context.Decode.LoadBlob(requests.GetBuffer(slots[1]));
+            foreach ((int literal, int first, int end) in _matches)
+            {
+                ArrayNode root = context.Nodes.Root;
+                CanonicalNode rows = context.Canonical.GetNode(context.Decode.DecodeRootRange(in root, wide ? _u64 : _u32, entries, first, end - first, keepEncoding: false));
+                if (rows.Kind != CanonicalKind.Primitive || rows.PType != width || rows.Length != end - first)
+                {
+                    return false;
+                }
+
+                if (wide)
+                {
+                    MarkRows(literal, 0, end - first, rows.Values.Cast<ulong>(), run.Meta.FirstBlock, blockRows);
+                }
+                else
+                {
+                    MarkRows(literal, 0, end - first, rows.Values.Cast<uint>(), run.Meta.FirstBlock, blockRows);
+                }
+            }
+
+            return true;
         }
     }
 }
