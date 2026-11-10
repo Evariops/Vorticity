@@ -1090,6 +1090,11 @@ internal static class RowKernels
         {
             row = WidenShorts(MemoryMarshal.Cast<TCode, ushort>(codes), limit, destination);
         }
+        else if (typeof(TCode) == typeof(uint) || typeof(TCode) == typeof(int))
+        {
+            // An int below zero is past any dictionary as unsigned, as WidenCode makes it.
+            row = CopyInts(MemoryMarshal.Cast<TCode, uint>(codes), limit, destination);
+        }
 
         for (; row < destination.Length; row++)
         {
@@ -1103,6 +1108,68 @@ internal static class RowKernels
         }
 
         return -1;
+    }
+
+    /// <summary>
+    /// The codes of 32 bits, which are the dictionary's indices as they stand: each block checked under
+    /// <paramref name="limit"/> and copied whole, sixteen or eight a vector, where a row at a time tested and stored each.
+    /// The rows copied; the scalar loop resumes at a block holding a code out of range.
+    /// </summary>
+    private static int CopyInts(ReadOnlySpan<uint> codes, uint limit, Span<uint> destination)
+    {
+        ref uint source = ref MemoryMarshal.GetReference(codes);
+        ref uint target = ref MemoryMarshal.GetReference(destination);
+        int row = 0;
+        if (Vector512.IsHardwareAccelerated)
+        {
+            Vector512<uint> bound = Vector512.Create(limit);
+            for (; row + 16 <= destination.Length; row += 16)
+            {
+                Vector512<uint> block = Vector512.LoadUnsafe(ref source, (nuint)row);
+                if (Vector512.GreaterThanOrEqualAny(block, bound))
+                {
+                    return row;
+                }
+
+                block.StoreUnsafe(ref target, (nuint)row);
+            }
+
+            return row;
+        }
+
+        if (Vector256.IsHardwareAccelerated)
+        {
+            Vector256<uint> bound = Vector256.Create(limit);
+            for (; row + 8 <= destination.Length; row += 8)
+            {
+                Vector256<uint> block = Vector256.LoadUnsafe(ref source, (nuint)row);
+                if (Vector256.GreaterThanOrEqualAny(block, bound))
+                {
+                    return row;
+                }
+
+                block.StoreUnsafe(ref target, (nuint)row);
+            }
+
+            return row;
+        }
+
+        if (Vector128.IsHardwareAccelerated)
+        {
+            Vector128<uint> bound = Vector128.Create(limit);
+            for (; row + 4 <= destination.Length; row += 4)
+            {
+                Vector128<uint> block = Vector128.LoadUnsafe(ref source, (nuint)row);
+                if (Vector128.GreaterThanOrEqualAny(block, bound))
+                {
+                    return row;
+                }
+
+                block.StoreUnsafe(ref target, (nuint)row);
+            }
+        }
+
+        return row;
     }
 
     private static int WidenBytes(ReadOnlySpan<byte> codes, uint limit, Span<uint> destination)

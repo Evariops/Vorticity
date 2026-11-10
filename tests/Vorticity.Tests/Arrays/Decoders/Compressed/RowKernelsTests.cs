@@ -18,6 +18,38 @@ public sealed class RowKernelsTests
 
     private const int Entries = 37;
 
+    /// <summary>
+    /// Codes of 32 bits, every one valid, widened whole where they are all in the dictionary, and the exact row of the
+    /// first one past it reported otherwise, at every place of a vector block, a signed code below zero one past it.
+    /// </summary>
+    [Theory]
+    [InlineData(PType.U32)]
+    [InlineData(PType.I32)]
+    internal void WideCodesAreCopiedOrTheirFirstPastTheDictionaryIsFound(PType ptype)
+    {
+        Random random = new Random(89);
+        const int Count = 100;
+        uint[] codes = new uint[Count];
+        for (int i = 0; i < Count; i++)
+        {
+            codes[i] = (uint)random.Next(Entries);
+        }
+
+        byte[] bytes = new byte[Count * 4];
+        Buffer.BlockCopy(codes, 0, bytes, 0, bytes.Length);
+        uint[] widened = new uint[Count];
+        Assert.Equal(-1, RowKernels.WidenCodes(bytes, ptype, Entries, widened, default, 0, default, 0, true, default));
+        Assert.Equal(codes, widened);
+
+        for (int past = 0; past < 40; past++)
+        {
+            byte[] spoiled = (byte[])bytes.Clone();
+            uint bad = ptype == PType.I32 && past % 2 == 0 ? unchecked((uint)-1) : Entries + (uint)past;
+            BinaryPrimitives.WriteUInt32LittleEndian(spoiled.AsSpan(past * 4), bad);
+            Assert.Equal(past, RowKernels.WidenCodes(spoiled, ptype, Entries, new uint[Count], default, 0, default, 0, true, default));
+        }
+    }
+
     /// <remarks>
     /// The dictionary is a few dozen values, whose validity the gather expands to a byte each, or
     /// more than a quarter of the rows, whose validity it reads in the bitmap at each code.
