@@ -44,15 +44,16 @@ internal static class Trigrams
         List<byte[]> runs = match.Op == StringMatchOp.Like
             ? BytePattern.LiteralRuns(match.Pattern.BytesValue, match.Escape)
             : [match.Pattern.BytesValue.ToArray()];
+        // Told apart by their three bytes in an integer, where a hexadecimal text of each was made and hashed.
         List<byte[]> trigrams = [];
-        HashSet<string> seen = new HashSet<string>(StringComparer.Ordinal);
+        HashSet<int> seen = [];
         Span<byte> scratch = stackalloc byte[Length];
         foreach (byte[] run in runs)
         {
             for (int i = 0; i + Length <= run.Length; i++)
             {
                 Copy(run.AsSpan(i, Length), fold, scratch);
-                if (seen.Add(Convert.ToHexString(scratch)))
+                if (seen.Add(scratch[0] | (scratch[1] << 8) | (scratch[2] << 16)))
                 {
                     trigrams.Add(scratch.ToArray());
                 }
