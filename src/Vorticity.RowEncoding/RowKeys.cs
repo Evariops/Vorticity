@@ -75,7 +75,8 @@ public sealed class RowKeys : IEncodedKeys
             ArgumentOutOfRangeException.ThrowIfGreaterThanOrEqual(indices[i], _rowCount);
         }
 
-        indices.Sort(new ByKey(this));
+        // By the keys' bytes eight at a time (SortStable), not a comparison of whole keys at every step.
+        SortStable(indices);
     }
 
     /// <summary>
@@ -340,12 +341,6 @@ public sealed class RowKeys : IEncodedKeys
     }
 
     private ReadOnlySpan<int> ThrowDisposedInts() => throw new ObjectDisposedException(nameof(RowKeys));
-
-    /// <summary>A struct comparer, so sorting allocates nothing.</summary>
-    private readonly struct ByKey(RowKeys keys) : IComparer<int>
-    {
-        public int Compare(int left, int right) => keys.Compare(left, right);
-    }
 
     /// <summary>
     /// A struct comparer over the keys' buffers, unchecked, of their bytes from <c>at</c> on, the bytes before it equal; the

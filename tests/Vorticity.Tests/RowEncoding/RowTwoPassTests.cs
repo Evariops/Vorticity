@@ -8,6 +8,7 @@
 // DIFFERENT bytes and require the results to be identical. A byte the encoder never wrote is the
 // one thing that would differ.
 using System;
+using System.Linq;
 using Vorticity.Types;
 using Vorticity.Types.Numerics;
 using Vorticity.RowEncoding;
@@ -218,6 +219,37 @@ public sealed class RowTwoPassTests
         Assert.True(keys.Compare(indices[0], indices[1]) <= 0);
         Assert.True(keys.Compare(indices[1], indices[2]) <= 0);
         Assert.True(keys.Compare(indices[2], indices[3]) <= 0);
+    }
+
+    /// <summary>
+    /// Thousands of rows, keys of a text sharing long prefixes, some null, then an integer, their indices shuffled: sorted,
+    /// they are a permutation of the indices, in the order a comparison of the keys gives.
+    /// </summary>
+    [Fact]
+    public void SortingManyShuffledIndicesPutsThemInKeyOrder()
+    {
+        using RowFixture fixture = new RowFixture();
+        Random random = new Random(2026_11_11);
+        const int Rows = 5_000;
+        byte[]?[] texts = new byte[]?[Rows];
+        int[] numbers = new int[Rows];
+        for (int i = 0; i < Rows; i++)
+        {
+            texts[i] = random.Next(20) == 0 ? null : System.Text.Encoding.UTF8.GetBytes($"service-name-shared-prefix-{random.Next(30)}/{new string('x', random.Next(0, 12))}");
+            numbers[i] = random.Next(-50, 50);
+        }
+
+        int text = fixture.VarBin(texts);
+        int number = fixture.Primitive<int>(PType.I32, numbers);
+        using RowKeys keys = RowEncoder.Encode(fixture.Arena, [text, number], [RowSortField.Ascending, new RowSortField(descending: true, nullsFirst: false)]);
+        int[] indices = [.. Enumerable.Range(0, Rows).OrderBy(_ => random.Next())];
+        keys.SortIndices(indices);
+
+        Assert.Equal(Enumerable.Range(0, Rows), indices.Order());
+        for (int i = 1; i < Rows; i++)
+        {
+            Assert.True(keys.Compare(indices[i - 1], indices[i]) <= 0, $"rows {indices[i - 1]} and {indices[i]} at {i}");
+        }
     }
 
     [Fact]
