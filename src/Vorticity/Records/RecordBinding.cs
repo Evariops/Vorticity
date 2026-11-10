@@ -85,6 +85,24 @@ internal sealed class RecordBinding
         return binding;
     }
 
+    /// <summary>
+    /// <see cref="For{TRecord}(VortexSchema, VortexExtensionRegistry?)"/> over the fields of <paramref name="type"/>, a struct
+    /// a result's batches share: kept by the type, where a schema made of it for each batch missed the cache every time and
+    /// bound the record again.
+    /// </summary>
+    internal static RecordBinding ForType<TRecord>(VortexType type, VortexExtensionRegistry? extensions)
+        where TRecord : IVortexRecord<TRecord>
+    {
+        if (Cache<TRecord>.ByType.TryGetValue(type, out RecordBinding? binding))
+        {
+            return binding;
+        }
+
+        binding = For<TRecord>(VortexSchema.Create(type.FieldArray), extensions);
+        Cache<TRecord>.ByType.AddOrUpdate(type, binding);
+        return binding;
+    }
+
     /// <summary>The binding of a nested record <typeparamref name="TNested"/> held by member <paramref name="member"/>.</summary>
     internal RecordBinding NestedFor<TNested>(int member)
         where TNested : IVortexRecord<TNested>
@@ -326,5 +344,7 @@ internal sealed class RecordBinding
     private static class Cache<TRecord>
     {
         internal static readonly ConditionalWeakTable<VortexSchema, RecordBinding> Bindings = [];
+
+        internal static readonly ConditionalWeakTable<VortexType, RecordBinding> ByType = [];
     }
 }
