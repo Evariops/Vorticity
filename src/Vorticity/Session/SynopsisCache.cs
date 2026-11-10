@@ -117,7 +117,8 @@ public sealed class SynopsisCache : IDisposable
     private long _peersListed;
 
     private readonly object _gate = new object();
-    private readonly Dictionary<string, Entry> _entries = new Dictionary<string, Entry>(StringComparer.Ordinal);
+    // The entries, found without the gate (Find), added and removed under it.
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, Entry> _entries = new System.Collections.Concurrent.ConcurrentDictionary<string, Entry>(StringComparer.Ordinal);
     private readonly LinkedList<Entry> _open = new LinkedList<Entry>();
 
     // The files of the other caches of the root read, kept open, the most recently read first, each with whether its bytes
@@ -852,23 +853,26 @@ public sealed class SynopsisCache : IDisposable
     private Entry? Find(string name) => Find(name.AsSpan());
 
     /// <summary>As <see cref="Find(string)"/>, the name as characters a caller made where it liked.</summary>
+    /// <remarks>
+    /// Without the gate: the lanes of a question each found their regions under it, and sixteen read no faster than one
+    /// (189 ns a hit across them, 151 ns from one thread). An entry found as it is dropped is read as the gate let it be
+    /// before: its mapping, once let go, is not taken (LeaseMap), and its handle is leased under the gate. Its hits are
+    /// counted by a plain write, a count a race leaves one short.
+    /// </remarks>
     private Entry? Find(ReadOnlySpan<char> name)
     {
-        lock (_gate)
+        if (!_entries.GetAlternateLookup<ReadOnlySpan<char>>().TryGetValue(name, out Entry? entry))
         {
-            if (!_entries.GetAlternateLookup<ReadOnlySpan<char>>().TryGetValue(name, out Entry? entry))
+            if (_root is null)
             {
-                if (_root is null)
-                {
-                    Missed();
-                }
-
-                return null;
+                Missed();
             }
 
-            entry.Hits = Math.Min(MaxHits, entry.Hits + 1);
-            return entry;
+            return null;
         }
+
+        entry.Hits = Math.Min(MaxHits, entry.Hits + 1);
+        return entry;
     }
 
     /// <summary>Whether the file of <paramref name="entry"/> holds exactly as many bytes as <paramref name="bytes"/>, read into it.</summary>
@@ -971,6 +975,13 @@ public sealed class SynopsisCache : IDisposable
     /// </summary>
     private IO.MappedFileOwner? LeaseMap(Entry entry)
     {
+        // The mapping the entry keeps, taken without the gate while it holds a reference: one the gate let go of meanwhile
+        // is not taken again, and the gate then decides.
+        if (Volatile.Read(ref entry.MapField) is { } mapped && mapped.TryRetain())
+        {
+            return mapped;
+        }
+
         lock (_gate)
         {
             if (entry.Map is { } held)
@@ -1844,7 +1855,7 @@ public sealed class SynopsisCache : IDisposable
     private void Evicted(Entry entry, List<Entry> evicted)
     {
         Close(entry)?.Dispose();
-        _entries.Remove(entry.Name);
+        _entries.TryRemove(entry.Name, out _);
         entry.Tier.Held -= entry.Bytes;
         VortexTelemetry.SynopsisHolds(-entry.Bytes);
         evicted.Add(entry);
@@ -1853,7 +1864,7 @@ public sealed class SynopsisCache : IDisposable
 
     private void Remove(Entry entry)
     {
-        if (entry.Node is null || !_entries.Remove(entry.Name))
+        if (entry.Node is null || !_entries.TryRemove(entry.Name, out _))
         {
             return;
         }
@@ -2005,7 +2016,16 @@ public sealed class SynopsisCache : IDisposable
         internal LinkedListNode<Entry>? OpenNode { get; set; }
 
         /// <summary>Its file mapped, while its handle is kept open: what a region read is a view of; null before.</summary>
-        internal IO.MappedFileOwner? Map { get; set; }
+        internal IO.MappedFileOwner? Map
+        {
+            get => Volatile.Read(ref MapField);
+            set => Volatile.Write(ref MapField, value);
+        }
+
+        /// <summary>What <see cref="Map"/> keeps, read without the gate (<see cref="LeaseMap"/>).</summary>
+#pragma warning disable SA1401 // A field, for Volatile.Read without the gate.
+        internal IO.MappedFileOwner? MapField;
+#pragma warning restore SA1401
 
         /// <summary>The mapping whose bytes a read found to hold their region's checksum; null before one did.</summary>
         internal IO.MappedFileOwner? Verified { get; set; }

@@ -85,6 +85,29 @@ internal abstract class SegmentOwner : IDisposable
         return this;
     }
 
+    /// <summary>
+    /// Adds one reference while the owner holds one at least: false, nothing changed, once its count reached zero. For an
+    /// owner another thread may let go of meanwhile, a cache's, which a reader then takes no reference of rather than
+    /// failing; never for a pooled owner, which a rental may count again from one.
+    /// </summary>
+    /// <returns>Whether the reference was added.</returns>
+    internal bool TryRetain()
+    {
+        int count = Volatile.Read(ref _refCount);
+        while (count > 0)
+        {
+            int seen = Interlocked.CompareExchange(ref _refCount, count + 1, count);
+            if (seen == count)
+            {
+                return true;
+            }
+
+            count = seen;
+        }
+
+        return false;
+    }
+
     /// <summary>Removes one reference, freeing the memory when the last one goes.</summary>
     /// <exception cref="ObjectDisposedException">
     /// The count was already zero: the caller released a reference it did not hold.
