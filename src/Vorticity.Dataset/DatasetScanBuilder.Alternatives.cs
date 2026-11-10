@@ -131,6 +131,38 @@ internal sealed partial class DatasetScanBuilder
         internal Task? Opened { get; set; }
     }
 
+    // What the alternatives of the unit being chosen ask two or three times, found once a choice (Choose): how its summaries
+    // judge it for its granules, the cost of its rows at a share of them, and of its sheets. A builder chooses one unit at a
+    // time, each choice to its end with no await (its walks, AnswersAnyAsync, PiecesAsync's plan, SpreadAsync); nothing of
+    // it is kept on the unit, which a question makes one of an object.
+    private Planned? _choosing;
+    private GranuleAnswer.Judgment _choiceJudged;
+    private PathCosts.Cost? _choiceRows;
+    private double _choiceRowsAt;
+    private PathCosts.Cost? _choiceSheets;
+
+    /// <summary>What reading the rows of <paramref name="unit"/> costs at the share of them it keeps (<see cref="RowsCost(in PositionedObject, double)"/>), found once a choice for that share.</summary>
+    private PathCosts.Cost RowsCostOf(Planned unit)
+    {
+        bool choosing = ReferenceEquals(_choosing, unit);
+        if (choosing && _choiceRows is { } known && _choiceRowsAt.Equals(unit.Kept))
+        {
+            return known;
+        }
+
+        PathCosts.Cost cost = RowsCost(unit.Held, unit.Kept, SheetsCostOf(unit));
+        if (choosing)
+        {
+            (_choiceRows, _choiceRowsAt) = (cost, unit.Kept);
+        }
+
+        return cost;
+    }
+
+    /// <summary>What reading the sheets of <paramref name="unit"/> costs (<see cref="SheetsCost"/>), found once a choice.</summary>
+    private PathCosts.Cost SheetsCostOf(Planned unit) =>
+        !ReferenceEquals(_choosing, unit) ? SheetsCost(unit.Held) : _choiceSheets ??= SheetsCost(unit.Held);
+
     /// <summary>
     /// One way of answering a unit (spec B, 6.1): whether it covers the unit from the entries alone, and what it costs at the
     /// dataset's profile, each region at the tier it lies in. What it gives, states or rows, the scan's loop reads through it.
@@ -272,12 +304,22 @@ internal sealed partial class DatasetScanBuilder
     /// </summary>
     private sealed class GranulesAlternative(DatasetScanBuilder scan) : Alternative(scan, AnswerPath.Granules, UnitLevel.Object)
     {
-        internal override Coverage Covers(Planned unit) =>
-            Scan.Answer() is not null && unit.Held.Entry.Contents is { GranuleStats.Count: > 0 } && Scan.Covered(unit.Held) > 0
-            && Scan.GranuleAnswer() is { } granules && (granules.Exclusion is not { } excluded || !excluded.Identifier || excluded.Placed(unit.Held.Entry.Uid))
-            && granules.Covers(unit.Held)
-                ? Coverage.Part
-                : Coverage.None;
+        internal override Coverage Covers(Planned unit)
+        {
+            if (Scan.Answer() is not null && unit.Held.Entry.Contents is { GranuleStats.Count: > 0 } && Scan.Covered(unit.Held) > 0
+                && Scan.GranuleAnswer() is { } granules && (granules.Exclusion is not { } excluded || !excluded.Identifier || excluded.Placed(unit.Held.Entry.Uid))
+                && granules.Covers(unit.Held, out GranuleAnswer.Judgment judged))
+            {
+                if (ReferenceEquals(Scan._choosing, unit))
+                {
+                    Scan._choiceJudged = judged;
+                }
+
+                return Coverage.Part;
+            }
+
+            return Coverage.None;
+        }
 
         internal override string Uncovered(Planned unit) =>
             Scan.Answer() is null ? Scan._answerDeclined ?? "does not cover it"
@@ -289,15 +331,19 @@ internal sealed partial class DatasetScanBuilder
 
         internal override PathCosts.Cost Cost(Planned unit)
         {
-            // Under a value left out, the places its indexes give it (GranuleAnswer.Placing).
-            (PathCosts.Cost statistics, PathCosts.Cost unanswered, _) = Scan.GranuleAnswer()!.Costs(unit.Held, unit.Kept);
-            PathCosts.Cost placing = Scan.GranuleAnswer()!.Placing(unit.Held);
-            return statistics + unanswered + placing + Scan.SheetsCost(unit.Held);
+            // Under a value left out, the places its indexes give it (GranuleAnswer.Placing). Its summaries were judged as the
+            // choice found it covered (Choose covers each alternative before it costs it).
+            GranuleAnswer granules = Scan.GranuleAnswer()!;
+            (PathCosts.Cost statistics, PathCosts.Cost unanswered) = ReferenceEquals(Scan._choosing, unit)
+                ? granules.Costs(unit.Held, unit.Kept, Scan._choiceJudged)
+                : granules.Costs(unit.Held, unit.Kept);
+            PathCosts.Cost placing = granules.Placing(unit.Held);
+            return statistics + unanswered + placing + Scan.SheetsCostOf(unit);
         }
 
         internal override string Describe(Planned unit, PathCosts.Cost cost)
         {
-            (PathCosts.Cost statistics, PathCosts.Cost unanswered, _) = Scan.GranuleAnswer()!.Costs(unit.Held, unit.Kept);
+            (PathCosts.Cost statistics, PathCosts.Cost unanswered) = Scan.GranuleAnswer()!.Costs(unit.Held, unit.Kept);
             return $"the statistics over the granules of {Scan.GranuleAnswer()!.Fields.Length} columns, {statistics.Bytes} bytes in {statistics.Requests} requests, "
                 + $"and the rows of the granules they do not answer, about {unanswered.Bytes} bytes in {unanswered.Requests}"
                 + (Scan.GranuleAnswer()!.Exclusion is { } exclusion && exclusion.Placed(unit.Held.Entry.Uid)
@@ -324,7 +370,7 @@ internal sealed partial class DatasetScanBuilder
             : !Scan._version.Schema.Holds(unit.Held.Entry) ? "its columns are an earlier schema's"
             : "its summaries do not prove the filter true over its rows, or the filter reads another column than the key's first";
 
-        internal override PathCosts.Cost Cost(Planned unit) => Scan.RowsCost(unit.Held, unit.Kept);
+        internal override PathCosts.Cost Cost(Planned unit) => Scan.RowsCostOf(unit);
 
         internal override string Describe(Planned unit, PathCosts.Cost cost) =>
             $"{RowsOf(unit)}, {cost.Bytes} bytes in {cost.Requests} requests, the blocks its zone maps settle taken from them";
@@ -335,7 +381,7 @@ internal sealed partial class DatasetScanBuilder
     {
         internal override Coverage Covers(Planned unit) => Coverage.Whole;
 
-        internal override PathCosts.Cost Cost(Planned unit) => Scan.RowsCost(unit.Held, unit.Kept);
+        internal override PathCosts.Cost Cost(Planned unit) => Scan.RowsCostOf(unit);
 
         internal override string Describe(Planned unit, PathCosts.Cost cost) => $"{RowsOf(unit)}, {cost.Bytes} bytes in {cost.Requests} requests";
     }
@@ -360,6 +406,21 @@ internal sealed partial class DatasetScanBuilder
     /// dataset's profile, the first in their order at a tie; with <paramref name="explain"/>, why each other lost.
     /// </summary>
     private void Choose(Planned unit, bool explain)
+    {
+        // What the alternatives ask more than once of the unit, found once this choice (_choosing).
+        (_choosing, _choiceRows, _choiceSheets) = (unit, null, null);
+        try
+        {
+            ChooseOnce(unit, explain);
+        }
+        finally
+        {
+            (_choosing, _choiceRows, _choiceSheets) = (null, null, null);
+        }
+    }
+
+    /// <summary>What <see cref="Choose"/> does, the unit's memo in place.</summary>
+    private void ChooseOnce(Planned unit, bool explain)
     {
         Alternative? best = null;
         PathCosts.Cost cost = default;
@@ -429,14 +490,17 @@ internal sealed partial class DatasetScanBuilder
     /// <paramref name="kept"/> share of its rows its key's sparse index keeps alone; and its sheets, read first when the
     /// filter asks values of a column.
     /// </summary>
-    private PathCosts.Cost RowsCost(in PositionedObject held, double kept = 1)
+    private PathCosts.Cost RowsCost(in PositionedObject held, double kept = 1) => RowsCost(held, kept, SheetsCost(held));
+
+    /// <summary>What <see cref="RowsCost(in PositionedObject, double)"/> says, its sheets costing <paramref name="sheets"/>.</summary>
+    private PathCosts.Cost RowsCost(in PositionedObject held, double kept, PathCosts.Cost sheets)
     {
         PathCosts costs = _version.Costs;
         int[] fields = FieldsRead();
         double share = Math.Clamp(kept, 0, 1);
         PathCosts.Cost rows = share < 1 ? costs.Share(held.Entry, fields, share) : costs.Rows(held.Entry, fields);
         double processing = share * costs.Processing(held.Entry, default, FieldsJudged(), _states is not null || _settles is not null ? fields.Length : 0);
-        return rows with { Nanoseconds = rows.Nanoseconds + processing } + SheetsCost(held);
+        return rows with { Nanoseconds = rows.Nanoseconds + processing } + sheets;
     }
 
     /// <summary>What reading the sheets of the object <paramref name="held"/> costs, when the scan reads them (<see cref="ReadsSheets"/>); nothing otherwise.</summary>

@@ -896,13 +896,32 @@ internal sealed class GranuleAnswer
     /// they do not prove true, other than the key's first and than those they prove constant, taken to vary in every
     /// granule. Past that, every granule would be read as rows after its statistics, a request for nothing. A function of a
     /// column, a truncation, holds one group over a granule whose extremes it sends to one. What they cost against the rows,
-    /// the scan's choice weighs (<see cref="Costs"/>).
+    /// the scan's choice weighs (<see cref="Costs(in PositionedObject, double)"/>).
     /// </summary>
-    internal bool Covers(in PositionedObject held) => Declines(held) is null;
+    internal bool Covers(in PositionedObject held) => Declines(held, out _) is null;
 
-    /// <summary>Why the granules of the object <paramref name="held"/> may not answer (<see cref="Covers"/>); null when they may.</summary>
-    internal string? Declines(in PositionedObject held)
+    /// <summary>
+    /// Whether the granules of the object <paramref name="held"/> may answer (<see cref="Covers(in PositionedObject)"/>), and, when they may, how its
+    /// summaries judge it, which its cost then takes (<see cref="Costs(in PositionedObject, double, in Judgment)"/>) rather
+    /// than judge it again.
+    /// </summary>
+    internal bool Covers(in PositionedObject held, out Judgment judged) => Declines(held, out judged) is null;
+
+    /// <summary>Why the granules of the object <paramref name="held"/> may not answer (<see cref="Covers(in PositionedObject)"/>); null when they may.</summary>
+    internal string? Declines(in PositionedObject held) => Declines(held, out _);
+
+    /// <summary>
+    /// How the summaries of an object judge it for its granules: whether they prove the filter true over its rows, and the
+    /// share of its rows whose granules its statistics are not expected to answer, before the edges a window cuts
+    /// (<see cref="Unanswered(in PositionedObject, bool)"/>). What the choice of an object's path asks two or three times,
+    /// judged once.
+    /// </summary>
+    internal readonly record struct Judgment(bool Proven, double Share);
+
+    /// <summary>Why the granules of the object <paramref name="held"/> may not answer, and how its summaries judge it when they may.</summary>
+    private string? Declines(in PositionedObject held, out Judgment judgment)
     {
+        judgment = default;
         ObjectEntry entry = held.Entry;
         if (entry.Contents is not { GranuleStats.Count: > 0 } contents || !_schema.Holds(entry))
         {
@@ -928,11 +947,11 @@ internal sealed class GranuleAnswer
             return CountsOnly ? "two of its keys' columns may vary in a granule" : "a key's column may vary in a granule under a measure";
         }
 
-        _ = Fields;
-        (SummaryPruner? judge, int[] filtered) = JudgeOf(held);
-        if (!judged && judge is { } filter && !filter.MustMatch(summaries.Columns, entry.PhysicalRows))
+        // The summaries' judgment of the filter, and the share it leaves unanswered, which the cost takes too.
+        judgment = Judge(held);
+        if (!judged && !judgment.Proven)
         {
-            foreach (int field in filtered)
+            foreach (int field in JudgeOf(held).Filtered)
             {
                 free += Array.IndexOf(_prefixed, field) < 0 && !Keyed(field) && Array.IndexOf(_ranged, field) < 0 ? 1 : 0;
             }
@@ -971,20 +990,23 @@ internal sealed class GranuleAnswer
 
         // An object whose every granule holds several values that the question needs one of reads its rows, the statistics a
         // request for nothing.
-        return Unanswered(held) < 1 ? null : "every granule holds several values that the question needs one of";
+        return Unanswered(held, judgment, edges: false) < 1 ? null : "every granule holds several values that the question needs one of";
     }
 
     /// <summary>
     /// What the object <paramref name="held"/> costs through its granules' statistics and their indexes, then through the rows of
-    /// the granules they would not answer, as their share of the object's rows estimates them (<see cref="Unanswered"/>), and
-    /// through the rows of the question's columns alone (<see cref="PathCosts"/>). Under a value of an identifier left out, the
+    /// the granules they would not answer, as their share of the object's rows estimates them
+    /// (<see cref="Unanswered(in PositionedObject, bool)"/>). Under a value of an identifier left out, the
     /// rows of a granule left are read under the whole filter, the identifier's column with the others. Of the
     /// <paramref name="kept"/> share of its rows the key's sparse index keeps, when it is known: the granules it refutes, their
     /// statistics refute too, and those it keeps leave as many unanswered as the object's do. A route's pods, under a key of
     /// the service and the route, were priced at the eighth of the object whose routes vary in a granule, where the five
     /// granules of the route leave two.
     /// </summary>
-    internal (PathCosts.Cost Statistics, PathCosts.Cost Unanswered, PathCosts.Cost Rows) Costs(in PositionedObject held, double kept = 1)
+    internal (PathCosts.Cost Statistics, PathCosts.Cost Unanswered) Costs(in PositionedObject held, double kept = 1) => Costs(held, kept, Judge(held));
+
+    /// <summary>What <see cref="Costs(in PositionedObject, double)"/> says, of an object its summaries judged as <paramref name="judged"/> says.</summary>
+    internal (PathCosts.Cost Statistics, PathCosts.Cost Unanswered) Costs(in PositionedObject held, double kept, in Judgment judged)
     {
         ObjectContents contents = held.Entry.Contents!;
         int[] fields = Fields;
@@ -1007,8 +1029,8 @@ internal sealed class GranuleAnswer
         }
 
         int[] read = _excluding is { } excluding ? excluding.ReadOf(ReadFields) : ReadFields;
-        double unanswered = Unanswered(held, edges: true) * Math.Clamp(kept, 0, 1);
-        return (_costs.Regions(held.Entry.Uid, regions), _costs.Share(held.Entry, read, unanswered, Unsliced(read)), _costs.Rows(held.Entry, read));
+        double unanswered = Unanswered(held, judged, edges: true) * Math.Clamp(kept, 0, 1);
+        return (_costs.Regions(held.Entry.Uid, regions), _costs.Share(held.Entry, read, unanswered, Unsliced(read)));
     }
 
     /// <summary>
@@ -1137,12 +1159,47 @@ internal sealed class GranuleAnswer
     /// read, those a window on a column of the key cuts too, which the choice of the path need not weigh: a window on the
     /// granule value cuts no granule of one value.
     /// </summary>
-    internal double Unanswered(in PositionedObject held, bool edges = false)
+    internal double Unanswered(in PositionedObject held, bool edges = false) => Unanswered(held, Judge(held), edges);
+
+    /// <summary>What <see cref="Unanswered(in PositionedObject, bool)"/> says, of an object its summaries judged as <paramref name="judged"/> says.</summary>
+    private double Unanswered(in PositionedObject held, in Judgment judged, bool edges)
     {
         ObjectEntry entry = held.Entry;
         if (entry.PhysicalRows <= 0)
         {
             return 0;
+        }
+
+        // A window the object's summaries do not prove cuts the granules at its bounds, read as rows: two at most on the first
+        // column, whose values the object holds in order; on another column of the key, a granule of each run of the first,
+        // every granule at most.
+        double share = judged.Share;
+        foreach (int field in edges && !judged.Proven ? _ranged : [])
+        {
+            share += field == _leading ? Math.Min(1, 2.0 * _granuleRows / entry.PhysicalRows) : 1;
+        }
+
+        // The value of an identifier left out lies in a granule or so of an object, which its postings place: read as rows; a
+        // value of another column, in the granules its indexes place it in, taken to be as few.
+        if (edges && _excluding is not null)
+        {
+            share += Math.Min(1, (double)_granuleRows / entry.PhysicalRows);
+        }
+
+        return Math.Min(1, share);
+    }
+
+    /// <summary>
+    /// How the summaries of the object <paramref name="held"/> judge it (<see cref="Judgment"/>): whether they prove the filter
+    /// true over its rows, and the share of its rows <see cref="Unanswered(in PositionedObject, bool)"/> gives before the
+    /// edges a window cuts.
+    /// </summary>
+    private Judgment Judge(in PositionedObject held)
+    {
+        ObjectEntry entry = held.Entry;
+        if (entry.PhysicalRows <= 0)
+        {
+            return new Judgment(true, 0);
         }
 
         ObjectSummaries summaries = held.Summaries(_schema);
@@ -1204,22 +1261,7 @@ internal sealed class GranuleAnswer
             share += (1 - share) * (1 - Math.Exp(-entry.DeletedRows / granules));
         }
 
-        // A window the object's summaries do not prove cuts the granules at its bounds, read as rows: two at most on the first
-        // column, whose values the object holds in order; on another column of the key, a granule of each run of the first,
-        // every granule at most.
-        foreach (int field in edges && !proven ? _ranged : [])
-        {
-            share += field == _leading ? Math.Min(1, 2.0 * _granuleRows / entry.PhysicalRows) : 1;
-        }
-
-        // The value of an identifier left out lies in a granule or so of an object, which its postings place: read as rows; a
-        // value of another column, in the granules its indexes place it in, taken to be as few.
-        if (edges && _excluding is not null)
-        {
-            share += Math.Min(1, (double)_granuleRows / entry.PhysicalRows);
-        }
-
-        return Math.Min(1, share);
+        return new Judgment(proven, share);
     }
 
     /// <summary>

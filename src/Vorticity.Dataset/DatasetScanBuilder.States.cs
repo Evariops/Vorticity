@@ -201,7 +201,7 @@ internal sealed partial class DatasetScanBuilder
         return statistics;
     }
 
-    /// <summary>The rows of the object <paramref name="held"/> its granules' statistics are expected to leave, read as rows (<see cref="Dataset.GranuleAnswer.Unanswered"/>).</summary>
+    /// <summary>The rows of the object <paramref name="held"/> its granules' statistics are expected to leave, read as rows (<see cref="Dataset.GranuleAnswer.Unanswered(in PositionedObject, bool)"/>).</summary>
     internal long GranulesLeave(in PositionedObject held) => (long)Math.Ceiling(GranuleAnswer()!.Unanswered(held, edges: true) * held.Entry.Rows);
 
     /// <summary>
