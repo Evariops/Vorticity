@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Threading;
 using Vorticity.Expressions;
 
 namespace Vorticity.Compute;
@@ -59,14 +60,12 @@ internal sealed class EncodedPredicate
             EncodedPredicateKind.Between => IntegerRange.OfBetween(literal, lowInclusive, high, highInclusive, decimals: false),
             _ => null,
         };
-        Members = kind == EncodedPredicateKind.In ? IntegerMembers(members, decimals: false) : null;
         Decimals = kind switch
         {
             EncodedPredicateKind.Compare => IntegerRange.OfComparison(op, literal, decimals: true),
             EncodedPredicateKind.Between => IntegerRange.OfBetween(literal, lowInclusive, high, highInclusive, decimals: true),
             _ => null,
         };
-        DecimalMembers = kind == EncodedPredicateKind.In ? IntegerMembers(members, decimals: true) : null;
     }
 
     /// <summary>The predicate's shape.</summary>
@@ -103,7 +102,11 @@ internal sealed class EncodedPredicate
     /// The integers of <see cref="EncodedPredicateKind.In"/>, ascending and distinct, each a value some integer column
     /// can equal; null for another shape, or a set with a null or a member that is no number.
     /// </summary>
-    internal Int128[]? Members { get; }
+    /// <remarks>
+    /// Made at the first ask, as a column of integers asks it: a set of texts made a list of every member twice, for
+    /// integers and for decimals, at every predicate, 32 KB an IN of a thousand. Lanes that ask at once make the same set.
+    /// </remarks>
+    internal Int128[]? Members => Kind != EncodedPredicateKind.In ? null : Volatile.Read(ref _membersMade) ? _members : Made(ref _members, ref _membersMade, decimals: false);
 
     /// <summary>
     /// The unscaled integers a comparison or a range of a decimal column selects, its literals read as the decimal
@@ -112,7 +115,20 @@ internal sealed class EncodedPredicate
     internal IntegerRange? Decimals { get; }
 
     /// <summary>The unscaled integers of <see cref="EncodedPredicateKind.In"/> on a decimal column, as <see cref="Members"/>.</summary>
-    internal Int128[]? DecimalMembers { get; }
+    internal Int128[]? DecimalMembers => Kind != EncodedPredicateKind.In ? null : Volatile.Read(ref _decimalsMade) ? _decimalMembers : Made(ref _decimalMembers, ref _decimalsMade, decimals: true);
+
+    private Int128[]? _members;
+    private bool _membersMade;
+    private Int128[]? _decimalMembers;
+    private bool _decimalsMade;
+
+    /// <summary>The members as integers, made and kept in <paramref name="members"/>, then marked made.</summary>
+    private Int128[]? Made(ref Int128[]? members, ref bool made, bool decimals)
+    {
+        members = IntegerMembers(Values, decimals);
+        Volatile.Write(ref made, true);
+        return members;
+    }
 
     /// <summary><c>column op literal</c>.</summary>
     internal static EncodedPredicate Compare(ComparisonOp op, FilterLiteral literal) =>
