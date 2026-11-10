@@ -3,6 +3,7 @@ using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.X86;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Arrays.Decoders.Compressed;
@@ -427,10 +428,15 @@ internal readonly struct BitPackPlan
             Unsafe.Add(ref f1, Width(unchecked(b - reference), elementBits) & second)++;
             Unsafe.Add(ref f2, Width(unchecked(c - reference), elementBits) & third)++;
             Unsafe.Add(ref f3, Width(unchecked(d - reference), elementBits) & fourth)++;
-            Unsafe.Add(ref z0, Width(ZigZag(a, shift), elementBits) & first)++;
-            Unsafe.Add(ref z1, Width(ZigZag(b, shift), elementBits) & second)++;
-            Unsafe.Add(ref z2, Width(ZigZag(c, shift), elementBits) & third)++;
-            Unsafe.Add(ref z3, Width(ZigZag(d, shift), elementBits) & fourth)++;
+
+            // The zigzag widths only where they are asked for: a column of unsigned values took them for nothing.
+            if (both)
+            {
+                Unsafe.Add(ref z0, Width(ZigZag(a, shift), elementBits) & first)++;
+                Unsafe.Add(ref z1, Width(ZigZag(b, shift), elementBits) & second)++;
+                Unsafe.Add(ref z2, Width(ZigZag(c, shift), elementBits) & third)++;
+                Unsafe.Add(ref z3, Width(ZigZag(d, shift), elementBits) & fourth)++;
+            }
         }
 
         for (; row < length; row++)
@@ -439,7 +445,10 @@ internal readonly struct BitPackPlan
             int one = -((Unsafe.Add(ref bit, at >> 3) >> (int)(at & 7)) & 1);
             T a = Unsafe.Add(ref value, row);
             Unsafe.Add(ref f0, Width(unchecked(a - reference), elementBits) & one)++;
-            Unsafe.Add(ref z0, Width(ZigZag(a, shift), elementBits) & one)++;
+            if (both)
+            {
+                Unsafe.Add(ref z0, Width(ZigZag(a, shift), elementBits) & one)++;
+            }
         }
 
         for (int w = 0; w < 65; w++)
@@ -573,7 +582,7 @@ internal readonly struct BitPackPlan
     /// -1 and 1 is -1 under one reading and 1 under the other. The result is then carried as raw
     /// bits, which is what both the subtraction and the serialized reference want.
     /// </remarks>
-    private static bool Minimum(
+    internal static bool Minimum(
         int length, ValidityMask mask, ReadOnlySpan<byte> values, PType ptype, out ulong reference)
     {
         reference = 0;
@@ -625,6 +634,14 @@ internal readonly struct BitPackPlan
         T b = T.MaxValue;
         nint valid = 0;
         nint row = 0;
+
+        // Rows 64 at a time under their validity word, each null standing for the maximum a vector of lanes at a time,
+        // where every row was a test of its bit and a select.
+        if (length >= 64 && ((Compute.WordBytes.IsAccelerated && Vector512<T>.IsSupported) || (Avx2.IsSupported && Vector256<T>.IsSupported)))
+        {
+            row = LeastLanes(ref value, length, bits, bitOffset, ref a, ref valid);
+        }
+
         for (; row <= length - 2; row += 2)
         {
             nint at = row + bitOffset;
@@ -649,6 +666,72 @@ internal readonly struct BitPackPlan
 
         any = valid != 0;
         return b < a ? b : a;
+    }
+
+    /// <summary>
+    /// The least valid value of the whole words of rows of <paramref name="length"/>, into <paramref name="least"/>, and
+    /// whether one is valid, into <paramref name="valid"/>; the rows it took: a null lane stands for the type's maximum,
+    /// under a mask of the word's bits, 512 bits at a time where AVX-512 spreads them, else 256 where AVX2 does.
+    /// </summary>
+    private static nint LeastLanes<T>(ref T value, int length, ReadOnlySpan<byte> bits, int bitOffset, ref T least, ref nint valid)
+        where T : unmanaged, IBinaryInteger<T>, IMinMaxValue<T>
+    {
+        nint row = 0;
+        ulong seen = 0;
+        if (Compute.WordBytes.IsAccelerated && Vector512<T>.IsSupported)
+        {
+            int lanes = Vector512<T>.Count;
+            Compute.WordBytes spread = Compute.WordBytes.Create();
+            Vector512<T> top = Vector512.Create(T.MaxValue);
+            Vector512<T> low = top;
+            for (; row <= length - 64; row += 64)
+            {
+                ulong word = BitWords.Load(bits, bitOffset + (int)row);
+                seen |= word;
+                for (int group = 0; group * lanes < 64; group++)
+                {
+                    Vector512<T> held = Vector512.LoadUnsafe(ref value, (nuint)(row + (group * lanes)));
+                    low = Vector512.Min(low, Vector512.ConditionalSelect(spread.Lanes<T>(word, group), held, top));
+                }
+            }
+
+            least = Fold(Vector256.Min(low.GetLower(), low.GetUpper()), least);
+        }
+        else
+        {
+            int lanes = Vector256<T>.Count;
+            Vector256<T> top = Vector256.Create(T.MaxValue);
+            Vector256<T> low = top;
+            for (; row <= length - 64; row += 64)
+            {
+                ulong word = BitWords.Load(bits, bitOffset + (int)row);
+                seen |= word;
+                for (int group = 0; group * lanes < 64; group++)
+                {
+                    Vector256<T> held = Vector256.LoadUnsafe(ref value, (nuint)(row + (group * lanes)));
+                    low = Vector256.Min(low, Vector256.ConditionalSelect(Compute.WordBytes.Lanes256<T>(word >> (group * lanes)), held, top));
+                }
+            }
+
+            least = Fold(low, least);
+        }
+
+        valid |= seen != 0 ? 1 : 0;
+        return row;
+
+        // The lanes folded in halves to 128 bits, then read from the stack.
+        static T Fold(Vector256<T> lanes, T least)
+        {
+            Vector128<T> half = Vector128.Min(lanes.GetLower(), lanes.GetUpper());
+            Span<T> held = stackalloc T[Vector128<T>.Count];
+            half.CopyTo(held);
+            foreach (T x in held)
+            {
+                least = x < least ? x : least;
+            }
+
+            return least;
+        }
     }
 
     /// <summary>The least of <paramref name="length"/> values, in four vector minimums so no step waits on the one before.</summary>
