@@ -107,4 +107,12 @@ public class AuditCompareKernelBenchmarks
         ComparisonKernels.Compare(_arena, _node, _op, _literal, _states);
         return _states[Rows - 1];
     }
+
+    /// <summary>Every row's verdict on <c>column &lt; column</c>: two columns compared row by row.</summary>
+    [Benchmark(OperationsPerInvoke = Rows)]
+    public byte Columns()
+    {
+        ComparisonKernels.CompareColumns(_arena, _node, ComparisonOp.Less, _node, _states);
+        return _states[Rows - 1];
+    }
 }
