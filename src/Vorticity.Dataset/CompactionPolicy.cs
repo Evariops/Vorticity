@@ -131,6 +131,13 @@ internal static partial class CompactionPolicy
         /// <summary>Where its tree pages are read from.</summary>
         internal IPageSource Pages => _snapshot.Pages;
 
+        /// <summary>Every entry of level <paramref name="level"/>, in key order, with the object it names, parsed once a page (<see cref="DatasetSnapshot.EntriesAsync"/>).</summary>
+        internal IAsyncEnumerable<(TreeEntry Entry, ObjectEntry Parsed)> EntriesAsync(int level, CancellationToken cancellationToken) =>
+            _snapshot.EntriesAsync(level, cancellationToken);
+
+        /// <summary>The entry <paramref name="value"/> holds, parsed once (<see cref="DatasetSnapshot.EntryOf"/>).</summary>
+        internal ObjectEntry EntryOf(ReadOnlyMemory<byte> value) => _snapshot.EntryOf(value);
+
         /// <summary>The objects its level 0 holds above its ceiling.</summary>
         internal long Lag => _snapshot.Levels.LagAtLevelZero();
 
@@ -713,9 +720,9 @@ internal static partial class CompactionPolicy
             }
 
             List<CompactionInput> level0 = [];
-            await foreach (TreeEntry entry in dataset.Levels[0].EnumerateAsync(dataset.Pages, cancellationToken).ConfigureAwait(false))
+            await foreach ((TreeEntry entry, ObjectEntry parsed) in dataset.EntriesAsync(0, cancellationToken).ConfigureAwait(false))
             {
-                level0.Add(new CompactionInput(0, entry.Key, ObjectEntry.FromBytes(entry.Value)));
+                level0.Add(new CompactionInput(0, entry.Key, parsed));
             }
 
             // Under a key, the objects that came late wait apart, within half the ceiling (LateRows).
@@ -724,7 +731,7 @@ internal static partial class CompactionPolicy
             {
                 foreach (TreeEntry entry in await dataset.Levels[level].LastAsync(dataset.Pages, 1, cancellationToken).ConfigureAwait(false))
                 {
-                    lasts.Add(ObjectEntry.FromBytes(entry.Value));
+                    lasts.Add(dataset.EntryOf(entry.Value));
                 }
             }
 
@@ -795,7 +802,7 @@ internal static partial class CompactionPolicy
             List<CompactionInput> tail = [];
             foreach (TreeEntry entry in await dataset.Levels[level].LastAsync(dataset.Pages, Window(settings), cancellationToken).ConfigureAwait(false))
             {
-                tail.Add(new CompactionInput(level, entry.Key, ObjectEntry.FromBytes(entry.Value)));
+                tail.Add(new CompactionInput(level, entry.Key, dataset.EntryOf(entry.Value)));
             }
 
             if (Neighbours(tail, level, settings, dataset.Cut) is { } small
@@ -808,9 +815,8 @@ internal static partial class CompactionPolicy
             {
                 LevelRange merged = LevelRange.Of(level, alone, dataset.Key);
                 List<CompactionInput> inputs = [.. alone];
-                await foreach (TreeEntry entry in dataset.Levels[0].EnumerateAsync(dataset.Pages, cancellationToken).ConfigureAwait(false))
+                await foreach ((TreeEntry entry, ObjectEntry held) in dataset.EntriesAsync(0, cancellationToken).ConfigureAwait(false))
                 {
-                    ObjectEntry held = ObjectEntry.FromBytes(entry.Value);
                     if (merged.Holds(entry.Key.Span, held))
                     {
                         inputs.Add(new CompactionInput(0, entry.Key, held));
@@ -975,9 +981,10 @@ internal static partial class CompactionPolicy
             await dataset.Pages.ReadPageAsync(reference, cancellationToken).ConfigureAwait(false));
         TreeEntry chosen = leaf[0];
         long most = -1;
+        ObjectSummaryFold fold = dataset.Fold;
         foreach (TreeEntry entry in leaf)
         {
-            long held = dataset.Fold.TallyOf(entry.Value.Span).Bytes;
+            long held = fold.TallyOf(entry.Value.Span).Bytes;
             if (held > most)
             {
                 most = held;
@@ -1007,7 +1014,7 @@ internal static partial class CompactionPolicy
                 .WalkAsync(dataset.Pages, 0, long.MaxValue, node => TallyOf(node).MostFragments > most, cancellationToken)
                 .ConfigureAwait(false))
             {
-                ObjectEntry entry = ObjectEntry.FromBytes(held.Entry.Value);
+                ObjectEntry entry = dataset.EntryOf(held.Entry.Value);
                 if (entry.Fragments.Count > most)
                 {
                     found.Add(new CompactionInput(level, held.Entry.Key, entry));
@@ -1274,7 +1281,7 @@ internal static partial class CompactionPolicy
                 .WalkAsync(dataset.Pages, 0, long.MaxValue, node => marking.MayBeDue(TallyOf(node)), cancellationToken)
                 .ConfigureAwait(false))
             {
-                ObjectEntry entry = ObjectEntry.FromBytes(held.Entry.Value);
+                ObjectEntry entry = dataset.EntryOf(held.Entry.Value);
                 double load = marking.Load(entry);
                 if (load >= 1 && load > most)
                 {
@@ -1367,9 +1374,12 @@ internal static partial class CompactionPolicy
             ObjectTally? tally = null;
             if (tree.Depth == 1)
             {
-                foreach (TreeEntry entry in TreePage.ReadLeaf(top))
+                // The page read in place, and the fold made once: one made an entry was a fold an object at each plan.
+                ObjectSummaryFold fold = dataset.Fold;
+                TreePage.LeafReader entries = new TreePage.LeafReader(top);
+                while (entries.TryRead(out TreeEntry entry))
                 {
-                    ObjectTally one = dataset.Fold.TallyOf(entry.Value.Span);
+                    ObjectTally one = fold.TallyOf(entry.Value.Span);
                     tally = tally is { } sum ? sum.With(one) : one;
                 }
             }
@@ -1408,10 +1418,9 @@ internal static partial class CompactionPolicy
         for (int level = 0; level < dataset.Levels.Count; level++)
         {
             List<CompactionInput> entries = [];
-            await foreach (TreeEntry entry in dataset.Levels[level]
-                .EnumerateAsync(dataset.Pages, cancellationToken).ConfigureAwait(false))
+            await foreach ((TreeEntry entry, ObjectEntry parsed) in dataset.EntriesAsync(level, cancellationToken).ConfigureAwait(false))
             {
-                entries.Add(new CompactionInput(level, entry.Key, ObjectEntry.FromBytes(entry.Value)));
+                entries.Add(new CompactionInput(level, entry.Key, parsed));
             }
 
             levels.Add(entries);

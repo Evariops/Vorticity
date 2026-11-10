@@ -27,6 +27,9 @@ internal sealed class EntryMemo
 {
     private readonly ConditionalWeakTable<byte[], Pages> _pages = [];
 
+    // The entries a reader met outside a walk of pages, by where their values lie in their arrays (OfValue).
+    private readonly ConditionalWeakTable<byte[], System.Collections.Concurrent.ConcurrentDictionary<int, ObjectEntry>> _values = [];
+
     /// <summary>
     /// The places of the entries of the leaf page <paramref name="page"/>, which holds <paramref name="count"/>; null when
     /// its bytes are not an array's, whose entries are parsed at every walk.
@@ -78,6 +81,22 @@ internal sealed class EntryMemo
 
         ObjectEntry parsed = ObjectEntry.FromBytes(value);
         return Interlocked.CompareExchange(ref slots[index], parsed, null) ?? parsed;
+    }
+
+    /// <summary>
+    /// The entry <paramref name="value"/> holds, met outside a walk of its page, as the plan of the compactions meets the
+    /// last entries of a level: parsed once for where it lies in its array, which nothing writes again; at every asking
+    /// for bytes that are not an array's.
+    /// </summary>
+    internal ObjectEntry OfValue(ReadOnlyMemory<byte> value)
+    {
+        if (!MemoryMarshal.TryGetArray(value, out ArraySegment<byte> segment) || segment.Array is not { } array)
+        {
+            return ObjectEntry.FromBytes(value);
+        }
+
+        System.Collections.Concurrent.ConcurrentDictionary<int, ObjectEntry> held = _values.GetValue(array, static _ => new());
+        return held.TryGetValue(segment.Offset, out ObjectEntry? known) ? known : held.GetOrAdd(segment.Offset, ObjectEntry.FromBytes(value));
     }
 
     /// <summary>The pages one array holds, most often one.</summary>

@@ -276,6 +276,28 @@ internal sealed class DatasetSnapshot
         return entry;
     }
 
+    /// <summary>The entry <paramref name="value"/> holds, a value of a page of the version's trees, parsed once (<see cref="EntryMemo.OfValue"/>).</summary>
+    internal ObjectEntry EntryOf(ReadOnlyMemory<byte> value) => _objects.Entries.OfValue(value);
+
+    /// <summary>
+    /// Every entry of level <paramref name="level"/>, in key order, with the object it names: parsed once a page through the
+    /// handle's memo of entries, as a walk parses them (<see cref="EntryMemo"/>), where a plan of the compactions parsed every
+    /// entry of every level again at each pass, 0.5 KB an object.
+    /// </summary>
+    internal async IAsyncEnumerable<(TreeEntry Entry, ObjectEntry Parsed)> EntriesAsync(
+        int level, [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        await foreach (PositionedLeaf leaf in Levels[level].WalkLeavesAsync(Pages, 0, long.MaxValue, null, cancellationToken).ConfigureAwait(false))
+        {
+            TreePage.LeafReader entries = new TreePage.LeafReader(leaf.Page);
+            ObjectEntry?[]? slots = _objects.Entries.SlotsOf(leaf.Page, entries.Count);
+            for (int index = 0; entries.TryRead(out TreeEntry held); index++)
+            {
+                yield return (held, EntryMemo.Of(slots, index, held.Value));
+            }
+        }
+    }
+
     // The bytes of the partition index entries a version keeps found (PartitionIndexAsync).
     private const long PartitionIndexEntriesBytes = 4L << 20;
 
