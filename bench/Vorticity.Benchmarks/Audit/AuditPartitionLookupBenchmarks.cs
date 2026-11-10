@@ -39,6 +39,13 @@ public partial class AuditPartitionLookupBenchmarks
     [Params(128, 8)]
     public int ObjectKiB { get; set; }
 
+    /// <summary>Whether the dataset is sealed, its objects read through their envelopes.</summary>
+    [Params(false, true)]
+    public bool Sealed { get; set; }
+
+    private VortexKeyring? _keyring;
+    private VortexSession? _session;
+
     /// <summary>A call: its service, instant, identifier and value.</summary>
     [VortexRecord]
     public partial record struct Row(string Service, DateTime At, long Id, double Value);
@@ -160,8 +167,18 @@ public partial class AuditPartitionLookupBenchmarks
     private async Task<VortexDataset> BuildAsync(List<long> daily)
     {
         Random random = new Random(71);
+        if (Sealed)
+        {
+            byte[] key = new byte[32];
+            Array.Fill(key, (byte)1);
+            _keyring = VortexKeyring.FromKeys(new VortexKey("bench-key", key));
+            _session = VortexSession.Create(options => options.Keyring = _keyring);
+        }
+
         VortexDataset dataset = await VortexDataset.CreateAsync(_store, Row.Schema, new DatasetOptions
         {
+            Session = _session ?? VortexSession.Default,
+            Encrypted = Sealed,
             Layout = new DatasetLayout
             {
                 Partition = LayoutValue.Column(nameof(Row.At)).Truncate(CalendarUnit.Day),
