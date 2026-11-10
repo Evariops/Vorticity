@@ -172,7 +172,7 @@ internal sealed class KeyIndexPruner
                 ? entry.BlockLength / (ulong)blockRows
                 : 1;
             if (stride == 0 || entry.BlockLength != (ulong)blockRows * unit || unit > KeyRunOptions.MostUnitBlocks
-                || !TryResolve(file.DType, entry.ColumnPath, out string path, out DType dtype)
+                || !TryResolveKept(file.DType, entry.ColumnPath, out string path, out DType dtype)
                 || !KeyRunOptions.TryParseEntry(entry.Options, out _, out bool fold))
             {
                 continue;
@@ -623,6 +623,65 @@ internal sealed class KeyIndexPruner
         return true;
     }
 
+    /// <summary>
+    /// The types a column's segments decode to, made once for the process in an arena nothing changes after: a column made
+    /// an arena of its own for three of them at every question.
+    /// </summary>
+    private static class KeyTypes
+    {
+        private static readonly DTypeArena Arena = new DTypeArena();
+
+        /// <summary>Each primitive type, non-nullable, by its <see cref="PType"/>.</summary>
+        internal static readonly DType[] Primitives = MakePrimitives();
+
+        internal static readonly DType Utf8 = Arena.Utf8(Nullability.NonNullable);
+
+        internal static readonly DType Binary = Arena.Binary(Nullability.NonNullable);
+
+        private static DType[] MakePrimitives()
+        {
+            PType[] all = Enum.GetValues<PType>();
+            int most = 0;
+            foreach (PType type in all)
+            {
+                most = Math.Max(most, (int)type);
+            }
+
+            DType[] types = new DType[most + 1];
+            foreach (PType type in all)
+            {
+                types[(int)type] = Arena.Primitive(type, Nullability.NonNullable);
+            }
+
+            return types;
+        }
+    }
+
+    // The path and type each entry's column resolves to in its file's schema, by the entry: a file's index directory, which
+    // holds its entries, is read once, where each question joined the path's names again.
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<IReadOnlyList<uint>, Resolved> s_resolved = new();
+
+    private sealed record Resolved(DType Schema, string Path, DType Type);
+
+    /// <summary><see cref="TryResolve(DType, IReadOnlyList{uint}, out string, out DType)"/>, kept for the entry's fields, which a directory holds.</summary>
+    private static bool TryResolveKept(DType schema, IReadOnlyList<uint> fields, out string path, out DType dtype)
+    {
+        if (s_resolved.TryGetValue(fields, out Resolved? kept) && kept.Schema.Equals(schema))
+        {
+            path = kept.Path;
+            dtype = kept.Type;
+            return true;
+        }
+
+        if (!TryResolve(schema, fields, out path, out dtype))
+        {
+            return false;
+        }
+
+        s_resolved.AddOrUpdate(fields, new Resolved(schema, path, dtype));
+        return true;
+    }
+
     /// <summary>The dotted path and dtype an entry's field indices name, or false when they name nothing.</summary>
     /// <param name="schema">The file's dtype.</param>
     /// <param name="fields">The entry's column path.</param>
@@ -1036,14 +1095,11 @@ internal sealed class KeyIndexPruner
             _rows = placing == Placing.Rows;
             _hashes = placing == Placing.Hashes;
             _layout = asked.Layout;
-            DTypeArena types = new DTypeArena();
             _keyType = storage.Kind == DTypeKind.Primitive
-                ? types.Primitive(storage.PType, Nullability.NonNullable)
-                : storage.Kind == DTypeKind.Utf8
-                    ? types.Utf8(Nullability.NonNullable)
-                    : types.Binary(Nullability.NonNullable);
-            _u32 = types.Primitive(PType.U32, Nullability.NonNullable);
-            _u64 = types.Primitive(PType.U64, Nullability.NonNullable);
+                ? KeyTypes.Primitives[(int)storage.PType]
+                : storage.Kind == DTypeKind.Utf8 ? KeyTypes.Utf8 : KeyTypes.Binary;
+            _u32 = KeyTypes.Primitives[(int)PType.U32];
+            _u64 = KeyTypes.Primitives[(int)PType.U64];
             Runs = runs;
             _blocks = blocks;
             _words = (blocks + 63) >> 6;
