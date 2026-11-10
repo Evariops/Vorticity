@@ -305,7 +305,11 @@ internal sealed partial class DatasetScanBuilder
     private async IAsyncEnumerable<RecordBatch> LookedUpAsync(VortexExpr lookup, [EnumeratorCancellation] CancellationToken cancellationToken)
     {
         LookupColumns(out int[]? columns);
-        List<(PositionedObject Held, Task<List<RecordBatch>?>? Found, bool Looked)> objects = [];
+        // The objects the walk keeps, in a rented array that grows by renting: a list of them grew by copies into new arrays,
+        // 160 KB a lookup over 600 objects. Until its read is chosen, an object's slot says whether its partition's index may
+        // answer for it, in place of whether it is looked up.
+        (PositionedObject Held, Task<List<RecordBatch>?>? Found, bool Looked)[] objects = ArrayPool<(PositionedObject, Task<List<RecordBatch>?>?, bool)>.Shared.Rent(64);
+        int count = 0;
         using CancellationTokenSource stopped = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         SemaphoreSlim? reading = null;
         Read[]? reads = null;
@@ -322,10 +326,16 @@ internal sealed partial class DatasetScanBuilder
             {
                 if (Covered(held) > 0)
                 {
-                    objects.Add((held, null, false));
-                    if (partitions is not null && Covered(held) == held.Entry.Rows && !held.Entry.HasDeletions && OwnColumns(held))
+                    bool indexed = partitions is not null && Covered(held) == held.Entry.Rows && !held.Entry.HasDeletions && OwnColumns(held);
+                    if (count == objects.Length)
                     {
-                        partitions.Ahead(held, stopped.Token);
+                        Grown(ref objects, count);
+                    }
+
+                    objects[count++] = (held, null, indexed);
+                    if (indexed)
+                    {
+                        partitions!.Ahead(held, stopped.Token);
                     }
                 }
             }
@@ -334,12 +344,11 @@ internal sealed partial class DatasetScanBuilder
             long ahead = 0;
 
             // How each object kept is read, and the rows it may hold while it waits for its turn; rented, given back at the end.
-            reads = System.Buffers.ArrayPool<Read>.Shared.Rent(Math.Max(objects.Count, 1));
-            for (int o = 0; o < objects.Count; o++)
+            reads = ArrayPool<Read>.Shared.Rent(Math.Max(count, 1));
+            for (int o = 0; o < count; o++)
             {
-                PositionedObject held = objects[o].Held;
-                if (partitions is not null && Covered(held) == held.Entry.Rows && !held.Entry.HasDeletions && OwnColumns(held)
-                    && await partitions.BlocksAsync(held, cancellationToken).ConfigureAwait(false) is { } located)
+                (PositionedObject held, _, bool indexed) = objects[o];
+                if (indexed && await partitions!.BlocksAsync(held, cancellationToken).ConfigureAwait(false) is { } located)
                 {
                     if (located.Blocks.Length == 0)
                     {
@@ -385,13 +394,14 @@ internal sealed partial class DatasetScanBuilder
                 kept++;
             }
 
-            objects.RemoveRange(kept, objects.Count - kept);
+            Array.Clear(objects, kept, count - kept);
+            count = kept;
 
             // Objects read as rows, two or more, read ahead together; one alone is read when its turn comes, as a scan reads it.
             if (read > 1)
             {
                 reading = new SemaphoreSlim(LookupReads);
-                for (int i = 0; i < objects.Count; i++)
+                for (int i = 0; i < count; i++)
                 {
                     if (reads[i].Kind == ReadKind.Rows)
                     {
@@ -401,7 +411,7 @@ internal sealed partial class DatasetScanBuilder
             }
 
             int started = 0;
-            for (int o = 0; o < objects.Count; o++)
+            for (int o = 0; o < count; o++)
             {
                 // The one before given, what it found let go: the scan has moved past its batches. Held to the scan's end,
                 // every object's of a user's rows over a week of S2's logs were.
@@ -418,7 +428,7 @@ internal sealed partial class DatasetScanBuilder
                 // The objects after this one started while they are within LookupsAhead of it and the rows they may hold,
                 // with those of the ones started before, within LookupRowsAhead; this one whatever it holds. Each holds what
                 // it finds until its turn.
-                for (; started < objects.Count && started <= o + LookupsAhead; started++)
+                for (; started < count && started <= o + LookupsAhead; started++)
                 {
                     if (objects[started].Found is not null || reads[started].Kind is ReadKind.Rows or ReadKind.AtTurn)
                     {
@@ -472,8 +482,9 @@ internal sealed partial class DatasetScanBuilder
                 await partitions.SettleAsync().ConfigureAwait(false);
             }
 
-            foreach ((_, Task<List<RecordBatch>?>? found, _) in objects)
+            for (int i = 0; i < count; i++)
             {
+                Task<List<RecordBatch>?>? found = objects[i].Found;
                 if (found is null)
                 {
                     continue;
@@ -494,9 +505,25 @@ internal sealed partial class DatasetScanBuilder
             reading?.Dispose();
             if (reads is not null)
             {
-                System.Buffers.ArrayPool<Read>.Shared.Return(reads, clearArray: true);
+                ArrayPool<Read>.Shared.Return(reads, clearArray: true);
             }
+
+            Array.Clear(objects, 0, count);
+            ArrayPool<(PositionedObject, Task<List<RecordBatch>?>?, bool)>.Shared.Return(objects);
         }
+    }
+
+    /// <summary>
+    /// Makes <paramref name="array"/>, rented and full to <paramref name="count"/>, one rented twice as long holding the same,
+    /// the first given back cleared.
+    /// </summary>
+    private static void Grown<T>(ref T[] array, int count)
+    {
+        T[] larger = ArrayPool<T>.Shared.Rent(2 * array.Length);
+        Array.Copy(array, larger, count);
+        Array.Clear(array, 0, count);
+        ArrayPool<T>.Shared.Return(array);
+        array = larger;
     }
 
     /// <summary>

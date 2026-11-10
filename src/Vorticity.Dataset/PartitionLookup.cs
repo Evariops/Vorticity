@@ -122,12 +122,14 @@ internal sealed class PartitionLookup
     /// <summary>The read of the index of the partition of <paramref name="held"/>, begun once.</summary>
     private Task<Partition?> LoadingAsync(PositionedObject held, CancellationToken cancellationToken)
     {
-        byte[] partition = PartitionOf(held);
+        // Found by the tree key's bytes: a key of its own is made for a partition met first alone.
+        ReadOnlySpan<byte> partition = PartitionSpan(_version, held);
         lock (_partitions)
         {
-            if (!_partitions.TryGetValue(partition, out Task<Partition?>? loading))
+            if (!_partitions.GetAlternateLookup<ReadOnlySpan<byte>>().TryGetValue(partition, out Task<Partition?>? loading))
             {
-                _partitions[partition] = loading = LoadAsync(partition, cancellationToken);
+                byte[] key = partition.ToArray();
+                _partitions[key] = loading = LoadAsync(key, cancellationToken);
             }
 
             return loading;
@@ -155,11 +157,11 @@ internal sealed class PartitionLookup
         }
     }
 
-    /// <summary>The partition <paramref name="held"/>'s rows hold, row-encoded as its tree key leads with it; empty for a dataset without one.</summary>
-    private byte[] PartitionOf(PositionedObject held) => PartitionOf(_version, held);
-
     /// <summary>The partition of <paramref name="version"/> that <paramref name="held"/>'s rows hold, row-encoded as its tree key leads with it; empty for a dataset without one.</summary>
-    internal static byte[] PartitionOf(DatasetSnapshot version, PositionedObject held)
+    internal static byte[] PartitionOf(DatasetSnapshot version, PositionedObject held) => PartitionSpan(version, held).ToArray();
+
+    /// <summary>The bytes of <paramref name="held"/>'s tree key that name its partition (<see cref="PartitionOf"/>).</summary>
+    internal static ReadOnlySpan<byte> PartitionSpan(DatasetSnapshot version, in PositionedObject held)
     {
         if (!version.Schema.Partitioned || held.TreeKey.Length <= VortexDataset.UidBytes)
         {
@@ -167,7 +169,7 @@ internal sealed class PartitionLookup
         }
 
         ReadOnlySpan<byte> key = VortexDataset.OrderOf(held.TreeKey).Span;
-        return key[..version.Schema.Tree!.PrefixLength(key, 1)].ToArray();
+        return key[..version.Schema.Tree!.PrefixLength(key, 1)];
     }
 
     /// <summary>

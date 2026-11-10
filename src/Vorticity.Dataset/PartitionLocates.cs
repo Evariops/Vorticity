@@ -114,18 +114,10 @@ internal sealed class PartitionLocates
     /// </summary>
     internal async ValueTask<IValueGranules?[]?> LocatesAsync(PositionedObject held, CancellationToken cancellationToken)
     {
-        byte[] key = PartitionLookup.PartitionOf(_version, held);
         Partition? known;
         while (true)
         {
-            Task<Partition?> load;
-            lock (_partitions)
-            {
-                if (!_partitions.TryGetValue(key, out load!))
-                {
-                    _partitions[key] = load = LoadAsync(key, cancellationToken);
-                }
-            }
+            Task<Partition?> load = LoadingAsync(held, cancellationToken);
 
             // The lanes of a question share the lookup: a load another lane's caller cancelled is not this one's failure,
             // and is begun again.
@@ -136,13 +128,7 @@ internal sealed class PartitionLocates
             }
             catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
             {
-                lock (_partitions)
-                {
-                    if (_partitions.TryGetValue(key, out Task<Partition?>? failed) && ReferenceEquals(failed, load))
-                    {
-                        _partitions.Remove(key);
-                    }
-                }
+                Forget(held, load);
             }
         }
 
@@ -171,6 +157,39 @@ internal sealed class PartitionLocates
         }
 
         return sources;
+    }
+
+    /// <summary>
+    /// The load of the index of the partition of <paramref name="held"/>, begun once: found by the tree key's bytes, a key of
+    /// its own made for a partition met first alone.
+    /// </summary>
+    private Task<Partition?> LoadingAsync(in PositionedObject held, CancellationToken cancellationToken)
+    {
+        ReadOnlySpan<byte> partition = PartitionLookup.PartitionSpan(_version, held);
+        lock (_partitions)
+        {
+            if (!_partitions.GetAlternateLookup<ReadOnlySpan<byte>>().TryGetValue(partition, out Task<Partition?>? load))
+            {
+                byte[] key = partition.ToArray();
+                _partitions[key] = load = LoadAsync(key, cancellationToken);
+            }
+
+            return load;
+        }
+    }
+
+    /// <summary>Forgets <paramref name="load"/>, the load of the partition of <paramref name="held"/>, when it is still the one begun.</summary>
+    private void Forget(in PositionedObject held, Task<Partition?> load)
+    {
+        ReadOnlySpan<byte> partition = PartitionLookup.PartitionSpan(_version, held);
+        lock (_partitions)
+        {
+            Dictionary<byte[], Task<Partition?>>.AlternateLookup<ReadOnlySpan<byte>> named = _partitions.GetAlternateLookup<ReadOnlySpan<byte>>();
+            if (named.TryGetValue(partition, out Task<Partition?>? failed) && ReferenceEquals(failed, load))
+            {
+                named.Remove(partition);
+            }
+        }
     }
 
     /// <summary>
