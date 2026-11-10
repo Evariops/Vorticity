@@ -224,8 +224,9 @@ internal sealed class SynopsisCacheReader : ISegmentReader, IIndexRegionReader
         }
 
         // The regions kept: those the disk holds fill their slots, those another reader is fetching are waited
-        // for, and this reader fetches the rest.
-        List<(int Slot, IndexSegment Region, bool Data, TaskCompletionSource Mine)> mine = [];
+        // for, and this reader fetches the rest; the list of those made at the first, a set the cache serves whole
+        // making none.
+        List<(int Slot, IndexSegment Region, bool Data, TaskCompletionSource Mine)>? mine = null;
         List<(int Slot, IndexSegment Region, bool Data, Task Theirs)>? waited = null;
         try
         {
@@ -249,7 +250,7 @@ internal sealed class SynopsisCacheReader : ISegmentReader, IIndexRegionReader
                 }
                 else if (TryBeginRead(region, data, out TaskCompletionSource? reading, out Task? theirs))
                 {
-                    mine.Add((slot, region, data, reading!));
+                    (mine ??= []).Add((slot, region, data, reading!));
                 }
                 else
                 {
@@ -260,11 +261,14 @@ internal sealed class SynopsisCacheReader : ISegmentReader, IIndexRegionReader
             if (waited is null)
             {
                 await _inner.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
-                Release(mine, requests, null);
+                if (mine is not null)
+                {
+                    Release(mine, requests, null);
+                }
             }
             else
             {
-                await ReadBesideAsync(requests, waited, mine, cancellationToken).ConfigureAwait(false);
+                await ReadBesideAsync(requests, waited, mine ??= [], cancellationToken).ConfigureAwait(false);
             }
         }
         catch
@@ -274,9 +278,12 @@ internal sealed class SynopsisCacheReader : ISegmentReader, IIndexRegionReader
         }
         finally
         {
-            foreach ((_, IndexSegment region, bool data, TaskCompletionSource reading) in mine)
+            if (mine is not null)
             {
-                EndRead(region, data, reading);
+                foreach ((_, IndexSegment region, bool data, TaskCompletionSource reading) in mine)
+                {
+                    EndRead(region, data, reading);
+                }
             }
         }
     }
