@@ -3,6 +3,7 @@ using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.Arm;
 using System.Runtime.Intrinsics.X86;
 
 using Vorticity.Arrays.Decoders.Canonical;
@@ -30,6 +31,56 @@ namespace Vorticity.Compute;
 /// </remarks>
 internal static class RowIndices
 {
+    /// <summary>
+    /// For each mask of eight rows, the permutation of their lanes that puts the kept ones first, eight lane numbers a
+    /// mask: <see cref="FromStates"/>'s left-pack where there is no compress, 8 KB once.
+    /// </summary>
+    private static readonly int[] Pack8 = BuildPack8();
+
+    /// <summary>For each mask of four rows, the byte shuffle of four 32-bit lanes that puts the kept ones first: 256 bytes.</summary>
+    private static readonly byte[] Pack4 = BuildPack4();
+
+    private static int[] BuildPack8()
+    {
+        int[] table = new int[256 * 8];
+        for (int mask = 0; mask < 256; mask++)
+        {
+            int kept = 0;
+            for (int lane = 0; lane < 8; lane++)
+            {
+                if (((mask >> lane) & 1) != 0)
+                {
+                    table[(mask * 8) + kept++] = lane;
+                }
+            }
+        }
+
+        return table;
+    }
+
+    private static byte[] BuildPack4()
+    {
+        byte[] table = new byte[16 * 16];
+        for (int mask = 0; mask < 16; mask++)
+        {
+            int kept = 0;
+            for (int lane = 0; lane < 4; lane++)
+            {
+                if (((mask >> lane) & 1) != 0)
+                {
+                    for (int b = 0; b < 4; b++)
+                    {
+                        table[(mask * 16) + (kept * 4) + b] = (byte)((lane * 4) + b);
+                    }
+
+                    kept++;
+                }
+            }
+        }
+
+        return table;
+    }
+
     /// <summary>The rows whose state is <see cref="Trilean.True"/>.</summary>
     /// <param name="states">One state per row.</param>
     /// <param name="indices">Room for every row, selected or not: each is written before it is kept.</param>
@@ -58,6 +109,56 @@ internal static class RowIndices
                 Avx512F.Compress(Vector512<int>.Zero, keep, next).StoreUnsafe(ref into, (nuint)count);
                 count += BitOperations.PopCount(keep.ExtractMostSignificantBits());
                 next += step;
+            }
+        }
+        else if (Avx2.IsSupported)
+        {
+            // No compress: a left-pack, eight rows' mask choosing the permutation of their indices that puts the kept
+            // ones first (Pack8), stored whole as the compress is, the lanes past the kept ones written over next.
+            Vector128<byte> selected = Vector128.Create(Trilean.True);
+            Vector256<int> sequence = Vector256.CreateSequence(0, 1);
+            Vector256<int> eight = Vector256.Create(8);
+            ref int table = ref MemoryMarshal.GetArrayDataReference(Pack8);
+            for (; row <= rows - 16; row += 16)
+            {
+                uint mask = Vector128.Equals(Vector128.LoadUnsafe(ref from, (nuint)row), selected).ExtractMostSignificantBits();
+                if (mask == 0)
+                {
+                    continue;
+                }
+
+                Vector256<int> low = sequence + Vector256.Create(row);
+                uint first = mask & 0xFF;
+                uint second = mask >> 8;
+                Avx2.PermuteVar8x32(low, Vector256.LoadUnsafe(ref table, first * 8)).StoreUnsafe(ref into, (nuint)count);
+                count += BitOperations.PopCount(first);
+                Avx2.PermuteVar8x32(low + eight, Vector256.LoadUnsafe(ref table, second * 8)).StoreUnsafe(ref into, (nuint)count);
+                count += BitOperations.PopCount(second);
+            }
+        }
+        else if (WordBytes.IsAccelerated128)
+        {
+            // The same four rows at a time, a byte shuffle of their indices (Pack4): pshufb on x64, tbl on ARM64.
+            Vector128<byte> selected = Vector128.Create(Trilean.True);
+            Vector128<int> sequence = Vector128.CreateSequence(0, 1);
+            ref byte table = ref MemoryMarshal.GetArrayDataReference(Pack4);
+            for (; row <= rows - 16; row += 16)
+            {
+                uint mask = Vector128.Equals(Vector128.LoadUnsafe(ref from, (nuint)row), selected).ExtractMostSignificantBits();
+                for (int group = 0; mask != 0; group += 4, mask >>= 4)
+                {
+                    uint four = mask & 0xF;
+                    if (four == 0)
+                    {
+                        continue;
+                    }
+
+                    Vector128<byte> lanes = (sequence + Vector128.Create(row + group)).AsByte();
+                    Vector128<byte> order = Vector128.LoadUnsafe(ref table, four * 16);
+                    Vector128<byte> packed = Ssse3.IsSupported ? Ssse3.Shuffle(lanes, order) : AdvSimd.Arm64.VectorTableLookup(lanes, order);
+                    packed.AsInt32().StoreUnsafe(ref into, (nuint)count);
+                    count += BitOperations.PopCount(four);
+                }
             }
         }
 
