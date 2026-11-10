@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics.X86;
 using Vorticity.Aggregating;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
@@ -55,6 +56,9 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
 
     /// <summary>The values hashed together, a fixed-width column's.</summary>
     private const int HashBatch = 64;
+
+    // The slots past which the table outgrows the second cache (512 KiB of slots): a batch's slots are fetched ahead.
+    private const int PrefetchSlots = 1 << 15;
 
     /// <summary>
     /// The bits of a slot's word its rows take, some 10^12 of them; the number of its value, in the order the values were
@@ -446,6 +450,13 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
                 }
             }
 
+            // A table past the second cache: the batch's slots fetched ahead of their probes, whose misses then overlap
+            // rather than wait one after the other.
+            if (_slots is { Length: >= PrefetchSlots } table)
+            {
+                Prefetch(table, hashes[..(stop - from)]);
+            }
+
             if (_slots is null && allValid)
             {
                 // The counts gone, every hash raises its register and nothing more.
@@ -733,6 +744,24 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
         }
 
         return slot;
+    }
+
+    /// <summary>Asks the caches for the slot each of <paramref name="hashes"/> probes first.</summary>
+    private static unsafe void Prefetch(Slot[] table, ReadOnlySpan<ulong> hashes)
+    {
+        if (!Sse.IsSupported)
+        {
+            return;
+        }
+
+        ulong mask = (ulong)table.Length - 1;
+        fixed (Slot* slots = table)
+        {
+            foreach (ulong hash in hashes)
+            {
+                Sse.Prefetch0(slots + (KeyHash.Mix(hash) & mask));
+            }
+        }
     }
 
     /// <summary>The slot of <paramref name="hash"/>, which the counts hold.</summary>
