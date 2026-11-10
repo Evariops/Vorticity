@@ -61,6 +61,17 @@ internal readonly struct WordBytes
         }
     }
 
+    /// <summary>
+    /// A byte per bit of the sixteen bits <paramref name="bits"/>: all ones where the bit is clear, zero where it is set, as a
+    /// select mask (<see cref="Clear"/>, sixteen rows at a time; <see cref="IsAccelerated128"/>).
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static Vector128<byte> Clear128(ushort bits) =>
+        Vector128.Equals(
+            Spread128(bits, Vector128.Create((byte)0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1))
+                & Vector128.Create((byte)1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128),
+            Vector128<byte>.Zero);
+
     /// <summary>Byte <c>j</c> of the result the byte of <paramref name="bits"/> holding bit <c>j</c>, by <paramref name="index"/>.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static Vector128<byte> Spread128(ushort bits, Vector128<byte> index)

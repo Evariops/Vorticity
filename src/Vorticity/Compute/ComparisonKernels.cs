@@ -726,6 +726,26 @@ internal static partial class ComparisonKernels
                     .StoreUnsafe(ref into, (nuint)i);
             }
         }
+        else if (WordBytes.IsAccelerated128)
+        {
+            // The same, sixteen rows a shuffle: a row a bit test and a branch otherwise.
+            Vector128<byte> unknown = Vector128.Create(Trilean.Unknown);
+            ref byte into = ref MemoryMarshal.GetReference(destination);
+            for (; i <= destination.Length - 64; i += 64)
+            {
+                ulong word = BitWords.Load(validity, offset + i);
+                if (word == ulong.MaxValue)
+                {
+                    continue;
+                }
+
+                for (int k = 0; k < 64; k += 16)
+                {
+                    Vector128.ConditionalSelect(WordBytes.Clear128((ushort)(word >> k)), unknown, Vector128.LoadUnsafe(ref into, (nuint)(i + k)))
+                        .StoreUnsafe(ref into, (nuint)(i + k));
+                }
+            }
+        }
 
         for (; i < destination.Length; i++)
         {
@@ -764,6 +784,21 @@ internal static partial class ComparisonKernels
             {
                 ulong word = BitWords.Load(bits, offset + i);
                 Vector512.ConditionalSelect(spread.Clear(word), clear, set).StoreUnsafe(ref into, (nuint)i);
+            }
+        }
+        else if (WordBytes.IsAccelerated128)
+        {
+            // The same, sixteen rows a shuffle, where the bytes below took eight selects a byte of the bitmap.
+            Vector128<byte> clear = Vector128.Create(whenFalse);
+            Vector128<byte> set = Vector128.Create(whenTrue);
+            ref byte into = ref MemoryMarshal.GetReference(destination);
+            for (; i <= destination.Length - 64; i += 64)
+            {
+                ulong word = BitWords.Load(bits, offset + i);
+                for (int k = 0; k < 64; k += 16)
+                {
+                    Vector128.ConditionalSelect(WordBytes.Clear128((ushort)(word >> k)), clear, set).StoreUnsafe(ref into, (nuint)(i + k));
+                }
             }
         }
 
