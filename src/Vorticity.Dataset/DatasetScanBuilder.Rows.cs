@@ -186,6 +186,26 @@ internal sealed partial class DatasetScanBuilder
     /// </summary>
     private bool LookupColumns(out int[]? columns)
     {
+        // Worked out once a builder: it depends on the projection, the filter and the schema alone, and LooksUp asks it of
+        // every object, an array, a set and the filter's fields each time.
+        if (_lookupColumns is { } known && ReferenceEquals(known.Filter, _filter))
+        {
+            columns = known.Columns;
+            return known.Holds;
+        }
+
+        bool holds = LookupColumnsOnce(out columns);
+        _lookupColumns = new LookupColumnsFound(holds, columns, _filter);
+        return holds;
+    }
+
+    // What LookupColumns found, and the filter it found it of: one reference, so a reader beside the writer sees all of it.
+    private LookupColumnsFound? _lookupColumns;
+
+    private sealed record LookupColumnsFound(bool Holds, int[]? Columns, VortexExpr? Filter);
+
+    private bool LookupColumnsOnce(out int[]? columns)
+    {
         columns = null;
         if (_mask is not { IsAll: false } mask)
         {
@@ -1136,8 +1156,10 @@ internal sealed partial class DatasetScanBuilder
             return null;
         }
 
+        // The scan's own filter's columns are its pruner's, made once; another filter's are collected here.
         List<int> fields = [];
-        foreach (string path in new SummaryPruner(filter).Paths)
+        IReadOnlyList<string> paths = ReferenceEquals(filter, _filter) && Pruner() is { } own ? own.Paths : new SummaryPruner(filter).Paths;
+        foreach (string path in paths)
         {
             if (path.Contains('.', StringComparison.Ordinal) || schema.IndexOfField(path) is not (int field and >= 0))
             {
