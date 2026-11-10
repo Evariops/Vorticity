@@ -25,8 +25,16 @@ namespace Vorticity.Dataset;
 /// </remarks>
 internal sealed class ObjectCache : IAsyncDisposable
 {
+    /// <summary>
+    /// What an open object keeps besides the tail it read, per byte of its footer: its layout, types, statistics and zone
+    /// maps, parsed as questions ask them. Measured at 5 to 7 (2026-11-10): 14.2 KB for a footer of 2.9 KB, 27 KB for one
+    /// of 3.9 KB.
+    /// </summary>
+    internal const int ParsedPerFooterByte = 6;
+
     private readonly IObjectStore _store;
     private readonly int _capacity;
+    private readonly long _byteCapacity;
     private readonly VortexSession _session;
     private readonly Lock _gate = new Lock();
     private readonly Dictionary<string, Held> _open = new Dictionary<string, Held>(StringComparer.Ordinal);
@@ -35,13 +43,28 @@ internal sealed class ObjectCache : IAsyncDisposable
     private Held? _idleOldest;
     private Held? _idleNewest;
     private int _idleCount;
+    // What the open objects weigh (Held.Weight), leased or idle.
+    private long _heldBytes;
     private bool _disposed;
 
-    internal ObjectCache(IObjectStore store, int capacity, VortexSession? session = null)
+    internal ObjectCache(IObjectStore store, int capacity, VortexSession? session = null, long byteCapacity = long.MaxValue)
     {
         _store = store;
         _capacity = Math.Max(1, capacity);
+        _byteCapacity = Math.Max(0, byteCapacity);
         _session = session ?? VortexSession.Default;
+    }
+
+    /// <summary>What the open objects weigh, leased or idle (<see cref="Held.Weight"/>).</summary>
+    internal long HeldBytes
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _heldBytes;
+            }
+        }
     }
 
     /// <summary>
@@ -168,6 +191,7 @@ internal sealed class ObjectCache : IAsyncDisposable
                 // No eviction here, only at a return: a walk that rents the objects in the same
                 // order every time would close, at each open, the idle object it rents next.
                 _open[handle] = held;
+                _heldBytes += held.Weight;
             }
         }
 
@@ -223,7 +247,10 @@ internal sealed class ObjectCache : IAsyncDisposable
                 : source;
             VortexFile file = await VortexFile.OpenAsync(SessionReader.Wrap(read, _session), OpenOptionsOf(entry, fragments), cancellationToken).ConfigureAwait(false);
             file.Session = _session;
-            return new Held(file, source, handle) { Leases = 1, FragmentRefusals = refused };
+
+            // What it keeps while open: the tail it read, and what it parses of its footer (ParsedPerFooterByte).
+            long weight = file.RetainedTailBytes + ((long)ParsedPerFooterByte * file.FooterBytes);
+            return new Held(file, source, handle) { Leases = 1, FragmentRefusals = refused, Weight = weight };
         }
         catch
         {
@@ -338,6 +365,7 @@ internal sealed class ObjectCache : IAsyncDisposable
             _idleOldest = null;
             _idleNewest = null;
             _idleCount = 0;
+            _heldBytes = 0;
         }
 
         await CloseAsync(open).ConfigureAwait(false);
@@ -383,18 +411,19 @@ internal sealed class ObjectCache : IAsyncDisposable
     }
 
     /// <summary>
-    /// Takes idle objects out, oldest first, until the cache is within its capacity, under the gate:
-    /// those to close, which the caller closes once it has let the gate go; null for none. A cache full
-    /// of leased objects stays over capacity rather than close a file someone is reading: the capacity
-    /// is a target, and making it a hard limit would trade bounded memory for unbounded latency.
+    /// Takes idle objects out, oldest first, until the cache is within its capacity, in objects and in bytes, under the
+    /// gate: those to close, which the caller closes once it has let the gate go; null for none. A cache full of leased
+    /// objects stays over capacity rather than close a file someone is reading: the capacity is a target, and making it a
+    /// hard limit would trade bounded memory for unbounded latency.
     /// </summary>
     private List<Held>? Evict()
     {
         List<Held>? closing = null;
-        while (_open.Count > _capacity && _idleOldest is { } oldest)
+        while ((_open.Count > _capacity || _heldBytes > _byteCapacity) && _idleOldest is { } oldest)
         {
             Unidle(oldest);
             _open.Remove(oldest.Handle);
+            _heldBytes -= oldest.Weight;
             oldest.Gone = true;
             (closing ??= []).Add(oldest);
         }
@@ -441,6 +470,9 @@ internal sealed class ObjectCache : IAsyncDisposable
         internal bool Gone { get; set; }
 
         internal IReadOnlyList<string> FragmentRefusals { get; init; } = [];
+
+        /// <summary>What it keeps while open, as the cache bounds it: the tail its open read, and its footer parsed (<see cref="ParsedPerFooterByte"/>).</summary>
+        internal long Weight { get; init; }
     }
 }
 

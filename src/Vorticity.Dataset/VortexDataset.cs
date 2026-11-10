@@ -63,7 +63,7 @@ public sealed class VortexDataset : IAsyncDisposable
     {
         _store = store;
         _options = options;
-        _objects = new ObjectCache(store, options.MaxOpenObjects, options.Session);
+        _objects = new ObjectCache(store, options.MaxOpenObjects, options.Session, options.MaxOpenObjectBytes);
         _pageCache = new PageCache(options.PageCacheBytes);
         _snapshot = new DatasetSnapshot(commit, PagesOf(version, commit), _objects, knownAt, Costs);
     }
@@ -133,6 +133,9 @@ public sealed class VortexDataset : IAsyncDisposable
 
     /// <summary>How many of its open objects a read holds: none once every read has given its objects back.</summary>
     internal int LeasedObjects => _objects.Leased;
+
+    /// <summary>What the objects open between scans weigh, as <see cref="DatasetOptions.MaxOpenObjectBytes"/> bounds them.</summary>
+    internal long OpenObjectBytes => _objects.HeldBytes;
 
     /// <summary>Its levels, where level 0 is the one an append lands in.</summary>
     internal DatasetLevels Levels => Snapshot.Levels;

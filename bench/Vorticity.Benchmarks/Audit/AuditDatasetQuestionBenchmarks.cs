@@ -34,6 +34,10 @@ public partial class AuditDatasetQuestionBenchmarks
     [Params("small", "sealed")]
     public string Shape { get; set; } = "small";
 
+    /// <summary>The objects that stay open between questions: the default, 32, or every one.</summary>
+    [Params(32, 4_096)]
+    public int MaxOpen { get; set; } = 32;
+
     /// <summary>An event: its instant and key, rising; its service; its value.</summary>
     [VortexRecord]
     public partial record struct Event(DateTime At, long Key, string Service, double Value);
@@ -56,7 +60,12 @@ public partial class AuditDatasetQuestionBenchmarks
             counted += held.Entry.Contents is { Counts.Count: > 0 } ? 1 : 0;
         }
 
-        Console.WriteLine($"// {Shape}: {objects} objects, {counted} with counts; group by all {GroupByAll()}, group by {GroupBy()}, range {GroupByRange()}, count {Count()}");
+        // What the objects a question opens keep while they stay open: the heap after a full collection, before and after.
+        long before = GC.GetTotalMemory(forceFullCollection: true);
+        long answers = GroupByAll() + GroupBy() + GroupByRange() + Count();
+        long after = GC.GetTotalMemory(forceFullCollection: true);
+        Console.WriteLine($"// {Shape}, {MaxOpen} open: {objects} objects, {counted} with counts; answers {answers}; "
+            + $"held after the questions {(after - before) / 1024.0:F0} KB, {(after - before) / (double)Math.Min(objects, MaxOpen) / 1024.0:F1} KB an open object");
     }
 
     /// <summary>Disposes the dataset and its store.</summary>
@@ -110,11 +119,13 @@ public partial class AuditDatasetQuestionBenchmarks
                 },
                 ContentsObjectBytes = 0,
                 SheetObjectBytes = 0,
+                MaxOpenObjects = MaxOpen,
             }
             : new DatasetOptions
             {
                 Seed = 0xA0D1_7004_5EED,
                 Layout = new DatasetLayout { SortKey = [LayoutValue.Column(nameof(Event.Key))] },
+                MaxOpenObjects = MaxOpen,
             };
 
         VortexDataset dataset = await VortexDataset.CreateAsync(_store, Event.Schema, options).ConfigureAwait(false);

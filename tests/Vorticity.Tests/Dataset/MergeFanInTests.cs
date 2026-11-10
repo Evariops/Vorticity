@@ -168,7 +168,7 @@ public sealed class MergeFanInTests
         CancellationToken ct = TestContext.Current.CancellationToken;
         DTypeArena types = new DTypeArena();
         DType schema = Schema(types);
-        DatasetOptions options = Clustered();
+        DatasetOptions options = Clustered() with { MaxOpenObjects = Objects / 2 };
 
         await using MemoryObjectStore store = new MemoryObjectStore();
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, options, ct);
@@ -183,6 +183,49 @@ public sealed class MergeFanInTests
 
         Assert.Equal(Objects, metrics.ObjectsOpened);
         Assert.Equal(options.MaxOpenObjects, metrics.CacheHits);
+    }
+
+    // The objects kept open between scans are bounded in bytes too: what they keep, their tails and parsed footers. Under a
+    // budget of a quarter of what all of them weigh, a walk again finds a quarter of them open or fewer, and the cache weighs
+    // no more than its budget once the walk gave them back; under a budget of nothing, none.
+    [Theory]
+    [InlineData(4)]
+    [InlineData(0)]
+    public async Task TheObjectsKeptOpenWeighNoMoreThanTheirBudget(int quarters)
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        DTypeArena types = new DTypeArena();
+        DType schema = Schema(types);
+
+        // What every object weighs open, found under no bound.
+        long whole;
+        await using (MemoryObjectStore measured = new MemoryObjectStore())
+        await using (VortexDataset all = await VortexDataset.CreateAsync(measured, schema, Clustered(), ct))
+        {
+            for (int residue = 0; residue < Objects; residue++)
+            {
+                await all.AppendAsync(Batches(types, schema, residue), ct);
+            }
+
+            Assert.Equal(Objects * PerObject, await WalkAsync(all.ScanBuilder(), ct));
+            whole = all.OpenObjectBytes;
+            Assert.True(whole > 0);
+        }
+
+        long budget = whole * quarters / 16;
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered() with { MaxOpenObjectBytes = budget }, ct);
+        for (int residue = 0; residue < Objects; residue++)
+        {
+            await dataset.AppendAsync(Batches(types, schema, residue), ct);
+        }
+
+        Assert.Equal(Objects * PerObject, await WalkAsync(dataset.ScanBuilder(), ct));
+        Assert.True(dataset.OpenObjectBytes <= budget, $"{dataset.OpenObjectBytes} bytes held open over a budget of {budget}");
+
+        DatasetScanCounters metrics = new DatasetScanCounters();
+        Assert.Equal(Objects * PerObject, await WalkAsync(dataset.ScanBuilder().WithMetrics(metrics), ct));
+        Assert.InRange(metrics.CacheHits, quarters == 0 ? 0 : 1, quarters * Objects / 16);
     }
 
     // Each object is smaller than the window an open reads at its end, so the open reads it whole
