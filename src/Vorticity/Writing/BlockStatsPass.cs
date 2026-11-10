@@ -2478,15 +2478,8 @@ internal static class BlockStatsPass
         ValidityMask mask = ValidityMask.From(arena, node.Validity);
         if (!mask.AllValid)
         {
-            int nulls = 0;
-            for (int i = 0; i < count; i++)
-            {
-                if (!mask.IsValid(start + i))
-                {
-                    nulls++;
-                }
-            }
-
+            // Counted a word of the bitmap at a time, where a test of each row's bit took a call a row.
+            int nulls = mask.AllInvalid ? count : count - BitmapKernels.CountSet(mask.Bits, mask.BitOffset + start, count);
             widths[0] += nulls;
             widths[BitPackWidths.ZigZagOffset] += nulls;
         }
