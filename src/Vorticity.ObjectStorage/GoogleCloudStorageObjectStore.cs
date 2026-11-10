@@ -56,6 +56,7 @@ public sealed partial class GoogleCloudStorageObjectStore : IObjectStore, IUploa
     private readonly string _base;
     private readonly string _bucketPath;
     private readonly string _jsonObjects;
+    private readonly BearerHeaders _bearers = new BearerHeaders();
     private int _disposed;
 
     /// <summary>A store over <see cref="GoogleCloudStorageOptions.Bucket"/>.</summary>
@@ -727,7 +728,7 @@ public sealed partial class GoogleCloudStorageObjectStore : IObjectStore, IUploa
 
         if (token is not null)
         {
-            request.Headers.TryAddWithoutValidation("Authorization", "Bearer " + token);
+            request.Headers.TryAddWithoutValidation("Authorization", _bearers.Of(token));
         }
 
         return request;

@@ -38,6 +38,7 @@ public sealed partial class AzureBlobObjectStore : IObjectStore, IUploadService
     private readonly AzureBlobStoreOptions _options;
     private readonly AzureAuthorizer _authorizer;
     private readonly HttpTransport _transport;
+    private readonly BearerHeaders _bearers = new BearerHeaders();
     private readonly UploadLimits _limits;
     private readonly ServiceClock _clock;
     private readonly string _base;
@@ -365,7 +366,7 @@ public sealed partial class AzureBlobObjectStore : IObjectStore, IUploadService
 
         if (authorization.Bearer is { } token)
         {
-            request.Headers.TryAddWithoutValidation("Authorization", "Bearer " + token);
+            request.Headers.TryAddWithoutValidation("Authorization", _bearers.Of(token));
         }
         else if (authorization.Key is { } accountKey)
         {
