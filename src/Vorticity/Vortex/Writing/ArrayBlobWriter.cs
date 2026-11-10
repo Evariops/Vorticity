@@ -1858,47 +1858,12 @@ internal static class ArrayBlobWriter
     /// other index arrays are one a patch or a dictionary entry. The host is little-endian, which
     /// the writer checks once at start-up, so the indices are written as the typed words they are.
     /// </remarks>
-    private static void WriteIndices(ReadOnlySpan<int> values, int width, Span<byte> destination)
+    internal static void WriteIndices(ReadOnlySpan<int> values, int width, Span<byte> destination)
     {
-        switch (width)
-        {
-            case 1:
-            {
-                Span<byte> into = destination[..values.Length];
-                for (int i = 0; i < into.Length; i++)
-                {
-                    into[i] = (byte)values[i];
-                }
-
-                break;
-            }
-
-            case 2:
-            {
-                Span<ushort> into = MemoryMarshal.Cast<byte, ushort>(destination)[..values.Length];
-                for (int i = 0; i < into.Length; i++)
-                {
-                    into[i] = (ushort)values[i];
-                }
-
-                break;
-            }
-
-            case 8:
-            {
-                Span<ulong> into = MemoryMarshal.Cast<byte, ulong>(destination)[..values.Length];
-                for (int i = 0; i < into.Length; i++)
-                {
-                    into[i] = (uint)values[i];
-                }
-
-                break;
-            }
-
-            default:
-                MemoryMarshal.AsBytes(values).CopyTo(destination);
-                break;
-        }
+        // Indices are never negative: truncated to a narrower signed type, or widened, they keep their bits, a register at
+        // a time where the vector narrowing covers the pair.
+        PType to = width switch { 1 => PType.I8, 2 => PType.I16, 4 => PType.I32, _ => PType.I64 };
+        Compute.IntegerNarrowing.Truncate(values, to, destination);
     }
 
     /// <summary>Writes indices at <paramref name="ptype"/>'s width as a raw primitive node, in a rental the blob hands back.</summary>
