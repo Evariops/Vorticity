@@ -616,6 +616,40 @@ public sealed class SortedRunsCursorTests
         Assert.All(refused, r => Assert.Contains("has no vorticity.dict.probe.v1 entry", r, StringComparison.Ordinal));
     }
 
+    /// <summary>
+    /// A distinct walk the dictionaries serve opens with its column's chunks read a batch at a time: the twelve chunks in a
+    /// read or two, where a read awaited for each chunk was twelve round trips, one after another.
+    /// </summary>
+    [Fact]
+    public async Task ADictionaryWalkOpensWithItsChunksReadTogether()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Decoders.EnsureRegistered();
+        ReadsCounted? counted = null;
+        await using Written written = await Written.CreateAsync(IndexSpec.Auto, source => counted = new ReadsCounted(source));
+        int served = 0;
+        foreach (string column in (string[])[.. Names, "label"])
+        {
+            KeyPlan plan = await written.File.Keys(column).Distinct().WithSource(KeySourceKind.Dictionary).ExplainAsync(ct);
+            if (plan.Source != KeySourceKind.Dictionary)
+            {
+                continue;
+            }
+
+            long before = counted!.Sets;
+            await using (KeyCursor cursor = await written.File.Keys(column).Distinct().WithSource(KeySourceKind.Dictionary).OpenAsync(ct))
+            {
+                Assert.True(await cursor.SeekFirstAsync(ct));
+            }
+
+            long sets = counted.Sets - before;
+            Assert.True(sets <= 2, $"{column}: {sets} reads one after another over its {Rows / Block} chunks");
+            served++;
+        }
+
+        Assert.True(served >= 2, $"{served} columns served by their dictionaries");
+    }
+
     [Fact]
     public async Task ADistinctWalkOverPostingsReadsNoDataSegment()
     {
@@ -1180,6 +1214,36 @@ public sealed class SortedRunsCursorTests
     }
 
     // ------------------------------------------------------------------------------ the file
+
+    /// <summary>A source that counts the sets of reads asked of it, each a round trip its asker waits for.</summary>
+    private sealed class ReadsCounted(ISegmentReader inner) : ISegmentReader
+    {
+        private long _sets;
+
+        internal long Sets => Interlocked.Read(ref _sets);
+
+        public ValueTask<long> GetLengthAsync(CancellationToken cancellationToken) => inner.GetLengthAsync(cancellationToken);
+
+        public ValueTask<SegmentOwner> ReadAsync(SegmentSpec spec, CancellationToken cancellationToken)
+        {
+            Interlocked.Increment(ref _sets);
+            return inner.ReadAsync(spec, cancellationToken);
+        }
+
+        public ValueTask ReadManyAsync(SegmentRequestSet requests, CancellationToken cancellationToken)
+        {
+            Interlocked.Increment(ref _sets);
+            return inner.ReadManyAsync(requests, cancellationToken);
+        }
+
+        public ValueTask<SegmentOwner> ReadRangeAsync(long offset, int length, int alignment, CancellationToken cancellationToken)
+        {
+            Interlocked.Increment(ref _sets);
+            return inner.ReadRangeAsync(offset, length, alignment, cancellationToken);
+        }
+
+        public ValueTask DisposeAsync() => inner.DisposeAsync();
+    }
 
     private sealed class Written : IAsyncDisposable
     {
