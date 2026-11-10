@@ -1766,7 +1766,7 @@ internal sealed class GranuleAnswer
             return AddRuns(granule, rows, varying, columns, runs[byRuns]!, _runKeys[byRuns], states);
         }
 
-        return AddValues(granule, rows, varying, columns, states, judging);
+        return AddValues(granule, rows, varying, columns, states, judging, whole);
     }
 
     /// <summary>
@@ -1775,10 +1775,19 @@ internal sealed class GranuleAnswer
     /// the value's; false when the filter is not proven over one. Apart from <see cref="SettleGranule"/>, whose frame its
     /// summaries and literals would widen, which the JIT zeroes at every call.
     /// </summary>
+    /// <remarks>
+    /// A filter proven over the granule (<paramref name="provenWhole"/>) selects every row of it, each value's among them:
+    /// they are not judged again. Judged again, each pod of a route over 312 granules took 62 % of the question.
+    /// </remarks>
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
-    private bool AddValues(int granule, long rows, int varying, GranuleColumn[] columns, GranuleStateRows states, Judging? judging)
+    private bool AddValues(int granule, long rows, int varying, GranuleColumn[] columns, GranuleStateRows states, Judging? judging, bool provenWhole)
     {
         GranuleColumn x = columns[varying];
+        if (provenWhole)
+        {
+            judging = null;
+        }
+
         List<ColumnSummary>? judged = judging?.Judged;
         int at = judged is null ? -1 : IndexOf(judged, judged.Count, x.Path);
         int[] keyPlaces = Placed.Keys;
