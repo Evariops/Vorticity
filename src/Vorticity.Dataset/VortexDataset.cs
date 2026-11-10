@@ -4093,13 +4093,14 @@ public sealed class VortexDataset : IAsyncDisposable
 
         // Read out of the chunks the sink still holds, before the put: the entry's bounds and the
         // smallest key its leaf is ordered by then cost no request at all. An object that went to the
-        // store as it was written is read from there once put, its footer in a request or two: an object
-        // past the part threshold took a request a part anyway. Should that read fail, the object is
-        // left unnamed, as an abandoned job's are, for a vacuum to take.
+        // store as it was written is read out of the tail its sink kept, or, when its description reads
+        // before the tail, from the store once put, its footer in a request or two. Should that read
+        // fail, the object is left unnamed, as an abandoned job's are, for a vacuum to take.
         ObjectSummaries summaries;
         byte[] prefix;
         byte[] last;
         bool streamed = draft.Sink.IsStreamed;
+        bool described = !streamed;
         try
         {
             if (!streamed)
@@ -4110,6 +4111,20 @@ public sealed class VortexDataset : IAsyncDisposable
             else
             {
                 (summaries, prefix, last) = (ObjectSummaries.Empty, [], []);
+
+                // A streamed object's tail, which the sink kept: its statistics are read out of it, with no request, unless
+                // its description reads before it, a key's bounds read from its rows.
+                if (draft.Sink.Tail(_options.Session.Options.EnginePool) is { } kept)
+                {
+                    try
+                    {
+                        (summaries, prefix, last) = await DescribeAsync(kept, firstRow, draft, cancellationToken).ConfigureAwait(false);
+                        described = true;
+                    }
+                    catch (Exception missed) when (Missed(missed))
+                    {
+                    }
+                }
             }
 
             if (await draft.Sink.CommitAsync(cancellationToken).ConfigureAwait(false) != PutOutcome.Created)
@@ -4126,7 +4141,7 @@ public sealed class VortexDataset : IAsyncDisposable
 
         // What the store holds, sealed bytes included: what a head reports, and verification checks.
         long bytes = draft.Sink.StoredLength;
-        if (streamed)
+        if (!described)
         {
             ISegmentReader stored = await SealedObjectStore.OpenDataAsync(_store, draft.Key, Uid(draft.Identity), bytes, cancellationToken).ConfigureAwait(false);
             (summaries, prefix, last) = await DescribeAsync(stored, firstRow, draft, cancellationToken, draft.Writer.TailBytes).ConfigureAwait(false);
@@ -4137,6 +4152,20 @@ public sealed class VortexDataset : IAsyncDisposable
             .WithLastKey(last)
             .WithArrival(draft.Arrival > 0 ? draft.Arrival : Math.Max(_options.TimeProvider.GetUtcNow().ToUnixTimeSeconds(), 1));
         return new WrittenObject(entry, KeyOf(prefix, entry), draft.Writer.DataBytes, draft.StartedAt, draft.KeyGeneration);
+    }
+
+    /// <summary>Whether <paramref name="failure"/> is a read before a streamed object's kept tail, however wrapped.</summary>
+    private static bool Missed(Exception failure)
+    {
+        for (Exception? at = failure; at is not null; at = at.InnerException)
+        {
+            if (at is ObjectSegmentSink.TailMissedException)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>

@@ -28,6 +28,7 @@ using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Buffers;
 using Vorticity.Dataset;
+using Vorticity.IO;
 using Vorticity.Expressions;
 using Vorticity.Indexes;
 using Vorticity.Scanning;
@@ -443,9 +444,9 @@ public sealed class DatasetBudgetTests
     public async Task AnObjectSentAsItIsWrittenIsDescribedAsOneHeldWhole(bool encrypted)
     {
         // The same rows, an object of most of a mebibyte: held whole and described from memory, or past
-        // a threshold of 64 KiB sent to the store as it is written and described from there once put.
-        // The entries say the same of their objects, their leaves sit at the same keys, and the rows
-        // read back the same.
+        // a threshold of 64 KiB sent to the store as it is written and described from the tail its sink
+        // kept, with no read of it from the store. The entries say the same of their objects, their
+        // leaves sit at the same keys, and the rows read back the same.
         Decoders.EnsureRegistered();
         CancellationToken ct = TestContext.Current.CancellationToken;
         using VortexKeyring? keyring = encrypted ? Sealing.SealedObjects.Keyring() : null;
@@ -468,9 +469,11 @@ public sealed class DatasetBudgetTests
                 Encrypted = encrypted,
                 StreamedObjectBytes = streamedFrom,
             };
-            await using MemoryObjectStore store = new MemoryObjectStore();
+            await using MemoryObjectStore memory = new MemoryObjectStore();
+            DataReads store = new DataReads(memory);
             await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, options, ct);
             await dataset.AppendAsync(OneBatch(types, schema, keys, measures), ct);
+            Assert.Equal(0, store.Reads);
             await foreach (PositionedObject held in dataset.WalkAsync(null, 0, long.MaxValue, null, ct))
             {
                 described.Add((held.Entry, held.TreeKey));
@@ -486,6 +489,24 @@ public sealed class DatasetBudgetTests
         Assert.Equal((held0.Rows, held0.Summaries), (streamed.Rows, streamed.Summaries));
         Assert.Equal(heldKey[..^VortexDataset.UidBytes].ToArray(), streamedKey[..^VortexDataset.UidBytes].ToArray());
         Assert.Equal(sums[0], sums[1]);
+    }
+
+    /// <summary>A store that counts the reads of data objects.</summary>
+    private sealed class DataReads(IObjectStore inner) : ForwardingStore(inner)
+    {
+        internal int Reads { get; private set; }
+
+        public override ValueTask<ObjectRead> ReadAsync(string key, long offset, Memory<byte> destination, string? ifToken, CancellationToken cancellationToken)
+        {
+            Reads += key.StartsWith(CommitKey.DataPrefix, StringComparison.Ordinal) ? 1 : 0;
+            return base.ReadAsync(key, offset, destination, ifToken, cancellationToken);
+        }
+
+        public override ValueTask<ObjectRead> ReadTailAsync(string key, Memory<byte> destination, CancellationToken cancellationToken)
+        {
+            Reads += key.StartsWith(CommitKey.DataPrefix, StringComparison.Ordinal) ? 1 : 0;
+            return base.ReadTailAsync(key, destination, cancellationToken);
+        }
     }
 
     /// <summary>One batch of <paramref name="columns"/> long columns, the first the key, the others the row times the column.</summary>

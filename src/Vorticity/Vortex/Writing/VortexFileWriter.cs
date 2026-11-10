@@ -3089,7 +3089,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         // written from its buffer: each is written before the next one clears it.
         FlatBufferBuilder builder = Blobs.Builder;
 
-        // The file statistics: the merge of every closed block per top-level field.
+        // The file statistics: the merge of every closed block per top-level field. The tail an open reads starts here.
+        _sink.KeepTail();
         long statisticsOffset = 0;
         int statisticsLength = 0;
         if (_fileStatistics)
