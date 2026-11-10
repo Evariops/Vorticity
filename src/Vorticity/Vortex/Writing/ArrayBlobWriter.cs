@@ -7,6 +7,7 @@ using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.X86;
 using ManagedCompressions.Zstd;
 using Vorticity.Aggregating;
 using Vorticity.Arrays;
@@ -586,7 +587,7 @@ internal static class ArrayBlobWriter
     }
 
     /// <summary>The bytes <paramref name="length"/> rows take packed at <paramref name="bitWidth"/> bits: whole blocks.</summary>
-    private static int PackedBytes(int length, int bitWidth)
+    internal static int PackedBytes(int length, int bitWidth)
     {
         int blocks = (length + FastLanes.BlockSize - 1) / FastLanes.BlockSize;
         return checked((int)((long)blocks * FastLanes.BlockByteLength(bitWidth)));
@@ -611,7 +612,7 @@ internal static class ArrayBlobWriter
     /// </param>
     /// <param name="patchIndices">The rows the exceptions are at, exactly as many as the plan counted.</param>
     /// <param name="patchValues">Their values in the encoded domain, as many.</param>
-    private static void Pack(
+    internal static void Pack(
         CanonicalArena arena, CanonicalNode node, in BitPackPlan plan, PType ptype, int length,
         Span<byte> destination, Span<int> patchIndices, Span<ulong> patchValues)
     {
@@ -762,6 +763,17 @@ internal static class ArrayBlobWriter
                     .StoreUnsafe(ref into, (nuint)i);
             }
         }
+        else if (Vector256.IsHardwareAccelerated)
+        {
+            int lanes = Vector256<T>.Count;
+            Vector256<T> origin = Vector256.Create(reference);
+            for (; i <= count - lanes; i += lanes)
+            {
+                Vector256<T> value = Vector256.LoadUnsafe(ref from, (nuint)i);
+                (frame ? value - origin : (value << 1) ^ (Vector256<T>.Zero - (value >>> shift)))
+                    .StoreUnsafe(ref into, (nuint)i);
+            }
+        }
         else if (Vector128.IsHardwareAccelerated)
         {
             int lanes = Vector128<T>.Count;
@@ -797,6 +809,7 @@ internal static class ArrayBlobWriter
         int offset = mask.BitOffset + start;
         ref T value = ref MemoryMarshal.GetReference(block);
         bool wide = WordBytes.IsAccelerated;
+        bool lanes256 = !wide && Avx2.IsSupported;
         WordBytes spread = wide ? WordBytes.Create() : default;
         for (int i = 0; i < block.Length; i += 64)
         {
@@ -819,6 +832,12 @@ internal static class ArrayBlobWriter
                 continue;
             }
 
+            if (lanes256 && take == 64)
+            {
+                ClearLanes256(ref Unsafe.Add(ref value, i), word);
+                continue;
+            }
+
             for (int k = 0; k < take; k++)
             {
                 Unsafe.Add(ref value, i + k) &= T.CreateTruncating(0UL - ((word >> k) & 1));
@@ -836,6 +855,19 @@ internal static class ArrayBlobWriter
         {
             nuint at = (nuint)(group * lanes);
             (Vector512.LoadUnsafe(ref rows, at) & spread.Lanes<T>(word, group)).StoreUnsafe(ref rows, at);
+        }
+    }
+
+    /// <summary>Sixty-four rows anded with a mask of their validity bits, a 256-bit vector at a time, where AVX2 is.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void ClearLanes256<T>(ref T rows, ulong word)
+        where T : unmanaged, IBinaryInteger<T>, IUnsignedNumber<T>
+    {
+        int lanes = Vector256<T>.Count;
+        for (int group = 0; group * lanes < 64; group++)
+        {
+            nuint at = (nuint)(group * lanes);
+            (Vector256.LoadUnsafe(ref rows, at) & WordBytes.Lanes256<T>(word >> (group * lanes))).StoreUnsafe(ref rows, at);
         }
     }
 
@@ -862,6 +894,18 @@ internal static class ArrayBlobWriter
             for (; i <= block.Length - lanes; i += lanes)
             {
                 if (Vector512.GreaterThanAny(Vector512.LoadUnsafe(ref first, (nuint)i), bound))
+                {
+                    found = CollectPatches(block.Slice(i, lanes), largest, start + i, indices, values, found);
+                }
+            }
+        }
+        else if (Vector256.IsHardwareAccelerated)
+        {
+            int lanes = Vector256<T>.Count;
+            Vector256<T> bound = Vector256.Create(largest);
+            for (; i <= block.Length - lanes; i += lanes)
+            {
+                if (Vector256.GreaterThanAny(Vector256.LoadUnsafe(ref first, (nuint)i), bound))
                 {
                     found = CollectPatches(block.Slice(i, lanes), largest, start + i, indices, values, found);
                 }
