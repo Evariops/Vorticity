@@ -295,14 +295,16 @@ internal sealed partial class DatasetScanBuilder
         // after the reads of the one before; left open in the handle's cache for the read that comes to them.
         int opensAhead = Math.Clamp(_dataset.Options.MaxOpenObjects / 4, 1, 8);
         int openSeen = 0;
+        int begunUpTo = 0;
         try
         {
             for (int o = 0; o < units.Count; o++)
             {
-                // The counts and statistics of the next units read ahead, as many ahead as the session reads at once.
-                for (int ahead = o; ahead < units.Count && ahead < o + width; ahead++)
+                // The counts and statistics of the next units read ahead, as many ahead as the session reads at once: from the
+                // last begun on, where each unit asked again every unit of its window whether it had begun.
+                for (; begunUpTo < units.Count && begunUpTo < o + width; begunUpTo++)
                 {
-                    Begin(units[ahead], answer, stopped.Token);
+                    Begin(units[begunUpTo], answer, stopped.Token);
                 }
 
                 // Each object that reads rows looked at once, as the window of those ahead reaches it.
