@@ -303,6 +303,16 @@ internal sealed class AlpRdDecoder : ArrayDecoder
                         .StoreUnsafe(ref target, (nuint)row);
                 }
             }
+            else if (Avx2.IsSupported && typeof(TCode) != typeof(ulong))
+            {
+                // The eight entries are one 256-bit register on AVX2: eight rows a permute.
+                Vector256<uint> lookup = Vector256.LoadUnsafe(ref table);
+                for (; row <= length - 8; row += 8)
+                {
+                    (Avx2.PermuteVar8x32(lookup, Codes8x32(ref Unsafe.Add(ref code, row))) | Vector256.LoadUnsafe(ref low, (nuint)row))
+                        .StoreUnsafe(ref target, (nuint)row);
+                }
+            }
 
             for (; row < length; row++)
             {
@@ -363,6 +373,26 @@ internal sealed class AlpRdDecoder : ArrayDecoder
         // Eight bytes and no more: a sixteen-byte load could reach past the last row.
         return Avx512F.ConvertToVector512UInt64(
             Vector128.CreateScalarUnsafe(Unsafe.ReadUnaligned<ulong>(ref Unsafe.As<TCode, byte>(ref code))).AsByte());
+    }
+
+    /// <summary>Eight codes at <paramref name="code"/>, zero-extended to the lanes of AVX2's 32-bit permute; never a 64-bit code.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static Vector256<uint> Codes8x32<TCode>(ref TCode code)
+        where TCode : unmanaged
+    {
+        if (typeof(TCode) == typeof(uint))
+        {
+            return Vector256.LoadUnsafe(ref Unsafe.As<TCode, uint>(ref code));
+        }
+
+        if (typeof(TCode) == typeof(ushort))
+        {
+            return Avx2.ConvertToVector256Int32(Vector128.LoadUnsafe(ref Unsafe.As<TCode, ushort>(ref code))).AsUInt32();
+        }
+
+        // Eight bytes and no more: a sixteen-byte load could reach past the last row.
+        return Avx2.ConvertToVector256Int32(
+            Vector128.CreateScalarUnsafe(Unsafe.ReadUnaligned<ulong>(ref Unsafe.As<TCode, byte>(ref code))).AsByte()).AsUInt32();
     }
 
     /// <summary>Sixteen codes at <paramref name="code"/>, zero-extended to the lanes of a 32-bit permute; never a 64-bit code.</summary>
