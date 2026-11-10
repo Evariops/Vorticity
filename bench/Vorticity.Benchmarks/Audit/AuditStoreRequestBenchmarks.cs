@@ -32,7 +32,8 @@ public class AuditStoreRequestBenchmarks
             Bucket = "warehouse",
             Credentials = StoreCredentials.Token(_ => ValueTask.FromResult(new AccessToken(token, DateTimeOffset.UtcNow.AddHours(1)))),
             Handler = new Answers(),
-            Transport = new StoreTransportOptions { RetryBaseDelay = TimeSpan.Zero },
+            // A budget wide enough that the reads measure the client, not the process's 2,000 requests a second.
+            Transport = new StoreTransportOptions { RetryBaseDelay = TimeSpan.Zero, RequestBudget = new RequestBudget(1_024, 10_000_000) },
         });
         Read();
     }
