@@ -459,47 +459,59 @@ internal sealed class IndexWriter : IDisposable
 
             CanonicalArena slices = _keySlices ??= new CanonicalArena();
             slices.Reset();
-            int[] columns = new int[fields.Length];
-            bool[] include = new bool[count];
-            include.AsSpan().Fill(true);
-            bool masked = true;
-            for (int c = 0; c < fields.Length; c++)
+
+            // Rented for the batch, as a nested column's are: two arrays a key and a batch were made new.
+            int[] rentedColumns = ArrayPool<int>.Shared.Rent(fields.Length);
+            bool[] rentedInclude = ArrayPool<bool>.Shared.Rent(count);
+            try
             {
-                int leaf = Descend(arena, fieldNodes, fields[c], start, include, ref masked);
-                if (leaf < 0)
+                Span<int> columns = rentedColumns.AsSpan(0, fields.Length);
+                Span<bool> include = rentedInclude.AsSpan(0, count);
+                include.Fill(true);
+                bool masked = true;
+                for (int c = 0; c < fields.Length; c++)
                 {
-                    builder.Abandon($"a batch has no column at '{_paths[field]}''s path");
-                    builder.Skip(count);
-                    break;
+                    int leaf = Descend(arena, fieldNodes, fields[c], start, include, ref masked);
+                    if (leaf < 0)
+                    {
+                        builder.Abandon($"a batch has no column at '{_paths[field]}''s path");
+                        builder.Skip(count);
+                        break;
+                    }
+
+                    columns[c] = Layouts.CanonicalSlice.SliceAcross(arena, slices, leaf, start, count);
+                    ValidityMask validity = ValidityMask.From(slices, slices.GetNode(columns[c]).Validity);
+                    if (validity.AllValid)
+                    {
+                        continue;
+                    }
+
+                    for (int row = 0; row < count; row++)
+                    {
+                        include[row] &= validity.IsValid(row);
+                    }
                 }
 
-                columns[c] = Layouts.CanonicalSlice.SliceAcross(arena, slices, leaf, start, count);
-                ValidityMask validity = ValidityMask.From(slices, slices.GetNode(columns[c]).Validity);
-                if (validity.AllValid)
+                if (builder.Abandoned is not null)
                 {
                     continue;
                 }
 
-                for (int row = 0; row < count; row++)
+                try
                 {
-                    include[row] &= validity.IsValid(row);
+                    using IEncodedKeys keys = _keyEncoder!.Encode(new BatchView(slices, columns, _keySchemas[field]!));
+                    builder.AccumulateEncoded(keys, include);
+                }
+                catch (Exception e) when (e is VortexUnsupportedException or ArgumentException)
+                {
+                    builder.Abandon($"the key encoder refused the key: {e.Message}");
+                    builder.Skip(count);
                 }
             }
-
-            if (builder.Abandoned is not null)
+            finally
             {
-                continue;
-            }
-
-            try
-            {
-                using IEncodedKeys keys = _keyEncoder!.Encode(new BatchView(slices, columns, _keySchemas[field]!));
-                builder.AccumulateEncoded(keys, include);
-            }
-            catch (Exception e) when (e is VortexUnsupportedException or ArgumentException)
-            {
-                builder.Abandon($"the key encoder refused the key: {e.Message}");
-                builder.Skip(count);
+                ArrayPool<int>.Shared.Return(rentedColumns);
+                ArrayPool<bool>.Shared.Return(rentedInclude);
             }
         }
     }
