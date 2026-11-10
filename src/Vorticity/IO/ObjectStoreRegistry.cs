@@ -267,6 +267,27 @@ public sealed class ObjectStoreRegistry
 /// </summary>
 internal sealed class PrefixedObjectStore(IObjectStore inner, string prefix) : IObjectStore
 {
+    /// <summary>
+    /// The store under every prefix of <paramref name="store"/> and the key it knows <paramref name="key"/> by: a source
+    /// that reads an object many times makes its key once, where each read, tail read or head made it again.
+    /// </summary>
+    internal static (IObjectStore Store, string Key) Resolve(IObjectStore store, string key)
+    {
+        while (store is PrefixedObjectStore prefixed)
+        {
+            key = prefixed.Prefix + key;
+            store = prefixed.Inner;
+        }
+
+        return (store, key);
+    }
+
+    /// <summary>The store under the prefix.</summary>
+    private IObjectStore Inner => inner;
+
+    /// <summary>The prefix of every key.</summary>
+    private string Prefix => prefix;
+
     public ObjectStoreCapabilities Capabilities => inner.Capabilities;
 
     public CostProfile CostProfile => inner.CostProfile;
