@@ -180,7 +180,13 @@ internal static partial class ComparisonKernels
         byte hit = equal ? Trilean.True : Trilean.False;
         byte miss = equal ? Trilean.False : Trilean.True;
         bool allValid = mask.AllValid;
-        for (int i = 0; i < rows; i++)
+        int i = 0;
+        if (inline && Vector256.IsHardwareAccelerated)
+        {
+            i = EqualInline(ref view0, rows, head, headMask, tail, tailMask, ref into, hit, miss);
+        }
+
+        for (; i < rows; i++)
         {
             ref byte view = ref Unsafe.Add(ref view0, i * ViewBytes);
             bool same;
@@ -213,6 +219,45 @@ internal static partial class ComparisonKernels
         {
             MarkUnknown(mask.Bits, mask.BitOffset, destination);
         }
+    }
+
+    /// <summary>
+    /// <see cref="EqualViews"/> for a literal held inline, whose rows' views equal it in their bytes under the masks: four
+    /// views a 512-bit vector, two a 256-bit one, each view's two words compared at once, where a row at a time tested and
+    /// branched on each. The rows decided.
+    /// </summary>
+    private static int EqualInline(
+        ref byte views, int rows, ulong head, ulong headMask, ulong tail, ulong tailMask, ref byte into, byte hit, byte miss)
+    {
+        int i = 0;
+        if (Vector512.IsHardwareAccelerated)
+        {
+            Vector512<ulong> expected = Vector512.Create(head, tail, head, tail, head, tail, head, tail);
+            Vector512<ulong> masks = Vector512.Create(headMask, tailMask, headMask, tailMask, headMask, tailMask, headMask, tailMask);
+            for (; i <= rows - 4; i += 4)
+            {
+                Vector512<ulong> found = Vector512.LoadUnsafe(ref Unsafe.Add(ref views, i * ViewBytes)).AsUInt64();
+                ulong words = Vector512.Equals((found ^ expected) & masks, Vector512<ulong>.Zero).ExtractMostSignificantBits();
+                for (int k = 0; k < 4; k++)
+                {
+                    Unsafe.Add(ref into, i + k) = ((words >> (2 * k)) & 3) == 3 ? hit : miss;
+                }
+            }
+
+            return i;
+        }
+
+        Vector256<ulong> pair = Vector256.Create(head, tail, head, tail);
+        Vector256<ulong> pairMasks = Vector256.Create(headMask, tailMask, headMask, tailMask);
+        for (; i <= rows - 2; i += 2)
+        {
+            Vector256<ulong> found = Vector256.LoadUnsafe(ref Unsafe.Add(ref views, i * ViewBytes)).AsUInt64();
+            uint words = Vector256.Equals((found ^ pair) & pairMasks, Vector256<ulong>.Zero).ExtractMostSignificantBits();
+            Unsafe.Add(ref into, i) = (words & 3) == 3 ? hit : miss;
+            Unsafe.Add(ref into, i + 1) = (words & 12) == 12 ? hit : miss;
+        }
+
+        return i;
     }
 
     /// <summary>
