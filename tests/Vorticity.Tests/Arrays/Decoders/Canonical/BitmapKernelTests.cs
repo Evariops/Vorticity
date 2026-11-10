@@ -133,6 +133,36 @@ public sealed class BitmapKernelTests
         }
     }
 
+    /// <summary>Copies long enough for the vector steps, at every source shift, with ragged ends: the bits one at a time copy.</summary>
+    [Fact]
+    public void LongCopiesMatchTheBitAtATimeCopyAtEveryShift()
+    {
+        Random random = new Random(83);
+        byte[] source = new byte[600];
+        random.NextBytes(source);
+        foreach (int count in new[] { 320, 321, 327, 640, 1_000, 3_333, 4_000 })
+        {
+            for (int sourceStart = 0; sourceStart <= 9; sourceStart++)
+            {
+                foreach (int destinationStart in new[] { 0, 5, 8 })
+                {
+                    byte[] expected = new byte[600];
+                    for (int i = 0; i < count; i++)
+                    {
+                        if (BitAt(source, sourceStart + i))
+                        {
+                            expected[(destinationStart + i) >> 3] |= (byte)(1 << ((destinationStart + i) & 7));
+                        }
+                    }
+
+                    byte[] actual = new byte[600];
+                    BitmapKernels.CopyRange(source, sourceStart, actual, destinationStart, count);
+                    Assert.Equal(expected, actual);
+                }
+            }
+        }
+    }
+
     [Fact]
     public void CopyRangeClearsWhereTheSourceIsClear()
     {

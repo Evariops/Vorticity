@@ -393,10 +393,30 @@ internal static class BitmapKernels
             }
             else
             {
+                // Thirty-two output bytes a step where vectors are the machine's: four words of source
+                // shifted, each with the word after it, loaded eight bytes on, for the bits the shift
+                // brings in; its reads end eight bytes short of the last byte the pairs below read.
+                int b = 0;
+                if (Vector256.IsHardwareAccelerated && wholeBytes >= 40)
+                {
+                    ref byte from = ref Unsafe.Add(ref MemoryMarshal.GetReference(source), sourceByte);
+                    ref byte to = ref Unsafe.Add(ref MemoryMarshal.GetReference(destination), destinationByte);
+                    if ((uint)(sourceByte + wholeBytes) >= (uint)source.Length || (uint)(destinationByte + wholeBytes) > (uint)destination.Length)
+                    {
+                        ThrowShortBitmap(destination.Length, count);
+                    }
+
+                    for (; b + 40 <= wholeBytes; b += 32)
+                    {
+                        Vector256<ulong> words = Vector256.LoadUnsafe(ref Unsafe.Add(ref from, b)).AsUInt64();
+                        Vector256<ulong> after = Vector256.LoadUnsafe(ref Unsafe.Add(ref from, b + 8)).AsUInt64();
+                        ((words >> shift) | (after << (64 - shift))).AsByte().StoreUnsafe(ref Unsafe.Add(ref to, b));
+                    }
+                }
+
                 // Eight output bytes at a time: the next eight source bytes as a word, shifted, and
                 // the byte after them for the bits the shift brings in. The last word reads the
                 // byte the last pair below would, so the reads end where the bytes' did.
-                int b = 0;
                 for (; b + 8 <= wholeBytes; b += 8)
                 {
                     ulong word = BinaryPrimitives.ReadUInt64LittleEndian(source.Slice(sourceByte + b, 8));
@@ -568,6 +588,17 @@ internal static class BitmapKernels
                 ulong zeros = Vector512.Equals(Vector512.LoadUnsafe(ref input, (uint)i), Vector512<byte>.Zero)
                     .ExtractMostSignificantBits();
                 BinaryPrimitives.WriteUInt64LittleEndian(destination.Slice(i >> 3, 8), ~zeros);
+            }
+        }
+
+        if (Vector256.IsHardwareAccelerated && length - i >= Vector256<byte>.Count)
+        {
+            // Thirty-two bytes to four of bits on AVX2, where 128-bit vectors made two.
+            ref byte input = ref MemoryMarshal.GetReference(source);
+            for (; i <= length - Vector256<byte>.Count; i += Vector256<byte>.Count)
+            {
+                uint zeros = Vector256.Equals(Vector256.LoadUnsafe(ref input, (uint)i), Vector256<byte>.Zero).ExtractMostSignificantBits();
+                BinaryPrimitives.WriteUInt32LittleEndian(destination.Slice(i >> 3, 4), ~zeros);
             }
         }
 
