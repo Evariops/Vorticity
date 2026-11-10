@@ -490,7 +490,7 @@ internal readonly struct ZstdPlan
     /// left, and every row elsewhere, are written whether valid or not and the count moves by the
     /// row's bit, a store and an add where a copy a row was a call.
     /// </remarks>
-    private static int Compact<T>(
+    internal static int Compact<T>(
         ReadOnlySpan<byte> source, in ValidityReader valid, int from, int to, Span<byte> stream, int count)
         where T : unmanaged
     {
@@ -530,6 +530,25 @@ internal readonly struct ZstdPlan
                     };
                     packed.StoreUnsafe(ref target, (nuint)count);
                     count += BitOperations.PopCount((word >> (group * lanes)) & groupBits);
+                }
+            }
+        }
+        else if (Avx2.IsSupported && Unsafe.SizeOf<T>() is 4 or 8
+            && (long)into.Length * Unsafe.SizeOf<T>() >= ((long)count + (to - from)) * Unsafe.SizeOf<T>() + CompactSlack)
+        {
+            // AVX2 has no compress: a permutation of a 256-bit row's lanes chosen by its bits does it (Compute.LeftPack),
+            // eight 32-bit or four 64-bit lanes; a row at a time took 0.64 ns a long, against 0.14 on AVX-512.
+            int lanes = Vector256<T>.Count;
+            uint laneBits = (1u << lanes) - 1;
+            for (; i + 64 <= to; i += 64)
+            {
+                ulong word = allValid ? ulong.MaxValue : BitWords.Load(bits, offset + i);
+                for (int group = 0; group < 64 / lanes; group++)
+                {
+                    uint kept = (uint)(word >> (group * lanes)) & laneBits;
+                    Vector256<T> row = Vector256.LoadUnsafe(ref value, (nuint)(i + (group * lanes)));
+                    Compute.LeftPack.Pack256(row, kept).StoreUnsafe(ref target, (nuint)count);
+                    count += BitOperations.PopCount(kept);
                 }
             }
         }
