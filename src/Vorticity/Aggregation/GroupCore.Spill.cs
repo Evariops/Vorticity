@@ -24,6 +24,9 @@ internal sealed partial class GroupCore
     private readonly SemaphoreSlim _spilling = new SemaphoreSlim(1, 1);
     private RunScratch? _scratch;
     private string? _scratchDirectory;
+
+    // The free space of the scratch's directory, read once a 64th of it is written, not at every page: the pages are appended one at a time.
+    private SpaceClaims _claims;
     private byte[]? _page;
     private ulong[]? _words;
     private int _spilledParts;
@@ -243,7 +246,7 @@ internal sealed partial class GroupCore
     {
         RunScratch scratch = Scratch();
         int bytes = entries * Shape.Words * sizeof(ulong);
-        if (!SpillSpace.TryClaim(_scratchDirectory!, bytes))
+        if (!_claims.TryClaim(_scratchDirectory!, bytes))
         {
             throw _memory!.Exceeded("spill of a group by", -1, bytes);
         }
@@ -251,7 +254,7 @@ internal sealed partial class GroupCore
         // Under the host's scratch budget, every byte written counted, and given back when the scratch closes.
         if (_source?.Session.Options.ScratchBudget is { } budget && !budget.TryReserve(bytes))
         {
-            SpillSpace.Release(bytes);
+            _claims.Release(bytes);
             throw ScratchExceeded(budget, "spill of a group by", bytes);
         }
 

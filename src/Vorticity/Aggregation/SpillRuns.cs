@@ -73,6 +73,55 @@ internal static class SpillSpace
 }
 
 /// <summary>
+/// One writer's claims on its directory's free space (<see cref="SpillSpace"/>), the space read again once the writer has
+/// written a 64th of it since, 64 MiB at least: a read is a walk of the system's mounts, 18.6 µs and 552 bytes, which a page
+/// of 64 KiB written at a time paid as much as its write. The writer appends one page at a time.
+/// </summary>
+internal struct SpaceClaims
+{
+    private long? _free;
+    private long _freeAt;
+    private long _claimed;
+    private bool _read;
+
+    /// <summary>Counts <paramref name="bytes"/> more written to <paramref name="directory"/>; false, nothing counted, as <see cref="SpillSpace.TryClaim(string, long)"/>.</summary>
+    internal bool TryClaim(string directory, long bytes)
+    {
+        if (!_read || _claimed - _freeAt > Math.Max(64L << 20, (_free ?? 0) / 64))
+        {
+            _free = GroupCore.Free(directory);
+            _freeAt = _claimed;
+            _read = true;
+        }
+
+        if (!SpillSpace.TryClaim(_free - (_claimed - _freeAt), bytes))
+        {
+            return false;
+        }
+
+        _claimed += bytes;
+        return true;
+    }
+
+    /// <summary>Gives back <paramref name="bytes"/> just claimed, which another budget refused.</summary>
+    internal void Release(long bytes)
+    {
+        SpillSpace.Release(bytes);
+        _claimed -= bytes;
+    }
+
+    /// <summary>Gives back every byte claimed, the writer's file gone; how many they were.</summary>
+    internal long ReleaseAll()
+    {
+        long claimed = _claimed;
+        SpillSpace.Release(claimed);
+        _claimed = 0;
+        _read = false;
+        return claimed;
+    }
+}
+
+/// <summary>
 /// What a query's lanes wrote to its scratch when its budget held their tables no more and the core could
 /// not take them: a file a lane or a slot, the runs written to them, and what they cost. Disposed with the
 /// query, its files gone and the scratch it held given back.
@@ -387,13 +436,7 @@ internal sealed class SpillFile : IDisposable
     private readonly string _directory;
     private readonly ScratchBudget? _budget;
     private readonly RunScratch _scratch;
-    private long _claimed;
-
-    // The directory's free space when last read, and what the file had written then: read again once
-    // the file has written a 64th of it since, 64 MiB at least. A read is a walk of the system's mounts,
-    // which a page of a few kilobytes written at a time would pay over and over.
-    private long? _free;
-    private long _freeAt = -1;
+    private SpaceClaims _claims;
 
     internal SpillFile(SpillScope scope, string directory, ScratchBudget? budget)
     {
@@ -412,24 +455,17 @@ internal sealed class SpillFile : IDisposable
     internal ValueTask<long> AppendAsync(ReadOnlyMemory<byte> bytes, CancellationToken cancellationToken)
     {
         long length = bytes.Length;
-        if (_freeAt < 0 || _claimed - _freeAt > Math.Max(64L << 20, (_free ?? 0) / 64))
-        {
-            _free = GroupCore.Free(_directory);
-            _freeAt = _claimed;
-        }
-
-        if (!SpillSpace.TryClaim(_free - (_claimed - _freeAt), length))
+        if (!_claims.TryClaim(_directory, length))
         {
             throw _scope.Memory.Exceeded("spill of a group by", -1, length);
         }
 
         if (_budget is { } budget && !budget.TryReserve(length))
         {
-            SpillSpace.Release(length);
+            _claims.Release(length);
             throw GroupCore.ScratchExceeded(budget, "spill of a group by", length);
         }
 
-        _claimed += length;
         return _scratch.AppendAsync(bytes, cancellationToken);
     }
 
@@ -442,9 +478,7 @@ internal sealed class SpillFile : IDisposable
 
     public void Dispose()
     {
-        SpillSpace.Release(_claimed);
-        _budget?.Release(_claimed);
-        _claimed = 0;
+        _budget?.Release(_claims.ReleaseAll());
         _scratch.Dispose();
     }
 }
