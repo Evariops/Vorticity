@@ -4,6 +4,8 @@ using System.Collections.Generic;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.X86;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
@@ -1391,7 +1393,13 @@ internal sealed class FixedKeys<TValue> : GroupKeys
                 // A span of one page, a few thousand values: its numbers read from the page itself, taken once
                 // a chunk, where the page and its start read again at every row made a chain of three loads.
                 ref int numbers = ref Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(pages[0]), starts[0]);
-                for (int i = 0; i < values.Length; i++)
+                int i = 0;
+                if (Avx2.IsSupported)
+                {
+                    i = Gathered(values, groups, ref numbers, min, span, out missed);
+                }
+
+                for (; i < values.Length; i++)
                 {
                     ulong number = (ulong)(Integer(values[i]) - min);
                     bool inside = number < span;
@@ -1707,6 +1715,82 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         }
 
         return left;
+    }
+
+    /// <summary>
+    /// The first pass of a chunk over a span of one page not numbered whole, eight rows a step with AVX2: each row's
+    /// group gathered from the page at its number, -1 past the span (a value not met yet reads the page's own -1).
+    /// </summary>
+    /// <remarks>
+    /// A row at a time, the number, its bound and the page's load took 0.9 to 1.0 ns a row, nine tenths of a key of two
+    /// bounded columns, whose columns are never numbered whole.
+    /// </remarks>
+    /// <returns>The rows taken, a multiple of eight; <paramref name="missed"/> negative when one is left for the lookup.</returns>
+    internal static unsafe int Gathered(ReadOnlySpan<TValue> values, Span<int> groups, ref int numbers, long min, ulong span, out int missed)
+    {
+        int i = 0;
+        Vector256<int> lefts = Vector256<int>.Zero;
+        ref int group = ref MemoryMarshal.GetReference(groups);
+        int size = Unsafe.SizeOf<TValue>();
+        fixed (int* table = &numbers)
+        {
+            if (size == sizeof(long))
+            {
+                // The difference taken and weighed in 64 bits, as the numbering whole does, then narrowed to the index.
+                ref long value = ref Unsafe.As<TValue, long>(ref MemoryMarshal.GetReference(values));
+                Vector256<long> least = Vector256.Create(min);
+                Vector256<ulong> width = Vector256.Create(span);
+                for (; i <= values.Length - 8; i += 8)
+                {
+                    Vector256<long> a = Vector256.LoadUnsafe(ref value, (nuint)i) - least;
+                    Vector256<long> b = Vector256.LoadUnsafe(ref value, (nuint)(i + 4)) - least;
+                    Vector256<int> outside = Vector256.Narrow(
+                        Vector256.GreaterThanOrEqual(a.AsUInt64(), width).AsInt64(),
+                        Vector256.GreaterThanOrEqual(b.AsUInt64(), width).AsInt64());
+                    Vector256<int> found = Avx2.GatherVector256(table, Vector256.AndNot(Vector256.Narrow(a, b), outside), 4) | outside;
+                    found.StoreUnsafe(ref group, (nuint)i);
+                    lefts |= found;
+                }
+            }
+            else
+            {
+                // Four bytes or fewer, widened to 32 bits as the type extends them: the difference wraps as the value
+                // does, and the span never does.
+                Vector256<int> least = Vector256.Create((int)min);
+                Vector256<uint> width = Vector256.Create((uint)span);
+                for (; i <= values.Length - 8; i += 8)
+                {
+                    Vector256<int> number = Eight(values, i) - least;
+                    Vector256<int> outside = Vector256.GreaterThanOrEqual(number.AsUInt32(), width).AsInt32();
+                    Vector256<int> found = Avx2.GatherVector256(table, Vector256.AndNot(number, outside), 4) | outside;
+                    found.StoreUnsafe(ref group, (nuint)i);
+                    lefts |= found;
+                }
+            }
+        }
+
+        missed = Vector256.LessThanAny(lefts, Vector256<int>.Zero) ? -1 : 0;
+        return i;
+    }
+
+    /// <summary>Eight values of four bytes or fewer from <paramref name="at"/>, widened to 32 bits as their type extends them.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static Vector256<int> Eight(ReadOnlySpan<TValue> values, int at)
+    {
+        ref TValue first = ref Unsafe.Add(ref MemoryMarshal.GetReference(values), at);
+        if (Unsafe.SizeOf<TValue>() == sizeof(int))
+        {
+            return Vector256.LoadUnsafe(ref Unsafe.As<TValue, int>(ref first));
+        }
+
+        if (Unsafe.SizeOf<TValue>() == sizeof(short))
+        {
+            Vector128<short> words = Vector128.LoadUnsafe(ref Unsafe.As<TValue, short>(ref first));
+            return typeof(TValue) == typeof(ushort) ? Avx2.ConvertToVector256Int32(words.AsUInt16()) : Avx2.ConvertToVector256Int32(words);
+        }
+
+        Vector128<byte> bytes = Vector128.CreateScalarUnsafe(Unsafe.ReadUnaligned<ulong>(ref Unsafe.As<TValue, byte>(ref first))).AsByte();
+        return typeof(TValue) == typeof(byte) ? Avx2.ConvertToVector256Int32(bytes) : Avx2.ConvertToVector256Int32(bytes.AsSByte());
     }
 
     /// <summary>Each value's number, the value less the least, or -1 past the span.</summary>

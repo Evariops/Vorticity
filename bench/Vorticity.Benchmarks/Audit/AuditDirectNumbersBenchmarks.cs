@@ -1,7 +1,8 @@
 // Audit AG-10: what grouping a batch by an integer key costs once every value of the span its statistics bound is met:
 // each row's group is its value less the least, the span numbered whole.
 //
-// A key bound to [0, 4095], every value met by a first batch; then batches of 65,536 rows drawn among them, by width.
+// A key bound to [0, 4095], every value met by a first batch; then batches of 65,536 rows drawn among them, by width;
+// the span numbered whole or each value looked up in the table of its numbers.
 using System;
 using System.Runtime.InteropServices;
 
@@ -32,6 +33,10 @@ public class AuditDirectNumbersBenchmarks
     [Params(2, 4, 8)]
     public int Width { get; set; }
 
+    /// <summary>Whether the span is numbered whole, as a key of one column is; the column of a key of several is not.</summary>
+    [Params(true, false)]
+    public bool Whole { get; set; }
+
     /// <summary>Draws the batch and meets every value.</summary>
     [GlobalSetup]
     public void Setup()
@@ -60,7 +65,7 @@ public class AuditDirectNumbersBenchmarks
         DTypeArena types = new DTypeArena();
         DType dtype = types.Primitive(ptype, Nullability.NonNullable);
         FixedKeys<T> keys = new FixedKeys<T>(new ColumnShape(new ColumnSym(Expr.Field("k"), type, null, null, -1, [])), sorted: false, new KeyBounds(0, Span - 1));
-        if (!keys.NumberWhole(groupBytes: 16))
+        if (Whole && !keys.NumberWhole(groupBytes: 16))
         {
             throw new InvalidOperationException("The span is not numbered whole.");
         }

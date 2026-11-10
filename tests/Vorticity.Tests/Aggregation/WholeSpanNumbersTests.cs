@@ -47,6 +47,70 @@ public sealed class WholeSpanNumbersTests
         Pass<ulong>(5_000, 9_000);
     }
 
+    // A span not numbered whole, of one page: each row's group gathered from the page at its number, -1 past the span
+    // or where the page holds none yet.
+    [Fact]
+    public void TheGatheredPassReadsEachRowsGroupFromThePage()
+    {
+        if (!System.Runtime.Intrinsics.X86.Avx2.IsSupported)
+        {
+            return;
+        }
+
+        Gather<sbyte>(-100, 100);
+        Gather<byte>(20, 230);
+        Gather<short>(-1_000, 3_000);
+        Gather<ushort>(40_000, 44_000);
+        Gather<int>(-1_000, 3_000);
+        Gather<uint>(3_000_000_000, 3_000_004_000);
+        Gather<long>(-1_000, 3_000);
+        Gather<ulong>(5_000, 9_000);
+    }
+
+    private static void Gather<T>(long min, long max)
+        where T : unmanaged, IEquatable<T>, IComparable<T>, IBinaryInteger<T>, IMinMaxValue<T>
+    {
+        int span = (int)(max - min + 1);
+        Random random = new Random(span + 1);
+        int[] page = new int[span];
+        for (int n = 0; n < span; n++)
+        {
+            page[n] = random.Next(10) == 0 ? -1 : random.Next(1_000_000);
+        }
+
+        T[] outside = [T.MinValue, T.MaxValue, T.CreateTruncating(min - 1), T.CreateTruncating(max + 1)];
+        T[] values = new T[Rows];
+        for (int i = 0; i < Rows; i++)
+        {
+            values[i] = random.Next(8) == 0 ? outside[random.Next(outside.Length)] : T.CreateTruncating(min + random.Next(span));
+        }
+
+        int[] groups = new int[Rows];
+        int done = FixedKeys<T>.Gathered(values, groups, ref page[0], min, (ulong)span, out int missed);
+        Assert.Equal(Rows & ~7, done);
+        bool anyLeft = false;
+        for (int i = 0; i < done; i++)
+        {
+            long value = long.CreateTruncating(values[i]);
+            bool within = typeof(T) == typeof(ulong) ? (ulong)value - (ulong)min < (ulong)span : value >= min && value <= max;
+            int expected = within ? page[value - min] : -1;
+            anyLeft |= expected < 0;
+            Assert.True(expected == groups[i], $"{typeof(T).Name} row {i}: {values[i]} gathered {groups[i]}, not {expected}");
+        }
+
+        Assert.Equal(anyLeft, missed < 0);
+
+        // Every row within the span and met: none left.
+        page.AsSpan().Fill(7);
+        for (int i = 0; i < Rows; i++)
+        {
+            values[i] = T.CreateTruncating(min + random.Next(span));
+        }
+
+        FixedKeys<T>.Gathered(values, groups, ref page[0], min, (ulong)span, out missed);
+        Assert.Equal(0, missed);
+    }
+
     private static void Pass<T>(long min, long max)
         where T : unmanaged, IEquatable<T>, IComparable<T>, IBinaryInteger<T>, IMinMaxValue<T>
     {
