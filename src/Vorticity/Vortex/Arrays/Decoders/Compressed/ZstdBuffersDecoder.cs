@@ -121,7 +121,8 @@ internal sealed class ZstdBuffersDecoder : ArrayDecoder
 
                 int alignment = alignments[i] <= 0 ? 1 : alignments[i];
                 context.ChargeBatch((int)size);
-                VortexBuffer destination = context.Canonical.Allocate(
+                // Not zeroed: the decompression writes every byte, or the buffer is refused.
+                VortexBuffer destination = context.Canonical.AllocateUninitialized(
                     (int)size, alignment, out Span<byte> writable);
 
                 if (size != 0)
