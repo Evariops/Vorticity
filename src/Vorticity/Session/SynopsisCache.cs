@@ -85,8 +85,14 @@ public sealed class SynopsisCache : IDisposable
     /// <summary>The reads an entry counts at most, which the main queue gives back one at a time.</summary>
     private const int MaxHits = 3;
 
-    /// <summary>The files the cache keeps open at most, the least recently opened closed first.</summary>
-    private const int MaxOpenHandles = 4096;
+    /// <summary>
+    /// The files the cache keeps open at most, each mapped once read, the least recently opened closed first. Past them,
+    /// each read opens, maps and lets go of a file: on Windows 160 µs where a hit costs 150 ns (16,384 regions of a
+    /// kibibyte read in turn, one thread), and a file kept open and mapped holds about 135 bytes of the kernel's
+    /// non-paged pool there: 65,536 of them, 9 MB. Elsewhere 4,096: each file is a descriptor under a limit of the
+    /// process the cache does not know, the sockets' too, and a mapping of a count Linux bounds (65,530 by default).
+    /// </summary>
+    private static readonly int MaxOpenHandles = OperatingSystem.IsWindows() ? 65_536 : 4_096;
 
     /// <summary>The files of the other caches of the root the cache keeps open at most, the least recently read closed first.</summary>
     private const int MaxPeerHandles = 1024;
