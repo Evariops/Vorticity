@@ -50,6 +50,9 @@ internal sealed class CountsMerge
     // The values each input that left some out keeps.
     private readonly List<HashSet<int>> _hiding = [];
 
+    // The one writer every sketch the merge seals is encoded through.
+    private readonly ArrayBufferWriter<byte> _sealing = new ArrayBufferWriter<byte>();
+
     /// <param name="entryLimit">The entries the merge keeps at most, past which the values of fewest rows are left out.</param>
     internal CountsMerge(int entryLimit = ColumnCountsBuilder.EntryLimit) => _entryLimit = entryLimit;
 
@@ -135,9 +138,27 @@ internal sealed class CountsMerge
             return null;
         }
 
+        // A value an input's entry of the values left out may hide in goes with them.
+        for (int entry = 0; entry < _groups.Count; entry++)
+        {
+            int group = _groups[entry];
+            if (group >= 0 && !KeptByAll(group))
+            {
+                MoveToOthers(entry);
+            }
+        }
+
+        LeaveOut();
+
+        // The entries left, the values left out's among them, sealed once every value moved.
         int measures = _sketched ? _fields.Length : 0;
         for (int entry = 0; entry < _groups.Count; entry++)
         {
+            if (_groups[entry] == Moved)
+            {
+                continue;
+            }
+
             for (int m = 0; m < measures; m++)
             {
                 Seal(ref _sketches[(entry * measures) + m]);
@@ -149,18 +170,21 @@ internal sealed class CountsMerge
             }
         }
 
-        // A value an input's entry of the values left out may hide in goes with them.
-        for (int entry = 0; entry < _groups.Count; entry++)
+        return Written();
+    }
+
+    /// <summary>Whether every input that left values out keeps value <paramref name="group"/>.</summary>
+    private bool KeptByAll(int group)
+    {
+        foreach (HashSet<int> kept in _hiding)
         {
-            int group = _groups[entry];
-            if (group >= 0 && !_hiding.TrueForAll(values => values.Contains(group)))
+            if (!kept.Contains(group))
             {
-                MoveToOthers(entry);
+                return false;
             }
         }
 
-        LeaveOut();
-        return Written();
+        return true;
     }
 
     /// <summary>Keeps of the merge's measures, sketches and wide columns those <paramref name="counts"/> carries too.</summary>
@@ -327,30 +351,78 @@ internal sealed class CountsMerge
             slot = new Ranks(opened);
         }
 
-        byte[] ranks = ((Ranks)slot).Values;
-        byte[] other = ArrayPool<byte>.Shared.Rent(ranks.Length);
-        try
+        HyperLogLog.Raise(encoded, ((Ranks)slot).Values);
+    }
+
+    /// <summary>
+    /// Merges the sketch of a moved entry, <paramref name="from"/>, encoded or open, into <paramref name="into"/>, and lets
+    /// it go: an open sketch merges as it is, where it was encoded to be opened again.
+    /// </summary>
+    private static void AbsorbSketch(ref object? into, ref object? from)
+    {
+        switch (from)
         {
-            HyperLogLog.Decode(encoded, other.AsSpan(0, ranks.Length));
-            for (int r = 0; r < ranks.Length; r++)
-            {
-                ranks[r] = Math.Max(ranks[r], other[r]);
-            }
+            case byte[] encoded:
+                MergeSketch(ref into, encoded);
+                break;
+            case QuantileSketch open:
+                switch (into)
+                {
+                    case null:
+                        into = open;
+                        break;
+                    case byte[] first:
+                        open.MergeEncoded(first);
+                        into = open;
+                        break;
+                    default:
+                        ((QuantileSketch)into).Merge(open);
+                        break;
+                }
+
+                break;
         }
-        finally
+
+        from = null;
+    }
+
+    /// <summary>Merges the registers of a moved entry, <paramref name="from"/>, encoded or open, into <paramref name="into"/>, and lets them go.</summary>
+    private static void AbsorbRegisters(ref object? into, ref object? from)
+    {
+        switch (from)
         {
-            ArrayPool<byte>.Shared.Return(other);
+            case byte[] encoded:
+                MergeRegisters(ref into, encoded);
+                break;
+            case Ranks open:
+                switch (into)
+                {
+                    case null:
+                        into = open;
+                        break;
+                    case byte[] first:
+                        HyperLogLog.Raise(first, open.Values);
+                        into = open;
+                        break;
+                    default:
+                        HyperLogLog.Highest(open.Values, ((Ranks)into).Values);
+                        break;
+                }
+
+                break;
         }
+
+        from = null;
     }
 
     /// <summary>Encodes an open sketch or open registers in <paramref name="slot"/>.</summary>
-    private static void Seal(ref object? slot)
+    private void Seal(ref object? slot)
     {
         if (slot is QuantileSketch sketch)
         {
-            ArrayBufferWriter<byte> writer = new ArrayBufferWriter<byte>();
-            sketch.Encode(writer);
-            slot = writer.WrittenSpan.ToArray();
+            _sealing.ResetWrittenCount();
+            sketch.Encode(_sealing);
+            slot = _sealing.WrittenSpan.ToArray();
         }
         else if (slot is Ranks ranks)
         {
@@ -367,14 +439,12 @@ internal sealed class CountsMerge
         int measures = _sketched ? _fields!.Length : 0;
         for (int m = 0; m < measures; m++)
         {
-            MergeSketch(ref _sketches[(others * measures) + m], _sketches[(entry * measures) + m] as byte[]);
-            Seal(ref _sketches[(others * measures) + m]);
+            AbsorbSketch(ref _sketches[(others * measures) + m], ref _sketches[(entry * measures) + m]);
         }
 
         for (int a = 0; a < _attached.Length; a++)
         {
-            MergeRegisters(ref _registers[(others * _attached.Length) + a], _registers[(entry * _attached.Length) + a] as byte[]);
-            Seal(ref _registers[(others * _attached.Length) + a]);
+            AbsorbRegisters(ref _registers[(others * _attached.Length) + a], ref _registers[(entry * _attached.Length) + a]);
         }
 
         _entries.Remove(group);
