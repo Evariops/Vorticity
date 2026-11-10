@@ -222,6 +222,56 @@ public sealed partial class GroupOrderTests
     }
 
     [Fact]
+    public async Task AFullSortByKeysRanksSignedKeysAndTheNullGroupAsTheColumnDoes()
+    {
+        // Keys of both signs and a null group, under a count and a sum thousands of groups share: a full sort ranks them by
+        // keys of 64 bits, a pass a byte that differs, the last order first (GroupSort.TrySortByKeys), as comparisons do,
+        // the null group last. A key of 64 bits with a null group leaves no key past its values: it is compared.
+        Comparer<int?> smalls = Comparer<int?>.Create((a, b) => a is null || b is null ? (a is null).CompareTo(b is null) : a.Value.CompareTo(b.Value));
+        Comparer<long?> wides = Comparer<long?>.Create((a, b) => a is null || b is null ? (a is null).CompareTo(b is null) : a.Value.CompareTo(b.Value));
+        Signed[] rows = new Signed[80_000];
+        for (int i = 0; i < rows.Length; i++)
+        {
+            int? small = i % 9 == 0 ? null : (int)(i * 7_919L % 20_000) - 10_000;
+            long? wide = i % 11 == 0 ? null : (i * 7_919L % 30_000 * 1_000_000_007L) * (i % 2 == 0 ? 1 : -1);
+            rows[i] = new Signed(small, wide, i % 4);
+        }
+
+        string directory = Path.Combine(AppContext.BaseDirectory, "group-orders");
+        Directory.CreateDirectory(directory);
+        string path = Path.Combine(directory, $"signed-{Environment.ProcessId}-{Guid.NewGuid():N}.vortex");
+        try
+        {
+            await using (VortexFileWriter writer = VortexSession.Default.CreateWriter<Signed>(path))
+            {
+                await writer.WriteAsync<Signed>(rows, Ct);
+                await writer.CompleteAsync(Ct);
+            }
+
+            await using VortexFile file = await VortexFile.OpenAsync(path, Ct);
+            Assert.Equal(
+                rows.GroupBy(r => r.Small).OrderByDescending(g => g.Count()).ThenBy(g => g.Key, smalls).Select(g => g.Key),
+                await file.Scan<Signed>().GroupBy(r => r.Small).OrderByDescending(g => g.Count()).Select(g => g.Key).ToListAsync(Ct));
+            Assert.Equal(
+                rows.GroupBy(r => r.Small).OrderBy(g => g.Sum(r => r.Value)).ThenBy(g => g.Key, smalls).Select(g => g.Key),
+                await file.Scan<Signed>().GroupBy(r => r.Small).OrderBy(g => g.Sum(r => r.Value)).Select(g => g.Key).ToListAsync(Ct));
+            Assert.Equal(
+                rows.GroupBy(r => r.Small).OrderBy(g => g.Key is null).ThenByDescending(g => g.Key).Select(g => g.Key),
+                await file.Scan<Signed>().GroupBy(r => r.Small).OrderByDescending(g => g.Key).Select(g => g.Key).ToListAsync(Ct));
+            Assert.Equal(
+                rows.GroupBy(r => r.Wide).OrderByDescending(g => g.Count()).ThenBy(g => g.Key, wides).Select(g => g.Key),
+                await file.Scan<Signed>().GroupBy(r => r.Wide).OrderByDescending(g => g.Count()).Select(g => g.Key).ToListAsync(Ct));
+            Assert.Equal(
+                rows.Where(r => r.Wide is not null).GroupBy(r => r.Wide).OrderByDescending(g => g.Count()).ThenBy(g => g.Key, wides).Select(g => g.Key),
+                await file.Scan<Signed>().Where(r => r.Wide != null).GroupBy(r => r.Wide).OrderByDescending(g => g.Count()).Select(g => g.Key).ToListAsync(Ct));
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
+    [Fact]
     public void AnAggregatesNumbersRankAsTheirColumnInBothDirections()
     {
         // Read into the pool for an order, integers and floats rank as keys of 64 bits: the
@@ -407,4 +457,7 @@ public sealed partial class GroupOrderTests
 
     [VortexRecord]
     public partial record struct Draw(string Name, long Id, double? Score, int? Value);
+
+    [VortexRecord]
+    public partial record struct Signed(int? Small, long? Wide, long Value);
 }

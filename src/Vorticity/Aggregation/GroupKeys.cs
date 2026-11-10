@@ -444,6 +444,13 @@ internal abstract class GroupKeys
     internal virtual int CompareKeys(int a, int b, int component) =>
         throw new NotSupportedException("These keys are ordered by the column of their values.");
 
+    /// <summary>
+    /// Writes into <paramref name="into"/>, for each group of <paramref name="groups"/>, a key of 64 bits whose unsigned order
+    /// is <see cref="CompareKeys(int, int, int)"/>'s for component <paramref name="component"/>, the null group last; false,
+    /// <paramref name="into"/> left as it is, when the keys give none: a sort by them then compares.
+    /// </summary>
+    internal virtual bool TryOrderKeys(ReadOnlySpan<int> groups, int component, Span<ulong> into) => false;
+
     /// <summary>Forgets the groups the codes of the last dictionary were given: they were numbered again.</summary>
     private protected void Renumbered() => _codeOrigin = default;
 
@@ -1925,6 +1932,77 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         }
 
         return _keys[a].CompareTo(_keys[b]);
+    }
+
+    /// <inheritdoc/>
+    /// <remarks>
+    /// An integer's value, its sign bit flipped when it has one, so that its unsigned order is its order; the null group
+    /// past every value, which a value of 64 bits leaves no room for: those keys give none when the null group is asked.
+    /// </remarks>
+    internal override bool TryOrderKeys(ReadOnlySpan<int> groups, int component, Span<ulong> into)
+    {
+        if (Floats || !Integers)
+        {
+            return false;
+        }
+
+        bool wide = Unsafe.SizeOf<TValue>() == sizeof(ulong);
+        TValue[] keys = _keys;
+        int none = _null;
+        for (int i = 0; i < groups.Length; i++)
+        {
+            int group = groups[i];
+            if (group == none)
+            {
+                if (wide)
+                {
+                    return false;
+                }
+
+                into[i] = ulong.MaxValue;
+                continue;
+            }
+
+            into[i] = OrderKey(keys[group]);
+        }
+
+        return true;
+    }
+
+    /// <summary>An integer as a key whose unsigned order is its order: its sign bit flipped, or its value when it has none.</summary>
+    private static ulong OrderKey(TValue value)
+    {
+        if (typeof(TValue) == typeof(long))
+        {
+            return (ulong)Unsafe.As<TValue, long>(ref value) ^ (1UL << 63);
+        }
+
+        if (typeof(TValue) == typeof(int))
+        {
+            return (uint)(Unsafe.As<TValue, int>(ref value) ^ int.MinValue);
+        }
+
+        if (typeof(TValue) == typeof(short))
+        {
+            return (ushort)(Unsafe.As<TValue, short>(ref value) ^ short.MinValue);
+        }
+
+        if (typeof(TValue) == typeof(sbyte))
+        {
+            return (byte)(Unsafe.As<TValue, sbyte>(ref value) ^ sbyte.MinValue);
+        }
+
+        if (typeof(TValue) == typeof(ulong))
+        {
+            return Unsafe.As<TValue, ulong>(ref value);
+        }
+
+        if (typeof(TValue) == typeof(uint))
+        {
+            return Unsafe.As<TValue, uint>(ref value);
+        }
+
+        return typeof(TValue) == typeof(ushort) ? Unsafe.As<TValue, ushort>(ref value) : Unsafe.As<TValue, byte>(ref value);
     }
 
     internal override void Keep(ReadOnlySpan<int> groups) => Keep(groups, room: 0);

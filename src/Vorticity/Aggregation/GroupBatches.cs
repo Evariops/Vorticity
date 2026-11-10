@@ -1151,6 +1151,11 @@ internal static class GroupSelection
                     ? GroupSort.TopK(ties, new IndexOrder(index!, groups, keys.Length), need, memory, cancellationToken)
                     : GroupSort.TopK(ties, new ChainOrder(orders[order.Keys.Length..]), need, memory, cancellationToken));
             }
+            else if (keep >= count && GroupSort.TrySortByKeys(positions, count, orders, memory, cancellationToken))
+            {
+                // Every group, each order of the chain keying its positions: sorted by their keys, with no comparison.
+                kept = count;
+            }
             else
             {
                 kept = GroupSort.Sort(positions, count, new ChainOrder(orders), keep, memory, cancellationToken);
