@@ -82,6 +82,12 @@ internal static class PairOrder
             return Lanes512<T, TOrder>(values, ref repeats);
         }
 
+        if (Vector256.IsHardwareAccelerated && Vector256<T>.IsSupported)
+        {
+            // Four lanes or more at every width on AVX2, 64-bit values included, which 128 bits leave to the walk.
+            return Lanes256<T, TOrder>(values, ref repeats);
+        }
+
         if (Vector128.IsHardwareAccelerated && Vector128<T>.IsSupported && Vector128<T>.Count >= 4)
         {
             return Lanes128<T, TOrder>(values, ref repeats);
@@ -120,6 +126,37 @@ internal static class PairOrder
         }
 
         repeats |= equal != Vector128<T>.Zero;
+        return i;
+    }
+
+    /// <summary><see cref="Lanes128{T, TOrder}"/> on 256-bit vectors, which hold four 64-bit lanes.</summary>
+    private static int Lanes256<T, TOrder>(ReadOnlySpan<T> values, ref bool repeats)
+        where T : unmanaged, INumber<T>
+        where TOrder : struct, IPairOrder
+    {
+        int lanes = Vector256<T>.Count;
+        ref T head = ref MemoryMarshal.GetReference(values);
+        Vector256<T> equal = Vector256<T>.Zero;
+        int i = 1;
+        for (; i + lanes <= values.Length; i += lanes)
+        {
+            Vector256<T> current = Vector256.LoadUnsafe(ref head, (nuint)i);
+            Vector256<T> previous = Vector256.LoadUnsafe(ref head, (nuint)(i - 1));
+            bool falls = TOrder.Descending
+                ? TOrder.Strict ? Vector256.GreaterThanOrEqualAny(current, previous) : Vector256.GreaterThanAny(current, previous)
+                : TOrder.Strict ? Vector256.LessThanOrEqualAny(current, previous) : Vector256.LessThanAny(current, previous);
+            if (falls || !Vector256.EqualsAll(current, current))
+            {
+                break;
+            }
+
+            if (!TOrder.Strict)
+            {
+                equal |= Vector256.Equals(current, previous);
+            }
+        }
+
+        repeats |= equal != Vector256<T>.Zero;
         return i;
     }
 
