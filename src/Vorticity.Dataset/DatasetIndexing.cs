@@ -142,6 +142,11 @@ internal static class DatasetIndexing
         // The fragments are built under the policy's budget and encoder, hashed postings at the dataset's units.
         VortexWriteOptions build = VortexWriteOptions.Default with { Indexes = policy, HashedUnitBytes = dataset.HashedUnitBytes };
         HashSet<string> left = new HashSet<string>(StringComparer.Ordinal);
+
+        // The objects this run gave their fragments, which hold every index the policy names from then on: a later walk
+        // passes them over, where it opened each again and read its directory to find nothing missing. An object a
+        // compaction rewrote since is a new key, and is looked at.
+        HashSet<string> done = new HashSet<string>(StringComparer.Ordinal);
         long indexed = 0;
         long bytes = 0;
         int walks = 0;
@@ -154,11 +159,17 @@ internal static class DatasetIndexing
             bool built = false;
             List<DatasetOperation> batch = [];
             List<long> lengths = [];
+            List<string> keys = [];
             await foreach (PositionedObject held in dataset.ScanBuilder().ObjectsAsync(cancellationToken).ConfigureAwait(false))
             {
                 if (left.Contains(held.Entry.Key))
                 {
                     lastLeft++;
+                    continue;
+                }
+
+                if (done.Contains(held.Entry.Key))
+                {
                     continue;
                 }
 
@@ -178,16 +189,17 @@ internal static class DatasetIndexing
                 built = true;
                 batch.Add(new DatasetOperation.AddFragment(held.TreeKey, held.Entry.Uid, fragment.Bytes) { Level = held.Level });
                 lengths.Add(fragment.Bytes.Length);
+                keys.Add(held.Entry.Key);
                 if (batch.Count == options.ObjectsPerCommit)
                 {
-                    (long applied, long length, bool created) = await CommitAsync(dataset, batch, lengths, cancellationToken).ConfigureAwait(false);
+                    (long applied, long length, bool created) = await CommitAsync(dataset, batch, lengths, keys, done, cancellationToken).ConfigureAwait(false);
                     (indexed, bytes, commits) = (indexed + applied, bytes + length, commits + (created ? 1 : 0));
                 }
             }
 
             if (batch.Count > 0)
             {
-                (long applied, long length, bool created) = await CommitAsync(dataset, batch, lengths, cancellationToken).ConfigureAwait(false);
+                (long applied, long length, bool created) = await CommitAsync(dataset, batch, lengths, keys, done, cancellationToken).ConfigureAwait(false);
                 (indexed, bytes, commits) = (indexed + applied, bytes + length, commits + (created ? 1 : 0));
             }
 
@@ -332,7 +344,7 @@ internal static class DatasetIndexing
 
     /// <summary>Commits a batch of fragments; the objects that took theirs, the bytes of those fragments, and whether a commit was made.</summary>
     private static async ValueTask<(long Applied, long Bytes, bool Created)> CommitAsync(
-        VortexDataset dataset, List<DatasetOperation> batch, List<long> lengths, CancellationToken cancellationToken)
+        VortexDataset dataset, List<DatasetOperation> batch, List<long> lengths, List<string> keys, HashSet<string> done, CancellationToken cancellationToken)
     {
         CommitResult commit = await dataset.CommitAsync(batch, CommitKind.Index, cancellationToken).ConfigureAwait(false);
         long applied = 0;
@@ -343,11 +355,13 @@ internal static class DatasetIndexing
             {
                 applied++;
                 bytes += lengths[i];
+                done.Add(keys[i]);
             }
         }
 
         batch.Clear();
         lengths.Clear();
+        keys.Clear();
         return (applied, bytes, commit.Created);
     }
 }
