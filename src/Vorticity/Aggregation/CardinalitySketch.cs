@@ -50,8 +50,14 @@ internal sealed class CardinalitySketch : IGroupSketch<CardinalitySketch>
     // Densely: every register's rank.
     private byte[]? _dense;
 
+    // The bytes of the three arrays, kept as each changes: a slot reads them before and after every value it adds.
+    private long _held;
+
     /// <summary>The bytes the sketch holds.</summary>
-    public long Bytes =>
+    public long Bytes => _held;
+
+    /// <summary>The bytes the sketch holds, counted from its arrays: what <see cref="Bytes"/> keeps.</summary>
+    internal long CountedBytes =>
         ((long)(_hashes?.Length ?? 0) * sizeof(ulong)) + ((long)(_table?.Length ?? 0) * sizeof(int)) + (_dense?.Length ?? 0);
 
     /// <summary>Whether the sketch still counts exactly.</summary>
@@ -78,6 +84,7 @@ internal sealed class CardinalitySketch : IGroupSketch<CardinalitySketch>
             if (_exact == hashes.Length)
             {
                 Array.Resize(ref _hashes, Math.Max(4, hashes.Length * 2));
+                _held += (long)(_hashes.Length - hashes.Length) * sizeof(ulong);
                 hashes = _hashes;
             }
 
@@ -401,6 +408,7 @@ internal sealed class CardinalitySketch : IGroupSketch<CardinalitySketch>
         _table = null;
         _set = 0;
         _dense = null;
+        _held = (long)_hashes.Length * sizeof(ulong);
     }
 
     /// <summary>Every register's rank into <paramref name="ranks"/>, of <see cref="Registers"/> bytes, the empty ones zero.</summary>
@@ -449,6 +457,7 @@ internal sealed class CardinalitySketch : IGroupSketch<CardinalitySketch>
         _hashes = null;
         _exact = 0;
         _table = new int[FirstTable];
+        _held += ((long)FirstTable * sizeof(int)) - ((long)hashes.Length * sizeof(ulong));
         for (int i = 0; i < exact; i++)
         {
             Set(hashes[i]);
@@ -536,6 +545,7 @@ internal sealed class CardinalitySketch : IGroupSketch<CardinalitySketch>
             table[slot] = entry;
         }
 
+        _held += (long)(table.Length - old.Length) * sizeof(int);
         _table = table;
     }
 
@@ -550,6 +560,7 @@ internal sealed class CardinalitySketch : IGroupSketch<CardinalitySketch>
             }
         }
 
+        _held += dense.Length - ((long)_table!.Length * sizeof(int));
         _dense = dense;
         _table = null;
         _set = 0;
