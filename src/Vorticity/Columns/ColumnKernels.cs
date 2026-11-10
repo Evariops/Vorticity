@@ -143,10 +143,60 @@ internal static class ColumnKernels
             }
         }
 
+        else if (Avx2.IsSupported && Pairs<T>.Laid && Unsafe.SizeOf<T>() is 4 or 8)
+        {
+            i = Nullables256(MemoryMarshal.AsBytes(values), valid, MemoryMarshal.CreateSpan(ref Unsafe.As<T?, byte>(ref MemoryMarshal.GetReference(into)), into.Length * Unsafe.SizeOf<T?>()), Unsafe.SizeOf<T>());
+        }
+
         for (; i < into.Length; i++)
         {
             into[i] = ColumnData.IsValid(valid, i) ? values[i] : null;
         }
+    }
+
+    /// <summary>
+    /// <see cref="Nullables{T}"/> on AVX2, for values of 4 or 8 bytes, 64 rows at a time: each row's pair written whole, its
+    /// flag in the first byte and its value at the offset of its size, cleared under a null, four rows a 256-bit lane set.
+    /// A row at a time took 0.58 ns a long, against 0.21 on AVX-512's lanes. The rows written.
+    /// </summary>
+    private static int Nullables256(ReadOnlySpan<byte> values, ReadOnlySpan<ulong> valid, Span<byte> into, int size)
+    {
+        int rows = values.Length / size;
+        ref byte from = ref MemoryMarshal.GetReference(values);
+        ref byte to = ref MemoryMarshal.GetReference(into);
+        Vector256<ulong> laneBits = Vector256.Create(1UL, 2, 4, 8);
+        int i = 0;
+        for (; i <= rows - 64; i += 64)
+        {
+            ulong word = valid.IsEmpty ? ulong.MaxValue : valid[i >> 6];
+            for (int group = 0; group < 16; group++)
+            {
+                // The four rows' bits as four 64-bit lanes, all ones where a row holds a value.
+                Vector256<ulong> lanes = Vector256.Equals(Vector256.Create((word >> (4 * group)) & 0xF) & laneBits, laneBits);
+                int row = i + (4 * group);
+                if (size == 8)
+                {
+                    // A pair is two 64-bit words: the flags and the values interleaved within each 128-bit half, then
+                    // the halves put in the rows' order.
+                    Vector256<ulong> flags = lanes & Vector256<ulong>.One;
+                    Vector256<ulong> kept = Vector256.LoadUnsafe(ref Unsafe.As<byte, ulong>(ref Unsafe.Add(ref from, 8 * row))) & lanes;
+                    Vector256<ulong> low = Avx2.UnpackLow(flags, kept);
+                    Vector256<ulong> high = Avx2.UnpackHigh(flags, kept);
+                    ref ulong target = ref Unsafe.As<byte, ulong>(ref Unsafe.Add(ref to, 16 * row));
+                    Avx2.Permute2x128(low, high, 0x20).StoreUnsafe(ref target);
+                    Avx2.Permute2x128(low, high, 0x31).StoreUnsafe(ref target, 4);
+                }
+                else
+                {
+                    // A pair is one 64-bit word: the value widened and moved up past the flag.
+                    Vector256<ulong> widened = Avx2.ConvertToVector256Int64(
+                        Vector128.LoadUnsafe(ref Unsafe.As<byte, uint>(ref Unsafe.Add(ref from, 4 * row)))).AsUInt64();
+                    (((widened << 32) | Vector256<ulong>.One) & lanes).StoreUnsafe(ref Unsafe.As<byte, ulong>(ref Unsafe.Add(ref to, 8 * row)));
+                }
+            }
+        }
+
+        return i;
     }
 
     /// <summary>The eight bits of <paramref name="bits"/> as eight bytes, 0 or 1, the lowest bit first in memory.</summary>
