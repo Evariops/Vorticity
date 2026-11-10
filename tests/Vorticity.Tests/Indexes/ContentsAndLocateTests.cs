@@ -5,6 +5,7 @@
 using System;
 using System.Collections.Generic;
 using Vorticity.Indexes;
+using Vorticity.Types.Variants;
 using Xunit;
 
 namespace Vorticity.Tests.Indexes;
@@ -25,6 +26,35 @@ public sealed class ContentsAndLocateTests
         Assert.Equal(Region(20), contents.CountsOf(2));
         Assert.Null(contents.CountsOf(0));
         Assert.Null(contents.LocateOf(0));
+    }
+
+    // A variant path's region by its column, key and class, scanned among few paths and through a table among many: the
+    // first of a path wins, another class or column has none.
+    [Theory]
+    [InlineData(5)]
+    [InlineData(40)]
+    public void EachPathsRegionIsTheFirstListedForIt(int paths)
+    {
+        List<(int Field, string Key, PathClass Class, IndexSegment Region)> locates = [];
+        for (int p = 0; p < paths; p++)
+        {
+            locates.Add((1, $"attr_{p:D3}", PathClass.String, Region(p)));
+        }
+
+        locates.Add((1, "attr_000", PathClass.String, Region(999)));
+        locates.Add((1, "attr_000", PathClass.Integer, Region(500)));
+        ObjectContents contents = new ObjectContents([], [], 0, []) { PathLocates = locates, PathGranuleStats = locates, PathSingleRows = [7, 8] };
+        for (int p = 0; p < paths; p++)
+        {
+            Assert.Equal(Region(p), contents.PathLocateOf(1, $"attr_{p:D3}", PathClass.String));
+        }
+
+        Assert.Equal(Region(500), contents.PathLocateOf(1, "attr_000", PathClass.Integer));
+        Assert.Null(contents.PathLocateOf(1, "attr_000", PathClass.Double));
+        Assert.Null(contents.PathLocateOf(2, "attr_000", PathClass.String));
+        Assert.Null(contents.PathLocateOf(1, "absent", PathClass.String));
+        Assert.Equal((Region(1), 8L), contents.PathGranuleStatsOf(1, "attr_001", PathClass.String));
+        Assert.Equal((Region(2), 0L), contents.PathGranuleStatsOf(1, "attr_002", PathClass.String));
     }
 
     [Theory]

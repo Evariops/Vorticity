@@ -7,6 +7,7 @@ using System.Collections.Generic;
 using BenchmarkDotNet.Attributes;
 
 using Vorticity.Indexes;
+using Vorticity.Types.Variants;
 
 namespace Vorticity.Benchmarks.Audit;
 
@@ -16,6 +17,7 @@ namespace Vorticity.Benchmarks.Audit;
 public class AuditContentsLookupBenchmarks
 {
     private ObjectContents _contents = null!;
+    private string[] _paths = [];
 
     /// <summary>The object's columns.</summary>
     [Params(16, 128)]
@@ -35,8 +37,29 @@ public class AuditContentsLookupBenchmarks
             stats.Add((f, new IndexSegment((ulong)(((f * 3) + 2) * 4096), 4096, 0)));
         }
 
-        _contents = new ObjectContents([], [], 0, []) { Sheets = sheets, Counts = counts, GranuleStats = stats };
+        List<(int Field, string Key, PathClass Class, IndexSegment Region)> paths = [];
+        _paths = new string[64];
+        for (int p = 0; p < _paths.Length; p++)
+        {
+            _paths[p] = $"attributes.http_{p:D3}";
+            paths.Add((0, _paths[p], PathClass.String, new IndexSegment((ulong)(p * 4096), 4096, 0)));
+        }
+
+        _contents = new ObjectContents([], [], 0, []) { Sheets = sheets, Counts = counts, GranuleStats = stats, PathLocates = paths };
         Lookups();
+    }
+
+    /// <summary>Every path's region of a variant column of 64 paths, by path.</summary>
+    [Benchmark(OperationsPerInvoke = 64)]
+    public long PathLookups()
+    {
+        long found = 0;
+        for (int p = 0; p < _paths.Length; p++)
+        {
+            found += (long)(_contents.PathLocateOf(0, _paths[p], PathClass.String)?.Offset ?? 0);
+        }
+
+        return found;
     }
 
     /// <summary>Every column's three regions, by column.</summary>

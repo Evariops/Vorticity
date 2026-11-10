@@ -152,32 +152,62 @@ internal sealed class ObjectContents(
     /// <summary>The statistics over the granules of key <paramref name="key"/> of the variant column <paramref name="field"/>, read as <paramref name="class"/>, and the rows of its granules of one value; null for none.</summary>
     internal (IndexSegment Region, long SingleRows)? PathGranuleStatsOf(int field, string key, PathClass @class)
     {
-        for (int i = 0; i < PathGranuleStats.Count; i++)
-        {
-            (int column, string named, PathClass held, IndexSegment region) = PathGranuleStats[i];
-            if (column == field && held == @class && string.Equals(named, key, StringComparison.Ordinal))
-            {
-                return (region, i < PathSingleRows.Count ? PathSingleRows[i] : 0);
-            }
-        }
-
-        return null;
+        int i = PathAt(ref _pathStatsAt, PathGranuleStats, field, key, @class);
+        return i < 0 ? null : (PathGranuleStats[i].Region, i < PathSingleRows.Count ? PathSingleRows[i] : 0);
     }
 
     /// <summary>The region of where key <paramref name="key"/> of the variant column <paramref name="field"/>, read as <paramref name="class"/>, lies; null for none.</summary>
     internal IndexSegment? PathLocateOf(int field, string key, PathClass @class)
     {
-        // By place rather than through the list's enumerator, which an interface boxes: a plan asks it of every object.
-        for (int i = 0; i < PathLocates.Count; i++)
+        int i = PathAt(ref _pathLocatesAt, PathLocates, field, key, @class);
+        return i < 0 ? null : PathLocates[i].Region;
+    }
+
+    // The places of the paths' regions by their (column, key, class), made at the first lookup of a list longer than
+    // ShortPaths: a plan asks them of every object, each a scan with a comparison of texts a path.
+    private Dictionary<(int Field, string Key, PathClass Class), int>? _pathStatsAt;
+    private Dictionary<(int Field, string Key, PathClass Class), int>? _pathLocatesAt;
+
+    /// <summary>The paths a lookup scans, past which a table finds them.</summary>
+    private const int ShortPaths = 8;
+
+    /// <summary>The place of the first path of <paramref name="paths"/> of the column, key and class asked; -1 for none.</summary>
+    private static int PathAt(
+        ref Dictionary<(int Field, string Key, PathClass Class), int>? at,
+        IReadOnlyList<(int Field, string Key, PathClass Class, IndexSegment Region)> paths,
+        int field,
+        string key,
+        PathClass @class)
+    {
+        if (paths.Count <= ShortPaths)
         {
-            (int column, string named, PathClass held, IndexSegment region) = PathLocates[i];
-            if (column == field && held == @class && string.Equals(named, key, StringComparison.Ordinal))
+            // By place rather than through the list's enumerator, which an interface boxes.
+            for (int i = 0; i < paths.Count; i++)
             {
-                return region;
+                (int column, string named, PathClass held, _) = paths[i];
+                if (column == field && held == @class && string.Equals(named, key, StringComparison.Ordinal))
+                {
+                    return i;
+                }
             }
+
+            return -1;
         }
 
-        return null;
+        Dictionary<(int Field, string Key, PathClass Class), int>? table = Volatile.Read(ref at);
+        if (table is null)
+        {
+            table = new Dictionary<(int Field, string Key, PathClass Class), int>(paths.Count);
+            for (int i = 0; i < paths.Count; i++)
+            {
+                (int column, string named, PathClass held, _) = paths[i];
+                table.TryAdd((column, named, held), i);
+            }
+
+            Volatile.Write(ref at, table);
+        }
+
+        return table.TryGetValue((field, key, @class), out int place) ? place : -1;
     }
 
     /// <summary>
