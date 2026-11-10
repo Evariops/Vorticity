@@ -108,6 +108,30 @@ public class AuditCompareKernelBenchmarks
         return _states[Rows - 1];
     }
 
+    /// <summary>Every row's verdict on <c>column IN (8 keys)</c>, through the set a question prepares once.</summary>
+    [Benchmark(OperationsPerInvoke = Rows)]
+    public byte In()
+    {
+        if (_in is null)
+        {
+            _keys = new FilterLiteral[8];
+            for (int k = 0; k < _keys.Length; k++)
+            {
+                _keys[k] = _literal.Kind == FilterLiteralKind.Float ? FilterLiteral.From(k * 1_000.5) : FilterLiteral.From(k * 12_345L);
+            }
+
+            _in = CandidateSet.For(_keys, ComparisonKernels.CandidatesFor(_arena, _node));
+            _scratch = new byte[Rows];
+        }
+
+        ComparisonKernels.In(_arena, _node, _keys, _states, _scratch, _in);
+        return _states[Rows - 1];
+    }
+
+    private FilterLiteral[] _keys = [];
+    private CandidateSet? _in;
+    private byte[] _scratch = [];
+
     /// <summary>Every row's verdict on <c>column &lt; column</c>: two columns compared row by row.</summary>
     [Benchmark(OperationsPerInvoke = Rows)]
     public byte Columns()
