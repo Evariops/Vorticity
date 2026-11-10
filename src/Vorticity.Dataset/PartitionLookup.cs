@@ -218,7 +218,7 @@ internal sealed class PartitionLookup
                 }
             }
 
-            return new Partition(index, postings, entry.RanksIn(index), Placed(placed));
+            return new Partition(index, postings, index.RanksOf(entry), Placed(placed));
         }
     }
 

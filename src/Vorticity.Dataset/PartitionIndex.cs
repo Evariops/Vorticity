@@ -84,6 +84,9 @@ internal sealed class PartitionIndex
     // The objects' ranks by uid, made by the first lookup that asks (RankOf).
     private Dictionary<UInt128, int>? _ranks;
 
+    // The ranks the entry that last named the index covers, with the entry (RanksOf).
+    private Tuple<PartitionIndexEntry, ulong[]>? _covered;
+
     private PartitionIndex(Covered[] objects, Entry[] entries)
     {
         _objects = objects;
@@ -112,6 +115,23 @@ internal sealed class PartitionIndex
 
             return Interlocked.CompareExchange(ref _ranks, ranks, null) ?? ranks;
         }
+    }
+
+    /// <summary>
+    /// The ranks of the objects <paramref name="entry"/>, a version's entry that names the index, covers, a bit a rank
+    /// (<see cref="PartitionIndexEntry.RanksIn"/>): kept for the entry that asked last, which a version keeps found
+    /// (<see cref="DatasetSnapshot.PartitionIndexAsync"/>), so that its questions after make none. The caller reads them.
+    /// </summary>
+    internal ulong[] RanksOf(PartitionIndexEntry entry)
+    {
+        if (Volatile.Read(ref _covered) is { } known && ReferenceEquals(known.Item1, entry))
+        {
+            return known.Item2;
+        }
+
+        ulong[] ranks = entry.RanksIn(this);
+        Volatile.Write(ref _covered, Tuple.Create(entry, ranks));
+        return ranks;
     }
 
     /// <summary>The entry of kind <paramref name="kind"/> of the column named <paramref name="name"/>, or null when the index holds none.</summary>

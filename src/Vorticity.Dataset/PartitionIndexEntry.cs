@@ -61,9 +61,9 @@ internal sealed record PartitionIndexEntry(
     internal ulong[] RanksIn(PartitionIndex index)
     {
         ulong[] ranks = new ulong[(index.Objects.Count + 63) >> 6];
-        foreach (UInt128 covered in Covered)
+        for (int i = 0; i < Covered.Count; i++)
         {
-            if (index.RankOf(covered) is int rank and >= 0)
+            if (index.RankOf(Covered[i]) is int rank and >= 0)
             {
                 ranks[rank >> 6] |= 1UL << (rank & 63);
             }

@@ -246,7 +246,7 @@ internal sealed class PartitionLocates
                 columns[c] = new Column(located, [.. spots]);
             }
 
-            return new Partition(index, entry.RanksIn(index), columns);
+            return new Partition(index, index.RanksOf(entry), columns);
         }
     }
 

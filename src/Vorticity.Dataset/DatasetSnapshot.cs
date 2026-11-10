@@ -256,11 +256,31 @@ internal sealed class DatasetSnapshot
             return null;
         }
 
+        // Found once a version, within a budget: each asking decoded the entry again, its object's key and every uid it
+        // covers, ten kilobytes a lookup over a month's days. A partition given in an array of its own is kept under it.
+        ClockMemo<byte[], PartitionIndexEntry?> found = Volatile.Read(ref _partitionIndexes)
+            ?? Interlocked.CompareExchange(ref _partitionIndexes, new ClockMemo<byte[], PartitionIndexEntry?>(PartitionIndexEntriesBytes, Buffers.ByteKeys.Instance), null)
+            ?? _partitionIndexes!;
+        byte[] named = System.Runtime.InteropServices.MemoryMarshal.TryGetArray(partition, out ArraySegment<byte> whole)
+            && whole.Offset == 0 && whole.Count == whole.Array!.Length ? whole.Array : partition.ToArray();
+        if (found.TryGet(named, out PartitionIndexEntry? known))
+        {
+            return known;
+        }
+
         byte[] key = PartitionIndexEntry.TreeKeyOf(partition.Span);
-        return await Levels.PartitionIndexes.FindAsync(key, Pages, cancellationToken).ConfigureAwait(false) is { } found
-            ? PartitionIndexEntry.FromBytes(found.Key.Span, found.Value.Span)
+        PartitionIndexEntry? entry = await Levels.PartitionIndexes.FindAsync(key, Pages, cancellationToken).ConfigureAwait(false) is { } tree
+            ? PartitionIndexEntry.FromBytes(tree.Key.Span, tree.Value.Span)
             : null;
+        found.Keep(named, entry, 96 + named.Length + (entry is null ? 0 : (2L * entry.ObjectKey.Length) + (16L * entry.Covered.Count)), out entry);
+        return entry;
     }
+
+    // The bytes of the partition index entries a version keeps found (PartitionIndexAsync).
+    private const long PartitionIndexEntriesBytes = 4L << 20;
+
+    // The partition index entries the version's questions found, by partition (PartitionIndexAsync).
+    private ClockMemo<byte[], PartitionIndexEntry?>? _partitionIndexes;
 
     /// <summary>
     /// The root of <paramref name="level"/>'s tree as the key walks of the version share it, read the
