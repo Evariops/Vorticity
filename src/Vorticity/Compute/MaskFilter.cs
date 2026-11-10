@@ -153,7 +153,8 @@ internal static class MaskFilter
         ref ulong to = ref MemoryMarshal.GetReference(destination);
         int written = 0;
         int w = 0;
-        if (IsAccelerated && Bmi2.X64.IsSupported)
+        // Lanes of 8 bytes: AVX-512F's compress, VBMI2 not needed (CP-01).
+        if (WordBytes.IsAccelerated && Avx512F.IsSupported && Bmi2.X64.IsSupported)
         {
             WordBytes spread = WordBytes.Create();
             for (; ((w + 1) << 6) <= rows; w++)
