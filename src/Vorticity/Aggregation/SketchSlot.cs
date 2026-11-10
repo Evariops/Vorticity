@@ -250,12 +250,14 @@ internal abstract class SketchSlot<TSketch, TResult> : AggregateSlot<TResult>
 
     internal override void WriteStates(ReadOnlySpan<int> groups, SpillBuffer buffer)
     {
+        // One delegate for the groups written, where each sketch was handed a new one: 64 bytes a group spilled.
+        Action<long> write = buffer.Write;
         foreach (int group in groups)
         {
             if (_sketches[group] is { } sketch)
             {
                 buffer.Write(1);
-                sketch.Write(buffer.Write);
+                sketch.Write(write);
             }
             else
             {
