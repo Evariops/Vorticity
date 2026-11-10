@@ -3385,16 +3385,32 @@ public sealed class VortexDataset : IAsyncDisposable
     /// contents names, side by side in one round trip, none once this handle read them. A column the object keeps no
     /// counts or sketches of, or an object with no table of contents this library reads, has none.
     /// </summary>
-    internal async ValueTask<(Indexes.ColumnCounts? Counts, Indexes.ColumnSketches? Sketches)> ReadCountsAsync(
+    internal ValueTask<(Indexes.ColumnCounts? Counts, Indexes.ColumnSketches? Sketches)> ReadCountsAsync(
         ObjectEntry entry, int field, bool sketches, CancellationToken cancellationToken)
     {
         if (entry.Contents is not { Counts.Count: > 0 } contents)
         {
-            return (null, null);
+            return new((null, null));
         }
 
+        // Both regions in the memo, or not asked: no read, and no arrays to read them by, which every object of a question
+        // its counts answer took once warm.
+        Indexes.IndexSegment? counted = contents.CountsOf(field);
+        Indexes.IndexSegment? sketched = sketches ? contents.SketchesOf(field) : null;
+        Indexes.ColumnCounts? counts = null;
+        Indexes.ColumnSketches? held = null;
+        return (counted is not { } region || _synopses.TryGet(entry.Uid, region.Offset, out counts))
+            && (sketched is not { } sketchRegion || _synopses.TryGet(entry.Uid, sketchRegion.Offset, out held))
+                ? new((counts, held))
+                : ReadCountsUnheldAsync(entry, contents, counted, sketched, cancellationToken);
+    }
+
+    /// <summary><see cref="ReadCountsAsync"/>'s regions, one at least not in the memo, read side by side in one round trip.</summary>
+    private async ValueTask<(Indexes.ColumnCounts? Counts, Indexes.ColumnSketches? Sketches)> ReadCountsUnheldAsync(
+        ObjectEntry entry, Indexes.ObjectContents contents, Indexes.IndexSegment? counted, Indexes.IndexSegment? sketched, CancellationToken cancellationToken)
+    {
         object?[] read = new object?[2];
-        Indexes.IndexSegment?[] regions = [contents.CountsOf(field), sketches ? contents.SketchesOf(field) : null];
+        Indexes.IndexSegment?[] regions = [counted, sketched];
         await ReadSynopsesAsync(entry, contents, regions, read, CountsOrSketches, cancellationToken).ConfigureAwait(false);
         return (read[0] as Indexes.ColumnCounts, read[1] as Indexes.ColumnSketches);
     }

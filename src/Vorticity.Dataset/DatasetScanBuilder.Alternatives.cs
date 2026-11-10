@@ -121,8 +121,11 @@ internal sealed partial class DatasetScanBuilder
         /// <summary>Whether its reads began (<see cref="Begin"/>).</summary>
         internal bool Begun { get; set; }
 
-        /// <summary>The read of its counts, begun ahead; null before or after.</summary>
-        internal Task<(ColumnCounts?, ColumnSketches?)>? Counts { get; set; }
+        /// <summary>
+        /// The read of its counts, begun ahead, awaited once; null before or after. A read its memo answers completes as it
+        /// begins, and takes no task.
+        /// </summary>
+        internal ValueTask<(ColumnCounts?, ColumnSketches?)>? Counts { get; set; }
 
         /// <summary>The read of its columns' statistics over its granules and its measures' histograms, begun ahead; null before or after.</summary>
         internal Task<(GranuleStats?[] Stats, GranuleHistograms?[] Histograms, GranuleKeyRuns?[] Runs)>? Statistics { get; set; }

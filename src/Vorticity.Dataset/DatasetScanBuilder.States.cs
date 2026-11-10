@@ -324,7 +324,7 @@ internal sealed partial class DatasetScanBuilder
                 {
                     StateRows? rows = null;
                     List<StateRows>? byBucket = null;
-                    Task<(Indexes.ColumnCounts?, Indexes.ColumnSketches?)> read = unit.Counts!;
+                    ValueTask<(Indexes.ColumnCounts?, Indexes.ColumnSketches?)> read = unit.Counts!.Value;
                     unit.Counts = null;
                     if (await read.ConfigureAwait(false) is ({ } counts, var sketched))
                     {
@@ -467,12 +467,18 @@ internal sealed partial class DatasetScanBuilder
             List<Task> begun = [];
             foreach (Planned left in units)
             {
-                foreach (Task? task in (ReadOnlySpan<Task?>)[left.Opened, left.Statistics, left.Counts])
+                foreach (Task? task in (ReadOnlySpan<Task?>)[left.Opened, left.Statistics])
                 {
                     if (task is not null)
                     {
                         begun.Add(task);
                     }
+                }
+
+                if (left.Counts is { } counting)
+                {
+                    left.Counts = null;
+                    begun.Add(counting.AsTask());
                 }
             }
 
@@ -503,17 +509,20 @@ internal sealed partial class DatasetScanBuilder
         }
 
         unit.Begun = true;
+
+        // A unit's counts are kept to be awaited once, by the loop that comes to it or by the cleanup that follows a stop.
+#pragma warning disable CA2012
         switch (unit.Chosen.Path)
         {
             case AnswerPath.Rollup:
-                unit.Counts = _dataset.ReadRollupCountsAsync(unit.Run!, unit.Field!.Value, answer.AsksSketches, answer.Values, unit.Buckets is not null, cancellationToken).AsTask();
+                unit.Counts = _dataset.ReadRollupCountsAsync(unit.Run!, unit.Field!.Value, answer.AsksSketches, answer.Values, unit.Buckets is not null, cancellationToken);
                 break;
             case AnswerPath.Counts:
                 ObjectEntry entry = unit.Held.Entry;
                 int field = unit.Field!.Value;
-                unit.Counts = entry.HasDeletions ? LiveCountsAsync(entry, field, cancellationToken)
-                    : answer.Exclusion is { } exclusion ? KeptCountsAsync(answer, unit.Held, field, exclusion.Field, exclusion.Found, cancellationToken)
-                    : _dataset.ReadCountsAsync(entry, field, answer.AsksSketches, cancellationToken).AsTask();
+                unit.Counts = entry.HasDeletions ? new(LiveCountsAsync(entry, field, cancellationToken))
+                    : answer.Exclusion is { } exclusion ? new(KeptCountsAsync(answer, unit.Held, field, exclusion.Field, exclusion.Found, cancellationToken))
+                    : _dataset.ReadCountsAsync(entry, field, answer.AsksSketches, cancellationToken);
                 break;
             case AnswerPath.Granules:
                 unit.Statistics = GranuleAnswer()!.Exclusion is { } excluded && excluded.Placed(unit.Held.Entry.Uid)
@@ -523,6 +532,7 @@ internal sealed partial class DatasetScanBuilder
                         GranuleAnswer()!.Unread(unit.Held)).AsTask();
                 break;
         }
+#pragma warning restore CA2012
     }
 
     /// <summary>
