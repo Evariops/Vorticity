@@ -1112,13 +1112,21 @@ internal sealed class FilterEvaluator
         Validity validity = Validity.AllInvalid;
         if (!outer.AllInvalid && !own.AllInvalid)
         {
+            // A word of 64 rows at a time, the two bitmaps read at their offsets and and-ed, where each row tested both.
             VortexBuffer bits = arena.Allocate(Math.Max((rows + 7) / 8, 1), 1, out Span<byte> raw);
             raw.Clear();
-            for (int row = 0; row < rows; row++)
+            for (int first = 0; first < rows; first += 64)
             {
-                if (outer.IsValid(row) && own.IsValid(row))
+                int span = Math.Min(64, rows - first);
+                ulong word = BitWords.Load(outer.Bits, outer.BitOffset + first) & BitWords.Mask(span);
+                if (!own.AllValid)
                 {
-                    raw[row >> 3] |= (byte)(1 << (row & 7));
+                    word &= BitWords.Load(own.Bits, own.BitOffset + first);
+                }
+
+                for (int b = 0; b < (span + 7) >> 3; b++)
+                {
+                    raw[(first >> 3) + b] = (byte)(word >> (8 * b));
                 }
             }
 
