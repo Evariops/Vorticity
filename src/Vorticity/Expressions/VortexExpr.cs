@@ -411,6 +411,28 @@ internal sealed class InExpr : VortexExpr
     /// <summary>The tuples whose column's values the set is, written beside them (<see cref="TupleInExpr.Of"/>); null for a set of its own.</summary>
     internal TupleInExpr? Projects { get; init; }
 
+    /// <summary>
+    /// The candidates hashed for a column of <paramref name="kind"/>, made at the first ask and kept with the expression,
+    /// null when an OR of equalities is the better answer: an evaluator a file made them again for every object a
+    /// question read. A set is not changed once made, so the lanes share it.
+    /// </summary>
+    internal Compute.CandidateSet? SetFor(Compute.CandidateKind kind)
+    {
+        System.Runtime.CompilerServices.StrongBox<Compute.CandidateSet?>?[] sets =
+            _sets ?? System.Threading.Interlocked.CompareExchange(ref _sets, new System.Runtime.CompilerServices.StrongBox<Compute.CandidateSet?>?[16], null) ?? _sets;
+        ref System.Runtime.CompilerServices.StrongBox<Compute.CandidateSet?>? slot = ref sets[(int)kind & 15];
+        System.Runtime.CompilerServices.StrongBox<Compute.CandidateSet?>? made = System.Threading.Volatile.Read(ref slot);
+        if (made is null)
+        {
+            made = new System.Runtime.CompilerServices.StrongBox<Compute.CandidateSet?>(Compute.CandidateSet.For(Literals, kind));
+            made = System.Threading.Interlocked.CompareExchange(ref slot, made, null) ?? made;
+        }
+
+        return made.Value;
+    }
+
+    private System.Runtime.CompilerServices.StrongBox<Compute.CandidateSet?>?[]? _sets;
+
     /// <inheritdoc/>
     internal override ExprKind Kind => ExprKind.In;
 
