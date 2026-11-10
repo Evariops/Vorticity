@@ -72,6 +72,70 @@ internal readonly struct WordBytes
                 & Vector128.Create((byte)1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128),
             Vector128<byte>.Zero);
 
+    /// <summary>
+    /// A lane per bit for a 256-bit vector of <typeparamref name="T"/> where AVX2 is: all ones where the bit is set, zero
+    /// where it is clear, lane <c>j</c> for bit <c>j</c> of <paramref name="bits"/>, as <see cref="Lanes{T}"/> makes them at
+    /// 512 bits.
+    /// </summary>
+    /// <typeparam name="T">An integer of 1, 2, 4 or 8 bytes.</typeparam>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static Vector256<T> Lanes256<T>(ulong bits)
+    {
+        if (Unsafe.SizeOf<T>() == 1)
+        {
+            // Each 128-bit lane holds the bits' four bytes four times, and vpshufb stays inside it.
+            Vector256<byte> spread = Avx2.Shuffle(
+                Vector256.Create((uint)bits).AsByte(),
+                Vector256.Create((byte)0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3));
+            Vector256<byte> bit = Vector256.Create((byte)1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128);
+            return (~Vector256.Equals(spread & bit, Vector256<byte>.Zero)).As<byte, T>();
+        }
+
+        if (Unsafe.SizeOf<T>() == 2)
+        {
+            Vector256<ushort> bit = Vector256.Create((ushort)1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768);
+            return (~Vector256.Equals(Vector256.Create((ushort)bits) & bit, Vector256<ushort>.Zero)).As<ushort, T>();
+        }
+
+        if (Unsafe.SizeOf<T>() == 4)
+        {
+            Vector256<uint> bit = Vector256.Create(1u, 2, 4, 8, 16, 32, 64, 128);
+            return (~Vector256.Equals(Vector256.Create((uint)bits) & bit, Vector256<uint>.Zero)).As<uint, T>();
+        }
+
+        Vector256<ulong> lane = Vector256.Create(1UL, 2, 4, 8);
+        return (~Vector256.Equals(Vector256.Create(bits) & lane, Vector256<ulong>.Zero)).As<ulong, T>();
+    }
+
+    /// <summary>
+    /// <see cref="Lanes256{T}"/> for a 128-bit vector, where its byte shuffle is (<see cref="IsAccelerated128"/>): lane
+    /// <c>j</c> for bit <c>j</c> of <paramref name="bits"/>.
+    /// </summary>
+    /// <typeparam name="T">An integer of 1, 2, 4 or 8 bytes.</typeparam>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static Vector128<T> Lanes128<T>(ulong bits)
+    {
+        if (Unsafe.SizeOf<T>() == 1)
+        {
+            return (~Clear128((ushort)bits)).As<byte, T>();
+        }
+
+        if (Unsafe.SizeOf<T>() == 2)
+        {
+            Vector128<ushort> bit = Vector128.Create((ushort)1, 2, 4, 8, 16, 32, 64, 128);
+            return (~Vector128.Equals(Vector128.Create((ushort)bits) & bit, Vector128<ushort>.Zero)).As<ushort, T>();
+        }
+
+        if (Unsafe.SizeOf<T>() == 4)
+        {
+            Vector128<uint> bit = Vector128.Create(1u, 2, 4, 8);
+            return (~Vector128.Equals(Vector128.Create((uint)bits) & bit, Vector128<uint>.Zero)).As<uint, T>();
+        }
+
+        Vector128<ulong> lane = Vector128.Create(1UL, 2);
+        return (~Vector128.Equals(Vector128.Create(bits) & lane, Vector128<ulong>.Zero)).As<ulong, T>();
+    }
+
     /// <summary>Byte <c>j</c> of the result the byte of <paramref name="bits"/> holding bit <c>j</c>, by <paramref name="index"/>.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static Vector128<byte> Spread128(ushort bits, Vector128<byte> index)
@@ -116,12 +180,11 @@ internal readonly struct WordBytes
 
         if (Unsafe.SizeOf<T>() == 2)
         {
-            uint half = (uint)(word >> (32 * group));
-            Vector512<ushort> held = Vector512.Create(Vector256.Create((ushort)half), Vector256.Create((ushort)(half >> 16)));
-            Vector512<ushort> bit = Vector512.Create(
-                (ushort)1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768,
-                1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768);
-            return (~Vector512.Equals(held & bit, Vector512<ushort>.Zero)).As<ushort, T>();
+            // The word's byte masks, the group's half of them sign-extended to words: the halves of the word broadcast
+            // into a vector of two halves went through memory, 0.21 ns a row of a select against 0.034 at 256 bits.
+            Vector512<byte> set = ~Clear(word);
+            Vector256<sbyte> half = (group == 0 ? set.GetLower() : set.GetUpper()).AsSByte();
+            return Avx512BW.ConvertToVector512Int16(half).As<short, T>();
         }
 
         if (Unsafe.SizeOf<T>() == 4)
