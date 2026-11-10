@@ -93,7 +93,10 @@ internal sealed class ParquetColumn
     /// <summary>The leaf's Vortex type, nullable when the leaf is optional.</summary>
     internal required VortexType Type { get; set; }
 
-    internal string DottedPath => string.Join('.', Path);
+    /// <summary>The leaf's names joined by dots, made at the first ask: a question's match of its filter's paths asked it of every column.</summary>
+    internal string DottedPath => _dottedPath ??= string.Join('.', Path);
+
+    private string? _dottedPath;
 }
 
 /// <summary>A field of the Vortex schema a Parquet schema maps to, and the levels that define it.</summary>
