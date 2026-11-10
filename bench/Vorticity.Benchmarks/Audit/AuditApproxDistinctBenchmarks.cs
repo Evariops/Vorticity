@@ -26,6 +26,10 @@ public partial class AuditApproxDistinctBenchmarks
     [Params(64, 32)]
     public int Bits { get; set; }
 
+    /// <summary>The groups (audit AG-21): 64, whose sketches are soon dense, or a million of four values each, kept exactly.</summary>
+    [Params(64, 1_048_576)]
+    public int Groups { get; set; } = 64;
+
     /// <summary>A row: its group, and its keys of 64 and 32 bits.</summary>
     [VortexRecord]
     public partial record struct Keyed(int Group, long Wide, int Narrow);
@@ -43,7 +47,7 @@ public partial class AuditApproxDistinctBenchmarks
         Keyed[] rows = new Keyed[Rows];
         for (int i = 0; i < Rows; i++)
         {
-            rows[i] = new Keyed(random.Next(64), random.NextInt64(1L << 40), random.Next());
+            rows[i] = new Keyed(random.Next(Groups), random.NextInt64(1L << 40), random.Next());
         }
 
         WriteAsync(path, rows).GetAwaiter().GetResult();
