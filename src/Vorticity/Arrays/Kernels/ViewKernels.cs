@@ -345,7 +345,22 @@ internal static class ViewKernels
         ulong total = 0;
         int i = 0;
 
-        if (Vector.IsHardwareAccelerated)
+        if (Avx2.IsSupported && values.Length >= 64)
+        {
+            // Eight bytes summed into a 64-bit lane by one sum of absolute differences against zero, where widening to
+            // 64 bits took seven steps a vector.
+            ref byte source = ref MemoryMarshal.GetReference(values);
+            Vector256<ulong> first = Vector256<ulong>.Zero;
+            Vector256<ulong> second = Vector256<ulong>.Zero;
+            for (; i <= values.Length - 64; i += 64)
+            {
+                first += Avx2.SumAbsoluteDifferences(Vector256.LoadUnsafe(ref source, (nuint)i), Vector256<byte>.Zero).AsUInt64();
+                second += Avx2.SumAbsoluteDifferences(Vector256.LoadUnsafe(ref source, (nuint)(i + 32)), Vector256<byte>.Zero).AsUInt64();
+            }
+
+            total = Vector256.Sum(first + second);
+        }
+        else if (Vector.IsHardwareAccelerated)
         {
             int lanes = Vector<byte>.Count;
             ref byte source = ref MemoryMarshal.GetReference(values);
