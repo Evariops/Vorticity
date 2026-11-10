@@ -87,16 +87,16 @@ internal sealed partial class DatasetScanBuilder
         }
 
         /// <summary>The object; default for a rollup.</summary>
-        internal PositionedObject Held { get; }
+        internal PositionedObject Held { get; private set; }
 
         /// <summary>The rollup; null for an object.</summary>
-        internal RollupEntry? Run { get; }
+        internal RollupEntry? Run { get; private set; }
 
         /// <summary>The summaries of the buckets of a rollup taken by bucket; null otherwise.</summary>
-        internal ObjectSummaries?[]? Buckets { get; }
+        internal ObjectSummaries?[]? Buckets { get; private set; }
 
         /// <summary>The column whose counts answer it; null when none does.</summary>
-        internal int? Field { get; }
+        internal int? Field { get; private set; }
 
         internal UnitLevel Level => Run is null ? UnitLevel.Object : UnitLevel.Run;
 
@@ -132,6 +132,94 @@ internal sealed partial class DatasetScanBuilder
 
         /// <summary>Its open, begun ahead; null before or after.</summary>
         internal Task? Opened { get; set; }
+
+        /// <summary>Makes this unit, chosen before or given back, the object <paramref name="held"/>'s, as new: nothing chosen or begun.</summary>
+        internal Planned Of(in PositionedObject held, int? field)
+        {
+            Clear();
+            (Held, Field) = (held, field);
+            return this;
+        }
+
+        /// <summary>Lets go of everything it holds: its object, its choice and its reads, as a unit given back keeps nothing alive.</summary>
+        internal void Clear()
+        {
+            (Held, Run, Buckets, Field, Chosen, Cost, Weight, Kept, Rejected) = (default, null, null, null, null!, default, 0, 1, null);
+            (Begun, Counts, Statistics, Opened) = (false, null, null, null);
+        }
+    }
+
+    /// <summary>
+    /// The units of a question's states, given back for the next question's (<see cref="StatesAsync"/>): the list its units
+    /// fill, and the units, each made again for an object (<see cref="Planned.Of"/>), which a question of 512 objects made
+    /// anew at 225 bytes each. A process keeps one shelf a processor at most, each of <see cref="KeptUnits"/> units, some
+    /// 230 KB, and a list of <see cref="KeptUnits"/> times four.
+    /// </summary>
+    private sealed class UnitShelf
+    {
+        /// <summary>The units a shelf keeps at most.</summary>
+        private const int KeptUnits = 1024;
+
+        private static readonly UnitShelf?[] Kept = new UnitShelf?[Environment.ProcessorCount];
+        private static readonly Lock Gate = new Lock();
+        private static int _count;
+
+        private readonly Stack<Planned> _free = new Stack<Planned>();
+
+        /// <summary>The list the question's units fill, empty when rented.</summary>
+        internal List<Planned> Units { get; private set; } = [];
+
+        /// <summary>A shelf a question gave back, or a new one.</summary>
+        internal static UnitShelf Rent()
+        {
+            lock (Gate)
+            {
+                if (_count > 0)
+                {
+                    UnitShelf kept = Kept[--_count]!;
+                    Kept[_count] = null;
+                    return kept;
+                }
+            }
+
+            return new UnitShelf();
+        }
+
+        /// <summary>A unit of the object <paramref name="held"/>, a unit given back made again or a new one.</summary>
+        internal Planned Of(in PositionedObject held, int? field) =>
+            _free.TryPop(out Planned? unit) ? unit.Of(held, field) : new Planned(held, field);
+
+        /// <summary>
+        /// Takes back the units of the list, which no read begun holds any more, each cleared, as many as it keeps, and keeps
+        /// the shelf for the next question, past the bound left to the collector.
+        /// </summary>
+        internal void Return()
+        {
+            foreach (Planned unit in Units)
+            {
+                if (_free.Count >= KeptUnits)
+                {
+                    break;
+                }
+
+                unit.Clear();
+                _free.Push(unit);
+            }
+
+            Units.Clear();
+            if (Units.Capacity > 4 * KeptUnits)
+            {
+                Units = [];
+            }
+
+            lock (Gate)
+            {
+                if (_count < Kept.Length)
+                {
+                    Kept[_count++] = this;
+                }
+            }
+        }
     }
 
     // What the alternatives of the unit being chosen ask two or three times, found once a choice (Choose): how its summaries
@@ -593,11 +681,13 @@ internal sealed partial class DatasetScanBuilder
     /// its objects (<see cref="KeepsAsync"/>), then the objects the walk meets that no rollup covers. With
     /// <paramref name="read"/>, the units whose choice reads rows are passed through their sheets, as a read does
     /// (<see cref="SheetsKeptAsync"/>); without, nothing but the entries is read, and the sheets weigh in each object's cost.
+    /// The objects' units come from <paramref name="shelf"/>, and fill its list, when there is one.
     /// </summary>
-    private async ValueTask<(RollupChoice? Rollups, List<Planned> Units)> UnitsAsync(CountsAnswer? answer, bool explain, bool read, CancellationToken cancellationToken)
+    private async ValueTask<(RollupChoice? Rollups, List<Planned> Units)> UnitsAsync(
+        CountsAnswer? answer, bool explain, bool read, UnitShelf? shelf, CancellationToken cancellationToken)
     {
         RollupChoice? rollups = answer is null ? null : await RollupsAsync(answer, cancellationToken).ConfigureAwait(false);
-        List<Planned> units = [];
+        List<Planned> units = shelf?.Units ?? [];
         foreach ((RollupEntry rollup, int field, ObjectSummaries?[]? buckets) in rollups?.Chosen ?? [])
         {
             Planned unit = new Planned(rollup, field, buckets);
@@ -630,7 +720,8 @@ internal sealed partial class DatasetScanBuilder
                     await PlacedAsync(held, cancellationToken).ConfigureAwait(false);
                 }
 
-                Planned unit = new Planned(held, answer is null ? null : AnsweredBy(answer, held));
+                int? field = answer is null ? null : AnsweredBy(answer, held);
+                Planned unit = shelf?.Of(held, field) ?? new Planned(held, field);
                 Choose(unit, explain);
                 units.Add(unit);
 
@@ -716,13 +807,13 @@ internal sealed partial class DatasetScanBuilder
             }
         }
 
-        List<Planned> kept = new List<Planned>(units.Count);
+        // The units kept move down the list, in their order, past the rollups, which stay first.
         int first = 0;
         for (; first < units.Count && units[first].Run is not null; first++)
         {
-            kept.Add(units[first]);
         }
 
+        int kept = first;
         List<PositionedObject> batch = new List<PositionedObject>(SheetBatch);
         DatasetScanCounters? metrics = _considers ? _metrics : null;
         PartitionLocates? partitions = LocatesOf(filter, columns);
@@ -742,13 +833,14 @@ internal sealed partial class DatasetScanBuilder
             {
                 if (p < passed.Count && passed[p].FirstRow == units[u].Held.FirstRow)
                 {
-                    kept.Add(units[u]);
+                    units[kept++] = units[u];
                     p++;
                 }
             }
         }
 
-        return kept;
+        units.RemoveRange(kept, units.Count - kept);
+        return units;
     }
 
     /// <summary>

@@ -26,7 +26,8 @@ internal sealed partial class DatasetScanBuilder
     /// </summary>
     internal (AnswerPath Path, bool AsksKept) ChosenOnOneLane(in PositionedObject held, double kept)
     {
-        Planned unit = new Planned(held, Answer() is { } answer ? AnsweredBy(answer, held) : null) { Kept = kept };
+        Planned unit = Scratch(held, Answer() is { } answer ? AnsweredBy(answer, held) : null);
+        unit.Kept = kept;
         Choose(unit, explain: false);
         return (unit.Chosen.Path, kept >= 1 && unit.Weight > _version.Costs.Weight(RowsCost(held, double.Epsilon)));
     }
@@ -265,7 +266,7 @@ internal sealed partial class DatasetScanBuilder
                 await PlacedAsync(held, cancellationToken).ConfigureAwait(false);
             }
 
-            Planned unit = new Planned(held, AnsweredBy(answer, held));
+            Planned unit = Scratch(held, AnsweredBy(answer, held));
             Choose(unit, explain: false);
             if (unit.Chosen.Path is not (AnswerPath.Rows or AnswerPath.Zones))
             {
@@ -277,6 +278,14 @@ internal sealed partial class DatasetScanBuilder
     }
 
     /// <summary>
+    /// The builder's one unit for a choice whose answer is read at once and kept nowhere, made the object
+    /// <paramref name="held"/>'s: a builder chooses one unit at a time (<see cref="_choosing"/>).
+    /// </summary>
+    private Planned Scratch(in PositionedObject held, int? field) => _scratch is { } unit ? unit.Of(held, field) : _scratch = new Planned(held, field);
+
+    private Planned? _scratch;
+
+    /// <summary>
     /// The scan as states where the objects' synopses answer: each unit as its weight chose it (<see cref="UnitsAsync"/>), a
     /// rollup's totals or an object's counts as batches of states, an object's blocks through their statistics and the rows
     /// of the blocks they do not answer, or its rows, the objects read as rows side by side a part of the scan, which reads
@@ -286,7 +295,9 @@ internal sealed partial class DatasetScanBuilder
     /// </summary>
     private async IAsyncEnumerable<RecordBatch> StatesAsync(CountsAnswer answer, [EnumeratorCancellation] CancellationToken cancellationToken)
     {
-        (RollupChoice? rollups, List<Planned> units) = await UnitsAsync(answer, explain: false, read: true, cancellationToken).ConfigureAwait(false);
+        // The units come from a shelf a question gave back, and go back to it once no read begun holds them.
+        UnitShelf shelf = UnitShelf.Rent();
+        (RollupChoice? rollups, List<Planned> units) = await UnitsAsync(answer, explain: false, read: true, shelf, cancellationToken).ConfigureAwait(false);
         using CancellationTokenSource stopped = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         int width = Math.Max(1, _dataset.Session.Options.MaxConcurrentReads);
         CanonicalArena arena = new CanonicalArena(answer.Nodes);
@@ -507,6 +518,7 @@ internal sealed partial class DatasetScanBuilder
             spare?.Dispose();
             objectRows?.Release();
             arena.Reset();
+            shelf.Return();
         }
     }
 
