@@ -201,11 +201,12 @@ internal static partial class DatasetCompactor
             Postings = postings,
         };
 
-        // A consolidation of several objects' worth runs in ranges of the key side by side, on the session's lanes, each
-        // reading of its inputs the granules of its range alone (KeyRanges); one of a value, since each object of a
-        // range shreds the paths of the first.
+        // A merge of several objects' worth runs in ranges of the key side by side, on the session's lanes, each reading of
+        // its inputs the granules of its range alone (KeyRanges): a consolidation's, and a level's, which ran on one lane
+        // whatever the session gave it, 336 ms for level 0's sixteen objects of 2 M rows at eight lanes, 93 ms in ranges.
+        // Not one of a value, since each object of a range shreds the paths of the first.
         KeyRanges? ranges = null;
-        if (late is null && merge && job.Trigger == CompactionTrigger.Consolidation && shreddings is not { Count: > 1 })
+        if (late is null && merge && shreddings is not { Count: > 1 })
         {
             using Activity? cutting = DatasetTelemetry.StartCompactionPass("ranges");
             ranges = await KeyRangesAsync(dataset, schema, job, cancellationToken).ConfigureAwait(false);

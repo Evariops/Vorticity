@@ -126,6 +126,61 @@ public sealed partial class DatasetRangedConsolidationTests
         return (DatasetCompactor.OpenChunkBytes(dataset, dataset.Snapshot.Schema, job), (long)job.Inputs.Average(static input => input.Entry.Bytes));
     }
 
+    /// <summary>
+    /// Sixteen appends of overlapping keys, with no partition, merged level by level on four lanes and on one: a merge of
+    /// several objects' worth runs in ranges of the key on four, and the levels hold the rows one lane leaves, sorted and
+    /// disjoint, as a verification finds them.
+    /// </summary>
+    [Fact]
+    public async Task ALevelMergedInRangesHoldsWhatOnePieceHolds()
+    {
+        (List<Row> appended, List<Row> ranged, IReadOnlyList<CompactionResult> rangedJobs) = await MergeLevelsAsync(lanes: 4);
+        (_, List<Row> single, IReadOnlyList<CompactionResult> singleJobs) = await MergeLevelsAsync(lanes: 1);
+        List<Row> all = [.. appended.OrderBy(static row => row.Sequence)];
+        Assert.Equal(all, ranged.OrderBy(static row => row.Sequence));
+        Assert.Equal(all, single.OrderBy(static row => row.Sequence));
+        Assert.Contains(rangedJobs, static job => job.RangesAtOnce > 1);
+        Assert.All(singleJobs, static job => Assert.Equal(1, job.RangesAtOnce));
+    }
+
+    private static async Task<(List<Row> Appended, List<Row> Read, IReadOnlyList<CompactionResult> Merged)> MergeLevelsAsync(int lanes)
+    {
+        Random random = new Random(53);
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = lanes);
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Row.Schema, new DatasetOptions
+        {
+            Session = session,
+            Layout = new DatasetLayout
+            {
+                SortKey = [LayoutValue.Column(nameof(Row.Service)), LayoutValue.Column(nameof(Row.Sequence))],
+                ObjectBytes = 1 << 18,
+                MergeFanout = 16,
+                CalmAfter = null,
+            },
+            ContentsObjectBytes = 0,
+        }, Ct);
+        List<Row> all = [];
+        for (int a = 0; a < 16; a++)
+        {
+            Row[] rows = [.. Enumerable.Range(0, 15_000).Select(i => new Row(0, $"svc-{random.Next(0, 400):D3}", all.Count + i, random.Next(0, 100), random.NextDouble()))];
+            all.AddRange(rows);
+            await using ObjectDraft draft = dataset.StartObject();
+            await draft.Writer.WriteAsync<Row>(rows, Ct);
+            await dataset.AppendAsync(draft, Ct);
+        }
+
+        List<CompactionResult> merged = [];
+        while (await dataset.CompactAsync(cancellationToken: Ct) is { } result)
+        {
+            merged.Add(result);
+        }
+
+        DatasetVerification verified = await dataset.VerifyAsync(cancellationToken: Ct);
+        Assert.True(verified.Holds, $"{lanes} lanes:\n{string.Join('\n', verified.Problems)}");
+        return (all, await dataset.Scan<Row>().ToRecordsAsync(Ct).ToListAsync(Ct), merged);
+    }
+
     private static async Task<(List<Row> Appended, List<Row> Read, IReadOnlyList<CompactionResult> Consolidated)> ConsolidateAsync(
         int lanes, QueryMemoryBudget? jobs = null, int chunkBytes = 1 << 20)
     {
