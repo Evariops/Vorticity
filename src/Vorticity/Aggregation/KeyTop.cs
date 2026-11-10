@@ -241,6 +241,7 @@ internal sealed class KeyTop
                 Array.Sort(best, 0, kept);
                 partition.Keep(best.AsSpan(0, kept));
                 partition.TopFrontier = _narrows && kept == _keep ? Array.BinarySearch(best, 0, kept, worst) : -1;
+                GroupSelection.GiveBack(best);
 
                 // The order the lane kept by is let go, not delivered.
                 memory?.LetGo((long)kept * sizeof(int));

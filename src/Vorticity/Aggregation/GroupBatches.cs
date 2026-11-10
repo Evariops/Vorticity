@@ -913,6 +913,7 @@ internal static class GroupSelection
             {
                 case GroupFilter filter:
                     (groups, count) = Filter(query, outcome, filter, groups, count, cancellationToken);
+                    outcome.HoldOperated(groups);
                     break;
                 case GroupOrder order:
                 {
@@ -926,6 +927,7 @@ internal static class GroupSelection
                     (groups, count) = chunks > 1
                         ? await TopInChunksAsync(query, outcome, order, groups, count, (int)keep, chunks, cancellationToken).ConfigureAwait(false)
                         : Order(query, outcome, order, groups, count, keep, cancellationToken);
+                    outcome.HoldOperated(groups);
                     break;
                 }
 
@@ -933,8 +935,11 @@ internal static class GroupSelection
                 {
                     int from = (int)Math.Min(window.Skip, count);
                     int kept = (int)Math.Min(count - from, window.Take);
-                    groups = groups.AsSpan(from, kept).ToArray();
+                    int[] windowed = Lent(kept);
+                    groups.AsSpan(from, kept).CopyTo(windowed);
+                    groups = windowed;
                     count = kept;
+                    outcome.HoldOperated(groups);
                     break;
                 }
 
@@ -944,6 +949,23 @@ internal static class GroupSelection
         }
 
         return (groups, count);
+    }
+
+    /// <summary>
+    /// An array of the process's shelf for <paramref name="length"/> groups an operator leaves, a power of two long, as the
+    /// whole order is (<see cref="AggregationEngine.LentOrder"/>): the result holds it until it is delivered
+    /// (<see cref="AggregationOutcome.HoldOperated"/>). An array a question was 4 MB for a million groups ordered.
+    /// </summary>
+    private static int[] Lent(int length) =>
+        length == 0 ? [] : ArrayShelf.Retained.Take<int>(Scratch.Capacity(length, 0), zeroed: false, overdraw: true);
+
+    /// <summary>Gives back an array of groups an operator made (<see cref="Order"/>, <see cref="Filter"/>) once read, when no result holds it.</summary>
+    internal static void GiveBack(int[] groups)
+    {
+        if (groups.Length > 0)
+        {
+            ArrayShelf.Retained.Give(groups);
+        }
     }
 
     private static long Saturated(long skip, long take) => take == long.MaxValue || skip > long.MaxValue - take ? long.MaxValue : skip + take;
@@ -1018,18 +1040,26 @@ internal static class GroupSelection
             candidates += (await chunk.ConfigureAwait(false)).Count;
         }
 
-        int[] best = new int[candidates];
+        int[] best = Lent(candidates);
         int at = 0;
         foreach (Task<(int[] Groups, int Count)> chunk in ranking)
         {
             (int[] kept, int n) = await chunk.ConfigureAwait(false);
             kept.AsSpan(0, n).CopyTo(best.AsSpan(at));
             at += n;
+            GiveBack(kept);
         }
 
         // Each chunk's ranking held its groups as a result's: the last one alone is.
         outcome.Memory?.LetGo((long)candidates * sizeof(int));
-        return Order(query, outcome, order, best, candidates, keep, cancellationToken);
+        try
+        {
+            return Order(query, outcome, order, best, candidates, keep, cancellationToken);
+        }
+        finally
+        {
+            GiveBack(best);
+        }
     }
 
     /// <summary>The first <paramref name="keep"/> of a chunk of <paramref name="groups"/>, in order, its groups in an array of the pool while it ranks.</summary>
@@ -1163,7 +1193,7 @@ internal static class GroupSelection
 
             // The groups in their order, the result's until it is delivered.
             memory?.Hold((long)kept * sizeof(int), "order of a group by");
-            int[] ordered = new int[kept];
+            int[] ordered = Lent(kept);
             for (int i = 0; i < kept; i++)
             {
                 ordered[i] = groups[positions[i]];
@@ -1190,7 +1220,8 @@ internal static class GroupSelection
         AggregationQuery query, AggregationOutcome outcome, GroupFilter filter, int[] groups, int count, CancellationToken cancellationToken)
     {
         using GroupFilterRun run = new GroupFilterRun(query, filter);
-        int[] kept = groups.AsSpan(0, count).ToArray();
+        int[] kept = Lent(count);
+        groups.AsSpan(0, count).CopyTo(kept);
         return (kept, run.Keep(outcome, kept, count, cancellationToken));
     }
 

@@ -720,6 +720,27 @@ internal sealed class AggregationOutcome
             {
                 ArrayShelf.Retained.Give(Order);
             }
+
+            if (Interlocked.Exchange(ref _operated, null) is { Length: > 0 } operated)
+            {
+                ArrayShelf.Retained.Give(operated);
+            }
+        }
+    }
+
+    // The groups the operators on groups left last, in an array of the process's shelf: given back with the result.
+    private int[]? _operated;
+
+    /// <summary>
+    /// Holds <paramref name="groups"/>, the groups an operator on groups left in an array of the process's shelf, until the
+    /// result is delivered; the array the operator before it left, which it read, goes back now.
+    /// </summary>
+    internal void HoldOperated(int[] groups)
+    {
+        int[]? previous = Interlocked.Exchange(ref _operated, groups);
+        if (previous is { Length: > 0 } && !ReferenceEquals(previous, groups))
+        {
+            ArrayShelf.Retained.Give(previous);
         }
     }
 

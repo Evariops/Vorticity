@@ -133,6 +133,11 @@ public sealed partial class GroupAllocationTests
         // tests before it left: not held to a ceiling until it does.
         ("chosen rows", 1, GroupCoreReason.None, 117_248, ChosenAsync),
 
+        // The hashed integers' groups ordered by their count: the groups in their order, and the copies a filter or a
+        // window of them makes, are arrays of the process's shelf the result holds until it is delivered, where every
+        // query made them new, four bytes a group.
+        ("ordered integers", 1, GroupCoreReason.None, 101_376, OrderedAsync),
+
         // The hashed integers' distinct values, a million, told by the core as they enter its sub-tables, which are the
         // result read whole and go back to the process's shelf once it is delivered: left to the collector, every query
         // made them again, 53.7 MB against 1.6. Its appliers copy values through one outcome each, pointed at each
@@ -225,6 +230,9 @@ public sealed partial class GroupAllocationTests
 
     private static Task<(long, GroupCoreReason)> WideAsync(VortexFile file, int lanes) =>
         CountAsync<WideTotal>(file.Scan<Row>().GroupBy(r => r.Wide).Select(g => (g.Key, g.Count(), g.Sum(r => r.Value))), lanes, 1);
+
+    private static Task<(long, GroupCoreReason)> OrderedAsync(VortexFile file, int lanes) =>
+        CountAsync<WideTotal>(file.Scan<Row>().GroupBy(r => r.Wide).OrderByDescending(g => g.Count()).Select(g => (g.Key, g.Count(), g.Sum(r => r.Value))), lanes, 1);
 
     private static Task<(long, GroupCoreReason)> DenseAsync(VortexFile file, int lanes) =>
         CountAsync<IntTotal>(file.Scan<Row>().GroupBy(r => r.Dense).Select(g => (g.Key, g.Count(), g.Sum(r => r.Value))), lanes, 1);

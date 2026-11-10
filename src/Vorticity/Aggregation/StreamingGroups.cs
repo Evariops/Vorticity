@@ -591,6 +591,7 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
                     // Descending, the batches come greatest first, and the groups of one ascend.
                     (int[] sorted, int sortedCount) = GroupSelection.Order(_query, _outcome!, order, _closed, count, long.MaxValue, _cancellationToken);
                     sorted.AsSpan(0, sortedCount).CopyTo(_closed);
+                    GroupSelection.GiveBack(sorted);
                     _memory?.LetGo((long)sortedCount * sizeof(int));
                     count = sortedCount;
                     break;
