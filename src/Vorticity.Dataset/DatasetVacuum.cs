@@ -364,8 +364,8 @@ internal static class DatasetVacuum
                 return;
             }
 
-            // The children walked in turn: their pages asked for side by side read the regions of their commits once each,
-            // where a read after another finds the region it lies in held.
+            // The children walked in turn, their pages not asked for side by side: reads side by side each fetched the region of
+            // their commit that a read after another finds held.
             foreach (InternalEntry child in TreePage.ReadInternal(page))
             {
                 await MarkAsync(child.Child, depth - 1, leaves).ConfigureAwait(false);
