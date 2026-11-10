@@ -199,7 +199,7 @@ internal sealed class PartitionPostings : IDisposable
         if (previous is not null)
         {
             before = await SealedObjectStore.OpenDataAsync(dataset.Store, previous.ObjectKey, previous.Uid, previous.Bytes, cancellationToken).ConfigureAwait(false);
-            old = await ReadAsync(before, previous.Bytes, cancellationToken).ConfigureAwait(false);
+            old = await ReadAsync(before, cancellationToken).ConfigureAwait(false);
         }
 
         try
@@ -341,22 +341,24 @@ internal sealed class PartitionPostings : IDisposable
 
     /// <summary>The index an object holds (<see cref="OpenAsync"/>), its last bytes let go.</summary>
     /// <exception cref="VortexFormatException">The object holds no index this version reads.</exception>
-    internal static async ValueTask<PartitionIndex> ReadAsync(ISegmentReader reader, long length, CancellationToken cancellationToken)
+    internal static async ValueTask<PartitionIndex> ReadAsync(ISegmentReader reader, CancellationToken cancellationToken)
     {
-        using OpenedIndex opened = await OpenAsync(reader, length, cancellationToken).ConfigureAwait(false);
+        using OpenedIndex opened = await OpenAsync(reader, cancellationToken).ConfigureAwait(false);
         return opened.Index;
     }
 
     /// <summary>
-    /// The index an object of <paramref name="length"/> bytes holds, from its last bytes, an open's tail of them at most
+    /// The index the object <paramref name="reader"/> reads holds, from its last bytes, an open's tail of them at most
     /// (<see cref="ObjectStoreSource.TailBytes"/>), read in one request: its tail, then its directory, a request more when it
     /// starts before them; the pages that lie in them are served from them (<see cref="OpenedIndex.LoadAsync"/>). An index of
-    /// a few pages is read whole in that request.
+    /// a few pages is read whole in that request. Its bytes are the reader's, a sealed object's plaintext, shorter than the
+    /// store holds.
     /// </summary>
     /// <exception cref="VortexFormatException">The object holds no index this version reads.</exception>
     internal static async ValueTask<OpenedIndex> OpenAsync(
-        ISegmentReader reader, long length, CancellationToken cancellationToken, PartitionIndexCache? cache = null, string? key = null, UInt128 uid = default)
+        ISegmentReader reader, CancellationToken cancellationToken, PartitionIndexCache? cache = null, string? key = null, UInt128 uid = default)
     {
+        long length = await reader.GetLengthAsync(cancellationToken).ConfigureAwait(false);
         if (length < PartitionIndex.TailBytes)
         {
             throw new VortexFormatException("An index of a partition ends with no tail this version reads.");
@@ -401,16 +403,16 @@ internal sealed class PartitionPostings : IDisposable
     }
 
     /// <summary>
-    /// The index object <paramref name="key"/> of uid <paramref name="uid"/> and <paramref name="length"/> bytes, as
-    /// <see cref="OpenAsync"/> opens it, from <paramref name="cache"/> when it holds
-    /// it: its directory parsed and its last bytes, with no request; kept there when read.
+    /// The index object <paramref name="key"/> of uid <paramref name="uid"/>, as <see cref="OpenAsync"/> opens it, from
+    /// <paramref name="cache"/> when it holds it: its directory parsed and its last bytes, with no request; kept there when
+    /// read.
     /// </summary>
     /// <exception cref="VortexFormatException">The object holds no index this version reads.</exception>
     internal static ValueTask<OpenedIndex> OpenCachedAsync(
-        ISegmentReader reader, string key, UInt128 uid, long length, PartitionIndexCache cache, CancellationToken cancellationToken) =>
+        ISegmentReader reader, string key, UInt128 uid, PartitionIndexCache cache, CancellationToken cancellationToken) =>
         cache.Of(key, uid) is { } held
             ? ValueTask.FromResult(new OpenedIndex(reader, held.Index, null, held.Tail, held.Start, held))
-            : OpenAsync(reader, length, cancellationToken, cache, key, uid);
+            : OpenAsync(reader, cancellationToken, cache, key, uid);
 
     /// <summary>
     /// An index of a partition as a lookup opened it (<see cref="OpenAsync"/>): its directory, and the object's last bytes,

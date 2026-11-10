@@ -188,7 +188,7 @@ internal sealed class PartitionLocates
         await using (reader.ConfigureAwait(false))
         {
             using PartitionPostings.OpenedIndex opened = await PartitionPostings.OpenCachedAsync(
-                reader, entry.ObjectKey, entry.Uid, entry.Bytes, _dataset.PartitionIndexes, cancellationToken).ConfigureAwait(false);
+                reader, entry.ObjectKey, entry.Uid, _dataset.PartitionIndexes, cancellationToken).ConfigureAwait(false);
             PartitionIndex index = opened.Index;
             Dictionary<UInt128, int> ranks = new Dictionary<UInt128, int>(index.Objects.Count);
             for (int rank = 0; rank < index.Objects.Count; rank++)

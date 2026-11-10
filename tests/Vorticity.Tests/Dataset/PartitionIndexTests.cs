@@ -28,15 +28,22 @@ public sealed partial class PartitionIndexTests
     /// identifier, merged and consolidated: an index a day, which covers the day's level 1, places every covered row, and
     /// rules covered objects out of a lookup unread. Late rows of the first day consolidated keep it so; a purge of part
     /// of the second day leaves the objects it rewrites outside its index; a vacuum past the retention keeps the indexes
-    /// the version names and takes the first day's first.
+    /// the version names and takes the first day's first. Sealed, the same: an index is read by its plaintext's length, which
+    /// the store's is not, by a lookup and by the consolidation that merges it.
     /// </summary>
-    [Fact]
-    public async Task AConsolidatedDaysIndexPlacesItsRowsAndKeepsItsCoverage()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AConsolidatedDaysIndexPlacesItsRowsAndKeepsItsCoverage(bool encrypted)
     {
         Random random = new Random(71);
         await using MemoryObjectStore store = new MemoryObjectStore();
+        using VortexKeyring? keyring = encrypted ? Sealing.SealedObjects.Keyring() : null;
+        await using VortexSession? session = keyring is null ? null : VortexSession.Create(options => options.Keyring = keyring);
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Row.Schema, new DatasetOptions
         {
+            Session = session ?? VortexSession.Default,
+            Encrypted = encrypted,
             Layout = new DatasetLayout
             {
                 Partition = LayoutValue.Column(nameof(Row.Day)),
@@ -130,7 +137,7 @@ public sealed partial class PartitionIndexTests
         foreach (PartitionIndexEntry entry in entries)
         {
             await using ISegmentReader reader = await SealedObjectStore.OpenDataAsync(dataset.Store, entry.ObjectKey, entry.Uid, entry.Bytes, Ct);
-            PartitionIndex index = await PartitionPostings.ReadAsync(reader, entry.Bytes, Ct);
+            PartitionIndex index = await PartitionPostings.ReadAsync(reader, Ct);
             PartitionIndex.Entry sequence = index.Of(nameof(Row.Sequence), PartitionIndex.EntryKind.Postings) ?? throw new InvalidOperationException("no postings of Sequence");
             int day = levelOne.Values.Where(held => entry.Covers(held.Held.Entry.Uid)).Select(held => held.Rows[0].Day).FirstOrDefault(-1);
             Assert.True(day >= 0, $"'{entry.ObjectKey}' covers no level 1 object");

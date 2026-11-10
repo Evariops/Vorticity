@@ -74,7 +74,7 @@ public sealed partial class DatasetPartitionLocatesTests
         {
             PartitionIndexEntry entry = PartitionIndexEntry.FromBytes(tree.Key.Span, tree.Value.Span);
             await using ISegmentReader reader = await SealedObjectStore.OpenDataAsync(dataset.Store, entry.ObjectKey, entry.Uid, entry.Bytes, Ct);
-            PartitionIndex index = await PartitionPostings.ReadAsync(reader, entry.Bytes, Ct);
+            PartitionIndex index = await PartitionPostings.ReadAsync(reader, Ct);
             Assert.NotNull(index.Of(nameof(Row.Service), PartitionIndex.EntryKind.Locate));
             indexes.Add(entry.ObjectKey);
         }
