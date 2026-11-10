@@ -1,6 +1,9 @@
 using System;
+using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.X86;
 using Vorticity.Arrays;
 using Vorticity.Types;
 using Vorticity.Writing;
@@ -500,16 +503,26 @@ internal sealed class RawKeys<TWord> : GroupKeys
     private ReadOnlySpan<TWord> Words(CanonicalArena arena, ReadOnlySpan<int> nodes, int rows)
     {
         bool wide = Unsafe.SizeOf<TWord>() > sizeof(ulong);
-        Scratch.Grow(ref _low, rows);
-        Span<ulong> low = _low.AsSpan(0, rows);
-        low.Clear();
+        Scratch.Grow(ref _words, rows);
+        Span<TWord> words = _words.AsSpan(0, rows);
+
+        // A word of 64 bits is built where it is kept; one of 128 a half at a time, then put together.
+        Span<ulong> low;
         Span<ulong> high = default;
         if (wide)
         {
+            Scratch.Grow(ref _low, rows);
+            low = _low.AsSpan(0, rows);
             Scratch.Grow(ref _high, rows);
             high = _high.AsSpan(0, rows);
             high.Clear();
         }
+        else
+        {
+            low = MemoryMarshal.Cast<TWord, ulong>(words);
+        }
+
+        low.Clear();
 
         for (int p = 0; p < nodes.Length; p++)
         {
@@ -533,34 +546,54 @@ internal sealed class RawKeys<TWord> : GroupKeys
             ReadOnlySpan<ulong> validity = ArenaWords.Validity(arena, canonical);
             if (nullBit >= 0 && !validity.IsEmpty)
             {
+                // The null rows a word of validity at a time, a row only where one is null.
                 Span<ulong> flags = nullBit < 64 ? low : high;
                 ulong flag = 1UL << (nullBit & 63);
                 int width = _layout.Widths[p];
                 ulong value = (width == 64 ? ulong.MaxValue : (1UL << width) - 1) << at;
-                for (int row = 0; row < rows; row++)
+                int validityWords = (rows + 63) >> 6;
+                for (int w = 0; w < validityWords; w++)
                 {
-                    if (!StorageValues.IsValid(validity, row))
+                    ulong nulls = ~validity[w];
+                    if (w == validityWords - 1 && (rows & 63) != 0)
                     {
+                        nulls &= (1UL << (rows & 63)) - 1;
+                    }
+
+                    while (nulls != 0)
+                    {
+                        int row = (w << 6) + BitOperations.TrailingZeroCount(nulls);
                         into[row] &= ~value;
                         flags[row] |= flag;
+                        nulls &= nulls - 1;
                     }
                 }
             }
         }
 
-        Scratch.Grow(ref _words, rows);
-        Span<TWord> words = _words.AsSpan(0, rows);
         if (wide)
         {
+            // A word of 128 bits holds its low half first: the halves interleaved two rows a step.
             Span<UInt128> wideWords = MemoryMarshal.Cast<TWord, UInt128>(words);
-            for (int row = 0; row < rows; row++)
+            int row = 0;
+            if (Sse2.IsSupported)
+            {
+                ref ulong from = ref MemoryMarshal.GetReference(low);
+                ref ulong upper = ref MemoryMarshal.GetReference(high);
+                ref ulong to = ref Unsafe.As<UInt128, ulong>(ref MemoryMarshal.GetReference(wideWords));
+                for (; row <= rows - 2; row += 2)
+                {
+                    Vector128<ulong> lows = Vector128.LoadUnsafe(ref from, (nuint)row);
+                    Vector128<ulong> highs = Vector128.LoadUnsafe(ref upper, (nuint)row);
+                    Sse2.UnpackLow(lows, highs).StoreUnsafe(ref to, (nuint)(2 * row));
+                    Sse2.UnpackHigh(lows, highs).StoreUnsafe(ref to, (nuint)((2 * row) + 2));
+                }
+            }
+
+            for (; row < rows; row++)
             {
                 wideWords[row] = new UInt128(high[row], low[row]);
             }
-        }
-        else
-        {
-            low.CopyTo(MemoryMarshal.Cast<TWord, ulong>(words));
         }
 
         return words;
@@ -571,10 +604,80 @@ internal sealed class RawKeys<TWord> : GroupKeys
         where TValue : unmanaged
     {
         ReadOnlySpan<TValue> values = MemoryMarshal.Cast<byte, TValue>(bytes)[..into.Length];
-        for (int row = 0; row < values.Length; row++)
+        int row = 0;
+        if (Vector.IsHardwareAccelerated)
+        {
+            // An integer's bits are its value's, zero-extended: widened over vectors, as many words a step as a
+            // vector of words holds.
+            ref ulong to = ref MemoryMarshal.GetReference(into);
+            int n = Vector<ulong>.Count;
+            if (typeof(TValue) == typeof(ulong))
+            {
+                ref ulong from = ref Unsafe.As<TValue, ulong>(ref MemoryMarshal.GetReference(values));
+                for (; row <= values.Length - n; row += n)
+                {
+                    OrAt(Vector.LoadUnsafe(ref from, (nuint)row), ref to, row, at);
+                }
+            }
+            else if (typeof(TValue) == typeof(uint))
+            {
+                ref uint from = ref Unsafe.As<TValue, uint>(ref MemoryMarshal.GetReference(values));
+                for (; row <= values.Length - (2 * n); row += 2 * n)
+                {
+                    Vector.Widen(Vector.LoadUnsafe(ref from, (nuint)row), out Vector<ulong> a, out Vector<ulong> b);
+                    OrAt(a, ref to, row, at);
+                    OrAt(b, ref to, row + n, at);
+                }
+            }
+            else if (typeof(TValue) == typeof(ushort))
+            {
+                ref ushort from = ref Unsafe.As<TValue, ushort>(ref MemoryMarshal.GetReference(values));
+                for (; row <= values.Length - (4 * n); row += 4 * n)
+                {
+                    Vector.Widen(Vector.LoadUnsafe(ref from, (nuint)row), out Vector<uint> l, out Vector<uint> h);
+                    Vector.Widen(l, out Vector<ulong> a, out Vector<ulong> b);
+                    Vector.Widen(h, out Vector<ulong> c, out Vector<ulong> d);
+                    OrAt(a, ref to, row, at);
+                    OrAt(b, ref to, row + n, at);
+                    OrAt(c, ref to, row + (2 * n), at);
+                    OrAt(d, ref to, row + (3 * n), at);
+                }
+            }
+            else if (typeof(TValue) == typeof(byte))
+            {
+                ref byte from = ref Unsafe.As<TValue, byte>(ref MemoryMarshal.GetReference(values));
+                for (; row <= values.Length - (8 * n); row += 8 * n)
+                {
+                    Vector.Widen(Vector.LoadUnsafe(ref from, (nuint)row), out Vector<ushort> l, out Vector<ushort> h);
+                    Vector.Widen(l, out Vector<uint> ll, out Vector<uint> lh);
+                    Vector.Widen(h, out Vector<uint> hl, out Vector<uint> hh);
+                    int quarter = 2 * n;
+                    Words(ll, ref to, row, at, n);
+                    Words(lh, ref to, row + quarter, at, n);
+                    Words(hl, ref to, row + (2 * quarter), at, n);
+                    Words(hh, ref to, row + (3 * quarter), at, n);
+                }
+            }
+        }
+
+        for (; row < values.Length; row++)
         {
             into[row] |= KeyWords.Of(values[row]).Low << at;
         }
+    }
+
+    /// <summary>Ors a vector of values, shifted to their place, into the words from <paramref name="row"/>.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void OrAt(Vector<ulong> values, ref ulong words, int row, int at) =>
+        (Vector.ShiftLeft(values, at) | Vector.LoadUnsafe(ref words, (nuint)row)).StoreUnsafe(ref words, (nuint)row);
+
+    /// <summary>A vector of 32-bit values widened into two of words, each ored into its place.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void Words(Vector<uint> values, ref ulong words, int row, int at, int n)
+    {
+        Vector.Widen(values, out Vector<ulong> a, out Vector<ulong> b);
+        OrAt(a, ref words, row, at);
+        OrAt(b, ref words, row + n, at);
     }
 
     /// <summary>Component <paramref name="component"/> of a word: whether it is null, and its value's bits.</summary>
