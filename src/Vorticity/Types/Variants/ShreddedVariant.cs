@@ -363,11 +363,11 @@ internal sealed class ShreddedVariant
         }
         else if (shred.Leaves)
         {
-            WriteLeaves(shred, slot, Ids(shred, in dictionary));
+            WriteLeaves(shred, slot, Ids(shred), in dictionary);
             return;
         }
 
-        int[] ids = Ids(shred, in dictionary);
+        _ = Ids(shred);
 
         // The fields in name order, as pairs of an id and a source on the stack: a shredded field's
         // index, or the complement of the index of one of the value's.
@@ -378,6 +378,8 @@ internal sealed class ShreddedVariant
         int other = 0;
         int named = -1;
         int otherId = 0;
+        int bound = 0;
+        bool same = false;
         ReadOnlySpan<byte> name = default;
         ReadOnlySpan<byte> previous = default;
         while (next < shred.Fields.Length || other < unshredded.Count)
@@ -396,16 +398,20 @@ internal sealed class ShreddedVariant
 
                     previous = name;
                     named = other;
+
+                    // The shredded names sorted, those before the value's next one found by halves rather than each set
+                    // against it: 200 shredded beside a row's residual of two were 200 comparisons a row.
+                    (bound, same) = Bound(shred.Names, next, name);
                 }
 
-                order = next < shred.Fields.Length ? shred.Names[next].AsSpan().SequenceCompareTo(name) : 1;
+                order = next < bound ? -1 : next == bound && same ? 0 : 1;
             }
 
             if (order <= 0)
             {
                 if (Defined(shred.Fields[next], slot))
                 {
-                    int id = ids[next];
+                    int id = IdOf(shred, next, in dictionary);
                     if (id < 0)
                     {
                         throw Unnamed(shred, next);
@@ -524,7 +530,7 @@ internal sealed class ShreddedVariant
     /// Appends an object of leaves whose row has no value beside its typed fields: each field's size
     /// is known before it is written, so the header goes first, at its final widths, and nothing moves.
     /// </summary>
-    private void WriteLeaves(Shred shred, int slot, int[] ids)
+    private void WriteLeaves(Shred shred, int slot, int[] ids, scoped in VariantDictionary dictionary)
     {
         int fields = shred.Fields.Length;
         int sizes = Grow(fields);
@@ -537,7 +543,7 @@ internal sealed class ShreddedVariant
             _stack[sizes + i] = bytes;
             if (bytes >= 0)
             {
-                if (ids[i] < 0)
+                if (IdOf(shred, i, in dictionary) < 0)
                 {
                     throw Unnamed(shred, i);
                 }
@@ -845,20 +851,59 @@ internal sealed class ShreddedVariant
         wide[..destination.Length].CopyTo(destination);
     }
 
-    /// <summary>The ids of <paramref name="shred"/>'s fields in the row's metadata, -1 for a name it lacks.</summary>
-    private int[] Ids(Shred shred, scoped in VariantDictionary dictionary)
+    /// <summary>
+    /// The first of <paramref name="names"/>, sorted, from <paramref name="from"/> on, not before <paramref name="name"/>, and
+    /// whether it is <paramref name="name"/>; the names' count when every one is before it.
+    /// </summary>
+    private static (int Bound, bool Same) Bound(byte[][] names, int from, ReadOnlySpan<byte> name)
+    {
+        int low = from;
+        int high = names.Length;
+        while (low < high)
+        {
+            int middle = (int)((uint)(low + high) >> 1);
+            if (names[middle].AsSpan().SequenceCompareTo(name) < 0)
+            {
+                low = middle + 1;
+            }
+            else
+            {
+                high = middle;
+            }
+        }
+
+        return (low, low < names.Length && names[low].AsSpan().SequenceEqual(name));
+    }
+
+    /// <summary>An id of <see cref="Shred.Ids"/> not looked up in the row's metadata yet.</summary>
+    private const int Unresolved = int.MinValue;
+
+    /// <summary>
+    /// The ids of <paramref name="shred"/>'s fields in the row's metadata, each looked up when a row first defines its field
+    /// (<see cref="IdOf"/>): a row of its own metadata, as a log's attributes are, defines a dozen fields of the hundreds
+    /// shredded, whose every name searched for took 4.6 us a row of 200.
+    /// </summary>
+    private int[] Ids(Shred shred)
     {
         if (shred.Generation != _generation)
         {
-            for (int i = 0; i < shred.Names.Length; i++)
-            {
-                shred.Ids[i] = dictionary.Find(shred.Names[i]);
-            }
-
+            shred.Ids.AsSpan().Fill(Unresolved);
             shred.Generation = _generation;
         }
 
         return shred.Ids;
+    }
+
+    /// <summary>The id of field <paramref name="field"/> of <paramref name="shred"/> in the row's metadata, -1 for a name it lacks.</summary>
+    private static int IdOf(Shred shred, int field, scoped in VariantDictionary dictionary)
+    {
+        int id = shred.Ids[field];
+        if (id == Unresolved)
+        {
+            shred.Ids[field] = id = dictionary.Find(shred.Names[field]);
+        }
+
+        return id;
     }
 
     /// <summary>Whether the value of <paramref name="shred"/> at <paramref name="slot"/> is there: one of its columns is not null.</summary>
