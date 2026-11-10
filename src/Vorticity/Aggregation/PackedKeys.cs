@@ -325,7 +325,20 @@ internal sealed class PackedKeys<TKey> : GroupKeys
         {
             ReadOnlySpan<int> ids = _ids[p].AsSpan(0, rows);
             int shift = _shifts[p];
-            for (int row = 0; row < rows; row++)
+            int row = 0;
+            if (Vector.IsHardwareAccelerated)
+            {
+                ref int slot = ref MemoryMarshal.GetReference(slots);
+                ref int id = ref MemoryMarshal.GetReference(ids);
+                Vector<int> masks = new Vector<int>(mask);
+                for (; row <= rows - Vector<int>.Count; row += Vector<int>.Count)
+                {
+                    Vector<int> placed = Vector.LoadUnsafe(ref slot, (nuint)row) | Vector.ShiftLeft(Vector.LoadUnsafe(ref id, (nuint)row), shift);
+                    (placed & masks).StoreUnsafe(ref slot, (nuint)row);
+                }
+            }
+
+            for (; row < rows; row++)
             {
                 slots[row] = (slots[row] | (ids[row] << shift)) & mask;
             }
