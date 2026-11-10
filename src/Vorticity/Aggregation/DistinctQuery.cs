@@ -179,6 +179,9 @@ internal sealed class DistinctBatches : IAsyncEnumerator<RecordBatch>
     private IAsyncEnumerator<RecordBatch>? _inner;
     private AggregationPartition? _partition;
     private AggregationOutcome? _outcome;
+
+    // The outcome a spilled part's values are told through, pointed at each part's set.
+    private AggregationOutcome? _told;
     private StructStore? _store;
     private CanonicalArena? _arena;
     private RecordBatch? _current;
@@ -386,7 +389,8 @@ internal sealed class DistinctBatches : IAsyncEnumerator<RecordBatch>
 
             StructStore store = Store();
             store.Truncate(0);
-            AggregationOutcome outcome = new AggregationOutcome(_query.Plan, [], set, []);
+            AggregationOutcome outcome = _told ??= new AggregationOutcome(_query.Plan, [], set, []);
+            outcome.Over(set);
             ResultColumn[] columns = _query.Columns;
             for (int c = 0; c < columns.Length; c++)
             {
@@ -1021,7 +1025,8 @@ internal sealed class DistinctEmitter : CoreEmitter
     /// <summary>The keys of groups [<paramref name="from"/>, <paramref name="to"/>) written into the applier's batch, handed on each time it fills.</summary>
     private void Copy(Emission emission, GroupKeys keys, int from, int to)
     {
-        AggregationOutcome outcome = new AggregationOutcome(_query.Plan, [], keys, []);
+        AggregationOutcome outcome = emission.Outcome ??= new AggregationOutcome(_query.Plan, [], keys, []);
+        outcome.Over(keys);
         while (from < to)
         {
             PartSlate slate = emission.Slate ??= Begun();
@@ -1100,5 +1105,8 @@ internal sealed class DistinctEmitter : CoreEmitter
         internal PartSlate? Slate;
 
         internal int[] Groups = [];
+
+        /// <summary>The outcome its copies read keys through, pointed at each sub-table's (<see cref="AggregationOutcome.Over"/>).</summary>
+        internal AggregationOutcome? Outcome;
     }
 }

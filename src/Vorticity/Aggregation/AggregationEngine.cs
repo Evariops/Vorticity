@@ -729,7 +729,14 @@ internal sealed class AggregationOutcome
     /// </summary>
     internal ResultParts? Parts { get; set; }
 
-    internal GroupKeys? Keys { get; }
+    internal GroupKeys? Keys { get; private set; }
+
+    /// <summary>
+    /// The outcome pointed at <paramref name="keys"/>, its keys alone read: a <c>Distinct</c>'s, whose applier copies
+    /// values from each sub-table it fills, or whose reader tells a spilled part's. One made for each copy was 8 MB a
+    /// question of 4M values.
+    /// </summary>
+    internal void Over(GroupKeys keys) => Keys = keys;
 
     /// <summary>
     /// The groups in delivery order, its first <see cref="Count"/>; the one group of a scalar aggregation.
