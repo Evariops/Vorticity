@@ -529,9 +529,40 @@ public sealed class DatasetWriter
         _rows += rows;
     }
 
-    /// <summary>The rows of a batch of several partitions, each partition's gathered in their order and copied to its store.</summary>
+    /// <summary>
+    /// The rows of a batch of several partitions, each partition's copied to its store in their order: run by run where they
+    /// come in runs of a partition, as rows in the order of their time do, each run a view of the batch copied once; gathered
+    /// by partition otherwise, a stable sort of the rows by it, each partition's rows gathered then copied.
+    /// </summary>
     private void Split(CanonicalArena arena, int root, int rows, RowKeys partitions)
     {
+        // A run is a partition's next rows in their order: the runs copied in turn keep each partition's rows in it. A
+        // million rows of 16 hours in the order of their time sorted by the hour, then each hour's gathered and copied: a
+        // fifth of the append.
+        int runs = 1;
+        for (int row = 1; row < rows && runs <= rows / RowsPerRun; row++)
+        {
+            runs += partitions.Same(row - 1, row) ? 0 : 1;
+        }
+
+        if (runs <= rows / RowsPerRun)
+        {
+            for (int at = 0, end; at < rows; at = end)
+            {
+                end = at + 1;
+                while (end < rows && partitions.Same(at, end))
+                {
+                    end++;
+                }
+
+                Part part = PartOf(partitions.Row(at));
+                StoreRows.Append(part.Store, arena, CanonicalSlice.SliceAcross(arena, arena, root, at, end - at));
+                part.Store.Commit();
+            }
+
+            return;
+        }
+
         int[] order = WorkArrays.Rent<int>(rows);
         try
         {
@@ -559,6 +590,9 @@ public sealed class DatasetWriter
             WorkArrays.Return(order);
         }
     }
+
+    /// <summary>The rows a run of one partition holds on average at least for a batch to be copied run by run (<see cref="Split"/>).</summary>
+    private const int RowsPerRun = 64;
 
     /// <summary>The partition of value <paramref name="partition"/>, row-encoded, met before or new.</summary>
     /// <exception cref="ArgumentException">The append would touch more partitions than the dataset allows one.</exception>
