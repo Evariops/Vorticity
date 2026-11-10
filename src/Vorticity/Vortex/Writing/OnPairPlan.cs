@@ -260,6 +260,9 @@ internal sealed class OnPairPlan
         private uint _presentLengths;
         private int _paddedBytes;
 
+        // The lengths of the tokens of two bytes or more that each pair of bytes opens, a bit a length.
+        private readonly uint[] _pairLengths = new uint[1 << 16];
+
         /// <summary>The tokens the dictionary holds.</summary>
         internal int Tokens => _tokens;
 
@@ -286,6 +289,7 @@ internal sealed class OnPairPlan
             Array.Clear(_length);
             Array.Clear(_prefixUsed);
             Array.Clear(_pairCount);
+            Array.Clear(_pairLengths);
             _pairs = 0;
             _tokens = 0;
             _longTokens = 0;
@@ -517,6 +521,7 @@ internal sealed class OnPairPlan
                 _offsets.AsSpan(0, tokens + 1).CopyTo(oldOffsets);
                 Array.Clear(_length);
                 Array.Clear(_prefixUsed);
+                Array.Clear(_pairLengths);
                 _longTokens = 0;
                 _presentLengths = 0;
                 int at = 0;
@@ -577,7 +582,10 @@ internal sealed class OnPairPlan
             ulong low = Unsafe.ReadUnaligned<ulong>(ref start);
             ulong high = Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref start, 8));
             int window = Math.Min(remaining, MaxTokenSize);
-            uint lengths = _presentLengths & ((2u << window) - 1);
+
+            // Only the lengths of the tokens these two bytes open, past the single byte: a probe a length the dictionary
+            // holds anywhere, sixteen at most, came to most of a row's encoding.
+            uint lengths = _presentLengths & ((2u << window) - 1) & (_pairLengths[(ushort)low] | 1u);
 
             // The long tokens only when one starts with these eight bytes.
             if (window > 8 && _longTokens > 0 && !HasPrefix(low))
@@ -655,6 +663,11 @@ internal sealed class OnPairPlan
             _length[slot] = (byte)length;
             _code[slot] = code;
             _presentLengths |= 1u << length;
+            if (length >= 2)
+            {
+                _pairLengths[(ushort)low] |= 1u << length;
+            }
+
             if (length > 8)
             {
                 AddPrefix(low);
