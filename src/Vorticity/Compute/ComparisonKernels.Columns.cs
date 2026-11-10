@@ -156,7 +156,37 @@ internal static partial class ComparisonKernels
         int leftOffset = left.BitOffset;
         int rightOffset = right.BitOffset;
         bool allValid = valid.AllValid;
-        for (int i = 0; i < destination.Length; i++)
+        int i = 0;
+
+        // Sixty-four rows a word: the operator's answer for each of the four pairs of bits is a mask of the two words,
+        // and the word of verdicts is spread as a comparison's is; a row at a time read two bits and looked the pair up.
+        if (WordBytes.IsAccelerated || WordBytes.IsAccelerated128)
+        {
+            bool falseFalse = answers[0] == Trilean.True;
+            bool falseTrue = answers[1] == Trilean.True;
+            bool trueFalse = answers[2] == Trilean.True;
+            bool trueTrue = answers[3] == Trilean.True;
+            WordBytes spread = WordBytes.IsAccelerated ? WordBytes.Create() : default;
+            ref byte into = ref MemoryMarshal.GetReference(destination);
+            for (; i <= destination.Length - 64; i += 64)
+            {
+                ulong l = BitWords.Load(leftBits, leftOffset + i);
+                ulong r = BitWords.Load(rightBits, rightOffset + i);
+                ulong held = (falseFalse ? ~l & ~r : 0) | (falseTrue ? ~l & r : 0) | (trueFalse ? l & ~r : 0) | (trueTrue ? l & r : 0);
+                ulong both = allValid ? ulong.MaxValue : valid.Word(i);
+                if (WordBytes.IsAccelerated)
+                {
+                    Vector512<byte> unknown = spread.Ones(~both);
+                    (spread.Ones(held & both) | (unknown + unknown)).StoreUnsafe(ref into, (nuint)i);
+                }
+                else
+                {
+                    WordBytes.Store128(held & both, ~both, ref Unsafe.Add(ref into, i));
+                }
+            }
+        }
+
+        for (; i < destination.Length; i++)
         {
             if (!allValid && !valid.IsValid(i))
             {
