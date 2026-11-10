@@ -38,7 +38,7 @@ public sealed class AggregationPartial
     public static AggregationPartial FromBytes(ReadOnlyMemory<byte> bytes) => new AggregationPartial(bytes);
 
     /// <summary>The partial over the bytes of the file a part wrote.</summary>
-    internal static AggregationPartial Of(byte[] bytes) => new AggregationPartial(bytes);
+    internal static AggregationPartial Of(ReadOnlyMemory<byte> bytes) => new AggregationPartial(bytes);
 
     /// <summary>The partial's file, opened in <paramref name="session"/> over its bytes.</summary>
     internal ValueTask<VortexFile> OpenAsync(VortexSession session, CancellationToken cancellationToken) =>
