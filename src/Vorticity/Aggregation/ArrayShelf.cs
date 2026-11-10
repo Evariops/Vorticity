@@ -578,6 +578,14 @@ internal sealed class ArrayShelf : ISweptAfterCollections
             return;
         }
 
+        // A query's shelf whose result is delivered offers what its tables give back to the process's, counted nowhere,
+        // as a lane's does.
+        if (_forgotten && _parent is not null)
+        {
+            _parent.Offer(array, _memory?.Started ?? long.MaxValue);
+            return;
+        }
+
         Clean(array);
 
         // Let go past the shelf's budget, or while the shelf lets go of what it is given: it leaves the query's count.
@@ -713,8 +721,8 @@ internal sealed class ArrayShelf : ISweptAfterCollections
     }
 
     /// <summary>
-    /// A lane's shelf whose tables are a result delivered, its query's memory given back whole: what
-    /// they give back goes to the process's shelf, counted nowhere.
+    /// A lane's shelf, or a query's (the core's), whose tables are a result delivered, its query's memory given back
+    /// whole: what they give back goes to the process's shelf, counted nowhere.
     /// </summary>
     internal void Forget()
     {

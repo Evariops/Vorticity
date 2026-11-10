@@ -1226,6 +1226,30 @@ internal sealed partial class GroupCore
     /// <summary>The parts written to the scratch, to bring back after those held in memory.</summary>
     internal CorePart[] SpilledList() => Array.FindAll(_parts, part => part.Runs is not null);
 
+    /// <summary>
+    /// The result read whole delivered, its query's memory given back: the sub-tables of the parts held in memory, its
+    /// groups, hand their arrays to the process's shelf for the next query, counted nowhere. Left to the collector, the
+    /// core's distinct of 4M values made its 360 MB of sub-tables again at every question.
+    /// </summary>
+    internal void LetDelivered()
+    {
+        _shelf.Forget();
+        foreach (CorePart part in _parts)
+        {
+            if (part.Runs is not null)
+            {
+                continue;
+            }
+
+            foreach (SubTable table in part.Tables)
+            {
+                table.Release();
+            }
+
+            part.Tables.Clear();
+        }
+    }
+
     /// <summary>A part's sub-tables read as one, once it is back in memory: its keys and its slots.</summary>
     internal (GroupKeys Keys, AggregateSlot[] Slots) Joined(CorePart part)
     {

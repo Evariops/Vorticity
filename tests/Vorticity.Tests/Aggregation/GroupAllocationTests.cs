@@ -132,6 +132,11 @@ public sealed partial class GroupAllocationTests
         // 12 MB, most of it the merge's key tables, which the shelf hands back or not depending on what the
         // tests before it left: not held to a ceiling until it does.
         ("chosen rows", 1, GroupCoreReason.None, 117_248, ChosenAsync),
+
+        // The hashed integers' distinct values, a million, told by the core as they enter its sub-tables, which are the
+        // result read whole and go back to the process's shelf once it is delivered: left to the collector, every query
+        // made them again, 53.7 MB against 1.6.
+        ("distinct integers", 4, GroupCoreReason.Asked, 1_900_544, DistinctAsync),
     ];
 
     [Fact]
@@ -241,6 +246,19 @@ public sealed partial class GroupAllocationTests
             file.Scan<Row>().GroupBy(r => r.Wide).Select(g => (g.Key, g.Count(), g.MaxBy(r => r.Value).Price, g.First().Day)),
             lanes,
             1);
+
+    /// <summary>The distinct values of the hashed integers, one a row, counted: the rows, and the path the core took.</summary>
+    private static async Task<(long, GroupCoreReason)> DistinctAsync(VortexFile file, int lanes)
+    {
+        Aggregation<long> values = file.Scan<Row>().Select(r => r.Wide).Distinct();
+        long rows = 0;
+        await foreach (long value in values)
+        {
+            rows += value >= 0 ? 1 : 0;
+        }
+
+        return (rows, ((DistinctQuery)values.Query).LastCore?.Reason is CoreReason.Plan ? GroupCoreReason.Asked : GroupCoreReason.None);
+    }
 
     /// <summary>
     /// Runs <paramref name="query"/> and reads its result as the batches it is, its counts summed: the

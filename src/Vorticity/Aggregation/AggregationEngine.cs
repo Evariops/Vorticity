@@ -682,6 +682,9 @@ internal sealed class AggregationOutcome
     /// </summary>
     internal AggregationPartition? Kept { get; init; }
 
+    /// <summary>The core whose sub-tables are the result read whole: their arrays go back to the process's shelf once it is delivered.</summary>
+    internal GroupCore? Core { get; init; }
+
     /// <summary>Whether <see cref="Order"/> is lent by the process's shelf, which takes it back once the result is delivered.</summary>
     internal bool OrderLent { get; init; }
 
@@ -706,6 +709,7 @@ internal sealed class AggregationOutcome
         if (Interlocked.Exchange(ref _givenBack, 1) == 0)
         {
             Kept?.Delivered();
+            Core?.LetDelivered();
             if (OrderLent)
             {
                 ArrayShelf.Retained.Give(Order);
@@ -3883,7 +3887,7 @@ internal static class AggregationEngine
                 (GroupKeys held, AggregateSlot[] heldSlots, long heldBytes, CorePart[] spilled) = await engaged.FinishAsync(joined, lanes, cancellationToken).ConfigureAwait(false);
                 plan.LastRun = Gathered(partitions, Stopwatch.GetTimestamp() - merging, 0, heldBytes) with { Core = engaged.Run() };
                 (int[] heldOrder, bool heldLent) = LentWholeOrder(held.Count);
-                AggregationOutcome outcome = new AggregationOutcome(plan, heldSlots, held, heldOrder, held.Count) { OrderLent = heldLent };
+                AggregationOutcome outcome = new AggregationOutcome(plan, heldSlots, held, heldOrder, held.Count) { OrderLent = heldLent, Core = engaged };
                 if (spilled.Length == 0)
                 {
                     foreach (AggregationPartition partition in partitions)
