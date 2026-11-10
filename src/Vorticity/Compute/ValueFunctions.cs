@@ -358,6 +358,9 @@ internal sealed class InstantTruncate : ValueFunction
 
     private readonly ZoneOffsets? _zone;
 
+    /// <summary>A bucket's longest stretch, a unit and an hour, past which an instant lies in the next bucket.</summary>
+    private readonly long _longest;
+
     /// <summary>The instants of the zone's calendar: from the first year a <see cref="DateTime"/> holds to its last.</summary>
     private readonly long _from;
     private readonly long _until;
@@ -370,6 +373,20 @@ internal sealed class InstantTruncate : ValueFunction
         _firstDay = long.MinValue / _day;
         _zone = zone is null || (zone.BaseUtcOffset == TimeSpan.Zero && !zone.SupportsDaylightSavingTime) ? null : ZoneOffsets.For(zone);
         Text = _zone is null ? $"Truncate({unit})" : $"Truncate({unit}, {zone!.Id})";
+
+        // A bucket's longest stretch, a zone's long day's hour with it: an instant that far past a bucket's start lies in
+        // the next bucket.
+        long hour = 3_600 * _second;
+        _longest = unit switch
+        {
+            CalendarUnit.Minute => 60 * _second,
+            CalendarUnit.Hour => hour,
+            CalendarUnit.Day => _day + hour,
+            CalendarUnit.Week => (7 * _day) + hour,
+            CalendarUnit.Month => (31 * _day) + hour,
+            CalendarUnit.Quarter => (92 * _day) + hour,
+            _ => (366 * _day) + hour,
+        };
 
         // Far enough from the storage's ends for an offset and a unit either side.
         Int128 day = _day;
@@ -423,11 +440,72 @@ internal sealed class InstantTruncate : ValueFunction
             return;
         }
 
+        // A calendar's unit, or a zone's: the bucket of the value before kept, [low, next), while the values stay in it. A
+        // value truncated alone took 14 ns (a month), 22 ns (a month in Paris), rows in time order holding one bucket for
+        // thousands of rows; values that leave their bucket more than an eighth of the time are truncated each, as
+        // Civil.FloorRuns does.
         ZoneCursor cursor = default;
+        long low = 0;
+        long next = 0;
+        long image = 0;
+        bool held = false;
+        int misses = 0;
         for (int i = 0; i < from.Length; i++)
         {
-            into[i] = Truncate(from[i], ref cursor);
+            long value = from[i];
+            if (held && value >= low && value < next)
+            {
+                into[i] = image;
+                continue;
+            }
+
+            long truncated = Truncate(value, ref cursor);
+            into[i] = truncated;
+            if (++misses > (i >> 3) + 16)
+            {
+                for (int j = i + 1; j < from.Length; j++)
+                {
+                    into[j] = Truncate(from[j], ref cursor);
+                }
+
+                return;
+            }
+
+            // A value of the bucket held, below the least one met in it.
+            if (held && truncated == image && value < next)
+            {
+                low = Math.Min(low, value);
+                continue;
+            }
+
+            held = TryBucket(value, truncated, ref cursor, out next);
+            low = value;
+            image = truncated;
         }
+    }
+
+    /// <summary>
+    /// The end of the bucket that starts at <paramref name="truncated"/>, <paramref name="value"/>'s: the start of the one
+    /// a bucket's longest stretch past it falls in, when every instant from <paramref name="value"/> to the one before it
+    /// truncates to <paramref name="truncated"/>, which a truncation, monotone, tells from the instant before that end
+    /// alone. False when it does not, or near the storage's ends.
+    /// </summary>
+    private bool TryBucket(long value, long truncated, ref ZoneCursor cursor, out long next)
+    {
+        next = 0;
+        if (truncated == long.MinValue || truncated > long.MaxValue - _longest)
+        {
+            return false;
+        }
+
+        long after = Truncate(truncated + _longest, ref cursor);
+        if (after <= value || Truncate(after - 1, ref cursor) != truncated)
+        {
+            return false;
+        }
+
+        next = after;
+        return true;
     }
 
     private long Truncate(long instant, ref ZoneCursor cursor)
@@ -795,7 +873,15 @@ internal sealed class ZoneOffsets
     private readonly TimeZoneInfo _zone;
     private readonly ConcurrentDictionary<long, (long[] Starts, long[] Offsets)> _years = new ConcurrentDictionary<long, (long[], long[])>();
 
-    private ZoneOffsets(TimeZoneInfo zone) => _zone = zone;
+    // The year's transitions as the cache makes them, a delegate made once: the method group made one at each year a
+    // cursor entered, 55 to 60 bytes a value of instants in no order over fifty years.
+    private readonly Func<long, (long[] Starts, long[] Offsets)> _transitions;
+
+    private ZoneOffsets(TimeZoneInfo zone)
+    {
+        _zone = zone;
+        _transitions = Transitions;
+    }
 
     internal static ZoneOffsets For(TimeZoneInfo zone) => Zones.GetOrAdd(zone.Id, _ => new ZoneOffsets(zone));
 
@@ -825,7 +911,7 @@ internal sealed class ZoneOffsets
         if (cursor.Starts is null || utc < cursor.From || utc >= cursor.Until)
         {
             long year = Civil.YearMonth(Civil.FloorDiv(utc, 86_400)).Year;
-            (cursor.Starts, cursor.Offsets) = _years.GetOrAdd(year, Transitions);
+            (cursor.Starts, cursor.Offsets) = _years.TryGetValue(year, out (long[] Starts, long[] Offsets) known) ? known : _years.GetOrAdd(year, _transitions);
             cursor.From = Civil.DaysFromCivil(year, 1, 1) * 86_400;
             cursor.Until = Civil.DaysFromCivil(year + 1, 1, 1) * 86_400;
         }

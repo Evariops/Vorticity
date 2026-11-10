@@ -337,11 +337,29 @@ public sealed partial class ValueFunctionTests
             new InstantTruncate(CalendarUnit.Hour, TimeUnit.Nanoseconds, null),
             new InstantTruncate(CalendarUnit.Day, TimeUnit.Nanoseconds, null),
             new InstantTruncate(CalendarUnit.Day, TimeUnit.Seconds, null),
+
+            // The calendar's units and a zone's, whose block keeps the bucket of the value before while values stay in it.
+            new InstantTruncate(CalendarUnit.Week, TimeUnit.Microseconds, null),
+            new InstantTruncate(CalendarUnit.Month, TimeUnit.Microseconds, null),
+            new InstantTruncate(CalendarUnit.Quarter, TimeUnit.Microseconds, null),
+            new InstantTruncate(CalendarUnit.Year, TimeUnit.Microseconds, null),
+            new InstantTruncate(CalendarUnit.Minute, TimeUnit.Microseconds, Paris),
+            new InstantTruncate(CalendarUnit.Hour, TimeUnit.Microseconds, Paris),
+            new InstantTruncate(CalendarUnit.Day, TimeUnit.Microseconds, Paris),
+            new InstantTruncate(CalendarUnit.Week, TimeUnit.Microseconds, Paris),
+            new InstantTruncate(CalendarUnit.Month, TimeUnit.Microseconds, Paris),
+            new InstantTruncate(CalendarUnit.Year, TimeUnit.Microseconds, Paris),
         ];
 
         Random random = new Random(11);
         long[] ordered = [.. Enumerable.Range(0, 5_000).Select(i => 1_760_000_000_000_000L + (i * 37_000_000L))];
         long[] ends = [long.MinValue, long.MinValue + 1, long.MinValue + 999, -1, 0, 1, long.MaxValue - 1, long.MaxValue, long.MinValue, 0, 0];
+
+        // Every seven minutes across Paris's spring and autumn transitions of 2025, in microseconds, and every 37 hours
+        // over two years: a zone's short and long days and hours, months and years in time order.
+        long[] transitions = [.. Enumerable.Range(0, 1_000).Select(i => 1_743_285_600_000_000L + (i * 420_000_000L))
+            .Concat(Enumerable.Range(0, 1_000).Select(i => 1_761_440_400_000_000L + (i * 420_000_000L)))];
+        long[] years = [.. Enumerable.Range(0, 1_000).Select(i => 1_700_000_000_000_000L + (i * 133_200_000_000L))];
         long[][] blocks =
         [
             ordered,
@@ -349,6 +367,10 @@ public sealed partial class ValueFunctionTests
             [.. ordered.Reverse()],
             ends,
             [.. ordered.Concat(ends).Concat(ordered)],
+            transitions,
+            years,
+            [.. years.Reverse()],
+            [.. transitions.Concat(years).Concat(transitions)],
         ];
 
         Vorticity.Types.DTypeArena types = new Vorticity.Types.DTypeArena();
