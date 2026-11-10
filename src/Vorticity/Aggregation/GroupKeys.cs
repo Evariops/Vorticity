@@ -1041,30 +1041,12 @@ internal sealed class FixedKeys<TValue> : GroupKeys
     }
 
     /// <summary>
-    /// The bits of the 64 <paramref name="values"/> of a word every row of which is kept that reach the
-    /// edge, compared with no branch, as <see cref="ValueFrontier"/> compares its values: from the
-    /// word's bits a row at a time, each row waited on the one before it.
+    /// The bits of the 64 integer <paramref name="values"/> of a word every row of which is kept that
+    /// reach the edge, compared over vectors as <see cref="ValueFrontier"/> compares its values: built
+    /// a row at a time, each row waited on the one before it.
     /// </summary>
-    private static ulong Reached(ReadOnlySpan<TValue> values, TValue edge, bool descending)
-    {
-        ulong reached = 0;
-        if (descending)
-        {
-            for (int i = 0; i < values.Length; i++)
-            {
-                reached |= (values[i].CompareTo(edge) >= 0 ? 1UL : 0UL) << i;
-            }
-        }
-        else
-        {
-            for (int i = 0; i < values.Length; i++)
-            {
-                reached |= (values[i].CompareTo(edge) <= 0 ? 1UL : 0UL) << i;
-            }
-        }
-
-        return reached;
-    }
+    private static ulong Reached(ReadOnlySpan<TValue> values, TValue edge, bool descending) =>
+        ComparisonKernels.Bounded(values, edge, atMost: !descending);
 
     internal override bool Assign(CanonicalArena arena, ReadOnlySpan<int> nodes, int rows, ReadOnlySpan<ulong> selection, int[] rowGroups, GroupRanges ranges)
     {

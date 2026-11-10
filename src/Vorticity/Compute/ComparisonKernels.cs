@@ -1167,6 +1167,44 @@ internal static partial class ComparisonKernels
         return i;
     }
 
+    /// <summary>
+    /// The answers of the first 64 integers of <paramref name="values"/> to <c>value &lt;= bound</c>, or to
+    /// <c>value &gt;= bound</c> when not <paramref name="atMost"/>, bit <c>i</c> for value <c>i</c>: the lane masks of
+    /// the widest vectors there are gathered into a word, as the column comparisons gather theirs.
+    /// </summary>
+    internal static ulong Bounded<T>(ReadOnlySpan<T> values, T bound, bool atMost)
+        where T : unmanaged, IComparable<T>
+    {
+        values = values[..64];
+        ref T at = ref MemoryMarshal.GetReference(values);
+        if (Vector512.IsHardwareAccelerated && Vector512<T>.IsSupported)
+        {
+            Vector512<T> right = Vector512.Create(bound);
+            return atMost ? Verdicts<T, LessOrEqualOp>(ref at, right) : Verdicts<T, GreaterOrEqualOp>(ref at, right);
+        }
+
+        if (Vector256.IsHardwareAccelerated && Vector256<T>.IsSupported)
+        {
+            Vector256<T> right = Vector256.Create(bound);
+            return atMost ? Verdicts256<T, LessOrEqualOp>(ref at, right) : Verdicts256<T, GreaterOrEqualOp>(ref at, right);
+        }
+
+        if (Vector128.IsHardwareAccelerated && Vector128<T>.IsSupported)
+        {
+            Vector128<T> right = Vector128.Create(bound);
+            return atMost ? Verdicts128<T, LessOrEqualOp>(ref at, right) : Verdicts128<T, GreaterOrEqualOp>(ref at, right);
+        }
+
+        ulong held = 0;
+        for (int i = 0; i < values.Length; i++)
+        {
+            int order = values[i].CompareTo(bound);
+            held |= ((atMost ? order <= 0 : order >= 0) ? 1UL : 0UL) << i;
+        }
+
+        return held;
+    }
+
     /// <summary>Sixty-four rows' verdicts from <paramref name="at"/>, bit <c>i</c> for row <c>i</c>.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static ulong Verdicts<T, TOp>(ref T at, Vector512<T> right)
