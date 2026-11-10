@@ -845,38 +845,66 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
         return hashes;
     }
 
-    /// <summary>The most frequent values whose bytes were kept, the most first, ties by their bytes.</summary>
+    /// <summary>
+    /// The most frequent values whose bytes were kept, the most first, ties by their bytes: the values kept so far in a heap
+    /// whose top is the least of them, which a value passes or not by its rows alone, mostly, where every distinct value
+    /// was listed and sorted to keep the first 128.
+    /// </summary>
     private SheetValue[] Frequent()
     {
-        List<(long Rows, int Offset, int Length)> held = new List<(long, int, int)>(_distinct + 1);
+        byte[] heap = _heap;
+        Ranked rank = new Ranked(heap);
+        PriorityQueue<(long Rows, int Offset, int Length), (long Rows, int Offset, int Length)> kept =
+            new PriorityQueue<(long, int, int), (long, int, int)>(ColumnSheet.TopValues + 1, rank);
         Slot[] slots = _slots!;
         for (int i = 0; i < slots.Length; i++)
         {
             if (slots[i].Key != 0 && _offsets[i] >= 0)
             {
-                held.Add((slots[i].Count & RowsMask, _offsets[i], _lengths[i]));
+                Keep(kept, (slots[i].Count & RowsMask, _offsets[i], _lengths[i]), rank);
             }
         }
 
         if (_zeroRows > 0 && _zeroOffset >= 0)
         {
-            held.Add((_zeroRows, _zeroOffset, _zeroLength));
+            Keep(kept, (_zeroRows, _zeroOffset, _zeroLength), rank);
         }
 
-        byte[] heap = _heap;
-        held.Sort((left, right) =>
+        // The least kept leave first: the array fills from its end, the most first.
+        SheetValue[] top = new SheetValue[kept.Count];
+        for (int i = top.Length - 1; i >= 0; i--)
         {
-            int byRows = right.Rows.CompareTo(left.Rows);
-            return byRows != 0 ? byRows : heap.AsSpan(left.Offset, left.Length).SequenceCompareTo(heap.AsSpan(right.Offset, right.Length));
-        });
-
-        SheetValue[] top = new SheetValue[Math.Min(held.Count, ColumnSheet.TopValues)];
-        for (int i = 0; i < top.Length; i++)
-        {
-            top[i] = new SheetValue(heap.AsSpan(held[i].Offset, held[i].Length).ToArray(), held[i].Rows, 0);
+            (long rows, int offset, int length) = kept.Dequeue();
+            top[i] = new SheetValue(heap.AsSpan(offset, length).ToArray(), rows, 0);
         }
 
         return top;
+
+        static void Keep(
+            PriorityQueue<(long Rows, int Offset, int Length), (long Rows, int Offset, int Length)> kept,
+            (long Rows, int Offset, int Length) value, Ranked rank)
+        {
+            if (kept.Count < ColumnSheet.TopValues)
+            {
+                kept.Enqueue(value, value);
+            }
+            else if (rank.Compare(value, kept.Peek()) > 0)
+            {
+                kept.DequeueEnqueue(value, value);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Ranks two kept values, the less frequent below, and of as many rows the greater bytes below: the order a sheet
+    /// lists its frequent values in, reversed, so that a heap's top is the one to leave first.
+    /// </summary>
+    private sealed class Ranked(byte[] heap) : IComparer<(long Rows, int Offset, int Length)>
+    {
+        public int Compare((long Rows, int Offset, int Length) x, (long Rows, int Offset, int Length) y) =>
+            x.Rows != y.Rows
+                ? x.Rows.CompareTo(y.Rows)
+                : heap.AsSpan(y.Offset, y.Length).SequenceCompareTo(heap.AsSpan(x.Offset, x.Length));
     }
     /// <summary>A distinct hash, and its rows with its value's number above them (<see cref="IdShift"/>), side by side in one entry.</summary>
     private struct Slot

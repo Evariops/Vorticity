@@ -1,6 +1,7 @@
-// Audit VW-11 (found by VW-01's trace of a compaction): what a column's sheet costs as the writer feeds it, the exact counts
-// of its distinct values kept by a table probed for every row. A column of 327,680 longs (an object of a compaction), fed
-// a block of 8,192 rows at a time, drawn among 1,000 values (a table that stays in the first caches), 100,000 (a table of
+// Audit VW-11 (found by VW-01's trace of a compaction) and VW-08: what a column's sheet costs as the writer feeds it, the
+// exact counts of its distinct values kept by a table probed for every row, and then finished. A column of 327,680 longs
+// (an object of a compaction), fed a block of 8,192 rows at a time, drawn among 1,000 values (a table that stays in the
+// first caches), 80,000 (few enough, a quarter of the rows, that the sheet lists its frequent values), 100,000 (a table of
 // some megabytes, as a column of sizes) or 600,000 (tens of megabytes). Then the sheet finished: its frequent values and
 // its filter, for a column whose values repeat.
 using System;
@@ -27,7 +28,7 @@ public class AuditSheetAccumulateBenchmarks
     private int _node;
 
     /// <summary>The distinct values the rows are drawn among.</summary>
-    [Params(1_000, 100_000, 600_000)]
+    [Params(1_000, 80_000, 100_000, 600_000)]
     public int Distinct { get; set; }
 
     /// <summary>Draws the column.</summary>
