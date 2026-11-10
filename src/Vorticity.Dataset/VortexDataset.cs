@@ -4126,14 +4126,12 @@ public sealed class VortexDataset : IAsyncDisposable
 
         foreach ((int _, DatasetTree tree) in version.Levels.Occupied())
         {
-            // The partitions lead the tree, and the positions of each run on from those of the others: every leaf's.
+            // The partitions lead the tree, and the positions of each run on from those of the others: every leaf's, a
+            // subtree's end kept by its page, which no version changes, so that an append reads the pages its commit
+            // wrote again, not every page.
             if (version.Schema.Partitioned)
             {
-                await foreach (PositionedEntry held in tree.WalkAsync(version.Pages, 0, long.MaxValue, null, cancellationToken).ConfigureAwait(false))
-                {
-                    end = Math.Max(end, PositionAt(held.Entry.Key.Span) + held.Entry.Rows);
-                }
-
+                end = Math.Max(end, await SubtreeEndAsync(version, tree.Root, tree.Depth, cancellationToken).ConfigureAwait(false));
                 continue;
             }
 
@@ -4152,6 +4150,44 @@ public sealed class VortexDataset : IAsyncDisposable
 
         return end;
     }
+
+    /// <summary>
+    /// The end of the positions of the rows the subtree under <paramref name="page"/>, of <paramref name="depth"/> levels of
+    /// pages, holds: the greatest of its leaves' places past their rows; kept by the page, which is never rewritten in place.
+    /// </summary>
+    private async ValueTask<long> SubtreeEndAsync(DatasetSnapshot version, PageReference page, int depth, CancellationToken cancellationToken)
+    {
+        if (_subtreeEnds.TryGet(page, out long known))
+        {
+            return known;
+        }
+
+        ReadOnlyMemory<byte> node = await version.Pages.ReadPageAsync(page, cancellationToken).ConfigureAwait(false);
+        long end = 0;
+        if (depth > 1)
+        {
+            foreach (InternalEntry child in TreePage.ReadInternal(node))
+            {
+                end = Math.Max(end, await SubtreeEndAsync(version, child.Child, depth - 1, cancellationToken).ConfigureAwait(false));
+            }
+        }
+        else
+        {
+            foreach (TreeEntry leaf in TreePage.ReadLeaf(node))
+            {
+                end = Math.Max(end, PositionAt(leaf.Key.Span) + leaf.Rows);
+            }
+        }
+
+        _subtreeEnds.Keep(page, end, SubtreeEndBytes, out _);
+        return end;
+    }
+
+    /// <summary>The bytes a subtree's end is counted at in <see cref="_subtreeEnds"/>: its page's reference, its value and a slot.</summary>
+    private const int SubtreeEndBytes = 96;
+
+    // The end of each subtree a keyless partitioned dataset's appends found (SubtreeEndAsync), by its page: a megabyte's worth.
+    private readonly ClockMemo<PageReference, long> _subtreeEnds = new ClockMemo<PageReference, long>(1L << 20);
 
     /// <summary>What a change reports when its filter can match no row: nothing read, nothing committed.</summary>
     private RowChangeResult Unchanged() => new RowChangeResult { Version = Version, Outcome = OperationOutcome.AlreadyThere };
