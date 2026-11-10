@@ -4,6 +4,7 @@ using System.IO.Hashing;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using Vorticity.Arrays;
 
 namespace Vorticity.Aggregating;
 
@@ -258,12 +259,19 @@ internal sealed class BytesCardinalitySlot : CardinalitySlot
     private MaskCache _rows;
     private CodeSet _distinct;
 
-    /// <summary>The sketches, then the masks joined and the codes met, back to the process's shelf.</summary>
+    // A batch's dictionary entries hashed at their first row: each code's hash, and the batch it was hashed in.
+    private ulong[] _hashes = [];
+    private int[] _hashedIn = [];
+    private int _batch;
+
+    /// <summary>The sketches, then the masks joined, the codes met and the entries' hashes, back to the process's shelf.</summary>
     internal override void Release()
     {
         base.Release();
         _rows.Release();
         _distinct.Release();
+        Scratch.Return(ref _hashes);
+        Scratch.Return(ref _hashedIn);
     }
 
     internal override void StepRange(in BatchInput input, int start, int end, int group)
@@ -274,8 +282,59 @@ internal sealed class BytesCardinalitySlot : CardinalitySlot
 
     internal override void StepRows(in BatchInput input, ReadOnlySpan<int> groups)
     {
+        if (EncodedForms.EncodingOf(input.Arena, input.Node) == ColumnEncoding.Dictionary)
+        {
+            StepCodes(input, groups);
+            return;
+        }
+
         Sink sink = new Sink(this);
         BytesWalk.Rows(ref sink, input, groups, ref _rows);
+    }
+
+    /// <summary>
+    /// The rows of a dictionary's text into their groups' sketches, each entry hashed once a batch, at its first row: each
+    /// row hashed its entry's bytes again, 54 ms for 4M rows of a thousand texts over 64 groups.
+    /// </summary>
+    private void StepCodes(in BatchInput input, ReadOnlySpan<int> groups)
+    {
+        CanonicalArena arena = input.Arena;
+        int entries = EncodedForms.Dictionary(arena, input.Node, out ReadOnlySpan<uint> codes);
+        BytesBlock dictionary = BytesBlock.Canonical(arena, entries, out ReadOnlySpan<ulong> valid);
+
+        // A batch's number marks the entries it hashed, so that no table is cleared between batches.
+        if (_hashedIn.Length < dictionary.Length)
+        {
+            Scratch.Grow(ref _hashes, dictionary.Length);
+            Scratch.Grow(ref _hashedIn, dictionary.Length);
+            _batch = 0;
+        }
+        else if (_batch == int.MaxValue)
+        {
+            Array.Clear(_hashedIn);
+            _batch = 0;
+        }
+
+        int batch = ++_batch;
+        ulong[] hashes = _hashes;
+        int[] hashedIn = _hashedIn;
+        RowCursor rows = new RowCursor(_rows.And(input, input.Selection, ArenaWords.Validity(arena, input.Node)), input.Start, input.End);
+        while (rows.Next(out int row))
+        {
+            int code = (int)codes[row];
+            if (!StorageValues.IsValid(valid, code))
+            {
+                continue;
+            }
+
+            if (hashedIn[code] != batch)
+            {
+                hashes[code] = Hash(dictionary[code]);
+                hashedIn[code] = batch;
+            }
+
+            Add(groups[row], hashes[code]);
+        }
     }
 
     private readonly struct Sink(BytesCardinalitySlot slot) : IBytesSink

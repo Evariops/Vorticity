@@ -143,6 +143,21 @@ public sealed partial class ApproximateDistinctTests
             sets.Pages.Add(row.Page);
         }
 
+        // Each group's sketches made here, a value's bytes hashed at each row: the query's estimates are theirs exactly,
+        // whether a page's text came from a dictionary, hashed once an entry, or row by row.
+        Dictionary<int, (CardinalitySketch Users, CardinalitySketch Pages)> sketches = [];
+        foreach (Visit row in rows)
+        {
+            if (!sketches.TryGetValue(row.Site, out var held))
+            {
+                held = (new CardinalitySketch(), new CardinalitySketch());
+                sketches[row.Site] = held;
+            }
+
+            held.Users.Add(CardinalitySlot.Hash(BitConverter.GetBytes(row.User)));
+            held.Pages.Add(CardinalitySlot.Hash(System.Text.Encoding.UTF8.GetBytes(row.Page)));
+        }
+
         Assert.Equal(exact.Count, found.Count);
         foreach (KeyCounts row in found)
         {
@@ -150,6 +165,8 @@ public sealed partial class ApproximateDistinctTests
             Assert.Equal(users.Count, row.Users);
             Assert.InRange(row.ApproximateUsers, users.Count * (1 - Tolerance), users.Count * (1 + Tolerance));
             Assert.InRange(row.ApproximatePages, pages.Count * (1 - Tolerance), pages.Count * (1 + Tolerance));
+            Assert.Equal(sketches[row.Site].Users.Estimate(), row.ApproximateUsers);
+            Assert.Equal(sketches[row.Site].Pages.Estimate(), row.ApproximatePages);
         }
 
         // Every degree gives the counts degree 1 gives.
