@@ -2,6 +2,7 @@ using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Linq;
+using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -213,8 +214,149 @@ internal sealed class ShreddedVariant
 
         // The written values' buffer follows the value column's, whose views a row taking its value keeps.
         ReadOnlySpan<byte> values = root.Value >= 0 ? root.ValueViews.Span : default;
-        WriteRows(root, node.Length, into, values, metadataViews, metadataBuffers, root.Value >= 0 ? root.ValueBufferCount : 0);
+        List(root);
+        try
+        {
+            WriteRows(root, node.Length, into, values, metadataViews, metadataBuffers, root.Value >= 0 ? root.ValueBufferCount : 0);
+        }
+        finally
+        {
+            Unlist(root);
+        }
     }
+
+    /// <summary>
+    /// For each object under <paramref name="shred"/> of <see cref="ListedFields"/> fields or more, the fields each of its
+    /// slots defines, in name order (<see cref="Shred.Listed"/>), found a word of 64 slots at a time from the fields'
+    /// validities: a row of a log's attributes defines a dozen of the hundreds of keys shredded, each of which a row tested
+    /// for its presence, 1 us a row of 200.
+    /// </summary>
+    private static void List(Shred shred)
+    {
+        switch (shred.Kind)
+        {
+            case ShredKind.Object:
+                foreach (Shred field in shred.Fields)
+                {
+                    List(field);
+                }
+
+                if (shred.Typed >= 0 && shred.Fields.Length >= ListedFields)
+                {
+                    ListDefined(shred);
+                }
+
+                break;
+
+            case ShredKind.Array:
+                List(shred.Element!);
+                break;
+        }
+    }
+
+    /// <summary>The fields each slot of the object <paramref name="shred"/> defines, counted, then laid out slot after slot.</summary>
+    private static void ListDefined(Shred shred)
+    {
+        int rows = shred.Length;
+        int words = (rows + 63) >> 6;
+        int[] starts = WorkArrays.Rent<int>(rows + 1);
+        starts.AsSpan(0, rows + 1).Clear();
+        int total = 0;
+        foreach (Shred field in shred.Fields)
+        {
+            for (int w = 0; w < words; w++)
+            {
+                for (ulong bits = Presence(field, w, rows); bits != 0; bits &= bits - 1)
+                {
+                    starts[(w << 6) + BitOperations.TrailingZeroCount(bits) + 1]++;
+                    total++;
+                }
+            }
+        }
+
+        for (int slot = 1; slot <= rows; slot++)
+        {
+            starts[slot] += starts[slot - 1];
+        }
+
+        // Each slot's fields at its start, which moves to the next slot's start as they are laid; then moved back.
+        int[] defined = WorkArrays.Rent<int>(Math.Max(total, 1));
+        for (int f = 0; f < shred.Fields.Length; f++)
+        {
+            Shred field = shred.Fields[f];
+            for (int w = 0; w < words; w++)
+            {
+                for (ulong bits = Presence(field, w, rows); bits != 0; bits &= bits - 1)
+                {
+                    defined[starts[(w << 6) + BitOperations.TrailingZeroCount(bits)]++] = f;
+                }
+            }
+        }
+
+        for (int slot = rows; slot > 0; slot--)
+        {
+            starts[slot] = starts[slot - 1];
+        }
+
+        starts[0] = 0;
+        shred.DefinedStarts = starts;
+        shred.DefinedFields = defined;
+        shred.Listed = true;
+    }
+
+    /// <summary>The slots of word <paramref name="word"/> of the <paramref name="rows"/> where <paramref name="field"/> is defined (<see cref="Defined"/>).</summary>
+    private static ulong Presence(Shred field, int word, int rows)
+    {
+        ulong held = (field.Value >= 0 ? field.ValuePresent.Word(word, rows) : 0) | (field.Typed >= 0 ? field.TypedPresent.Word(word, rows) : 0);
+        return held == 0 ? 0 : held & field.Group.Word(word, rows);
+    }
+
+    /// <summary>Gives back the lists <see cref="List"/> made under <paramref name="shred"/>.</summary>
+    private static void Unlist(Shred shred)
+    {
+        if (shred.Listed)
+        {
+            WorkArrays.Return(shred.DefinedStarts);
+            WorkArrays.Return(shred.DefinedFields);
+            shred.DefinedStarts = [];
+            shred.DefinedFields = [];
+            shred.Listed = false;
+        }
+
+        foreach (Shred field in shred.Fields)
+        {
+            Unlist(field);
+        }
+
+        if (shred.Element is { } element)
+        {
+            Unlist(element);
+        }
+    }
+
+    /// <summary>
+    /// The next field of <paramref name="shred"/> the slot <paramref name="slot"/> defines, from <paramref name="at"/>, which
+    /// moves past it: its index in the slot's list when the object lists them, among every field otherwise. The fields'
+    /// count when no other is.
+    /// </summary>
+    private static int NextDefined(Shred shred, int slot, ReadOnlySpan<int> listed, ref int at)
+    {
+        if (shred.Listed)
+        {
+            return at < listed.Length ? listed[at++] : shred.Fields.Length;
+        }
+
+        while (at < shred.Fields.Length && !Defined(shred.Fields[at], slot))
+        {
+            at++;
+        }
+
+        return at < shred.Fields.Length ? at++ : shred.Fields.Length;
+    }
+
+    /// <summary>The fields slot <paramref name="slot"/> of <paramref name="shred"/> defines, when it lists them.</summary>
+    private static ReadOnlySpan<int> ListedAt(Shred shred, int slot) =>
+        shred.Listed ? shred.DefinedFields.AsSpan(shred.DefinedStarts[slot], shred.DefinedStarts[slot + 1] - shred.DefinedStarts[slot]) : default;
 
     /// <summary>
     /// The binary node of the <paramref name="rows"/> rows the slices wrote: their <paramref name="views"/> over the value
@@ -430,63 +572,52 @@ internal sealed class ShreddedVariant
         int pairs = _top;
         int count = 0;
         uint largest = 0;
-        int next = 0;
+        ReadOnlySpan<int> listed = ListedAt(shred, slot);
+        int cursor = 0;
+        int field = NextDefined(shred, slot, listed, ref cursor);
         int other = 0;
         int named = -1;
         int otherId = 0;
         int bound = 0;
-        bool same = false;
-        ReadOnlySpan<byte> name = default;
         ReadOnlySpan<byte> previous = default;
-        while (next < shred.Fields.Length || other < unshredded.Count)
+        while (field < shred.Fields.Length || other < unshredded.Count)
         {
-            int order = -1;
-            if (other < unshredded.Count)
+            if (other < unshredded.Count && named != other)
             {
-                if (named != other)
+                otherId = unshredded.IdAt(other);
+                ReadOnlySpan<byte> name = dictionary[otherId];
+                if (other > 0 && previous.SequenceCompareTo(name) >= 0)
                 {
-                    otherId = unshredded.IdAt(other);
-                    name = dictionary[otherId];
-                    if (other > 0 && previous.SequenceCompareTo(name) >= 0)
-                    {
-                        throw new VortexFormatException($"{Name(shred.Path)} holds an object whose fields are not in the order of their names.");
-                    }
-
-                    previous = name;
-                    named = other;
-
-                    // The shredded names sorted, those before the value's next one found by halves rather than each set
-                    // against it: 200 shredded beside a row's residual of two were 200 comparisons a row.
-                    (bound, same) = Bound(shred.Names, next, name);
+                    throw new VortexFormatException($"{Name(shred.Path)} holds an object whose fields are not in the order of their names.");
                 }
 
-                order = next < bound ? -1 : next == bound && same ? 0 : 1;
-            }
+                previous = name;
+                named = other;
 
-            if (order <= 0)
-            {
-                if (Defined(shred.Fields[next], slot))
-                {
-                    int id = IdOf(shred, next, in dictionary);
-                    if (id < 0)
-                    {
-                        throw Unnamed(shred, next);
-                    }
-
-                    Push(id, next);
-                    largest = Math.Max(largest, (uint)id);
-                    count++;
-                }
-
-                if (order == 0)
+                // The shredded names sorted, those before the value's next one found by halves rather than each set
+                // against it: 200 shredded beside a row's residual of two were 200 comparisons a row.
+                (bound, bool same) = Bound(shred.Names, bound, name);
+                if (same)
                 {
                     // A shredded name never appears in the value, as the Arrow reader the reference
                     // relies on also refuses: the row would hold two values of one key.
                     throw new VortexFormatException(
                         $"{Name(shred.Path)} holds the field '{System.Text.Encoding.UTF8.GetString(name)}' both shredded and in its value.");
                 }
+            }
 
-                next++;
+            if (other >= unshredded.Count || field < bound)
+            {
+                int id = IdOf(shred, field, in dictionary);
+                if (id < 0)
+                {
+                    throw Unnamed(shred, field);
+                }
+
+                Push(id, field);
+                largest = Math.Max(largest, (uint)id);
+                count++;
+                field = NextDefined(shred, slot, listed, ref cursor);
             }
             else
             {
@@ -588,23 +719,25 @@ internal sealed class ShreddedVariant
     /// </summary>
     private void WriteLeaves(Shred shred, int slot, int[] ids, scoped in VariantDictionary dictionary)
     {
-        int fields = shred.Fields.Length;
+        ReadOnlySpan<int> listed = ListedAt(shred, slot);
+        int fields = shred.Listed ? listed.Length : shred.Fields.Length;
         int sizes = Grow(fields);
         int count = 0;
         uint largest = 0;
         int size = 0;
         for (int i = 0; i < fields; i++)
         {
-            int bytes = LeafSize(shred.Fields[i], slot);
+            int f = shred.Listed ? listed[i] : i;
+            int bytes = LeafSize(shred.Fields[f], slot);
             _stack[sizes + i] = bytes;
             if (bytes >= 0)
             {
-                if (IdOf(shred, i, in dictionary) < 0)
+                if (IdOf(shred, f, in dictionary) < 0)
                 {
-                    throw Unnamed(shred, i);
+                    throw Unnamed(shred, f);
                 }
 
-                largest = Math.Max(largest, (uint)ids[i]);
+                largest = Math.Max(largest, (uint)ids[f]);
                 size = checked(size + bytes);
                 count++;
             }
@@ -623,7 +756,7 @@ internal sealed class ShreddedVariant
         {
             if (_stack[sizes + i] >= 0)
             {
-                ParquetVariant.Put(header, ref at, (uint)ids[i], idWidth);
+                ParquetVariant.Put(header, ref at, (uint)ids[shred.Listed ? listed[i] : i], idWidth);
             }
         }
 
@@ -643,7 +776,7 @@ internal sealed class ShreddedVariant
         {
             if (_stack[sizes + i] >= 0)
             {
-                WriteLeaf(shred.Fields[i], slot);
+                WriteLeaf(shred.Fields[shred.Listed ? listed[i] : i], slot);
             }
         }
 
@@ -930,6 +1063,9 @@ internal sealed class ShreddedVariant
 
         return (low, low < names.Length && names[low].AsSpan().SequenceEqual(name));
     }
+
+    /// <summary>The fields from which an object lists those each slot defines rather than testing each one a slot.</summary>
+    private const int ListedFields = 32;
 
     /// <summary>An id of <see cref="Shred.Ids"/> not looked up in the row's metadata yet.</summary>
     private const int Unresolved = int.MinValue;
@@ -1329,6 +1465,54 @@ internal sealed class ShreddedVariant
                 return _mode == Bits && ((_bits.Span[at >> 3] >> (at & 7)) & 1) != 0;
             }
         }
+
+        /// <summary>The slots <c>64 * word</c> to <c>64 * word + 63</c> of the <paramref name="rows"/> as bits, the first lowest; those past the rows clear.</summary>
+        internal readonly ulong Word(int word, int rows)
+        {
+            if (_mode != Bits)
+            {
+                int count = Math.Min(64, rows - (word << 6));
+                return _mode == None ? 0 : count == 64 ? ulong.MaxValue : (1UL << count) - 1;
+            }
+
+            return BitsWord(_bits.Span, _offset, word, rows);
+        }
+    }
+
+    /// <summary>
+    /// Bits <c>64 * word</c> to <c>64 * word + 63</c> of the <paramref name="rows"/> bits <paramref name="offset"/> bits into
+    /// <paramref name="bits"/>, least significant first, as one word, those past the rows clear.
+    /// </summary>
+    internal static ulong BitsWord(ReadOnlySpan<byte> bits, int offset, int word, int rows)
+    {
+        int first = word << 6;
+        int count = Math.Min(64, rows - first);
+        ulong mask = count == 64 ? ulong.MaxValue : (1UL << count) - 1;
+        int at = offset + first;
+        int start = at >> 3;
+        int shift = at & 7;
+        int available = bits.Length - start;
+        ulong value;
+        if (available >= 8)
+        {
+            value = BinaryPrimitives.ReadUInt64LittleEndian(bits[start..]) >> shift;
+            if (shift != 0 && available > 8)
+            {
+                value |= (ulong)bits[start + 8] << (64 - shift);
+            }
+        }
+        else
+        {
+            value = 0;
+            for (int b = 0; b < available; b++)
+            {
+                value |= (ulong)bits[start + b] << (8 * b);
+            }
+
+            value >>= shift;
+        }
+
+        return value & mask;
     }
 
     /// <summary>
@@ -1354,6 +1538,14 @@ internal sealed class ShreddedVariant
         internal int[] Columns = [];
         internal byte[][] Names = [];
         internal int[] Ids = [];
+
+        /// <summary>
+        /// Whether the object lists the fields each slot bound defines (<see cref="List"/>): the slot's in
+        /// <see cref="DefinedFields"/> from <see cref="DefinedStarts"/> at the slot to it at the next, rented for a slice.
+        /// </summary>
+        internal bool Listed;
+        internal int[] DefinedStarts = [];
+        internal int[] DefinedFields = [];
 
         /// <summary>Whether an object's fields are all leaves, which hold no object and no array.</summary>
         internal bool Leaves;

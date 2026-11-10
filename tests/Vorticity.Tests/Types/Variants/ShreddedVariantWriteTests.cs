@@ -86,6 +86,82 @@ public sealed partial class ShreddedVariantWriteTests
     }
 
     /// <summary>
+    /// A shredding of 40 keys, one an object of 36 more, whose rows a scan puts back by the fields each row defines: rows
+    /// of a few keys, of a residual or none, of values of another class, null, missing, not objects at all, read back
+    /// every document over chunks of 512 rows on one lane or four.
+    /// </summary>
+    [Theory]
+    [InlineData(9, 1)]
+    [InlineData(10, 4)]
+    public async Task AWideShreddingReadsBackEveryDocument(int seed, int degree)
+    {
+        Random random = new Random(seed);
+        List<(string, VariantShredding)> inner = [.. Enumerable.Range(0, 36).Select(k => ($"i{k:D2}", VariantShredding.Primitive(k % 2 == 0 ? VariantClass.String : VariantClass.Integer)))];
+        List<(string, VariantShredding)> keys = [.. Enumerable.Range(0, 39).Select(k => ($"k{k:D2}", VariantShredding.Primitive(k % 3 == 0 ? VariantClass.String : VariantClass.Integer)))];
+        keys.Add(("nested", VariantShredding.Object([.. inner])));
+        VariantShredding wide = VariantShredding.Object([.. keys]);
+
+        Variant Value(int key) => random.Next(12) switch
+        {
+            0 => Variant.Null,
+            1 => Variant.From(random.NextDouble()),
+            _ => key % 2 == 0 ? Variant.From($"v{random.Next(50)}") : Variant.From(random.Next(1_000)),
+        };
+
+        Dictionary<string, Variant> Fields(string prefix, int count, int defined, bool residual)
+        {
+            Dictionary<string, Variant> fields = [];
+            while (fields.Count < defined)
+            {
+                int key = random.Next(count);
+                fields[$"{prefix}{key:D2}"] = Value(key);
+            }
+
+            if (residual)
+            {
+                fields[$"r{random.Next(9)}"] = Variant.From(random.Next(9));
+                fields[$"a{random.Next(9)}"] = Variant.From("left");
+            }
+
+            return fields;
+        }
+
+        Variant Document()
+        {
+            switch (random.Next(25))
+            {
+                case 0:
+                    return Variant.Null;
+                case 1:
+                    return Variant.From("not an object");
+            }
+
+            Dictionary<string, Variant> top = Fields("k", 39, random.Next(0, 9), residual: random.Next(3) == 0);
+            if (random.Next(2) == 0)
+            {
+                top["nested"] = random.Next(8) == 0
+                    ? Variant.From(3L)
+                    : Variant.Object([.. Fields("i", 36, random.Next(0, 7), residual: random.Next(4) == 0).Select(f => (f.Key, f.Value))]);
+            }
+
+            return Variant.Object([.. top.Select(f => (f.Key, f.Value))]);
+        }
+
+        Doc[] rows = [.. Enumerable.Range(0, 3_000).Select(i => new Doc(i, Document(), random.Next(10) == 0 ? null : Document()))];
+        List<Doc> read = await RoundTripAsync(rows, new() { [nameof(Doc.Attributes)] = wide, [nameof(Doc.Extra)] = wide }, degree);
+        Assert.Equal(rows.Length, read.Count);
+        for (int i = 0; i < rows.Length; i++)
+        {
+            Assert.True(rows[i].Attributes.Equals(read[i].Attributes), $"row {i}: {rows[i].Attributes.ToJson()} read as {read[i].Attributes.ToJson()}");
+            Assert.Equal(rows[i].Extra is null, read[i].Extra is null);
+            if (rows[i].Extra is { } extra)
+            {
+                Assert.True(extra.Equals(read[i].Extra!.Value), $"row {i}: {extra.ToJson()} read as {read[i].Extra!.Value.ToJson()}");
+            }
+        }
+    }
+
+    /// <summary>
     /// Integers of the four widths under one shredded key go to one 64-bit column, and come back at
     /// that width, equal in value; a key without a shredding keeps its width in the residual.
     /// </summary>

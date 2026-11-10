@@ -1,7 +1,7 @@
 // Audit VA-03: what a shredded variant column costs a scan that reads it put back together, and the share of it the copy of
 // the rebuilt values into the batch's arena takes.
 //
-// 65,536 rows of attributes, each 12 of 200 keys shredded as strings or integers and 2 of 50 left in the residual, read from
+// 65,536 rows of attributes, each 12 of 200 keys shredded (or 6 of 16) as strings or integers and 2 of 50 left in the residual, read from
 // a file in memory, the column alone, each row's value bytes summed.
 using System;
 using System.Collections.Generic;
@@ -26,10 +26,13 @@ namespace Vorticity.Benchmarks.Audit;
 public partial class AuditShreddedReadBenchmarks
 {
     private const int Rows = 65_536;
-    private const int Shredded = 200;
 
     private readonly ColumnFieldExpr _column = new ColumnFieldExpr(nameof(Line.Attributes));
     private VortexFile _file = null!;
+
+    /// <summary>The keys shredded: a row defines 12 of 200, or 6 of 16.</summary>
+    [Params(16, 200)]
+    public int Shredded { get; set; }
 
     /// <summary>A log line.</summary>
     [VortexRecord]
@@ -47,7 +50,7 @@ public partial class AuditShreddedReadBenchmarks
             for (int i = 0; i < Rows; i++)
             {
                 Dictionary<string, Variant> fields = [];
-                while (fields.Count < 12)
+                while (fields.Count < (Shredded >= 100 ? 12 : 6))
                 {
                     int key = random.Next(Shredded);
                     fields[$"k{key:D3}"] = key % 2 == 0 ? Variant.From($"v{random.Next(100)}") : Variant.From(random.Next(1_000));
