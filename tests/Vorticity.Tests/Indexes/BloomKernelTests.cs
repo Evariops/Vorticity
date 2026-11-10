@@ -81,6 +81,31 @@ public sealed class BloomKernelTests
         }
     }
 
+    /// <summary>
+    /// The halves of a key's bits ARM64 takes, its powers of two made from floats, are each word's salted bit: on every key
+    /// of a draw and on keys whose salted products' top bits reach 0 and 31.
+    /// </summary>
+    [Fact]
+    public void TheHalvesOfAKeysBitsAreItsSaltedBits()
+    {
+        Random random = new Random(20261110);
+        uint[] salts = [0x47b6137bu, 0x44974d91, 0x8824ad5b, 0xa2b7289d, 0x705495c7, 0x2df1424b, 0x9efc4947, 0x5c6bfb31];
+        bool[] seen = new bool[32];
+        for (int n = 0; n < 20_000; n++)
+        {
+            uint key = n < 2 ? (n == 0 ? 0u : uint.MaxValue) : (uint)random.NextInt64(0, 1L << 32);
+            (System.Runtime.Intrinsics.Vector128<uint> low, System.Runtime.Intrinsics.Vector128<uint> high) = SplitBlockBloom.Bits128(key);
+            for (int i = 0; i < SplitBlockBloom.WordsPerBlock; i++)
+            {
+                int shift = (int)((key * salts[i]) >> 27);
+                seen[shift] = true;
+                Assert.Equal(1u << shift, i < 4 ? low[i] : high[i - 4]);
+            }
+        }
+
+        Assert.All(seen, Assert.True);
+    }
+
     [Fact]
     public void BatchedRowsBuildTheSetOneValueAtATimeWould()
     {

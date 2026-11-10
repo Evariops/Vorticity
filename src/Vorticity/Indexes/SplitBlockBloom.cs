@@ -4,6 +4,7 @@ using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.Arm;
 using System.Runtime.Intrinsics.X86;
 
 namespace Vorticity.Indexes;
@@ -101,6 +102,15 @@ internal static class SplitBlockBloom
             return;
         }
 
+        if (AdvSimd.IsSupported)
+        {
+            ref uint first = ref MemoryMarshal.GetReference(lanes);
+            (Vector128<uint> low, Vector128<uint> high) = Bits128(key);
+            (Vector128.LoadUnsafe(ref first) | low).StoreUnsafe(ref first);
+            (Vector128.LoadUnsafe(ref first, 4) | high).StoreUnsafe(ref first, 4);
+            return;
+        }
+
         ReadOnlySpan<uint> salts = Salts;
         for (int i = 0; i < WordsPerBlock; i++)
         {
@@ -121,6 +131,13 @@ internal static class SplitBlockBloom
         if (Avx2.IsSupported)
         {
             return (Bits(key) & ~Vector256.LoadUnsafe(ref MemoryMarshal.GetReference(lanes))) == Vector256<uint>.Zero;
+        }
+
+        if (AdvSimd.IsSupported)
+        {
+            ref uint first = ref MemoryMarshal.GetReference(lanes);
+            (Vector128<uint> low, Vector128<uint> high) = Bits128(key);
+            return ((low & ~Vector128.LoadUnsafe(ref first)) | (high & ~Vector128.LoadUnsafe(ref first, 4))) == Vector128<uint>.Zero;
         }
 
         ReadOnlySpan<uint> salts = Salts;
@@ -197,15 +214,52 @@ internal static class SplitBlockBloom
         {
             // The run of block b begins at block b * run, at or past b: past every block written.
             nuint source = (nuint)(block * run * WordsPerBlock);
-            Vector256<uint> bits = Vector256.LoadUnsafe(ref start, source);
-            for (int i = 1; i < run; i++)
+            nuint target = (nuint)(block * WordsPerBlock);
+            if (Vector256.IsHardwareAccelerated)
             {
-                bits |= Vector256.LoadUnsafe(ref start, source + (nuint)(i * WordsPerBlock));
+                Vector256<uint> bits = Vector256.LoadUnsafe(ref start, source);
+                for (int i = 1; i < run; i++)
+                {
+                    bits |= Vector256.LoadUnsafe(ref start, source + (nuint)(i * WordsPerBlock));
+                }
+
+                bits.StoreUnsafe(ref start, target);
+                continue;
             }
 
-            bits.StoreUnsafe(ref start, (nuint)(block * WordsPerBlock));
+            // Two halves where 256-bit vectors are not the machine's, as on ARM64, which emulates them a lane at a time.
+            Vector128<uint> low = Vector128.LoadUnsafe(ref start, source);
+            Vector128<uint> high = Vector128.LoadUnsafe(ref start, source + 4);
+            for (int i = 1; i < run; i++)
+            {
+                low |= Vector128.LoadUnsafe(ref start, source + (nuint)(i * WordsPerBlock));
+                high |= Vector128.LoadUnsafe(ref start, source + (nuint)(i * WordsPerBlock) + 4);
+            }
+
+            low.StoreUnsafe(ref start, target);
+            high.StoreUnsafe(ref start, target + 4);
         }
     }
+
+    /// <summary>
+    /// The eight words of a key's bits in a block as two halves of four (<see cref="Bits"/>), for a machine without AVX2's
+    /// shift of each lane by its own count, as ARM64's portable vectors have none: 1 shifted by a salted key's top five
+    /// bits is the float of that exponent, converted, exactly. A word at a time took 5.19 ns a probe against 0.77 by
+    /// AVX2's shift.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static (Vector128<uint> Low, Vector128<uint> High) Bits128(uint key)
+    {
+        Vector128<uint> salted = Vector128.Create(key);
+        return (
+            PowersOfTwo((salted * Vector128.Create(0x47b6137bu, 0x44974d91, 0x8824ad5b, 0xa2b7289d)) >> 27),
+            PowersOfTwo((salted * Vector128.Create(0x705495c7u, 0x2df1424b, 0x9efc4947, 0x5c6bfb31)) >> 27));
+    }
+
+    /// <summary>2 to each lane's power, 0 to 31: the float whose exponent field is the power, biased, converted to an integer.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static Vector128<uint> PowersOfTwo(Vector128<uint> exponents) =>
+        Vector128.ConvertToUInt32(((exponents + Vector128.Create(127u)) << 23).AsSingle());
 
     /// <summary>xxHash64's final mix.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
