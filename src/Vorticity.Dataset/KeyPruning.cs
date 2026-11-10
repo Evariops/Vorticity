@@ -337,11 +337,14 @@ internal sealed class KeyPruning
 
     /// <summary>
     /// The granules of <paramref name="keys"/> that the exclusion search alone keeps, the intervals unused: what the
-    /// bisection keeps within, which its tests compare it with. Not kept for the question.
+    /// bisection keeps within, which its tests compare it with; with <paramref name="decoded"/>, each box decoded and judged
+    /// by the summaries' pruner, where its keys' bytes would judge it (<see cref="KeyIntervals.Boxes"/>). Not kept for the
+    /// question.
     /// </summary>
-    internal List<(int First, int End)> Excluded(GranuleKeys keys, ReadOnlySpan<byte> partition) => Search(keys, partition, bisect: false);
+    internal List<(int First, int End)> Excluded(GranuleKeys keys, ReadOnlySpan<byte> partition, bool decoded = false) =>
+        Search(keys, partition, bisect: false, decoded);
 
-    private List<(int First, int End)> Search(GranuleKeys keys, ReadOnlySpan<byte> partition, bool bisect = true)
+    private List<(int First, int End)> Search(GranuleKeys keys, ReadOnlySpan<byte> partition, bool bisect = true, bool decoded = false)
     {
         Interlocked.Increment(ref _searches);
         List<(int First, int End)> kept = [];
@@ -360,6 +363,8 @@ internal sealed class KeyPruning
             return Merge(kept);
         }
 
+        // The boxes judged on their keys' bytes where the filter allows it: a box decoded took some 150 ns.
+        KeyBoxes? boxes = decoded ? null : Intervals.Boxes;
         Scratch scratch = Interlocked.Exchange(ref _spare, null) ?? new Scratch(_tree.Count + 1);
         try
         {
@@ -374,7 +379,7 @@ internal sealed class KeyPruning
             else
             {
                 // The pages first: a page runs from its first key to the next page's, the last one to the object's last key.
-                Search(keys, partition, 0, keys.Pages, granules: false, within, scratch, ref judged, default);
+                Search(keys, partition, 0, keys.Pages, granules: false, within, scratch, boxes, ref judged, default);
                 for (int i = 0; i < within.Count; i++)
                 {
                     (int firstPage, int endPage) = within[i];
@@ -387,16 +392,16 @@ internal sealed class KeyPruning
             foreach ((int from, int to) in Merge(within))
             {
                 int last = Math.Min(to + 1, keys.Granules);
-                byte[] decoded = ArrayPool<byte>.Shared.Rent((last - from) * Math.Max(keys.Longest(from, last), 1));
+                byte[] rangeKeys = ArrayPool<byte>.Shared.Rent((last - from) * Math.Max(keys.Longest(from, last), 1));
                 int[] ends = ArrayPool<int>.Shared.Rent(last - from);
                 try
                 {
-                    keys.Decode(from, last, decoded, ends);
-                    Search(keys, partition, from, to, granules: true, kept, scratch, ref judged, new RangeKeys(from, decoded, ends));
+                    keys.Decode(from, last, rangeKeys, ends);
+                    Search(keys, partition, from, to, granules: true, kept, scratch, boxes, ref judged, new RangeKeys(from, rangeKeys, ends));
                 }
                 finally
                 {
-                    ArrayPool<byte>.Shared.Return(decoded);
+                    ArrayPool<byte>.Shared.Return(rangeKeys);
                     ArrayPool<int>.Shared.Return(ends);
                 }
             }
@@ -468,7 +473,7 @@ internal sealed class KeyPruning
     /// </summary>
     private void Search(
         GranuleKeys keys, ReadOnlySpan<byte> partition, int from, int to, bool granules, List<(int First, int End)> kept, Scratch scratch,
-        ref int judged, in RangeKeys range)
+        KeyBoxes? boxes, ref int judged, in RangeKeys range)
     {
         if (from >= to)
         {
@@ -476,7 +481,9 @@ internal sealed class KeyPruning
         }
 
         judged++;
-        if (!Judge(EntryKey(keys, from, granules, in range), NextKey(keys, to, granules, in range), _skip, partition, scratch.Box, scratch.Values, keys.Coding))
+        ReadOnlySpan<byte> low = EntryKey(keys, from, granules, in range);
+        ReadOnlySpan<byte> high = NextKey(keys, to, granules, in range);
+        if (!(boxes?.MayHold(low, high, keys.Coding) ?? Judge(low, high, _skip, partition, scratch.Box, scratch.Values, keys.Coding)))
         {
             return;
         }
@@ -499,7 +506,7 @@ internal sealed class KeyPruning
         int step = Math.Max(1, (to - from + Fanout - 1) / Fanout);
         for (int at = from; at < to; at += step)
         {
-            Search(keys, partition, at, Math.Min(at + step, to), granules, kept, scratch, ref judged, in range);
+            Search(keys, partition, at, Math.Min(at + step, to), granules, kept, scratch, boxes, ref judged, in range);
         }
     }
 

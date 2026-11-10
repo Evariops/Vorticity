@@ -74,6 +74,14 @@ internal sealed class KeyIntervals
     /// <summary>Whether the high bounds exclude their own keys.</summary>
     internal bool HighStrict { get; }
 
+    /// <summary>
+    /// The boxes of the exclusion search judged on their keys' bytes, where the intervals are not exact: every conjunct on
+    /// the indexed components' columns an equality, a set or a comparison of one column, which feeds one indexed component
+    /// as it is, with no function and no variant's key; null otherwise, the boxes then decoded and judged by the summaries'
+    /// pruner.
+    /// </summary>
+    internal KeyBoxes? Boxes { get; private init; }
+
     /// <summary>The bounds end to end, an interval's low then its high, and where each ends, two an interval.</summary>
     private sealed record Coded(byte[] Bytes, int[] Ends)
     {
@@ -186,6 +194,7 @@ internal sealed class KeyIntervals
         Bounds[] bounds = new Bounds[indexed.Length];
         List<string> read = [];
         bool residual = false;
+        bool nulls = false;
         HashSet<string> usedColumns = new HashSet<string>(StringComparer.Ordinal);
         List<TupleInExpr> tupleSets = [];
         foreach (VortexExpr conjunct in conjuncts)
@@ -220,6 +229,7 @@ internal sealed class KeyIntervals
                 continue;
             }
 
+            nulls |= shape.Nulls;
             usedColumns.Add(shape.Column);
             for (int position = 0; position < indexed.Length; position++)
             {
@@ -283,9 +293,10 @@ internal sealed class KeyIntervals
         }
 
         int used = points + (ranged ? 1 : 0);
+        KeyBoxes? boxes = residual || nulls || tupleSets.Count > 0 ? null : BoxesOf(bounds, indexed, names, usedColumns, tree, skip);
         if (used == 0)
         {
-            return Unbounded;
+            return boxes is null ? Unbounded : new KeyIntervals([], [], [], false, false, exact: false, bounded: false) { Boxes = boxes };
         }
 
         // Exact when every column a conjunct was taken for feeds the bounded components alone.
@@ -333,7 +344,51 @@ internal sealed class KeyIntervals
         }
 
         return new KeyIntervals(
-            [.. bytes], ends, tree.Widths.Slice(skip, indexed.Length).ToArray(), range is { Low: not null, LowStrict: true }, range is { High: not null, HighStrict: true }, exact, bounded: true);
+            [.. bytes], ends, tree.Widths.Slice(skip, indexed.Length).ToArray(), range is { Low: not null, LowStrict: true }, range is { High: not null, HighStrict: true }, exact, bounded: true)
+        {
+            Boxes = exact ? null : boxes,
+        };
+    }
+
+    /// <summary>
+    /// What the conjuncts allow of each indexed component of <paramref name="indexed"/>, from <paramref name="bounds"/>, to
+    /// judge boxes on their keys' bytes; null when a column of <paramref name="used"/> feeds no indexed component, or more
+    /// than one, or one through a function or a variant's key, whose box the summaries' pruner judges from the source's values.
+    /// </summary>
+    private static KeyBoxes? BoxesOf(Bounds?[] bounds, LayoutColumn?[] indexed, string?[] names, HashSet<string> used, SortKey tree, int skip)
+    {
+        foreach (string column in used)
+        {
+            int feeds = 0;
+            for (int position = 0; position < indexed.Length; position++)
+            {
+                if (string.Equals(names[position], column, StringComparison.Ordinal))
+                {
+                    feeds += indexed[position] is { Function: null, Read: null } ? 1 : 2;
+                }
+            }
+
+            if (feeds != 1)
+            {
+                return null;
+            }
+        }
+
+        KeyBoxes.Allowed?[] allowed = new KeyBoxes.Allowed?[indexed.Length];
+        byte[]?[] nullBytes = new byte[]?[indexed.Length];
+        for (int position = 0; position < indexed.Length; position++)
+        {
+            if (bounds[position] is { } at)
+            {
+                allowed[position] = new KeyBoxes.Allowed(at.Points?.ToArray(), at.Low, at.LowStrict, at.High, at.HighStrict);
+            }
+
+            nullBytes[position] = indexed[position] is { } component && tree.TypeAt(skip + position) is { IsNullable: true } type
+                ? Bounds.Encode(FilterLiteral.Null, component, type)
+                : null;
+        }
+
+        return new KeyBoxes(allowed, tree.Widths.Slice(skip, indexed.Length).ToArray(), nullBytes);
     }
 
     /// <summary>The leading components whose columns are all among the columns of <paramref name="tuples"/>.</summary>
