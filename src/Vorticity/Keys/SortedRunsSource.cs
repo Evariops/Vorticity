@@ -1,4 +1,5 @@
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
@@ -580,13 +581,94 @@ internal sealed partial class SortedRunsSource : KeySource
     private async ValueTask<long> SumAsync<TKey>(TKey key, long row, CancellationToken cancellationToken)
         where TKey : struct, IKeyOrder
     {
-        long rank = 0;
-        for (int r = 0; r < _runs.Length; r++)
+        long[] at = ArrayPool<long>.Shared.Rent(_runs.Length);
+        try
         {
-            rank += await FirstAtOrAfterAsync(_runs[r], key, row, cancellationToken).ConfigureAwait(false);
+            await ProbeAllAsync(key, row, at, cancellationToken).ConfigureAwait(false);
+            long rank = 0;
+            for (int r = 0; r < _runs.Length; r++)
+            {
+                rank += at[r];
+            }
+
+            return rank;
+        }
+        finally
+        {
+            ArrayPool<long>.Shared.Return(at);
+        }
+    }
+
+    /// <summary>
+    /// Every run's first entry at or after <c>(key, row)</c> into <paramref name="at"/>, each run's probe started before any is
+    /// awaited: a run that waits for a page of its fences or a segment of its keys waits in the same round trip as the others,
+    /// where probed one after another, <c>r</c> runs waited up to <c>2r</c> round trips in turn. A run's probe moves its own
+    /// state alone.
+    /// </summary>
+    private async ValueTask ProbeAllAsync<TKey>(TKey key, long row, long[] at, CancellationToken cancellationToken)
+        where TKey : struct, IKeyOrder
+    {
+        Run[] runs = _runs;
+        if (runs.Length == 1)
+        {
+            at[0] = await FirstAtOrAfterAsync(runs[0], key, row, cancellationToken).ConfigureAwait(false);
+            return;
         }
 
-        return rank;
+        // A probe its run's caches answer is done at once, no task made for it; one that reads waits as a task.
+        Task<long>?[]? waiting = null;
+        try
+        {
+            for (int r = 0; r < runs.Length; r++)
+            {
+                ValueTask<long> probe = FirstAtOrAfterAsync(runs[r], key, row, cancellationToken);
+                if (probe.IsCompletedSuccessfully)
+                {
+                    at[r] = await probe.ConfigureAwait(false);
+                    continue;
+                }
+
+                waiting ??= ArrayPool<Task<long>?>.Shared.Rent(runs.Length);
+                waiting[r] = probe.AsTask();
+            }
+
+            if (waiting is null)
+            {
+                return;
+            }
+
+            // Every probe awaited, the first failure kept and thrown once all are done.
+            Exception? failure = null;
+            for (int r = 0; r < runs.Length; r++)
+            {
+                if (waiting[r] is not { } task)
+                {
+                    continue;
+                }
+
+                try
+                {
+                    at[r] = await task.ConfigureAwait(false);
+                }
+                catch (Exception caught)
+                {
+                    failure ??= caught;
+                }
+            }
+
+            if (failure is not null)
+            {
+                System.Runtime.ExceptionServices.ExceptionDispatchInfo.Throw(failure);
+            }
+        }
+        finally
+        {
+            if (waiting is not null)
+            {
+                Array.Clear(waiting, 0, runs.Length);
+                ArrayPool<Task<long>?>.Shared.Return(waiting);
+            }
+        }
     }
 
     /// <remarks>
@@ -766,17 +848,26 @@ internal sealed partial class SortedRunsSource : KeySource
 
     internal override async ValueTask<long> CountAtKeyAsync(CancellationToken cancellationToken)
     {
-        FilterLiteral key = Key;
-        long count = 0;
-        for (int r = 0; r < _runs.Length; r++)
+        LiteralKey key = new LiteralKey(this, Key);
+        long[] high = ArrayPool<long>.Shared.Rent(_runs.Length);
+        long[] low = ArrayPool<long>.Shared.Rent(_runs.Length);
+        try
         {
-            Run run = _runs[r];
-            long high = await FirstAtOrAfterAsync(run, key, long.MaxValue, cancellationToken).ConfigureAwait(false);
-            long low = await FirstAtOrAfterAsync(run, key, long.MinValue, cancellationToken).ConfigureAwait(false);
-            count += high - low;
-        }
+            await ProbeAllAsync(key, long.MaxValue, high, cancellationToken).ConfigureAwait(false);
+            await ProbeAllAsync(key, long.MinValue, low, cancellationToken).ConfigureAwait(false);
+            long count = 0;
+            for (int r = 0; r < _runs.Length; r++)
+            {
+                count += high[r] - low[r];
+            }
 
-        return count;
+            return count;
+        }
+        finally
+        {
+            ArrayPool<long>.Shared.Return(low);
+            ArrayPool<long>.Shared.Return(high);
+        }
     }
 
     /// <remarks>
@@ -840,13 +931,21 @@ internal sealed partial class SortedRunsSource : KeySource
     private async ValueTask<bool> ForwardAsync(FilterLiteral key, long row, CancellationToken cancellationToken)
     {
         Reset(1);
-        for (int r = 0; r < _runs.Length; r++)
+        long[] found = ArrayPool<long>.Shared.Rent(_runs.Length);
+        try
         {
-            long at = await FirstAtOrAfterAsync(_runs[r], key, row, cancellationToken).ConfigureAwait(false);
-            if (at < _runs[r].Count)
+            await ProbeAllAsync(new LiteralKey(this, key), row, found, cancellationToken).ConfigureAwait(false);
+            for (int r = 0; r < _runs.Length; r++)
             {
-                await PlaceAsync(r, at, cancellationToken).ConfigureAwait(false);
+                if (found[r] < _runs[r].Count)
+                {
+                    await PlaceAsync(r, found[r], cancellationToken).ConfigureAwait(false);
+                }
             }
+        }
+        finally
+        {
+            ArrayPool<long>.Shared.Return(found);
         }
 
         return IsValid;
@@ -856,13 +955,22 @@ internal sealed partial class SortedRunsSource : KeySource
     private async ValueTask<bool> BackwardAsync(FilterLiteral key, long row, CancellationToken cancellationToken)
     {
         Reset(-1);
-        for (int r = 0; r < _runs.Length; r++)
+        long[] found = ArrayPool<long>.Shared.Rent(_runs.Length);
+        try
         {
-            long at = await FirstAtOrAfterAsync(_runs[r], key, row, cancellationToken).ConfigureAwait(false) - 1;
-            if (at >= 0)
+            await ProbeAllAsync(new LiteralKey(this, key), row, found, cancellationToken).ConfigureAwait(false);
+            for (int r = 0; r < _runs.Length; r++)
             {
-                await PlaceAsync(r, at, cancellationToken).ConfigureAwait(false);
+                long at = found[r] - 1;
+                if (at >= 0)
+                {
+                    await PlaceAsync(r, at, cancellationToken).ConfigureAwait(false);
+                }
             }
+        }
+        finally
+        {
+            ArrayPool<long>.Shared.Return(found);
         }
 
         return IsValid;

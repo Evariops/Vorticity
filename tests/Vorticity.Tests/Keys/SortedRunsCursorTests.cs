@@ -1215,6 +1215,99 @@ public sealed class SortedRunsCursorTests
 
     // ------------------------------------------------------------------------------ the file
 
+    /// <summary>
+    /// A seek over a column's runs probes every run at once: the runs that read a segment of keys read it in the same round
+    /// trip, where probed one after another each waited for its own, as many round trips as runs.
+    /// </summary>
+    [Fact]
+    public async Task ASeekProbesEveryRunInOneRoundTrip()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Decoders.EnsureRegistered();
+        StepsCounted? counted = null;
+        await using Written written = await Written.CreateAsync(IndexSpec.SortedRuns.WithSegmentEntries(SegmentEntries), source => counted = new StepsCounted(source));
+        await using KeyCursor cursor = await written.File.Keys("i64").WithSource(KeySourceKind.SortedRuns).OpenAsync(ct);
+        counted!.Reset();
+        Assert.True(await cursor.SeekAsync(FilterLiteral.From(0L), SeekMode.AtOrAfter, ct));
+        Assert.True(counted.Requests >= 2, $"{counted.Requests} reads");
+        Assert.True(counted.Steps < counted.Requests, $"{counted.Steps} round trips one after another for {counted.Requests} reads");
+    }
+
+    /// <summary>
+    /// A source that counts the reads asked of it and the round trips: the reads that found none in flight. Each read waits
+    /// 20 ms before it is served, so that a read asked while another is out rides its round trip.
+    /// </summary>
+    private sealed class StepsCounted(ISegmentReader inner) : ISegmentReader
+    {
+        private int _inFlight;
+        private long _requests;
+        private long _steps;
+
+        internal long Requests => Interlocked.Read(ref _requests);
+
+        internal long Steps => Interlocked.Read(ref _steps);
+
+        internal void Reset()
+        {
+            Interlocked.Exchange(ref _requests, 0);
+            Interlocked.Exchange(ref _steps, 0);
+        }
+
+        public ValueTask<long> GetLengthAsync(CancellationToken cancellationToken) => inner.GetLengthAsync(cancellationToken);
+
+        public async ValueTask<SegmentOwner> ReadAsync(SegmentSpec spec, CancellationToken cancellationToken)
+        {
+            await BeginAsync(cancellationToken);
+            try
+            {
+                return await inner.ReadAsync(spec, cancellationToken);
+            }
+            finally
+            {
+                Interlocked.Decrement(ref _inFlight);
+            }
+        }
+
+        public async ValueTask ReadManyAsync(SegmentRequestSet requests, CancellationToken cancellationToken)
+        {
+            await BeginAsync(cancellationToken);
+            try
+            {
+                await inner.ReadManyAsync(requests, cancellationToken);
+            }
+            finally
+            {
+                Interlocked.Decrement(ref _inFlight);
+            }
+        }
+
+        public async ValueTask<SegmentOwner> ReadRangeAsync(long offset, int length, int alignment, CancellationToken cancellationToken)
+        {
+            await BeginAsync(cancellationToken);
+            try
+            {
+                return await inner.ReadRangeAsync(offset, length, alignment, cancellationToken);
+            }
+            finally
+            {
+                Interlocked.Decrement(ref _inFlight);
+            }
+        }
+
+        public ValueTask DisposeAsync() => inner.DisposeAsync();
+
+        private async Task BeginAsync(CancellationToken cancellationToken)
+        {
+            Interlocked.Increment(ref _requests);
+            if (Interlocked.Increment(ref _inFlight) == 1)
+            {
+                Interlocked.Increment(ref _steps);
+            }
+
+            await Task.Delay(20, cancellationToken);
+        }
+    }
+
     /// <summary>A source that counts the sets of reads asked of it, each a round trip its asker waits for.</summary>
     private sealed class ReadsCounted(ISegmentReader inner) : ISegmentReader
     {
