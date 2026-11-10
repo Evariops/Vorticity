@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
+using System.IO.Enumeration;
 using System.IO.Pipelines;
 using System.Text;
 using System.Threading;
@@ -910,29 +911,50 @@ public sealed class FileObjectStore : IObjectStore
             }
         }
 
+        // Each file's key read from its directory, relative to the root, made once a directory, and its name: a string for a
+        // key kept alone. The full path, made relative and its separators replaced, a file at a time, took three strings a
+        // file and more than the walk itself: the newest of 20,000 commits listed in 16.7 ms and 7.83 MB, the walk 6.9 ms.
         List<string> keys = [];
         List<string>? abandoned = null;
         DateTime aged = DateTime.UtcNow - AbandonedAfter;
-        foreach (string file in Directory.EnumerateFiles(walked, "*", SearchOption.AllDirectories))
+        string? directory = null;
+        string relative = string.Empty;
+        FileSystemEnumerable<string> files = new FileSystemEnumerable<string>(
+            walked, (ref FileSystemEntry entry) => KeyOf(Relative(ref entry), entry.FileName), Walked)
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            string key = Path.GetRelativePath(_root, file).Replace(Path.DirectorySeparatorChar, '/');
-
-            // An object being written lies beside its key, under a name no key can have. One a day old
-            // was left by a put that died, and goes once the walk is over.
-            if (key.Contains(Beside, StringComparison.Ordinal))
+            ShouldIncludePredicate = (ref FileSystemEntry entry) =>
             {
-                if (System.IO.File.GetLastWriteTimeUtc(file) < aged)
+                if (entry.IsDirectory)
                 {
-                    (abandoned ??= []).Add(file);
+                    return false;
                 }
 
-                continue;
-            }
+                cancellationToken.ThrowIfCancellationRequested();
+                string at = Relative(ref entry);
+                ReadOnlySpan<char> name = entry.FileName;
+                int length = (at.Length == 0 ? 0 : at.Length + 1) + name.Length;
+                Span<char> key = length <= 512 ? stackalloc char[length] : new char[length];
+                WriteKey(key, at, name);
 
-            if (key.StartsWith(prefix, StringComparison.Ordinal)
-                && (startAfter is not { } after || string.CompareOrdinal(key, after) > 0)
-                && ObjectKey.IsValid(key))
+                // An object being written lies beside its key, under a name no key can have. One a day old
+                // was left by a put that died, and goes once the walk is over.
+                if (key.IndexOf(Beside, StringComparison.Ordinal) >= 0)
+                {
+                    if (entry.LastWriteTimeUtc.UtcDateTime < aged)
+                    {
+                        (abandoned ??= []).Add(entry.ToFullPath());
+                    }
+
+                    return false;
+                }
+
+                return key.StartsWith(prefix, StringComparison.Ordinal) && (startAfter is not { } after || key.SequenceCompareTo(after) > 0);
+            },
+        };
+
+        foreach (string key in files)
+        {
+            if (ObjectKey.IsValid(key))
             {
                 keys.Add(key);
             }
@@ -951,6 +973,47 @@ public sealed class FileObjectStore : IObjectStore
         {
             yield return key;
         }
+
+        // The directory of the entry relative to the root, '/' between its names, made once a directory; empty for the root.
+        string Relative(ref FileSystemEntry entry)
+        {
+            ReadOnlySpan<char> at = entry.Directory;
+            if (directory is null || !at.SequenceEqual(directory))
+            {
+                directory = at.ToString();
+                relative = Path.GetRelativePath(_root, directory).Replace(Path.DirectorySeparatorChar, '/');
+                relative = relative == "." ? string.Empty : relative;
+            }
+
+            return relative;
+        }
+    }
+
+    /// <summary>What a walk of the store's files skips: nothing, as <see cref="Directory.EnumerateFiles(string, string, SearchOption)"/> did, in every directory.</summary>
+    private static readonly EnumerationOptions Walked = new EnumerationOptions { RecurseSubdirectories = true, AttributesToSkip = 0, IgnoreInaccessible = false };
+
+    /// <summary>The key of the file <paramref name="name"/> in the directory <paramref name="directory"/>, relative to the root.</summary>
+    private static string KeyOf(string directory, ReadOnlySpan<char> name)
+    {
+        int length = (directory.Length == 0 ? 0 : directory.Length + 1) + name.Length;
+        Span<char> key = length <= 512 ? stackalloc char[length] : new char[length];
+        WriteKey(key, directory, name);
+        return key.ToString();
+    }
+
+    /// <summary>Writes into <paramref name="key"/> the key of the file <paramref name="name"/> in the directory <paramref name="directory"/>.</summary>
+    private static void WriteKey(Span<char> key, string directory, ReadOnlySpan<char> name)
+    {
+        int at = 0;
+        if (directory.Length > 0)
+        {
+            directory.CopyTo(key);
+            key[directory.Length] = '/';
+            at = directory.Length + 1;
+        }
+
+        name.CopyTo(key[at..]);
+        key[at..].Replace(Path.DirectorySeparatorChar, '/');
     }
 
     /// <inheritdoc/>
