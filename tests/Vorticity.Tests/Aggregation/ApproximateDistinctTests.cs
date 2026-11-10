@@ -19,6 +19,32 @@ public sealed partial class ApproximateDistinctTests
     /// <summary>Four standard errors of a sketch of 2^14 registers: 1.04 / 128 each.</summary>
     private const double Tolerance = 4 * 1.04 / 128;
 
+    /// <summary>
+    /// The inline XXH3 of a value of 1, 2, 4, 8 or 16 bytes is the library's, bit for bit, over values drawn at random
+    /// and at the ends of each width: a sketch's registers are the same whichever made them, here or in a file.
+    /// </summary>
+    [Fact]
+    public void AShortValuesHashIsTheLibrarys()
+    {
+        Assert.True(ShortHash.Agrees);
+        Random random = new Random(61);
+        byte[] bytes = new byte[16];
+        for (int round = 0; round < 20_000; round++)
+        {
+            random.NextBytes(bytes);
+            if (round < 4)
+            {
+                bytes.AsSpan().Fill(round switch { 0 => (byte)0, 1 => (byte)0xFF, 2 => (byte)0x80, _ => (byte)0x7F });
+            }
+
+            Assert.Equal(System.IO.Hashing.XxHash3.HashToUInt64(bytes.AsSpan(0, 1)), ShortHash.Of1(bytes[0]));
+            Assert.Equal(System.IO.Hashing.XxHash3.HashToUInt64(bytes.AsSpan(0, 2)), ShortHash.Of2(BitConverter.ToUInt16(bytes, 0)));
+            Assert.Equal(System.IO.Hashing.XxHash3.HashToUInt64(bytes.AsSpan(0, 4)), ShortHash.Of4(BitConverter.ToUInt32(bytes, 0)));
+            Assert.Equal(System.IO.Hashing.XxHash3.HashToUInt64(bytes.AsSpan(0, 8)), ShortHash.Of8(BitConverter.ToUInt64(bytes, 0)));
+            Assert.Equal(System.IO.Hashing.XxHash3.HashToUInt64(bytes), ShortHash.Of16(BitConverter.ToUInt64(bytes, 0), BitConverter.ToUInt64(bytes, 8)));
+        }
+    }
+
     [Fact]
     public void ACountIsExactWhileFewAndCloseAfter()
     {
