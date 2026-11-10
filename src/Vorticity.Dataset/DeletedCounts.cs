@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Vorticity.Aggregating;
 using Vorticity.Arrays;
@@ -485,13 +486,7 @@ internal sealed class DeletedCounts
             CanonicalNode root = arena.GetNode(batch.RootIndex);
             foreach (Column column in _columns)
             {
-                for (int row = 0; row < batch.RowCount; row++)
-                {
-                    if (selection.IsEmpty || ((selection[row >> 6] >> (row & 63)) & 1) != 0)
-                    {
-                        column.Add(arena, root, row);
-                    }
-                }
+                column.Add(arena, root, batch.RowCount, selection);
             }
         }
 
@@ -516,39 +511,111 @@ internal sealed class DeletedCounts
         /// <param name="kinds">How each is summed.</param>
         private sealed class Column(int field, int place, DType dtype, int[] measureFields, int[] measurePlaces, MeasureKind[] kinds)
         {
+            // The rows a count takes at a time, their entries found before their measures are folded.
+            private const int Tranche = 1024;
+
             private readonly int _width = StateWords.Count(kinds);
             private readonly Dictionary<byte[], long[]> _entries = new Dictionary<byte[], long[]>(ByteKeys.Instance);
             private long[]? _nulls;
 
             internal int Field { get; } = field;
 
-            /// <summary>Counts row <paramref name="row"/> of the batch whose root is <paramref name="root"/>.</summary>
-            internal void Add(CanonicalArena arena, CanonicalNode root, int row)
+            /// <summary>
+            /// Counts the rows of the batch whose root is <paramref name="root"/>, of <paramref name="count"/> rows, whose bits
+            /// <paramref name="selection"/> sets, every one when it is empty: the column's storage and validity found once a batch,
+            /// each row taken found its entry, then each measure folded over the rows taken. A row at a time, each row looked
+            /// its column and every measure up again, extensions, storage and validity: 69 ns a row of a column counted with two
+            /// measures (2026-11-10).
+            /// </summary>
+            [SkipLocalsInit]
+            internal void Add(CanonicalArena arena, CanonicalNode root, int count, ReadOnlySpan<ulong> selection)
             {
-                long[] words;
-                if (TryBytes(arena, root.GetFieldIndex(place), row, dtype, out ReadOnlySpan<byte> value))
+                // The entries of the rows taken and the rows, a tranche at a time: the measures folded over each.
+                long[][] entries = System.Buffers.ArrayPool<long[]>.Shared.Rent(Tranche);
+                Span<int> rows = stackalloc int[Tranche];
+                try
                 {
-                    Dictionary<byte[], long[]>.AlternateLookup<ReadOnlySpan<byte>> lookup = _entries.GetAlternateLookup<ReadOnlySpan<byte>>();
-                    if (!lookup.TryGetValue(value, out long[]? held))
+                    AddRows(arena, root, count, selection, entries, rows);
+                }
+                finally
+                {
+                    Array.Clear(entries, 0, Tranche);
+                    System.Buffers.ArrayPool<long[]>.Shared.Return(entries);
+                }
+            }
+
+            private void AddRows(CanonicalArena arena, CanonicalNode root, int count, ReadOnlySpan<ulong> selection, long[][] entries, Span<int> rows)
+            {
+                Stored key = new Stored(arena, root.GetFieldIndex(place));
+                CanonicalNode node = key.Node;
+                CanonicalKind kind = node.Kind;
+                if (kind is not (CanonicalKind.Constant or CanonicalKind.Primitive or CanonicalKind.VarBinView))
+                {
+                    throw new NotSupportedException($"A counted column of {dtype} holds a {kind} array, whose values no counts key.");
+                }
+
+                ReadOnlySpan<byte> values = kind == CanonicalKind.Constant ? node.ConstantElement : kind == CanonicalKind.Primitive ? node.Values.Span : node.Views.Span;
+                ReadOnlySpan<VortexBuffer> buffers = kind == CanonicalKind.VarBinView ? node.DataBuffers : default;
+                int width = kind == CanonicalKind.Primitive ? node.PType.ByteWidth() : 0;
+                Dictionary<byte[], long[]>.AlternateLookup<ReadOnlySpan<byte>> lookup = _entries.GetAlternateLookup<ReadOnlySpan<byte>>();
+                int taken = 0;
+                int words = (count + 63) >> 6;
+                for (int word = 0; word < words; word++)
+                {
+                    ulong bits = selection.IsEmpty ? ulong.MaxValue : selection[word];
+                    if (word == words - 1 && (count & 63) != 0)
                     {
-                        held = Opened();
-                        lookup[value] = held;
+                        bits &= (1UL << (count & 63)) - 1;
                     }
 
-                    words = held;
-                }
-                else
-                {
-                    words = _nulls ??= Opened();
+                    while (bits != 0)
+                    {
+                        int row = (word << 6) + System.Numerics.BitOperations.TrailingZeroCount(bits);
+                        bits &= bits - 1;
+                        long[] held;
+                        if (key.Valid(row))
+                        {
+                            ReadOnlySpan<byte> value = kind switch
+                            {
+                                CanonicalKind.Constant => values,
+                                CanonicalKind.Primitive => values.Slice(row * width, width),
+                                _ => BloomBuilder.ValueAt(values, buffers, row),
+                            };
+                            if (!lookup.TryGetValue(value, out long[]? found))
+                            {
+                                found = Opened();
+                                lookup[value] = found;
+                            }
+
+                            held = found;
+                        }
+                        else
+                        {
+                            held = _nulls ??= Opened();
+                        }
+
+                        held[0]++;
+                        entries[taken] = held;
+                        rows[taken++] = row;
+                        if (taken == Tranche)
+                        {
+                            Measures(arena, root, entries.AsSpan(0, taken), rows[..taken]);
+                            taken = 0;
+                        }
+                    }
                 }
 
-                words[0]++;
+                Measures(arena, root, entries.AsSpan(0, taken), rows[..taken]);
+            }
+
+            /// <summary>Folds each measure of the rows <paramref name="rows"/> into their entries <paramref name="entries"/>.</summary>
+            private void Measures(CanonicalArena arena, CanonicalNode root, ReadOnlySpan<long[]> entries, ReadOnlySpan<int> rows)
+            {
                 int at = 1;
                 for (int m = 0; m < measureFields.Length; m++)
                 {
-                    bool floats = kinds[m] == MeasureKind.Float;
-                    Fold(arena, root.GetFieldIndex(measurePlaces[m]), row, kinds[m], words.AsSpan(at, MeasureLayout.Words(floats)));
-                    at += MeasureLayout.Words(floats);
+                    Fold(new Stored(arena, root.GetFieldIndex(measurePlaces[m])), kinds[m], entries, rows, at);
+                    at += MeasureLayout.Words(kinds[m] == MeasureKind.Float);
                 }
             }
 
@@ -605,77 +672,79 @@ internal sealed class DeletedCounts
             }
         }
 
-        /// <summary>Folds row <paramref name="row"/>'s value of the measure node <paramref name="nodeIndex"/> into <paramref name="state"/>: its count, exact sum and extremes.</summary>
-        private static void Fold(CanonicalArena arena, int nodeIndex, int row, MeasureKind kind, Span<long> state)
-        {
-            CanonicalNode node = arena.GetNode(Storage(arena, nodeIndex, row, out bool valid));
-            if (!valid)
-            {
-                return;
-            }
-
-            ReadOnlySpan<byte> values = node.Kind == CanonicalKind.Constant ? node.ConstantElement : node.Values.Span;
-            int at = node.Kind == CanonicalKind.Constant ? 0 : row;
-            int width = node.PType.ByteWidth();
-            state[MeasureLayout.Values]++;
-            if (kind == MeasureKind.Float)
-            {
-                double value = width == 8 ? MemoryMarshal.Read<double>(values[(at * 8)..]) : MemoryMarshal.Read<float>(values[(at * 4)..]);
-                WideIndexedSum sum = StateWords.SumOf(state, MeasureLayout.Sum);
-                sum.Add(value);
-                StateWords.Write(sum, state, MeasureLayout.Sum);
-                state[MeasureLayout.FloatLeast] = BitConverter.DoubleToInt64Bits(Math.Min(BitConverter.Int64BitsToDouble(state[MeasureLayout.FloatLeast]), value));
-                state[MeasureLayout.FloatGreatest] = BitConverter.DoubleToInt64Bits(Math.Max(BitConverter.Int64BitsToDouble(state[MeasureLayout.FloatGreatest]), value));
-                return;
-            }
-
-            long integer = CountsPlan.Integer(values, width, at, kind == MeasureKind.Signed);
-            Int128 total = StateWords.IntegerOf(state, MeasureLayout.Sum) + (kind == MeasureKind.Signed ? integer : (Int128)(ulong)integer);
-            StateWords.Write(total, state, MeasureLayout.Sum);
-            (state[MeasureLayout.IntegerLeast], state[MeasureLayout.IntegerGreatest]) = kind == MeasureKind.Signed
-                ? (Math.Min(state[MeasureLayout.IntegerLeast], integer), Math.Max(state[MeasureLayout.IntegerGreatest], integer))
-                : ((long)Math.Min((ulong)state[MeasureLayout.IntegerLeast], (ulong)integer), (long)Math.Max((ulong)state[MeasureLayout.IntegerGreatest], (ulong)integer));
-        }
-
-        /// <summary>The storage node under the extensions of <paramref name="nodeIndex"/>, and whether row <paramref name="row"/> holds a value.</summary>
-        private static int Storage(CanonicalArena arena, int nodeIndex, int row, out bool valid)
-        {
-            CanonicalNode outer = arena.GetNode(nodeIndex);
-            int storage = nodeIndex;
-            CanonicalNode node = outer;
-            while (node.Kind == CanonicalKind.Extension)
-            {
-                storage = node.StorageIndex;
-                node = arena.GetNode(storage);
-            }
-
-            ValidityMask own = ValidityMask.From(arena, node.Validity);
-            ValidityMask wrapper = ValidityMask.From(arena, outer.Validity);
-            valid = !own.AllInvalid && !wrapper.AllInvalid && (own.AllValid || own.IsValid(row)) && (wrapper.AllValid || wrapper.IsValid(row));
-            return storage;
-        }
-
         /// <summary>
-        /// The bytes of row <paramref name="row"/>'s value of the node <paramref name="nodeIndex"/> of <paramref name="dtype"/>, as the
-        /// column stores them; false for a null.
+        /// Folds into each of <paramref name="taken"/>, the entries of the rows <paramref name="rows"/>, from word
+        /// <paramref name="at"/>, the row's value of <paramref name="measure"/>, of kind <paramref name="kind"/>: its count, exact
+        /// sum and extremes.
         /// </summary>
-        private static bool TryBytes(CanonicalArena arena, int nodeIndex, int row, DType dtype, out ReadOnlySpan<byte> bytes)
+        private static void Fold(Stored measure, MeasureKind kind, ReadOnlySpan<long[]> taken, ReadOnlySpan<int> rows, int at)
         {
-            CanonicalNode node = arena.GetNode(Storage(arena, nodeIndex, row, out bool valid));
-            if (!valid)
+            CanonicalNode node = measure.Node;
+            bool constant = node.Kind == CanonicalKind.Constant;
+            ReadOnlySpan<byte> values = constant ? node.ConstantElement : node.Values.Span;
+            int width = node.PType.ByteWidth();
+            int words = MeasureLayout.Words(kind == MeasureKind.Float);
+            for (int i = 0; i < rows.Length; i++)
             {
-                bytes = default;
-                return false;
+                int row = rows[i];
+                if (!measure.Valid(row))
+                {
+                    continue;
+                }
+
+                Span<long> state = taken[i].AsSpan(at, words);
+                int place = constant ? 0 : row;
+                state[MeasureLayout.Values]++;
+                if (kind == MeasureKind.Float)
+                {
+                    double value = width == 8 ? MemoryMarshal.Read<double>(values[(place * 8)..]) : MemoryMarshal.Read<float>(values[(place * 4)..]);
+                    WideIndexedSum sum = StateWords.SumOf(state, MeasureLayout.Sum);
+                    sum.Add(value);
+                    StateWords.Write(sum, state, MeasureLayout.Sum);
+                    state[MeasureLayout.FloatLeast] = BitConverter.DoubleToInt64Bits(Math.Min(BitConverter.Int64BitsToDouble(state[MeasureLayout.FloatLeast]), value));
+                    state[MeasureLayout.FloatGreatest] = BitConverter.DoubleToInt64Bits(Math.Max(BitConverter.Int64BitsToDouble(state[MeasureLayout.FloatGreatest]), value));
+                    continue;
+                }
+
+                long integer = CountsPlan.Integer(values, width, place, kind == MeasureKind.Signed);
+                Int128 total = StateWords.IntegerOf(state, MeasureLayout.Sum) + (kind == MeasureKind.Signed ? integer : (Int128)(ulong)integer);
+                StateWords.Write(total, state, MeasureLayout.Sum);
+                (state[MeasureLayout.IntegerLeast], state[MeasureLayout.IntegerGreatest]) = kind == MeasureKind.Signed
+                    ? (Math.Min(state[MeasureLayout.IntegerLeast], integer), Math.Max(state[MeasureLayout.IntegerGreatest], integer))
+                    : ((long)Math.Min((ulong)state[MeasureLayout.IntegerLeast], (ulong)integer), (long)Math.Max((ulong)state[MeasureLayout.IntegerGreatest], (ulong)integer));
+            }
+        }
+
+        /// <summary>A column of a batch as a count reads it: its storage node under its extensions, and the validity of both, found once.</summary>
+        private readonly ref struct Stored
+        {
+            private readonly ValidityMask _own;
+            private readonly ValidityMask _wrapper;
+            private readonly bool _none;
+            private readonly bool _all;
+
+            internal Stored(CanonicalArena arena, int nodeIndex)
+            {
+                CanonicalNode outer = arena.GetNode(nodeIndex);
+                CanonicalNode node = outer;
+                while (node.Kind == CanonicalKind.Extension)
+                {
+                    node = arena.GetNode(node.StorageIndex);
+                }
+
+                Node = node;
+                _own = ValidityMask.From(arena, node.Validity);
+                _wrapper = ValidityMask.From(arena, outer.Validity);
+                _none = _own.AllInvalid || _wrapper.AllInvalid;
+                _all = !_none && _own.AllValid && _wrapper.AllValid;
             }
 
-            bytes = node.Kind switch
-            {
-                CanonicalKind.Constant => node.ConstantElement,
-                CanonicalKind.Primitive => node.Values.Span.Slice(row * node.PType.ByteWidth(), node.PType.ByteWidth()),
-                CanonicalKind.VarBinView => BloomBuilder.ValueAt(node.Views.Span, node.DataBuffers, row),
-                _ => throw new NotSupportedException($"A counted column of {dtype} holds a {node.Kind} array, whose values no counts key."),
-            };
-            return true;
+            /// <summary>The storage node.</summary>
+            internal CanonicalNode Node { get; }
+
+            /// <summary>Whether row <paramref name="row"/> holds a value: valid in the storage and under its extensions.</summary>
+            internal bool Valid(int row) =>
+                _all || (!_none && (_own.AllValid || _own.IsValid(row)) && (_wrapper.AllValid || _wrapper.IsValid(row)));
         }
     }
 }
