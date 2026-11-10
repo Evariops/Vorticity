@@ -1,4 +1,5 @@
 using System;
+using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -390,6 +391,12 @@ internal sealed class SortedColumnSource : ISortedEntries
             await EnsureLoadedAsync(start, cancellationToken).ConfigureAwait(false);
             long low = start;
             long high = end;
+            if (key.Literal(out FilterLiteral literal) && TypedBound(literal, strict, start, end) is long typed)
+            {
+                low = typed;
+                high = low;
+            }
+
             while (low < high)
             {
                 long mid = low + ((high - low) >> 1);
@@ -412,6 +419,87 @@ internal sealed class SortedColumnSource : ISortedEntries
         }
 
         return entries;
+    }
+
+    /// <summary>
+    /// The bound of <paramref name="key"/> among the loaded rows <paramref name="start"/> to <paramref name="end"/> of a
+    /// primitive column, bisected over the decoded values in the column's own type, each compared in the literal's (its
+    /// order, <see cref="KeyOrder.Ieee"/>); null for a column of another kind, which the rows' literals bisect. A literal
+    /// read at each step of a bisection was most of a long IN's scan in key order.
+    /// </summary>
+    private long? TypedBound(FilterLiteral key, bool strict, long start, long end)
+    {
+        CanonicalNode node = _context!.Canonical.GetNode(_column);
+        if (node.Kind != CanonicalKind.Primitive)
+        {
+            return null;
+        }
+
+        int from = (int)(start - _loadedStart);
+        int length = (int)(end - start);
+        int found;
+        switch (node.PType)
+        {
+            case PType.I64 when key.Kind == FilterLiteralKind.Signed:
+                found = Bisect(node.Values.Cast<long>().Slice(from, length), key.SignedValue, strict);
+                break;
+            case PType.I32 when key.Kind == FilterLiteralKind.Signed:
+                found = Bisect(node.Values.Cast<int>().Slice(from, length), key.SignedValue, strict);
+                break;
+            case PType.I16 when key.Kind == FilterLiteralKind.Signed:
+                found = Bisect(node.Values.Cast<short>().Slice(from, length), key.SignedValue, strict);
+                break;
+            case PType.I8 when key.Kind == FilterLiteralKind.Signed:
+                found = Bisect(node.Values.Cast<sbyte>().Slice(from, length), key.SignedValue, strict);
+                break;
+            case PType.U64 when key.Kind == FilterLiteralKind.Unsigned:
+                found = Bisect(node.Values.Cast<ulong>().Slice(from, length), key.UnsignedValue, strict);
+                break;
+            case PType.U32 when key.Kind == FilterLiteralKind.Unsigned:
+                found = Bisect(node.Values.Cast<uint>().Slice(from, length), key.UnsignedValue, strict);
+                break;
+            case PType.U16 when key.Kind == FilterLiteralKind.Unsigned:
+                found = Bisect(node.Values.Cast<ushort>().Slice(from, length), key.UnsignedValue, strict);
+                break;
+            case PType.U8 when key.Kind == FilterLiteralKind.Unsigned:
+                found = Bisect(node.Values.Cast<byte>().Slice(from, length), key.UnsignedValue, strict);
+                break;
+            case PType.F64 when key.Kind == FilterLiteralKind.Float:
+                found = Bisect(node.Values.Cast<double>().Slice(from, length), key.FloatValue, strict);
+                break;
+            case PType.F32 when key.Kind == FilterLiteralKind.Float:
+                found = Bisect(node.Values.Cast<float>().Slice(from, length), key.FloatValue, strict);
+                break;
+            default:
+                return null;
+        }
+
+        return start + found;
+    }
+
+    /// <summary>The first of <paramref name="values"/>, sorted, at or after <paramref name="key"/>, or strictly after it; each compared as a <typeparamref name="TWide"/>.</summary>
+    private static int Bisect<T, TWide>(ReadOnlySpan<T> values, TWide key, bool strict)
+        where T : unmanaged, INumberBase<T>
+        where TWide : INumber<TWide>
+    {
+        int low = 0;
+        int high = values.Length;
+        while (low < high)
+        {
+            int mid = (low + high) >>> 1;
+            TWide value = TWide.CreateTruncating(values[mid]);
+            bool before = strict ? value <= key : value < key;
+            if (before)
+            {
+                low = mid + 1;
+            }
+            else
+            {
+                high = mid;
+            }
+        }
+
+        return low;
     }
 
     /// <summary>
@@ -732,6 +820,9 @@ internal sealed class SortedColumnSource : ISortedEntries
 
         /// <summary>The sign of the loaded zone's row less the key.</summary>
         int OrderLoaded(long row);
+
+        /// <summary>The key as a literal, which a primitive column's values bisect in their own type; false for a key lent as bytes.</summary>
+        bool Literal(out FilterLiteral literal);
     }
 
     /// <summary>A key sought as a literal, as a seek names it.</summary>
@@ -742,6 +833,12 @@ internal sealed class SortedColumnSource : ISortedEntries
         public int Order(FilterLiteral bound) => Compare(bound, key);
 
         public int OrderLoaded(long row) => source.CompareLoaded(row, key);
+
+        public bool Literal(out FilterLiteral literal)
+        {
+            literal = key;
+            return true;
+        }
     }
 
     /// <summary>A byte key sought where another source lends it, on its current entry.</summary>
@@ -752,5 +849,11 @@ internal sealed class SortedColumnSource : ISortedEntries
         public int Order(FilterLiteral bound) => Math.Sign(bound.BytesValue.SequenceCompareTo(lender.KeyBytes));
 
         public int OrderLoaded(long row) => source.CompareLoaded(row, lender.KeyBytes);
+
+        public bool Literal(out FilterLiteral literal)
+        {
+            literal = default;
+            return false;
+        }
     }
 }
