@@ -537,6 +537,18 @@ internal static class ColumnData
     /// <typeparam name="TText"><see cref="string"/>, with or without its nullability: the text column's type argument.</typeparam>
     internal static void CopyStrings<TText>(CanonicalArena arena, int node, Span<TText> destination)
     {
+        // A dictionary's or a constant's few values made once each and shared by their rows, where each row made its own:
+        // 8,192 rows of 12 texts, 8,192 strings.
+        switch (arena.RecordRef(node).Kind)
+        {
+            case CanonicalKind.Dictionary:
+                CopyCodes(arena, node, destination);
+                return;
+            case CanonicalKind.Constant:
+                CopyConstant(arena, node, destination);
+                return;
+        }
+
         int views = EncodedForms.Canonical(arena, node);
         CanonicalNode record = arena.GetNode(views);
         ViewValues texts = new ViewValues(record);
@@ -546,6 +558,56 @@ internal static class ColumnData
         {
             string? text = IsValid(valid, i) ? Encoding.UTF8.GetString(texts.At(i)) : null;
             into[i] = Unsafe.As<string?, TText>(ref text);
+        }
+    }
+
+    /// <summary>The rows of a dictionary's text node as strings, each entry made at its first row and shared by the rest.</summary>
+    private static void CopyCodes<TText>(CanonicalArena arena, int node, Span<TText> destination)
+    {
+        int entries = EncodedForms.Dictionary(arena, node, out ReadOnlySpan<uint> codes);
+        int values = EncodedForms.Canonical(arena, entries);
+        CanonicalNode record = arena.GetNode(values);
+        ViewValues texts = new ViewValues(record);
+        ReadOnlySpan<ulong> valid = ArenaWords.Validity(arena, node);
+        Span<TText> into = Destination(destination, arena.RecordRef(node).Length);
+        string?[] made = System.Buffers.ArrayPool<string?>.Shared.Rent(Math.Max(1, record.Length));
+        try
+        {
+            Array.Clear(made, 0, record.Length);
+            for (int i = 0; i < into.Length; i++)
+            {
+                // The rows' validity alone, as the dictionary's rows materialized take it: an entry's own is not read.
+                string? text = null;
+                if (IsValid(valid, i))
+                {
+                    int code = (int)codes[i];
+                    text = made[code] ??= Encoding.UTF8.GetString(texts.At(code));
+                }
+
+                into[i] = Unsafe.As<string?, TText>(ref text);
+            }
+        }
+        finally
+        {
+            System.Buffers.ArrayPool<string?>.Shared.Return(made, clearArray: true);
+        }
+    }
+
+    /// <summary>The rows of a constant text node as strings: one, shared by every row that holds it.</summary>
+    private static void CopyConstant<TText>(CanonicalArena arena, int node, Span<TText> destination)
+    {
+        ReadOnlySpan<ulong> valid = ArenaWords.Validity(arena, node);
+        Span<TText> into = Destination(destination, arena.RecordRef(node).Length);
+        string? text = null;
+        for (int i = 0; i < into.Length; i++)
+        {
+            string? row = null;
+            if (IsValid(valid, i))
+            {
+                row = text ??= Encoding.UTF8.GetString(Aggregating.BytesBlock.Constant(arena, node));
+            }
+
+            into[i] = Unsafe.As<string?, TText>(ref row);
         }
     }
 
