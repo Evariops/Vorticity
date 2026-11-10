@@ -29,7 +29,7 @@ public partial class AuditDistinctMergeBenchmarks
 
     /// <summary>A row: its key and its value.</summary>
     [VortexRecord]
-    public partial record struct Pair(long Key, long Value);
+    public partial record struct Pair(long Key, long Value, string Label);
 
     /// <summary>Writes the file and opens it.</summary>
     [GlobalSetup]
@@ -40,7 +40,8 @@ public partial class AuditDistinctMergeBenchmarks
         Pair[] rows = new Pair[Rows];
         for (int i = 0; i < Rows; i++)
         {
-            rows[i] = new Pair(random.Next(Groups), random.Next(64));
+            int value = random.Next(64);
+            rows[i] = new Pair(random.Next(Groups), value, $"label-{value:D3}");
         }
 
         WriteAsync(rows).GetAwaiter().GetResult();
@@ -58,13 +59,17 @@ public partial class AuditDistinctMergeBenchmarks
 
     /// <summary>Each key's distinct values, counted.</summary>
     [Benchmark]
-    public long Count() => CountAsync().GetAwaiter().GetResult();
+    public long Count() => CountAsync("count_distinct(Value)").GetAwaiter().GetResult();
 
-    private async Task<long> CountAsync()
+    /// <summary>Each key's distinct labels, text, counted.</summary>
+    [Benchmark]
+    public long CountText() => CountAsync("count_distinct(Label)").GetAwaiter().GetResult();
+
+    private async Task<long> CountAsync(string aggregate)
     {
         long read = 0;
         Scan scan = _file.Scan().With(new ScanOptions { DegreeOfParallelism = Degree });
-        await foreach (RecordBatch batch in scan.GroupBy(["Key"]).Select(["count_distinct(Value)"]).ToBatchesAsync(CancellationToken.None).ConfigureAwait(false))
+        await foreach (RecordBatch batch in scan.GroupBy(["Key"]).Select([aggregate]).ToBatchesAsync(CancellationToken.None).ConfigureAwait(false))
         {
             using (batch)
             {
