@@ -373,6 +373,114 @@ public sealed partial class ValueFunctionTests
         }
     }
 
+    /// <summary>
+    /// The floor by a width's reciprocal against the processor's division: every width from 1 to 1,000, the powers of
+    /// two, a minute, an hour and a day in nanoseconds, widths around 2^31, 2^32 and 2^62, the greatest, and widths drawn
+    /// at random; over values around zero and the width's multiples, at the storage's ends, and drawn at random.
+    /// </summary>
+    [Fact]
+    public void AFloorByAReciprocalIsTheDivisionsFloor()
+    {
+        Random random = new Random(13);
+        List<long> units = [.. Enumerable.Range(1, 1_000).Select(u => (long)u)];
+        units.AddRange([60_000_000_000L, 3_600_000_000_000L, 86_400_000_000_000L, int.MaxValue, (long)int.MaxValue + 2, uint.MaxValue, (long)uint.MaxValue + 2, (1L << 62) - 1, (1L << 62) + 1, long.MaxValue - 1, long.MaxValue]);
+        for (int bit = 0; bit < 63; bit++)
+        {
+            units.Add(1L << bit);
+        }
+
+        for (int i = 0; i < 300; i++)
+        {
+            units.Add(random.NextInt64(1, long.MaxValue));
+        }
+
+        foreach (long unit in units)
+        {
+            FloorDivisor divisor = new FloorDivisor(unit);
+            List<long> values = [0, 1, -1, 2, -2, long.MinValue, long.MinValue + 1, long.MaxValue, long.MaxValue - 1];
+            foreach (long around in new[] { unit, -unit, unit * 3, -unit * 3 })
+            {
+                values.AddRange([around - 1, around, around + 1]);
+            }
+
+            long reach = unit > long.MaxValue / 4 ? long.MaxValue / 4 : 4 * unit;
+            for (int i = 0; i < 64; i++)
+            {
+                values.Add(random.NextInt64(long.MinValue, long.MaxValue));
+                values.Add(random.NextInt64(-reach, reach));
+            }
+
+            foreach (long value in values)
+            {
+                Assert.True(Civil.FloorTo(value, unit) == divisor.Floor(value), $"{value} floored by {unit}: {divisor.Floor(value)}, {Civil.FloorTo(value, unit)} dividing");
+                Assert.True((ulong)value / (ulong)unit == divisor.Quotient((ulong)value), $"{(ulong)value} over {unit}");
+            }
+        }
+    }
+
+    /// <summary>
+    /// A bucket of integers over a block of every storage, signed and not, of widths from one to beyond the storage:
+    /// each value's image in the block is the one the function gives it alone, floored below the storage's least value
+    /// to that value.
+    /// </summary>
+    [Fact]
+    public void ABucketOfIntegersMapsABlockOfEveryStorageAsEachValueAlone()
+    {
+        Random random = new Random(17);
+        PType[] storages = [PType.I8, PType.I16, PType.I32, PType.I64, PType.U8, PType.U16, PType.U32, PType.U64];
+        long[] widths = [1, 3, 10, 1_000, 1 << 20, 1_000_000_000_007, long.MaxValue];
+        Vorticity.Types.DTypeArena types = new Vorticity.Types.DTypeArena();
+        foreach (PType storage in storages)
+        {
+            int width = storage.ByteWidth();
+            (Int128 min, Int128 max) = ValueFunction.Integers(storage);
+            foreach (long bucket in widths)
+            {
+                NumberBucket function = new NumberBucket(storage, bucket, bucket, bucket.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                const int Count = 512;
+                Vorticity.Arrays.CanonicalArena arena = new Vorticity.Arrays.CanonicalArena();
+                Vorticity.Buffers.VortexBuffer buffer = arena.Allocate(Count * width, width, out Span<byte> bytes);
+                random.NextBytes(bytes);
+                Int128[] ends = [min, min + 1, max, max - 1, 0, 1];
+                for (int e = 0; e < ends.Length; e++)
+                {
+                    Write(bytes.Slice(e * width, width), storage, ends[e]);
+                }
+
+                int column = arena.AddPrimitive(types.Primitive(storage, Nullability.NonNullable), Count, Vorticity.Arrays.Validity.NonNullable, storage, buffer);
+                ReadOnlySpan<byte> mapped = arena.GetNode(function.Apply(arena, column)).Values.Span;
+                for (int i = 0; i < Count; i++)
+                {
+                    Int128 value = Read(bytes.Slice(i * width, width), storage);
+                    Int128 image = Read(mapped.Slice(i * width, width), storage);
+                    Assert.True(Image(function, value) == image, $"Bucket({bucket}) of {storage} sends {value} to {image} in a block, {Image(function, value)} alone");
+                }
+
+                arena.Reset();
+            }
+        }
+
+        static Int128 Read(ReadOnlySpan<byte> bytes, PType storage) => storage switch
+        {
+            PType.I8 => (sbyte)bytes[0],
+            PType.I16 => System.Buffers.Binary.BinaryPrimitives.ReadInt16LittleEndian(bytes),
+            PType.I32 => System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(bytes),
+            PType.I64 => System.Buffers.Binary.BinaryPrimitives.ReadInt64LittleEndian(bytes),
+            PType.U8 => bytes[0],
+            PType.U16 => System.Buffers.Binary.BinaryPrimitives.ReadUInt16LittleEndian(bytes),
+            PType.U32 => System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes),
+            _ => System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(bytes),
+        };
+
+        static void Write(Span<byte> bytes, PType storage, Int128 value)
+        {
+            Span<byte> wide = stackalloc byte[16];
+            System.Buffers.Binary.BinaryPrimitives.WriteInt128LittleEndian(wide, value);
+            wide[..bytes.Length].CopyTo(bytes);
+            _ = storage;
+        }
+    }
+
     private static Int128 Image(ValueFunction function, Int128 value)
     {
         Assert.True(function.TryMap(function.Literal(value), out FilterLiteral image));
