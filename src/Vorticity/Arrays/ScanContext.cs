@@ -1760,11 +1760,11 @@ internal sealed class ScanContext : IDisposable
     /// <summary>
     /// Readies a context made over an encoding table (the constructor of ids), given back by a read, for the next read over
     /// <paramref name="arrayEncodingIds"/>: the ids resolved again only when they are not the ones the context holds, as the
-    /// objects of one dataset share theirs.
+    /// objects of one dataset share theirs; under <paramref name="options"/>, the default when null.
     /// </summary>
-    internal void RebindEncodings(ReadOnlySpan<string> arrayEncodingIds)
+    internal void RebindEncodings(ReadOnlySpan<string> arrayEncodingIds, VortexReadOptions? options = null)
     {
-        Options = VortexReadOptions.Default;
+        Options = options ?? VortexReadOptions.Default;
         KeepTypes();
         if (arrayEncodingIds.SequenceEqual(_arrayEncodingIds))
         {

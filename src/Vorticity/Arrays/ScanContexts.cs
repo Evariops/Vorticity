@@ -94,8 +94,11 @@ internal sealed class ScanContexts : ISweptAfterCollections
     internal static ScanContexts Footerless { get; } =
         new ScanContexts(Math.Max(16, Environment.ProcessorCount), Math.Max(64, 8 * Environment.ProcessorCount), metadata: true).Swept();
 
-    /// <summary>A context an earlier read over an encoding table gave back, over <paramref name="arrayEncodingIds"/>, or a new one.</summary>
-    internal ScanContext RentEncodings(string[] arrayEncodingIds)
+    /// <summary>
+    /// A context an earlier read over an encoding table gave back, over <paramref name="arrayEncodingIds"/> and under
+    /// <paramref name="options"/>, the default when null, or a new one.
+    /// </summary>
+    internal ScanContext RentEncodings(string[] arrayEncodingIds, VortexReadOptions? options = null)
     {
         ScanContext? context = null;
         lock (_gate)
@@ -105,10 +108,10 @@ internal sealed class ScanContexts : ISweptAfterCollections
 
         if (context is null)
         {
-            return new ScanContext(arrayEncodingIds);
+            return new ScanContext(arrayEncodingIds, options);
         }
 
-        context.RebindEncodings(arrayEncodingIds);
+        context.RebindEncodings(arrayEncodingIds, options);
         return context;
     }
 
