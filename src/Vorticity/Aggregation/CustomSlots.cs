@@ -34,6 +34,14 @@ internal sealed class CustomSlot<T, TAggregator, TState> : RecordSlot<TState, TS
             return;
         }
 
+        // Every row of the range kept and none null: the range's own values, every one of them, where a window of
+        // words over the whole block was built and read a bit at a time.
+        if (input.Selection.IsEmpty && valid.IsEmpty)
+        {
+            TAggregator.Step(ref State(group), values[start..end], default, new Selection(end - start));
+            return;
+        }
+
         Selection rows = RowMasks.Window(input.Selection, input.Rows, start, end, ref _clip);
         if (rows.Count > 0)
         {
@@ -46,11 +54,60 @@ internal sealed class CustomSlot<T, TAggregator, TState> : RecordSlot<TState, TS
     internal override void StepRows(in BatchInput input, ReadOnlySpan<int> groups)
     {
         ReadOnlySpan<T> values = FixedReader.Values(input.Arena, input.Node, StorageKind.Primitive, ref _values, out ReadOnlySpan<ulong> valid);
-        RowCursor rows = new RowCursor(_rows.And(input, input.Selection, valid), input.Start, input.End);
+        ReadOnlySpan<ulong> kept = _rows.And(input, input.Selection, valid);
         StateView<TState> states = States;
+        if (kept.IsEmpty)
+        {
+            // Every row kept: a run's end is the first row of another group, found over vectors once the next row
+            // shares the group, and a row whose next does not is a step of its own.
+            int row = input.Start;
+            int last = input.End;
+            while (row < last)
+            {
+                int owner = groups[row];
+                int stop = row + 1;
+                if (stop < last && groups[stop] == owner)
+                {
+                    int past = groups[stop..last].IndexOfAnyExcept(owner);
+                    stop = past < 0 ? last : stop + past;
+                }
+
+                TAggregator.Step(ref states[owner], values[row..stop], default, new Selection(stop - row));
+                row = stop;
+            }
+
+            return;
+        }
+
+        RowCursor rows = new RowCursor(kept, input.Start, input.End);
+
+        // A run of rows one after the other, all kept and of one group, is one step: the rows of a key that comes in
+        // blocks, which a step a row handed over one at a time.
+        int start = -1;
+        int end = -1;
+        int group = -1;
         while (rows.Next(out int row))
         {
-            TAggregator.Step(ref states[groups[row]], values.Slice(row, 1), default, new Selection(1));
+            int next = groups[row];
+            if (row == end && next == group)
+            {
+                end++;
+                continue;
+            }
+
+            if (start >= 0)
+            {
+                TAggregator.Step(ref states[group], values[start..end], default, new Selection(end - start));
+            }
+
+            start = row;
+            end = row + 1;
+            group = next;
+        }
+
+        if (start >= 0)
+        {
+            TAggregator.Step(ref states[group], values[start..end], default, new Selection(end - start));
         }
     }
 
@@ -149,6 +206,13 @@ internal sealed class EncodedCustomSlot<T, TAggregator, TState> : RecordSlot<TSt
                     return;
                 }
 
+                // Every row of the range kept: the range's own codes, every one of them.
+                if (rows.IsEmpty)
+                {
+                    TAggregator.StepDictionary(ref state, codes[start..end], dictionary, new Selection(end - start));
+                    return;
+                }
+
                 Selection window = RowMasks.Window(rows, input.Rows, start, end, ref _clip);
                 if (window.Count > 0)
                 {
@@ -168,6 +232,13 @@ internal sealed class EncodedCustomSlot<T, TAggregator, TState> : RecordSlot<TSt
         if (start == 0 && end == input.Rows && input.Selection.IsEmpty)
         {
             TAggregator.Step(ref state, canonical, valid, new Selection(input.Rows));
+            return;
+        }
+
+        // Every row of the range kept and none null: the range's own values, every one of them.
+        if (input.Selection.IsEmpty && valid.IsEmpty)
+        {
+            TAggregator.Step(ref state, canonical[start..end], default, new Selection(end - start));
             return;
         }
 
@@ -219,7 +290,30 @@ internal sealed class EncodedCustomSlot<T, TAggregator, TState> : RecordSlot<TSt
             default:
             {
                 ReadOnlySpan<T> values = FixedReader.Values(arena, node, StorageKind.Primitive, ref _values, out ReadOnlySpan<ulong> valid);
-                RowCursor rows = new RowCursor(_rows.And(input, input.Selection, valid), input.Start, input.End);
+                ReadOnlySpan<ulong> kept = _rows.And(input, input.Selection, valid);
+                if (kept.IsEmpty)
+                {
+                    // Every row kept: a run of one group's rows is one step, as the plain slot takes it.
+                    int row = input.Start;
+                    int last = input.End;
+                    while (row < last)
+                    {
+                        int owner = groups[row];
+                        int stop = row + 1;
+                        if (stop < last && groups[stop] == owner)
+                        {
+                            int past = groups[stop..last].IndexOfAnyExcept(owner);
+                            stop = past < 0 ? last : stop + past;
+                        }
+
+                        TAggregator.Step(ref states[owner], values[row..stop], default, new Selection(stop - row));
+                        row = stop;
+                    }
+
+                    return;
+                }
+
+                RowCursor rows = new RowCursor(kept, input.Start, input.End);
                 while (rows.Next(out int row))
                 {
                     TAggregator.StepConstant(ref states[groups[row]], values[row], 1);
