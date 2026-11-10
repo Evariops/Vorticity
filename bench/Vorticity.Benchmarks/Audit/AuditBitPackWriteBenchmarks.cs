@@ -65,6 +65,10 @@ public class AuditBitPackWriteBenchmarks
         _values = new ulong[_plan.Exceptions];
     }
 
+    /// <summary>The chunk planned: its transform, reference and width; the width.</summary>
+    [Benchmark]
+    public int Plan() => BitPackPlan.TryBuild(_arena, _arena.GetNode(_node))?.BitWidth ?? -1;
+
     /// <summary>The chunk packed; its first byte.</summary>
     [Benchmark]
     public byte Pack()

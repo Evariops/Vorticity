@@ -2791,10 +2791,21 @@ internal static class BlockStatsPass
 
         if (whole > 0)
         {
-            for (int lane = 0; lane < 64; lane++)
+            // The vectors' 64 lanes folded into 16 by halves, then read from the stack: an element a lane, of a lane
+            // the loop names, spilled the vector at every read.
+            Vector128<byte> lows = Vector128.Min(
+                Vector128.Min(low.GetLower().GetLower(), low.GetLower().GetUpper()),
+                Vector128.Min(low.GetUpper().GetLower(), low.GetUpper().GetUpper()));
+            Vector128<byte> highs = Vector128.Max(
+                Vector128.Max(high.GetLower().GetLower(), high.GetLower().GetUpper()),
+                Vector128.Max(high.GetUpper().GetLower(), high.GetUpper().GetUpper()));
+            Span<byte> lanes = stackalloc byte[2 * Vector128<byte>.Count];
+            lows.CopyTo(lanes);
+            highs.CopyTo(lanes[Vector128<byte>.Count..]);
+            for (int lane = 0; lane < Vector128<byte>.Count; lane++)
             {
-                least = Math.Min(least, low.GetElement(lane));
-                greatest = Math.Max(greatest, high.GetElement(lane));
+                least = Math.Min(least, lanes[lane]);
+                greatest = Math.Max(greatest, lanes[Vector128<byte>.Count + lane]);
             }
         }
 
