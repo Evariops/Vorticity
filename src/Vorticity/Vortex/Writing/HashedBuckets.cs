@@ -451,7 +451,11 @@ internal sealed class HashedBuckets : IDisposable
     }
 }
 
-/// <summary>The arrays a bucket is read back and sorted in, two of each, kept from one bucket to the next.</summary>
+/// <summary>
+/// The arrays a bucket is read back and sorted in, two of each, kept from one bucket to the next: from the process's shelf
+/// at a power of two, which the next file's buckets take again, and given back by <see cref="Release"/>. Made new for every
+/// file, they were a hashed index's most allocated bytes, 24 a pair.
+/// </summary>
 internal sealed class BucketBuffers
 {
     private int[] _starts = new int[Compute.RadixSort.Counts];
@@ -473,12 +477,35 @@ internal sealed class BucketBuffers
     {
         if (Hashes.Length < count)
         {
-            int size = Math.Max(count, Hashes.Length * 2);
-            Hashes = new ulong[size];
-            Blocks = new uint[size];
-            OtherHashes = new ulong[size];
-            OtherBlocks = new uint[size];
+            int size = Aggregating.ArrayShelf.Grown(count, Hashes.Length);
+            Release();
+            Hashes = Aggregating.ArrayShelf.Retained.Take<ulong>(size, zeroed: false);
+            Blocks = Aggregating.ArrayShelf.Retained.Take<uint>(size, zeroed: false);
+            OtherHashes = Aggregating.ArrayShelf.Retained.Take<ulong>(size, zeroed: false);
+            OtherBlocks = Aggregating.ArrayShelf.Retained.Take<uint>(size, zeroed: false);
         }
+    }
+
+    /// <summary>Gives the arrays back to the process's shelf; the buffers hold none after.</summary>
+    internal void Release()
+    {
+        foreach (ulong[] hashes in (ReadOnlySpan<ulong[]>)[Hashes, OtherHashes])
+        {
+            if (hashes.Length > 0)
+            {
+                Aggregating.ArrayShelf.Retained.Give(hashes);
+            }
+        }
+
+        foreach (uint[] blocks in (ReadOnlySpan<uint[]>)[Blocks, OtherBlocks])
+        {
+            if (blocks.Length > 0)
+            {
+                Aggregating.ArrayShelf.Retained.Give(blocks);
+            }
+        }
+
+        (Hashes, Blocks, OtherHashes, OtherBlocks) = ([], [], [], []);
     }
 
     /// <summary>Takes the arrays the sort ended in as the sorted ones, the others as its scratch.</summary>

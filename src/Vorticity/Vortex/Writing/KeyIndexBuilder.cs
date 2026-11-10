@@ -294,6 +294,27 @@ internal sealed class KeyIndexBuilder : IndexBuilder
         {
             case CanonicalKind.Primitive:
                 ReadOnlySpan<byte> values = node.Values.Span;
+                if (_hashed)
+                {
+                    // The rows hashed together, a batch at a time and in vectors for four- and eight-byte values, as a Bloom
+                    // filter and a sheet hash theirs, where each row's bytes went through XXH3 alone.
+                    Span<ulong> hashes = stackalloc ulong[XxHash3Fixed.RowBatch];
+                    for (int from = start; from < start + count; from += XxHash3Fixed.RowBatch)
+                    {
+                        int stop = Math.Min(from + XxHash3Fixed.RowBatch, start + count);
+                        XxHash3Fixed.HashRows(values, width, from, stop, hashes);
+                        for (int row = from; row < stop; row++)
+                        {
+                            if (allValid || (own.IsValid(row) && wrapper.IsValid(row)))
+                            {
+                                Hashed(hashes[row - from]);
+                            }
+                        }
+                    }
+
+                    return;
+                }
+
                 for (int row = start; row < start + count; row++)
                 {
                     if (allValid || (own.IsValid(row) && wrapper.IsValid(row)))
@@ -636,6 +657,14 @@ internal sealed class KeyIndexBuilder : IndexBuilder
             }
 
             throw;
+        }
+        finally
+        {
+            // Every sort has ended either way: the buffers go back to the shelf, for the next file's buckets.
+            foreach (BucketBuffers? held in buffers)
+            {
+                held?.Release();
+            }
         }
 
         if (main is not null)

@@ -441,7 +441,7 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
         for (int from = start; from < start + count; from += HashBatch)
         {
             int stop = Math.Min(from + HashBatch, start + count);
-            Hash(values, width, from, stop, hashes);
+            XxHash3Fixed.HashRows(values, width, from, stop, hashes);
             if (_rowHashes is { } rowHashes)
             {
                 for (int row = from; row < stop; row++)
@@ -501,63 +501,6 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
                     ids[row - start] = lastId;
                 }
             }
-        }
-    }
-
-    /// <summary>The hashes of rows <c>[start, stop)</c> of fixed-width values, as XXH3 hashes their bytes, into <paramref name="hashes"/>.</summary>
-    private static void Hash(ReadOnlySpan<byte> values, int width, int start, int stop, Span<ulong> hashes)
-    {
-        switch (width)
-        {
-            case 4:
-            {
-                ReadOnlySpan<uint> words = MemoryMarshal.Cast<byte, uint>(values)[start..stop];
-                if (XxHash3Fixed.IsVectorized && words.Length == HashBatch)
-                {
-                    XxHash3Fixed.Hash4(words, hashes);
-                    return;
-                }
-
-                for (int i = 0; i < words.Length; i++)
-                {
-                    hashes[i] = XxHash3Fixed.Hash4(words[i]);
-                }
-
-                return;
-            }
-
-            case 8:
-            {
-                ReadOnlySpan<ulong> words = MemoryMarshal.Cast<byte, ulong>(values)[start..stop];
-                if (XxHash3Fixed.IsVectorized && words.Length == HashBatch)
-                {
-                    XxHash3Fixed.Hash8(words, hashes);
-                    return;
-                }
-
-                for (int i = 0; i < words.Length; i++)
-                {
-                    hashes[i] = XxHash3Fixed.Hash8(words[i]);
-                }
-
-                return;
-            }
-
-            case <= 3:
-                for (int row = start; row < stop; row++)
-                {
-                    hashes[row - start] = XxHash3Fixed.Hash1To3(values.Slice(row * width, width));
-                }
-
-                return;
-
-            default:
-                for (int row = start; row < stop; row++)
-                {
-                    hashes[row - start] = XxHash3Fixed.Hash9To16(values.Slice(row * width, width));
-                }
-
-                return;
         }
     }
 

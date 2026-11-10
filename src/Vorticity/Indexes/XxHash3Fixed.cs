@@ -151,4 +151,76 @@ internal static class XxHash3Fixed
         h *= PrimeMx1;
         return h ^ (h >> 32);
     }
+
+    /// <summary>The rows a vector pass hashes at a time.</summary>
+    internal const int RowBatch = 64;
+
+    /// <summary>
+    /// The hashes of rows <c>[start, stop)</c> of values of <paramref name="width"/> bytes each, as XXH3 hashes their bytes,
+    /// into <paramref name="hashes"/>: by XXH3's own short path for the width, resolved once for the rows, four- and
+    /// eight-byte values <see cref="RowBatch"/> at a time where <see cref="IsVectorized"/>. A Bloom filter, a sheet and
+    /// hashed postings hash their rows through it, so that a probe hashes a literal as every one of them does.
+    /// </summary>
+    internal static void HashRows(ReadOnlySpan<byte> values, int width, int start, int stop, Span<ulong> hashes)
+    {
+        hashes = hashes[..(stop - start)];
+        switch (width)
+        {
+            case 4:
+            {
+                ReadOnlySpan<uint> words = MemoryMarshal.Cast<byte, uint>(values)[start..stop];
+                int i = 0;
+                if (IsVectorized)
+                {
+                    for (; i <= words.Length - RowBatch; i += RowBatch)
+                    {
+                        Hash4(words.Slice(i, RowBatch), hashes.Slice(i, RowBatch));
+                    }
+                }
+
+                for (; i < words.Length; i++)
+                {
+                    hashes[i] = Hash4(words[i]);
+                }
+
+                return;
+            }
+
+            case 8:
+            {
+                ReadOnlySpan<ulong> words = MemoryMarshal.Cast<byte, ulong>(values)[start..stop];
+                int i = 0;
+                if (IsVectorized)
+                {
+                    for (; i <= words.Length - RowBatch; i += RowBatch)
+                    {
+                        Hash8(words.Slice(i, RowBatch), hashes.Slice(i, RowBatch));
+                    }
+                }
+
+                for (; i < words.Length; i++)
+                {
+                    hashes[i] = Hash8(words[i]);
+                }
+
+                return;
+            }
+
+            case <= 3:
+                for (int row = start; row < stop; row++)
+                {
+                    hashes[row - start] = Hash1To3(values.Slice(row * width, width));
+                }
+
+                return;
+
+            default:
+                for (int row = start; row < stop; row++)
+                {
+                    hashes[row - start] = Hash9To16(values.Slice(row * width, width));
+                }
+
+                return;
+        }
+    }
 }

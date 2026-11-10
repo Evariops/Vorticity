@@ -612,64 +612,7 @@ internal sealed class BloomBuilder : IndexBuilder
         ReadOnlySpan<byte> values, int width, int start, int stop, HashSet64 block, Span<ulong> hashes)
     {
         hashes = hashes[..(stop - start)];
-        switch (width)
-        {
-            case 4:
-            {
-                ReadOnlySpan<uint> words = MemoryMarshal.Cast<byte, uint>(values)[start..stop];
-                int i = 0;
-                if (XxHash3Fixed.IsVectorized)
-                {
-                    for (; i <= words.Length - HashBatch; i += HashBatch)
-                    {
-                        XxHash3Fixed.Hash4(words.Slice(i, HashBatch), hashes.Slice(i, HashBatch));
-                    }
-                }
-
-                for (; i < words.Length; i++)
-                {
-                    hashes[i] = XxHash3Fixed.Hash4(words[i]);
-                }
-
-                break;
-            }
-
-            case 8:
-            {
-                ReadOnlySpan<ulong> words = MemoryMarshal.Cast<byte, ulong>(values)[start..stop];
-                int i = 0;
-                if (XxHash3Fixed.IsVectorized)
-                {
-                    for (; i <= words.Length - HashBatch; i += HashBatch)
-                    {
-                        XxHash3Fixed.Hash8(words.Slice(i, HashBatch), hashes.Slice(i, HashBatch));
-                    }
-                }
-
-                for (; i < words.Length; i++)
-                {
-                    hashes[i] = XxHash3Fixed.Hash8(words[i]);
-                }
-
-                break;
-            }
-
-            case <= 3:
-                for (int row = start; row < stop; row++)
-                {
-                    hashes[row - start] = XxHash3Fixed.Hash1To3(values.Slice(row * width, width));
-                }
-
-                break;
-
-            default:
-                for (int row = start; row < stop; row++)
-                {
-                    hashes[row - start] = XxHash3Fixed.Hash9To16(values.Slice(row * width, width));
-                }
-
-                break;
-        }
+        XxHash3Fixed.HashRows(values, width, start, stop, hashes);
 
         block.AddRange(hashes);
     }

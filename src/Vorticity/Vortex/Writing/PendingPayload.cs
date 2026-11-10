@@ -77,6 +77,18 @@ internal sealed class PendingPayload(
             () => ArrayPool<uint>.Shared.Return(rented));
 
     /// <summary>
+    /// A payload over the first <paramref name="length"/> words of an array of the process's shelf
+    /// (<see cref="Aggregating.ArrayShelf.Retained"/>), given back to it once laid: the shelf keeps the arrays of a length a
+    /// writer takes again from one file to the next, where the shared pool kept a few of a length and let the rest go.
+    /// </summary>
+    internal static PendingPayload ShelvedU32(uint[] shelved, int length, bool compress) =>
+        new PendingPayload(
+            (arena, types) => LayU32(arena, types, shelved, length),
+            compress,
+            (long)length * sizeof(uint),
+            () => Aggregating.ArrayShelf.Retained.Give(shelved));
+
+    /// <summary>
     /// A payload over the first <paramref name="length"/> words of a rented <see cref="ulong"/>
     /// array, laid at 64 bits: a run's rows when it spans 2³² rows or more.
     /// </summary>
