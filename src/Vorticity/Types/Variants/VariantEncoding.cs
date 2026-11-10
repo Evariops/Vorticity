@@ -5,6 +5,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Text;
 using System.Text.Json;
+using System.Text.Unicode;
 
 namespace Vorticity.Types.Variants;
 
@@ -43,27 +44,37 @@ internal static class VariantEncoding
     /// <summary>An integer in the narrowest of the four widths that holds it.</summary>
     internal static byte[] Integer(long value)
     {
-        Span<byte> payload = stackalloc byte[8];
+        Span<byte> written = stackalloc byte[9];
+        return written[..PutInteger(written, value)].ToArray();
+    }
+
+    /// <summary><see cref="Integer"/>'s bytes written into <paramref name="into"/>, nine at most. The bytes written.</summary>
+    internal static int PutInteger(Span<byte> into, long value)
+    {
         if (value is >= sbyte.MinValue and <= sbyte.MaxValue)
         {
-            payload[0] = (byte)(sbyte)value;
-            return Primitive(3, payload[..1]);
+            into[0] = ParquetVariant.Primitive(3);
+            into[1] = (byte)(sbyte)value;
+            return 2;
         }
 
         if (value is >= short.MinValue and <= short.MaxValue)
         {
-            BinaryPrimitives.WriteInt16LittleEndian(payload, (short)value);
-            return Primitive(4, payload[..2]);
+            into[0] = ParquetVariant.Primitive(4);
+            BinaryPrimitives.WriteInt16LittleEndian(into[1..], (short)value);
+            return 3;
         }
 
         if (value is >= int.MinValue and <= int.MaxValue)
         {
-            BinaryPrimitives.WriteInt32LittleEndian(payload, (int)value);
-            return Primitive(5, payload[..4]);
+            into[0] = ParquetVariant.Primitive(5);
+            BinaryPrimitives.WriteInt32LittleEndian(into[1..], (int)value);
+            return 5;
         }
 
-        BinaryPrimitives.WriteInt64LittleEndian(payload, value);
-        return Primitive(6, payload);
+        into[0] = ParquetVariant.Primitive(6);
+        BinaryPrimitives.WriteInt64LittleEndian(into[1..], value);
+        return 9;
     }
 
     internal static byte[] Double(double value)
@@ -83,22 +94,31 @@ internal static class VariantEncoding
     /// <summary>A decimal of <paramref name="scale"/> in the narrowest of its three widths that holds its unscaled value.</summary>
     internal static byte[] Decimal(Int128 unscaled, byte scale)
     {
-        Span<byte> payload = stackalloc byte[17];
-        payload[0] = scale;
+        Span<byte> written = stackalloc byte[18];
+        return written[..PutDecimal(written, unscaled, scale)].ToArray();
+    }
+
+    /// <summary><see cref="Decimal"/>'s bytes written into <paramref name="into"/>, eighteen at most. The bytes written.</summary>
+    internal static int PutDecimal(Span<byte> into, Int128 unscaled, byte scale)
+    {
+        into[1] = scale;
         if (unscaled >= int.MinValue && unscaled <= int.MaxValue)
         {
-            BinaryPrimitives.WriteInt32LittleEndian(payload[1..], (int)unscaled);
-            return Primitive(8, payload[..5]);
+            into[0] = ParquetVariant.Primitive(8);
+            BinaryPrimitives.WriteInt32LittleEndian(into[2..], (int)unscaled);
+            return 6;
         }
 
         if (unscaled >= long.MinValue && unscaled <= long.MaxValue)
         {
-            BinaryPrimitives.WriteInt64LittleEndian(payload[1..], (long)unscaled);
-            return Primitive(9, payload[..9]);
+            into[0] = ParquetVariant.Primitive(9);
+            BinaryPrimitives.WriteInt64LittleEndian(into[2..], (long)unscaled);
+            return 10;
         }
 
-        BinaryPrimitives.WriteInt128LittleEndian(payload[1..], unscaled);
-        return Primitive(10, payload);
+        into[0] = ParquetVariant.Primitive(10);
+        BinaryPrimitives.WriteInt128LittleEndian(into[2..], unscaled);
+        return 18;
     }
 
     internal static byte[] Date(int days)
@@ -664,156 +684,477 @@ internal static class VariantEncoding
     }
 
     /// <summary>The variant a JSON document holds: an integer in the narrowest width that holds it, any other number a double.</summary>
-    /// <exception cref="ArgumentException">The text is not one JSON document, or an object repeats a key.</exception>
+    /// <remarks>
+    /// Two passes over the text and no tree. The first gathers every key, sorts them into the dictionary and gives each
+    /// occurrence its id; the second writes each value where it ends up, a container's members first and its header put in
+    /// front of them once their count and sizes are known, an object's values put in its keys' order then. A tree of nodes
+    /// took a list a container, an array a key and a scalar, a set of the keys and a copy of each level into the next:
+    /// 7.86 KB and 4.08 us for an object of fifteen members in 400 bytes of JSON.
+    /// </remarks>
+    /// <exception cref="ArgumentException">The text is not one JSON document of UTF-8, or an object repeats a key.</exception>
     internal static (byte[] Metadata, byte[] Value) FromJson(ReadOnlySpan<byte> utf8)
     {
-        Utf8JsonReader reader = new(utf8, new JsonReaderOptions { CommentHandling = JsonCommentHandling.Skip });
-        JsonNode root;
+        JsonReaderOptions options = new() { CommentHandling = JsonCommentHandling.Skip };
+        JsonWriting writing = new(utf8.Length);
         try
         {
-            if (!reader.Read())
-            {
-                throw new ArgumentException("The JSON text holds no value.", nameof(utf8));
-            }
-
-            root = Parse(ref reader);
-            if (reader.Read())
-            {
-                throw new ArgumentException("The JSON text holds more than one value.", nameof(utf8));
-            }
+            Utf8JsonReader reader = new(utf8, options);
+            byte[] metadata = writing.Dictionary(ref reader);
+            reader = new Utf8JsonReader(utf8, options);
+            _ = reader.Read();
+            writing.Value(ref reader);
+            return (metadata, writing.Written.ToArray());
         }
-        catch (JsonException malformed)
+        finally
         {
-            throw new ArgumentException($"The text is not JSON: {malformed.Message}", nameof(utf8), malformed);
+            writing.Return();
         }
-
-        SortedSet<byte[]> names = new(KeyOrder);
-        root.Collect(names);
-        List<byte[]> keys = [.. names];
-        return (Metadata(keys), root.Write(keys));
     }
 
-    private static JsonNode Parse(ref Utf8JsonReader reader)
+    /// <summary>The scratch of a JSON document's two passes, rented and given back whole.</summary>
+    private struct JsonWriting
     {
-        switch (reader.TokenType)
+        /// <summary>The value's bytes as far as they are written.</summary>
+        private byte[] _value;
+        private int _length;
+
+        /// <summary>Each key's bytes, in the order the text names them, then each occurrence's place and id.</summary>
+        private byte[] _keys;
+        private Occurrence[] _occurrences;
+        private int[] _ids;
+
+        /// <summary>The occurrence the second pass meets next.</summary>
+        private int _next;
+
+        /// <summary>The members of the containers open, the innermost last.</summary>
+        private Member[] _members;
+        private int _open;
+
+        /// <summary>An object's values while they are put in its keys' order.</summary>
+        private byte[] _moved;
+
+        /// <summary>The dictionary, which names a key an object repeats.</summary>
+        private byte[]? _metadata;
+
+        internal JsonWriting(int textBytes)
         {
-            case JsonTokenType.StartObject:
+            _value = ArrayPool<byte>.Shared.Rent(Math.Max(256, textBytes + 64));
+            _keys = ArrayPool<byte>.Shared.Rent(Math.Max(16, textBytes));
+            _occurrences = ArrayPool<Occurrence>.Shared.Rent(32);
+            _ids = [];
+            _members = ArrayPool<Member>.Shared.Rent(32);
+            _moved = [];
+        }
+
+        internal readonly ReadOnlySpan<byte> Written => _value.AsSpan(0, _length);
+
+        /// <summary>
+        /// The first pass: the text checked to be one document, its keys gathered, sorted and made unique, each
+        /// occurrence given its key's id. The metadata of the dictionary.
+        /// </summary>
+        internal byte[] Dictionary(ref Utf8JsonReader reader)
+        {
+            int count = 0;
+            int bytes = 0;
+            try
             {
-                List<(byte[] Key, JsonNode Value)> fields = [];
-                while (reader.Read() && reader.TokenType != JsonTokenType.EndObject)
+                if (!reader.Read())
                 {
-                    byte[] key = Encoding.UTF8.GetBytes(reader.GetString()!);
-                    _ = reader.Read();
-                    fields.Add((key, Parse(ref reader)));
+                    throw new ArgumentException("The JSON text holds no value.", "utf8");
                 }
 
-                fields.Sort(static (a, b) => KeyOrder.Compare(a.Key, b.Key));
-                for (int i = 1; i < fields.Count; i++)
+                if (reader.TokenType is JsonTokenType.StartObject or JsonTokenType.StartArray)
                 {
-                    if (fields[i - 1].Key.AsSpan().SequenceEqual(fields[i].Key))
+                    while (reader.Read())
                     {
-                        throw new ArgumentException($"A JSON object repeats the key '{Encoding.UTF8.GetString(fields[i].Key)}'.");
+                        if (reader.TokenType == JsonTokenType.PropertyName)
+                        {
+                            if (count == _occurrences.Length)
+                            {
+                                Grow(ref _occurrences, count, count * 2);
+                            }
+
+                            int length = Unescaped(ref reader, _keys.AsSpan(bytes));
+                            _occurrences[count] = new Occurrence(bytes, length, count);
+                            bytes += length;
+                            count++;
+                        }
+                        else if (reader.CurrentDepth == 0)
+                        {
+                            // The root's end.
+                            break;
+                        }
                     }
                 }
 
-                return new JsonNode(null, fields, null);
+                if (reader.Read())
+                {
+                    throw new ArgumentException("The JSON text holds more than one value.", "utf8");
+                }
+            }
+            catch (JsonException malformed)
+            {
+                throw new ArgumentException($"The text is not JSON: {malformed.Message}", "utf8", malformed);
             }
 
-            case JsonTokenType.StartArray:
+            if (count == 0)
             {
-                List<JsonNode> elements = [];
-                while (reader.Read() && reader.TokenType != JsonTokenType.EndArray)
+                return _metadata = EmptyMetadata;
+            }
+
+            Span<Occurrence> sorted = _occurrences.AsSpan(0, count);
+            if (count <= 32)
+            {
+                // In place, as the runtime's sort does below 16: its comparer, a struct, would be boxed.
+                for (int i = 1; i < count; i++)
                 {
-                    elements.Add(Parse(ref reader));
+                    Occurrence moved = sorted[i];
+                    int j = i - 1;
+                    for (; j >= 0 && Key(sorted[j]).SequenceCompareTo(Key(moved)) > 0; j--)
+                    {
+                        sorted[j + 1] = sorted[j];
+                    }
+
+                    sorted[j + 1] = moved;
+                }
+            }
+            else
+            {
+                sorted.Sort(new KeyBytes(_keys));
+            }
+
+            _ids = ArrayPool<int>.Shared.Rent(count);
+            int unique = 0;
+            int uniqueBytes = 0;
+            for (int i = 0; i < count; i++)
+            {
+                if (i == 0 || !Key(sorted[i]).SequenceEqual(Key(sorted[i - 1])))
+                {
+                    unique++;
+                    uniqueBytes += sorted[i].Length;
                 }
 
-                return new JsonNode(null, null, elements);
+                _ids[sorted[i].Index] = unique - 1;
             }
 
-            case JsonTokenType.String:
-                return new JsonNode(String(Encoding.UTF8.GetBytes(reader.GetString()!)), null, null);
-            case JsonTokenType.Number:
-                return new JsonNode(Number(ref reader), null, null);
-            case JsonTokenType.True:
-                return new JsonNode(Bool(true), null, null);
-            case JsonTokenType.False:
-                return new JsonNode(Bool(false), null, null);
-            default:
-                return new JsonNode(NullValue, null, null);
+            int width = ParquetVariant.WidthOf((uint)Math.Max(uniqueBytes, unique));
+            byte[] metadata = new byte[1 + width + ((unique + 1) * width) + uniqueBytes];
+
+            // Version 1, the strings sorted and unique, the offsets' width.
+            metadata[0] = (byte)(0x01 | 0x10 | ((width - 1) << 6));
+            int at = 1;
+            ParquetVariant.Put(metadata, ref at, (uint)unique, width);
+            int strings = at + ((unique + 1) * width);
+            int offset = 0;
+            for (int i = 0; i < count; i++)
+            {
+                if (i == 0 || _ids[sorted[i].Index] != _ids[sorted[i - 1].Index])
+                {
+                    ParquetVariant.Put(metadata, ref at, (uint)offset, width);
+                    Key(sorted[i]).CopyTo(metadata.AsSpan(strings + offset));
+                    offset += sorted[i].Length;
+                }
+            }
+
+            ParquetVariant.Put(metadata, ref at, (uint)offset, width);
+            return _metadata = metadata;
+        }
+
+        /// <summary>The second pass: the value at <paramref name="reader"/>'s token written, and every value it holds.</summary>
+        internal void Value(ref Utf8JsonReader reader)
+        {
+            switch (reader.TokenType)
+            {
+                case JsonTokenType.StartObject:
+                    Object(ref reader);
+                    break;
+                case JsonTokenType.StartArray:
+                    Array(ref reader);
+                    break;
+                case JsonTokenType.String:
+                    String(ref reader);
+                    break;
+                case JsonTokenType.Number:
+                    Number(ref reader);
+                    break;
+                default:
+                    Reserve(1);
+                    _value[_length++] = reader.TokenType switch
+                    {
+                        JsonTokenType.True => ParquetVariant.Primitive(1),
+                        JsonTokenType.False => ParquetVariant.Primitive(2),
+                        _ => NullValue[0],
+                    };
+                    break;
+            }
+        }
+
+        internal void Return()
+        {
+            ArrayPool<byte>.Shared.Return(_value);
+            ArrayPool<byte>.Shared.Return(_keys);
+            ArrayPool<Occurrence>.Shared.Return(_occurrences);
+            ArrayPool<Member>.Shared.Return(_members);
+            if (_ids.Length > 0)
+            {
+                ArrayPool<int>.Shared.Return(_ids);
+            }
+
+            if (_moved.Length > 0)
+            {
+                ArrayPool<byte>.Shared.Return(_moved);
+            }
+        }
+
+        private readonly ReadOnlySpan<byte> Key(Occurrence occurrence) => _keys.AsSpan(occurrence.Start, occurrence.Length);
+
+        /// <summary>An object: its values written in the text's order, then moved behind its header in its keys' order.</summary>
+        private void Object(ref Utf8JsonReader reader)
+        {
+            int start = _length;
+            int first = _open;
+            while (reader.Read() && reader.TokenType != JsonTokenType.EndObject)
+            {
+                int id = _ids[_next++];
+                _ = reader.Read();
+                int at = _length;
+                Value(ref reader);
+                Open(new Member(id, at, _length - at));
+            }
+
+            int count = _open - first;
+            Span<Member> members = _members.AsSpan(first, count);
+            bool ordered = true;
+            int maxId = 0;
+            for (int i = 0; i < count; i++)
+            {
+                maxId = Math.Max(maxId, members[i].Id);
+                ordered &= i == 0 || members[i].Id > members[i - 1].Id;
+            }
+
+            if (!ordered)
+            {
+                members.Sort(static (a, b) => a.Id.CompareTo(b.Id));
+                for (int i = 1; i < count; i++)
+                {
+                    if (members[i].Id == members[i - 1].Id)
+                    {
+                        throw new ArgumentException(
+                            $"A JSON object repeats the key '{Encoding.UTF8.GetString(VariantDictionary.Read(_metadata)[members[i].Id])}'.");
+                    }
+                }
+            }
+
+            int size = _length - start;
+            int countWidth = count > 0xFF ? 4 : 1;
+            int idWidth = ParquetVariant.WidthOf((uint)maxId);
+            int offsetWidth = ParquetVariant.WidthOf((uint)size);
+            int header = checked(1 + countWidth + (count * idWidth) + ((count + 1) * offsetWidth));
+            Reserve(header);
+            Span<byte> value = _value;
+            if (ordered)
+            {
+                value.Slice(start, size).CopyTo(value[(start + header)..]);
+            }
+            else
+            {
+                if (_moved.Length < size)
+                {
+                    if (_moved.Length > 0)
+                    {
+                        ArrayPool<byte>.Shared.Return(_moved);
+                    }
+
+                    _moved = ArrayPool<byte>.Shared.Rent(size);
+                }
+
+                value.Slice(start, size).CopyTo(_moved);
+                int to = start + header;
+                foreach (Member member in members)
+                {
+                    _moved.AsSpan(member.Start - start, member.Length).CopyTo(value[to..]);
+                    to += member.Length;
+                }
+            }
+
+            value[start] = (byte)(((((countWidth == 4 ? 1 : 0) << 4) | ((idWidth - 1) << 2) | (offsetWidth - 1)) << 2) | ParquetVariant.BasicObject);
+            int put = start + 1;
+            ParquetVariant.Put(value, ref put, (uint)count, countWidth);
+            foreach (Member member in members)
+            {
+                ParquetVariant.Put(value, ref put, (uint)member.Id, idWidth);
+            }
+
+            int offset = 0;
+            foreach (Member member in members)
+            {
+                ParquetVariant.Put(value, ref put, (uint)offset, offsetWidth);
+                offset += member.Length;
+            }
+
+            ParquetVariant.Put(value, ref put, (uint)offset, offsetWidth);
+            _length += header;
+            _open = first;
+        }
+
+        /// <summary>An array: its elements written in order, then moved behind its header.</summary>
+        private void Array(ref Utf8JsonReader reader)
+        {
+            int start = _length;
+            int first = _open;
+            while (reader.Read() && reader.TokenType != JsonTokenType.EndArray)
+            {
+                int at = _length;
+                Value(ref reader);
+                Open(new Member(0, at, _length - at));
+            }
+
+            int count = _open - first;
+            int size = _length - start;
+            int countWidth = count > 0xFF ? 4 : 1;
+            int offsetWidth = ParquetVariant.WidthOf((uint)size);
+            int header = checked(1 + countWidth + ((count + 1) * offsetWidth));
+            Reserve(header);
+            Span<byte> value = _value;
+            value.Slice(start, size).CopyTo(value[(start + header)..]);
+            value[start] = (byte)(((((countWidth == 4 ? 1 : 0) << 2) | (offsetWidth - 1)) << 2) | ParquetVariant.BasicArray);
+            int put = start + 1;
+            ParquetVariant.Put(value, ref put, (uint)count, countWidth);
+            foreach (Member element in _members.AsSpan(first, count))
+            {
+                ParquetVariant.Put(value, ref put, (uint)(element.Start - start), offsetWidth);
+            }
+
+            ParquetVariant.Put(value, ref put, (uint)size, offsetWidth);
+            _length += header;
+            _open = first;
+        }
+
+        /// <summary>A string, in the short form when it fits in the header's six bits.</summary>
+        private void String(ref Utf8JsonReader reader)
+        {
+            // The text's bytes bound the string's: an escape only shortens it.
+            int most = reader.ValueSpan.Length;
+            int header = most <= ParquetVariant.MaxShortString ? 1 : 5;
+            Reserve(header + most);
+            int length = Unescaped(ref reader, _value.AsSpan(_length + header, most));
+            if (length <= ParquetVariant.MaxShortString)
+            {
+                if (header != 1)
+                {
+                    _value.AsSpan(_length + header, length).CopyTo(_value.AsSpan(_length + 1));
+                }
+
+                _value[_length] = (byte)((length << 2) | ParquetVariant.BasicShortString);
+                _length += 1 + length;
+                return;
+            }
+
+            _value[_length] = ParquetVariant.Primitive(16);
+            BinaryPrimitives.WriteUInt32LittleEndian(_value.AsSpan(_length + 1), (uint)length);
+            _length += 5 + length;
+        }
+
+        /// <summary>
+        /// A number: an integer in the narrowest width that holds it, past 64 bits a decimal of scale 0 while 38 digits
+        /// hold it, any other a double.
+        /// </summary>
+        private void Number(ref Utf8JsonReader reader)
+        {
+            Reserve(18);
+            Span<byte> into = _value.AsSpan(_length);
+            if (reader.TryGetInt64(out long integer))
+            {
+                _length += PutInteger(into, integer);
+                return;
+            }
+
+            ReadOnlySpan<byte> text = reader.ValueSpan;
+            if (text.IndexOfAny(".eE"u8) < 0 && text.Length <= 39
+                && Int128.TryParse(text, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out Int128 wide)
+                && Int128.Abs(wide) < DecimalLimit)
+            {
+                _length += PutDecimal(into, wide, 0);
+                return;
+            }
+
+            into[0] = ParquetVariant.Primitive(7);
+            BinaryPrimitives.WriteDoubleLittleEndian(into[1..], reader.GetDouble());
+            _length += 9;
+        }
+
+        /// <summary>Room for <paramref name="bytes"/> more bytes of the value.</summary>
+        private void Reserve(int bytes)
+        {
+            if (_value.Length - _length < bytes)
+            {
+                Grow(ref _value, _length, Math.Max(_value.Length * 2, _length + bytes));
+            }
+        }
+
+        private void Open(Member member)
+        {
+            if (_open == _members.Length)
+            {
+                Grow(ref _members, _open, _open * 2);
+            }
+
+            _members[_open++] = member;
+        }
+
+        /// <summary>The string at <paramref name="reader"/> unescaped into <paramref name="into"/>, checked to be UTF-8. Its length.</summary>
+        private static int Unescaped(ref Utf8JsonReader reader, Span<byte> into)
+        {
+            int length;
+            if (reader.ValueIsEscaped)
+            {
+                try
+                {
+                    length = reader.CopyString(into);
+                }
+                catch (InvalidOperationException invalid)
+                {
+                    throw new ArgumentException("The text is not JSON: a string is not UTF-8.", "utf8", invalid);
+                }
+            }
+            else
+            {
+                reader.ValueSpan.CopyTo(into);
+                length = reader.ValueSpan.Length;
+            }
+
+            if (!Utf8.IsValid(into[..length]))
+            {
+                throw new ArgumentException("The text is not JSON: a string is not UTF-8.", "utf8");
+            }
+
+            return length;
+        }
+
+        private static void Grow<T>(ref T[] array, int kept, int size)
+        {
+            T[] grown = ArrayPool<T>.Shared.Rent(size);
+            array.AsSpan(0, kept).CopyTo(grown);
+            ArrayPool<T>.Shared.Return(array);
+            array = grown;
         }
     }
 
-    private static byte[] Number(ref Utf8JsonReader reader)
+    /// <summary>A key as the text names it: its bytes' place among the keys gathered, and which occurrence it is.</summary>
+    private readonly record struct Occurrence(int Start, int Length, int Index);
+
+    /// <summary>A member of a container being written: its key's id, and where its value's bytes lie.</summary>
+    private readonly record struct Member(int Id, int Start, int Length);
+
+    /// <summary>Keys in the standard's order, their bytes in the keys gathered.</summary>
+    private readonly struct KeyBytes(byte[] keys) : IComparer<Occurrence>
     {
-        if (reader.TryGetInt64(out long integer))
-        {
-            return Integer(integer);
-        }
-
-        // An integer past 64 bits is a decimal of scale 0 while 38 digits hold it.
-        ReadOnlySpan<byte> text = reader.ValueSpan;
-        if (text.IndexOfAny(".eE"u8) < 0 && text.Length <= 39
-            && Int128.TryParse(text, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out Int128 wide)
-            && Int128.Abs(wide) < DecimalLimit)
-        {
-            return Decimal(wide, 0);
-        }
-
-        return Double(reader.GetDouble());
+        public int Compare(Occurrence x, Occurrence y) =>
+            keys.AsSpan(x.Start, x.Length).SequenceCompareTo(keys.AsSpan(y.Start, y.Length));
     }
 
     /// <summary>10^38, the first unscaled value past the 38 digits a decimal holds.</summary>
     private static readonly Int128 DecimalLimit = Int128.Parse("100000000000000000000000000000000000000", CultureInfo.InvariantCulture);
-
-    /// <summary>A JSON value parsed, before the dictionary its objects' ids index is known.</summary>
-    private sealed class JsonNode(byte[]? primitive, List<(byte[] Key, JsonNode Value)>? fields, List<JsonNode>? elements)
-    {
-        internal void Collect(SortedSet<byte[]> names)
-        {
-            if (fields is not null)
-            {
-                foreach ((byte[] key, JsonNode value) in fields)
-                {
-                    _ = names.Add(key);
-                    value.Collect(names);
-                }
-            }
-            else if (elements is not null)
-            {
-                foreach (JsonNode element in elements)
-                {
-                    element.Collect(names);
-                }
-            }
-        }
-
-        internal byte[] Write(List<byte[]> keys)
-        {
-            if (primitive is not null)
-            {
-                return primitive;
-            }
-
-            if (elements is not null)
-            {
-                List<byte[]> written = new(elements.Count);
-                foreach (JsonNode element in elements)
-                {
-                    written.Add(element.Write(keys));
-                }
-
-                return Array(written);
-            }
-
-            List<(int Id, byte[] Value)> members = new(fields!.Count);
-            foreach ((byte[] key, JsonNode value) in fields)
-            {
-                members.Add((keys.BinarySearch(key, KeyOrder), value.Write(keys)));
-            }
-
-            return Object(members);
-        }
-    }
 
     /// <summary>A value as JSON text.</summary>
     internal static string Json(ReadOnlySpan<byte> metadata, ReadOnlySpan<byte> value)
