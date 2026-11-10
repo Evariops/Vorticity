@@ -198,6 +198,12 @@ internal sealed class ScanContext : IDisposable
     public VortexReadOptions Options { get; private set; }
 
     /// <summary>
+    /// The pool the context goes back to when a batch that took it over is disposed (<see cref="RecordBatch.Adopt"/>), the
+    /// pool of contexts over an encoding table that lent it; null for a context disposed with its batch.
+    /// </summary>
+    internal ScanContexts? Home { get; set; }
+
+    /// <summary>
     /// The arena every DType derived during decoding is built in: the validity child's
     /// non-nullable <c>Bool</c>, a <c>Primitive(ptype, NonNullable)</c> read out of metadata, and
     /// so on.

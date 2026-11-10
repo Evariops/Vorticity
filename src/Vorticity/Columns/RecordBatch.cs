@@ -37,9 +37,6 @@ public sealed class RecordBatch : IDisposable
     private ScanContext? _context;
     private CanonicalArena _arena;
 
-    // The pool an owned context goes back to when the batch is disposed, rather than being disposed; null for none.
-    private Arrays.ScanContexts? _home;
-
     /// <summary>The arena a disposed copy points at in place of the one it gave back: empty, and never written.</summary>
     private static readonly CanonicalArena Released = new CanonicalArena(1);
     private int _root;
@@ -264,10 +261,10 @@ public sealed class RecordBatch : IDisposable
 
     /// <summary>
     /// A batch that takes over <paramref name="context"/>: its arena and segments are released when the batch is disposed,
-    /// the context given back to <paramref name="home"/> when one is named, disposed otherwise.
+    /// the context given back to the pool it came from when it names one (<see cref="ScanContext.Home"/>), disposed otherwise.
     /// </summary>
-    internal static RecordBatch Adopt(ScanContext context, int root, long startRow, VortexSchema? schema, VortexSession? session, Arrays.ScanContexts? home = null) =>
-        new RecordBatch(context.Canonical, root, startRow, context, owns: true) { _publicSchema = schema, Session = session, _home = home };
+    internal static RecordBatch Adopt(ScanContext context, int root, long startRow, VortexSchema? schema, VortexSession? session) =>
+        new RecordBatch(context.Canonical, root, startRow, context, owns: true) { _publicSchema = schema, Session = session };
 
     /// <summary>The session whose pool the batch's buffers come from.</summary>
     internal VortexSession? Session { get; private init; }
@@ -688,9 +685,9 @@ public sealed class RecordBatch : IDisposable
         {
             if (_context is not null)
             {
-                if (_home is not null)
+                if (_context.Home is { } home)
                 {
-                    _home.Return(_context);
+                    home.Return(_context);
                 }
                 else
                 {

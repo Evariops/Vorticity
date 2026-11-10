@@ -108,9 +108,10 @@ internal sealed class ScanContexts : ISweptAfterCollections
 
         if (context is null)
         {
-            return new ScanContext(arrayEncodingIds, options);
+            return new ScanContext(arrayEncodingIds, options) { Home = this };
         }
 
+        context.Home = this;
         context.RebindEncodings(arrayEncodingIds, options);
         return context;
     }

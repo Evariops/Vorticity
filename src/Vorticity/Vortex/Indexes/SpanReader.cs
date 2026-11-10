@@ -574,7 +574,7 @@ internal sealed class SpanReader : IDisposable
 
         int root = context.Canonical.AddStruct(
             schema, length, schema.IsNullable ? Validity.AllValid : Validity.NonNullable, decoded);
-        return RecordBatch.Adopt(context, root, span.Start, null, null, Contexts);
+        return RecordBatch.Adopt(context, root, span.Start, null, null);
     }
 
     /// <summary>
