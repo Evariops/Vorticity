@@ -229,6 +229,12 @@ public sealed record DatasetOptions
     internal int ChunkBytes { get; init; } = 1 << 20;
 
     /// <summary>
+    /// The bytes a handle keeps of the granules its filters kept rows in (<see cref="PredicatePages"/>), least used first
+    /// out: 16 MiB by default; 0 keeps none, the session's synopsis cache, when it has one, then holding them alone.
+    /// </summary>
+    internal long PredicatePageBytes { get; init; } = PredicatePages.DefaultBudget;
+
+    /// <summary>
     /// The rows after which the chunks of every column of an object end together, at least: 2^22 by default. A lane's
     /// range of the object is cut where they do, so that no chunk is read by two lanes.
     /// </summary>

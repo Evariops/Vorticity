@@ -65,6 +65,7 @@ public sealed class VortexDataset : IAsyncDisposable
         _options = options;
         _objects = new ObjectCache(store, options.MaxOpenObjects, options.Session, options.MaxOpenObjectBytes);
         _pageCache = new PageCache(options.PageCacheBytes);
+        Predicates = new PredicatePages(options.PredicatePageBytes);
         _snapshot = new DatasetSnapshot(commit, PagesOf(version, commit), _objects, knownAt, Costs);
     }
 
@@ -3084,7 +3085,7 @@ public sealed class VortexDataset : IAsyncDisposable
     internal PartitionIndexCache PartitionIndexes { get; } = new PartitionIndexCache(PartitionIndexBytes);
 
     /// <summary>The granules where the filters this handle evaluated on its objects' rows kept a row (<see cref="PredicatePages"/>).</summary>
-    internal PredicatePages Predicates { get; } = new PredicatePages();
+    internal PredicatePages Predicates { get; }
 
     /// <summary>
     /// What reading the dataset costs (spec B, 2.3): its options' profile when they give one, its store's otherwise, a remote
