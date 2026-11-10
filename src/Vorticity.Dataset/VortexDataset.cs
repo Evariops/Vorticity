@@ -3008,7 +3008,7 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <paramref name="named"/> of its locating indexes alone, or, when null, the directory whole, its entries on the columns
     /// <paramref name="indexed"/> keeps; null when it does not parse.
     /// </summary>
-    private static Task<Indexes.IndexDirectory?> LocatingAsync(
+    private Task<Indexes.IndexDirectory?> LocatingAsync(
         ObjectEntry entry, Indexes.IndexSegment region, ISegmentReader reader, Func<uint, bool>? indexed, List<Indexes.IndexSegment>? named,
         CancellationToken cancellationToken)
     {
@@ -3027,21 +3027,49 @@ public sealed class VortexDataset : IAsyncDisposable
 
         // The entries alone, a directory of them over the object's rows: each checked against its own checksum, one that fails
         // costing itself, as in a directory read whole.
+        // The entries alone, each parsed once for the object it lies in and kept (IndexEntries), read only when none is.
         async Task<Indexes.IndexDirectory?> EntriesAsync(List<Indexes.IndexSegment> regions)
         {
-            using SegmentRequestSet requests = new SegmentRequestSet(regions.Count);
-            int[] slots = new int[regions.Count];
+            Indexes.IndexEntry?[] found = new Indexes.IndexEntry?[regions.Count];
+            int missing = 0;
             for (int i = 0; i < regions.Count; i++)
             {
-                slots[i] = requests.Add(new Serialization.Schemas.SegmentSpec(regions[i].Offset, regions[i].Length, regions[i].AlignmentExponent, 0, 0));
+                missing += _indexEntries.TryGet((entry.Uid, regions[i].Offset), out Indexes.IndexEntry known) ? 0 : 1;
+                found[i] = known;
             }
 
-            await reader.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
-            List<Indexes.IndexEntry> kept = new List<Indexes.IndexEntry>(regions.Count);
-            for (int i = 0; i < regions.Count; i++)
+            if (missing > 0)
             {
-                ReadOnlySpan<byte> bytes = requests.GetBuffer(slots[i]).Span;
-                if (regions[i].Holds(bytes) && Indexes.IndexDirectory.TryParseEntry(bytes, region.Offset, out Indexes.IndexEntry? index))
+                using SegmentRequestSet requests = new SegmentRequestSet(missing);
+                int[] slots = new int[regions.Count];
+                for (int i = 0; i < regions.Count; i++)
+                {
+                    slots[i] = found[i] is null
+                        ? requests.Add(new Serialization.Schemas.SegmentSpec(regions[i].Offset, regions[i].Length, regions[i].AlignmentExponent, 0, 0))
+                        : -1;
+                }
+
+                await reader.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
+                for (int i = 0; i < regions.Count; i++)
+                {
+                    if (slots[i] < 0)
+                    {
+                        continue;
+                    }
+
+                    ReadOnlySpan<byte> bytes = requests.GetBuffer(slots[i]).Span;
+                    if (regions[i].Holds(bytes) && Indexes.IndexDirectory.TryParseEntry(bytes, region.Offset, out Indexes.IndexEntry? index))
+                    {
+                        _indexEntries.Keep((entry.Uid, regions[i].Offset), index, IndexEntryBytes + (2L * regions[i].Length), out index);
+                        found[i] = index;
+                    }
+                }
+            }
+
+            List<Indexes.IndexEntry> kept = new List<Indexes.IndexEntry>(regions.Count);
+            foreach (Indexes.IndexEntry? index in found)
+            {
+                if (index is not null)
                 {
                     kept.Add(index);
                 }
@@ -4189,6 +4217,17 @@ public sealed class VortexDataset : IAsyncDisposable
 
     // The end of each subtree a keyless partitioned dataset's appends found (SubtreeEndAsync), by its page: a megabyte's worth.
     private readonly ClockMemo<PageReference, long> _subtreeEnds = new ClockMemo<PageReference, long>(1L << 20);
+
+    /// <summary>
+    /// The entries of objects' index directories a lookup read, parsed, by object and region, which do not change: each
+    /// locating index's entry of every object a lookup reached was read and parsed at every question, 15 % of what a search
+    /// of one identifier allocated. Within 4 MiB, an entry weighed twice its bytes.
+    /// </summary>
+    private readonly ClockMemo<(UInt128 Uid, ulong Offset), Indexes.IndexEntry> _indexEntries =
+        new ClockMemo<(UInt128 Uid, ulong Offset), Indexes.IndexEntry>(4L << 20);
+
+    /// <summary>What an entry kept weighs besides its bytes: the record, its lists and the memo's slot.</summary>
+    private const long IndexEntryBytes = 256;
 
     /// <summary>What a change reports when its filter can match no row: nothing read, nothing committed.</summary>
     private RowChangeResult Unchanged() => new RowChangeResult { Version = Version, Outcome = OperationOutcome.AlreadyThere };
