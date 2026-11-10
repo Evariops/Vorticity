@@ -87,6 +87,32 @@ public sealed class SumKernelsTests
     }
 
     [Fact]
+    public void WordSumsCrossTheBlocksTheirLanesAreWidenedAt()
+    {
+        // Lanes of 32 bits gain up to 65 536 a step: past 32 768 steps of extremes, a lane widened
+        // too late has overflowed.
+        foreach (int length in new[] { 600_000, 2_200_000 })
+        {
+            foreach (byte fill in new byte[] { 0xFF, 0x00 })
+            {
+                byte[] bytes = new byte[length * 2];
+                bytes.AsSpan().Fill(fill);
+                if (fill == 0x00)
+                {
+                    // Every word -32 768, the signed minimum.
+                    for (int i = 1; i < bytes.Length; i += 2)
+                    {
+                        bytes[i] = 0x80;
+                    }
+                }
+
+                Check<ushort>(bytes, length);
+                Check<short>(bytes, length);
+            }
+        }
+    }
+
+    [Fact]
     public void SixtyFourBitSumsAreExactAtTheEndsOfTheRange()
     {
         foreach (int length in Lengths)
