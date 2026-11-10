@@ -435,8 +435,7 @@ internal sealed class FilterEvaluator
                     Evaluate(conjuncts[next], arena, rootIndex, rows, default, other, 2);
                 }
 
-                Trilean.And(destination, other);
-                int now = destination.Count(Trilean.False);
+                int now = Trilean.AndCountingFalse(destination, other);
                 Observe(next, now - ruledOut, evaluated - ruledOut);
                 ruledOut = now;
             }

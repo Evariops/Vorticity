@@ -40,6 +40,74 @@ internal static class Trilean
     internal static void And(Span<byte> left, ReadOnlySpan<byte> right) => Combine(left, right, AndTable);
 
     /// <summary>
+    /// <c>left AND right</c> in place over <paramref name="left"/>, as <see cref="And"/>, the rows it leaves false counted
+    /// in the same pass: a conjunct's verdicts joined to those before it, and the rows they rule out together. A count
+    /// after the conjunction read every state again, 5.35 µs over 65,536 rows where the conjunction alone takes 1.33.
+    /// </summary>
+    /// <param name="left">The accumulator, overwritten.</param>
+    /// <param name="right">The other operand; at least as long.</param>
+    /// <returns>The rows of <paramref name="left"/> false after the conjunction.</returns>
+    internal static int AndCountingFalse(Span<byte> left, ReadOnlySpan<byte> right)
+    {
+        if (right.Length < left.Length)
+        {
+            throw new ArgumentException("The operands differ in length.", nameof(right));
+        }
+
+        ref byte a0 = ref MemoryMarshal.GetReference(left);
+        ref byte b0 = ref MemoryMarshal.GetReference(right);
+        Vector128<byte> table = AndTable;
+        int i = 0;
+        int count = 0;
+        if (Vector512.IsHardwareAccelerated)
+        {
+            Vector512<byte> wide = Vector512.Create(table);
+            for (; i <= left.Length - Vector512<byte>.Count; i += Vector512<byte>.Count)
+            {
+                Vector512<byte> a = Vector512.LoadUnsafe(ref a0, (nuint)i);
+                Vector512<byte> b = Vector512.LoadUnsafe(ref b0, (nuint)i);
+                Vector512<byte> joined = Vector512.ShuffleNative(wide, (a << 2) | b);
+                joined.StoreUnsafe(ref a0, (nuint)i);
+                count += BitOperations.PopCount(Vector512.Equals(joined, Vector512<byte>.Zero).ExtractMostSignificantBits());
+            }
+        }
+
+        if (Vector256.IsHardwareAccelerated)
+        {
+            Vector256<byte> wide = Vector256.Create(table);
+            for (; i <= left.Length - Vector256<byte>.Count; i += Vector256<byte>.Count)
+            {
+                Vector256<byte> a = Vector256.LoadUnsafe(ref a0, (nuint)i);
+                Vector256<byte> b = Vector256.LoadUnsafe(ref b0, (nuint)i);
+                Vector256<byte> joined = Vector256.ShuffleNative(wide, (a << 2) | b);
+                joined.StoreUnsafe(ref a0, (nuint)i);
+                count += BitOperations.PopCount(Vector256.Equals(joined, Vector256<byte>.Zero).ExtractMostSignificantBits());
+            }
+        }
+
+        if (Vector128.IsHardwareAccelerated)
+        {
+            for (; i <= left.Length - Vector128<byte>.Count; i += Vector128<byte>.Count)
+            {
+                Vector128<byte> a = Vector128.LoadUnsafe(ref a0, (nuint)i);
+                Vector128<byte> b = Vector128.LoadUnsafe(ref b0, (nuint)i);
+                Vector128<byte> joined = Vector128.ShuffleNative(table, (a << 2) | b);
+                joined.StoreUnsafe(ref a0, (nuint)i);
+                count += BitOperations.PopCount(Vector128.Equals(joined, Vector128<byte>.Zero).ExtractMostSignificantBits());
+            }
+        }
+
+        for (; i < left.Length; i++)
+        {
+            byte joined = table.GetElement(((left[i] << 2) | right[i]) & 15);
+            left[i] = joined;
+            count += joined == False ? 1 : 0;
+        }
+
+        return count;
+    }
+
+    /// <summary>
     /// <c>left OR right</c>, in place over <paramref name="left"/>.
     /// </summary>
     /// <remarks><c>unknown OR true = true</c>, the mirror of the AND rule.</remarks>
