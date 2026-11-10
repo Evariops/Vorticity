@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Text;
+using System.Threading;
 using Vorticity.Serialization.Protobuf;
 using Vorticity.Types;
 using Vorticity.Types.Serialization;
@@ -85,7 +86,7 @@ internal sealed class ObjectContents(
     internal IReadOnlyList<(int Field, IndexSegment Region)> Sheets { get; init; } = [];
 
     /// <summary>The region of column <paramref name="field"/>'s sheet, or null when the object keeps none of it.</summary>
-    internal IndexSegment? SheetOf(int field) => RegionOf(Sheets, field);
+    internal IndexSegment? SheetOf(int field) => ByField(ref _sheetsByField, Sheets, field);
 
     /// <summary>
     /// Each top-level column's counts (<see cref="ColumnCounts"/>), and its region: what a question on that column
@@ -94,7 +95,7 @@ internal sealed class ObjectContents(
     internal IReadOnlyList<(int Field, IndexSegment Region)> Counts { get; init; } = [];
 
     /// <summary>The region of column <paramref name="field"/>'s counts, or null when the object keeps none of it.</summary>
-    internal IndexSegment? CountsOf(int field) => RegionOf(Counts, field);
+    internal IndexSegment? CountsOf(int field) => ByField(ref _countsByField, Counts, field);
 
     /// <summary>
     /// Each top-level column's sketches of its counts (<see cref="ColumnSketches"/>), and its region, right after the
@@ -103,7 +104,7 @@ internal sealed class ObjectContents(
     internal IReadOnlyList<(int Field, IndexSegment Region)> Sketches { get; init; } = [];
 
     /// <summary>The region of the sketches of column <paramref name="field"/>'s counts, or null when the object keeps none of it.</summary>
-    internal IndexSegment? SketchesOf(int field) => RegionOf(Sketches, field);
+    internal IndexSegment? SketchesOf(int field) => ByField(ref _sketchesByField, Sketches, field);
 
     /// <summary>
     /// The statistics of each column over the object's granules (<see cref="Indexes.GranuleStats"/>) and their regions: what a
@@ -112,7 +113,7 @@ internal sealed class ObjectContents(
     internal IReadOnlyList<(int Field, IndexSegment Region)> GranuleStats { get; init; } = [];
 
     /// <summary>The region of column <paramref name="field"/>'s statistics over the granules, or null when the object keeps none of it.</summary>
-    internal IndexSegment? GranuleStatsOf(int field) => RegionOf(GranuleStats, field);
+    internal IndexSegment? GranuleStatsOf(int field) => ByField(ref _granuleStatsByField, GranuleStats, field);
 
     /// <summary>
     /// Each measure's histograms over the object's granules (<see cref="Indexes.GranuleHistograms"/>) and their regions: what a
@@ -121,7 +122,7 @@ internal sealed class ObjectContents(
     internal IReadOnlyList<(int Field, IndexSegment Region)> GranuleHistograms { get; init; } = [];
 
     /// <summary>The region of measure <paramref name="field"/>'s histograms over the granules, or null when the object keeps none of it.</summary>
-    internal IndexSegment? GranuleHistogramsOf(int field) => RegionOf(GranuleHistograms, field);
+    internal IndexSegment? GranuleHistogramsOf(int field) => ByField(ref _granuleHistogramsByField, GranuleHistograms, field);
 
     /// <summary>
     /// Where each value of each column lies, granule by granule (<see cref="ColumnLocate"/>), and their regions: what a filter
@@ -130,7 +131,7 @@ internal sealed class ObjectContents(
     internal IReadOnlyList<(int Field, IndexSegment Region)> Locates { get; init; } = [];
 
     /// <summary>The region of where column <paramref name="field"/>'s values lie, or null when the object keeps none of it.</summary>
-    internal IndexSegment? LocateOf(int field) => RegionOf(Locates, field);
+    internal IndexSegment? LocateOf(int field) => ByField(ref _locatesByField, Locates, field);
 
     /// <summary>
     /// Where each value of each shredded key of a variant column lies, read in its class (spec E, 3.3): the variant column,
@@ -326,17 +327,41 @@ internal sealed class ObjectContents(
     /// </summary>
     internal IReadOnlyList<ColumnDictionary?> Dictionaries { get; init; } = [];
 
-    private static IndexSegment? RegionOf(IReadOnlyList<(int Field, IndexSegment Region)> regions, int field)
+    // Each kind's regions by their field, made at the first lookup: a plan asks them of every object, each a scan of the
+    // list through its interface, a question of many columns over wide objects as many as the columns over each.
+    private IndexSegment?[]? _sheetsByField;
+    private IndexSegment?[]? _countsByField;
+    private IndexSegment?[]? _sketchesByField;
+    private IndexSegment?[]? _granuleStatsByField;
+    private IndexSegment?[]? _granuleHistogramsByField;
+    private IndexSegment?[]? _locatesByField;
+
+    /// <summary>The region of <paramref name="field"/> among <paramref name="regions"/>, through their table by field, made once; the first of a field wins, as a scan finds it.</summary>
+    private static IndexSegment? ByField(ref IndexSegment?[]? byField, IReadOnlyList<(int Field, IndexSegment Region)> regions, int field)
     {
-        for (int i = 0; i < regions.Count; i++)
+        IndexSegment?[]? table = Volatile.Read(ref byField);
+        if (table is null)
         {
-            if (regions[i].Field == field)
+            int most = -1;
+            for (int i = 0; i < regions.Count; i++)
             {
-                return regions[i].Region;
+                most = Math.Max(most, regions[i].Field);
             }
+
+            table = new IndexSegment?[most + 1];
+            for (int i = regions.Count - 1; i >= 0; i--)
+            {
+                (int at, IndexSegment region) = regions[i];
+                if (at >= 0)
+                {
+                    table[at] = region;
+                }
+            }
+
+            Volatile.Write(ref byField, table);
         }
 
-        return null;
+        return (uint)field < (uint)table.Length ? table[field] : null;
     }
 
     /// <summary>
