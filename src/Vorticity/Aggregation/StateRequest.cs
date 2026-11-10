@@ -310,3 +310,59 @@ internal sealed class StateRequest
     private static bool Numeric(PType ptype) =>
         ptype is PType.I8 or PType.I16 or PType.I32 or PType.I64 or PType.U8 or PType.U16 or PType.U32 or PType.U64 or PType.F32 or PType.F64;
 }
+
+/// <summary>
+/// The names of a measure's columns in a batch of states, in UTF-8, made once for the partition: a batch of states made
+/// nine of them again for each measure, and looked each up through its encoding, the first allocation of a question
+/// its objects' states answer (`AuditDatasetQuestionBenchmarks.GroupBySums`).
+/// </summary>
+internal sealed class StateNames
+{
+    internal StateNames(string column)
+    {
+        Values = Utf8(StateRequest.ValuesOf(column));
+        IntegerSums = Sums(column, floats: false);
+        FloatSums = Sums(column, floats: true);
+        Least = Utf8(StateRequest.LeastOf(column));
+        Greatest = Utf8(StateRequest.GreatestOf(column));
+        Sketch = Utf8(StateRequest.SketchOf(column));
+    }
+
+    /// <summary>The column of the rows each row of states stands for.</summary>
+    internal static byte[] Rows { get; } = Utf8(StateRequest.RowsColumn);
+
+    /// <summary>The column of how many values a row of states folds.</summary>
+    internal byte[] Values { get; }
+
+    /// <summary>The columns of the sum's words for integers.</summary>
+    internal byte[][] IntegerSums { get; }
+
+    /// <summary>The columns of the sum's words for floats.</summary>
+    internal byte[][] FloatSums { get; }
+
+    /// <summary>The column of the least value.</summary>
+    internal byte[] Least { get; }
+
+    /// <summary>The column of the greatest value.</summary>
+    internal byte[] Greatest { get; }
+
+    /// <summary>The column of the values' sketch, which a table of sketches holds.</summary>
+    internal byte[] Sketch { get; }
+
+    /// <summary>The name of the distinct sketch of <paramref name="column"/>'s values, in UTF-8.</summary>
+    internal static byte[] DistinctOf(string column) => Utf8(StateRequest.DistinctOf(column));
+
+    private static byte[][] Sums(string column, bool floats)
+    {
+        ReadOnlySpan<string> words = MeasureLayout.SumWords(floats);
+        byte[][] sums = new byte[words.Length][];
+        for (int i = 0; i < words.Length; i++)
+        {
+            sums[i] = Utf8(StateRequest.SumWord(column, words[i]));
+        }
+
+        return sums;
+    }
+
+    private static byte[] Utf8(string name) => System.Text.Encoding.UTF8.GetBytes(name);
+}

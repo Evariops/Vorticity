@@ -46,6 +46,10 @@ public partial class AuditDatasetQuestionBenchmarks
     [VortexRecord]
     public partial record struct ServiceCount(string Service, long Count);
 
+    /// <summary>A service's count, sum and greatest value.</summary>
+    [VortexRecord]
+    public partial record struct ServiceSum(string Service, long Count, double Sum, double Max);
+
     /// <summary>Writes the dataset.</summary>
     [GlobalSetup]
     public void Setup()
@@ -89,6 +93,13 @@ public partial class AuditDatasetQuestionBenchmarks
     public long GroupByRange() => GroupsAsync(_dataset.Scan<Event>()
         .Where(e => e.Key >= (300L * 1_024) + 100 && e.Key < (1_700L * 1_024) + 900)).GetAwaiter().GetResult();
 
+    /// <summary>
+    /// Every row's value summed and its greatest, by service (audit AG-21): on "sealed", each object's states answer it,
+    /// a batch of states an object, whose measure's columns are found by name.
+    /// </summary>
+    [Benchmark]
+    public long GroupBySums() => SumsAsync(_dataset.Scan<Event>()).GetAwaiter().GetResult();
+
     /// <summary>The rows whose value is below one half.</summary>
     [Benchmark]
     public long Count() => _dataset.Scan<Event>().Where(e => e.Value < 0.5).CountAsync().AsTask().GetAwaiter().GetResult();
@@ -97,6 +108,18 @@ public partial class AuditDatasetQuestionBenchmarks
     {
         long read = 0;
         await foreach (Columns<ServiceCount> batch in scan.GroupBy(e => e.Service).Select(g => (g.Key, g.Count())).As<ServiceCount>())
+        {
+            read += Vorticity.Bench.Scenarios.Consume.Typed(batch);
+        }
+
+        return read;
+    }
+
+    private static async Task<long> SumsAsync(Scan<Event> scan)
+    {
+        long read = 0;
+        await foreach (Columns<ServiceSum> batch in scan.GroupBy(e => e.Service)
+            .Select(g => (g.Key, g.Count(), g.Sum(e => e.Value), g.Max(e => e.Value))).As<ServiceSum>())
         {
             read += Vorticity.Bench.Scenarios.Consume.Typed(batch);
         }

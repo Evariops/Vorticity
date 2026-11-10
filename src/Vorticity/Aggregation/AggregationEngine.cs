@@ -826,7 +826,10 @@ internal sealed class AggregationPartition
     private readonly int[] _nodes;
 
     // The column of distinct sketches of each distinct count's column a batch of states may hold, named at the first.
-    private string?[]? _distinctColumns;
+    private byte[]?[]? _distinctColumns;
+
+    // The names of each measure's columns in a batch of states, made at the first batch.
+    private StateNames?[]? _stateNames;
 
     // The filter of each aggregate, or -1, and the selection of each filter over the batch.
     private readonly int[] _filterOf;
@@ -2649,7 +2652,7 @@ internal sealed class AggregationPartition
             Slots[i].EnsureGroups(count);
         }
 
-        ReadOnlySpan<long> stood = StateColumn(arena, root, StateRequest.RowsColumn);
+        ReadOnlySpan<long> stood = StateColumn(arena, root, StateNames.Rows);
         long number = 0;
         for (int i = 0; i < Slots.Length; i++)
         {
@@ -2663,8 +2666,8 @@ internal sealed class AggregationPartition
                 // A table of sketches holds the sketch of the column's values in each row, in place of the column, which
                 // an approximate count merges.
                 int column = _inputs[i];
-                _distinctColumns ??= new string?[Slots.Length];
-                string sketches = _distinctColumns[i] ??= StateRequest.DistinctOf(StateRequest.NameOf(_columns[column].Field));
+                _distinctColumns ??= new byte[]?[Slots.Length];
+                byte[] sketches = _distinctColumns[i] ??= StateNames.DistinctOf(StateRequest.NameOf(_columns[column].Field));
                 if (Sketched(arena, root, sketches, stood, out StateInput distinct))
                 {
                     if (_plan.Aggregates[i].Kind != AggregateKind.ApproximateCountDistinct || !Slots[i].StepStates(in distinct, selection, groups))
@@ -2690,9 +2693,14 @@ internal sealed class AggregationPartition
                 continue;
             }
 
-            StateInput input = StatesOf(
-                arena, root, _plan.Aggregates[i].Input is { } measured ? StateRequest.NameOf(measured.Field) : null, stood,
-                sketched: _plan.Aggregates[i].Kind is AggregateKind.Distribution or AggregateKind.Quantile);
+            StateNames? names = null;
+            if (_plan.Aggregates[i].Input is { } measured)
+            {
+                _stateNames ??= new StateNames?[Slots.Length];
+                names = _stateNames[i] ??= new StateNames(StateRequest.NameOf(measured.Field));
+            }
+
+            StateInput input = StatesOf(arena, root, names, stood, sketched: _plan.Aggregates[i].Kind is AggregateKind.Distribution or AggregateKind.Quantile);
             if (!Slots[i].StepStates(in input, selection, groups))
             {
                 throw new InvalidOperationException($"A batch of states reached the aggregate {_plan.Aggregates[i].Kind}, which folds none.");
@@ -2714,38 +2722,37 @@ internal sealed class AggregationPartition
     internal ReadOnlySpan<int> StateGroups(int rows) => _rowGroups.AsSpan(0, rows);
 
     /// <summary>
-    /// The states of <paramref name="column"/>'s aggregate in a batch of states, and with <paramref name="sketched"/>, a
-    /// distribution's, its sketches; the rows alone for a count of rows.
+    /// The states of the aggregate whose measure's columns <paramref name="names"/> names in a batch of states, and with
+    /// <paramref name="sketched"/>, a distribution's, its sketches; the rows alone for a count of rows.
     /// </summary>
-    private static StateInput StatesOf(CanonicalArena arena, int root, string? column, ReadOnlySpan<long> rows, bool sketched)
+    private static StateInput StatesOf(CanonicalArena arena, int root, StateNames? names, ReadOnlySpan<long> rows, bool sketched)
     {
-        if (column is null)
+        if (names is null)
         {
             return new StateInput { Rows = rows };
         }
 
         CanonicalNode batch = arena.GetNode(root);
-        bool floats = batch.DType.IndexOfField(StateRequest.SumWord(column, MeasureLayout.SumWords(floats: true)[0])) >= 0;
+        bool floats = batch.DType.IndexOfField(names.FloatSums[0]) >= 0;
 
-        // The columns MeasureLayout.Names lists, named one at a time: a batch of states would otherwise allocate their
-        // array, per measure and per batch.
-        ReadOnlySpan<string> sum = MeasureLayout.SumWords(floats);
+        // The columns MeasureLayout.Names lists, found one at a time by their names in UTF-8, made once for the partition.
+        byte[][] sum = floats ? names.FloatSums : names.IntegerSums;
 
         // A table of sketches holds each measure's besides its states, a binary column of them, which a distribution alone
-        // looks for: its name is made for the batch.
+        // looks for.
         StateInput sketches = default;
-        bool sketch = sketched && Sketched(arena, root, StateRequest.SketchOf(column), rows, out sketches);
+        bool sketch = sketched && Sketched(arena, root, names.Sketch, rows, out sketches);
         return new StateInput
         {
             Rows = rows,
-            Values = StateColumn(arena, root, StateRequest.ValuesOf(column)),
-            Sum0 = StateColumn(arena, root, StateRequest.SumWord(column, sum[0])),
-            Sum1 = StateColumn(arena, root, StateRequest.SumWord(column, sum[1])),
-            Sum2 = floats ? StateColumn(arena, root, StateRequest.SumWord(column, sum[2])) : default,
-            Sum3 = floats ? StateColumn(arena, root, StateRequest.SumWord(column, sum[3])) : default,
-            Sum4 = floats ? StateColumn(arena, root, StateRequest.SumWord(column, sum[4])) : default,
-            Least = StateColumn(arena, root, StateRequest.LeastOf(column)),
-            Greatest = StateColumn(arena, root, StateRequest.GreatestOf(column)),
+            Values = StateColumn(arena, root, names.Values),
+            Sum0 = StateColumn(arena, root, sum[0]),
+            Sum1 = StateColumn(arena, root, sum[1]),
+            Sum2 = floats ? StateColumn(arena, root, sum[2]) : default,
+            Sum3 = floats ? StateColumn(arena, root, sum[3]) : default,
+            Sum4 = floats ? StateColumn(arena, root, sum[4]) : default,
+            Least = StateColumn(arena, root, names.Least),
+            Greatest = StateColumn(arena, root, names.Greatest),
             Floats = floats,
             SketchViews = sketch ? sketches.SketchViews : default,
             SketchData = sketch ? sketches.SketchData : default,
@@ -2756,7 +2763,7 @@ internal sealed class AggregationPartition
     /// The sketches of the binary column <paramref name="name"/> of a batch of states, beside the rows each row of states
     /// stands for, when the batch holds the column.
     /// </summary>
-    private static bool Sketched(CanonicalArena arena, int root, string name, ReadOnlySpan<long> rows, out StateInput sketches)
+    private static bool Sketched(CanonicalArena arena, int root, ReadOnlySpan<byte> name, ReadOnlySpan<long> rows, out StateInput sketches)
     {
         CanonicalNode batch = arena.GetNode(root);
         int field = batch.DType.IndexOfField(name);
@@ -2769,7 +2776,7 @@ internal sealed class AggregationPartition
         CanonicalNode column = arena.GetNode(EncodedForms.Canonical(arena, batch.GetFieldIndex(field)));
         if (column.Kind != CanonicalKind.VarBinView)
         {
-            throw new InvalidOperationException($"The column '{name}' of a batch of states is not binary.");
+            throw new InvalidOperationException($"The column '{System.Text.Encoding.UTF8.GetString(name)}' of a batch of states is not binary.");
         }
 
         sketches = new StateInput { Rows = rows, SketchViews = column.Views.Span, SketchData = column.DataBuffers };
@@ -2777,19 +2784,19 @@ internal sealed class AggregationPartition
     }
 
     /// <summary>The 64-bit integers of the field <paramref name="name"/> of a batch of states.</summary>
-    private static ReadOnlySpan<long> StateColumn(CanonicalArena arena, int root, string name)
+    private static ReadOnlySpan<long> StateColumn(CanonicalArena arena, int root, ReadOnlySpan<byte> name)
     {
         CanonicalNode batch = arena.GetNode(root);
         int field = batch.DType.IndexOfField(name);
         if (field < 0)
         {
-            throw new InvalidOperationException($"A batch of states holds no column '{name}'.");
+            throw new InvalidOperationException($"A batch of states holds no column '{System.Text.Encoding.UTF8.GetString(name)}'.");
         }
 
         CanonicalNode column = arena.GetNode(batch.GetFieldIndex(field));
         if (column.Kind != CanonicalKind.Primitive || column.PType != PType.I64)
         {
-            throw new InvalidOperationException($"The column '{name}' of a batch of states is not 64-bit integers.");
+            throw new InvalidOperationException($"The column '{System.Text.Encoding.UTF8.GetString(name)}' of a batch of states is not 64-bit integers.");
         }
 
         return column.Values.Cast<long>();
