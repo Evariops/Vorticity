@@ -163,18 +163,12 @@ public partial class AuditRollupBuildBenchmarks
 
         public ObjectStoreCapabilities Capabilities => inner.Capabilities;
 
-        // A millisecond to the microsecond, off the caller's thread, as a round trip that holds no thread.
+        // A millisecond to the tenth, one clock completing every wait due, as a round trip that holds no thread: a wait
+        // that spun on a thread of the pool starved the pool under reads side by side.
         private Task Wait()
         {
             Interlocked.Increment(ref _requests);
-            return Task.Run(static () =>
-            {
-                long until = Stopwatch.GetTimestamp() + (Stopwatch.Frequency / 1_000);
-                while (Stopwatch.GetTimestamp() < until)
-                {
-                    Thread.SpinWait(20);
-                }
-            });
+            return Vorticity.Benchmarks.Queries.PreciseDelay.Delay(TimeSpan.FromMilliseconds(1));
         }
     }
 }

@@ -181,11 +181,26 @@ internal static class DatasetVacuum
         HashSet<PageReference> fragmentsSeen = [];
         Dictionary<ulong, long> live = [];
         CommitPageSource pages = new CommitPageSource(store);
-        foreach (ulong version in retained)
+
+        // The retained versions' commits opened a batch at a time side by side, then marked in turn: one after the other, a
+        // round trip each, a dataset that keeps thousands of versions waited for each.
+        const int OpenedAhead = 32;
+        Task<CommitObject>?[] opening = new Task<CommitObject>?[retained.Count];
+        for (int at = 0; at < retained.Count; at++)
         {
-            CommitObject commit = version == latest
-                ? head
-                : await CommitObject.OpenAsync(store, CommitKey.For(version), cancellationToken).ConfigureAwait(false);
+            if (at % OpenedAhead == 0)
+            {
+                for (int ahead = at; ahead < Math.Min(at + OpenedAhead, retained.Count); ahead++)
+                {
+                    opening[ahead] = retained[ahead] == latest
+                        ? null
+                        : CommitObject.OpenAsync(store, CommitKey.For(retained[ahead]), cancellationToken).AsTask();
+                }
+            }
+
+            ulong version = retained[at];
+            CommitObject commit = opening[at] is { } open ? await open.ConfigureAwait(false) : head;
+            opening[at] = null;
             pages.Open(version, commit);
             DatasetLevels trees = DatasetLevels.Of(commit.Header);
             foreach ((int _, DatasetTree tree) in trees.Occupied())
@@ -349,6 +364,8 @@ internal static class DatasetVacuum
                 return;
             }
 
+            // The children walked in turn: their pages asked for side by side read the regions of their commits once each,
+            // where a read after another finds the region it lies in held.
             foreach (InternalEntry child in TreePage.ReadInternal(page))
             {
                 await MarkAsync(child.Child, depth - 1, leaves).ConfigureAwait(false);
