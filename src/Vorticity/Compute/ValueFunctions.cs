@@ -32,7 +32,10 @@ internal sealed class FunctionFieldExpr : FieldExpr
 
     internal ValueFunction Function { get; }
 
-    internal override string Key => $"{Column.Key}.{Function.Text}";
+    /// <remarks>Made once: the expression does not change, and each zone's decision asked it again.</remarks>
+    internal override string Key => _key ??= $"{Column.Key}.{Function.Text}";
+
+    private string? _key;
 
     /// <summary>The values of the column's node through every function, the innermost first.</summary>
     internal int Apply(CanonicalArena arena, int node) =>

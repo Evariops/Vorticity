@@ -155,7 +155,10 @@ internal sealed class VariantFieldExpr : FieldExpr
             }
             : null;
 
-    internal override string Key => $"{Column.Key}{string.Concat(Steps)}.{Read}()";
+    /// <remarks>Made once: the expression does not change, and each zone's decision asked it again.</remarks>
+    internal override string Key => _key ??= $"{Column.Key}{string.Concat(Steps)}.{Read}()";
+
+    private string? _key;
 
     /// <summary>What separates the keys of a nested path in the name its indexes take (<see cref="KeyName"/>).</summary>
     internal const char NestedKeys = '\u001f';

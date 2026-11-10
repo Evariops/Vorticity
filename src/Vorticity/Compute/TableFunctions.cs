@@ -212,7 +212,10 @@ internal sealed class MappedFieldExpr : FieldExpr
 
     internal ValueTable Table { get; }
 
-    internal override string Key => $"{Column.Key}.{Table.Text}";
+    /// <remarks>Made once: the expression does not change, and each zone's decision asked it again.</remarks>
+    internal override string Key => _key ??= $"{Column.Key}.{Table.Text}";
+
+    private string? _key;
 
     /// <summary>The same table over another reference to the column: its name in an object of a dataset.</summary>
     internal MappedFieldExpr Over(FieldExpr column) =>

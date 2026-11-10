@@ -1660,6 +1660,13 @@ internal sealed class ZonePruner : IBlockPruner
     {
         System.Collections.Concurrent.ConcurrentDictionary<string, ZoneColumn?> through =
             _through ?? System.Threading.Interlocked.CompareExchange(ref _through, new(StringComparer.Ordinal), null) ?? _through!;
+
+        // Found without the closure the first one makes, which each decision made again: one a range of zones, one a block.
+        if (through.TryGetValue(function.Key, out ZoneColumn? held))
+        {
+            return held;
+        }
+
         return through.GetOrAdd(function.Key, _ =>
         {
             if (Find(function.Column) is not { HasStatistics: true } column)
