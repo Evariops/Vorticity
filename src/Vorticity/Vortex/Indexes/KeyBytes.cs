@@ -82,19 +82,20 @@ internal readonly record struct KeyLayout(KeyShape Shape, int Width, PType PType
             case KeyShape.Bytes:
                 return Math.Sign(left.SequenceCompareTo(right));
 
-            case KeyShape.Unsigned:
-                return CompareMagnitude(left, right);
-
-            case KeyShape.Signed:
-                bool leftNegative = (left[^1] & 0x80) != 0;
-                bool rightNegative = (right[^1] & 0x80) != 0;
-                if (leftNegative != rightNegative)
+            case KeyShape.Unsigned or KeyShape.Signed:
+                // Each key read once as an integer of its width, where the bytes were compared one at a time from the
+                // highest: keys that share their high bytes, as rising identifiers do, compared most of them.
+                bool signed = Shape == KeyShape.Signed;
+                return Width switch
                 {
-                    return leftNegative ? -1 : 1;
-                }
-
-                // Same sign: two's complement orders like the unsigned magnitude.
-                return CompareMagnitude(left, right);
+                    8 => signed
+                        ? BinaryPrimitives.ReadInt64LittleEndian(left).CompareTo(BinaryPrimitives.ReadInt64LittleEndian(right))
+                        : BinaryPrimitives.ReadUInt64LittleEndian(left).CompareTo(BinaryPrimitives.ReadUInt64LittleEndian(right)),
+                    4 => signed
+                        ? BinaryPrimitives.ReadInt32LittleEndian(left).CompareTo(BinaryPrimitives.ReadInt32LittleEndian(right))
+                        : BinaryPrimitives.ReadUInt32LittleEndian(left).CompareTo(BinaryPrimitives.ReadUInt32LittleEndian(right)),
+                    _ => SortKey(left).CompareTo(SortKey(right)),
+                };
 
             default:
                 return TotalFloat(left).CompareTo(TotalFloat(right));
@@ -123,19 +124,6 @@ internal readonly record struct KeyLayout(KeyShape Shape, int Width, PType PType
 
         // Two's complement orders like the unsigned value once its sign bit is flipped.
         return Shape == KeyShape.Signed ? value ^ (1UL << ((Width * 8) - 1)) : value;
-    }
-
-    private static int CompareMagnitude(ReadOnlySpan<byte> left, ReadOnlySpan<byte> right)
-    {
-        for (int i = left.Length - 1; i >= 0; i--)
-        {
-            if (left[i] != right[i])
-            {
-                return left[i] < right[i] ? -1 : 1;
-            }
-        }
-
-        return 0;
     }
 
     /// <summary>A float's bits mapped onto an unsigned integer in the total order.</summary>
