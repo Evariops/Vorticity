@@ -262,29 +262,37 @@ internal static class DatasetRollups
     private static async ValueTask<RollupEntry?> FromObjectsAsync(
         VortexDataset dataset, DatasetSnapshot version, DatasetKey key, int level, List<PositionedObject> objects, Run run, CancellationToken cancellationToken)
     {
-        RollupBuilder builder = new RollupBuilder(level, 1, key, version.Schema.Cut);
         for (int i = run.First; i < run.First + run.Count; i++)
         {
             PositionedObject held = objects[i];
-            if (held.Entry.HasDeletions || held.Entry.Contents is not { Counts.Count: > 0 } contents || !version.Schema.Holds(held.Entry))
+            if (held.Entry.HasDeletions || held.Entry.Contents is not { Counts.Count: > 0 } || !version.Schema.Holds(held.Entry))
             {
                 return null;
             }
+        }
 
-            List<(int Field, ColumnCounts Counts, ColumnSketches? Sketches)> counts = [];
-            foreach ((int field, IndexSegment _) in contents.Counts)
-            {
-                if (await dataset.ReadCountsAsync(held.Entry, field, sketches: true, cancellationToken).ConfigureAwait(false) is ({ } kept, var sketches))
-                {
-                    counts.Add((field, kept, sketches));
-                }
-            }
+        // The run's objects' counts read side by side, and summed in the run's order: an object at a time, a round trip each,
+        // a run of a day's hours waited for 24 of them in turn.
+        Task<List<(int Field, ColumnCounts Counts, ColumnSketches? Sketches)>>[] reads = new Task<List<(int, ColumnCounts, ColumnSketches?)>>[run.Count];
+        for (int i = 0; i < reads.Length; i++)
+        {
+            reads[i] = CountsOfAsync(dataset, objects[run.First + i].Entry, cancellationToken);
+        }
 
-            builder.AddObject(held, counts);
+        List<(int Field, ColumnCounts Counts, ColumnSketches? Sketches)>[] counted = await Task.WhenAll(reads).ConfigureAwait(false);
+        RollupBuilder builder = new RollupBuilder(level, 1, key, version.Schema.Cut);
+        for (int i = 0; i < counted.Length; i++)
+        {
+            builder.AddObject(objects[run.First + i], counted[i]);
         }
 
         return await WriteAsync(dataset, builder, cancellationToken).ConfigureAwait(false);
     }
+
+    /// <summary>The counts the object <paramref name="entry"/> names keeps, with their sketches, by column: every column's in one round trip.</summary>
+    private static async Task<List<(int Field, ColumnCounts Counts, ColumnSketches? Sketches)>> CountsOfAsync(
+        VortexDataset dataset, ObjectEntry entry, CancellationToken cancellationToken) =>
+        await dataset.ReadCountsWithSketchesAsync(entry, cancellationToken).ConfigureAwait(false);
 
     /// <summary>
     /// The rollup of rank <paramref name="rank"/> over <paramref name="run"/>'s runs of the rank below, from their rollups'
@@ -294,19 +302,35 @@ internal static class DatasetRollups
         VortexDataset dataset, DatasetSnapshot version, DatasetKey key, int level, int rank, List<PositionedObject> objects, List<List<Run>> ranks, Run run,
         Dictionary<string, RollupEntry> below, CancellationToken cancellationToken)
     {
-        RollupBuilder builder = new RollupBuilder(level, rank, key, version.Schema.Cut);
+        // The children's rollups, by the first object each run covers, over as many children as its run; their objects read
+        // side by side, where each was a round trip in turn.
+        RollupEntry[] children = new RollupEntry[run.Count];
         for (int i = run.First; i < run.First + run.Count; i++)
         {
-            // The child's rollup, by the first object its run covers, over as many children as its run, and all its regions.
             ReadOnlyMemory<byte> first = objects[FirstObject(ranks, rank, i)].TreeKey;
             if (!below.TryGetValue(Convert.ToHexString(first.Span), out RollupEntry? child) || child.Children != ranks[rank - 2][i].Count)
             {
                 return null;
             }
 
-            byte[] bytes = new byte[child.Bytes];
-            ObjectRead read = await dataset.Store.ReadAsync(child.Key, 0, bytes, null, cancellationToken).ConfigureAwait(false);
-            if (read.BytesRead != bytes.Length)
+            children[i - run.First] = child;
+        }
+
+        byte[][] objectBytes = new byte[children.Length][];
+        Task<ObjectRead>[] reads = new Task<ObjectRead>[children.Length];
+        for (int c = 0; c < children.Length; c++)
+        {
+            objectBytes[c] = new byte[children[c].Bytes];
+            reads[c] = dataset.Store.ReadAsync(children[c].Key, 0, objectBytes[c], null, cancellationToken).AsTask();
+        }
+
+        ObjectRead[] done = await Task.WhenAll(reads).ConfigureAwait(false);
+        RollupBuilder builder = new RollupBuilder(level, rank, key, version.Schema.Cut);
+        for (int c = 0; c < children.Length; c++)
+        {
+            RollupEntry child = children[c];
+            byte[] bytes = objectBytes[c];
+            if (done[c].BytesRead != bytes.Length)
             {
                 return null;
             }

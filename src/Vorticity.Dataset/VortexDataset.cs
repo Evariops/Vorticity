@@ -3400,6 +3400,42 @@ public sealed class VortexDataset : IAsyncDisposable
     }
 
     /// <summary>
+    /// The counts of every column the object <paramref name="entry"/> names keeps them of, with their sketches, as
+    /// <see cref="ReadCountsAsync"/> reads one column's, every column's regions side by side in one round trip where a column
+    /// at a time took one each: a column whose counts do not read is left out.
+    /// </summary>
+    internal async ValueTask<List<(int Field, Indexes.ColumnCounts Counts, Indexes.ColumnSketches? Sketches)>> ReadCountsWithSketchesAsync(
+        ObjectEntry entry, CancellationToken cancellationToken)
+    {
+        List<(int Field, Indexes.ColumnCounts Counts, Indexes.ColumnSketches? Sketches)> counted = [];
+        if (entry.Contents is not { Counts.Count: > 0 } contents)
+        {
+            return counted;
+        }
+
+        int fields = contents.Counts.Count;
+        Indexes.IndexSegment?[] regions = new Indexes.IndexSegment?[2 * fields];
+        for (int i = 0; i < fields; i++)
+        {
+            regions[2 * i] = contents.Counts[i].Region;
+            regions[(2 * i) + 1] = contents.SketchesOf(contents.Counts[i].Field);
+        }
+
+        object?[] read = new object?[regions.Length];
+        await ReadSynopsesAsync(entry, contents, regions, read, static (position, bytes) => CountsOrSketches(position % 2, bytes), cancellationToken)
+            .ConfigureAwait(false);
+        for (int i = 0; i < fields; i++)
+        {
+            if (read[2 * i] is Indexes.ColumnCounts counts)
+            {
+                counted.Add((contents.Counts[i].Field, counts, read[(2 * i) + 1] as Indexes.ColumnSketches));
+            }
+        }
+
+        return counted;
+    }
+
+    /// <summary>
     /// The counts of every column the object <paramref name="entry"/> names keeps them of, by the column's place, read as
     /// <see cref="ReadCountsAsync"/> reads one's, side by side in one round trip; null when it keeps none, or one of them
     /// does not read.
