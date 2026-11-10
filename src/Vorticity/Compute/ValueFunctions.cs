@@ -5,6 +5,7 @@ using System.Diagnostics;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
 using Vorticity.Arrays;
 using Vorticity.Buffers;
 using Vorticity.Expressions;
@@ -730,7 +731,35 @@ internal sealed class NumberBucket : ValueFunction
     {
         ReadOnlySpan<T> from = MemoryMarshal.Cast<byte, T>(source);
         Span<T> into = MemoryMarshal.Cast<byte, T>(destination);
-        for (int i = 0; i < from.Length; i++)
+        int i = 0;
+        if (Vector256.IsHardwareAccelerated && (typeof(T) == typeof(double) || typeof(T) == typeof(float)))
+        {
+            // The same division, floor and product of doubles, each rounded as the scalar line rounds it, four values a
+            // vector, a float widened to a double and the bucket narrowed back as the scalar line converts it: a value at
+            // a time called the floor for each.
+            Vector256<double> width = Vector256.Create(_float);
+            if (typeof(T) == typeof(double))
+            {
+                ref double at = ref Unsafe.As<T, double>(ref MemoryMarshal.GetReference(from));
+                ref double to = ref Unsafe.As<T, double>(ref MemoryMarshal.GetReference(into));
+                for (; i <= from.Length - 4; i += 4)
+                {
+                    (Vector256.Floor(Vector256.LoadUnsafe(ref at, (nuint)i) / width) * width).StoreUnsafe(ref to, (nuint)i);
+                }
+            }
+            else
+            {
+                ref float at = ref Unsafe.As<T, float>(ref MemoryMarshal.GetReference(from));
+                ref float to = ref Unsafe.As<T, float>(ref MemoryMarshal.GetReference(into));
+                for (; i <= from.Length - 8; i += 8)
+                {
+                    (Vector256<double> low, Vector256<double> high) = Vector256.Widen(Vector256.LoadUnsafe(ref at, (nuint)i));
+                    Vector256.Narrow(Vector256.Floor(low / width) * width, Vector256.Floor(high / width) * width).StoreUnsafe(ref to, (nuint)i);
+                }
+            }
+        }
+
+        for (; i < from.Length; i++)
         {
             into[i] = T.CreateTruncating(Math.Floor(double.CreateTruncating(from[i]) / _float) * _float);
         }
