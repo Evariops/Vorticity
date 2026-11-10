@@ -81,6 +81,9 @@ internal sealed class DistinctQuery : ResultQuery
     /// <summary>What the core did on the last run's path through it; null when the run took the values on the reader's thread, or no lane's cache filled.</summary>
     internal CoreRun? LastCore { get; set; }
 
+    /// <summary>The most bytes of batches the core's path handed on and the reader had not given back, at once.</summary>
+    internal long PeakEmitted { get; set; }
+
     internal override VortexSchema Schema
     {
         get
@@ -497,7 +500,13 @@ internal sealed class DistinctBatches : IAsyncEnumerator<RecordBatch>
         // as many as its threads would hold until the pass is over.
         spec = spec with { Options = spec.Options with { DegreeOfParallelism = degree - 1 } };
         int batchRows = spec.Options.BatchRows > 0 ? spec.Options.BatchRows : GroupBatches.BatchRows;
-        _emitter = new DistinctEmitter(_query, batchRows);
+
+        // The batches handed to the reader are held under the session's budget until it gives them back, the appliers
+        // waiting for it past their bound (DistinctEmitter).
+        _stopping = CancellationTokenSource.CreateLinkedTokenSource(_cancellationToken);
+        CancellationToken token = _stopping.Token;
+        _memory ??= new QueryMemory(projection.Host.Source.Session.Options.MemoryBudget ?? QueryMemoryBudget.Process);
+        _emitter = new DistinctEmitter(_query, batchRows, _memory, token);
         AggregationPlan plan = new AggregationPlan([], _query.Keys)
         {
             Core = true,
@@ -506,8 +515,6 @@ internal sealed class DistinctBatches : IAsyncEnumerator<RecordBatch>
             Emitter = _emitter,
         };
 
-        _stopping = CancellationTokenSource.CreateLinkedTokenSource(_cancellationToken);
-        CancellationToken token = _stopping.Token;
         _pass = Task.Run(() => PassAsync(projection, spec, plan, token), token);
         return true;
     }
@@ -593,6 +600,8 @@ internal sealed class DistinctBatches : IAsyncEnumerator<RecordBatch>
                 continue;
             }
 
+            // Out of the channel: the batch the reader holds until the next is not one the appliers wait on.
+            emitter.Taken(slate);
             long first = _position;
             _position += slate.Rows;
             int from = (int)Math.Clamp(_query.Skip - first, 0, slate.Rows);
@@ -651,7 +660,12 @@ internal sealed class DistinctBatches : IAsyncEnumerator<RecordBatch>
             _emitter!.Give(given);
         }
 
-        _emitter?.Release();
+        if (_emitter is { } emitter)
+        {
+            _query.PeakEmitted = Math.Max(_query.PeakEmitted, emitter.PeakWaiting);
+            emitter.Release();
+        }
+
         _stopping?.Dispose();
         _stopping = null;
         _cut?.Reset();
@@ -778,14 +792,44 @@ internal sealed class DistinctEmitter : CoreEmitter
     private readonly Lock _gate = new Lock();
     private readonly Stack<PartSlate> _slates = [];
     private readonly DType _dtype;
-    private bool _released;
+    private readonly QueryMemory? _memory;
+    private readonly CancellationToken _cancellationToken;
+    private readonly long _mostWaiting;
+    private readonly long _tranche;
 
-    internal DistinctEmitter(DistinctQuery query, int batchRows)
+    // What the appliers that wait for room wait on: a lock the runtime's Monitor waits on, which the gate's type cannot.
+    private readonly object _room = new object();
+    private volatile bool _released;
+
+    // The bytes of the batches in the channel, handed on and not given back by the reader; what the budget holds for
+    // them, a tranche at a time; the most of them at once; and the appliers waiting for room.
+    private long _waiting;
+    private long _reserved;
+    private long _peak;
+    private int _sleepers;
+
+    /// <summary>
+    /// The bytes the budget is asked for at a time as the batches waiting pass what it holds: asked a batch at a time, the
+    /// budget observed its state each time, and took the lean core's distinct of 4M values from 70 to 119 ms.
+    /// </summary>
+    private const long Tranche = 16L << 20;
+
+    /// <summary>How long an applier waits for room before it looks whether the pass was stopped, in milliseconds.</summary>
+    private const int WaitSlice = 50;
+
+    internal DistinctEmitter(DistinctQuery query, int batchRows, QueryMemory? memory = null, CancellationToken cancellationToken = default)
     {
         _query = query;
         _batchRows = batchRows;
+        _memory = memory;
+        _cancellationToken = cancellationToken;
+        _mostWaiting = Math.Max(1, query.Plan.EmittedBytes);
+        _tranche = Math.Min(Tranche, _mostWaiting);
         _dtype = VortexTypes.ToDType(query.Schema, new DTypeArena());
     }
+
+    /// <summary>The most bytes of batches handed on and not given back at once.</summary>
+    internal long PeakWaiting => Volatile.Read(ref _peak);
 
     /// <summary>The batches of values handed on, in the order they were.</summary>
     internal ChannelReader<PartSlate> Emitted => _emitted.Reader;
@@ -822,6 +866,7 @@ internal sealed class DistinctEmitter : CoreEmitter
     /// <summary>A batch back in the pool once delivered; let go once the result is.</summary>
     internal void Give(PartSlate slate)
     {
+        LetGo(slate);
         lock (_gate)
         {
             if (!_released)
@@ -842,6 +887,11 @@ internal sealed class DistinctEmitter : CoreEmitter
             _released = true;
         }
 
+        lock (_room)
+        {
+            Monitor.PulseAll(_room);
+        }
+
         foreach (PartSlate slate in _slates)
         {
             slate.Release();
@@ -850,7 +900,121 @@ internal sealed class DistinctEmitter : CoreEmitter
         _slates.Clear();
         while (_emitted.Reader.TryRead(out PartSlate? unread))
         {
+            LetGo(unread);
             unread.Release();
+        }
+
+        // The tranches the budget held for the batches that waited.
+        lock (_room)
+        {
+            if (_reserved > 0)
+            {
+                _memory?.LetGo(_reserved);
+                _reserved = 0;
+            }
+        }
+    }
+
+    /// <summary>
+    /// <paramref name="slate"/> taken out of the channel by the reader: no longer waiting. Counted until given back, the
+    /// batch the reader holds until it reads the next kept the appliers waiting on it, and the reader on them.
+    /// </summary>
+    internal void Taken(PartSlate slate) => LetGo(slate);
+
+    /// <summary>
+    /// <paramref name="slate"/> no longer waiting, the appliers that wait for room woken; the tranches the budget holds
+    /// kept until the result is let go.
+    /// </summary>
+    private void LetGo(PartSlate slate)
+    {
+        if (slate.Held > 0)
+        {
+            // The sleepers read after the bytes leave, as an applier reads the bytes after it counts itself among
+            // them: one of the two sees the other.
+            Interlocked.Add(ref _waiting, -slate.Held);
+            slate.Held = 0;
+            if (Volatile.Read(ref _sleepers) > 0)
+            {
+                lock (_room)
+                {
+                    Monitor.PulseAll(_room);
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Room for a batch of <paramref name="bytes"/> past those waiting for the reader: the budget asked for a tranche
+    /// more, up to the most the reader may have waiting; past it, or refused, the applier waits for the reader to give
+    /// batches back, as a bounded channel's writer would, rather than fail. A batch goes whatever its bytes when none
+    /// waits, so that no applier waits on another's.
+    /// </summary>
+    /// <exception cref="OperationCanceledException">The pass was stopped while the applier waited.</exception>
+    private void MakeRoom(long bytes)
+    {
+        lock (_room)
+        {
+            // Released, the result lets every tranche go under this lock: none is reserved after.
+            while (!_released && Volatile.Read(ref _waiting) + bytes > _reserved)
+            {
+                if (Grow())
+                {
+                    continue;
+                }
+
+                Interlocked.Increment(ref _sleepers);
+                try
+                {
+                    long waiting = Volatile.Read(ref _waiting);
+                    if (waiting == 0)
+                    {
+                        return;
+                    }
+
+                    if (waiting + bytes > _reserved)
+                    {
+                        Monitor.Wait(_room, WaitSlice);
+                    }
+                }
+                finally
+                {
+                    Interlocked.Decrement(ref _sleepers);
+                }
+
+                _cancellationToken.ThrowIfCancellationRequested();
+            }
+        }
+    }
+
+    /// <summary>
+    /// A tranche more held for the batches waiting, under the lock, up to the most they may take: a quarter of it, and so
+    /// on down to <see cref="LeastTranche"/>, when the budget refuses it, as a budget the core spills under does.
+    /// Whether it was.
+    /// </summary>
+    private bool Grow()
+    {
+        for (long ask = Math.Min(_tranche, _mostWaiting - _reserved); ask > 0; ask = ask > LeastTranche ? Math.Max(LeastTranche, ask / 4) : 0)
+        {
+            if (_memory is null || _memory.TryGrow(ask))
+            {
+                _memory?.Measure(ask);
+                Volatile.Write(ref _reserved, _reserved + ask);
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>The least tranche asked of a budget that refused larger ones.</summary>
+    private const long LeastTranche = 256 << 10;
+
+    /// <summary>The most bytes waiting raised to <paramref name="waiting"/> when past it.</summary>
+    private void Peak(long waiting)
+    {
+        long seen;
+        while (waiting > (seen = Volatile.Read(ref _peak)) && Interlocked.CompareExchange(ref _peak, waiting, seen) != seen)
+        {
         }
     }
 
@@ -887,6 +1051,22 @@ internal sealed class DistinctEmitter : CoreEmitter
 
         emission.Slate = null;
         slate.Seal();
+
+        // Counted until the reader gives it back: a reader slower than the appliers let the batches pile up in the
+        // channel, uncounted, the whole result once the core's parts came back from the scratch one at a time.
+        long bytes = slate.Arena.ByteSize(slate.Root);
+        if (Volatile.Read(ref _waiting) + bytes > Volatile.Read(ref _reserved))
+        {
+            MakeRoom(bytes);
+        }
+
+        slate.Held = bytes;
+        long waiting = Interlocked.Add(ref _waiting, bytes);
+        if (waiting > Volatile.Read(ref _peak))
+        {
+            Peak(waiting);
+        }
+
         if (!_emitted.Writer.TryWrite(slate))
         {
             Give(slate);

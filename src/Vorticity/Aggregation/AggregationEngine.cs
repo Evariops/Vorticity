@@ -381,6 +381,12 @@ internal sealed class AggregationPlan
     internal bool CoreDistinct { get; set; } = true;
 
     /// <summary>
+    /// The most bytes of a <c>Distinct</c>'s batches its core hands on ahead of the reader, held under the budget; past
+    /// them, its appliers wait for the reader. A setting for the tests to meet that wait.
+    /// </summary>
+    internal long EmittedBytes { get; set; } = 64L << 20;
+
+    /// <summary>
     /// Whether the core asked for (<see cref="Core"/>) is the lean one lanes turn to under pressure: α at 1,
     /// a part applied from 256 entries, batches of a kilobyte, its caches and batches sized on the
     /// budget: a <c>Distinct</c>'s, which tells its values as they enter their sets and spills under its
