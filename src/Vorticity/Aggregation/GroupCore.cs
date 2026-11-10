@@ -2380,6 +2380,10 @@ internal sealed class CoreApplier
     private int[] _next = [];
     private int[] _entryAt = [];
     private int[] _batchAt = [];
+
+    /// <summary>The numbers 0, 1, 2 and on, as many as a batch of entries has held: shared by every applier, never written once made.</summary>
+    private static int[] s_identity = [];
+
     private byte[] _bits = [];
     private int[] _clear = [];
     private int[] _set = [];
@@ -2545,15 +2549,14 @@ internal sealed class CoreApplier
         starts.Clear();
         if (tables == 1)
         {
+            // Each batch's entries in order: a copy of the first numbers and a fill, where a row at a time wrote both.
             int place = 0;
             for (int i = 0; i < count; i++)
             {
                 int length = _taken[i].Count;
-                for (int e = 0; e < length; e++, place++)
-                {
-                    _entryAt[place] = e;
-                    _batchAt[place] = i;
-                }
+                Identity(length).CopyTo(_entryAt.AsSpan(place, length));
+                _batchAt.AsSpan(place, length).Fill(i);
+                place += length;
             }
 
             starts[1] = entries;
@@ -2605,6 +2608,25 @@ internal sealed class CoreApplier
         return tables;
     }
 
+    /// <summary>The first <paramref name="length"/> numbers from 0; two appliers that grow them at once make two equal arrays, either one right.</summary>
+    private static ReadOnlySpan<int> Identity(int length)
+    {
+        int[] identity = Volatile.Read(ref s_identity);
+        if (identity.Length < length)
+        {
+            int[] grown = new int[Math.Max(length, 2 * identity.Length)];
+            for (int i = 0; i < grown.Length; i++)
+            {
+                grown[i] = i;
+            }
+
+            Volatile.Write(ref s_identity, grown);
+            identity = grown;
+        }
+
+        return identity.AsSpan(0, length);
+    }
+
     /// <summary>
     /// The entries [<paramref name="start"/>, <paramref name="end"/>) of the cut into the sub-table at
     /// <paramref name="index"/>, a run of one batch at a time while the sub-table is in cache. Past its
@@ -2622,11 +2644,8 @@ internal sealed class CoreApplier
         while (start < end)
         {
             int batch = _batchAt[start];
-            int run = start + 1;
-            while (run < end && _batchAt[run] == batch)
-            {
-                run++;
-            }
+            int past = _batchAt.AsSpan(start + 1, end - start - 1).IndexOfAnyExcept(batch);
+            int run = past < 0 ? end : start + 1 + past;
 
             Apply(table, _taken[batch], _entryAt.AsSpan(start, run - start));
             start = run;
