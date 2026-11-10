@@ -557,20 +557,31 @@ internal sealed class CountsAnswer
     /// </summary>
     internal StateRows? Rows(ColumnCounts counts, ColumnSketches? sketches, ObjectSummaries summaries)
     {
+        StateRows rows = new StateRows(this);
+        return Fill(rows, counts, sketches, summaries) ? rows : null;
+    }
+
+    /// <summary>
+    /// Makes <paramref name="rows"/>, a stream's, hold the states <see cref="Rows"/> gives, in place of those it held: its
+    /// arrays kept from one object to the next. False, and what it holds left to no read, where <see cref="Rows"/> gives
+    /// none.
+    /// </summary>
+    internal bool Fill(StateRows rows, ColumnCounts counts, ColumnSketches? sketches, ObjectSummaries summaries)
+    {
         // Each measure's place among those the counts carry.
-        int[] places = new int[Measures.Length];
+        Span<int> places = rows.Places;
         for (int i = 0; i < Measures.Length; i++)
         {
             int place = Array.IndexOf(counts.MeasureFields, Measures[i].Field);
             if (place < 0 || (counts.Kinds[place] == MeasureKind.Float) != Measures[i].Floats)
             {
-                return null;
+                return false;
             }
 
             if (Measures[i].Sketch && (!counts.Sketched || sketches is not { } held || held.Entries != counts.Entries
                 || held.Measures != counts.MeasureFields.Length || _request.SketchBits > ColumnCountsBuilder.SketchBits))
             {
-                return null;
+                return false;
             }
 
             places[i] = place;
@@ -581,25 +592,26 @@ internal sealed class CountsAnswer
         {
             if (group.Kind == CountedValue.Others && (Keyed || Values is not null))
             {
-                return null;
+                return false;
             }
         }
 
         // The value each constant key's column holds over the object, as the column stores it.
-        byte[]?[] constants = new byte[]?[KeyFields.Length];
+        Span<byte[]?> constants = rows.Constants;
+        constants.Clear();
         foreach ((int field, string path, FieldExpr key) in _constants)
         {
             int at = Array.IndexOf(KeyFields, field);
             if (ConstantOf(summaries, path, key) is not { } value || ValuesOf([value], _schema.DType.GetField(field)) is not [{ } bytes, ..])
             {
-                return null;
+                return false;
             }
 
             constants[at] = bytes;
         }
 
         // The entries: those of the values asked, or every one.
-        int[] entries = new int[counts.Entries];
+        Span<int> entries = rows.Entries(counts.Entries);
         int taken = 0;
         if (Values is { } asked)
         {
@@ -619,11 +631,12 @@ internal sealed class CountsAnswer
             }
         }
 
-        return new StateRows(this, counts, sketches, entries, taken, places, constants);
+        rows.Hold(counts, sketches, taken);
+        return true;
     }
 
     /// <summary>Takes into <paramref name="entries"/> those of <paramref name="group"/>.</summary>
-    private static void Take(CountGroup group, int[] entries, ref int taken)
+    private static void Take(CountGroup group, Span<int> entries, ref int taken)
     {
         for (int entry = group.FirstEntry; entry < group.FirstEntry + group.Entries; entry++)
         {
@@ -834,14 +847,16 @@ internal sealed class CountsAnswer
 /// <summary>
 /// An object's entries of the counts that answer, as batches of states (<see cref="RecordBatch.CarriesStates"/>): a row an
 /// entry, its keys' columns, the column's value and the values the object holds constant, its rows, and each measure's
-/// states and sketch under the names <see cref="StateRequest"/> gives them, in the columns the answer lays out.
+/// states and sketch under the names <see cref="StateRequest"/> gives them, in the columns the answer lays out. A stream's
+/// holds one object's after another (<see cref="CountsAnswer.Fill"/>), its arrays kept, its entries' rented until
+/// <see cref="Release"/>.
 /// </summary>
 internal sealed class StateRows : StateTable
 {
-    private readonly ColumnCounts _counts;
-    private readonly ColumnSketches? _sketches;
-    private readonly int[] _entries;
-    private readonly int _count;
+    private ColumnCounts _counts = null!;
+    private ColumnSketches? _sketches;
+    private int[] _entries = [];
+    private int _count;
 
     // Each measure, its place among the counts', and its first word among an entry's.
     private readonly (string Name, int Field, bool Floats, bool Sketch)[] _measures;
@@ -852,32 +867,59 @@ internal sealed class StateRows : StateTable
     // null for the counted column, whose entries give their own.
     private readonly byte[]?[] _constants;
 
-    internal StateRows(CountsAnswer answer, ColumnCounts counts, ColumnSketches? sketches, int[] entries, int count, int[] places, byte[]?[] constants)
+    /// <summary>Rows of the states of <paramref name="answer"/>, holding none yet.</summary>
+    internal StateRows(CountsAnswer answer)
         : base(answer.KeyFields.Length, answer.Measures, answer.Type, answer.Bool)
     {
-        _counts = counts;
-        _sketches = sketches;
-        _entries = entries;
-        _count = count;
         _measures = answer.Measures;
-        _places = places;
-        _constants = constants;
-        int[] offsets = new int[counts.MeasureFields.Length];
-        for (int m = 0, at = 1; m < offsets.Length; m++)
-        {
-            offsets[m] = at;
-            at += MeasureLayout.Words(counts.Kinds[m] == MeasureKind.Float);
-        }
-
-        _wordAt = new int[places.Length];
-        for (int i = 0; i < places.Length; i++)
-        {
-            _wordAt[i] = offsets[places[i]];
-        }
+        _places = new int[_measures.Length];
+        _wordAt = new int[_measures.Length];
+        _constants = new byte[]?[answer.KeyFields.Length];
     }
 
     /// <summary>The rows of states: an entry each.</summary>
     internal int Count => _count;
+
+    /// <summary>Each measure's place among those of the counts held next, which the answer sets.</summary>
+    internal Span<int> Places => _places;
+
+    /// <summary>The value each key's column holds over the object held next, which the answer sets.</summary>
+    internal Span<byte[]?> Constants => _constants;
+
+    /// <summary>Room for <paramref name="entries"/> entries of the counts held next, rented, which the answer fills.</summary>
+    internal Span<int> Entries(int entries)
+    {
+        Pooled.Grow(ref _entries, entries);
+        return _entries.AsSpan(0, entries);
+    }
+
+    /// <summary>Holds the first <paramref name="count"/> entries set of <paramref name="counts"/>, with <paramref name="sketches"/> their sketches.</summary>
+    internal void Hold(ColumnCounts counts, ColumnSketches? sketches, int count)
+    {
+        _counts = counts;
+        _sketches = sketches;
+        _count = count;
+
+        // Each measure's first word among an entry's: past the rows', those of the measures before its place.
+        for (int i = 0; i < _places.Length; i++)
+        {
+            int at = 1;
+            for (int m = 0; m < _places[i]; m++)
+            {
+                at += MeasureLayout.Words(counts.Kinds[m] == MeasureKind.Float);
+            }
+
+            _wordAt[i] = at;
+        }
+    }
+
+    /// <summary>Gives the entries' array back: no row is read after.</summary>
+    internal void Release()
+    {
+        Pooled.Return(_entries);
+        (_entries, _count, _counts, _sketches) = ([], 0, null!, null);
+        _constants.AsSpan().Clear();
+    }
 
     /// <inheritdoc/>
     protected override void FillWords(Span<long> into, int start, int word)

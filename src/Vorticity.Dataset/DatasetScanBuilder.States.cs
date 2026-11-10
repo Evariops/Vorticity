@@ -296,6 +296,11 @@ internal sealed partial class DatasetScanBuilder
         int opensAhead = Math.Clamp(_dataset.Options.MaxOpenObjects / 4, 1, 8);
         int openSeen = 0;
         int begunUpTo = 0;
+
+        // The rows of states of one object's counts after another, and the batch of states the stream gave last, bound
+        // again into the next: the consumer is done with a batch when it asks for the next, as the arena's reset says.
+        StateRows? objectRows = null;
+        RecordBatch? spare = null;
         try
         {
             for (int o = 0; o < units.Count; o++)
@@ -330,7 +335,8 @@ internal sealed partial class DatasetScanBuilder
                     {
                         if (unit.Buckets is null)
                         {
-                            rows = answer.Rows(counts, sketched, unit.Run is { } run ? run.Summaries : answer.SummariesOf(held));
+                            objectRows ??= new StateRows(answer);
+                            rows = answer.Fill(objectRows, counts, sketched, unit.Run is { } run ? run.Summaries : answer.SummariesOf(held)) ? objectRows : null;
                         }
                         else
                         {
@@ -353,17 +359,21 @@ internal sealed partial class DatasetScanBuilder
 
                         for (int at = 0; rows is not null && at < rows.Count; at += StateRows.BatchRows)
                         {
+                            spare?.Dispose();
                             arena.Reset();
-                            yield return rows.Batch(arena, at, Math.Min(StateRows.BatchRows, rows.Count - at), held.FirstRow);
+                            yield return spare = rows.Batch(arena, at, Math.Min(StateRows.BatchRows, rows.Count - at), held.FirstRow, spare);
                         }
 
                         for (int b = 0; b < (byBucket?.Count ?? 0); b++)
                         {
                             for (int at = 0; at < byBucket![b].Count; at += StateRows.BatchRows)
                             {
+                                spare?.Dispose();
                                 arena.Reset();
-                                yield return byBucket[b].Batch(arena, at, Math.Min(StateRows.BatchRows, byBucket[b].Count - at), held.FirstRow);
+                                yield return spare = byBucket[b].Batch(arena, at, Math.Min(StateRows.BatchRows, byBucket[b].Count - at), held.FirstRow, spare);
                             }
+
+                            byBucket[b].Release();
                         }
 
                         continue;
@@ -407,8 +417,9 @@ internal sealed partial class DatasetScanBuilder
                     {
                         for (int at = 0; settled is not null && at < settled.Count; at += StateTable.BatchRows)
                         {
+                            spare?.Dispose();
                             arena.Reset();
-                            yield return settled.Batch(arena, at, Math.Min(StateTable.BatchRows, settled.Count - at), Math.Max(_from, held.FirstRow));
+                            yield return spare = settled.Batch(arena, at, Math.Min(StateTable.BatchRows, settled.Count - at), Math.Max(_from, held.FirstRow), spare);
                         }
                     }
                     finally
@@ -493,6 +504,8 @@ internal sealed partial class DatasetScanBuilder
                 }
             }
 
+            spare?.Dispose();
+            objectRows?.Release();
             arena.Reset();
         }
     }
