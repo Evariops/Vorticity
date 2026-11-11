@@ -1371,13 +1371,15 @@ internal static partial class DatasetCompactor
             // lanes to spare, on another while the writer takes the same rows, the census reading them alone once their
             // nodes are canonical; the census and its spans as counted in turn. Counted first, it held a merge of log
             // records a fifth of its time.
-            PathCensus.Counting[] ready = new PathCensus.Counting[census.Length];
+            // The stream's one array of countings, which each batch fills once the one before is counted; a run of a few rows,
+            // a merge of keys that interleave cutting one a row, counted in place, where a task a run cost more than it.
+            PathCensus.Counting[] ready = _ready ??= new PathCensus.Counting[census.Length];
             for (int v = 0; v < census.Length; v++)
             {
                 ready[v] = PathCensus.Prepare(batch, _variants![v]);
             }
 
-            if (_dataset.Session.Options.MaxDegreeOfParallelism <= 1)
+            if (_dataset.Session.Options.MaxDegreeOfParallelism <= 1 || batch.RowCount < CountedApartRows)
             {
                 Count(census, ready);
                 await output.Writer.WriteBatchAsync(batch, cancellationToken).ConfigureAwait(false);
@@ -1466,6 +1468,11 @@ internal static partial class DatasetCompactor
                 writer.DeclareDirectory(name, VariantDirectory.From(census[v], shredded.GetValueOrDefault(name), _groupRows));
             }
         }
+
+        // The countings of a batch's variant columns, the stream's one array; the rows under which a batch is counted in
+        // place rather than beside its write.
+        private PathCensus.Counting[]? _ready;
+        private const int CountedApartRows = 64;
 
         // The place among the shreddings of the value being written and its first key; the paths of the object being
         // written, a census a variant column, the columns, and the rows of the groups its directory names.
