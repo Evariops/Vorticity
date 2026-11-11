@@ -210,6 +210,59 @@ public sealed class DatasetSchemaEvolutionTests
         });
     }
 
+    /// <summary>
+    /// A tiered job moves a run of objects as large as the level above aims at, opened a wave at a time to read the schema
+    /// each holds: forty of them, past a wave, all move; one of them written under an earlier schema has the whole job
+    /// rewritten into the current one.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ATieredMoveOfMoreObjectsThanAWaveMovesThemUnlessOneHoldsAnEarlierSchema(bool evolved)
+    {
+        const int Objects = 40;
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Decoders.EnsureRegistered();
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, evolved ? MeterV1.Schema : MeterV2.Schema, Options(clustered: false), ct);
+        List<MeterV2> expected = [];
+        for (int part = 0; part < Objects; part++)
+        {
+            if (evolved && part == 0)
+            {
+                List<MeterV1> first = Meters(part, Objects);
+                await AppendAsync(dataset, first, ct);
+                expected.AddRange(first.Select(ToV2));
+                await dataset.EvolveSchemaAsync(MeterV2.Schema, new Dictionary<string, string> { ["Place"] = "Site" }, ct);
+                continue;
+            }
+
+            List<MeterV2> rows = [.. Meters(part, Objects).Select(ToV2).Select(row => row with { Temperature = row.Key % 7 }) ];
+            await AppendAsync(dataset, rows, ct);
+            expected.AddRange(rows);
+        }
+
+        long least = long.MaxValue;
+        await foreach (PositionedObject held in dataset.WalkAsync(null, 0, long.MaxValue, null, ct))
+        {
+            least = Math.Min(least, held.Entry.Bytes);
+        }
+
+        CompactionOptions options = new CompactionOptions
+        {
+            LevelZeroCeiling = 2,
+            TargetBytesAtLevelOne = least,
+            Fanout = 1_000,
+            MaxObjectBytes = 1L << 30,
+            TrivialMoves = true,
+        };
+        CompactionResult? done = await dataset.CompactAsync(options, ct);
+        Assert.NotNull(done);
+        Assert.Equal((Objects, evolved ? 0 : Objects), (done.ObjectsIn, done.ObjectsMoved));
+        Assert.Equal(0, await EarlierObjectsAsync(dataset, ct));
+        Assert.Equal(Sorted(expected), Sorted(await RowsAsync<MeterV2>(dataset, ct)));
+    }
+
     [Fact]
     public async Task CompactionWritesTheObjectsItTakesInTheCurrentSchema()
     {
