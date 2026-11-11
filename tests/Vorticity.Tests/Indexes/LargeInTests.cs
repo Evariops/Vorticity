@@ -227,7 +227,19 @@ public sealed class LargeInTests
 
         // The writer stores the words flat: every region read is read where it lies.
         Assert.Equal(0, pruner.Copied);
-        return (live.LiveCount, pruner.Segments);
+
+        // Each node's children are read once: refining a fresh mask again reads nothing, and asking every filter
+        // leaves the same blocks.
+        int segments = pruner.Segments;
+        BlockMask again = new BlockMask(file.RowCount, Block);
+        await pruner.RefineAsync(file, again, ct);
+        Assert.Equal(segments, pruner.Segments);
+        if (askAll)
+        {
+            Assert.Equal(live.LiveCount, again.LiveCount);
+        }
+
+        return (live.LiveCount, segments);
     }
 
     /// <summary>The blocks the sorted runs leave live under <paramref name="filter"/>.</summary>

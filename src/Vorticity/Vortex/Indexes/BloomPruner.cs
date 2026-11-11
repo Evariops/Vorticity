@@ -333,7 +333,7 @@ internal sealed class BloomPruner : IDisposable
             return null;
         }
 
-        return BloomNode.TryRead(words, 0, words.Length, level, leaves, out BloomNode? root) ? root : null;
+        return BloomNode.TryRead(words, 0, words.Length, level, leaves, out BloomNode root) ? root : null;
     }
 
     /// <summary>
@@ -342,7 +342,9 @@ internal sealed class BloomPruner : IDisposable
     /// </summary>
     private async ValueTask LoadLevelAsync(IIndexHost file, BlockMask live, int level, CancellationToken cancellationToken)
     {
-        using IndexBatches<(Tree Tree, long Index, BloomNode Parent, int Slot)> batches = new();
+        // Each region wanted names its parent by its place among the nodes read one level up, which adopting the
+        // children, a level down, leaves where they are.
+        using IndexBatches<(Tree Tree, int Parent, int Slot)> batches = new();
         foreach (Column column in _columns.Values)
         {
             // A level no question will ask is not worth its read.
@@ -353,40 +355,43 @@ internal sealed class BloomPruner : IDisposable
 
             foreach (Tree tree in column.Trees)
             {
-                if (tree.Root is null || tree.Root.Level <= level || tree.NodesAt(level + 1) is not { } parents)
+                if (tree.Root is not { } root || root.Level <= level)
                 {
                     continue;
                 }
 
-                foreach ((long index, BloomNode parent) in parents)
+                Span<(long Index, BloomNode Node, bool Opened)> parents = tree.NodesAt(level + 1);
+                for (int at = 0; at < parents.Length; at++)
                 {
-                    if (parent.Children is not { } region || tree.IsOpened(level + 1, index))
+                    ref (long Index, BloomNode Node, bool Opened) parent = ref parents[at];
+                    if (parent.Node.Children is not { } region || parent.Opened)
                     {
                         continue;
                     }
 
-                    long start = (long)tree.Run.FirstBlock + (index << (4 * (level + 1)));
-                    long end = Math.Min(start + parent.Leaves, (long)tree.Run.EndBlock);
+                    long start = (long)tree.Run.FirstBlock + (parent.Index << (4 * (level + 1)));
+                    long end = Math.Min(start + parent.Node.Leaves, (long)tree.Run.EndBlock);
                     if (!AnyLive(live, start, end))
                     {
                         continue;
                     }
 
-                    tree.Open(level + 1, index);
-                    IndexBatches<(Tree Tree, long Index, BloomNode Parent, int Slot)>.Batch batch = batches.For(tree.Run);
+                    parent.Opened = true;
+                    IndexBatches<(Tree Tree, int Parent, int Slot)>.Batch batch = batches.For(tree.Run);
                     int slot = batch.Requests.Add(new SegmentSpec(region.Offset, region.Length, region.AlignmentExponent, 0, 0));
-                    batch.Wanted.Add((tree, index, parent, slot));
+                    batch.Wanted.Add((tree, at, slot));
                 }
             }
         }
 
-        foreach ((int origin, IndexBatches<(Tree Tree, long Index, BloomNode Parent, int Slot)>.Batch batch) in batches.ByOrigin)
+        foreach ((int origin, IndexBatches<(Tree Tree, int Parent, int Slot)>.Batch batch) in batches.ByOrigin)
         {
             await ReadAsync(file, origin, batch.Requests, cancellationToken).ConfigureAwait(false);
             using IndexContext lease = IndexContext.Of(file, origin);
             ScanContext context = lease.Context;
-            foreach ((Tree tree, long index, BloomNode parent, int slot) in batch.Wanted)
+            foreach ((Tree tree, int at, int slot) in batch.Wanted)
             {
+                (long index, BloomNode parent, _) = tree.NodesAt(level + 1)[at];
                 VortexBuffer bytes = batch.Requests.GetBuffer(slot);
                 ReadOnlySpan<uint> childWords = parent.ChildWords;
                 long total = 0;
@@ -493,9 +498,20 @@ internal sealed class BloomPruner : IDisposable
         _held[_heldCount++] = owner;
     }
 
-    /// <summary>Lets go of the segments the words read lie in: no node or leaf of the pruner is asked after.</summary>
+    /// <summary>
+    /// Gives the trees' arrays back and lets go of the segments the words read lie in: no node or leaf of the pruner is
+    /// asked after.
+    /// </summary>
     public void Dispose()
     {
+        foreach (Column column in _columns.Values)
+        {
+            foreach (Tree tree in column.Trees)
+            {
+                tree.Return();
+            }
+        }
+
         for (int i = 0; i < _heldCount; i++)
         {
             _held[i].Release();
@@ -507,6 +523,43 @@ internal sealed class BloomPruner : IDisposable
         }
 
         (_held, _heldCount) = ([], 0);
+    }
+
+    /// <summary>Items added in order to an array rented from the pool, given back by <see cref="Return"/>.</summary>
+    private struct Kept<T>
+    {
+        private T[]? _items;
+        private int _count;
+
+        /// <summary>The items, in the order added.</summary>
+        internal readonly Span<T> Items => new Span<T>(_items, 0, _count);
+
+        internal void Add(T item)
+        {
+            if (_items is null || _count == _items.Length)
+            {
+                T[] grown = ArrayPool<T>.Shared.Rent(Math.Max(16, 2 * _count));
+                if (_items is not null)
+                {
+                    _items.AsSpan(0, _count).CopyTo(grown);
+                    ArrayPool<T>.Shared.Return(_items, RuntimeHelpers.IsReferenceOrContainsReferences<T>());
+                }
+
+                _items = grown;
+            }
+
+            _items[_count++] = item;
+        }
+
+        internal void Return()
+        {
+            if (_items is not null)
+            {
+                ArrayPool<T>.Shared.Return(_items, RuntimeHelpers.IsReferenceOrContainsReferences<T>());
+            }
+
+            (_items, _count) = (null, 0);
+        }
     }
 
     /// <summary>The dtype of a region's words: an array of u32 no row leaves null.</summary>
@@ -823,9 +876,9 @@ internal sealed class BloomPruner : IDisposable
                         }
                     }
                 }
-                else if (tree.NodesAt(level) is { } nodes)
+                else
                 {
-                    foreach ((long index, BloomNode node) in nodes)
+                    foreach ((long index, BloomNode node, bool _) in tree.NodesAt(level))
                     {
                         if (node.FilterBlocks > 0 && Proves(node.Filter))
                         {
@@ -948,13 +1001,19 @@ internal sealed class BloomPruner : IDisposable
         }
     }
 
-    /// <summary>One run's tree: its root, and the nodes and leaves read so far.</summary>
+    /// <summary>
+    /// One run's tree: its root, and the nodes and leaves read so far, each read once, in arrays rented for the question
+    /// and given back by <see cref="Return"/>: they are only added to and walked in order, which a dictionary a level
+    /// paid for with its entries, its buckets and its growth (2026-11-11).
+    /// </summary>
     private sealed class Tree(IndexRun run, BloomHash hash)
     {
-        /// <summary>[level]: node index at that level to node; [0] is unused, leaves live apart.</summary>
-        private readonly List<Dictionary<long, BloomNode>> _nodes = [];
-        private readonly Dictionary<long, BloomWords> _leaves = [];
-        private readonly HashSet<(int Level, long Index)> _opened = [];
+        /// <summary>
+        /// [level]: the nodes read at that level, with their index there and whether their children were read; [0] is
+        /// unused, leaves live apart.
+        /// </summary>
+        private Kept<(long Index, BloomNode Node, bool Opened)>[] _nodes = [];
+        private Kept<(long Relative, BloomWords Words)> _leaves;
         private BloomNode? _root;
 
         internal IndexRun Run { get; } = run;
@@ -968,22 +1027,22 @@ internal sealed class BloomPruner : IDisposable
             set
             {
                 _root = value;
-                if (value is not null)
+                if (value is { } root)
                 {
-                    Level(value.Level)[0] = value;
+                    Level(root.Level).Add((0, root, false));
                 }
             }
         }
 
-        /// <summary>The nodes read at <paramref name="level"/>, by index at that level; null when none were.</summary>
-        internal Dictionary<long, BloomNode>? NodesAt(int level) => level < _nodes.Count ? _nodes[level] : null;
+        /// <summary>
+        /// The nodes read at <paramref name="level"/>, with their index at that level and whether their children were
+        /// read, which a reader marks.
+        /// </summary>
+        internal Span<(long Index, BloomNode Node, bool Opened)> NodesAt(int level) =>
+            level < _nodes.Length ? _nodes[level].Items : default;
 
-        /// <summary>The leaves read, by block relative to the run: where each one's filter lies.</summary>
-        internal Dictionary<long, BloomWords> Leaves => _leaves;
-
-        internal bool IsOpened(int level, long index) => _opened.Contains((level, index));
-
-        internal void Open(int level, long index) => _opened.Add((level, index));
+        /// <summary>The leaves read, with their block relative to the run: where each one's filter lies.</summary>
+        internal ReadOnlySpan<(long Relative, BloomWords Words)> Leaves => _leaves.Items;
 
         /// <summary>Takes the children of <paramref name="parent"/>, whose words are <paramref name="words"/>.</summary>
         /// <param name="level">The children's level.</param>
@@ -1002,26 +1061,39 @@ internal sealed class BloomPruner : IDisposable
                 {
                     if (length > 0)
                     {
-                        _leaves[position] = words.Slice(at, length);
+                        _leaves.Add((position, words.Slice(at, length)));
                     }
                 }
-                else if (BloomNode.TryRead(words, at, length, level, BloomNode.ChildLeaves(parent.Level, parent.Leaves, child), out BloomNode? node))
+                else if (BloomNode.TryRead(words, at, length, level, BloomNode.ChildLeaves(parent.Level, parent.Leaves, child), out BloomNode node))
                 {
-                    Level(level)[position] = node!;
+                    Level(level).Add((position, node, false));
                 }
 
                 at += length;
             }
         }
 
-        private Dictionary<long, BloomNode> Level(int level)
+        /// <summary>Gives the arrays of the nodes and leaves back: the tree is not asked after.</summary>
+        internal void Return()
         {
-            while (_nodes.Count <= level)
+            for (int level = 0; level < _nodes.Length; level++)
             {
-                _nodes.Add([]);
+                _nodes[level].Return();
             }
 
-            return _nodes[level];
+            _leaves.Return();
+            (_nodes, _root) = ([], null);
+        }
+
+        private ref Kept<(long Index, BloomNode Node, bool Opened)> Level(int level)
+        {
+            if (_nodes.Length <= level)
+            {
+                // A root's level is the deepest: the first node read is the root, so this grows once.
+                Array.Resize(ref _nodes, level + 1);
+            }
+
+            return ref _nodes[level];
         }
     }
 }

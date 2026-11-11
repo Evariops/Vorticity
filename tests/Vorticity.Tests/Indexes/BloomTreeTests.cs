@@ -75,8 +75,8 @@ public sealed class BloomTreeTests
         uint[] words = GC.AllocateArray<uint>(BloomNode.WordsOf(children.Length, 2), pinned: true);
         BloomNode.Write(words, 2, 40, region, children, filter);
 
-        Assert.True(TryRead(words, 0, words.Length, 2, 40, out BloomNode? node));
-        Assert.Equal((2, 40L, 3, 2), (node!.Level, node.Leaves, node.ChildCount, node.FilterBlocks));
+        Assert.True(TryRead(words, 0, words.Length, 2, 40, out BloomNode node));
+        Assert.Equal((2, 40L, 3, 2), (node.Level, node.Leaves, node.ChildCount, node.FilterBlocks));
         Assert.Equal(region, node.Children);
         Assert.Equal([30u, 30u, 25u], node.ChildWords.ToArray());
         Assert.Equal(filter, node.Filter.ToArray());
@@ -98,8 +98,8 @@ public sealed class BloomTreeTests
         int[] none = new int[16];
         uint[] bare = GC.AllocateArray<uint>(BloomNode.WordsOf(0, 1), pinned: true);
         BloomNode.Write(bare, 1, 16, null, none, filter.AsSpan(0, 8));
-        Assert.True(TryRead(bare, 0, bare.Length, 1, 16, out BloomNode? leafless));
-        Assert.True(leafless!.ChildWords.IsEmpty);
+        Assert.True(TryRead(bare, 0, bare.Length, 1, 16, out BloomNode leafless));
+        Assert.True(leafless.ChildWords.IsEmpty);
         Assert.Null(leafless.Children);
         Assert.Equal(16, leafless.ChildCount);
         uint[] named = Pinned(bare);
@@ -122,7 +122,7 @@ public sealed class BloomTreeTests
     }
 
     /// <summary>The node <paramref name="pinned"/> holds, read in place: an array allocated pinned.</summary>
-    private static bool TryRead(uint[] pinned, int start, int length, int level, long leaves, out BloomNode? node) =>
+    private static bool TryRead(uint[] pinned, int start, int length, int level, long leaves, out BloomNode node) =>
         BloomNode.TryRead(BloomWords.Pinned(pinned), start, length, level, leaves, out node);
 
     /// <summary>A copy of <paramref name="words"/> that does not move.</summary>
@@ -473,9 +473,9 @@ public sealed class BloomTreeTests
     private static async Task<List<Walked>> WalkAsync(VortexFile file, IndexRun run)
     {
         uint[] rootWords = await WordsAsync(file, run.Payload[0], BloomTreeRun.RootWords(run.OptionBytes));
-        Assert.True(BloomNode.TryRead(BloomWords.Pinned(rootWords), 0, rootWords.Length, (int)((rootWords[0] >> 8) & 0xFF), rootWords[1], out BloomNode? root));
+        Assert.True(BloomNode.TryRead(BloomWords.Pinned(rootWords), 0, rootWords.Length, (int)((rootWords[0] >> 8) & 0xFF), rootWords[1], out BloomNode root));
         List<Walked> nodes = [];
-        await AddAsync(root!, (long)run.FirstBlock, rootWords);
+        await AddAsync(root, (long)run.FirstBlock, rootWords);
         return nodes;
 
         async Task AddAsync(BloomNode node, long first, uint[] words)
@@ -495,8 +495,8 @@ public sealed class BloomTreeTests
                 }
                 else
                 {
-                    Assert.True(BloomNode.TryRead(BloomWords.Pinned(children), at, length, node.Level - 1, BloomNode.ChildLeaves(node.Level, node.Leaves, c), out BloomNode? child));
-                    await AddAsync(child!, first + (c * BloomNode.ChildSpan(node.Level)), children);
+                    Assert.True(BloomNode.TryRead(BloomWords.Pinned(children), at, length, node.Level - 1, BloomNode.ChildLeaves(node.Level, node.Leaves, c), out BloomNode child));
+                    await AddAsync(child, first + (c * BloomNode.ChildSpan(node.Level)), children);
                 }
 
                 at += length;

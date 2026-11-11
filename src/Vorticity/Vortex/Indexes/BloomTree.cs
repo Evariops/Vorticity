@@ -53,8 +53,10 @@ internal readonly unsafe struct BloomWords
 /// reads a whole level in one ranged read. Every node is checked against what its parent says of it
 /// -- its level, its blocks, its word count -- and its children's region against the checksum the
 /// node carries, since a node that does not check out must claim nothing for the blocks beneath it.
+/// A value, kept where its reader keeps the nodes it read: a question reads hundreds to thousands of
+/// them, an object each before (2026-11-11).
 /// </remarks>
-internal sealed class BloomNode
+internal readonly struct BloomNode
 {
     /// <summary>The words before a node's child sizes.</summary>
     internal const int HeaderWords = 9;
@@ -199,9 +201,9 @@ internal sealed class BloomNode
     /// <param name="leaves">Its blocks.</param>
     /// <param name="node">The node.</param>
     /// <returns>Whether the words are that node.</returns>
-    internal static bool TryRead(BloomWords words, int start, int length, int level, long leaves, out BloomNode? node)
+    internal static bool TryRead(BloomWords words, int start, int length, int level, long leaves, out BloomNode node)
     {
-        node = null;
+        node = default;
         if (length < HeaderWords || start < 0 || (long)start + length > words.Length || level is < 1 or > MaxLevel || leaves < 1)
         {
             return false;
