@@ -92,9 +92,10 @@ public sealed class RetainedTableTests
         Assert.False(alone.MeetsOtherLanes);
     }
 
-    // A lane that asks for a chunk another is decoding does not wait: it is handed a claim of its own, which it decodes and
-    // publishes. Its later batches borrow its own entry, which no other lane's lookup finds; the other lanes borrow the
-    // shared one once it is published; and both are evicted as their batches die.
+    // A lane that asks for a chunk another is decoding does not wait: it is handed a claim of its own, which no other lane's
+    // lookup finds while it decodes. Once published, its copy is any lane's, so that a lane reaching the chunk later
+    // borrows it rather than decode the chunk once more; the shared one, published, goes first; and both are evicted as
+    // their batches die.
     [Fact]
     public void ALaneMeetingAnothersClaimDecodesAnEntryOfItsOwn()
     {
@@ -106,12 +107,18 @@ public sealed class RetainedTableTests
         Assert.False(table.TryGet(7, second, batch: 1, out RetainedChunk? own, out _, out _));
         Assert.NotNull(own);
         Assert.NotSame(shared, own);
+
+        // Claimed, the second lane's entry is its own: a third lane meeting both claims decodes one of its own too.
+        Assert.False(table.TryGet(7, third, batch: 1, out RetainedChunk? another, out _, out _));
+        Assert.NotSame(own, another);
+        table.Abandon(another!);
         table.Publish(own!, nodeIndex: 2, batch: 1);
 
-        // The shared entry is claimed still: the second lane borrows its own, and no one else finds that.
+        // The shared entry is claimed still: the second lane's copy, published, is every lane's.
         Assert.True(table.TryGet(7, second, batch: 2, out _, out _, out int mine));
         Assert.Equal(2, mine);
-        Assert.False(table.Peek(7, batch: 2, out _, out _));
+        Assert.True(table.Peek(7, batch: 2, out _, out int early));
+        Assert.Equal(2, early);
 
         table.Publish(shared!, nodeIndex: 1, batch: 1);
         Assert.True(table.Peek(7, batch: 2, out _, out int peeked));

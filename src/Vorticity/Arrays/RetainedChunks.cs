@@ -15,9 +15,10 @@ namespace Vorticity.Arrays;
 /// A chunk larger than a batch is decoded once and each batch borrows a window of it. The lanes of
 /// a scan take consecutive batches in turn, so a table per lane would decode a chunk once per lane
 /// that meets it; one table per scan decodes it once. A context that asks for a chunk another context
-/// is decoding at that moment decodes it too, into an entry of its own (<see cref="RetainedChunk.Owner"/>),
-/// rather than hold its thread for the other's decode: the two lanes that reach a chunk at once decode
-/// it twice, and every later batch borrows whichever is published.
+/// is decoding at that moment decodes it too, into an entry of its own while it decodes
+/// (<see cref="RetainedChunk.Owner"/>), rather than hold its thread for the other's decode: the lanes
+/// that reach a chunk at once decode it once each, and every later batch borrows whichever is published,
+/// the shared one first.
 /// </para>
 /// <para>
 /// An entry may view another: a window of a dictionary views the dictionary's values, decoded once
@@ -162,9 +163,10 @@ internal class RetainedChunks : IDisposable
     /// <returns><see langword="true"/> when the entry is published.</returns>
     /// <remarks>
     /// Never waits. While another context holds the claim, the caller is handed a claim of its own, on an entry its
-    /// lookups alone find (<see cref="RetainedChunk.Owner"/>): it decodes the chunk too, where a wait held its thread
-    /// for the other's decode inside a synchronous one. Only a scan above one lane meets another's claim, at a chunk
-    /// both reach at once; its later batches of the chunk borrow whichever of the two is published.
+    /// lookups alone find until it is published (<see cref="RetainedChunk.Owner"/>): it decodes the chunk too, where a
+    /// wait held its thread for the other's decode inside a synchronous one. Only a scan above one lane meets another's
+    /// claim, at a chunk both reach at once; every later batch of the chunk, any context's, borrows whichever of the
+    /// two is published.
     /// </remarks>
     internal bool TryGet(
         long key, ScanContext claimant, long batch, out RetainedChunk? claim, out CanonicalArena arena, out int nodeIndex) =>
@@ -313,6 +315,11 @@ internal class RetainedChunks : IDisposable
             claim.Arena?.Seal();
             claim.NodeIndex = nodeIndex;
             claim.Claimant = null;
+
+            // A copy decoded beside another's claim is any context's once published: kept to its owner, it outlived the
+            // shared one's borrowers while no other context could take it, and the next context to reach the chunk decoded
+            // it once more (a chunk's dictionary decoded 5 times on 4 lanes, against once).
+            claim.Owner = null;
             if (claim.LastTouched < batch)
             {
                 claim.LastTouched = batch;
@@ -539,9 +546,9 @@ internal class RetainedChunks : IDisposable
     private const int OrderedHeld = 16;
 
     /// <summary>
-    /// The entry under <paramref name="key"/> that <paramref name="asker"/> may borrow, or null: one every context shares,
-    /// or one of the asker's own (<see cref="RetainedChunk.Owner"/>), a published one before a claimed one. The table's
-    /// lock is held.
+    /// The entry under <paramref name="key"/> that <paramref name="asker"/> may borrow, or null: a published one first,
+    /// any context's (<see cref="RetainedChunk.Owner"/>), then the asker's claim, then a claim every context shares. The
+    /// table's lock is held.
     /// </summary>
     private RetainedChunk? Find(long key, ScanContext? asker = null)
     {
@@ -553,14 +560,9 @@ internal class RetainedChunks : IDisposable
             for (int i = 0; i < _count; i++)
             {
                 RetainedChunk entry = entries[i]!;
-                if (entry.Key == key && (entry.Owner is null || ReferenceEquals(entry.Owner, asker)))
+                if (entry.Key == key && (entry.Owner is null || ReferenceEquals(entry.Owner, asker)) && Published(entry, asker, ref claimed))
                 {
-                    if (entry.NodeIndex >= 0)
-                    {
-                        return entry;
-                    }
-
-                    claimed ??= entry;
+                    return entry;
                 }
             }
 
@@ -570,18 +572,32 @@ internal class RetainedChunks : IDisposable
         int mask = (2 * held) - 1;
         for (int slot = Home(key, mask); entries[held + slot] is { } entry; slot = (slot + 1) & mask)
         {
-            if (entry.Key == key && (entry.Owner is null || ReferenceEquals(entry.Owner, asker)))
+            if (entry.Key == key && (entry.Owner is null || ReferenceEquals(entry.Owner, asker)) && Published(entry, asker, ref claimed))
             {
-                if (entry.NodeIndex >= 0)
-                {
-                    return entry;
-                }
-
-                claimed ??= entry;
+                return entry;
             }
         }
 
         return claimed;
+    }
+
+    /// <summary>
+    /// Whether <paramref name="entry"/>, one <see cref="Find"/> may return, is published, which it returns at once; else
+    /// a claim, kept in <paramref name="claimed"/> when it is the first seen or the asker's own.
+    /// </summary>
+    private static bool Published(RetainedChunk entry, ScanContext? asker, ref RetainedChunk? claimed)
+    {
+        if (entry.NodeIndex >= 0)
+        {
+            return true;
+        }
+
+        if (claimed is null || (ReferenceEquals(entry.Claimant, asker) && !ReferenceEquals(claimed.Claimant, asker)))
+        {
+            claimed = entry;
+        }
+
+        return false;
     }
 
     /// <summary>Adds <paramref name="entry"/>, doubling the table when it is full; the table's lock is held.</summary>
@@ -762,9 +778,9 @@ internal sealed class RetainedChunk
     internal ScanContext? Claimant;
 
     /// <summary>
-    /// The context the entry is its own, when it decoded a chunk another context was decoding rather than wait for it:
-    /// found by its owner's lookups alone, held for its batches, and evicted as theirs die; null for an entry every
-    /// context shares.
+    /// The context the entry is its own while it decodes a chunk another context was decoding, rather than wait for it:
+    /// found by its owner's lookups alone, so that no other context takes its claim for the shared one. Null once it is
+    /// published, a copy any context borrows, and for an entry every context shares.
     /// </summary>
     internal ScanContext? Owner;
 
