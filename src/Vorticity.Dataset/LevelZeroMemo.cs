@@ -70,6 +70,11 @@ internal sealed class LevelZeroMemo : IAsyncDisposable
     // Under the lock of the copies.
     private readonly Dictionary<UInt128, Dictionary<string, HashSet<string>>> _lying = [];
 
+    // The keys a question asks, as sets by column, made once a question, which hands every object of level 0 it reads the
+    // same keys: made again an object, they cost a question half a kilobyte an object. Read only; kept as long as the
+    // question's keys live.
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<IReadOnlyDictionary<string, string[]>, Dictionary<string, HashSet<string>>> Asked = new();
+
     /// <summary>Whether the object <paramref name="uid"/> names was found to read by every key of <paramref name="wanted"/>.</summary>
     private bool Lying(UInt128 uid, Dictionary<string, HashSet<string>> wanted)
     {
@@ -118,7 +123,7 @@ internal sealed class LevelZeroMemo : IAsyncDisposable
         }
 
         await ForgetMovedAsync(version, cancellationToken).ConfigureAwait(false);
-        Dictionary<string, HashSet<string>> wanted = Wanted(keys, null);
+        Dictionary<string, HashSet<string>> wanted = Asked.GetValue(keys, static asked => Wanted(asked, null));
         if (Leased(entry.Uid, wanted, out _) is { } served)
         {
             return served;
