@@ -1,4 +1,4 @@
-// Audit DS-63: what a plan of the compactions pays a dataset of thousands of objects, as a driver asks it again and again.
+// What a plan of the compactions pays a dataset of thousands of objects, as a driver asks it again and again.
 //
 // 4,096 appends of 64 rows to a dataset sorted by its key, compacted until no job is left, in an in-memory store: thousands
 // of objects over the levels. The plan: what the policy would compact next, nothing at all once the levels are calm.

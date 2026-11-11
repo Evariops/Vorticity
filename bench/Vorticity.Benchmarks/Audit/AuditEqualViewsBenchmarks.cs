@@ -1,4 +1,4 @@
-// Audit CP-02: what an equality costs on a text column that no dictionary holds, its rows views of 16 bytes, a value of up
+// What an equality costs on a text column that no dictionary holds, its rows views of 16 bytes, a value of up
 // to 12 bytes inline in its view.
 //
 // 65,536 rows of 50 service names of 6 to 12 bytes, one name in fifty equal to the literal; and a literal of 20 bytes,

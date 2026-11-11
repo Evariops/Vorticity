@@ -1,4 +1,4 @@
-// Audit IO-04: what a read of an object under a store's prefix allocates besides its bytes: the prefixed key, made at
+// What a read of an object under a store's prefix allocates besides its bytes: the prefixed key, made at
 // each read, tail read or head.
 //
 // An object of 1 MiB in an in-memory store under "datasets/events/objects/", read 4 KiB at a time through a source over

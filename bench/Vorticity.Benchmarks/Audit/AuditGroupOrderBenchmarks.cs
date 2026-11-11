@@ -1,4 +1,4 @@
-// Audit AG-01: what ordering a million groups costs, against their aggregation alone.
+// What ordering a million groups costs, against their aggregation alone.
 //
 // A file of 4,194,304 rows whose `Key` is drawn at random among 1,048,576 values is grouped by its key and each
 // group counted: as it comes, ordered by its count descending (ties by the key, the groups' order), and its first 100

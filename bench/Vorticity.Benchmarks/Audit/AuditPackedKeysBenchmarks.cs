@@ -1,4 +1,4 @@
-// Audit AG-10: what grouping a batch by a key of two columns costs when the tuple of their numbers indexes a table of
+// What grouping a batch by a key of two columns costs when the tuple of their numbers indexes a table of
 // groups: each column numbered by its own index, then each row's slot made of its numbers, then the table read.
 //
 // Batches of 65,536 rows of two int columns, each drawn among 32 values, or all one tuple; the columns bound by

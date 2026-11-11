@@ -1,4 +1,4 @@
-// Audit VW-09: what Pco's encoding of a chunk of integers costs where the values share a divisor, each latent split into
+// What Pco's encoding of a chunk of integers costs where the values share a divisor, each latent split into
 // its multiple of the divisor and what is left: 65,536 instants in microseconds taken at milliseconds, rising with jitter.
 using System;
 using System.Runtime.InteropServices;

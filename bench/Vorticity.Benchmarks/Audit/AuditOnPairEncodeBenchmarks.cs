@@ -1,4 +1,4 @@
-// Audit VW-08: what OnPair's encoding of a chunk of text costs, a dictionary trained on a sample and every row's bytes cut
+// What OnPair's encoding of a chunk of text costs, a dictionary trained on a sample and every row's bytes cut
 // into the longest tokens it holds. 65,536 log lines of 60 to 120 characters, words drawn among 2,000 and numbers.
 using System;
 using System.Buffers.Binary;

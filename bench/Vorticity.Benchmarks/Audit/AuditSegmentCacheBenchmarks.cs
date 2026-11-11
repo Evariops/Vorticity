@@ -1,4 +1,4 @@
-// Audit IO-01, IO-02: what a hit of the process's segment cache costs, alone and with sixteen threads at once.
+// What a hit of the process's segment cache costs, alone and with sixteen threads at once.
 //
 // 4,096 segments of 4 KiB of one object of a store are kept in a cache, under the store's reader of the object
 // (an ObjectStoreSource, whose key a lookup hashes). `Lookup` asks the cache for each of them in turn, segment by

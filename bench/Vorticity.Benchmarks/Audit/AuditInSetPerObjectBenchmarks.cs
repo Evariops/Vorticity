@@ -1,4 +1,4 @@
-// Audit SC-03: what an IN of a thousand texts costs each object a question reads, an evaluator made for each object's scan
+// What an IN of a thousand texts costs each object a question reads, an evaluator made for each object's scan
 // and the candidates hashed for it, over a batch of 1,024 rows.
 using System;
 using System.Buffers.Binary;

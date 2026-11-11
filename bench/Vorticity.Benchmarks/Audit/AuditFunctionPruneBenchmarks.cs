@@ -1,4 +1,4 @@
-// Audit CP-13: what a filter on a function of a column pays its zone maps, each decision asking the function's key.
+// What a filter on a function of a column pays its zone maps, each decision asking the function's key.
 //
 // 4,194,304 rows of an instant a second apart (48 days) and a value, read from memory; the rows of one day counted, the
 // filter on the instant truncated to a day, which the zone maps decide zone by zone through the function.

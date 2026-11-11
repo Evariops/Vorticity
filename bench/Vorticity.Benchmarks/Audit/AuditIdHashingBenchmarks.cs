@@ -1,4 +1,4 @@
-// Audit VW-06: what a column of identifiers costs a write in hashes, the same value hashed by each index of the column.
+// What a column of identifiers costs a write in hashes, the same value hashed by each index of the column.
 // 524,288 rows of a trace identifier (32 hexadecimal characters) and an instant, written to a file with no index, with a
 // Bloom filter of the identifier, or with a Bloom filter and hashed postings of it.
 using System;

@@ -1,4 +1,4 @@
-// Audit IN-07: what finding a column's synopsis region in an object's table of contents costs, which a plan asks of
+// What finding a column's synopsis region in an object's table of contents costs, which a plan asks of
 // every object for every column a question reads: an object of 16 or 128 columns, each with its sheet, counts and
 // statistics over its granules, every column's three regions looked up. And what reading those contents from their
 // bytes costs, as an object's open does, its chunk directories included.

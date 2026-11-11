@@ -1,4 +1,4 @@
-// Audit DS-14: what a lookup of identifiers pays each consolidated partition whose index it reads, the index warm.
+// What a lookup of identifiers pays each consolidated partition whose index it reads, the index warm.
 //
 // Thirty days of calls (65,536 a day, four appends a day), partitioned by the day, sorted by the service, cut into objects
 // of 128 KiB (four a day) or 8 KiB (twenty), each call's random identifier declared, compacted and consolidated: an index

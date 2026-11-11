@@ -1,4 +1,4 @@
-// Audit AG-11: what turning a batch's verdicts into words of rows costs, which a filtered aggregate's condition read
+// What turning a batch's verdicts into words of rows costs, which a filtered aggregate's condition read
 // both ways paid twice: a pass over the verdicts for the rows where it holds, another for those where it does not;
 // against the second as the first's complement, a word at a time.
 //

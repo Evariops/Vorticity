@@ -1,4 +1,4 @@
-// Audit DS-21: what a key walk over a partitioned dataset pays a key, its walks of every partition and level looked over
+// What a key walk over a partitioned dataset pays a key, its walks of every partition and level looked over
 // at each step.
 //
 // A dataset partitioned by day, sorted by `Key`, of 256 days of 4,096 rows each (one object a day), in an in-memory store.

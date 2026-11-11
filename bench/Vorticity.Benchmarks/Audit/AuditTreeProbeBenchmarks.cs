@@ -1,4 +1,4 @@
-// Audit VW-03: what an index fragment built after the write pays in round trips for the array trees of a file's chunks,
+// What an index fragment built after the write pays in round trips for the array trees of a file's chunks,
 // which say which chunks are dictionaries before any row is read. A file of 8 columns (six longs, two texts of 20 values)
 // and 524,288 rows in chunks of 256 KiB, kept in memory behind a source that answers each request, one range or many,
 // after a millisecond, as an object store would sooner or later; the fragment of the default policy built over it.

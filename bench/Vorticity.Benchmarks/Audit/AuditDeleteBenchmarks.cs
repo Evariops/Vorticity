@@ -1,4 +1,4 @@
-// Audit DS-54: what a delete by a filter pays an object it touches, its filter evaluated once to count the rows, again to
+// What a delete by a filter pays an object it touches, its filter evaluated once to count the rows, again to
 // mark them.
 //
 // 8 appends of 262,144 calls (20 services, a status of 500 in fifty), sorted by the service and the instant, compacted,

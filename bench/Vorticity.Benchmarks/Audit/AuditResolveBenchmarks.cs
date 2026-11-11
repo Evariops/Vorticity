@@ -1,4 +1,4 @@
-// Audit AG-06: what finding an aggregate's column in a batch by its path costs, as the engine does for each column of
+// What finding an aggregate's column in a batch by its path costs, as the engine does for each column of
 // each batch: a struct of eight fields, the sixth named, and a field two levels down.
 using System;
 

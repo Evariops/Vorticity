@@ -1,4 +1,4 @@
-// Audit CP-03: what an equality costs on a column of UUIDs, sixteen bytes a row, as a lookup by an identifier filters it.
+// What an equality costs on a column of UUIDs, sixteen bytes a row, as a lookup by an identifier filters it.
 //
 // 65,536 random UUIDs, the literal one of them.
 using System;

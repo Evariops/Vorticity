@@ -1,4 +1,4 @@
-// Audit AG-05: what an exact distinct count of many groups costs to merge across lanes.
+// What an exact distinct count of many groups costs to merge across lanes.
 //
 // A file of 4,194,304 rows, a `Key` drawn among 1,048,576 values and a `Value` among 64, grouped by key and its values
 // counted distinct, at two lanes and at eight: each lane's pairs of a group and a value, made distinct across the lanes in parts

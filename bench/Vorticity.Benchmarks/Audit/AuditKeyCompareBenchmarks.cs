@@ -1,4 +1,4 @@
-// Audit IN-10: what ordering two keys of an index costs, as a fence table's bisection asks it: 64-bit signed keys that
+// What ordering two keys of an index costs, as a fence table's bisection asks it: 64-bit signed keys that
 // share their high bytes (rising identifiers), and keys drawn at random.
 using System;
 using System.Runtime.InteropServices;

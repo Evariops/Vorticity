@@ -1,4 +1,4 @@
-// Audit AG-03: what an approximate distinct count of a text column a dictionary holds costs a row, per group.
+// What an approximate distinct count of a text column a dictionary holds costs a row, per group.
 //
 // 4,194,304 rows of a text among 1,000 of 20 to 30 bytes, written as a dictionary, and a group of 64 values; the
 // approximate distinct count of the text per group, at one lane, from memory: each row's text hashed into its group's

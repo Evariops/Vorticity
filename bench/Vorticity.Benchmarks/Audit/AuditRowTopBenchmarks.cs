@@ -1,4 +1,4 @@
-// Audit AG-02: what a top of rows by a column the layout does not order costs.
+// What a top of rows by a column the layout does not order costs.
 //
 // A dataset of 64 objects of 65,536 rows (a sorted `Key`, a pseudo-random `Value`, a `Label`) in an in-memory store is
 // asked the 100 rows of the least value, and of the greatest: the places of the best rows first, from the column alone,

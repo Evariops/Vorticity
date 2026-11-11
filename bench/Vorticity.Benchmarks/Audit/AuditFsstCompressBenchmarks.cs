@@ -1,4 +1,4 @@
-// Audit DE-05: what a literal costs compressed by a chunk's FSST symbol table, as an equality or a prefix pushed into an
+// What a literal costs compressed by a chunk's FSST symbol table, as an equality or a prefix pushed into an
 // FSST column compresses its literal once per chunk.
 //
 // A table of 255 symbols of 1 to 8 bytes drawn from text, a literal of 20 bytes made of some of them and a few others.

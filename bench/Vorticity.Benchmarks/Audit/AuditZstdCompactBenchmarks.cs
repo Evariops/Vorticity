@@ -1,4 +1,4 @@
-// Audit WR-04: what laying a nullable column's valid values end to end before zstd costs a row, on the vector widths a
+// What laying a nullable column's valid values end to end before zstd costs a row, on the vector widths a
 // machine has.
 //
 // 65,536 nullable longs, one in ten null. Run as it is (AVX-512 here: vpcompress), and under DOTNET_EnableAVX512=0 (AVX2: a

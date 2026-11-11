@@ -1,4 +1,4 @@
-// Audit DS-11: what a part of a scan worked out again of its filter before it took the scan's own.
+// What a part of a scan worked out again of its filter before it took the scan's own.
 //
 // A part (a run of objects read as rows, an object's granules its statistics leave) is a new builder of the scan's
 // filter, projection and schema. Each found again what depends on those alone: the filter's pruner over summaries,

@@ -1,4 +1,4 @@
-// Audit IN-08: what finding the distinct trigrams a text predicate requires costs, which a Bloom or key index's pruner
+// What finding the distinct trigrams a text predicate requires costs, which a Bloom or key index's pruner
 // asks of each file a question reads: a LIKE of a 40-character run, and a starts-with of 12 characters.
 using System;
 using System.Collections.Generic;

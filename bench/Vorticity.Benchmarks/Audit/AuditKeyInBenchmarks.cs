@@ -1,4 +1,4 @@
-// Audit KE-03: what a scan in key order filtered by a long IN on the key costs, each literal's slice found by two rank
+// What a scan in key order filtered by a long IN on the key costs, each literal's slice found by two rank
 // searches of the key column, one literal after the other.
 //
 // A file of 4,194,304 rows whose `Key` rises (0, 2, 4, ...), from memory; an IN of 10, 1,000 or 10,000 keys drawn at

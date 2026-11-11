@@ -1,4 +1,4 @@
-// Audit AG-04: XXH3-64 of a value of 8 or 4 bytes, through the library's general entry and inline.
+// XXH3-64 of a value of 8 or 4 bytes, through the library's general entry and inline.
 //
 // 4,096 values hashed a call, each the hash a distinct count takes of a number.
 using System;

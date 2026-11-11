@@ -1,4 +1,4 @@
-// Audit DS-15: what a question pays to search each object's sparse index when its filter bounds no leading component of
+// What a question pays to search each object's sparse index when its filter bounds no leading component of
 // the key, the boxes of granules judged by an exclusion search.
 //
 // 8 appends of 524,288 calls (8 services, 200 pods, a status), sorted by (Service, Pod, At), the service and the pod

@@ -1,4 +1,4 @@
-// Audit AG-10: what counting a span of 64-bit integers into a percentile's sketch costs once its dense window holds their
+// What counting a span of 64-bit integers into a percentile's sketch costs once its dense window holds their
 // buckets, as a percentile of durations folds them. The ISA under test is the process's: run once as is and once with
 // DOTNET_EnableAVX512=0.
 //

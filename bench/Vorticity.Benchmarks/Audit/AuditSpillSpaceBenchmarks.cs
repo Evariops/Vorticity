@@ -1,4 +1,4 @@
-// Audit AG-07: what reading the free space of a spill's directory costs, which the core's spill paid before each page it
+// What reading the free space of a spill's directory costs, which the core's spill paid before each page it
 // appended (64 KiB to a few MiB): a walk of the system's mounts and a query of the drive.
 using System;
 using System.IO;

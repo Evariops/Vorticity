@@ -1,4 +1,4 @@
-// Audit CO-02: what copying a text column of few values into strings costs, the column a dictionary.
+// What copying a text column of few values into strings costs, the column a dictionary.
 //
 // 8,192 rows of 12 texts of 20 to 31 bytes, a dictionary block (codes over a block of the 12), copied into a string
 // array by Column<string>.CopyTo, as a consumer that wants .NET strings does.

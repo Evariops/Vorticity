@@ -1,4 +1,4 @@
-// Audit AG-21: what exporting an aggregation's partial costs, its rows of states written to a file in memory: a group by of
+// What exporting an aggregation's partial costs, its rows of states written to a file in memory: a group by of
 // 1,048,576 groups' counts and sums (a partial of some 40 MB), and of 64 groups'.
 //
 // 4,194,304 rows from memory, at one lane.

@@ -1,4 +1,4 @@
-// Audit IN-01 (a), IN-06: what a lookup through a sorted-runs index costs, the pruner built and a fresh mask refined,
+// What a lookup through a sorted-runs index costs, the pruner built and a fresh mask refined,
 // over a file of 65,536 blocks of 64 rows. Keys unique and scattered (each in one block), or in runs of 1,024 rows (each
 // in sixteen blocks): a lookup decoded its segment of keys whole, and marked a key's rows one division at a time.
 using System;

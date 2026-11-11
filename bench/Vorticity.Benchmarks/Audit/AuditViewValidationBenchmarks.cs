@@ -1,4 +1,4 @@
-// Audit DE-01: what the validation of a chunk of text views costs a row, the work a decode of
+// What the validation of a chunk of text views costs a row, the work a decode of
 // `vortex.varbinview` does besides wrapping its buffers.
 //
 // 65,536 views of one data buffer, pinned: values of 8 bytes (inline in their views), of 24 ASCII bytes,

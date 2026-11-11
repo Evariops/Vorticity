@@ -1,4 +1,4 @@
-// Audit DE-23: what an ALP-RD column costs read, its values' left parts looked up in its dictionary of eight a vector at a
+// What an ALP-RD column costs read, its values' left parts looked up in its dictionary of eight a vector at a
 // time: on AVX-512 before, a row at a time on AVX2. Run as it is and under DOTNET_EnableAVX512=0.
 //
 // 1,048,576 doubles (or floats) of full precision, written as ALP-RD to a file in memory and read back, every batch.

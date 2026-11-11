@@ -1,4 +1,4 @@
-// Audit IN-03: what decoding an object's counts of a column costs, a value at a time.
+// What decoding an object's counts of a column costs, a value at a time.
 //
 // The counts of a text column of 8 or 1,000 values of 16 to 24 bytes, each value's entry holding its rows and the
 // states of two integer measures, written by ColumnCounts.ToBytes and read back by ColumnCounts.From, as a question

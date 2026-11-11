@@ -1,4 +1,4 @@
-// Audit WR-03: what ALP's encoding of a float column costs a value, on the vector widths a machine has.
+// What ALP's encoding of a float column costs a value, on the vector widths a machine has.
 //
 // 65,536 doubles of two decimals (prices): the exponents chosen over their samples, then the values encoded. Run as it
 // is (AVX-512 here), and under DOTNET_EnableAVX512=0 (AVX2: the 128-bit tier, the encoder having no 256-bit one, and its

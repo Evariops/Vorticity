@@ -1,4 +1,4 @@
-// Audit DS-08: what a question answered granule by granule pays a granule, its filter judged on each one's statistics.
+// What a question answered granule by granule pays a granule, its filter judged on each one's statistics.
 //
 // 2,560,000 calls of two services, four routes each, 200 pods, sorted by the service, the route, then the instant, written
 // in one day and consolidated into one object of about 300 granules (DatasetGranuleJudgmentTests' layout, four times the

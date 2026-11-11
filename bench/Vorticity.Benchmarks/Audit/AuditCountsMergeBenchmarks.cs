@@ -1,4 +1,4 @@
-// Audit IN-21: what summing objects' counts of a column costs, as a rollup or a deletion's counts are built: 24 objects (an
+// What summing objects' counts of a column costs, as a rollup or a deletion's counts are built: 24 objects (an
 // hour each of a day), each counting 2,048 values drawn among 4,096 integers, an entry a value of one integer measure whose
 // quantile sketch holds a few rows, and a wide column's registers, 24 of the 2,048 set; every fourth object counted 3,968
 // values and left the others out, so the merge checks every value against the values those objects keep and moves some

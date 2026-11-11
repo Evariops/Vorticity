@@ -1,4 +1,4 @@
-// Audit AR-10: what the views of selected rows of texts cost cut from their offsets, a row's bytes checked as UTF-8 one row
+// What the views of selected rows of texts cost cut from their offsets, a row's bytes checked as UTF-8 one row
 // at a time, against the same rows taken as bytes, unchecked.
 //
 // 16,384 rows of 8 to 24 ASCII bytes, one in two selected, or one in sixteen.

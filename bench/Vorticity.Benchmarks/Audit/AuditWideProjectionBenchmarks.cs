@@ -1,4 +1,4 @@
-// Audit LA-03: what a projection of many columns costs a batch, its struct's type rebuilt from its fields' names and
+// What a projection of many columns costs a batch, its struct's type rebuilt from its fields' names and
 // types at every batch.
 //
 // A file of 262,144 rows of 128 long columns, from memory, at one lane; 64 of them projected, in batches of 1,024 or

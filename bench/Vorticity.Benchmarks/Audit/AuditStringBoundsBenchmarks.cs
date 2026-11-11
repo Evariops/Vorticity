@@ -1,4 +1,4 @@
-// Audit VW-07: what a text column's bounds cost as the writer feeds them, each block's least and greatest value kept, under
+// What a text column's bounds cost as the writer feeds them, each block's least and greatest value kept, under
 // each instruction set (run with DOTNET_EnableAVX512=0 for AVX2). 131,072 values of 16 to 40 characters drawn among 5,000
 // that open with one of 50 prefixes, fed by blocks of 8,192.
 using System;

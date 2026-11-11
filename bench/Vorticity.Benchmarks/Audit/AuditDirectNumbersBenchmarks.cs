@@ -1,4 +1,4 @@
-// Audit AG-10: what grouping a batch by an integer key costs once every value of the span its statistics bound is met:
+// What grouping a batch by an integer key costs once every value of the span its statistics bound is met:
 // each row's group is its value less the least, the span numbered whole.
 //
 // A key bound to [0, 4095], every value met by a first batch; then batches of 65,536 rows drawn among them, by width;

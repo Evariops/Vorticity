@@ -1,4 +1,4 @@
-// Audit DS-09: what a question answered by a dataset's rollups pays to choose them, every rollup decoded at each question.
+// What a question answered by a dataset's rollups pays to choose them, every rollup decoded at each question.
 //
 // A dataset of 1,024 hours of hits (64 rows an hour, an append an hour, compacted), partitioned by the hour, rolled up
 // with a fan-out of 2: about two thousand rollups of every rank. The question: the hits by service, which the rollups'

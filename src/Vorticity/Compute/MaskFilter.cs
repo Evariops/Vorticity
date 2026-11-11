@@ -47,7 +47,7 @@ internal static class MaskFilter
         int written = 0;
         int w = 0;
 
-        // Lanes of 4 and 8 bytes compress with AVX-512F alone; VBMI2 is for those of 1 and 2 (CP-01).
+        // Lanes of 4 and 8 bytes compress with AVX-512F alone; VBMI2 is for those of 1 and 2.
         bool wide = Unsafe.SizeOf<T>() >= 4 ? WordBytes.IsAccelerated && Avx512F.IsSupported : IsAccelerated;
         if (!wide && Unsafe.SizeOf<T>() >= 4 && Avx2.IsSupported)
         {
@@ -153,7 +153,7 @@ internal static class MaskFilter
         ref ulong to = ref MemoryMarshal.GetReference(destination);
         int written = 0;
         int w = 0;
-        // Lanes of 8 bytes: AVX-512F's compress, VBMI2 not needed (CP-01).
+        // Lanes of 8 bytes: AVX-512F's compress, VBMI2 not needed.
         if (WordBytes.IsAccelerated && Avx512F.IsSupported && Bmi2.X64.IsSupported)
         {
             WordBytes spread = WordBytes.Create();

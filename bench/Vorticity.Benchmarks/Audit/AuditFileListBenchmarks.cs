@@ -1,4 +1,4 @@
-// Audit DS-41: what the newest version costs on a local disk that holds a long history.
+// What the newest version costs on a local disk that holds a long history.
 //
 // A file store whose commit directory holds 20,000 commit objects of a few bytes, written once in a directory of the temp
 // folder. A listing of the newest commit, one key, as an open or a refresh that does not trust the version it knows asks

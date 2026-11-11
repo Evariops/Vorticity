@@ -1,4 +1,4 @@
-// Audit VW-07: what writing a chunk's indices costs, a dictionary's codes or a string column's offsets narrowed from ints
+// What writing a chunk's indices costs, a dictionary's codes or a string column's offsets narrowed from ints
 // to the width the column needs: 65,536 codes below 200 to one byte, below 50,000 to two, and offsets kept at eight.
 using System;
 

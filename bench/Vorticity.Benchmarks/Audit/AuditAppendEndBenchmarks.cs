@@ -1,4 +1,4 @@
-// Audit DS-51: what finding where an append's rows begin costs a dataset partitioned with no key, against the append.
+// What finding where an append's rows begin costs a dataset partitioned with no key, against the append.
 //
 // A dataset partitioned by a day with no sort key holds 2,048 objects, a day each, of 64 rows, in an in-memory store.
 // An append to it first finds the end of every row's position: the greatest of every object's place and rows, by a walk

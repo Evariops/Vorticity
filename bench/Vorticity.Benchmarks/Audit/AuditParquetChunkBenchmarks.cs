@@ -1,4 +1,4 @@
-// Audit PQ-02: what a Parquet chunk's metadata costs decoded from the footer, and a question that asks for it, by group and
+// What a Parquet chunk's metadata costs decoded from the footer, and a question that asks for it, by group and
 // column, several times.
 //
 // 524,288 rows of eight columns in 64 row groups of 8,192. `Chunks` decodes every chunk's metadata once; `Count` counts

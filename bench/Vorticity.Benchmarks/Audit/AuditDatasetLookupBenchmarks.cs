@@ -1,4 +1,4 @@
-// Audit DS-11: what a lookup of an identifier costs, the identifier's column projected alone.
+// What a lookup of an identifier costs, the identifier's column projected alone.
 //
 // A dataset of 32 objects of 65,536 rows each (sorted `key`, a unique `id` scattered over the whole range in every
 // object, so that no object's bounds rule a value out) is written into an in-memory store, `id` declared its

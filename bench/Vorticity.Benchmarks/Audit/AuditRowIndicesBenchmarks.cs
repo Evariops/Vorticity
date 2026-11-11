@@ -1,4 +1,4 @@
-// Audit S1: what turning a filter's verdicts into the indices of the rows it keeps costs per row, at half the rows kept
+// What turning a filter's verdicts into the indices of the rows it keeps costs per row, at half the rows kept
 // and at a twentieth. Run it as it is and under DOTNET_EnableAVX512=0 (AVX2) and DOTNET_EnableAVX2=0 (SSE).
 using System;
 

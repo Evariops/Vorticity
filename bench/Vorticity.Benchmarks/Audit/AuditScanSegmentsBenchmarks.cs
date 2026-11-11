@@ -1,4 +1,4 @@
-// Audit SC-02: what a wide scan over a source whose reads copy pays for the segments its lanes share.
+// What a wide scan over a source whose reads copy pays for the segments its lanes share.
 //
 // A file of 64 integer columns and 1,048,576 rows, in blocks of 8,192, is put in an in-memory object store and opened
 // through it, so that every segment a batch asks for is a read the scan's shared set holds for the batches after it.

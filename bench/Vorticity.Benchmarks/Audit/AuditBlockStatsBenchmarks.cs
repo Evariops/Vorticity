@@ -1,4 +1,4 @@
-// Audit WR-02: what a writer's statistics of a block cost a value, on the vector widths a machine has.
+// What a writer's statistics of a block cost a value, on the vector widths a machine has.
 //
 // A block of 8,192 values, 64-bit integers or doubles drawn at random: its least and greatest. Run as it is (AVX-512 here),
 // and under DOTNET_EnableAVX512=0 (AVX2: the 128-bit tier, the kernels having no 256-bit one) to see what AVX2 and NEON

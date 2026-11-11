@@ -1,4 +1,4 @@
-// Audit VA-01: what a variant made from a log line's JSON costs, a call a row, as an ingestion of JSON attributes makes it.
+// What a variant made from a log line's JSON costs, a call a row, as an ingestion of JSON attributes makes it.
 //
 // A JSON object of fifteen members, two of them objects and one an array, about 400 bytes.
 using System.Text;

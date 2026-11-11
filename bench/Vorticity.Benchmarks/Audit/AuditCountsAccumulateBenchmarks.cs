@@ -1,4 +1,4 @@
-// Audit VW-04 and VW-05: what a column's counts cost as the writer feeds them, each row of the counted column folding every
+// What a column's counts cost as the writer feeds them, each row of the counted column folding every
 // measure into its value's entry and adding to its sketches; and what a measure's granule statistics cost, its values
 // folded into the granule's record and its histogram. 327,680 rows (an object of a compaction) fed by blocks of 8,192, a
 // granule each: an instant, the counted key (20 values), an amount (a long), a size (an int, one row in ten null) and a

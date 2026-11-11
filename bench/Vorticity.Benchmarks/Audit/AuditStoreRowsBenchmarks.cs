@@ -1,4 +1,4 @@
-// Audit WR-01: what appending a canonical column of 65,536 rows to a store of its type costs, per row, column by column:
+// What appending a canonical column of 65,536 rows to a store of its type costs, per row, column by column:
 // the copy every external sort, top-k and ingestion makes of its batches.
 //
 // Each column is built once in an arena: 64-bit integers with no null and with a null every tenth row, booleans with a

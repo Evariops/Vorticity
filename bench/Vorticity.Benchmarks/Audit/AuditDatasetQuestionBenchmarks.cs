@@ -1,4 +1,4 @@
-// Audit DS-04 and DS-05: what a question over a dataset of many objects pays to plan, besides its reads.
+// What a question over a dataset of many objects pays to plan, besides its reads.
 //
 // Two datasets of 2,097,152 rows (an `At` an hour of 4,096 rows rising, a sorted `Key`, a `Service` of 8
 // values, a pseudo-random `Value` in [0, 1)) in an in-memory store:
@@ -94,7 +94,7 @@ public partial class AuditDatasetQuestionBenchmarks
         .Where(e => e.Key >= (300L * 1_024) + 100 && e.Key < (1_700L * 1_024) + 900)).GetAwaiter().GetResult();
 
     /// <summary>
-    /// Every row's value summed and its greatest, by service (audit AG-21): on "sealed", each object's states answer it,
+    /// Every row's value summed and its greatest, by service: on "sealed", each object's states answer it,
     /// a batch of states an object, whose measure's columns are found by name.
     /// </summary>
     [Benchmark]

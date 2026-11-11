@@ -1,4 +1,4 @@
-// Audit CP-15: what a zone's bound costs read as a literal from a zone map's column, as the first open of a file's map reads
+// What a zone's bound costs read as a literal from a zone map's column, as the first open of a file's map reads
 // two to four of them for every zone of every column.
 //
 // 1,024 zones of a primitive column of longs, each read once.

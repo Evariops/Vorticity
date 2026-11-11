@@ -1,4 +1,4 @@
-// Audit CO-04: what a nullable column's values cost a reader that takes them as T?, on the vector widths a machine has.
+// What a nullable column's values cost a reader that takes them as T?, on the vector widths a machine has.
 //
 // 65,536 rows, one in ten null, as longs, ints and bools. Run as it is (AVX-512 here), and under DOTNET_EnableAVX512=0
 // (AVX2: a row at a time).

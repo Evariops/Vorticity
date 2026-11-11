@@ -1,4 +1,4 @@
-// Audit DE-20: what putting an instant back together from its days, seconds and fractions costs a row.
+// What putting an instant back together from its days, seconds and fractions costs a row.
 //
 // 1,048,576 instants in microseconds cut as the DateTimeParts encoding cuts them: days since the epoch as i32, the
 // second of the day as u32, the microsecond as u32, recomposed into i64. Run under DOTNET_EnableAVX512=0 for the AVX2

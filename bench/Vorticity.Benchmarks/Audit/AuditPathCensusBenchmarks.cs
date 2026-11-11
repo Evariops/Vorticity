@@ -1,4 +1,4 @@
-// Audit VA-02: what a census of a variant column's paths costs a row, its values whole, by a selection of its rows.
+// What a census of a variant column's paths costs a row, its values whole, by a selection of its rows.
 //
 // 65,536 rows of attributes, 6 of 40 keys each, one row in ten null, read from a file in memory; half the rows selected.
 using System;

@@ -1,4 +1,4 @@
-// Audit IN-09: what or-ing a value's granules into a question's map costs, from a file's index of where each value lies:
+// What or-ing a value's granules into a question's map costs, from a file's index of where each value lies:
 // a file of 4,096 granules, 256 values each in a quarter of them at random, kept as maps; every value's granules or-ed in,
 // as a prefix that every value starts with asks.
 using System;

@@ -1,4 +1,4 @@
-// Audit OS-01: what an object store's request costs on the client, authorized by a bearer token: 1,000 reads of 4 KiB from
+// What an object store's request costs on the client, authorized by a bearer token: 1,000 reads of 4 KiB from
 // Cloud Storage over a transport that answers in memory, under a token of 1,200 characters as OAuth 2.0 gives them.
 using System;
 using System.Net;

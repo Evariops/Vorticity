@@ -1,4 +1,4 @@
-// Audit CO-03: what a column's values cost a consumer when they lie as the file laid them out, 16 bytes from a 64-byte
+// What a column's values cost a consumer when they lie as the file laid them out, 16 bytes from a 64-byte
 // boundary, against their copy into an aligned block, which the first typed access makes.
 //
 // 65,536 longs summed by 512-bit vectors (a consumer's pass): in an aligned block, in place 16 bytes off, and copied

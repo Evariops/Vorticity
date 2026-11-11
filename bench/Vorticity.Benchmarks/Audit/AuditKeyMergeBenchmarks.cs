@@ -1,4 +1,4 @@
-// Audit DS-30: what a key-ordered read of a dataset pays its merge of objects whose keys do not interleave.
+// What a key-ordered read of a dataset pays its merge of objects whose keys do not interleave.
 //
 // A dataset of 2,097,152 rows (a sorted `Key`, a `Value`) in an in-memory store, its sort key `Key`: 256 objects of 8,192
 // rows, each its own run of keys, as a level's objects are. Every row read in key order, its values consumed: the merge

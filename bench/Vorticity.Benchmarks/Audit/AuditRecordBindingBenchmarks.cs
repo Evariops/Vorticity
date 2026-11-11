@@ -1,4 +1,4 @@
-// Audit RS-02: what a result's batch of records paid to bind its record: a schema made of the result's type for each
+// What a result's batch of records paid to bind its record: a schema made of the result's type for each
 // batch, which the bindings' cache, keyed by the schema, never found; against a binding kept by the type.
 using BenchmarkDotNet.Attributes;
 

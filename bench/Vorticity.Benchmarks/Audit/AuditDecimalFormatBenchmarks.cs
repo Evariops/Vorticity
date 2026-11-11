@@ -1,4 +1,4 @@
-// Audit VA-03: what a decimal costs formatted as text, its unscaled 256-bit value divided by 10^19 a chunk of digits.
+// What a decimal costs formatted as text, its unscaled 256-bit value divided by 10^19 a chunk of digits.
 //
 // A decimal of 7 digits (scale 2), one of 38 digits (scale 4) and one of 70 digits (scale 10), each formatted into a
 // buffer of its own.

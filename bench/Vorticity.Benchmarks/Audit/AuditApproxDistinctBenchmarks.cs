@@ -1,4 +1,4 @@
-// Audit AG-04: what an approximate distinct count of numbers costs a row, each value hashed as its bytes.
+// What an approximate distinct count of numbers costs a row, each value hashed as its bytes.
 //
 // 4,194,304 rows of a 64-bit key drawn among 2^40, a 32-bit one among 2^31, and a group of 64 values; the approximate
 // distinct count of the key per group, at one lane, from memory: each value hashed (XXH3-64 of its bytes, seed 0) into
@@ -26,7 +26,7 @@ public partial class AuditApproxDistinctBenchmarks
     [Params(64, 32)]
     public int Bits { get; set; }
 
-    /// <summary>The groups (audit AG-21): 64, whose sketches are soon dense, or a million of four values each, kept exactly.</summary>
+    /// <summary>The groups: 64, whose sketches are soon dense, or a million of four values each, kept exactly.</summary>
     [Params(64, 1_048_576)]
     public int Groups { get; set; } = 64;
 

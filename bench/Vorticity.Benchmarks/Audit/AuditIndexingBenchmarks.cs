@@ -1,4 +1,4 @@
-// Audit DS-64: what giving a dataset's objects an index policy pays, its walks over the objects until one builds nothing.
+// What giving a dataset's objects an index policy pays, its walks over the objects until one builds nothing.
 //
 // 64 appends of 16,384 calls (40 services) to a dataset sorted by the instant, in an in-memory store that answers each
 // request in 5 ms, copied afresh before each run. The run: a Bloom filter on the service for every object, a fragment each.

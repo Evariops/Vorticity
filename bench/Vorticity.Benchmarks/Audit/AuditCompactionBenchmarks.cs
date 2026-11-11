@@ -1,4 +1,4 @@
-// Audit DS-62: what a merge of level 0 into the level above pays, on one lane or on a session's eight.
+// What a merge of level 0 into the level above pays, on one lane or on a session's eight.
 //
 // 16 appends of 131,072 calls (20 services, an instant, bytes), sorted by the service and the instant, left in level 0, in
 // an in-memory store copied afresh before each compaction. The compaction: the one job that merges level 0 into level 1.

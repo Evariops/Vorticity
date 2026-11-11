@@ -1,4 +1,4 @@
-// Audit AR-12: what a nullable column's dictionary codes cost widened, the rows' validity tracked from the codes' and the
+// What a nullable column's dictionary codes cost widened, the rows' validity tracked from the codes' and the
 // values', as a decode of dictionary-encoded texts with nulls makes it.
 //
 // 65,536 codes of 16 or 32 bits into a dictionary of 5,000 values all valid, one code in ten null.

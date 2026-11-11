@@ -1,4 +1,4 @@
-// Audit S1: what the filter kernel comparing a column against a literal costs per row, by column type, with and without
+// What the filter kernel comparing a column against a literal costs per row, by column type, with and without
 // nulls. Run it as it is and again under DOTNET_EnableAVX512=0 (AVX2; on .NET 11 DOTNET_EnableAVX512F=0 no longer turns
 // AVX-512 off), DOTNET_EnableAVX2=0 (SSE) and DOTNET_EnableHWIntrinsic=0 (scalar): the kernel was vectorised under
 // AVX-512 alone. A boolean column is compared with true, which spreads its bits to verdicts and its nulls to unknowns.

@@ -1,4 +1,4 @@
-// Audit DS-01: what a filtered Count, Any and Max over many objects cost, at one lane and at eight.
+// What a filtered Count, Any and Max over many objects cost, at one lane and at eight.
 //
 // A dataset of 32 objects of 65,536 rows each (sorted `key`, a pseudo-random `measure` in [0, 1)) is
 // written into an in-memory store. Every question carries a filter on `measure` that no object's summary

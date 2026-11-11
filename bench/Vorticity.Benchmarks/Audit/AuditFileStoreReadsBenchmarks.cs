@@ -1,4 +1,4 @@
-// Audit DS-40 and DS-42: what a read of a held file costs a store on local disk, from one thread and from sixteen.
+// What a read of a held file costs a store on local disk, from one thread and from sixteen.
 //
 // A file object store in a temporary directory holds 64 objects of 64 KiB, kept open after their first read. Each
 // operation reads 1 KiB of one of them under its token, as a dataset's reads of segments do: from one thread, and from

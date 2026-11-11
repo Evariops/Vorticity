@@ -1,4 +1,4 @@
-// Audit S1: what the connectives of a filter's verdicts cost per row: AND of two columns of verdicts, NOT of one, and the
+// What the connectives of a filter's verdicts cost per row: AND of two columns of verdicts, NOT of one, and the
 // selection as words of bits. Run it as it is and under DOTNET_EnableAVX512=0 (AVX2) and DOTNET_EnableAVX2=0 (SSE).
 using System;
 

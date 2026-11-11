@@ -1,4 +1,4 @@
-// Audit ED-01: what a writer pays to ask whether its target edition carries an array id, a question its compressor asks
+// What a writer pays to ask whether its target edition carries an array id, a question its compressor asks
 // of each scheme it weighs.
 using BenchmarkDotNet.Attributes;
 

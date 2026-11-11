@@ -1,4 +1,4 @@
-// Audit AG-06: what a caller's aggregator costs a row when the rows of a batch go to many groups, each row stepped on
+// What a caller's aggregator costs a row when the rows of a batch go to many groups, each row stepped on
 // its own, against the engine's own sum.
 //
 // 4,194,304 rows of a key among 64 groups and a 64-bit value, from memory, at one lane: the keys drawn at random row by

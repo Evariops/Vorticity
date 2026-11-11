@@ -1,4 +1,4 @@
-// Audit AR-07: what the lengths that cut a decoded heap of texts cost summed, as bytes (short texts) or 32-bit integers.
+// What the lengths that cut a decoded heap of texts cost summed, as bytes (short texts) or 32-bit integers.
 //
 // 65,536 lengths, every row.
 using System;

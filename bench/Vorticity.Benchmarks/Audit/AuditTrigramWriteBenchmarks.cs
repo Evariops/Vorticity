@@ -1,4 +1,4 @@
-// Audit VW-06: what a text column's trigram indexes cost a write, every trigram of every value noted. 131,072 log lines of
+// What a text column's trigram indexes cost a write, every trigram of every value noted. 131,072 log lines of
 // 60 to 120 characters, words drawn among 2,000 and numbers, written to a file with no index, with a trigram Bloom filter,
 // or with trigram postings.
 using System;

@@ -1,4 +1,4 @@
-// Audit DS-60: what a merge of level 0 pays for a variant column: the first pass that counts its paths to choose what each
+// What a merge of level 0 pays for a variant column: the first pass that counts its paths to choose what each
 // object shreds, then the merge that reads the rows again.
 //
 // 8 appends of 65,536 events of a day (20 services, an instant, attributes of 10 keys of 100, texts and integers), sorted

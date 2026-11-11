@@ -1,4 +1,4 @@
-// What a range on instants costs when their DateTimeParts encoding answers it (DE-04).
+// What a range on instants costs when their DateTimeParts encoding answers it.
 //
 // A file of 1,048,576 instants in microseconds, scattered over 30 days so that no zone map prunes a
 // chunk, written as days, seconds and microseconds. The filter keeps a range that starts and ends

@@ -1,4 +1,4 @@
-// Audit DS-53: what the counts of the rows a delete takes cost a row, on an object that keeps counts.
+// What the counts of the rows a delete takes cost a row, on an object that keeps counts.
 //
 // 65,536 calls (a service among 40, a status, bytes, a latency) read from a file in memory, in the batches its scan gives,
 // owned. The service is counted, with the bytes summed as integers and the latency as floats, as a dataset counts it; the

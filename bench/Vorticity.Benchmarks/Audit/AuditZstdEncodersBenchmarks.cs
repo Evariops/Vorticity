@@ -1,4 +1,4 @@
-// Audit WR-05: what a writer pays to borrow a zstd compressor from the process's pool and give it back, under its lock.
+// What a writer pays to borrow a zstd compressor from the process's pool and give it back, under its lock.
 using BenchmarkDotNet.Attributes;
 
 using Vorticity.Writing;

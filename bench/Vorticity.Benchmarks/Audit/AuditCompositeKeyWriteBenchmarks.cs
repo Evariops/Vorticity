@@ -1,4 +1,4 @@
-// Audit VW-10: what a composite key's index costs a write in allocations, the key's columns cut and encoded together for
+// What a composite key's index costs a write in allocations, the key's columns cut and encoded together for
 // every batch. 524,288 rows of a service (20 values) and an instant, written to a file with sorted runs of the key
 // (service, instant).
 using System;
@@ -20,7 +20,7 @@ public partial class AuditCompositeKeyWriteBenchmarks
 
     /// <summary>
     /// Whether the index is kept, its budget raised: under the default budget, an index of these unique keys outweighs
-    /// the file's 330 KB of data and is abandoned once built (VW-12).
+    /// the file's 330 KB of data and is abandoned once built.
     /// </summary>
     [Params(false, true)]
     public bool Kept { get; set; }

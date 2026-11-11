@@ -1,4 +1,4 @@
-// Audit DS-67: what a commit pays an append, its entries summed, its header measured, its tree's edge rewritten.
+// What a commit pays an append, its entries summed, its header measured, its tree's edge rewritten.
 //
 // A dataset sorted by its key, 1,024 objects appended before, in an in-memory store; each operation appends one more
 // object of 256 rows and commits it.

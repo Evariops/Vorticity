@@ -1,4 +1,4 @@
-// Audit PQ-04: what a Parquet writer costs for columns of 8- and 16-bit integers, which it widens to INT32 a row at a time.
+// What a Parquet writer costs for columns of 8- and 16-bit integers, which it widens to INT32 a row at a time.
 //
 // 1,048,576 rows of four such columns (signed and unsigned bytes and shorts), written to a sink that keeps nothing, with no compression, one
 // in ten null or none.

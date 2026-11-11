@@ -1,4 +1,4 @@
-// Audit S1: what checking that a column rises costs per row, as a writer's statistics check it: the registers clear the
+// What checking that a column rises costs per row, as a writer's statistics check it: the registers clear the
 // pairs of adjacent values, a scalar walk the rest. Run it under DOTNET_EnableAVX512=0 (AVX2) and DOTNET_EnableAVX2=0.
 using System;
 

@@ -1,4 +1,4 @@
-// Audit AR-04: what dense values cost spread over the rows of a nullable column, as zstd and pco decodes do, a word of
+// What dense values cost spread over the rows of a nullable column, as zstd and pco decodes do, a word of
 // mixed validity expanded in registers on AVX-512 and row by row elsewhere.
 //
 // 65,536 rows, one in ten null or one in two, of 4- and 8-byte values, into zeroed rows. Run as it is (AVX-512 here) and

@@ -1,4 +1,4 @@
-// Audit DS-69: what a question on a key of a variant column pays for each object of level 0 it reads from the node's memo
+// What a question on a key of a variant column pays for each object of level 0 it reads from the node's memo
 // of shredded copies, once they are made.
 //
 // 64 appends of 4,096 documents (a rising id, attributes of a route and a status), left in level 0. The question counts the

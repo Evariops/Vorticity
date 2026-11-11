@@ -1,4 +1,4 @@
-// Audit VW-11 (found by VW-01's trace of a compaction) and VW-08: what a column's sheet costs as the writer feeds it, the
+// What a column's sheet costs as the writer feeds it, the
 // exact counts of its distinct values kept by a table probed for every row, and then finished. A column of 327,680 longs
 // (an object of a compaction), fed a block of 8,192 rows at a time, drawn among 1,000 values (a table that stays in the
 // first caches), 80,000 (few enough, a quarter of the rows, that the sheet lists its frequent values), 100,000 (a table of

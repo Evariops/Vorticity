@@ -1,4 +1,4 @@
-// Audit AR-05 and AR-06: what bitmaps cost made from bytes of 0 or 1 (a bool column's validity or values packed), and
+// What bitmaps cost made from bytes of 0 or 1 (a bool column's validity or values packed), and
 // copied from a bit off a byte boundary (a slice's validity concatenated), on AVX-512 and under DOTNET_EnableAVX512=0.
 //
 // 65,536 bits.

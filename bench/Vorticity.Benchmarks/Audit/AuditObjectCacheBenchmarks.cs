@@ -1,4 +1,4 @@
-// Audit DS-06, DS-07: what a rent and a return of an open data object cost, alone and with sixteen threads at once.
+// What a rent and a return of an open data object cost, alone and with sixteen threads at once.
 //
 // A dataset of 32 small objects is written into an in-memory store, and each object is rented once so that the
 // handle's cache holds them all open. `RentReturn` then rents every object and gives it back, in turn; each thread

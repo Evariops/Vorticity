@@ -1,4 +1,4 @@
-// Audit DS-68: what a cold walk of a dataset's objects pays the versions whose pages its tree holds, the start of each
+// What a cold walk of a dataset's objects pays the versions whose pages its tree holds, the start of each
 // version's pages read before its first page.
 //
 // 1,024 appends of 256 rows to a dataset sorted by its key, each its own version, in an in-memory store that answers each

@@ -1,4 +1,4 @@
-// Audit RE-02: what the seek key of a composite index costs made from a record, as a caller makes one a lookup.
+// What the seek key of a composite index costs made from a record, as a caller makes one a lookup.
 //
 // A key of a service name, a status and a timestamp.
 using System;

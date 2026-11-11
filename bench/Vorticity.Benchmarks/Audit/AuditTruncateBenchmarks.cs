@@ -1,4 +1,4 @@
-// Audit CP-10 (b): what truncating an instant to a calendar unit, or in a zone, costs a value.
+// What truncating an instant to a calendar unit, or in a zone, costs a value.
 //
 // 1,048,576 instants in microseconds, over a year in time order, or over fifty years in no order, truncated to a month
 // as stored, to a month in Paris, or to an hour in Paris: the calendar's arithmetic for every value, and the zone's

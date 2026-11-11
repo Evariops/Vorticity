@@ -1,4 +1,4 @@
-// Audit DS-22: what a walk of a composite sort key pays a key, its object's tuples read a granule at a time.
+// What a walk of a composite sort key pays a key, its object's tuples read a granule at a time.
 //
 // A dataset sorted by (Service, Sequence), of 16 appends of 65,536 rows (40 services), compacted, in an in-memory store.
 // Every key walked in order through the dataset's key cursor, its tuple's bytes read in place at each step: each object's

@@ -1,4 +1,4 @@
-// Audit VA-02: what a census of a shredded variant column's paths costs a batch of an edge granule, read as its shredding
+// What a census of a shredded variant column's paths costs a batch of an edge granule, read as its shredding
 // holds it, by the selections words it is walked under.
 //
 // 65,536 rows of attributes, each 12 of 200 keys shredded as strings or integers and 2 of 50 left in the residual, read

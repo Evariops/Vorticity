@@ -1,4 +1,4 @@
-// Audit CP-04: what the row of a column's least value costs found, as a scan asked for the row of its minimum does, a
+// What the row of a column's least value costs found, as a scan asked for the row of its minimum does, a
 // batch at a time.
 //
 // 65,536 random longs or ints, every row valid.

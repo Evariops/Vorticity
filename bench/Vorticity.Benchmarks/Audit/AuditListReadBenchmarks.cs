@@ -1,4 +1,4 @@
-// Audit LA-01: what reading a column of lists costs a row, its boundaries turned into each row's start and size.
+// What reading a column of lists costs a row, its boundaries turned into each row's start and size.
 //
 // A file of 1,048,576 rows of a list of zero to six longs, from memory, at one lane; every row's list read and its
 // values counted.

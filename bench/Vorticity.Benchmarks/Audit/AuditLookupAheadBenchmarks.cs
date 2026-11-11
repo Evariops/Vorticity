@@ -1,4 +1,4 @@
-// Audit DS-16: what a lookup pays for the objects it cannot look up, read as any, ahead, their batches copied.
+// What a lookup pays for the objects it cannot look up, read as any, ahead, their batches copied.
 //
 // 16 appends of 65,536 rows (a rising key, an identifier of 16,384 values drawn at random, a message of 48 characters, a
 // value), an identifier declared but no object large enough to keep a table of contents, so that no object takes the

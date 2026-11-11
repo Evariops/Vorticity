@@ -1,4 +1,4 @@
-// Audit VA-03: what a shredded variant column costs a scan that reads it put back together, and the share of it the copy of
+// What a shredded variant column costs a scan that reads it put back together, and the share of it the copy of
 // the rebuilt values into the batch's arena takes.
 //
 // 65,536 rows of attributes, each 12 of 200 keys shredded (or 6 of 16) as strings or integers and 2 of 50 left in the residual, read from

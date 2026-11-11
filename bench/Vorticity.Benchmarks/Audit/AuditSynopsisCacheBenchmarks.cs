@@ -1,9 +1,9 @@
-// Audit SY-01 and SY-02: what a region read from the session's disk cache costs when the cache holds it.
+// What a region read from the session's disk cache costs when the cache holds it.
 //
 // A cache in a temporary directory holds 4,096 or 16,384 regions of 1 KiB, 64 an object, written and flushed. Each
 // operation reads one region a thread, a hit, its view released: from one thread, and from sixteen at once, as the
 // lanes of a question ask their regions. The cache keeps 4,096 files open, each mapped once read: past them, every
-// read opens, maps and lets go of a file (SY-02).
+// read opens, maps and lets go of a file.
 using System;
 using System.IO;
 using System.Threading;

@@ -1,4 +1,4 @@
-// Audit S1: what spreading a dictionary's answers over its rows by their codes costs per row, a dictionary of 8 values
+// What spreading a dictionary's answers over its rows by their codes costs per row, a dictionary of 8 values
 // coded in bytes, as a dictionary decoder answers a pushed predicate. Run it under DOTNET_EnableAVX512=0 (AVX2) and
 // DOTNET_EnableAVX2=0 (SSE): the kernel was vectorised under AVX-512 VBMI alone.
 using System;

@@ -1,4 +1,4 @@
-// Audit DS-50: what an append of records costs a dataset that sorts or partitions them.
+// What an append of records costs a dataset that sorts or partitions them.
 //
 // 1,048,576 records (an instant over 16 hours, a key, a service of 8, a value), their keys shuffled, appended as one
 // object draft into an in-memory store: a dataset sorted by the key ("sorted"), and one partitioned by the hour of the

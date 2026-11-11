@@ -1,4 +1,4 @@
-// Audit AG-10: what a sum of a dense column of 8- or 16-bit integers costs, as an aggregate's span of values takes it.
+// What a sum of a dense column of 8- or 16-bit integers costs, as an aggregate's span of values takes it.
 // The ISA under test is the process's: run once as is and once with DOTNET_EnableAVX512=0 for the AVX2 path.
 //
 // 65,536 values drawn at random, every row.

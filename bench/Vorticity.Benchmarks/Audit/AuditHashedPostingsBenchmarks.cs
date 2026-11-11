@@ -1,4 +1,4 @@
-// Audit VW-06: what hashed postings cost as the writer feeds them, each row's value hashed and its hash placed in its
+// What hashed postings cost as the writer feeds them, each row's value hashed and its hash placed in its
 // block's bucket. 327,680 rows of a column of identifiers, longs drawn at random, fed by blocks of 8,192; the buckets kept
 // in memory, the feed alone measured.
 using System;

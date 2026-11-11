@@ -1,4 +1,4 @@
-// Audit CP-05: what a bucket of floats costs a value, the column's values floored to a multiple of its width, as a group
+// What a bucket of floats costs a value, the column's values floored to a multiple of its width, as a group
 // by on Bucket(latency, 2.5) reads its key.
 //
 // 1,048,576 doubles (or floats) drawn in [0, 1000), floored to multiples of 2.5 by NumberBucket over a primitive block.

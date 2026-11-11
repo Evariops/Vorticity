@@ -1,4 +1,4 @@
-// Audit SC-02: what one batch pays, under the lock its scan's lanes share, to take its segments from what the scan holds.
+// What one batch pays, under the lock its scan's lanes share, to take its segments from what the scan holds.
 //
 // Each operation is a batch of a scan over a file whose chunks are a block each, wide: 64 segments of its own, none held
 // yet. It claims them, fills them as its read would, publishes them for the batches after it, and the batch delivered

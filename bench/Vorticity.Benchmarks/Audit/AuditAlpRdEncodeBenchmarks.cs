@@ -1,4 +1,4 @@
-// Audit VW-07: what ALP-RD's encoding of a chunk of doubles costs, each value cut into the left part a small dictionary
+// What ALP-RD's encoding of a chunk of doubles costs, each value cut into the left part a small dictionary
 // codes and the right part kept, under each instruction set (run with DOTNET_EnableAVX512=0 for AVX2). 65,536 doubles
 // of a sensor, a few bits of noise on a slow wave, every one valid or one in sixteen null.
 using System;

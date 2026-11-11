@@ -1,4 +1,4 @@
-// Audit CP-14: what validities cost combined, a nullable struct's over its field's (a filter on a nested field), and taken
+// What validities cost combined, a nullable struct's over its field's (a filter on a nested field), and taken
 // by row indices (a selective read's), both a row at a time before.
 //
 // 65,536 rows, one in ten null on each side, from a bit off a byte; one row in three taken. The nodes are laid again in a

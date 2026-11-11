@@ -1,4 +1,4 @@
-// Audit CP-16: what the predicate an encoding answers costs made for an IN of a thousand texts, as a question's plan makes
+// What the predicate an encoding answers costs made for an IN of a thousand texts, as a question's plan makes
 // one for its filter.
 using System;
 

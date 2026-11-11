@@ -1,4 +1,4 @@
-// What a scan of an OnPair node larger than its batch pays per batch for its dictionary (DE-03).
+// What a scan of an OnPair node larger than its batch pays per batch for its dictionary.
 //
 // One node of 262,144 rows of one to five codes each, over a dictionary of `Tokens` tokens of one to
 // sixteen bytes, read in windows of 8,192 rows as a scan reads a flat node larger than its batch:

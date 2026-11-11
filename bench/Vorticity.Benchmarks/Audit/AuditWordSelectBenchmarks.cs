@@ -1,4 +1,4 @@
-// Audit AG-10: what selecting the rows of a run of dense mask words costs before a filtered aggregate folds them, the
+// What selecting the rows of a run of dense mask words costs before a filtered aggregate folds them, the
 // rows left out read as a filler: a run of 16 words of 64 rows, one row in two kept at random, by value width.
 // The ISA under test is the process's: run once as is and once with DOTNET_EnableAVX512=0.
 using System;

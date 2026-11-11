@@ -1,4 +1,4 @@
-// Audit DE-22: what an IN of more than 16 members costs over packed codes of at most 8 bits, a dictionary's of at most
+// What an IN of more than 16 members costs over packed codes of at most 8 bits, a dictionary's of at most
 // 256 values: each block of 1,024 codes unpacked, then each code looked up in a bit a value of the width. 65,536 rows of
 // `BitWidth`-bit codes, `Members` of whose values are in the set. Run as it is (AVX-512 VBMI on Zen 4) and under
 // DOTNET_EnableAVX512=0 (AVX2) and DOTNET_EnableHWIntrinsic=0 (scalar).

@@ -1,4 +1,4 @@
-// Audit IX-02: what a presence filter of a column sheet costs built, its keys distinct hashes, as a writer builds one a
+// What a presence filter of a column sheet costs built, its keys distinct hashes, as a writer builds one a
 // column of an object whose values repeat.
 //
 // 1,000 and 65,536 keys drawn at random.

@@ -1,4 +1,4 @@
-// Audit S2: what a filter of several conjunctions costs a row, and which share of it its verdicts take as bytes.
+// What a filter of several conjunctions costs a row, and which share of it its verdicts take as bytes.
 //
 // A file of 4,194,304 rows of five 64-bit columns, values drawn among a thousand. The filter is one comparison or
 // four (A < 700, B >= 300, C < 700, D >= 300: 70 % each, 24 % together), on one lane; the kept rows' E read.

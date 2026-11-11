@@ -1,4 +1,4 @@
-// Audit S1, CP-01: what packing the values a mask keeps costs per row, 32- and 64-bit values, half the rows kept. Run it
+// What packing the values a mask keeps costs per row, 32- and 64-bit values, half the rows kept. Run it
 // as it is and under DOTNET_EnableAVX512=0 (AVX2) and DOTNET_EnableAVX2=0 (SSE).
 using System;
 using System.Numerics;

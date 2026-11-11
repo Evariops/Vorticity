@@ -1,4 +1,4 @@
-// Audit DS-65: what writing a dataset's rollups costs in round trips, each object's counts read for the rank above. A
+// What writing a dataset's rollups costs in round trips, each object's counts read for the rank above. A
 // dataset of 128 hours of hits (64 rows an hour, an append an hour, compacted), partitioned by the hour, rolled up with a
 // fan-out of 4, copied afresh before each build into a store whose every read, head or tail answers after a millisecond.
 using System;

@@ -1,4 +1,4 @@
-// Audit CP-10: what a bucket of integers costs a value, the column's values floored to a multiple of its width.
+// What a bucket of integers costs a value, the column's values floored to a multiple of its width.
 //
 // 1,048,576 values of 64 bits (and of 32), drawn among 10^12 (among 2^31) in no order, or sorted, floored to multiples
 // of 1,000 by NumberBucket over a primitive block, as a group by on Bucket(size, 1000) reads its key.

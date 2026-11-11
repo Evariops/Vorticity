@@ -1,4 +1,4 @@
-// Audit S2: what a filter's verdicts cost as a byte a row against two bitmaps, past the comparisons.
+// What a filter's verdicts cost as a byte a row against two bitmaps, past the comparisons.
 //
 // 65,536 rows, two conjuncts' verdicts, each true for 70 % of rows drawn at random, no unknown. A byte a row: the
 // conjunction in place (Trilean.And), the rows it rules out counted (Count), the kept rows' indices (FromStates). Two

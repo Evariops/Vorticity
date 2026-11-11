@@ -1,4 +1,4 @@
-// Audit CO-01: what a consumer reading a text column row by row pays a value through the column's indexer.
+// What a consumer reading a text column row by row pays a value through the column's indexer.
 //
 // 65,536 texts of 8 to 40 bytes in a canonical view block (a third inline in their view, the rest on the heap); each
 // read through Column<ReadOnlyMemory<byte>>[i], its length summed, against the views read with the block's node held.

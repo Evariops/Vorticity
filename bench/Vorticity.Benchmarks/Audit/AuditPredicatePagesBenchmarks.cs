@@ -1,4 +1,4 @@
-// Audit DS-13: what a selective filter asked again costs, with its pages kept in memory, in the session's disk cache
+// What a selective filter asked again costs, with its pages kept in memory, in the session's disk cache
 // alone, or nowhere.
 //
 // 100,000 events (an instant, a code of twenty thousand values, a body of 300 bytes) in 4 objects, blocks of 512 rows; a

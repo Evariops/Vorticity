@@ -1,4 +1,4 @@
-// Audit AR-14: what a key of bytes costs hashed for the dictionaries keyed by bytes (paths, names, values), by the
+// What a key of bytes costs hashed for the dictionaries keyed by bytes (paths, names, values), by the
 // runtime's HashCode, which ByteKeys used, and by XXH3 under a seed drawn for the process.
 //
 // 1,024 keys of 8, 24 or 64 bytes, each hashed once.

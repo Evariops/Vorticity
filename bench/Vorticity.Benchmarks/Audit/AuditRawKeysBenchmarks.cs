@@ -1,4 +1,4 @@
-// Audit AG-10: what grouping a batch by a key of two fixed-width columns packed into one word costs: each column's bits
+// What grouping a batch by a key of two fixed-width columns packed into one word costs: each column's bits
 // shifted into their place in the word, then the word looked up.
 //
 // Batches of 65,536 rows drawn among 1,024 tuples, or all one tuple, whose rows skip the lookup but where a null changes the word: an int and a byte (64 bits), a long and an unsigned int (96 bits, in 128),

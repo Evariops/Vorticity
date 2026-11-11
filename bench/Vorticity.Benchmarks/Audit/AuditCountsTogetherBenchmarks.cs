@@ -1,4 +1,4 @@
-// Audit IN-20: what putting buckets' counts of a column together costs, as a rollup is built: 24 buckets (an hour each of
+// What putting buckets' counts of a column together costs, as a rollup is built: 24 buckets (an hour each of
 // a day), each counting 4,096 values drawn among 8,192 texts of 12 to 20 bytes, an entry a value.
 using System;
 using System.Collections.Generic;

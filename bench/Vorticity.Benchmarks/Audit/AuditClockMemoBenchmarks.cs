@@ -1,4 +1,4 @@
-// Audit DS-07: what a lookup of a dataset handle's synopsis memo and page cache costs, alone and with sixteen threads,
+// What a lookup of a dataset handle's synopsis memo and page cache costs, alone and with sixteen threads,
 // and what the memo keeps of a hot set while a stream of synopses read once goes through it.
 //
 // `Synopsis` looks up 4,096 synopses kept in a SynopsisMemo, `Page` 4,096 pages of 1 KiB kept in a PageCache; each

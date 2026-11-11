@@ -1,4 +1,4 @@
-// Audit DS-61: what a dataset without a key pays its tiered compactions over its life, the objects already as large as the
+// What a dataset without a key pays its tiered compactions over its life, the objects already as large as the
 // level above aims at moved whole or concatenated again.
 //
 // 2,097,152 calls (an identifier, an instant, a service of 20, bytes, a latency) appended in objects of 4,096 or 32,768

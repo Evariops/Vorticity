@@ -1,4 +1,4 @@
-// Audit DS-02, DS-03: what a walk of a dataset's object tree costs, per object, in time and bytes.
+// What a walk of a dataset's object tree costs, per object, in time and bytes.
 //
 // A dataset of `Objects` synthetic object entries (four summarised columns, about 200 bytes an
 // entry, the size the tree is sized for) is committed into an in-memory store and opened. A walk
@@ -87,7 +87,7 @@ public class AuditDatasetWalkBenchmarks
     [Benchmark]
     public long Pruned() => WalkAsync(_pruner).GetAwaiter().GetResult();
 
-    /// <summary>A thousand keys spread over the tree, each found from the root down (DS-02's FindAsync).</summary>
+    /// <summary>A thousand keys spread over the tree, each found from the root down (FindAsync).</summary>
     [Benchmark(OperationsPerInvoke = Lookups)]
     public long Find() => FindAsync().GetAwaiter().GetResult();
 

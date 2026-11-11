@@ -1,4 +1,4 @@
-// Audit DS-66: what a vacuum pays in round trips to mark what the retained versions reference, every page of every
+// What a vacuum pays in round trips to mark what the retained versions reference, every page of every
 // version's trees read. A dataset of 2,048 appends of 64 rows each, a version each, left uncompacted, copied afresh before
 // each vacuum into a store whose every read, head or tail answers after a millisecond, timed by one clock; the vacuum a dry run.
 using System;

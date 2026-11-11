@@ -1,4 +1,4 @@
-// Audit AG-08 and AG-70: what a distinct of many values costs on the core's path, whose appliers hand batches to one
+// What a distinct of many values costs on the core's path, whose appliers hand batches to one
 // reader.
 //
 // A file of 4,194,304 rows of 64-bit keys drawn among 2^40 (no statistics bound them, so the core's path takes them),

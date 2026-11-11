@@ -1,4 +1,4 @@
-// Audit SC-01: what a filtered Count, Any and Max over one large file cost, at one lane and at several.
+// What a filtered Count, Any and Max over one large file cost, at one lane and at several.
 //
 // A file of 4,194,304 rows (sorted `key`, a pseudo-random `measure` in [0, 1)) is written to a temporary
 // path and opened. Every question carries a filter on `measure` that no zone map settles, so every split

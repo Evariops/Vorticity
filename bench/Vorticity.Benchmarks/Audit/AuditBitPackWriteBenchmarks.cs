@@ -1,4 +1,4 @@
-// Audit VW-07: what bit-packing a chunk of integers costs, each block of 1,024 rows transformed, its nulls cleared, its
+// What bit-packing a chunk of integers costs, each block of 1,024 rows transformed, its nulls cleared, its
 // patches found and packed, under each instruction set (run with DOTNET_EnableAVX512=0 for AVX2). 65,536 uints of
 // sizes around a reference, one in 512 too wide for the width, every one valid or one in sixteen null.
 using System;

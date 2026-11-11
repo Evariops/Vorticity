@@ -1532,7 +1532,7 @@ internal sealed class KeyIndexPruner
         /// <summary>
         /// Marks the blocks of a key's rows <c>[lo, hi)</c>, which the run holds ascending: a block each, the rows past it
         /// in the same block passed over by a search for the first row of the next one, where each row took a division
-        /// and a marking (IN-06). A key of many rows in few blocks costs its blocks, not its rows.
+        /// and a marking. A key of many rows in few blocks costs its blocks, not its rows.
         /// </summary>
         private void MarkRows(
             int literal, int lo, int hi, ReadOnlySpan<uint> rows, ulong firstBlock, long blockRows)
@@ -1773,7 +1773,7 @@ internal sealed class KeyIndexPruner
         /// <summary>
         /// One segment's lookup by samples, when it asks few keys of many entries: every 1,024th key decoded, then for each
         /// key asked the one stretch of entries the samples leave it, and of the rows or postings the entries it holds
-        /// alone, where the segment's every key, and every row or posting, was decoded for a key or two (IN-01 a). Null
+        /// alone, where the segment's every key, and every row or posting, was decoded for a key or two. Null
         /// when the lookup asks too many keys for it, which a whole decode then answers.
         /// </summary>
         /// <returns>Whether the segment made sense, or null.</returns>

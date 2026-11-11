@@ -1,4 +1,4 @@
-// Audit AR-02: what a dictionary's codes cost widened to the 32-bit indices a decode takes, every code valid, by the codes'
+// What a dictionary's codes cost widened to the 32-bit indices a decode takes, every code valid, by the codes'
 // type: 16-bit codes went by vectors, 32-bit ones a row at a time.
 //
 // 65,536 codes into a dictionary of 100,000 values (60,000 for 16-bit codes).

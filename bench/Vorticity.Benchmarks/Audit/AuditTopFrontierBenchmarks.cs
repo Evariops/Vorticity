@@ -1,4 +1,4 @@
-// Audit AG-10: what narrowing a batch to the rows that reach a top's frontier costs, every row selected: a group key's
+// What narrowing a batch to the rows that reach a top's frontier costs, every row selected: a group key's
 // frontier (a top of groups by their key) and a column's extreme (a top of groups by their one maximum), the bits of
 // each word of 64 rows built from the column.
 //

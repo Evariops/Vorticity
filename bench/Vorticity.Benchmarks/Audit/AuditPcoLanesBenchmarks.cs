@@ -1,4 +1,4 @@
-// Audit DE-06: what a column written in pco costs its lanes, each decode keeping the state it reuses.
+// What a column written in pco costs its lanes, each decode keeping the state it reuses.
 //
 // 4,194,304 jittered timestamps (i64, a second apart with a millisecond of jitter), written under the smallest profile,
 // which writes them in pco, in blocks of 65,536 rows; read from memory at one lane and at eight, every value consumed.

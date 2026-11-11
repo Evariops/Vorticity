@@ -1,4 +1,4 @@
-// Audit AR-01: what the set bits of a bitmap cost counted, a batch's validity (8,192 rows) or a long selection (524,288),
+// What the set bits of a bitmap cost counted, a batch's validity (8,192 rows) or a long selection (524,288),
 // starting off a byte boundary as a slice's does.
 using System;
 

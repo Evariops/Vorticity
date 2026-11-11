@@ -1,4 +1,4 @@
-// Audit AR-11: what a run-end encoding's values cost expanded over their rows, runs of a few rows as a sorted column's
+// What a run-end encoding's values cost expanded over their rows, runs of a few rows as a sorted column's
 // repeated values make them, or long ones.
 //
 // 65,536 rows of 8-byte values in runs of 1 to 8 rows, or 64 to 512.

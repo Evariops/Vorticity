@@ -1,4 +1,4 @@
-// Audit CP-11: what an IN of a few texts costs a row of a text column no dictionary holds, each row's value hashed and
+// What an IN of a few texts costs a row of a text column no dictionary holds, each row's value hashed and
 // looked up among the candidates.
 //
 // 65,536 rows of 50 service names of 6 to 12 bytes, all inline in their views; five candidates.
