@@ -405,9 +405,9 @@ internal static partial class FastLanes
 
     /// <summary>
     /// <see cref="InSet{T}"/> over codes of at most 8 bits, a dictionary's of at most 256 values: 64 codes at a time, each
-    /// code's byte of the set and its bit within it looked up in registers -- two byte permutes under AVX-512 VBMI, two
-    /// in-lane shuffles and a blend under AVX2 -- where the scalar loop shifted a word of the set a code (0.58-0.61 ns a
-    /// code, 2026-11-11).
+    /// code's byte of the set and its bit within it looked up in registers -- two byte permutes under AVX-512 VBMI where
+    /// the runtime takes 512-bit vectors, two in-lane shuffles and a blend under AVX2 -- where the scalar loop shifted a
+    /// word of the set a code (0.58-0.61 ns a code, 2026-11-11).
     /// </summary>
     [SkipLocalsInit]
     private static void InSetBytes(ReadOnlySpan<byte> packed, int bitWidth, ReadOnlySpan<ulong> set, Span<ulong> words, int blocks)
@@ -421,7 +421,7 @@ internal static partial class FastLanes
         ReadOnlySpan<byte> bits = MemoryMarshal.AsBytes(set);
         bits[..Math.Min(bits.Length, 32)].CopyTo(table);
         ref byte from = ref MemoryMarshal.GetReference(values);
-        if (Avx512Vbmi.IsSupported)
+        if (Vector512.IsHardwareAccelerated && Avx512Vbmi.IsSupported)
         {
             Vector512<byte> bytesOfSet = Vector512.LoadUnsafe(ref MemoryMarshal.GetReference(table));
             Vector512<byte> bitOf = Vector512.Create((ulong)0x8040_2010_0804_0201).AsByte();
