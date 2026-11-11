@@ -207,6 +207,12 @@ jobs:
             key: scalar
             projects: tests/Vorticity.Tests tests/Vorticity.Conformance
             scalar-pass: true
+          # And the vector paths a runner's own width passes over, by the same classes: the 256-bit ones with
+          # AVX-512 disabled, then the 128-bit ones with AVX2 disabled, whatever the runner holds.
+          - name: Vorticity's narrower vector paths and the conformance corpus, AVX-512 then AVX2 disabled
+            key: vectors
+            projects: tests/Vorticity.Tests tests/Vorticity.Conformance
+            vector-pass: true
     steps:
       # Nothing here pushes to git: the token is not left on disk.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -233,7 +239,7 @@ jobs:
       # back: the library then spills to the user's cache, on the runner's disk, and so do the tests
       # that name their scratch (TestScratch), TMPDIR unset.
       - name: Test
-        if: ${{ !matrix.scalar-pass && !matrix.runs-alone }}
+        if: ${{ !matrix.scalar-pass && !matrix.runs-alone && !matrix.vector-pass }}
         env:
           PROJECTS: ${{ matrix.projects }}
           FILTERS: ${{ matrix.filters }}
@@ -255,6 +261,14 @@ jobs:
       - name: Test the scalar fallbacks
         if: ${{ matrix.scalar-pass }}
         run: bash tests/scalar-pass.sh --no-build --report-xunit-xml --results-directory "$RUNNER_TEMP/reports"
+
+      - name: Test the narrower vector paths
+        if: ${{ matrix.vector-pass }}
+        run: |
+          status=0
+          PASS=avx2 bash tests/scalar-pass.sh --no-build --report-xunit-xml --results-directory "$RUNNER_TEMP/reports/avx2" || status=1
+          PASS=vector128 bash tests/scalar-pass.sh --no-build --report-xunit-xml --results-directory "$RUNNER_TEMP/reports/vector128" || status=1
+          exit $status
 
       # Where the time goes, test by test, kept a fortnight: what the next split of the runners is
       # decided on.
