@@ -177,6 +177,63 @@ public sealed partial class ApproximateDistinctTests
         Assert.InRange(all, exact.Values.SelectMany(s => s.Users).Distinct().Count() * (1 - Tolerance), exact.Values.SelectMany(s => s.Users).Distinct().Count() * (1 + Tolerance));
     }
 
+    /// <summary>
+    /// Thirty thousand groups of one to eight distinct values each, every value met two or three times, a number and a text:
+    /// each group's approximate counts are its exact ones, at every degree, whether the lanes' groups held their first
+    /// values in line or had sketched them past four, and whatever lane met which.
+    /// </summary>
+    [Theory]
+    [InlineData(1)]
+    [InlineData(4)]
+    [InlineData(14)]
+    public async Task ManySmallGroupsCountExactlyAtEveryDegree(int degree)
+    {
+        Random random = new Random(14);
+        List<Visit> rows = [];
+        for (int site = 0; site < 30_000; site++)
+        {
+            int distinct = 1 + random.Next(8);
+            for (int value = 0; value < distinct; value++)
+            {
+                for (int seen = 0; seen < 2 + random.Next(2); seen++)
+                {
+                    rows.Add(new Visit(site, (site * 31L) + value, $"/page/{(site * 7) + value}"));
+                }
+            }
+        }
+
+        Visit[] shuffled = [.. rows.OrderBy(_ => random.Next())];
+        string path = Path.Combine(Path.GetTempPath(), $"vorticity-approximate-small-{Guid.NewGuid():N}.vortex");
+        try
+        {
+            await using (VortexFileWriter writer = VortexSession.Default.CreateWriter<Visit>(path))
+            {
+                await writer.WriteAsync<Visit>(shuffled, Ct);
+                await writer.CompleteAsync(Ct);
+            }
+
+            await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = degree);
+            await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
+            Dictionary<int, int> exact = rows.GroupBy(static r => r.Site).ToDictionary(static g => g.Key, static g => g.Select(static r => r.User).Distinct().Count());
+            int groups = 0;
+            await foreach (KeyCounts row in file.Scan<Visit>().GroupBy(r => r.Site)
+                .Select(g => (g.Key, g.ApproximateCountDistinct(r => r.User), g.ApproximateCountDistinct(r => r.Page), g.CountDistinct(r => r.User)))
+                .As<KeyCounts>().ToRecordsAsync(Ct))
+            {
+                Assert.Equal(exact[row.Site], row.Users);
+                Assert.Equal(row.Users, row.ApproximateUsers);
+                Assert.Equal(row.Users, row.ApproximatePages);
+                groups++;
+            }
+
+            Assert.Equal(exact.Count, groups);
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
     private static ulong Hash(int value) => CardinalitySlot.Hash(BitConverter.GetBytes((long)value));
 
     private static List<long> Words(CardinalitySketch sketch)

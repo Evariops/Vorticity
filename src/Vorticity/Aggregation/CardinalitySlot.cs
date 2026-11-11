@@ -1,4 +1,5 @@
 using System;
+using System.Buffers;
 using System.Buffers.Binary;
 using System.IO.Hashing;
 using System.Numerics;
@@ -15,6 +16,15 @@ namespace Vorticity.Aggregating;
 /// </summary>
 internal abstract class CardinalitySlot : SketchSlot<CardinalitySketch, long>
 {
+    // A group's first distinct hashes, Firsts of them, kept in line, and how many it holds; past them, InSketch, its sketch
+    // holds them. A million groups of a few values each made a sketch and its array of hashes each, reached through an
+    // array of a million references: three cache misses in a chain a row, and a million objects aged to the oldest
+    // generation, 645 ms and 146 MB a question.
+    private const int Firsts = 4;
+    private const byte InSketch = Firsts + 1;
+    private ulong[] _firsts = [];
+    private byte[] _held = [];
+
     /// <summary>What a value may add at most: a register entry, or a hash kept exactly.</summary>
     private protected override long ValueBytes => sizeof(ulong);
 
@@ -22,17 +32,172 @@ internal abstract class CardinalitySlot : SketchSlot<CardinalitySketch, long>
 
     private protected override CardinalitySketch Read(ref SpillReader reader) => CardinalitySketch.Read(ref reader);
 
-    /// <summary>Adds a value's hash to a group's sketch, counting what it grows by.</summary>
+    /// <summary>Adds a value's hash to a group's: among its first hashes while they number no more than <see cref="Firsts"/>, else to its sketch, counting what it grows by.</summary>
     private protected void Add(int group, ulong hash)
     {
-        CardinalitySketch sketch = Sketch(group);
+        int held = _held[group];
+        if (held < InSketch)
+        {
+            ref ulong first = ref _firsts[group * Firsts];
+            for (int k = 0; k < held; k++)
+            {
+                if (Unsafe.Add(ref first, k) == hash)
+                {
+                    return;
+                }
+            }
 
+            if (held < Firsts)
+            {
+                Unsafe.Add(ref first, held) = hash;
+                _held[group] = (byte)(held + 1);
+                return;
+            }
+
+            Sketched(group);
+        }
+
+        CardinalitySketch sketch = Sketch(group);
         long before = sketch.Bytes;
         sketch.Add(hash);
         Grew(sketch.Bytes - before);
     }
 
-    internal override long Result(int group) => Held(group) is { } sketch ? sketch.Estimate() : 0;
+    /// <summary>Moves a group's first hashes, when it holds them in line, into its sketch, which holds the group from then on.</summary>
+    private void Sketched(int group)
+    {
+        int held = _held[group];
+        if (held == InSketch)
+        {
+            return;
+        }
+
+        CardinalitySketch sketch = Sketch(group);
+        long before = sketch.Bytes;
+        for (int k = 0; k < held; k++)
+        {
+            sketch.Add(_firsts[(group * Firsts) + k]);
+        }
+
+        Grew(sketch.Bytes - before);
+        _held[group] = InSketch;
+    }
+
+    /// <summary>Moves the first hashes of each of <paramref name="groups"/> into its sketch: what a path that reads or writes sketches reads.</summary>
+    private void Sketched(ReadOnlySpan<int> groups)
+    {
+        foreach (int group in groups)
+        {
+            Sketched(group);
+        }
+    }
+
+    internal override long Result(int group) =>
+        group < _held.Length && _held[group] < InSketch ? _held[group] : Held(group) is { } sketch ? sketch.Estimate() : 0;
+
+    internal override void EnsureGroups(int groups)
+    {
+        base.EnsureGroups(groups);
+        if (groups > _held.Length)
+        {
+            int capacity = Math.Max(groups, Math.Min(2 * _held.Length, int.MaxValue / Firsts));
+            ArrayShelf.Resize(Shelf, ref _held, capacity);
+            ArrayShelf.Resize(Shelf, ref _firsts, capacity * Firsts);
+        }
+    }
+
+    internal override bool StepStates(in StateInput input, ReadOnlySpan<ulong> selection, ReadOnlySpan<int> groups)
+    {
+        Sketched(groups);
+        return base.StepStates(input, selection, groups);
+    }
+
+    internal override void ExportStates(ReadOnlySpan<int> groups, in StateExport into)
+    {
+        Sketched(groups);
+        base.ExportStates(groups, into);
+    }
+
+    /// <summary>Another lane's groups into these: each one's first hashes added as values, a sketch merged into a sketch.</summary>
+    internal override void MergeFrom(AggregateSlot other, ReadOnlySpan<int> from, ReadOnlySpan<int> into)
+    {
+        CardinalitySlot theirs = (CardinalitySlot)other;
+        for (int i = 0; i < from.Length; i++)
+        {
+            int group = from[i];
+            if (theirs.Held(group) is { } sketch)
+            {
+                Sketched(into[i]);
+                CardinalitySketch mine = Sketch(into[i]);
+                long before = mine.Bytes;
+                mine.Merge(sketch);
+                Grew(mine.Bytes - before);
+                continue;
+            }
+
+            for (int k = 0, held = group < theirs._held.Length ? theirs._held[group] : 0; k < held && held < InSketch; k++)
+            {
+                Add(into[i], theirs._firsts[(group * Firsts) + k]);
+            }
+        }
+    }
+
+    internal override void MoveFrom(AggregateSlot other, ReadOnlySpan<int> from, ReadOnlySpan<int> into) => MergeFrom(other, from, into);
+
+    internal override void Keep(ReadOnlySpan<int> groups)
+    {
+        // The kept groups' first hashes taken aside in their order, then put first, as the sketches are.
+        byte[] held = ArrayPool<byte>.Shared.Rent(Math.Max(groups.Length, 1));
+        ulong[] firsts = ArrayPool<ulong>.Shared.Rent(Math.Max(groups.Length * Firsts, 1));
+        try
+        {
+            for (int i = 0; i < groups.Length; i++)
+            {
+                held[i] = _held[groups[i]];
+                _firsts.AsSpan(groups[i] * Firsts, Firsts).CopyTo(firsts.AsSpan(i * Firsts));
+            }
+
+            base.Keep(groups);
+            held.AsSpan(0, groups.Length).CopyTo(_held);
+            firsts.AsSpan(0, groups.Length * Firsts).CopyTo(_firsts);
+            _held.AsSpan(groups.Length).Clear();
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(held);
+            ArrayPool<ulong>.Shared.Return(firsts);
+        }
+    }
+
+    internal override void Release()
+    {
+        base.Release();
+        if (_held.Length > 0)
+        {
+            Shelf?.Give(_held);
+            Shelf?.Give(_firsts);
+            (_held, _firsts) = ([], []);
+        }
+    }
+
+    internal override long Footprint => base.Footprint + ((long)_firsts.Length * sizeof(ulong)) + _held.Length;
+
+    internal override long GrowthFor(int more) => base.GrowthFor(more) + ((long)more * ((Firsts * sizeof(ulong)) + 1));
+
+    internal override void WriteStates(ReadOnlySpan<int> groups, SpillBuffer buffer)
+    {
+        Sketched(groups);
+        base.WriteStates(groups, buffer);
+    }
+
+    internal override void ReadStates(ref SpillReader reader, int count)
+    {
+        base.ReadStates(ref reader, count);
+        for (int group = 0; group < count; group++)
+        {
+            _held[group] = Held(group) is null ? (byte)0 : InSketch;
+        }
+    }
 
     /// <summary>The hash every distinct count takes of a value's bytes: XXH3-64 of seed 0, the same in every process.</summary>
     internal static ulong Hash(ReadOnlySpan<byte> value) => XxHash3.HashToUInt64(value);
