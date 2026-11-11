@@ -23,12 +23,12 @@ public sealed class SynopsisCacheTests
     /// regions go in its place, and goes at a later eviction once the system lets it.
     /// </summary>
     [Fact]
-    public void AFileTheSystemWillNotDeleteYetGoesAtALaterEviction()
+    public async Task AFileTheSystemWillNotDeleteYetGoesAtALaterEviction()
     {
         string directory = CacheDirectory();
         try
         {
-            using SynopsisCache cache = new SynopsisCache(directory, 4 << 20);
+            await using SynopsisCache cache = new SynopsisCache(directory, 4 << 20);
             UInt128 uid = 0x6e;
             List<(IndexSegment Region, int Bytes)> admitted = [];
             IndexSegment Admitted(int seed)
@@ -75,12 +75,12 @@ public sealed class SynopsisCacheTests
 
     /// <summary>A region whose file is flipped at any byte, or cut short at any length, is dropped, and kept again once read.</summary>
     [Fact]
-    public void ARegionFlippedOrTornAnywhereIsDropped()
+    public async Task ARegionFlippedOrTornAnywhereIsDropped()
     {
         string directory = CacheDirectory();
         try
         {
-            using SynopsisCache cache = new SynopsisCache(directory, 1 << 20);
+            await using SynopsisCache cache = new SynopsisCache(directory, 1 << 20);
             byte[] bytes = new byte[300];
             new Random(61).NextBytes(bytes);
             UInt128 uid = new UInt128(0x0123_4567_89ab_cdef, 0xfedc_ba98_7654_3210);
@@ -96,7 +96,7 @@ public sealed class SynopsisCacheTests
                 // The cache maps the files it read, which no one writes then: it lets them go first.
                 byte[] flipped = [.. bytes];
                 flipped[i] ^= 1;
-                cache.CloseFiles();
+                await cache.CloseFilesAsync();
                 System.IO.File.WriteAllBytes(file, flipped);
                 Assert.False(cache.TryRead(uid, region, out _), $"byte {i} flipped");
                 Assert.False(System.IO.File.Exists(file));
@@ -106,7 +106,7 @@ public sealed class SynopsisCacheTests
 
             for (int length = 0; length < bytes.Length; length += 7)
             {
-                cache.CloseFiles();
+                await cache.CloseFilesAsync();
                 System.IO.File.WriteAllBytes(file, bytes[..length]);
                 Assert.False(cache.TryRead(uid, region, out _), $"cut at {length}");
                 dropped++;
@@ -130,7 +130,7 @@ public sealed class SynopsisCacheTests
     /// before the cache is disposed is on the disk for the next cache of the directory.
     /// </summary>
     [Fact]
-    public void ARegionAdmittedBehindItsReaderIsServedAndWrittenBeforeTheCacheCloses()
+    public async Task ARegionAdmittedBehindItsReaderIsServedAndWrittenBeforeTheCacheCloses()
     {
         string directory = CacheDirectory();
         try
@@ -152,7 +152,7 @@ public sealed class SynopsisCacheTests
             IndexSegment last;
             byte[] firstBytes;
             byte[] lastBytes;
-            using (SynopsisCache cache = new SynopsisCache(directory, 1 << 20))
+            await using (SynopsisCache cache = new SynopsisCache(directory, 1 << 20))
             {
                 (first, firstBytes) = Admitted(cache, 1);
                 Assert.True(cache.Holds(uid, first));
@@ -161,13 +161,13 @@ public sealed class SynopsisCacheTests
                 Assert.Equal(firstBytes, read.Buffer.Span.ToArray());
                 read.Release();
 
-                cache.Flush();
+                await cache.FlushAsync();
                 Assert.Single(Directory.GetFiles(directory, SynopsisCache.NameOf(uid, first), SearchOption.AllDirectories));
                 Assert.Equal(firstBytes.Length, cache.HeldBytes);
                 (last, lastBytes) = Admitted(cache, 2);
             }
 
-            using SynopsisCache reopened = new SynopsisCache(directory, 1 << 20);
+            await using SynopsisCache reopened = new SynopsisCache(directory, 1 << 20);
             foreach ((IndexSegment region, byte[] bytes) in new[] { (first, firstBytes), (last, lastBytes) })
             {
                 Assert.True(reopened.TryRead(uid, region, out Vorticity.Buffers.SegmentOwner owner));
@@ -194,7 +194,7 @@ public sealed class SynopsisCacheTests
         try
         {
             UInt128 uid = 0xfa17;
-            using SynopsisCache cache = new SynopsisCache(directory, 1 << 20);
+            await using SynopsisCache cache = new SynopsisCache(directory, 1 << 20);
             IndexSegment Admitted(int seed)
             {
                 byte[] bytes = new byte[4_096 + seed];
@@ -209,14 +209,14 @@ public sealed class SynopsisCacheTests
 
             cache.WriteFault = static _ => throw new InvalidOperationException("a write that fails past the disk's failures");
             IndexSegment failed = Admitted(1);
-            Task flushed = Task.Run(cache.Flush, Ct);
+            Task flushed = cache.FlushAsync().AsTask();
             Assert.Same(flushed, await Task.WhenAny(flushed, Task.Delay(TimeSpan.FromSeconds(10), Ct)));
             Assert.Equal(1, cache.FailedWrites);
             Assert.False(cache.Holds(uid, failed));
 
             cache.WriteFault = null;
             IndexSegment kept = Admitted(2);
-            cache.Flush();
+            await cache.FlushAsync();
             Assert.True(cache.Holds(uid, kept));
             Assert.Single(Directory.GetFiles(directory, SynopsisCache.NameOf(uid, kept), SearchOption.AllDirectories));
         }
@@ -231,7 +231,7 @@ public sealed class SynopsisCacheTests
     /// one finds every entry the first kept, and deletes what a write left under its temporary name.
     /// </summary>
     [Fact]
-    public void ADirectoryHasOneCacheAndOutlivesIt()
+    public async Task ADirectoryHasOneCacheAndOutlivesIt()
     {
         string directory = CacheDirectory();
         try
@@ -240,7 +240,7 @@ public sealed class SynopsisCacheTests
             new Random(67).NextBytes(bytes);
             UInt128 uid = 42;
             IndexSegment region = IndexSegment.Of(0, bytes, 0);
-            using (SynopsisCache first = new SynopsisCache(directory, 1 << 20))
+            await using (SynopsisCache first = new SynopsisCache(directory, 1 << 20))
             {
                 Assert.Throws<InvalidOperationException>(() => new SynopsisCache(directory, 1 << 20));
                 first.Admit(uid, region, bytes);
@@ -248,7 +248,7 @@ public sealed class SynopsisCacheTests
 
             string left = Path.Combine(directory, "2a", "torn.0123.tmp");
             System.IO.File.WriteAllBytes(left, bytes);
-            using SynopsisCache second = new SynopsisCache(directory, 1 << 20);
+            await using SynopsisCache second = new SynopsisCache(directory, 1 << 20);
             Assert.Equal(bytes.Length, second.HeldBytes);
             Assert.True(second.TryRead(uid, region, out Vorticity.Buffers.SegmentOwner owner));
             Assert.Equal(bytes, owner.Buffer.Span.ToArray());
@@ -267,13 +267,13 @@ public sealed class SynopsisCacheTests
     /// regions read again and again before it are still there after it, and the sweep's own left but the newest.
     /// </summary>
     [Fact]
-    public void ASweepPassesThroughWithoutPushingOutWhatIsReadOften()
+    public async Task ASweepPassesThroughWithoutPushingOutWhatIsReadOften()
     {
         string directory = CacheDirectory();
         try
         {
             byte[] bytes = new byte[1_000];
-            using SynopsisCache cache = new SynopsisCache(directory, 20 * bytes.Length);
+            await using SynopsisCache cache = new SynopsisCache(directory, 20 * bytes.Length);
             IndexSegment RegionOf(int n)
             {
                 bytes.AsSpan().Fill((byte)n);
@@ -325,13 +325,13 @@ public sealed class SynopsisCacheTests
     /// a file the first's directory holds torn is not served, and stays the first's to drop.
     /// </summary>
     [Fact]
-    public void CachesSharingARootReadWhatTheOthersKept()
+    public async Task CachesSharingARootReadWhatTheOthersKept()
     {
         string root = CacheDirectory();
         try
         {
-            using SynopsisCache first = SynopsisCache.OpenShared(root, 1 << 20);
-            using SynopsisCache second = SynopsisCache.OpenShared(root, 1 << 20);
+            await using SynopsisCache first = SynopsisCache.OpenShared(root, 1 << 20);
+            await using SynopsisCache second = SynopsisCache.OpenShared(root, 1 << 20);
             Assert.Equal(Path.Combine(Path.GetFullPath(root), "p0"), first.Directory);
             Assert.Equal(Path.Combine(Path.GetFullPath(root), "p1"), second.Directory);
             first.ListPeers();
@@ -367,7 +367,7 @@ public sealed class SynopsisCacheTests
             string file = Directory.GetFiles(first.Directory, SynopsisCache.NameOf(uid, kept), SearchOption.AllDirectories).Single();
             byte[] flipped = [.. keptBytes];
             flipped[7] ^= 1;
-            second.CloseFiles();
+            await second.CloseFilesAsync();
             System.IO.File.WriteAllBytes(file, flipped);
             Assert.False(second.TryRead(uid, kept, out _));
             Assert.True(System.IO.File.Exists(file));
@@ -385,7 +385,7 @@ public sealed class SynopsisCacheTests
     /// the shared caches took for its entries.
     /// </summary>
     [Fact]
-    public void ARootIsSharedOrOwned()
+    public async Task ARootIsSharedOrOwned()
     {
         string root = CacheDirectory();
         string owned = CacheDirectory();
@@ -394,18 +394,18 @@ public sealed class SynopsisCacheTests
             byte[] bytes = new byte[100];
             new Random(71).NextBytes(bytes);
             IndexSegment region = IndexSegment.Of(0, bytes, 0);
-            using (SynopsisCache shared = SynopsisCache.OpenShared(root, 1 << 20))
+            await using (SynopsisCache shared = SynopsisCache.OpenShared(root, 1 << 20))
             {
                 Assert.Throws<InvalidOperationException>(() => new SynopsisCache(root, 1 << 20));
                 shared.Admit(42, region, bytes);
             }
 
-            using (SynopsisCache own = new SynopsisCache(owned, 1 << 20))
+            await using (SynopsisCache own = new SynopsisCache(owned, 1 << 20))
             {
                 Assert.Throws<InvalidOperationException>(() => SynopsisCache.OpenShared(owned, 1 << 20));
             }
 
-            using SynopsisCache alone = new SynopsisCache(root, 1 << 20);
+            await using SynopsisCache alone = new SynopsisCache(root, 1 << 20);
             Assert.Equal(0, alone.HeldBytes);
             Assert.False(alone.TryRead(42, region, out _));
         }
@@ -421,7 +421,7 @@ public sealed class SynopsisCacheTests
     /// the root takes it again, with what it holds.
     /// </summary>
     [Fact]
-    public void ASharedCachesDirectoryOutlivesIt()
+    public async Task ASharedCachesDirectoryOutlivesIt()
     {
         string root = CacheDirectory();
         try
@@ -430,8 +430,8 @@ public sealed class SynopsisCacheTests
             new Random(73).NextBytes(bytes);
             UInt128 uid = 7;
             IndexSegment region = IndexSegment.Of(4_096, bytes, 6);
-            using SynopsisCache staying = SynopsisCache.OpenShared(root, 1 << 20);
-            using (SynopsisCache leaving = SynopsisCache.OpenShared(root, 1 << 20))
+            await using SynopsisCache staying = SynopsisCache.OpenShared(root, 1 << 20);
+            await using (SynopsisCache leaving = SynopsisCache.OpenShared(root, 1 << 20))
             {
                 leaving.Admit(uid, region, bytes);
             }
@@ -441,7 +441,7 @@ public sealed class SynopsisCacheTests
             Assert.Equal(bytes, owner.Buffer.Span.ToArray());
             owner.Release();
 
-            using SynopsisCache next = SynopsisCache.OpenShared(root, 1 << 20);
+            await using SynopsisCache next = SynopsisCache.OpenShared(root, 1 << 20);
             Assert.Equal(Path.Combine(Path.GetFullPath(root), "p1"), next.Directory);
             Assert.Equal(bytes.Length, next.HeldBytes);
         }
@@ -456,13 +456,13 @@ public sealed class SynopsisCacheTests
     /// a frame is held when the other holds it, so that its reader asks no store for it, and none is kept again.
     /// </summary>
     [Fact]
-    public void SealedBytesAndPagesAreReadFromTheOthersToo()
+    public async Task SealedBytesAndPagesAreReadFromTheOthersToo()
     {
         string root = CacheDirectory();
         try
         {
-            using SynopsisCache first = SynopsisCache.OpenShared(root, 1 << 20);
-            using SynopsisCache second = SynopsisCache.OpenShared(root, 1 << 20);
+            await using SynopsisCache first = SynopsisCache.OpenShared(root, 1 << 20);
+            await using SynopsisCache second = SynopsisCache.OpenShared(root, 1 << 20);
             UInt128 uid = 0xfeed;
             byte[] frame = new byte[65_536];
             new Random(79).NextBytes(frame);
@@ -476,7 +476,7 @@ public sealed class SynopsisCacheTests
             first.AdmitSealed(uid, frameName, frame);
             first.AdmitSealed(uid, trailerName, trailer);
             first.AdmitPage(hash, page);
-            first.Flush();
+            await first.FlushAsync();
 
             Assert.True(second.HoldsSealed(frameName));
             byte[] read = new byte[frame.Length];

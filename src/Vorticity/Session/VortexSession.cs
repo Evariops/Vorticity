@@ -788,8 +788,18 @@ public sealed class VortexSession : IAsyncDisposable
             Volatile.Write(ref _disposed, 1);
         }
 
+        return DisposeOwnedAsync();
+    }
+
+    /// <summary>What the session owns let go, once its dispose is past the files it had open: the synopsis cache's writers awaited.</summary>
+    private async ValueTask DisposeOwnedAsync()
+    {
         ClearSegmentCache();
-        Options.SynopsisCache?.Dispose();
+        if (Options.SynopsisCache is { } synopses)
+        {
+            await synopses.DisposeAsync().ConfigureAwait(false);
+        }
+
         Mappings?.Clear();
         Keys?.Dispose();
         if (Options.MemoryPool is AlignedMemoryPool aligned && !ReferenceEquals(aligned, AlignedMemoryPool.Shared))
@@ -798,7 +808,7 @@ public sealed class VortexSession : IAsyncDisposable
         }
 
         ReadGate.Dispose();
-        return Options.ObjectStores.DisposeAsync();
+        await Options.ObjectStores.DisposeAsync().ConfigureAwait(false);
     }
 
     internal void Detach(VortexFile file) => _open.TryRemove(file, out _);

@@ -60,7 +60,7 @@ public class AuditSynopsisCacheBenchmarks
             }
         }
 
-        _cache.Flush();
+        _cache.FlushAsync().AsTask().GetAwaiter().GetResult();
         Console.WriteLine($"// {Read()} hits");
     }
 
@@ -68,7 +68,7 @@ public class AuditSynopsisCacheBenchmarks
     [GlobalCleanup]
     public void Cleanup()
     {
-        _cache.Dispose();
+        _cache.DisposeAsync().AsTask().GetAwaiter().GetResult();
         Directory.Delete(_directory, recursive: true);
     }
 

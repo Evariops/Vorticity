@@ -41,7 +41,7 @@ internal static class PeerCacheMicro
             await using VortexSession owner = VortexSession.Create(options => options.SynopsisCache = SynopsisCache.OpenShared(directory, Regions, Data));
             await using VortexDataset own = await VortexDataset.OpenAsync(store, new DatasetOptions { Session = owner });
             double answer = await AskAsync(own);
-            owner.Options.SynopsisCache!.Flush();
+            await owner.Options.SynopsisCache!.FlushAsync();
             Console.WriteLine(string.Create(
                 CultureInfo.InvariantCulture,
                 $"{objects} objects of {rows:N0} rows; the question's data {owner.Options.SynopsisCache.DataHeldBytes / 1e6:F1} MB on the disk"));
