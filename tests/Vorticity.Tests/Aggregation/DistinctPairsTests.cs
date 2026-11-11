@@ -151,6 +151,63 @@ public sealed partial class DistinctPairsTests
         }
     }
 
+    // A group that holds half the rows' distinct values, under the whole budget and under a fifth of the group by's peak.
+    // Under the whole budget each value counts once a group. Under the fifth the query is refused, and cleanly: a spill
+    // cuts its parts by group, and the one group's pairs, which go whole to one part, pass what the budget holds at any
+    // part; the budget is whole again and no file is left. (Groups of even size under the same fifth spill and end exact.)
+    [Theory]
+    [InlineData(2)]
+    [InlineData(4)]
+    public async Task AGroupWhosePairsPassTheBudgetIsRefusedCleanly(int degree)
+    {
+        Row[] rows = Rows_(sorted: false);
+        for (int row = 0; row < rows.Length; row += 2)
+        {
+            rows[row] = new Row(7, 1_000 + row, $"w-{row}");
+        }
+
+        string path = await WriteAsync(rows);
+        string scratch = TestScratch.Create("vorticity-pairs-");
+        try
+        {
+            long peak = 0;
+            foreach (long ceiling in new[] { 1L << 30, 0 })
+            {
+                QueryMemoryBudget budget = new QueryMemoryBudget(ceiling > 0 ? ceiling : peak / 5);
+                await using VortexSession session = VortexSession.Create(options =>
+                {
+                    options.MaxDegreeOfParallelism = degree;
+                    options.MemoryBudget = budget;
+                    options.ScratchDirectory = scratch;
+                });
+                await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
+                Vorticity.Aggregation query = file.Scan<Row>()
+                    .With(new ScanOptions { BatchRows = 4_096 })
+                    .GroupBy(r => r.Key)
+                    .Select(g => (g.Key, g.CountDistinct(x => x.Value), g.CountDistinct(x => x.Text)));
+                query.Plan.MergeInParts = false;
+                if (ceiling > 0)
+                {
+                    Assert.Equal(Expected(rows), (await ListAsync(query.As<KeyCounts>())).ToDictionary(c => c.Key));
+                    peak = budget.PeakBytes;
+                }
+                else
+                {
+                    await Assert.ThrowsAsync<VortexMemoryException>(async () => await ListAsync(query.As<KeyCounts>()));
+                }
+
+                Assert.Equal(0, budget.ReservedBytes);
+            }
+
+            Assert.Empty(Directory.EnumerateFileSystemEntries(scratch));
+        }
+        finally
+        {
+            Directory.Delete(scratch, recursive: true);
+            System.IO.File.Delete(path);
+        }
+    }
+
     [Fact]
     public void PartsOneOfWhichHoldsMoreThanTwiceTheAverageAreLopsided()
     {
