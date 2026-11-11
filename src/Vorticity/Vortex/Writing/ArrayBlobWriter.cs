@@ -3209,9 +3209,6 @@ internal static class ArrayBlobWriter
         /// </summary>
         internal int FrameRows { get; init; }
 
-        /// <summary>The writer's threads, which a column's zstd frames may be compressed on; none for one thread.</summary>
-        internal WorkFan? Fan { get; init; }
-
         /// <summary>
         /// Whether every array the workspace writes is priced by its bytes alone, a column's
         /// children -- an ALP's integers, a dictionary's codes, a run's ends -- as well as the
@@ -3225,14 +3222,6 @@ internal static class ArrayBlobWriter
         /// variant's shredded keys as well as the columns (<see cref="ColumnCompressor"/>).
         /// </summary>
         internal int GranuleRows { get; init; }
-
-        private ZstdFrames? _frames;
-
-        /// <summary>The frame table of a column compressed on <see cref="Fan"/>, rented by the first column that uses it.</summary>
-        internal ZstdFrames Frames => _frames ??= ZstdFrames.Rent();
-
-        /// <summary>The zstd trials whose frames were compressed across threads.</summary>
-        internal int ColumnsAcross => _frames?.Columns ?? 0;
 
         /// <summary>The buffers the blob being written has queued, in order.</summary>
         internal List<PendingBuffer> Buffers => _buffers;
@@ -3277,7 +3266,7 @@ internal static class ArrayBlobWriter
             // Never size first: what it measures is the plan every other profile writes.
             _measure ??= new Workspace
             {
-                FrameRows = FrameRows, GranuleRows = GranuleRows, Fan = Fan, OwnTypes = OwnTypes, ZstdLevel = ZstdLevel,
+                FrameRows = FrameRows, GranuleRows = GranuleRows, OwnTypes = OwnTypes, ZstdLevel = ZstdLevel,
             };
             _measure.ColumnLevel = ColumnLevel;
             if (_measureEncodings is null || _measureEncodings.Target != target)
@@ -3378,12 +3367,6 @@ internal static class ArrayBlobWriter
             _metadata.Dispose();
             _leaves?.Reset();
             ReturnCompressors();
-            if (_frames is { } frames)
-            {
-                _frames = null;
-                ZstdFrames.Return(frames);
-            }
-
             _measure?.Dispose();
             _measure = null;
         }

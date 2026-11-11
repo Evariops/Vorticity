@@ -306,13 +306,25 @@ public sealed class WriteAllocationTests
     private const int DegreeRows = 262_144;
 
     /// <summary>
-    /// The degree axis: a column's zstd frames compressed on four threads cost nothing one thread
+    /// The bytes a write on several threads may allocate past one on one: the states of the methods that awaited its
+    /// helpers, those above the fan's own path made anew, a pooled one missed now and then. 728 to 1,256 bytes
+    /// measured at 262,144 rows, the most beside the other tests that run alone.
+    /// </summary>
+    private const long AwaitedStates = 2 << 10;
+
+    /// <summary>
+    /// The degree axis: zstd columns compressed side by side on four threads cost nothing one thread
     /// does not. The fan-out, its helpers and the helpers' encoders are the process's, rented by a
-    /// writer and given back, and every column queues the same helpers again.
+    /// writer and given back, and every chunk queues the same helpers again.
     /// </summary>
     /// <remarks>
     /// The counter is process-wide, so what the helpers allocate on the pool's threads is counted.
-    /// The batch and the options are built outside the measured region, once for every write.
+    /// The batch and the options are built outside the measured region, once for every write. A
+    /// write on four threads awaits its helpers rather than block a thread for them: the states of
+    /// the methods on the fan's path are pooled, those of the methods above them made anew when they
+    /// suspend with it, a few states a write whatever its rows (<see cref="AwaitedStates"/>). Pooled
+    /// as well, those slowed a compaction by 1.5 %, at eight lanes as at one, where none awaits a
+    /// helper.
     /// </remarks>
     [Fact]
     public async Task AWriteOnFourThreadsAllocatesWhatAWriteOnOneDoes()
@@ -334,9 +346,9 @@ public sealed class WriteAllocationTests
         long four = await MeasureDegree(schema, arena, root, across);
         string report = string.Create(
             CultureInfo.InvariantCulture,
-            $"DEGREE: {DegreeRows} rows of zstd frames, one thread {one} B, four threads {four} B\n");
+            $"DEGREE: {DegreeRows} rows of zstd columns, one thread {one} B, four threads {four} B\n");
         Console.Out.Write(report);
-        Assert.True(four <= one, report);
+        Assert.True(four <= one + AwaitedStates, report);
     }
 
     /// <summary>The floor of several writes of the degree axis's batch under <paramref name="options"/>.</summary>
@@ -358,8 +370,13 @@ public sealed class WriteAllocationTests
         return floor;
     }
 
-    /// <summary>Writes the degree axis's batch and returns the zstd trials compressed across threads.</summary>
-    private static async Task<int> WriteDense(DType schema, CanonicalArena arena, int root, VortexWriteOptions options)
+    /// <summary>Writes the degree axis's batch and returns the chunks of columns compressed side by side.</summary>
+    /// <remarks>
+    /// Its state pooled as the writer's own: a write on several threads awaits its helpers and suspends, and the test's
+    /// own method with it, whose state a plain builder makes anew each time.
+    /// </remarks>
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder<>))]
+    private static async ValueTask<int> WriteDense(DType schema, CanonicalArena arena, int root, VortexWriteOptions options)
     {
         await using VortexFileWriter writer = VortexFileWriter.Create(new NullSink(), schema, options);
         using (RecordBatch batch = new RecordBatch(arena, root, 0))
@@ -368,7 +385,7 @@ public sealed class WriteAllocationTests
         }
 
         await writer.CompleteAsync(CancellationToken.None);
-        return writer.ColumnsCompressedAcross;
+        return writer.ColumnChunksAcross;
     }
 
     /// <summary>Keys scattered over twenty bits and sevenths: columns zstd keeps.</summary>

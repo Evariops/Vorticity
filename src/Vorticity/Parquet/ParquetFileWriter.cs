@@ -560,7 +560,7 @@ public sealed class ParquetFileWriter : IAsyncDisposable
     /// closed side by side. A nested column always stages here, before the others: its shredding
     /// may lay out nodes in the batch's arena, which the columns staging side by side only read.
     /// </remarks>
-    private void Stage(CanonicalArena arena, int start, int count, bool closes)
+    private ValueTask StageAsync(CanonicalArena arena, int start, int count, bool closes)
     {
         if (_lanes == 1 || _columns.Length == 1)
         {
@@ -569,7 +569,7 @@ public sealed class ParquetFileWriter : IAsyncDisposable
                 _columns[c].Append(arena, _nodes[c], start, count);
             }
 
-            return;
+            return ValueTask.CompletedTask;
         }
 
         bool across = (long)count * _columns.Length >= AcrossCells;
@@ -589,8 +589,10 @@ public sealed class ParquetFileWriter : IAsyncDisposable
             work.Stages = across;
             work.Closes = closes;
             work.Order(fan.Items(_columns.Length));
-            fan.Run(work, _columns.Length, arena, count);
+            return fan.RunAsync(work, _columns.Length, arena, count);
         }
+
+        return ValueTask.CompletedTask;
     }
 
     /// <summary>
@@ -776,7 +778,7 @@ public sealed class ParquetFileWriter : IAsyncDisposable
         {
             int take = Math.Min(rows - start, blockRows - (int)(_groupRows % blockRows));
             bool closes = (_groupRows + take) % blockRows == 0;
-            Stage(arena, start, take, closes);
+            await StageAsync(arena, start, take, closes).ConfigureAwait(false);
             start += take;
             _groupRows += take;
             _rowCount += take;

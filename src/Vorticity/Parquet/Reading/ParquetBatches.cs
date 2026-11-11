@@ -372,7 +372,7 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
             WorkFan fan = _fan ??= WorkFan.Rent(Math.Min(_degree, FanLanes));
             FieldDecoding decoding = _decoding ??= new FieldDecoding(this);
             decoding.Order(fan.Items(_nodes.Length));
-            fan.Run(decoding, _nodes.Length, null, rows);
+            await fan.RunAsync(decoding, _nodes.Length, null, rows).ConfigureAwait(false);
             for (int i = 0; i < _nodes.Length; i++)
             {
                 _nodes[i] = arena.ReferenceFrom(fieldContexts[i].Canonical, _nodes[i]);

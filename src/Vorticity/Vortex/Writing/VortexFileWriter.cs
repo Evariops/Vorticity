@@ -149,9 +149,6 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
     private long _chunksFromTable;
 
-    /// <summary>Zstd trials whose frames were compressed on several threads, kept or not, until the writer is disposed.</summary>
-    internal int ColumnsCompressedAcross => _blobs?.ColumnsAcross ?? 0;
-
     /// <summary>Batches whose columns were ingested on several threads.</summary>
     internal int BatchesIngestedAcross { get; private set; }
 
@@ -1484,7 +1481,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         if (_rowBlock == 0)
         {
             // One call, one chunk.
-            Ingest(arena, root);
+            await IngestAsync(arena, root).ConfigureAwait(false);
             await EmitChunkAsync(arena, root, rows, cancellationToken).ConfigureAwait(false);
             return;
         }
@@ -1510,7 +1507,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
         // The statistics pass runs before any copy or emission: the decode that produced the batch
         // has just touched every byte, and a row's block does not depend on where the row ends up.
-        Ingest(arena, root);
+        await IngestAsync(arena, root).ConfigureAwait(false);
 
         // Nothing pending and already big enough: write it where it lies, with no transit copy.
         if (_pending.Count == 0 &&
@@ -1563,7 +1560,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                 }
                 else
                 {
-                    Ingest(arena, piece);
+                    await IngestAsync(arena, piece).ConfigureAwait(false);
                     await EmitChunkAsync(arena, piece, whole, cancellationToken).ConfigureAwait(false);
                 }
 
@@ -1573,7 +1570,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
             int take = (int)Math.Min(left, chunk - _pendingRows);
             int part = take == rows ? root : CanonicalSlice.SliceAcross(arena, arena, root, offset, take);
-            Ingest(arena, part);
+            await IngestAsync(arena, part).ConfigureAwait(false);
             Hold(arena, part);
             offset += take;
         }
@@ -1844,7 +1841,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// Folds one batch into the open block of every column, closing blocks as it crosses them: a
     /// batch that straddles a boundary is cut there and its leftover continues the next block.
     /// </summary>
-    private void Ingest(CanonicalArena arena, int rootIndex)
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
+    private async ValueTask IngestAsync(CanonicalArena arena, int rootIndex)
     {
         CanonicalNode root = arena.GetNode(rootIndex);
         if (_isTabular)
@@ -1861,14 +1859,15 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
         int rows = root.Length;
         _indexes?.PrepareCounts(arena, _fieldNodes, rows);
-        IngestRows(arena, rows);
+        await IngestRowsAsync(arena, rows).ConfigureAwait(false);
 
         // Once every column's builders took the batch: the distinct values the columns of few values keep of the wide ones.
         _indexes?.AttachCounts(rows);
     }
 
     /// <summary>Folds the batch's <paramref name="rows"/> into the open block of every column and feeds the indexes, crossing the blocks.</summary>
-    private void IngestRows(CanonicalArena arena, int rows)
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
+    private async ValueTask IngestRowsAsync(CanonicalArena arena, int rows)
     {
         if (_blockRows == 0)
         {
@@ -1885,10 +1884,13 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
         // A builder that reads several columns at a block close ingests on one thread with them, the
         // file's first block too; past it, a builder that reads its own column alone is fed on the
-        // thread that ingests that column (IndexWriter.FeedsAcross).
-        if ((_indexes is null or { AsksNothing: true } || _indexes.FeedsAcross) && rows >= _blockRows && Fan is { } fan)
+        // thread that ingests that column (IndexWriter.FeedsAcross). A file of one column ingests on
+        // its caller's thread: its two or three accumulators gained nothing spread (a million log
+        // lines at eight lanes, 436 ms against 437 on one), and a helper that ends after the caller
+        // moves the write onto its own thread, half the batches (8 ms of 448).
+        if ((_indexes is null or { AsksNothing: true } || _indexes.FeedsAcross) && rows >= _blockRows && _fieldCount > 1 && Fan is { } fan)
         {
-            IngestAcross(fan, arena, rows);
+            await IngestAcrossAsync(fan, arena, rows).ConfigureAwait(false);
             return;
         }
 
@@ -1912,7 +1914,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     }
 
     /// <summary>
-    /// <see cref="Ingest"/> on the writer's threads: every column's statistics, and apart from them
+    /// <see cref="IngestAsync"/> on the writer's threads: every column's statistics, and apart from them
     /// the bounds and the distinct table of a column that keeps them, each over the whole batch and
     /// closing its own blocks. What an accumulator holds is its own, so each ends as the ingest on
     /// one thread leaves it.
@@ -1923,13 +1925,20 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// column's index builders are an item of their own, its field above three bits of zero, which
     /// feeds them the batch block by block as the ingest on one thread does.
     /// </remarks>
-    private void IngestAcross(WorkFan fan, CanonicalArena arena, int rows)
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
+    private async ValueTask IngestAcrossAsync(WorkFan fan, CanonicalArena arena, int rows)
     {
-        Span<int> items = fan.Items(_fieldCount * 4);
-        int count = FeedItems(items, IngestItems(arena, items));
-        fan.Run(this, count, arena, rows);
+        int count = ItemsOf(fan, arena);
+        await fan.RunAsync(this, count, arena, rows).ConfigureAwait(false);
         _blockFilled = (_blockFilled + rows) % _blockRows;
         BatchesIngestedAcross++;
+    }
+
+    /// <summary>The items of an ingest across <paramref name="fan"/>'s threads, laid in its room: how many there are.</summary>
+    private int ItemsOf(WorkFan fan, CanonicalArena arena)
+    {
+        Span<int> items = fan.Items(_fieldCount * 4);
+        return FeedItems(items, IngestItems(arena, items));
     }
 
     /// <summary>
@@ -1979,7 +1988,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         return count;
     }
 
-    /// <summary>Runs one accumulator of <see cref="IngestAcross"/> over the batch, block by block, or one column's index builders.</summary>
+    /// <summary>Runs one accumulator of <see cref="IngestAcrossAsync"/> over the batch, block by block, or one column's index builders.</summary>
     void IFanWork.Run(WorkFan fan, int item)
     {
         int entry = fan.Item(item);
@@ -2034,7 +2043,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
     /// <summary>
     /// Feeds the rows of <paramref name="rootIndex"/> to every column's distinct table only, with
-    /// the field resolution <see cref="Ingest"/> makes.
+    /// the field resolution <see cref="IngestAsync"/> makes.
     /// </summary>
     private void Reprobe(CanonicalArena arena, int rootIndex)
     {
@@ -2150,7 +2159,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// </summary>
     private ArrayBlobWriter.Workspace Blobs => _blobs ??= new ArrayBlobWriter.Workspace
     {
-        FrameRows = _rowBlock, GranuleRows = GranuleReadRows, Fan = Fan, SizeFirst = _sizeFirst, ZstdLevel = _zstdLevel,
+        FrameRows = _rowBlock, GranuleRows = GranuleReadRows, SizeFirst = _sizeFirst, ZstdLevel = _zstdLevel,
     };
 
     /// <summary>The writer's threads, or null when it has one.</summary>
@@ -2759,7 +2768,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                 await counting.ConfigureAwait(false);
             }
 
-            Ingest(tailArena, tailRoot);
+            await IngestAsync(tailArena, tailRoot).ConfigureAwait(false);
             direct = _pending.Count == 0;
             if (!direct)
             {
