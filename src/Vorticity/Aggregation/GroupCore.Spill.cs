@@ -422,9 +422,10 @@ internal sealed partial class GroupCore
     {
         if (_scratch is not null)
         {
-            long spilled = Interlocked.Read(ref _spilledBytes);
-            SpillSpace.Release(spilled);
-            _source?.Session.Options.ScratchBudget?.Release(spilled);
+            // What the claims counted, the bytes written: given back once, the claims emptied for a spill after this one,
+            // which reads the free space again (SpilledBytes is the count the run reports).
+            long claimed = _claims.ReleaseAll();
+            _source?.Session.Options.ScratchBudget?.Release(claimed);
             _scratch.Dispose();
             _scratch = null;
         }
