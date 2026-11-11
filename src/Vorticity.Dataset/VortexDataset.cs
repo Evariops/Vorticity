@@ -2460,7 +2460,8 @@ public sealed class VortexDataset : IAsyncDisposable
     private ValueTask<ISegmentReader> OpenFooterlessAsync(ObjectEntry entry, Indexes.ObjectContents contents, CancellationToken cancellationToken) =>
         SealedObjectStore.OpenDataAsync(
             _store, entry.Key, entry.Uid, entry.Bytes, cancellationToken,
-            _store is SealedObjectStore { Seals: true } ? SealedSynopsisCache.Over(Session.Options.SynopsisCache, entry.Uid, contents) : null);
+            _store is SealedObjectStore { Seals: true } ? SealedSynopsisCache.Over(Session.Options.SynopsisCache, entry.Uid, contents) : null,
+            footerless: true);
 
     /// <summary>
     /// The reader of an object read with no open of it, from the store's reader <paramref name="source"/>: the

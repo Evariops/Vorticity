@@ -35,7 +35,7 @@ namespace Vorticity.Dataset;
 /// <para>
 /// What it opens: the commit objects only, by their head, in the one request a plain one costs when the
 /// store gives the object's length with its answer. A data object is opened by the dataset's object
-/// cache through a sealed reader over the store's own bytes (<see cref="OpenDataAsync(string, UInt128, long, CancellationToken, ISealedFrameCache?)"/>),
+/// cache through a sealed reader over the store's own bytes (<see cref="OpenDataAsync(string, UInt128, long, CancellationToken, ISealedFrameCache?, bool)"/>),
 /// which serves the Vortex open from the read that brought the trailer. A read with no open keeps the
 /// trailer and the frames of the declared regions in the session's synopsis cache, the sealed bytes as
 /// the store holds them. A head says what the store holds: the sealed length.
@@ -69,6 +69,14 @@ internal sealed class SealedObjectStore : IObjectStore
     private readonly object _gate = new object();
     private readonly Dictionary<string, CommitLayout> _layouts = new Dictionary<string, CommitLayout>(StringComparer.Ordinal);
     private readonly Queue<string> _order = new Queue<string>();
+
+    // The trailers of the data objects read with no open of them, by key, which the next such read opens from with no read
+    // of the envelope's end: a few hundred bytes each, what the object's envelope says, no plaintext; the most bytes kept.
+    private readonly ClockMemo<string, byte[]> _trailers = new ClockMemo<string, byte[]>(TrailerBytes, StringComparer.Ordinal);
+    private const long TrailerBytes = 4L << 20;
+
+    // What a trailer kept costs beyond its bytes: its array, its key and its slot.
+    private const int TrailerOverhead = 128;
     private int _kind;
     private byte[]? _datasetId;
     private KeyName? _current;
@@ -774,7 +782,7 @@ internal sealed class SealedObjectStore : IObjectStore
     /// </summary>
     /// <exception cref="VortexEncryptionException">The object is plain in an encrypted dataset, or not the one its entry names.</exception>
     internal async ValueTask<ISegmentReader> OpenDataAsync(
-        string key, UInt128 uid, long length, CancellationToken cancellationToken, ISealedFrameCache? cache = null)
+        string key, UInt128 uid, long length, CancellationToken cancellationToken, ISealedFrameCache? cache = null, bool footerless = false)
     {
         ObjectStoreSource source = new ObjectStoreSource(_inner, key, length);
         if (!Seals)
@@ -784,7 +792,11 @@ internal sealed class SealedObjectStore : IObjectStore
 
         try
         {
-            return await SealedSegmentReader.OpenAsync(
+            // A read with no open, and no cache that keeps the trailer, opens from the trailer the last such read kept: it
+            // reads the regions its table of contents declares, not the file's tail, which the envelope's end read and
+            // decrypted each question for nothing, a fifth of a sealed lookup.
+            byte[]? trailer = footerless && cache is null && _trailers.TryGet(key, out byte[] held) ? held : null;
+            SealedSegmentReader reader = await SealedSegmentReader.OpenAsync(
                 source,
                 ownsInner: true,
                 (descriptor, token) =>
@@ -798,7 +810,15 @@ internal sealed class SealedObjectStore : IObjectStore
                     return _keys.UnwrapAsync(descriptor, token);
                 },
                 cancellationToken,
-                cache: cache).ConfigureAwait(false);
+                cache: cache,
+                trailer: trailer,
+                keepTrailer: footerless && cache is null && trailer is null).ConfigureAwait(false);
+            if (reader.Trailer is { } read)
+            {
+                _trailers.Keep(key, read, read.Length + TrailerOverhead, out _);
+            }
+
+            return reader;
         }
         catch (VortexFormatException cause)
         {
@@ -832,9 +852,10 @@ internal sealed class SealedObjectStore : IObjectStore
     /// sealed reader keeps its sealed bytes in <paramref name="cache"/> when one is given.
     /// </summary>
     internal static ValueTask<ISegmentReader> OpenDataAsync(
-        IObjectStore store, string key, UInt128 uid, long length, CancellationToken cancellationToken, ISealedFrameCache? cache = null) =>
+        IObjectStore store, string key, UInt128 uid, long length, CancellationToken cancellationToken, ISealedFrameCache? cache = null,
+        bool footerless = false) =>
         store is SealedObjectStore sealedStore
-            ? sealedStore.OpenDataAsync(key, uid, length, cancellationToken, cache)
+            ? sealedStore.OpenDataAsync(key, uid, length, cancellationToken, cache, footerless)
             : new ValueTask<ISegmentReader>(new ObjectStoreSource(store, key, length));
 
     /// <summary>

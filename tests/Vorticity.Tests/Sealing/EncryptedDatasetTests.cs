@@ -553,6 +553,52 @@ public sealed class EncryptedDatasetTests
         Assert.True(sealedScan <= plainScan, $"a scan cost {sealedScan} requests sealed and {plainScan} plain");
     }
 
+    /// <summary>
+    /// A sealed object read with no open of it, twice, through readers of the store: the first reads its envelope's end and
+    /// keeps its trailer, the second opens from the trailer kept with no request; both read the same plaintext, and a
+    /// reader of the whole file, which wants the tail, still reads the end. A store's other object reads its own end.
+    /// </summary>
+    [Fact]
+    public async Task AReadWithNoOpenOpensASealedObjectFromItsTrailerKept()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        using VortexKeyring keyring = SealedObjects.Keyring();
+        await using MemoryObjectStore memory = await EncryptedStoreAsync(keyring, appends: 2, ct);
+        await using CountingObjectStore counting = new CountingObjectStore(memory, ownsInner: false);
+        await using VortexSession session = Session(keyring);
+        await using VortexDataset dataset = await VortexDataset.OpenAsync(counting, new DatasetOptions { Session = session }, ct);
+        List<PositionedObject> objects = [];
+        await foreach (PositionedObject held in dataset.ScanBuilder().ObjectsAsync(ct))
+        {
+            objects.Add(held);
+        }
+
+        Assert.Equal(2, objects.Count);
+        ObjectEntry entry = objects[0].Entry;
+        (byte[] first, long firstOpen) = await ReadAsync(entry, footerless: true);
+        (byte[] second, long secondOpen) = await ReadAsync(entry, footerless: true);
+        Assert.True(firstOpen > 0, "the first read with no open read no envelope's end");
+        Assert.Equal(0, secondOpen);
+        Assert.Equal(first, second);
+
+        // A reader that will open the file reads the end still, as does another object's first read with no open.
+        (byte[] whole, long wholeOpen) = await ReadAsync(entry, footerless: false);
+        Assert.Equal(first, whole);
+        Assert.True(wholeOpen > 0, "a reader of the whole file opened from a trailer kept");
+        Assert.True((await ReadAsync(objects[1].Entry, footerless: true)).Open > 0, "another object opened from this one's trailer");
+
+        // The plaintext of an object's first bytes through a reader of the store, and the requests its open made.
+        async Task<(byte[] Bytes, long Open)> ReadAsync(ObjectEntry of, bool footerless)
+        {
+            long start = counting.Requests;
+            await using Vorticity.IO.ISegmentReader reader = await SealedObjectStore.OpenDataAsync(dataset.Store, of.Key, of.Uid, of.Bytes, ct, footerless: footerless);
+            long open = counting.Requests - start;
+            long length = await reader.GetLengthAsync(ct);
+            using Vorticity.Buffers.SegmentOwner read = await reader.ReadRangeAsync(0, (int)Math.Min(length, 4_096), 1, ct);
+            return (read.Buffer.Span.ToArray(), open);
+        }
+    }
+
     private static async Task<(long Open, long Scan)> RequestsAsync(IObjectStore store, DatasetOptions options, CancellationToken ct)
     {
         await using CountingObjectStore counting = new CountingObjectStore(store, ownsInner: false);
