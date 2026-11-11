@@ -354,6 +354,9 @@ A job that pushes one object up from a level above 0, where nothing in the level
 moves its entry from one tree to the other and rewrites nothing, when the object holds no marks, no
 fragments and the current schema, and fits what the level above targets
 ([what compaction buys](15-compaction.md#1-what-compaction-buys-and-what-it-costs)).
+A tiered job of a dataset without a key moves the objects of its run that are at least half what the
+level above targets, which a concatenation would only cut or write again, and concatenates the others
+([the tiered plan](15-compaction.md#the-pointer-and-the-tiered-plan)).
 `CompactionResult.ObjectsMoved` counts such objects, and their bytes are in neither `BytesIn` nor
 `BytesOut`.
 

@@ -166,7 +166,9 @@ public sealed record CompactionOptions
 
     /// <summary>
     /// Whether a job of one object that overlaps nothing in the level above moves the object's entry
-    /// there instead of rewriting the object; true by default, false to measure what the moves save.
+    /// there instead of rewriting the object, and a tiered job moves the objects that reach the level
+    /// above's target and concatenates the others a whole number of its objects at a time; true by
+    /// default, false to measure what the moves save.
     /// </summary>
     internal bool TrivialMoves { get; init; } = true;
 
@@ -400,9 +402,10 @@ public sealed record CompactionJob
     internal LevelRange? Range { get; init; }
 
     /// <summary>
-    /// Whether the job may move its one object into the level above whole, its entry taken out of one
-    /// tree and put into the other byte for byte, with no row read or written. A merge of that object
-    /// alone would write its rows as one object of the same bounds.
+    /// Whether the job may move its objects into the level above whole, each entry taken out of one
+    /// tree and put into the other byte for byte, with no row read or written: a leveled job's one
+    /// object, which a merge of it alone would write as one object of the same bounds, or a tiered
+    /// job's objects, which a concatenation would only cut or write again.
     /// </summary>
     internal bool Moves { get; init; }
 

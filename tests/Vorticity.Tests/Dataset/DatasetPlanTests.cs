@@ -155,6 +155,51 @@ public sealed class DatasetPlanTests
     }
 
     [Theory]
+    [InlineData("3000 2500 500 600", true, 2, true)]
+    [InlineData("500 600 700 3800", true, 3, false)]
+    [InlineData("1500 1500 1500 1500 1500 1500 3000", true, 5, false)]
+    [InlineData("500 4000", true, 1, true)]
+    [InlineData("500d 4000", true, 1, false)]
+    [InlineData("3000f 2500", true, 1, false)]
+    [InlineData("3000 2500 500 600", false, 4, false)]
+    public async Task ATieredJobMovesWhatAConcatenationWouldOnlyCutAndConcatenatesWholeTargets(string sizes, bool moves, int taken, bool moved)
+    {
+        // Level 1 over its 4,000 bytes, its objects one after another; level 2's objects aim at 4,000 bytes, so that one of
+        // 2,000 or more stands (d marks rows, f attaches a fragment). The job moves the leading objects that stand; or
+        // concatenates those that do not, a whole number of targets of them, a lone plain one moved instead; or, with moves
+        // off, concatenates the whole run.
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        List<(int Level, ReadOnlyMemory<byte> Key, ObjectEntry Entry)> objects = [];
+        long position = 0;
+        foreach (string size in sizes.Split(' '))
+        {
+            objects.Add(Arrival(1, position, 100, long.Parse(size.TrimEnd('d', 'f'), System.Globalization.CultureInfo.InvariantCulture),
+                size.EndsWith('f') ? 1 : 0, size.EndsWith('d') ? 3 : 0));
+            position += 100;
+        }
+
+        await using VortexDataset dataset = await CreateAsync(store, null, objects, ct, clustered: false);
+        CompactionOptions options = new CompactionOptions
+        {
+            TargetBytesAtLevelOne = 1_000,
+            Fanout = 4,
+            MaxObjectBytes = 4_000,
+            Style = CompactionStyle.Tiered,
+            Pick = CompactionPick.RoundRobin,
+            PurgeMarks = false,
+            TrivialMoves = moves,
+        };
+
+        CompactionPlan plan = await dataset.PlanCompactionAsync(options, ct);
+        Same(await CompactionPolicy.PlanByReadingEveryLeafAsync(dataset, options, ct), plan, seed: -1);
+        CompactionJob job = Assert.IsType<CompactionJob>(plan.Job);
+        Assert.Equal((CompactionTrigger.LevelSize, 1, 2, 4_000L), (job.Trigger, job.FromLevel, job.ToLevel, job.TargetBytes));
+        Assert.Equal(objects.Take(taken).Select(o => Convert.ToHexString(o.Key.Span)), job.Inputs.Select(input => Convert.ToHexString(input.Key.Span)));
+        Assert.Equal((moved, Convert.ToHexString(objects[taken - 1].Key.Span), 0L), (job.Moves, Convert.ToHexString(job.Stop.Span), job.FirstRow));
+    }
+
+    [Theory]
     [InlineData(25_000)]
     [InlineData(100_000)]
     public async Task ATieredPlanAsksForTheSameFewPagesWhateverTheObjectsALevelHolds(int deepest)
@@ -750,7 +795,7 @@ public sealed class DatasetPlanTests
 
         CompactionJob other = Assert.IsType<CompactionJob>(actual.Job);
         Assert.Equal((job.Trigger, job.FromLevel, job.ToLevel, job.TargetBytes, job.Rows, job.Bytes), (other.Trigger, other.FromLevel, other.ToLevel, other.TargetBytes, other.Rows, other.Bytes));
-        Assert.Equal((job.Style, job.FirstRow, Convert.ToHexString(job.Stop.Span)), (other.Style, other.FirstRow, Convert.ToHexString(other.Stop.Span)));
+        Assert.Equal((job.Style, job.FirstRow, Convert.ToHexString(job.Stop.Span), job.Moves), (other.Style, other.FirstRow, Convert.ToHexString(other.Stop.Span), other.Moves));
         Assert.True(job.ObjectKeys.SequenceEqual(other.ObjectKeys), $"{shape}: {string.Join(",", job.ObjectKeys)} against {string.Join(",", other.ObjectKeys)}");
         Assert.Equal(
             job.Inputs.Select(input => (input.Level, Convert.ToHexString(input.Key.Span))),

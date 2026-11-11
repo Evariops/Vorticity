@@ -21,7 +21,9 @@ namespace Vorticity.Dataset;
 /// starts past the level's pointer ends at the first object of another level past its start, one
 /// descent per level; the longest run is a fact of every level's order in full, so a plan that
 /// takes it reads every leaf, as does a plan over a level whose top page was written before
-/// tallies. Both choose the same job.
+/// tallies. Both choose the same job, and take of the run the part <see cref="TieredPart"/> says: the objects already
+/// as large as the level above aims at move there whole, and the others are concatenated a whole number of its objects
+/// at a time.
 /// </para>
 /// </remarks>
 internal static partial class CompactionPolicy
@@ -474,6 +476,12 @@ internal static partial class CompactionPolicy
             to = settings.LevelZeroDestination(bytes);
         }
 
+        bool moves = false;
+        if (style == CompactionStyle.Tiered)
+        {
+            (sources, moves) = TieredPart(sources, settings.TargetBytes(to), settings);
+        }
+
         List<CompactionInput> inputs = [.. sources];
         LevelRange? range = style == CompactionStyle.Leveled && dataset.Keyed ? LevelRange.Of(to, sources, dataset.Key) : null;
         if (range is not null && to < levels.Count)
@@ -496,9 +504,79 @@ internal static partial class CompactionPolicy
         {
             Stop = stops ? sources[^1].Key : default,
             Range = range,
-            Moves = range is not null && Moves(from, to, inputs, settings),
+            Moves = moves || (range is not null && Moves(from, to, inputs, settings)),
         };
     }
+
+    /// <summary>
+    /// What a tiered job takes of <paramref name="run"/>, a level's objects in the order of their rows, into the level above,
+    /// whose objects aim at <paramref name="target"/> bytes, and whether it moves them there whole. Its leading objects that
+    /// are about that large already (<see cref="Stands"/>) move: a concatenation would only cut them, or write them again
+    /// as they are, as it did to every object past the levels whose targets reach the cap on an object, each of which aims
+    /// at the one below's size. Otherwise its leading objects that do not, up to the first that does, are concatenated, a
+    /// whole number of targets of them when they hold one, so that the last object written is about full rather than a
+    /// remainder each level above would keep; the rest wait in the level. One object alone that a concatenation would
+    /// write again as itself moves instead.
+    /// </summary>
+    /// <remarks>
+    /// The objects of a concatenation stay one stretch of the run, which its outputs take the positions of; a move keeps
+    /// each object's own. Off with <see cref="CompactionOptions.TrivialMoves"/>, the job concatenates the whole run.
+    /// </remarks>
+    private static (List<CompactionInput> Taken, bool Moves) TieredPart(List<CompactionInput> run, long target, CompactionOptions settings)
+    {
+        if (!settings.TrivialMoves || target <= 0 || run.Count == 0)
+        {
+            return (run, false);
+        }
+
+        int standing = 0;
+        while (standing < run.Count && Stands(run[standing], target))
+        {
+            standing++;
+        }
+
+        if (standing > 0)
+        {
+            return (standing == run.Count ? run : run.GetRange(0, standing), true);
+        }
+
+        int under = 0;
+        long bytes = 0;
+        while (under < run.Count && !Stands(run[under], target))
+        {
+            bytes += run[under].Entry.Bytes;
+            under++;
+        }
+
+        int taken = under;
+        long whole = bytes / target * target;
+        if (whole > 0)
+        {
+            long sum = 0;
+            taken = 0;
+            while (taken < under && sum + run[taken].Entry.Bytes <= whole)
+            {
+                sum += run[taken].Entry.Bytes;
+                taken++;
+            }
+
+            taken = Math.Max(taken, 1);
+        }
+
+        List<CompactionInput> part = taken == run.Count ? run : run.GetRange(0, taken);
+        return (part, taken == 1 && Plain(part[0]));
+    }
+
+    /// <summary>Whether an object holds no marks and no fragments, which only a rewrite folds.</summary>
+    private static bool Plain(CompactionInput input) => input.Entry is { HasDeletions: false, Fragments.Count: 0 };
+
+    /// <summary>
+    /// Whether an object a tiered job would concatenate into objects of <paramref name="target"/> bytes moves instead: plain,
+    /// and at least half the target. A writer rolls its objects on an estimate of what it holds, which their bytes miss by
+    /// what a batch or a chunk weighs, so an object it rolled full can fall short of the target; and a concatenation of
+    /// objects of half the target or more pays every byte of them to save at most every other object.
+    /// </summary>
+    private static bool Stands(CompactionInput input, long target) => Plain(input) && input.Entry.Bytes >= target - (target / 2);
 
     /// <summary>
     /// Whether a leveled job may move its one object into the level above whole: an object of a level
@@ -833,13 +911,20 @@ internal static partial class CompactionPolicy
             : new CompactionJob(untaken[0].Level, untaken[0].Level, style, CompactionTrigger.Fragments, untaken, 0, 0);
     }
 
-    /// <summary>The tiered job that concatenates <paramref name="run"/> into the level above, and records where it stopped.</summary>
+    /// <summary>
+    /// The tiered job that concatenates or moves the part of <paramref name="run"/> <see cref="TieredPart"/> takes into the
+    /// level above, and records where it stopped.
+    /// </summary>
     private static CompactionJob Tiered(
-        PlannedVersion dataset, List<CompactionInput> run, int from, CompactionOptions settings, CompactionTrigger trigger) =>
-        new CompactionJob(from, from + 1, CompactionStyle.Tiered, trigger, run, settings.TargetBytes(from + 1), FirstRow(dataset, run[0]))
+        PlannedVersion dataset, List<CompactionInput> run, int from, CompactionOptions settings, CompactionTrigger trigger)
+    {
+        (List<CompactionInput> taken, bool moves) = TieredPart(run, settings.TargetBytes(from + 1), settings);
+        return new CompactionJob(from, from + 1, CompactionStyle.Tiered, trigger, taken, settings.TargetBytes(from + 1), FirstRow(dataset, taken[0]))
         {
-            Stop = run[^1].Key,
+            Stop = taken[^1].Key,
+            Moves = moves,
         };
+    }
 
     /// <summary>
     /// <see cref="RunFrom"/> by descent: the run starts with the object past the level's pointer and

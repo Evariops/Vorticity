@@ -628,6 +628,89 @@ public sealed class DatasetCompactionTests
         Assert.Equal(before.GetRange(150, 300), await KeysAsync(dataset.ScanBuilder().Rows(150, 450)));
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task ATieredCompactionMovesTheObjectsAsLargeAsTheLevelAboveAimsAtAndKeepsTheRowOrder(bool moves)
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        // Appends of 1,000 rows among appends of 50, under a level 1 whose objects aim at the bytes of the smallest of the
+        // large ones: those move whole, their objects kept under their keys, and the small ones between them are
+        // concatenated. Moved or not, the rows keep their order, and the objects' positions follow one another.
+        Decoders.EnsureRegistered();
+        DTypeArena types = new DTypeArena();
+        DType schema = Schema(types);
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Unclustered(), ct);
+        int[] sizes = [1_000, 50, 50, 1_000, 1_000, 50, 50, 50, 1_000, 50];
+        long rows = 0;
+        for (int i = 0; i < sizes.Length; i++)
+        {
+            await dataset.AppendAsync(Shuffled(types, schema, rows, sizes[i], seed: i + 1), ct);
+            rows += sizes[i];
+        }
+
+        List<(TreeEntry Tree, ObjectEntry Entry)> appended = await EntriesAsync(dataset, 0);
+        long large = appended.Where(o => o.Entry.Rows == 1_000).Min(o => o.Entry.Bytes);
+        Assert.True(2 * appended.Where(o => o.Entry.Rows == 50).Max(o => o.Entry.Bytes) < large, "a small object must stand under half the target");
+
+        List<long> before = await KeysAsync(dataset.ScanBuilder());
+        CompactionOptions options = new CompactionOptions
+        {
+            LevelZeroCeiling = 2,
+            TargetBytesAtLevelOne = large,
+            Fanout = 1_000,
+            MaxObjectBytes = 1L << 30,
+            TrivialMoves = moves,
+        };
+
+        long moved = 0;
+        long jobs = 0;
+        while (await dataset.CompactAsync(options, ct) is { } done)
+        {
+            Assert.Equal((CompactionTrigger.LevelZeroCeiling, 0, 1), (done.Trigger, done.FromLevel, done.ToLevel));
+            moved += done.ObjectsMoved;
+            jobs++;
+        }
+
+        // Ten objects over a ceiling of two: moved, the large one, the two small ones concatenated, the two large ones moved,
+        // the three small ones concatenated, and the last large and small ones stay; without moves, all ten concatenated
+        // into objects of the target.
+        Assert.Equal((moves ? 4L : 1L, moves ? 3L : 0L), (jobs, moved));
+        Assert.Equal(rows, dataset.RowCount);
+        Assert.Equal(before, await KeysAsync(dataset.ScanBuilder()));
+        Assert.Equal(before.GetRange(500, 2_000), await KeysAsync(dataset.ScanBuilder().Rows(500, 2_500)));
+
+        List<(TreeEntry Tree, ObjectEntry Entry)> above = await EntriesAsync(dataset, 1);
+        HashSet<UInt128> kept = [.. above.Select(o => o.Entry.Uid)];
+        Assert.Equal(moves ? 3 : 0, appended.Take(5).Count(o => kept.Contains(o.Entry.Uid)));
+        Assert.Equal(moves ? 5 : 0, moves ? above.Count : (await EntriesAsync(dataset, 0)).Count);
+
+        List<(long Position, long Rows)> placed = [.. above.Concat(await EntriesAsync(dataset, 0))
+            .Select(o => (VortexDataset.PositionAt(o.Tree.Key.Span), o.Entry.Rows))
+            .OrderBy(o => o.Item1)];
+        long next = 0;
+        foreach ((long position, long held) in placed)
+        {
+            Assert.Equal(next, position);
+            next += held;
+        }
+
+        Assert.Equal(rows, next);
+    }
+
+    private static async Task<List<(TreeEntry Tree, ObjectEntry Entry)>> EntriesAsync(VortexDataset dataset, int level)
+    {
+        List<(TreeEntry, ObjectEntry)> entries = [];
+        await foreach (TreeEntry entry in dataset.Levels[level].EnumerateAsync(dataset.Pages, TestContext.Current.CancellationToken))
+        {
+            entries.Add((entry, ObjectEntry.FromBytes(entry.Value)));
+        }
+
+        return entries;
+    }
+
     [Fact]
     public async Task AKeyedDatasetCompactsInTheLevelsItsLayoutDeclares()
     {
