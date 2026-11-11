@@ -1,6 +1,7 @@
 // The row of a column's least or greatest value, every row valid: the first of the rows that hold it, for integers of
-// every width, columns shorter and longer than a vector, the extreme held more than once.
+// every width, columns shorter and longer than a vector, the extreme held more than once from four rows on.
 using System;
+using System.Linq;
 using System.Runtime.InteropServices;
 using Vorticity.Arrays;
 using Vorticity.Buffers;
@@ -37,10 +38,23 @@ public sealed class ExtremeRowTests
             random.NextBytes(bytes);
             Span<T> values = MemoryMarshal.Cast<byte, T>(bytes);
 
-            // The extremes held twice or more, at places drawn at random.
-            for (int copy = 0; copy < 3 && rows > 2; copy++)
+            // The extremes held twice or more, copied to rows drawn at random among the others, before and after the first
+            // row that held them, neither over the other. Drawn at random, a value of 32 or 64 bits is held once.
+            if (rows > 3)
             {
-                values[random.Next(rows)] = values[random.Next(rows)];
+                (int least, int most) = Ends(values);
+                T low = values[least];
+                T high = values[most];
+                int[] others = [.. Enumerable.Range(0, rows).Where(row => row != least && row != most)];
+                random.Shuffle(others);
+                int copies = Math.Min(3, others.Length / 2);
+                for (int copy = 0; copy < copies; copy++)
+                {
+                    values[others[copy]] = low;
+                    values[others[copies + copy]] = high;
+                }
+
+                Assert.True(Held(values, low) >= 2 && Held(values, high) >= 2);
             }
 
             int node = arena.AddPrimitive(new DTypeArena().Primitive(ptype, Nullability.NonNullable), rows, Validity.NonNullable, ptype, buffer);
@@ -60,5 +74,33 @@ public sealed class ExtremeRowTests
                 Assert.Equal(expected, found);
             }
         }
+    }
+
+    /// <summary>The first rows of the least and the greatest values.</summary>
+    private static (int Least, int Most) Ends<T>(ReadOnlySpan<T> values)
+        where T : unmanaged, IComparable<T>
+    {
+        int least = 0;
+        int most = 0;
+        for (int row = 1; row < values.Length; row++)
+        {
+            least = values[row].CompareTo(values[least]) < 0 ? row : least;
+            most = values[row].CompareTo(values[most]) > 0 ? row : most;
+        }
+
+        return (least, most);
+    }
+
+    /// <summary>The rows that hold <paramref name="value"/>.</summary>
+    private static int Held<T>(ReadOnlySpan<T> values, T value)
+        where T : unmanaged, IComparable<T>
+    {
+        int held = 0;
+        foreach (T each in values)
+        {
+            held += each.CompareTo(value) == 0 ? 1 : 0;
+        }
+
+        return held;
     }
 }
