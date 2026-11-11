@@ -733,13 +733,14 @@ internal sealed class AggregationOutcome
 
     /// <summary>
     /// Holds <paramref name="groups"/>, the groups an operator on groups left in an array of the process's shelf, until the
-    /// result is delivered; the array the operator before it left, which it read, goes back now.
+    /// result is delivered; the array the operator before it left, which it read, goes back now, measured no more.
     /// </summary>
     internal void HoldOperated(int[] groups)
     {
         int[]? previous = Interlocked.Exchange(ref _operated, groups);
         if (previous is { Length: > 0 } && !ReferenceEquals(previous, groups))
         {
+            Memory?.Measure(-(long)previous.Length * sizeof(int));
             ArrayShelf.Retained.Give(previous);
         }
     }
