@@ -2,7 +2,8 @@
 //
 // A file of 4,194,304 rows, a `Key` drawn among 1,048,576 values and a `Value` among 64, grouped by key and its values
 // counted distinct, at two lanes and at eight: each lane's pairs of a group and a value, made distinct across the lanes in parts
-// side by side. The groups are read.
+// side by side. The groups are read. Skewed, three rows in four are of one key, their values drawn among 2^24: that group
+// holds about three pairs in four, as a dominant customer or an "unknown" value would.
 using System;
 using System.IO;
 using System.Threading;
@@ -24,6 +25,10 @@ public partial class AuditDistinctMergeBenchmarks
     [Params(2, 8)]
     public int Degree { get; set; } = 8;
 
+    /// <summary>Whether one key holds three rows in four, of values drawn among 2^24.</summary>
+    [Params(false, true)]
+    public bool Skewed { get; set; }
+
     private string _path = null!;
     private VortexFile _file = null!;
 
@@ -40,6 +45,13 @@ public partial class AuditDistinctMergeBenchmarks
         Pair[] rows = new Pair[Rows];
         for (int i = 0; i < Rows; i++)
         {
+            if (Skewed && random.Next(4) != 0)
+            {
+                int wide = random.Next(1 << 24);
+                rows[i] = new Pair(0, wide, $"label-{wide:D8}");
+                continue;
+            }
+
             int value = random.Next(64);
             rows[i] = new Pair(random.Next(Groups), value, $"label-{value:D3}");
         }

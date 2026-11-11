@@ -999,11 +999,16 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>, IPairedSl
 
         // Each lane's pairs placed by part, then each part's pairs from every lane made distinct. With many more groups than
         // parts, a part owns its groups whole, every lane's pairs of them, and counts them where the slot keeps them: no
-        // count of every group a part, a gigabyte at a million groups and 128 parts, nor a sum of them all.
+        // count of every group a part, a gigabyte at a million groups and 128 parts, nor a sum of them all. Unless a group
+        // holds so many pairs that its part outweighs the others (PairedParts.Lopsided): then by the pairs' hash.
         int shift = 64 - BitOperations.Log2((uint)parts);
-        bool byGroup = groups >= parts * GroupsPerPart;
-        (int[] Placed, int[] Starts)[] cuts = new (int[], int[])[all.Length];
-        await SideBySide.RunAsync(all.Length, p => cuts[p] = all[p].Cut(maps[p], shift, parts, byGroup), degree, cancellationToken).ConfigureAwait(false);
+        ((int[] Placed, int[] Starts)[] cuts, bool byGroup) = await PairedParts.CutAsync(
+            Array.ConvertAll(all, static lane => lane.Count),
+            (p, group, partOf) => all[p].PartsOf(maps[p], shift, parts, group, partOf),
+            groups,
+            parts,
+            degree,
+            cancellationToken).ConfigureAwait(false);
         if (byGroup)
         {
             EnsureGroups(groups);
@@ -1094,9 +1099,6 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>, IPairedSl
 
         ReleasePairs(groups);
     }
-
-    /// <summary>The groups a part of a merge owns at least on average for the parts to be cut by group (<see cref="MergeInPartsAsync"/>).</summary>
-    private const int GroupsPerPart = 16;
 
     /// <summary>The pairs, counted: let go, their arrays given back, a table for <paramref name="groups"/> groups made.</summary>
     private void ReleasePairs(int groups)

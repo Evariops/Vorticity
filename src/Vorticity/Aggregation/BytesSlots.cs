@@ -745,11 +745,16 @@ internal sealed class BytesDistinctSlot : AggregateSlot<long>, IPairedSlot
 
         // Each lane's pairs placed by part, the hash of the value under its group's target, then each
         // part's pairs from every lane made distinct. With many more groups than parts, a part owns its
-        // groups whole and counts them where the slot keeps them: no count of every group a part.
+        // groups whole and counts them where the slot keeps them: no count of every group a part; unless
+        // a group's pairs outweigh the other parts (PairedParts.Lopsided), cut by the pairs' hash then.
         int shift = 64 - BitOperations.Log2((uint)parts);
-        bool byGroup = groups >= parts * GroupsPerPart;
-        (int[] Placed, int[] Starts)[] cuts = new (int[], int[])[all.Length];
-        await SideBySide.RunAsync(all.Length, p => cuts[p] = all[p].Cut(maps[p], shift, parts, byGroup), degree, cancellationToken).ConfigureAwait(false);
+        ((int[] Placed, int[] Starts)[] cuts, bool byGroup) = await PairedParts.CutAsync(
+            Array.ConvertAll(all, static lane => lane._seen.Count),
+            (p, group, partOf) => all[p].PartsOf(maps[p], shift, parts, group, partOf),
+            groups,
+            parts,
+            degree,
+            cancellationToken).ConfigureAwait(false);
         long[][] counts = new long[parts][];
         if (byGroup)
         {
@@ -816,14 +821,14 @@ internal sealed class BytesDistinctSlot : AggregateSlot<long>, IPairedSlot
         Array.Clear(_first);
     }
 
-    /// <summary>The groups a part of a merge owns at least on average for the parts to be cut by group (<see cref="MergeInPartsAsync"/>).</summary>
-    private const int GroupsPerPart = 16;
-
-    /// <summary>The table's pairs placed by part, the part of a pair the top bits past <paramref name="shift"/> of its value's hash under its group's target.</summary>
-    private (int[] Placed, int[] Starts) Cut(int[] map, int shift, int parts, bool byGroup)
+    /// <summary>
+    /// Each of the table's pairs' part, into <paramref name="partOf"/>: the top bits past <paramref name="shift"/> of its
+    /// value's hash under its group's target, or with <paramref name="byGroup"/> of its group's target alone; where each
+    /// part starts once placed (<see cref="PairedParts.CutAsync"/>).
+    /// </summary>
+    private int[] PartsOf(int[] map, int shift, int parts, bool byGroup, int[] partOf)
     {
         int count = _seen.Count;
-        int[] partOf = GC.AllocateUninitializedArray<int>(count);
         int[] starts = new int[parts + 1];
         for (int number = 0; number < count; number++)
         {
@@ -841,14 +846,7 @@ internal sealed class BytesDistinctSlot : AggregateSlot<long>, IPairedSlot
             starts[part + 1] += starts[part];
         }
 
-        int[] next = starts[..^1];
-        int[] placed = GC.AllocateUninitializedArray<int>(count);
-        for (int number = 0; number < count; number++)
-        {
-            placed[next[partOf[number]]++] = number;
-        }
-
-        return (placed, starts);
+        return starts;
     }
 
     /// <summary>The table of its (group, value) pairs, their chains, and the counts.</summary>

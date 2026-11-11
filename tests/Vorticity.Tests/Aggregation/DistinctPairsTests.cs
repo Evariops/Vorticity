@@ -113,6 +113,54 @@ public sealed partial class DistinctPairsTests
         }
     }
 
+    // Sixty thousand groups and one that holds most of the pairs, a dominant customer's: merged in series, the lanes' pairs
+    // go by parts, which a cut by group would leave lopsided, the dominant group's part on one worker; cut by the pairs'
+    // hash instead, each value still counts once a group.
+    [Theory]
+    [InlineData(2)]
+    [InlineData(4)]
+    public async Task AGroupThatHoldsMostPairsCountsEachValueOnce(int degree)
+    {
+        Row[] rows = Rows_(sorted: false);
+        for (int row = 0; row < rows.Length; row += 4)
+        {
+            rows[row] = rows[row] with { Key = 7 };
+        }
+
+        for (int row = 1; row < rows.Length; row += 4)
+        {
+            rows[row] = new Row(7, 1_000 + row, $"w-{row}");
+        }
+
+        string path = await WriteAsync(rows);
+        try
+        {
+            await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = degree);
+            await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
+            Vorticity.Aggregation query = file.Scan<Row>()
+                .GroupBy(r => r.Key)
+                .Select(g => (g.Key, g.CountDistinct(x => x.Value), g.CountDistinct(x => x.Text)));
+            query.Plan.MergeInParts = false;
+            Dictionary<int, KeyCounts> got = (await ListAsync(query.As<KeyCounts>())).ToDictionary(c => c.Key);
+            Assert.Equal(Expected(rows), got);
+            Assert.True(got[7].Values > Rows / 4, $"group 7 holds {got[7].Values} values");
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void PartsOneOfWhichHoldsMoreThanTwiceTheAverageAreLopsided()
+    {
+        // Two lanes over four parts: 100 pairs in all, an average part of 25.
+        Assert.False(PairedParts.Lopsided([[0, 10, 20, 30, 40], [0, 15, 30, 45, 60]], 4));
+        Assert.False(PairedParts.Lopsided([[0, 25, 30, 35, 40], [0, 25, 40, 50, 60]], 4));
+        Assert.True(PairedParts.Lopsided([[0, 26, 30, 35, 40], [0, 25, 40, 50, 60]], 4));
+        Assert.True(PairedParts.Lopsided([[0, 0, 0, 40, 40], [0, 0, 0, 60, 60]], 4));
+    }
+
     [Theory]
     [InlineData(1)]
     [InlineData(4)]

@@ -562,6 +562,79 @@ internal interface IPairedSlot
     Task MergeInPartsAsync(AggregateSlot[] slots, int[][] maps, int groups, int parts, int degree, QueryMemory? memory, CancellationToken cancellationToken);
 }
 
+/// <summary>How a distinct count's merge in parts (<see cref="IPairedSlot.MergeInPartsAsync"/>) cuts its pairs.</summary>
+internal static class PairedParts
+{
+    /// <summary>The groups a part owns at least on average for the parts to be cut by group.</summary>
+    internal const int GroupsPerPart = 16;
+
+    /// <summary>
+    /// Every lane's pairs placed by part: by group, a part owning its groups whole, when there are
+    /// <see cref="GroupsPerPart"/> groups a part or more and that leaves the parts even (<see cref="Lopsided"/>); by the
+    /// pairs' hash otherwise. <paramref name="partsOf"/> fills lane <c>p</c>'s array of each of its pairs' parts, of
+    /// <c>pairs[p]</c> entries, cut by group or not, and returns where each part starts once placed.
+    /// </summary>
+    /// <returns>Each lane's pairs' numbers part after part and where each part starts, and whether they are cut by group.</returns>
+    internal static async Task<((int[] Placed, int[] Starts)[] Cuts, bool ByGroup)> CutAsync(
+        int[] pairs, Func<int, bool, int[], int[]> partsOf, int groups, int parts, int degree, CancellationToken cancellationToken)
+    {
+        int lanes = pairs.Length;
+        bool byGroup = groups >= parts * GroupsPerPart;
+        int[][] partOf = new int[lanes][];
+        int[][] starts = new int[lanes][];
+        await SideBySide.RunAsync(
+            lanes, p => starts[p] = partsOf(p, byGroup, partOf[p] = GC.AllocateUninitializedArray<int>(pairs[p])), degree, cancellationToken)
+            .ConfigureAwait(false);
+        if (byGroup && Lopsided(starts, parts))
+        {
+            byGroup = false;
+            await SideBySide.RunAsync(lanes, p => starts[p] = partsOf(p, false, partOf[p]), degree, cancellationToken).ConfigureAwait(false);
+        }
+
+        (int[] Placed, int[] Starts)[] cuts = new (int[], int[])[lanes];
+        await SideBySide.RunAsync(lanes, p => cuts[p] = (Place(partOf[p], starts[p]), starts[p]), degree, cancellationToken).ConfigureAwait(false);
+        return (cuts, byGroup);
+    }
+
+    /// <summary>
+    /// Whether every lane's pairs, as <paramref name="starts"/> place them in <paramref name="parts"/> parts, leave one part
+    /// more than twice the average part's: cut by group, a group that holds a large share of the pairs puts them all in
+    /// its part, which one worker makes distinct, its table held whole, while the others are idle. Cut by the pairs' hash
+    /// instead, the parts are even.
+    /// </summary>
+    internal static bool Lopsided(int[][] starts, int parts)
+    {
+        long total = 0;
+        long most = 0;
+        for (int part = 0; part < parts; part++)
+        {
+            long held = 0;
+            foreach (int[] lane in starts)
+            {
+                held += lane[part + 1] - lane[part];
+            }
+
+            total += held;
+            most = Math.Max(most, held);
+        }
+
+        return most * parts > 2 * total;
+    }
+
+    /// <summary>The pairs' numbers, part after part, as <paramref name="partOf"/> and <paramref name="starts"/> place them.</summary>
+    private static int[] Place(int[] partOf, int[] starts)
+    {
+        int[] next = starts[..^1];
+        int[] placed = GC.AllocateUninitializedArray<int>(partOf.Length);
+        for (int number = 0; number < partOf.Length; number++)
+        {
+            placed[next[partOf[number]]++] = number;
+        }
+
+        return placed;
+    }
+}
+
 /// <summary>Work items run side by side, a worker taking the next item as it finishes one.</summary>
 internal static class SideBySide
 {

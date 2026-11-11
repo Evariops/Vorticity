@@ -253,19 +253,14 @@ internal sealed class DistinctPairs<TValue>
     internal TValue ValueAt(int number) => _pairs[number].Value;
 
     /// <summary>
-    /// The pairs placed by part, the part of a pair the top bits past <paramref name="shift"/> of its
-    /// hash under its group's target <c>map[g]</c>: the same pair in every lane falls in one part.
+    /// Each pair's part, into <paramref name="partOf"/>, of <see cref="Count"/> entries: the top bits past
+    /// <paramref name="shift"/> of its hash under its group's target <c>map[g]</c>, so that the same pair in every lane falls
+    /// in one part; or, with <paramref name="byGroup"/>, of its group's target alone, every pair of a group from every lane
+    /// in one part, which owns the group (<see cref="PairedParts.CutAsync"/>).
     /// </summary>
-    /// <returns>The pairs' numbers, part after part, and where each part's start, then the end.</returns>
-    internal (int[] Placed, int[] Starts) Cut(ReadOnlySpan<int> map, int shift, int parts) => Cut(map, shift, parts, byGroup: false);
-
-    /// <summary>
-    /// <see cref="Cut(ReadOnlySpan{int}, int, int)"/> with <paramref name="byGroup"/>, a pair's part the top bits of its group's
-    /// target alone: every pair of a group, from every lane, falls in one part, which owns the group.
-    /// </summary>
-    internal (int[] Placed, int[] Starts) Cut(ReadOnlySpan<int> map, int shift, int parts, bool byGroup)
+    /// <returns>Where each part's pairs start once placed, then the end.</returns>
+    internal int[] PartsOf(ReadOnlySpan<int> map, int shift, int parts, bool byGroup, int[] partOf)
     {
-        int[] partOf = GC.AllocateUninitializedArray<int>(_count);
         int[] starts = new int[parts + 1];
         Pair[] pairs = _pairs;
         for (int number = 0; number < _count; number++)
@@ -283,14 +278,7 @@ internal sealed class DistinctPairs<TValue>
             starts[part + 1] += starts[part];
         }
 
-        int[] next = starts[..^1];
-        int[] placed = GC.AllocateUninitializedArray<int>(_count);
-        for (int number = 0; number < _count; number++)
-        {
-            placed[next[partOf[number]]++] = number;
-        }
-
-        return (placed, starts);
+        return starts;
     }
 
     /// <summary>
