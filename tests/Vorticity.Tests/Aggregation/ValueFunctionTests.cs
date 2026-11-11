@@ -396,6 +396,151 @@ public sealed partial class ValueFunctionTests
     }
 
     /// <summary>
+    /// A zone's truncation keeps the bucket of the value before while values stay in it, which a truncation that is not
+    /// monotone, a clock set back across a unit's boundary, could fool: around every transition of every zone the system
+    /// knows, from 1970 to 2040, up to eight of each zone's kinds of change, every unit maps a block of instants, in time
+    /// order, reversed, shuffled and in a zigzag about the transition, as it maps each instant alone.
+    /// </summary>
+    [Fact]
+    public void ABlockMapsAsTheFunctionAloneAroundEveryZonesTransitions()
+    {
+        Random random = new Random(37);
+        Vorticity.Types.DTypeArena types = new Vorticity.Types.DTypeArena();
+        DType dtype = types.Primitive(PType.I64, Nullability.NonNullable);
+        CalendarUnit[] units = [CalendarUnit.Minute, CalendarUnit.Hour, CalendarUnit.Day, CalendarUnit.Week, CalendarUnit.Month];
+        long[] spans = [180, 3 * 3_600, 3 * 86_400, 9 * 86_400, 40 * 86_400];
+        int transitions = 0;
+        int zones = 0;
+
+        // And zones the system may not hold, whose clocks go back across a unit's boundary: 17 minutes at local midnight,
+        // 30 minutes at ten past midnight, two hours at one, and forward 45 minutes at ten to midnight.
+        TimeZoneInfo Made(string id, int baseMinutes, int deltaMinutes, int backHour, int backMinute)
+        {
+            TimeZoneInfo.TransitionTime start = TimeZoneInfo.TransitionTime.CreateFixedDateRule(new DateTime(1, 1, 1, 2, 0, 0), 4, 1);
+            TimeZoneInfo.TransitionTime end = TimeZoneInfo.TransitionTime.CreateFixedDateRule(new DateTime(1, 1, 1, backHour, backMinute, 0), 10, 1);
+            TimeZoneInfo.AdjustmentRule rule = TimeZoneInfo.AdjustmentRule.CreateAdjustmentRule(
+                new DateTime(1970, 1, 1), new DateTime(2039, 12, 31), TimeSpan.FromMinutes(deltaMinutes), start, end);
+            return TimeZoneInfo.CreateCustomTimeZone(id, TimeSpan.FromMinutes(baseMinutes), id, id, id, [rule]);
+        }
+
+        TimeZoneInfo[] made =
+        [
+            Made("Back-17-at-midnight", 20, 17, 0, 0),
+            Made("Back-30-at-00:10", 90, 30, 0, 10),
+            Made("Back-120-at-01:00", -150, 120, 1, 0),
+            Made("Forward-45-at-23:50", 345, 45, 23, 50),
+        ];
+
+        foreach (TimeZoneInfo zone in TimeZoneInfo.GetSystemTimeZones().Concat(made))
+        {
+            List<long> found = Transitions(zone);
+            if (found.Count == 0)
+            {
+                continue;
+            }
+
+            zones++;
+            foreach (long transition in found)
+            {
+                transitions++;
+                for (int u = 0; u < units.Length; u++)
+                {
+                    InstantTruncate function = new InstantTruncate(units[u], TimeUnit.Seconds, zone);
+                    long span = spans[u];
+                    long step = Math.Max(1, span / 200);
+                    // Over a few units about the transition, and a minute apart over three hours either side of it, where the
+                    // instants a change of offset sends back or forward lie.
+                    long[] around = [.. Enumerable.Range(0, 401).Select(i => transition - span + (i * step) + random.Next((int)step))
+                        .Concat(Enumerable.Range(-180, 361).Select(m => transition + (m * 60L) + random.Next(60)))
+                        .Order()];
+                    long[] zigzag = new long[around.Length];
+                    for (int i = 0; i < zigzag.Length; i++)
+                    {
+                        zigzag[i] = around[i % 2 == 0 ? i / 2 : around.Length - 1 - (i / 2)];
+                    }
+
+                    // And blocks of three that go past the transition, back before it, then between: a bucket held past it
+                    // and stretched down to an instant before it must not answer for one the change sent elsewhere.
+                    List<long[]> blocks = [around, [.. around.Reverse()], [.. around.OrderBy(_ => random.Next())], zigzag];
+                    foreach (long after in (long[])[60, 600, 1_800, 5_400, 9_000])
+                    {
+                        foreach (long before in (long[])[9_000, 5_400, 2_700, 300])
+                        {
+                            foreach (long between in (long[])[3_600, 1_800, 60])
+                            {
+                                if (between < before)
+                                {
+                                    blocks.Add([transition + after, transition - before, transition - between]);
+                                }
+                            }
+                        }
+                    }
+
+                    foreach (long[] values in blocks)
+                    {
+                        Vorticity.Arrays.CanonicalArena arena = new Vorticity.Arrays.CanonicalArena();
+                        Vorticity.Buffers.VortexBuffer buffer = arena.Allocate(values.Length * sizeof(long), sizeof(long), out Span<byte> bytes);
+                        values.AsSpan().CopyTo(System.Runtime.InteropServices.MemoryMarshal.Cast<byte, long>(bytes));
+                        int column = arena.AddPrimitive(dtype, values.Length, Vorticity.Arrays.Validity.NonNullable, PType.I64, buffer);
+                        ReadOnlySpan<long> mapped = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, long>(arena.GetNode(function.Apply(arena, column)).Values.Span);
+                        for (int i = 0; i < values.Length; i++)
+                        {
+                            Int128 alone = Image(function, values[i]);
+                            if (alone != mapped[i])
+                            {
+                                Assert.Fail($"{function.Text} sends {values[i]} to {mapped[i]} in a block, {alone} alone (transition at {transition})");
+                            }
+                        }
+
+                        arena.Reset();
+                    }
+                }
+            }
+        }
+
+        Console.Out.Write(FormattableString.Invariant($"ZONE BLOCKS: {transitions} transitions of {zones} zones, five units, four orders and blocks of three each.\n"));
+        Assert.True(zones > 10, $"only {zones} zones with transitions");
+    }
+
+    /// <summary>
+    /// Up to eight transitions of <paramref name="zone"/> between 1970 and 2040, in Unix seconds, one of each change of offset
+    /// it makes (from an offset to another), found a day at a time and then to the second.
+    /// </summary>
+    private static List<long> Transitions(TimeZoneInfo zone)
+    {
+        List<long> found = [];
+        HashSet<(TimeSpan, TimeSpan)> kinds = [];
+        DateTime day = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        TimeSpan offset = zone.GetUtcOffset(day);
+        while (day.Year < 2040 && found.Count < 8)
+        {
+            DateTime next = day.AddDays(1);
+            TimeSpan now = zone.GetUtcOffset(next);
+            if (now != offset)
+            {
+                if (kinds.Add((offset, now)))
+                {
+                    DateTime from = day;
+                    DateTime to = next;
+                    while ((to - from).TotalSeconds > 1)
+                    {
+                        DateTime middle = from.AddSeconds(Math.Floor((to - from).TotalSeconds / 2));
+                        (from, to) = zone.GetUtcOffset(middle) == offset ? (middle, to) : (from, middle);
+                    }
+
+                    found.Add(new DateTimeOffset(to).ToUnixTimeSeconds());
+                }
+
+                offset = now;
+            }
+
+            day = next;
+        }
+
+        return found;
+    }
+
+    /// <summary>
     /// The floor by a width's reciprocal against the processor's division: every width from 1 to 1,000, the powers of
     /// two, a minute, an hour and a day in nanoseconds, widths around 2^31, 2^32 and 2^62, the greatest, and widths drawn
     /// at random; over values around zero and the width's multiples, at the storage's ends, and drawn at random.

@@ -454,6 +454,10 @@ internal sealed class InstantTruncate : ValueFunction
         long image = 0;
         bool held = false;
         int misses = 0;
+
+        // The zone's next change of offset past changeFrom, at changeAt: the change past any value between them.
+        long changeFrom = long.MaxValue;
+        long changeAt = long.MinValue;
         for (int i = 0; i < from.Length; i++)
         {
             long value = from[i];
@@ -475,26 +479,47 @@ internal sealed class InstantTruncate : ValueFunction
                 return;
             }
 
-            // A value of the bucket held, below the least one met in it.
-            if (held && truncated == image && value < next)
+            // A value of the bucket held, below the least one met in it, with no change of offset between it and the end of
+            // what is held: the truncation is monotone over that stretch then, its two ends agreeing.
+            if (held && truncated == image && value < next
+                && (_zone is null || NextChange(value, ref cursor, ref changeFrom, ref changeAt) >= next))
             {
                 low = Math.Min(low, value);
                 continue;
             }
 
-            held = TryBucket(value, truncated, ref cursor, out next);
+            held = TryBucket(value, truncated, ref cursor, ref changeFrom, ref changeAt, out next);
             low = value;
             image = truncated;
         }
     }
 
+    /// <summary>The zone's next change of offset past <paramref name="value"/>, the one kept when it is past the value too.</summary>
+    private long NextChange(long value, ref ZoneCursor cursor, ref long changeFrom, ref long changeAt)
+    {
+        if (value < changeFrom || value >= changeAt)
+        {
+            changeAt = _zone!.NextChange(value, _second, ref cursor);
+            changeFrom = value;
+        }
+
+        return changeAt;
+    }
+
     /// <summary>
-    /// The end of the bucket that starts at <paramref name="truncated"/>, <paramref name="value"/>'s: the start of the one
-    /// a bucket's longest stretch past it falls in, when every instant from <paramref name="value"/> to the one before it
-    /// truncates to <paramref name="truncated"/>, which a truncation, monotone, tells from the instant before that end
-    /// alone. False when it does not, or near the storage's ends.
+    /// The end of the stretch of the bucket that starts at <paramref name="truncated"/>, <paramref name="value"/>'s, that
+    /// holds: the start of the next bucket, or the zone's next change of offset when it comes first, when every instant
+    /// from <paramref name="value"/> to the one before that end truncates to <paramref name="truncated"/>. False when it
+    /// does not, or near the storage's ends.
     /// </summary>
-    private bool TryBucket(long value, long truncated, ref ZoneCursor cursor, out long next)
+    /// <remarks>
+    /// The instant before that end tells it alone where the truncation is monotone: under one offset, the local time rises
+    /// with the instant. Across a change of the zone's offset it may not: clocks set back two hours at one in the morning
+    /// of the first of a month take the instants before the change into the month and those after back into the one
+    /// before, a dip of the month inside the bucket of the one before, whose two ends agree. So the stretch held stops at
+    /// the change, and the values past it start a stretch of their own.
+    /// </remarks>
+    private bool TryBucket(long value, long truncated, ref ZoneCursor cursor, ref long changeFrom, ref long changeAt, out long next)
     {
         next = 0;
         if (truncated == long.MinValue || truncated > long.MaxValue - _longest)
@@ -503,6 +528,11 @@ internal sealed class InstantTruncate : ValueFunction
         }
 
         long after = Truncate(truncated + _longest, ref cursor);
+        if (_zone is not null)
+        {
+            after = Math.Min(after, NextChange(value, ref cursor, ref changeFrom, ref changeAt));
+        }
+
         if (after <= value || Truncate(after - 1, ref cursor) != truncated)
         {
             return false;
@@ -936,6 +966,31 @@ internal sealed class ZoneOffsets
 
         long other = local - found;
         return OffsetAt(other, second, ref cursor) == found ? other : utc;
+    }
+
+    /// <summary>
+    /// The first instant past <paramref name="instant"/> at which the zone's offset changes, in the instant's ticks: of its
+    /// year, or else of the next; <see cref="long.MaxValue"/> when neither changes it.
+    /// </summary>
+    internal long NextChange(long instant, long second, ref ZoneCursor cursor)
+    {
+        long utc = Civil.FloorDiv(instant, second);
+        OffsetSeconds(utc, ref cursor);
+        long[] starts = cursor.Starts!;
+        for (int at = 1; at < starts.Length; at++)
+        {
+            if (starts[at] > utc)
+            {
+                return Math.Min(starts[at], long.MaxValue / second) * second;
+            }
+        }
+
+        // None left in its year: the next year's first, or its start when its offset there is another.
+        long last = cursor.Offsets![^1];
+        long year = Civil.YearMonth(Civil.FloorDiv(utc, 86_400)).Year + 1;
+        (long[] Starts, long[] Offsets) next = _years.TryGetValue(year, out (long[] Starts, long[] Offsets) known) ? known : _years.GetOrAdd(year, _transitions);
+        long change = next.Offsets[0] != last ? next.Starts[0] : next.Starts.Length > 1 ? next.Starts[1] : long.MaxValue;
+        return change == long.MaxValue ? long.MaxValue : Math.Min(change, long.MaxValue / second) * second;
     }
 
     private long OffsetSeconds(long utc, ref ZoneCursor cursor)
