@@ -14,16 +14,16 @@ namespace Vorticity.Arrays;
 /// <para>
 /// A chunk larger than a batch is decoded once and each batch borrows a window of it. The lanes of
 /// a scan take consecutive batches in turn, so a table per lane would decode a chunk once per lane
-/// that meets it; one table per scan decodes it once, and a context that asks for a chunk another
-/// context is decoding waits for that decode instead of starting its own.
+/// that meets it; one table per scan decodes it once. A context that asks for a chunk another context
+/// is decoding at that moment decodes it too, into an entry of its own (<see cref="RetainedChunk.Owner"/>),
+/// rather than hold its thread for the other's decode: the two lanes that reach a chunk at once decode
+/// it twice, and every later batch borrows whichever is published.
 /// </para>
 /// <para>
 /// An entry may view another: a window of a dictionary views the dictionary's values, decoded once
 /// for every window of the chunk under a key of their own and lent to each window that reads them.
 /// A lent entry outlives every entry it is lent to, whatever its own age. A context holds at most
-/// two claims, an entry and a child of the node it is decoding, and it waits only for an entry
-/// while it holds none or for a child of the node it is decoding: every wait is for a node deeper
-/// in the array than any node the waiting context holds, so the waits cannot form a cycle.
+/// two claims, an entry and a child of the node it is decoding.
 /// </para>
 /// <para>
 /// An entry is borrowed by every batch that touched it, and a batch is dead once the scan has
@@ -44,13 +44,12 @@ namespace Vorticity.Arrays;
 /// entry before it.
 /// </para>
 /// <para>
-/// A claim waits on the table's lock, which a table several contexts decode into borrows from the
+/// A claim is taken under the table's lock, which a table several contexts decode into borrows from the
 /// process (see <see cref="Scanning.LaneGates"/>): a monitor allocates the first time two threads meet
-/// in it, 40 bytes, and the first time one waits on it, 88, so a monitor of the table's own would pay
-/// that in every scan, part way, at the first claim two lanes made at once. A table of one context is
-/// its own lock, and never waits, and only a table of several, a class of its own, holds the monitor
-/// it borrows, so that a table of one is no larger for it. The waiters are woken only when there are
-/// some.
+/// in it, 40 bytes, so a monitor of the table's own would pay that in every scan, part way, at the first
+/// claim two lanes made at once. A table of one context is its own lock, and only a table of several, a
+/// class of its own, holds the monitor it borrows, so that a table of one is no larger for it. No
+/// context ever waits in it but for the lock.
 /// </para>
 /// </remarks>
 internal class RetainedChunks : IDisposable
@@ -67,7 +66,6 @@ internal class RetainedChunks : IDisposable
     private int _count;
     private RetainedChunk? _spares;
     private long _floor;
-    private int _waiters;
     private bool _prepare;
     private bool _lending;
     private bool _disposed;
@@ -117,15 +115,15 @@ internal class RetainedChunks : IDisposable
         internal bool Leave() => Interlocked.Decrement(ref _holders) == 0;
     }
 
-    /// <summary>The lock the claims wait on: the table itself, or the monitor a table of several contexts borrows.</summary>
+    /// <summary>The lock the claims are taken under: the table itself, or the monitor a table of several contexts borrows.</summary>
     internal virtual object Gate => this;
 
-    /// <summary>Gives the borrowed monitor back, once the table is disposed and <paramref name="idle"/>, no context waiting on it.</summary>
-    private protected virtual void GiveBackGate(bool idle)
+    /// <summary>Gives the borrowed monitor back, once the table is disposed.</summary>
+    private protected virtual void GiveBackGate()
     {
     }
 
-    /// <summary>A table several contexts decode into, side by side: it waits and wakes on a monitor the process lends it.</summary>
+    /// <summary>A table several contexts decode into, side by side: it locks on a monitor the process lends it.</summary>
     private sealed class SideBySide(int columns, int lanes) : RetainedChunks(columns, lanes)
     {
         private readonly object _gate = Scanning.LaneGates.RentMonitor();
@@ -133,9 +131,9 @@ internal class RetainedChunks : IDisposable
 
         internal override object Gate => _gate;
 
-        private protected override void GiveBackGate(bool idle)
+        private protected override void GiveBackGate()
         {
-            if (idle && _lent)
+            if (_lent)
             {
                 _lent = false;
                 Scanning.LaneGates.ReturnMonitor(_gate);
@@ -163,10 +161,10 @@ internal class RetainedChunks : IDisposable
     /// <param name="nodeIndex">The node's index in <paramref name="arena"/>, when it is published.</param>
     /// <returns><see langword="true"/> when the entry is published.</returns>
     /// <remarks>
-    /// Waits while another context holds the claim: the chunk is about to be published, and
-    /// decoding it a second time is what this table exists to avoid. The wait blocks the thread,
-    /// because it happens inside a synchronous decode; it lasts one chunk decode at most, and only a
-    /// scan above one lane can ever wait.
+    /// Never waits. While another context holds the claim, the caller is handed a claim of its own, on an entry its
+    /// lookups alone find (<see cref="RetainedChunk.Owner"/>): it decodes the chunk too, where a wait held its thread
+    /// for the other's decode inside a synchronous one. Only a scan above one lane meets another's claim, at a chunk
+    /// both reach at once; its later batches of the chunk borrow whichever of the two is published.
     /// </remarks>
     internal bool TryGet(
         long key, ScanContext claimant, long batch, out RetainedChunk? claim, out CanonicalArena arena, out int nodeIndex) =>
@@ -197,70 +195,60 @@ internal class RetainedChunks : IDisposable
     {
         lock (Gate)
         {
-            while (true)
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            ScanContext? owned = null;
+            if (Find(key, claimant) is { } entry)
             {
-                ObjectDisposedException.ThrowIf(_disposed, this);
-                if (Find(key) is { } entry)
+                if (entry.NodeIndex >= 0)
                 {
-                    if (entry.NodeIndex >= 0)
+                    if (entry.LastTouched < batch)
                     {
-                        if (entry.LastTouched < batch)
-                        {
-                            entry.LastTouched = batch;
-                        }
-
-                        borrower?.Borrow(entry);
-                        claim = null;
-                        arena = entry.Arena!;
-                        nodeIndex = entry.NodeIndex;
-                        return true;
+                        entry.LastTouched = batch;
                     }
 
-                    if (ReferenceEquals(entry.Claimant, claimant))
-                    {
-                        claim = entry;
-                        arena = null!;
-                        nodeIndex = -1;
-                        return false;
-                    }
-
-                    _waiters++;
-                    try
-                    {
-                        Monitor.Wait(Gate);
-                    }
-                    finally
-                    {
-                        _waiters--;
-                    }
-
-                    continue;
+                    borrower?.Borrow(entry);
+                    claim = null;
+                    arena = entry.Arena!;
+                    nodeIndex = entry.NodeIndex;
+                    return true;
                 }
 
-                RetainedChunk taken = Take();
-                taken.Key = key;
-                taken.Claimant = claimant;
-                taken.NodeIndex = -1;
-                taken.LastTouched = batch;
-                if (_entries.Length == 0)
+                if (ReferenceEquals(entry.Claimant, claimant))
                 {
-                    // Sized for this scan whatever the size of the table another scan gave back.
-                    _held = (int)BitOperations.RoundUpToPowerOf2((uint)_capacity);
-                    _entries = Tables.Rent(3 * _held);
+                    claim = entry;
+                    arena = null!;
+                    nodeIndex = -1;
+                    return false;
                 }
 
-                if (borrower is not null && !_lending)
-                {
-                    _lending = true;
-                    Reserve(_lendingCapacity);
-                }
-
-                Add(taken);
-                claim = taken;
-                arena = null!;
-                nodeIndex = -1;
-                return false;
+                // Another context is decoding the chunk: this one decodes it too, into an entry of its own.
+                owned = claimant;
             }
+
+            RetainedChunk taken = Take();
+            taken.Key = key;
+            taken.Claimant = claimant;
+            taken.Owner = owned;
+            taken.NodeIndex = -1;
+            taken.LastTouched = batch;
+            if (_entries.Length == 0)
+            {
+                // Sized for this scan whatever the size of the table another scan gave back.
+                _held = (int)BitOperations.RoundUpToPowerOf2((uint)_capacity);
+                _entries = Tables.Rent(3 * _held);
+            }
+
+            if (borrower is not null && !_lending)
+            {
+                _lending = true;
+                Reserve(_lendingCapacity);
+            }
+
+            Add(taken);
+            claim = taken;
+            arena = null!;
+            nodeIndex = -1;
+            return false;
         }
     }
 
@@ -303,14 +291,14 @@ internal class RetainedChunks : IDisposable
         }
     }
 
-    /// <summary>Publishes a claimed entry, decoded, and wakes whoever waits for it.</summary>
+    /// <summary>Publishes a claimed entry, decoded.</summary>
     /// <param name="claim">The claim <see cref="TryGet"/> handed out.</param>
     /// <param name="nodeIndex">The decoded node's index in the claim's arena.</param>
     /// <param name="batch">The number of the batch that decoded it.</param>
     internal void Publish(RetainedChunk claim, int nodeIndex, long batch) =>
         PublishCore(claim, nodeIndex, batch, borrower: null);
 
-    /// <summary>Publishes a claimed child, decoded, lends it to <paramref name="borrower"/>, and wakes whoever waits for it.</summary>
+    /// <summary>Publishes a claimed child, decoded, and lends it to <paramref name="borrower"/>.</summary>
     /// <param name="claim">The claim <see cref="TryGetFor"/> handed out.</param>
     /// <param name="nodeIndex">The decoded node's index in the claim's arena.</param>
     /// <param name="batch">The number of the batch that decoded it.</param>
@@ -332,11 +320,10 @@ internal class RetainedChunks : IDisposable
 
             claim.RetainSegments();
             borrower?.Borrow(claim);
-            Wake();
         }
     }
 
-    /// <summary>Gives up a claim whose decode did not publish, and wakes whoever waits for it.</summary>
+    /// <summary>Gives up a claim whose decode did not publish.</summary>
     /// <param name="claim">The claim <see cref="TryGet"/> handed out.</param>
     /// <remarks>What the claim had borrowed is given back, and a lender it was the last to borrow is evicted when its own time has passed.</remarks>
     internal void Abandon(RetainedChunk claim)
@@ -348,7 +335,6 @@ internal class RetainedChunks : IDisposable
             claim.Forget();
             ReturnLoans(claim);
             Recycle(claim);
-            Wake();
         }
     }
 
@@ -427,7 +413,6 @@ internal class RetainedChunks : IDisposable
             return;
         }
 
-        bool idle;
         lock (Gate)
         {
             if (_disposed)
@@ -470,14 +455,9 @@ internal class RetainedChunks : IDisposable
                 spare.NextSpare = null;
                 RetainedChunkPool.Shared.Return(spare);
             }
-
-            Wake();
-            idle = _waiters == 0;
         }
 
-        // Given back only when no context waits on it any more: one woken by the dispose takes the
-        // lock again to learn the table is gone, and would take another scan's lock otherwise.
-        GiveBackGate(idle);
+        GiveBackGate();
     }
 
     private RetainedChunk Take()
@@ -558,34 +538,50 @@ internal class RetainedChunks : IDisposable
     /// </summary>
     private const int OrderedHeld = 16;
 
-    /// <summary>The entry under <paramref name="key"/>, or null; the table's lock is held.</summary>
-    private RetainedChunk? Find(long key)
+    /// <summary>
+    /// The entry under <paramref name="key"/> that <paramref name="asker"/> may borrow, or null: one every context shares,
+    /// or one of the asker's own (<see cref="RetainedChunk.Owner"/>), a published one before a claimed one. The table's
+    /// lock is held.
+    /// </summary>
+    private RetainedChunk? Find(long key, ScanContext? asker = null)
     {
         RetainedChunk?[] entries = _entries;
         int held = _held;
+        RetainedChunk? claimed = null;
         if (held <= OrderedHeld)
         {
             for (int i = 0; i < _count; i++)
             {
                 RetainedChunk entry = entries[i]!;
-                if (entry.Key == key)
+                if (entry.Key == key && (entry.Owner is null || ReferenceEquals(entry.Owner, asker)))
                 {
-                    return entry;
+                    if (entry.NodeIndex >= 0)
+                    {
+                        return entry;
+                    }
+
+                    claimed ??= entry;
                 }
             }
 
-            return null;
+            return claimed;
         }
 
         int mask = (2 * held) - 1;
-        for (int slot = Home(key, mask); ; slot = (slot + 1) & mask)
+        for (int slot = Home(key, mask); entries[held + slot] is { } entry; slot = (slot + 1) & mask)
         {
-            RetainedChunk? entry = entries[held + slot];
-            if (entry is null || entry.Key == key)
+            if (entry.Key == key && (entry.Owner is null || ReferenceEquals(entry.Owner, asker)))
             {
-                return entry;
+                if (entry.NodeIndex >= 0)
+                {
+                    return entry;
+                }
+
+                claimed ??= entry;
             }
         }
+
+        return claimed;
     }
 
     /// <summary>Adds <paramref name="entry"/>, doubling the table when it is full; the table's lock is held.</summary>
@@ -691,15 +687,6 @@ internal class RetainedChunks : IDisposable
         }
     }
 
-    /// <summary>Wakes the contexts waiting for a claim, when there are some; the table's lock is held.</summary>
-    private void Wake()
-    {
-        if (_waiters != 0)
-        {
-            Monitor.PulseAll(Gate);
-        }
-    }
-
     /// <summary>
     /// The entry tables scans gave back, for the scans that follow: a table grows once to what the
     /// scans of the process hold, and a scan allocates none.
@@ -745,6 +732,7 @@ internal class RetainedChunks : IDisposable
     {
         entry.NodeIndex = -1;
         entry.Claimant = null;
+        entry.Owner = null;
         if (!_disposed)
         {
             entry.NextSpare = _spares;
@@ -772,6 +760,13 @@ internal sealed class RetainedChunk
 
     /// <summary>The context decoding the chunk, until it is published.</summary>
     internal ScanContext? Claimant;
+
+    /// <summary>
+    /// The context the entry is its own, when it decoded a chunk another context was decoding rather than wait for it:
+    /// found by its owner's lookups alone, held for its batches, and evicted as theirs die; null for an entry every
+    /// context shares.
+    /// </summary>
+    internal ScanContext? Owner;
 
     /// <summary>The next evicted entry, while this one waits to be refilled.</summary>
     internal RetainedChunk? NextSpare;

@@ -1527,8 +1527,8 @@ internal sealed class ScanContext : IDisposable
     /// <param name="nodeIndex">The child's node in <paramref name="arena"/>.</param>
     /// <returns><see langword="true"/> when the child is retained.</returns>
     /// <remarks>
-    /// Another context decoding the same child is waited for, which is safe while this context
-    /// holds its one entry's claim: see <see cref="RetainedChunks"/>.
+    /// Another context decoding the same child at that moment is not waited for: this one decodes
+    /// the child too, into an entry of its own (see <see cref="RetainedChunks"/>).
     /// </remarks>
     /// <exception cref="InvalidOperationException">No retained decode is in flight, or a child's is.</exception>
     internal bool TryGetRetainedChild(long key, out CanonicalArena arena, out int nodeIndex)
@@ -1614,8 +1614,9 @@ internal sealed class ScanContext : IDisposable
     /// <remarks>
     /// Touching an entry is what keeps it from eviction while the batch in flight borrows it, so it
     /// happens on the hit path and not only when the entry is created. A miss claims the key: when
-    /// another context of the scan is decoding it, the call waits for that decode and returns it,
-    /// so a chunk is decoded once per scan. A claim still held from an earlier miss is given up
+    /// another context of the scan is decoding it at that moment, the claim is on an entry of this
+    /// context's own, which it decodes too rather than wait (<see cref="RetainedChunks"/>); a chunk
+    /// is otherwise decoded once per scan. A claim still held from an earlier miss is given up
     /// first, since this context has moved on without decoding it; inside a retained decode the
     /// table is only looked at, never claimed, because the context already holds one claim.
     /// </remarks>
