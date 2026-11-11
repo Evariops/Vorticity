@@ -21,15 +21,15 @@ internal readonly unsafe struct BloomWords
         Length = length;
     }
 
-    /// <summary>The words of <paramref name="bytes"/>, read where they lie; valid while their owner is held.</summary>
+    /// <summary>
+    /// The words of <paramref name="bytes"/>, read where they lie: the one way to view words, so that a view holds what a
+    /// <see cref="VortexBuffer"/> holds, memory that does not move, mapped, native or pinned, and is valid while the
+    /// buffer's owner is held, as every buffer of the reader is. A node read over them is valid as long, its pruner
+    /// holding the owners until it is disposed.
+    /// </summary>
     /// <param name="bytes">Little-endian words.</param>
     internal static BloomWords InPlace(VortexBuffer bytes) =>
         new BloomWords((uint*)Unsafe.AsPointer(ref MemoryMarshal.GetReference(bytes.Span)), bytes.Length / sizeof(uint));
-
-    /// <summary>The words of <paramref name="pinned"/>, which the caller keeps fixed while the view is used.</summary>
-    /// <param name="pinned">Words that do not move: pinned, native, or on the stack of a frame that outlives the view.</param>
-    internal static BloomWords Pinned(ReadOnlySpan<uint> pinned) =>
-        new BloomWords((uint*)Unsafe.AsPointer(ref MemoryMarshal.GetReference(pinned)), pinned.Length);
 
     /// <summary>How many words.</summary>
     internal int Length { get; }

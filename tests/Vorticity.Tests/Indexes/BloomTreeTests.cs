@@ -123,7 +123,11 @@ public sealed class BloomTreeTests
 
     /// <summary>The node <paramref name="pinned"/> holds, read in place: an array allocated pinned.</summary>
     private static bool TryRead(uint[] pinned, int start, int length, int level, long leaves, out BloomNode node) =>
-        BloomNode.TryRead(BloomWords.Pinned(pinned), start, length, level, leaves, out node);
+        BloomNode.TryRead(Words(pinned), start, length, level, leaves, out node);
+
+    /// <summary>The words of <paramref name="pinned"/>, an array allocated pinned, as a buffer of the reader views them.</summary>
+    private static BloomWords Words(uint[] pinned) =>
+        BloomWords.InPlace(VortexBuffer.FromPinned(MemoryMarshal.AsBytes(pinned.AsSpan()), 2));
 
     /// <summary>A copy of <paramref name="words"/> that does not move.</summary>
     private static uint[] Pinned(uint[] words)
@@ -473,7 +477,7 @@ public sealed class BloomTreeTests
     private static async Task<List<Walked>> WalkAsync(VortexFile file, IndexRun run)
     {
         uint[] rootWords = await WordsAsync(file, run.Payload[0], BloomTreeRun.RootWords(run.OptionBytes));
-        Assert.True(BloomNode.TryRead(BloomWords.Pinned(rootWords), 0, rootWords.Length, (int)((rootWords[0] >> 8) & 0xFF), rootWords[1], out BloomNode root));
+        Assert.True(BloomNode.TryRead(Words(rootWords), 0, rootWords.Length, (int)((rootWords[0] >> 8) & 0xFF), rootWords[1], out BloomNode root));
         List<Walked> nodes = [];
         await AddAsync(root, (long)run.FirstBlock, rootWords);
         return nodes;
@@ -495,7 +499,7 @@ public sealed class BloomTreeTests
                 }
                 else
                 {
-                    Assert.True(BloomNode.TryRead(BloomWords.Pinned(children), at, length, node.Level - 1, BloomNode.ChildLeaves(node.Level, node.Leaves, c), out BloomNode child));
+                    Assert.True(BloomNode.TryRead(Words(children), at, length, node.Level - 1, BloomNode.ChildLeaves(node.Level, node.Leaves, c), out BloomNode child));
                     await AddAsync(child, first + (c * BloomNode.ChildSpan(node.Level)), children);
                 }
 
