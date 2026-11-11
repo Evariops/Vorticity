@@ -159,6 +159,9 @@ public sealed class DatasetPlanTests
     [InlineData("500 600 700 3800", true, 3, false)]
     [InlineData("1500 1500 1500 1500 1500 1500 3000", true, 5, false)]
     [InlineData("500 4000", true, 1, true)]
+    [InlineData("500 3000 600", true, 2, false)]
+    [InlineData("500 3500 600", true, 2, false)]
+    [InlineData("500 3600 600", true, 1, true)]
     [InlineData("500d 4000", true, 1, false)]
     [InlineData("3000f 2500", true, 1, false)]
     [InlineData("3000 2500 500 600", false, 4, false)]
@@ -166,8 +169,8 @@ public sealed class DatasetPlanTests
     {
         // Level 1 over its 4,000 bytes, its objects one after another; level 2's objects aim at 4,000 bytes, so that one of
         // 2,000 or more stands (d marks rows, f attaches a fragment). The job moves the leading objects that stand; or
-        // concatenates those that do not, a whole number of targets of them, a lone plain one moved instead; or, with moves
-        // off, concatenates the whole run.
+        // concatenates those that do not, a whole number of targets of them, a lone plain one with the object after it when
+        // the two fit the target, else moved; or, with moves off, concatenates the whole run.
         CancellationToken ct = TestContext.Current.CancellationToken;
         await using MemoryObjectStore store = new MemoryObjectStore();
         List<(int Level, ReadOnlyMemory<byte> Key, ObjectEntry Entry)> objects = [];

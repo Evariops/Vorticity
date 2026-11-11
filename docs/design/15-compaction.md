@@ -256,7 +256,12 @@ rolled full can fall short of its target, and a concatenation of objects of half
 pays every byte of them to save at most every other object. Otherwise its leading objects under that
 are concatenated, a whole number of targets of them when they hold one, the rest waiting in the level,
 so that the last object written is about full rather than a remainder every level above keeps; one
-object alone, which a concatenation would write again as itself, moves.
+object alone, which a concatenation would write again as itself, moves. Below the cap it meets objects
+that do not stand yet a level or two up, and goes with their concatenation. From the cap up, where the
+objects about it stand for good, it would climb alone to the top, an object for every small append
+between large ones: there it joins the object after it when the two fit the target, and moves alone
+only before an object that leaves it no room. Appends alternating 32 768 rows and 1 024 at scale 1
+ended in 35 objects rather than 49, for 33.4 MB rewritten rather than 19.5.
 
 Over the life of a dataset without a key, appends each followed by the compactions they make due,
 scaled down from the defaults to a fan-out of 4, 64 KiB at level 1 and a cap of 1 MiB from level 3 up

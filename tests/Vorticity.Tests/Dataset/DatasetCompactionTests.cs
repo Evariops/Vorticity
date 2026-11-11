@@ -700,6 +700,63 @@ public sealed class DatasetCompactionTests
         Assert.Equal(rows, next);
     }
 
+    [Fact]
+    public async Task ATieredCompactionOfAppendsOfAlternateSizesKeepsFewSmallObjects()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        // Appends of 1,000 rows and of 20 in turn, each followed by the compactions it makes due: every small object lies
+        // alone between two large ones. Moved alone, each would climb every level as it is, the objects as many as the
+        // appends. A small one joins the large one after it when the two fit the level's target: the objects above level 0
+        // that hold a small append's rows alone are at most one a level, at a run's end.
+        Decoders.EnsureRegistered();
+        DTypeArena types = new DTypeArena();
+        DType schema = Schema(types);
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Unclustered(), ct);
+        await dataset.AppendAsync(Shuffled(types, schema, 0, 1_000, seed: 1), ct);
+        long large = (await EntriesAsync(dataset, 0))[0].Entry.Bytes;
+        CompactionOptions options = new CompactionOptions
+        {
+            LevelZeroCeiling = 2,
+            TargetBytesAtLevelOne = large,
+            Fanout = 4,
+            MaxObjectBytes = 2 * large,
+        };
+
+        long rows = 1_000;
+        for (int pair = 0; pair < 40; pair++)
+        {
+            await dataset.AppendAsync(Shuffled(types, schema, rows, 20, seed: (2 * pair) + 2), ct);
+            rows += 20;
+            await DrainAsync();
+            await dataset.AppendAsync(Shuffled(types, schema, rows, 1_000, seed: (2 * pair) + 3), ct);
+            rows += 1_000;
+            await DrainAsync();
+        }
+
+        int alone = 0;
+        int objects = 0;
+        for (int level = 1; level < dataset.Levels.Count; level++)
+        {
+            foreach ((TreeEntry _, ObjectEntry entry) in await EntriesAsync(dataset, level))
+            {
+                objects++;
+                alone += entry.Rows == 20 ? 1 : 0;
+            }
+        }
+
+        Assert.Equal(rows, dataset.RowCount);
+        Assert.True(alone <= dataset.Levels.Count, $"{alone} small objects alone among {objects} above level 0, over {dataset.Levels.Count} levels");
+
+        async Task DrainAsync()
+        {
+            while (await dataset.CompactAsync(options, ct) is not null)
+            {
+            }
+        }
+    }
+
     private static async Task<List<(TreeEntry Tree, ObjectEntry Entry)>> EntriesAsync(VortexDataset dataset, int level)
     {
         List<(TreeEntry, ObjectEntry)> entries = [];

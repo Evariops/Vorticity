@@ -479,7 +479,7 @@ internal static partial class CompactionPolicy
         bool moves = false;
         if (style == CompactionStyle.Tiered)
         {
-            (sources, moves) = TieredPart(sources, settings.TargetBytes(to), settings);
+            (sources, moves) = TieredPart(sources, settings.TargetBytes(to), settings.TargetBytes(to + 1) <= settings.TargetBytes(to), settings);
         }
 
         List<CompactionInput> inputs = [.. sources];
@@ -515,14 +515,20 @@ internal static partial class CompactionPolicy
     /// as they are, as it did to every object past the levels whose targets reach the cap on an object, each of which aims
     /// at the one below's size. Otherwise its leading objects that do not, up to the first that does, are concatenated, a
     /// whole number of targets of them when they hold one, so that the last object written is about full rather than a
-    /// remainder each level above would keep; the rest wait in the level. One object alone that a concatenation would
-    /// write again as itself moves instead.
+    /// remainder each level above would keep; the rest wait in the level. One object alone, which a concatenation would
+    /// write again as itself, moves; but into a level whose target the levels above keep (<paramref name="capped"/>), where
+    /// the objects about it stand for good and it would climb alone to the top, it joins the object after it when the two
+    /// fit the target, the one written then standing.
     /// </summary>
     /// <remarks>
     /// The objects of a concatenation stay one stretch of the run, which its outputs take the positions of; a move keeps
-    /// each object's own. Off with <see cref="CompactionOptions.TrivialMoves"/>, the job concatenates the whole run.
+    /// each object's own. Below the cap, a small object moved alone meets objects that do not stand yet at a level further
+    /// up, and goes with their concatenation, no object written for it alone; from the cap up, it moves alone only before
+    /// an object that leaves it no room, or at the run's end: appends of alternate sizes leave as many small objects as
+    /// large ones at most, never one an append. Off with <see cref="CompactionOptions.TrivialMoves"/>, the job concatenates
+    /// the whole run.
     /// </remarks>
-    private static (List<CompactionInput> Taken, bool Moves) TieredPart(List<CompactionInput> run, long target, CompactionOptions settings)
+    private static (List<CompactionInput> Taken, bool Moves) TieredPart(List<CompactionInput> run, long target, bool capped, CompactionOptions settings)
     {
         if (!settings.TrivialMoves || target <= 0 || run.Count == 0)
         {
@@ -563,8 +569,14 @@ internal static partial class CompactionPolicy
             taken = Math.Max(taken, 1);
         }
 
-        List<CompactionInput> part = taken == run.Count ? run : run.GetRange(0, taken);
-        return (part, taken == 1 && Plain(part[0]));
+        if (taken == 1 && Plain(run[0]))
+        {
+            return capped && under == 1 && run.Count > 1 && run[0].Entry.Bytes + run[1].Entry.Bytes <= target
+                ? (run.Count == 2 ? run : run.GetRange(0, 2), false)
+                : (run.Count == 1 ? run : run.GetRange(0, 1), true);
+        }
+
+        return (taken == run.Count ? run : run.GetRange(0, taken), false);
     }
 
     /// <summary>Whether an object holds no marks and no fragments, which only a rewrite folds.</summary>
@@ -918,7 +930,8 @@ internal static partial class CompactionPolicy
     private static CompactionJob Tiered(
         PlannedVersion dataset, List<CompactionInput> run, int from, CompactionOptions settings, CompactionTrigger trigger)
     {
-        (List<CompactionInput> taken, bool moves) = TieredPart(run, settings.TargetBytes(from + 1), settings);
+        (List<CompactionInput> taken, bool moves) = TieredPart(
+            run, settings.TargetBytes(from + 1), settings.TargetBytes(from + 2) <= settings.TargetBytes(from + 1), settings);
         return new CompactionJob(from, from + 1, CompactionStyle.Tiered, trigger, taken, settings.TargetBytes(from + 1), FirstRow(dataset, taken[0]))
         {
             Stop = taken[^1].Key,

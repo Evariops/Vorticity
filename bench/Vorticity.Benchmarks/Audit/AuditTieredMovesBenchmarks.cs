@@ -7,6 +7,8 @@
 // at 1 MiB from level 3 up, a column's chunks at 16 KiB, so that the ~22 MB the calls take climb two levels past the cap.
 // Scale 4 multiplies the rows, the appends, the targets and the chunks by four, so that what a compaction's batch weighs
 // against an object, which sets how far an object it rolls passes its target, comes four times nearer the defaults'.
+// Alternate makes every other append 32 times smaller, as many rows in all: each small object lies alone between two
+// large ones, which a move of it alone would leave as many objects as appends.
 using System;
 using System.Linq;
 using System.Threading.Tasks;
@@ -44,6 +46,10 @@ public partial class AuditTieredMovesBenchmarks
     [Params(1, 4)]
     public int Scale { get; set; }
 
+    /// <summary>Whether every other append is 32 times smaller.</summary>
+    [Params(false, true)]
+    public bool Alternate { get; set; }
+
     /// <summary>A call: its identifier, instant, service, bytes and latency.</summary>
     [VortexRecord]
     public partial record struct Call(long Id, DateTime At, string Service, long Bytes, double Latency);
@@ -54,12 +60,16 @@ public partial class AuditTieredMovesBenchmarks
     {
         Random random = new Random(41);
         long id = 0;
-        _appends = new Call[TotalRows / RowsPerAppend][];
-        for (int a = 0; a < _appends.Length; a++)
+        System.Collections.Generic.List<Call[]> appends = [];
+        while (id < (long)TotalRows * Scale)
         {
-            _appends[a] = [.. Enumerable.Range(0, RowsPerAppend * Scale).Select(_ => new Call(
-                id, Start.AddMilliseconds(id++ * 3), Services[random.Next(20)], random.NextInt64(100, 100_000), random.NextDouble() * 250))];
+            int rows = (int)Math.Min(
+                Alternate && appends.Count % 2 == 1 ? RowsPerAppend * Scale / 32 : RowsPerAppend * Scale, ((long)TotalRows * Scale) - id);
+            appends.Add([.. Enumerable.Range(0, rows).Select(_ => new Call(
+                id, Start.AddMilliseconds(id++ * 3), Services[random.Next(20)], random.NextInt64(100, 100_000), random.NextDouble() * 250))]);
         }
+
+        _appends = [.. appends];
 
         Fresh();
         Life life = LiveAsync().GetAwaiter().GetResult();
@@ -68,7 +78,7 @@ public partial class AuditTieredMovesBenchmarks
         long held = plan.BytesByLevel.Sum();
         int top = plan.ObjectsByLevel.Length - 1;
         Console.WriteLine(
-            $"// moves={Moves} rows/append={RowsPerAppend * Scale} scale={Scale}: {life.Jobs} jobs, {life.Moved} objects moved, " +
+            $"// moves={Moves} rows/append={RowsPerAppend * Scale} scale={Scale} alternate={Alternate}: {_appends.Length} appends, {life.Jobs} jobs, {life.Moved} objects moved, " +
             $"{life.Rewritten / 1e6:F2} MB rewritten in {life.Rewrites} rewrites ({(double)life.Rewritten / held:F2} times what the dataset holds); " +
             $"{_dataset.RowCount:N0} rows in {_dataset.ObjectCount} objects, {held / 1e6:F2} MB ({levels}); the top level's objects at " +
             $"{(double)plan.BytesByLevel[top] / plan.ObjectsByLevel[top] / Options().MaxObjectBytes:F2} of their target");
