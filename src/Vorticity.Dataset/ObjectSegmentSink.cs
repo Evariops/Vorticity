@@ -301,7 +301,9 @@ internal sealed class ObjectSegmentSink : ISegmentSink, IAsyncDisposable
     /// A source over the file's tail a streamed object kept a copy of (<see cref="KeepTail"/>), as long as the file, which
     /// reads that tail alone: what an open reads, so that the dataset reads the file's statistics without reading the
     /// object back once put. Null when the object is held, or kept no tail. A read past the tail throws
-    /// <see cref="TailMissedException"/>. Not to be used once <see cref="CommitAsync"/> or <see cref="Discard"/> released it.
+    /// <see cref="TailMissedException"/>. Not to be used once <see cref="CommitAsync"/> or <see cref="Discard"/> released it,
+    /// nor beside them: the tail is an array of the shared pool, which they give back. A segment read before is the bytes
+    /// copied out of it (<see cref="SourceReader"/> copies a lease over a managed array), and outlives the sink.
     /// </summary>
     internal ISegmentReader? Tail(Buffers.AlignedBufferPool pool) =>
         _pipe is not null && _tailFrom >= 0 && _tail is not null && !_released
