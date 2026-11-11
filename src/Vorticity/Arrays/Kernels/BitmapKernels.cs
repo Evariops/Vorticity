@@ -244,14 +244,21 @@ internal static class BitmapKernels
     }
 
     /// <summary>
-    /// The set bits of the whole pairs of vectors of <paramref name="bytes"/>, 512-bit on AVX-512, 256-bit on AVX2, and how
-    /// many bytes those are: each byte's two nibbles counted by a table shuffle, the bytes' counts summed by eight with a
-    /// sum of absolute differences, in two accumulators. A popcount a word took 1.63 us a 64 KB bitmap, 8 bytes a cycle.
+    /// The set bits of the whole pairs of vectors of <paramref name="bytes"/>, 512-bit on AVX-512 where the runtime takes
+    /// such vectors (as <see cref="Compute.WordBytes.IsAccelerated"/> says), 256-bit on AVX2, and how many bytes those are:
+    /// each byte's two nibbles counted by a table shuffle, the bytes' counts summed by eight with a sum of absolute
+    /// differences, in two accumulators. A popcount a word took 1.63 us a 64 KB bitmap, 8 bytes a cycle.
     /// </summary>
+    /// <remarks>
+    /// Of 64 to 127 bytes on AVX-512 the 512-bit pairs count none, and the words count them all. Sending them to the
+    /// 256-bit pairs instead took a hundred bytes from 6.66 to 6.29 ns, but a test of the length here took a bitmap of
+    /// 1 KB from 15.7 to 23.8 ns, the loop's code laid out otherwise, and a method of its own for them cost 6 % on 1 KB
+    /// and 9 to 11 % on AVX2.
+    /// </remarks>
     private static int CountNibbles(ReadOnlySpan<byte> bytes, out int counted)
     {
         ref byte from = ref MemoryMarshal.GetReference(bytes);
-        if (Avx512BW.IsSupported)
+        if (Vector512.IsHardwareAccelerated && Avx512BW.IsSupported)
         {
             Vector512<byte> table = Vector512.Create(Vector128.Create((byte)0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4));
             Vector512<byte> nibble = Vector512.Create((byte)0x0F);
