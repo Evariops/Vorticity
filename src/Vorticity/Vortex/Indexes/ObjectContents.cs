@@ -1005,6 +1005,9 @@ internal sealed class ObjectContents(
             List<LocatingEntry>? locating = null;
             ChunkPaging? paging = null;
             byte[]? schema = null;
+
+            // The largest column a region found by its column names, which the chunk directories must name too.
+            int widest = -1;
             while (reader.TryReadTag(out int field, out ProtoWireType wire))
             {
                 switch (field, wire)
@@ -1064,6 +1067,7 @@ internal sealed class ObjectContents(
                         }
 
                         sheets.Add(sheet);
+                        widest = Math.Max(widest, sheet.Item1);
                         break;
                     case (TagCounts, ProtoWireType.LengthDelimited):
                         if (Directory(reader.ReadMessage()) is not { } counted)
@@ -1072,6 +1076,7 @@ internal sealed class ObjectContents(
                         }
 
                         counts.Add(counted);
+                        widest = Math.Max(widest, counted.Item1);
                         break;
                     case (TagSketches, ProtoWireType.LengthDelimited):
                         if (Directory(reader.ReadMessage()) is not { } sketched)
@@ -1080,6 +1085,7 @@ internal sealed class ObjectContents(
                         }
 
                         sketches.Add(sketched);
+                        widest = Math.Max(widest, sketched.Item1);
                         break;
                     case (TagGranuleStats, ProtoWireType.LengthDelimited):
                         if (Directory(reader.ReadMessage()) is not { } stated)
@@ -1088,6 +1094,7 @@ internal sealed class ObjectContents(
                         }
 
                         granuleStats.Add(stated);
+                        widest = Math.Max(widest, stated.Item1);
                         break;
                     case (TagGranuleHistograms, ProtoWireType.LengthDelimited):
                         if (Directory(reader.ReadMessage()) is not { } histogrammed)
@@ -1096,6 +1103,7 @@ internal sealed class ObjectContents(
                         }
 
                         granuleHistograms.Add(histogrammed);
+                        widest = Math.Max(widest, histogrammed.Item1);
                         break;
                     case (TagColumnBytes, ProtoWireType.LengthDelimited):
                         ProtoReader packed = reader.ReadMessage();
@@ -1180,6 +1188,7 @@ internal sealed class ObjectContents(
                         }
 
                         locates.Add(lying);
+                        widest = Math.Max(widest, lying.Item1);
                         break;
                     case (TagPathLocate, ProtoWireType.LengthDelimited):
                         if (PathLocated(reader.ReadMessage()) is not { } pathLying)
@@ -1228,9 +1237,10 @@ internal sealed class ObjectContents(
 
             // The entries of a directory lie within it; a paged column's page table, whose length its pages give, is a chunk
             // directory the contents name, and its pages cover the file's rows.
-            // A dictionary names a column the directories name.
+            // A dictionary names a column the directories name, and so does every region found by its column, whose table
+            // (ByField) then holds a slot a column rather than one up to a field a damaged file names.
             return version == Version && rows is { } held && schema is not null
-                && dictionaries.TrueForAll(d => d.Field < directories.Count)
+                && dictionaries.TrueForAll(d => d.Field < directories.Count) && widest < directories.Count
                 && (locating is null || (indexDirectory is { } named && locating.TrueForAll(l => l.Region.Offset >= named.Offset
                     && l.Region.Offset + l.Region.Length <= named.Offset + named.Length)))
                 && (paging is null || (held > 0 && paging.PageRows[^1] < held && Array.TrueForAll(paging.Columns, c =>

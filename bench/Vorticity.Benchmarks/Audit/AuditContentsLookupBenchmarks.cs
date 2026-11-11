@@ -1,6 +1,7 @@
 // Audit IN-07: what finding a column's synopsis region in an object's table of contents costs, which a plan asks of
 // every object for every column a question reads: an object of 16 or 128 columns, each with its sheet, counts and
-// statistics over its granules, every column's three regions looked up.
+// statistics over its granules, every column's three regions looked up. And what reading those contents from their
+// bytes costs, as an object's open does, its chunk directories included.
 using System;
 using System.Collections.Generic;
 
@@ -17,6 +18,7 @@ namespace Vorticity.Benchmarks.Audit;
 public class AuditContentsLookupBenchmarks
 {
     private ObjectContents _contents = null!;
+    private ReadOnlyMemory<byte> _bytes;
     private string[] _paths = [];
 
     /// <summary>The object's columns.</summary>
@@ -47,7 +49,26 @@ public class AuditContentsLookupBenchmarks
 
         _contents = new ObjectContents([], [], 0, []) { Sheets = sheets, Counts = counts, GranuleStats = stats, PathLocates = paths };
         Lookups();
+
+        IndexSegment[] directories = new IndexSegment[Columns];
+        for (int f = 0; f < Columns; f++)
+        {
+            directories[f] = new IndexSegment((ulong)(f * 4096), 4096, 0);
+        }
+
+        _bytes = new ObjectContents([1, 2, 3, 4], [], 1_000_000, directories)
+        {
+            Sheets = sheets,
+            Counts = counts,
+            GranuleStats = stats,
+            PathLocates = paths,
+        }.ToBytes();
+        Console.WriteLine($"// {_bytes.Length} bytes of contents; read back: {Read()}");
     }
+
+    /// <summary>The contents read from their bytes.</summary>
+    [Benchmark]
+    public long Read() => ObjectContents.From(_bytes)?.Rows ?? -1;
 
     /// <summary>Every path's region of a variant column of 64 paths, by path.</summary>
     [Benchmark(OperationsPerInvoke = 64)]

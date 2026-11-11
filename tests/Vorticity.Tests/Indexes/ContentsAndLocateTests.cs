@@ -28,6 +28,50 @@ public sealed class ContentsAndLocateTests
         Assert.Null(contents.LocateOf(0));
     }
 
+    // Contents read from bytes name regions by columns the file has: a region of a column past the chunk directories', as
+    // a damaged or forged file would hold, refuses the contents, rather than size the table by column after it; one
+    // within them reads back.
+    [Theory]
+    [InlineData("sheets")]
+    [InlineData("counts")]
+    [InlineData("sketches")]
+    [InlineData("granule stats")]
+    [InlineData("granule histograms")]
+    [InlineData("locates")]
+    public void ContentsNamingAColumnPastTheFilesDoNotRead(string kind)
+    {
+        foreach ((int field, bool reads) in ((int, bool)[])[(2, true), (3, false), (100_000_000, false), (int.MaxValue, false)])
+        {
+            List<(int Field, IndexSegment Region)> regions = [(0, Region(1)), (field, Region(2))];
+            IndexSegment[] directories = [Region(10), Region(11), Region(12)];
+            ObjectContents written = kind switch
+            {
+                "sheets" => new ObjectContents([1, 2, 3], [], 10, directories) { Sheets = regions },
+                "counts" => new ObjectContents([1, 2, 3], [], 10, directories) { Counts = regions },
+                "sketches" => new ObjectContents([1, 2, 3], [], 10, directories) { Sketches = regions },
+                "granule stats" => new ObjectContents([1, 2, 3], [], 10, directories) { GranuleStats = regions },
+                "granule histograms" => new ObjectContents([1, 2, 3], [], 10, directories) { GranuleHistograms = regions },
+                _ => new ObjectContents([1, 2, 3], [], 10, directories) { Locates = regions },
+            };
+
+            ObjectContents? read = ObjectContents.From(written.ToBytes());
+            Assert.Equal(reads, read is not null);
+            if (read is not null)
+            {
+                IndexSegment? found = kind switch
+                {
+                    "sheets" => read.SheetOf(field),
+                    "counts" => read.CountsOf(field),
+                    "sketches" => read.SketchesOf(field),
+                    "granule stats" => read.GranuleStatsOf(field),
+                    "granule histograms" => read.GranuleHistogramsOf(field),
+                    _ => read.LocateOf(field),
+                };
+                Assert.Equal(Region(2), found);
+            }
+        }
+    }
+
     // A variant path's region by its column, key and class, scanned among few paths and through a table among many: the
     // first of a path wins, another class or column has none.
     [Theory]
