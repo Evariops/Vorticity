@@ -19,6 +19,17 @@ public sealed class RunEndRepeatTests
         Check<ulong>();
     }
 
+    // Runs that end before the rows do: the rows past the last end keep what they held, every vector store kept within the
+    // runs, whatever the width and wherever the last end falls against a vector's length.
+    [Fact]
+    public void TheRowsPastTheLastRunKeepWhatTheyHeld()
+    {
+        Untouched<byte>();
+        Untouched<ushort>();
+        Untouched<uint>();
+        Untouched<ulong>();
+    }
+
     [Fact]
     public void AnEndThatGoesBackIsRefused()
     {
@@ -26,6 +37,23 @@ public sealed class RunEndRepeatTests
         byte[] values = new byte[4 * sizeof(ulong)];
         byte[] rows = new byte[64 * sizeof(ulong)];
         Assert.ThrowsAny<ArgumentException>(() => CanonicalArena.Repeat<ulong>(ends, values, rows));
+    }
+
+    private static void Untouched<T>()
+        where T : unmanaged
+    {
+        int width = System.Runtime.CompilerServices.Unsafe.SizeOf<T>();
+        foreach (int covered in new[] { 1, 5, 33, 64, 65, 200 })
+        {
+            uint[] ends = covered < 4 ? [(uint)covered] : [(uint)(covered / 4), (uint)(covered / 2), (uint)covered];
+            byte[] values = new byte[ends.Length * width];
+            values.AsSpan().Fill(0x11);
+            byte[] rows = new byte[(covered + 40) * width];
+            rows.AsSpan().Fill(0xEE);
+            CanonicalArena.Repeat<T>(ends, values, rows);
+            Assert.All(rows.AsSpan(0, covered * width).ToArray(), b => Assert.Equal(0x11, b));
+            Assert.All(rows.AsSpan(covered * width).ToArray(), b => Assert.Equal(0xEE, b));
+        }
     }
 
     private static void Check<T>()

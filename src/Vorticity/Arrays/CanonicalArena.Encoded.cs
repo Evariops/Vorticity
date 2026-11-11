@@ -358,7 +358,8 @@ internal partial class CanonicalArena
     /// <remarks>
     /// Where vectors are the machine's, a run's value is stored as a whole vector at its start whatever its length, the
     /// next run's store covering what spilled past its end, and a longer run's rest a vector a step: a fill a run cost
-    /// its call on runs of a few rows. The runs near the end, where a vector would pass the rows, are filled.
+    /// its call on runs of a few rows. The runs near the last end, where a vector would pass it, are filled: no store
+    /// reaches past the last run, so rows of <paramref name="destination"/> beyond it keep what they held.
     /// </remarks>
     internal static void Repeat<T>(ReadOnlySpan<uint> ends, ReadOnlySpan<byte> values, Span<byte> destination)
         where T : unmanaged
@@ -367,11 +368,11 @@ internal partial class CanonicalArena
         Span<T> target = MemoryMarshal.Cast<byte, T>(destination);
         int start = 0;
         int run = 0;
-        if (Vector256.IsHardwareAccelerated && Vector256<T>.IsSupported)
+        if (Vector256.IsHardwareAccelerated && Vector256<T>.IsSupported && ends.Length > 0)
         {
             ref T into = ref MemoryMarshal.GetReference(target);
             int lanes = Vector256<T>.Count;
-            int last = target.Length - lanes;
+            int last = (int)Math.Min((uint)target.Length, ends[^1]) - lanes;
             for (; run < ends.Length && start <= last; run++)
             {
                 int end = (int)ends[run];
