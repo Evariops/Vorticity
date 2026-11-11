@@ -734,16 +734,18 @@ internal sealed class VariantFieldExpr : FieldExpr
                 _ => sizeof(long),
             };
 
+            // Cleared once, here: Allocate clears too, and a path of a few rows in ten took its column cleared twice, a tenth
+            // of a merge of log records that shreds a hundred keys.
             if (width == 0)
             {
-                _values = arena.Allocate(Math.Max(CanonicalSupport.BitmapByteCount(rows), 1), 1, out _into);
+                _values = arena.AllocateUninitialized(Math.Max(CanonicalSupport.BitmapByteCount(rows), 1), 1, out _into);
             }
             else
             {
-                _values = arena.Allocate(Math.Max(rows * width, width), 64, out _into);
+                _values = arena.AllocateUninitialized(Math.Max(rows * width, width), 64, out _into);
             }
 
-            _validity = arena.Allocate(Math.Max(CanonicalSupport.BitmapByteCount(rows), 1), 1, out _validBits);
+            _validity = arena.AllocateUninitialized(Math.Max(CanonicalSupport.BitmapByteCount(rows), 1), 1, out _validBits);
             _into.Clear();
             _validBits.Clear();
         }
