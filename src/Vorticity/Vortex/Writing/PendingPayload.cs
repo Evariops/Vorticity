@@ -81,8 +81,12 @@ internal sealed class PendingPayload(
 
     /// <summary>
     /// A payload over the first <paramref name="length"/> words of a rented array, given back to
-    /// <see cref="ArrayPool{T}.Shared"/> once laid.
+    /// <see cref="ArrayPool{T}.Shared"/> once laid or forsaken.
     /// </summary>
+    /// <remarks>
+    /// The array is the payload's from here: the caller neither gives it back nor reads or writes it again, and drops its
+    /// own reference to it, since the payload gives it back once, and an array given back twice is handed to two renters.
+    /// </remarks>
     internal static PendingPayload RentedU32(uint[] rented, int length, bool compress) =>
         new PendingPayload(
             (arena, types) => LayU32(arena, types, rented, length),
@@ -92,9 +96,11 @@ internal sealed class PendingPayload(
 
     /// <summary>
     /// A payload over the first <paramref name="length"/> words of an array of the process's shelf
-    /// (<see cref="Aggregating.ArrayShelf.Retained"/>), given back to it once laid: the shelf keeps the arrays of a length a
-    /// writer takes again from one file to the next, where the shared pool kept a few of a length and let the rest go.
+    /// (<see cref="Aggregating.ArrayShelf.Retained"/>), given back to it once laid or forsaken: the shelf keeps the arrays of
+    /// a length a writer takes again from one file to the next, where the shared pool kept a few of a length and let the rest
+    /// go.
     /// </summary>
+    /// <remarks>The array is the payload's from here, as <see cref="RentedU32"/>'s is.</remarks>
     internal static PendingPayload ShelvedU32(uint[] shelved, int length, bool compress) =>
         new PendingPayload(
             (arena, types) => LayU32(arena, types, shelved, length),
@@ -106,6 +112,7 @@ internal sealed class PendingPayload(
     /// A payload over the first <paramref name="length"/> words of a rented <see cref="ulong"/>
     /// array, laid at 64 bits: a run's rows when it spans 2³² rows or more.
     /// </summary>
+    /// <remarks>The array is the payload's from here, as <see cref="RentedU32"/>'s is.</remarks>
     internal static PendingPayload RentedU64(ulong[] rented, int length, bool compress) =>
         new PendingPayload(
             (arena, types) =>
