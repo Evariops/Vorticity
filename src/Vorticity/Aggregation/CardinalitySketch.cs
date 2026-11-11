@@ -258,20 +258,48 @@ internal sealed class CardinalitySketch : IGroupSketch<CardinalitySketch>
     /// </summary>
     public void Encode(IBufferWriter<byte> into)
     {
-        if (_hashes is { } hashes)
+        if (_hashes is { } held)
         {
-            Span<byte> exact = into.GetSpan(1 + Varint.MaxLength64 + (_exact * sizeof(ulong)));
-            exact[0] = ExactForm;
-            int at = 1 + Varint.Write(exact[1..], (ulong)_exact);
-            for (int i = 0; i < _exact; i++, at += sizeof(ulong))
-            {
-                BinaryPrimitives.WriteUInt64LittleEndian(exact[at..], hashes[i]);
-            }
-
-            into.Advance(at);
+            into.Advance(EncodeExact(held.AsSpan(0, _exact), into.GetSpan(ExactBytes(_exact))));
             return;
         }
 
+        EncodeRegisters(into);
+    }
+
+    /// <summary>The bytes <see cref="Encode"/> writes of an exact sketch of <paramref name="hashes"/> at most.</summary>
+    internal static int ExactBytes(int hashes) => 1 + Varint.MaxLength64 + (hashes * sizeof(ulong));
+
+    /// <summary>
+    /// What <see cref="Encode"/> writes of an exact sketch of <paramref name="hashes"/>, distinct and ascending, into
+    /// <paramref name="into"/>, with no sketch made: its form, its count, its hashes. The bytes written.
+    /// </summary>
+    internal static int EncodeExact(ReadOnlySpan<ulong> hashes, Span<byte> into)
+    {
+        into[0] = ExactForm;
+        int at = 1 + Varint.Write(into[1..], (ulong)hashes.Length);
+        foreach (ulong hash in hashes)
+        {
+            BinaryPrimitives.WriteUInt64LittleEndian(into[at..], hash);
+            at += sizeof(ulong);
+        }
+
+        return at;
+    }
+
+    /// <summary>What <see cref="Write"/> hands out of an exact sketch of <paramref name="hashes"/>, distinct and ascending, with no sketch made.</summary>
+    internal static void WriteExact(ReadOnlySpan<ulong> hashes, SpillBuffer into)
+    {
+        into.Write(0L);
+        into.Write((long)hashes.Length);
+        foreach (ulong hash in hashes)
+        {
+            into.Write(unchecked((long)hash));
+        }
+    }
+
+    private void EncodeRegisters(IBufferWriter<byte> into)
+    {
         int set = _dense is { } counted ? Registers - counted.AsSpan().Count((byte)0) : _set;
         if (set > Registers / 2)
         {

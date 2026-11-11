@@ -234,6 +234,40 @@ public sealed partial class ApproximateDistinctTests
         }
     }
 
+    // Hashes held in line, none to four, written and encoded as an exact sketch of them, with no sketch made: the same words
+    // and the same bytes as the sketch they would make, which reads back to the same count.
+    [Fact]
+    public void FirstHashesWriteAndEncodeAsTheExactSketchOfThem()
+    {
+        for (int count = 0; count <= 4; count++)
+        {
+            ulong[] hashes = [.. Enumerable.Range(0, count).Select(i => Hash(1_000 + (i * 37))).Order()];
+            CardinalitySketch sketch = new CardinalitySketch();
+            foreach (ulong hash in hashes)
+            {
+                sketch.Add(hash);
+            }
+
+            System.Buffers.ArrayBufferWriter<byte> encoded = new System.Buffers.ArrayBufferWriter<byte>();
+            sketch.Encode(encoded);
+            byte[] exact = new byte[CardinalitySketch.ExactBytes(count)];
+            Assert.Equal(encoded.WrittenSpan.ToArray(), exact.AsSpan(0, CardinalitySketch.EncodeExact(hashes, exact)).ToArray());
+
+            SpillBuffer spill = new SpillBuffer(null);
+            CardinalitySketch.WriteExact(hashes, spill);
+            Assert.Equal(Words(sketch), [.. System.Runtime.InteropServices.MemoryMarshal.Cast<byte, long>(spill.Written.Span).ToArray()]);
+            Assert.Equal(count, CardinalitySketch.Read(new SpillWords(spill.Written).Next).Estimate());
+        }
+    }
+
+    /// <summary>The words of a spill, handed out one at a time.</summary>
+    private sealed class SpillWords(ReadOnlyMemory<byte> written)
+    {
+        private int _at;
+
+        internal long Next() => System.Buffers.Binary.BinaryPrimitives.ReadInt64LittleEndian(written.Span[(8 * _at++)..]);
+    }
+
     private static ulong Hash(int value) => CardinalitySlot.Hash(BitConverter.GetBytes((long)value));
 
     private static List<long> Words(CardinalitySketch sketch)

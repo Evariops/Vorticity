@@ -112,12 +112,6 @@ internal abstract class CardinalitySlot : SketchSlot<CardinalitySketch, long>
         return base.StepStates(input, selection, groups);
     }
 
-    internal override void ExportStates(ReadOnlySpan<int> groups, in StateExport into)
-    {
-        Sketched(groups);
-        base.ExportStates(groups, into);
-    }
-
     /// <summary>Another lane's groups into these: each one's first hashes added as values, a sketch merged into a sketch.</summary>
     internal override void MergeFrom(AggregateSlot other, ReadOnlySpan<int> from, ReadOnlySpan<int> into)
     {
@@ -184,10 +178,68 @@ internal abstract class CardinalitySlot : SketchSlot<CardinalitySketch, long>
 
     internal override long GrowthFor(int more) => base.GrowthFor(more) + ((long)more * ((Firsts * sizeof(ulong)) + 1));
 
+    /// <summary>
+    /// Each group's state as its sketch writes it, a group that holds its first hashes in line writing them as an exact
+    /// sketch of them would, with no sketch made for it: a spill is where memory runs short, and a sketch and its array a
+    /// group of a million took a hundred megabytes there.
+    /// </summary>
     internal override void WriteStates(ReadOnlySpan<int> groups, SpillBuffer buffer)
     {
-        Sketched(groups);
-        base.WriteStates(groups, buffer);
+        Action<long>? write = null;
+        Span<ulong> sorted = stackalloc ulong[Firsts];
+        foreach (int group in groups)
+        {
+            int held = group < _held.Length ? _held[group] : 0;
+            if (held is > 0 and < InSketch)
+            {
+                buffer.Write(1);
+                CardinalitySketch.WriteExact(SortedFirsts(group, held, sorted), buffer);
+            }
+            else if (Held(group) is { } sketch)
+            {
+                buffer.Write(1);
+                sketch.Write(write ??= buffer.Write);
+            }
+            else
+            {
+                buffer.Write(0);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Each group's sketch as a table of sketches holds it, a group that holds its first hashes in line, or none, encoded
+    /// as an exact sketch of them, the same bytes, with no sketch made for it.
+    /// </summary>
+    internal override void ExportStates(ReadOnlySpan<int> groups, in StateExport into)
+    {
+        ArrayBufferWriter<byte>? written = null;
+        Span<ulong> sorted = stackalloc ulong[Firsts];
+        Span<byte> exact = stackalloc byte[CardinalitySketch.ExactBytes(Firsts)];
+        for (int i = 0; i < groups.Length; i++)
+        {
+            int group = groups[i];
+            int held = group < _held.Length ? _held[group] : 0;
+            if (held < InSketch)
+            {
+                into.Sketches[i] = exact[..CardinalitySketch.EncodeExact(SortedFirsts(group, held, sorted), exact)].ToArray();
+                continue;
+            }
+
+            written ??= new ArrayBufferWriter<byte>();
+            written.ResetWrittenCount();
+            Held(group)!.Encode(written);
+            into.Sketches[i] = written.WrittenSpan.ToArray();
+        }
+    }
+
+    /// <summary>The <paramref name="held"/> first hashes of <paramref name="group"/>, ascending, in <paramref name="sorted"/>: as an exact sketch keeps them.</summary>
+    private ReadOnlySpan<ulong> SortedFirsts(int group, int held, Span<ulong> sorted)
+    {
+        Span<ulong> hashes = sorted[..held];
+        _firsts.AsSpan(group * Firsts, held).CopyTo(hashes);
+        hashes.Sort();
+        return hashes;
     }
 
     internal override void ReadStates(ref SpillReader reader, int count)
