@@ -18,7 +18,8 @@ internal interface IPayloadLayout
 /// is laid only when the file writer can take it, between two chunks, so a builder may hold its
 /// results in whatever shape it likes until then. The estimate is the uncompressed size, an upper
 /// bound that judges a builder before its payloads go out, and the writer replaces it with the
-/// real length once placed. A payload never laid leaves its rentals to the collector.
+/// real length once placed. A payload whose index is abandoned gives its rentals back unlaid
+/// (<see cref="Forsake"/>).
 /// </summary>
 internal sealed class PendingPayload(
     Func<CanonicalArena, DTypeArena, int>? build, bool compress, long estimate, Action? release = null)
@@ -42,6 +43,19 @@ internal sealed class PendingPayload(
         _release = null;
         release?.Invoke();
         return node;
+    }
+
+    /// <summary>
+    /// Gives the payload's arrays back without laying it, for an index abandoned before it went out: an index over its
+    /// budget is built whole before the budget judges it, and its run segments, megabytes of them, went to the collector.
+    /// A payload forsaken is never laid.
+    /// </summary>
+    internal void Forsake()
+    {
+        _build = null;
+        Action? release = _release;
+        _release = null;
+        release?.Invoke();
     }
 
     /// <summary>Whether the column compressor may choose its encoding.</summary>

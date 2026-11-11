@@ -97,11 +97,19 @@ internal abstract class IndexBuilder : IDisposable
     /// <summary>The data ended; close what only the end closes.</summary>
     internal virtual ValueTask EndOfDataAsync(CancellationToken cancellationToken) => ValueTask.CompletedTask;
 
-    /// <summary>Drops the whole index; anything already written stays in the file as dead weight.</summary>
+    /// <summary>
+    /// Drops the whole index; anything already written stays in the file as dead weight, and the arrays of the payloads
+    /// never written go back where they came from, for the next index to take again.
+    /// </summary>
     internal virtual void Abandon(string reason)
     {
         Abandoned ??= reason;
         Ledger?.Dropped(Pending.Count);
+        foreach (PendingPayload payload in Pending)
+        {
+            payload.Forsake();
+        }
+
         Pending.Clear();
         _pending = 0;
     }

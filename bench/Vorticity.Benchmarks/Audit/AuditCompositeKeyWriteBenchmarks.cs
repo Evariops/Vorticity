@@ -18,6 +18,13 @@ public partial class AuditCompositeKeyWriteBenchmarks
 {
     private const int Rows = 524_288;
 
+    /// <summary>
+    /// Whether the index is kept, its budget raised: under the default budget, an index of these unique keys outweighs
+    /// the file's 330 KB of data and is abandoned once built (VW-12).
+    /// </summary>
+    [Params(false, true)]
+    public bool Kept { get; set; }
+
     private Call[] _rows = [];
     private string _path = string.Empty;
 
@@ -48,7 +55,8 @@ public partial class AuditCompositeKeyWriteBenchmarks
     {
         IndexPolicy policy = IndexPolicy.None.ForKey(
             [nameof(Call.Service), nameof(Call.At)], IndexKind.SortedRuns, new Vorticity.RowEncoding.RowKeyEncoder(Vorticity.RowEncoding.RowSortField.Ascending, Vorticity.RowEncoding.RowSortField.Ascending));
-        await using (VortexFileWriter writer = VortexSession.Default.CreateWriter<Call>(_path, new VortexWriteOptions { Indexes = policy }))
+        VortexWriteOptions options = new VortexWriteOptions { Indexes = Kept ? policy.WithBudgetPerMille(1_000_000) : policy };
+        await using (VortexFileWriter writer = VortexSession.Default.CreateWriter<Call>(_path, options))
         {
             await writer.WriteAsync<Call>(_rows, CancellationToken.None).ConfigureAwait(false);
             await writer.CompleteAsync(CancellationToken.None).ConfigureAwait(false);
