@@ -300,7 +300,7 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
             {
                 if (_piped >= 0)
                 {
-                    _pipeline!.Finish();
+                    await _pipeline!.FinishAsync().ConfigureAwait(false);
                     _piped = -1;
                 }
 
@@ -354,7 +354,7 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
         if (_piped >= 0)
         {
             // Decoded ahead, a field at a time: the batch's arena references their nodes where they lie.
-            int slot = _pipeline!.Wait(_piped++);
+            int slot = await _pipeline!.WaitAsync(_piped++).ConfigureAwait(false);
             _file.Counters.AddPiped();
             for (int i = 0; i < _nodes.Length; i++)
             {
@@ -371,6 +371,7 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
             // references: their bytes stay where they were decoded, until the batch is dead.
             WorkFan fan = _fan ??= WorkFan.Rent(Math.Min(_degree, FanLanes));
             FieldDecoding decoding = _decoding ??= new FieldDecoding(this);
+            await PagesReadyAsync(rows, running: true).ConfigureAwait(false);
             decoding.Order(fan.Items(_nodes.Length));
             await fan.RunAsync(decoding, _nodes.Length, null, rows).ConfigureAwait(false);
             for (int i = 0; i < _nodes.Length; i++)
@@ -382,6 +383,7 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
         }
         else
         {
+            await PagesReadyAsync(rows, running: false).ConfigureAwait(false);
             for (int i = 0; i < _nodes.Length; i++)
             {
                 _nodes[i] = Read(_context, i, rows);
@@ -405,16 +407,18 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
         await _abandon.CancelAsync().ConfigureAwait(false);
         _current?.Dispose();
 
-        // The lanes still decoding batches ahead are waited for before their readers go.
+        // The lanes still decoding batches ahead are awaited before their readers go, and so are the lanes still
+        // decompressing a page of theirs, which reads the group's bytes.
         if (_piped >= 0)
         {
-            _pipeline!.Finish();
+            await _pipeline!.FinishAsync().ConfigureAwait(false);
             _piped = -1;
         }
 
         _pipeline?.Dispose();
         foreach (ColumnChunkReader reader in _readers)
         {
+            await reader.QuiesceAsync().ConfigureAwait(false);
             reader.Dispose();
         }
 
@@ -549,6 +553,54 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
         _nested[field] is { } nested ? nested.Read(context, rows) : _readers[_flat[field]].Read(context, rows);
 
     /// <summary>
+    /// Joins the pages decompressing ahead that the batch's reads of <paramref name="rows"/> rows take first: a read
+    /// cannot await a lane, and would decompress such a page again. When <paramref name="running"/>, the fields decoding
+    /// side by side, those a lane runs alone, each other one left to the thread that decodes its field; else every one
+    /// not yet decompressed, here, as the read on this thread would.
+    /// </summary>
+    private ValueTask PagesReadyAsync(int rows, bool running)
+    {
+        if (_lanes is not null)
+        {
+            for (int i = 0; i < _nodes.Length; i++)
+            {
+                if (PageToJoin(i, rows, running) is not null)
+                {
+                    return JoinPagesAsync(rows, running);
+                }
+            }
+        }
+
+        return default;
+    }
+
+    private async ValueTask JoinPagesAsync(int rows, bool running)
+    {
+        for (int i = 0; i < _nodes.Length; i++)
+        {
+            while (PageToJoin(i, rows, running) is { } page)
+            {
+                if (page.Running)
+                {
+                    _file.Counters.AddAwaited();
+                }
+
+                await page.JoinAsync().ConfigureAwait(false);
+            }
+        }
+    }
+
+    /// <summary>
+    /// The page decompressing ahead, not yet decompressed, that field <paramref name="field"/>'s read of
+    /// <paramref name="rows"/> rows takes first; when <paramref name="running"/>, only one a lane runs. Null for none.
+    /// </summary>
+    private LaneWork? PageToJoin(int field, int rows, bool running)
+    {
+        LaneWork? page = _nested[field] is { } nested ? nested.Unready() : _readers[_flat[field]].Unready(rows);
+        return page is null || (running && !page.Running) ? null : page;
+    }
+
+    /// <summary>
     /// A batch's fields decoded by the work fan, a field an item, each into its own context, on
     /// whichever of the scan's threads claims it.
     /// </summary>
@@ -594,8 +646,10 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
     /// </summary>
     private async ValueTask<bool> NextRowGroupAsync()
     {
+        // A lane still decompressing a page reads the group's bytes, which go back below: awaited first.
         foreach (ColumnChunkReader reader in _readers)
         {
+            await reader.QuiesceAsync().ConfigureAwait(false);
             reader.Release();
         }
 

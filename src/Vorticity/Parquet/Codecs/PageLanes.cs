@@ -2,6 +2,8 @@ using System;
 using System.Collections.Concurrent;
 using System.Runtime.ExceptionServices;
 using System.Threading;
+using System.Threading.Tasks;
+using System.Threading.Tasks.Sources;
 using Vorticity.Parquet.Metadata;
 
 namespace Vorticity.Parquet.Codecs;
@@ -129,24 +131,41 @@ internal sealed class PageLanes
     }
 }
 
+
 /// <summary>
 /// A page's codec, run on a lane of <see cref="PageLanes"/> the column took for it, or by the column
 /// itself when it comes to the page before the pool has run the lane: whichever claims the work runs
-/// it, and the column waits for a lane that did.
+/// it. No thread waits for a lane: the column awaits the one running the page it takes next before a
+/// read (<see cref="JoinAsync"/>), and a read that meets such a page where it cannot await does the
+/// work again itself; a page the column gives up while its lane runs is the lane's to give back once
+/// it finishes (<see cref="Abandon"/>).
 /// </summary>
 /// <param name="lanes">The lanes, one of which the column took for the work it queues, given back by whichever claims it.</param>
-internal abstract class LaneWork(PageLanes lanes) : IThreadPoolWorkItem
+internal abstract class LaneWork(PageLanes lanes) : IThreadPoolWorkItem, IValueTaskSource
 {
-    private readonly object _gate = new();
-    private int _claimed;
+    // Who claimed the work, a lane or its column, and what became of it, in one word: a lane that finishes reads in the
+    // same step whether the column awaits it or gave it up, and the column whether the lane has finished.
+    private const int ByLane = 1;
+    private const int ByColumn = 2;
+    private const int Finished = 4;
+    private const int Awaited = 8;
+    private const int GivenUp = 16;
+
+    // What the column awaits, completed by the lane as it finishes; its continuation runs on the pool, not on the lane,
+    // which goes on with the pages after. Or what the lane calls as it finishes, on its own thread (OnFinished).
+    private ManualResetValueTaskSourceCore<bool> _finished = new() { RunContinuationsAsynchronously = true };
+    private Action? _onFinished;
+    private int _state;
     private bool _queued;
-    private bool _done;
 
     /// <summary>What the work threw, which the column rethrows where it takes the page.</summary>
     internal ExceptionDispatchInfo? Error { get; private set; }
 
     /// <summary>Whether the work is done: run, by a lane or by the column.</summary>
-    internal bool Done => Volatile.Read(ref _done);
+    internal bool Done => (Volatile.Read(ref _state) & Finished) != 0;
+
+    /// <summary>Whether a lane has begun the work and not yet finished it.</summary>
+    internal bool Running => (Volatile.Read(ref _state) & (ByLane | Finished)) == ByLane;
 
     /// <summary>Queues the work on the lane taken for it, for the pool or a thread that helps to run.</summary>
     internal void Queue()
@@ -161,67 +180,120 @@ internal abstract class LaneWork(PageLanes lanes) : IThreadPoolWorkItem
     /// <summary>Runs the work on a lane, unless the column or another lane has claimed it: false then.</summary>
     internal bool TryRun()
     {
-        if (!Claim())
+        if (Interlocked.CompareExchange(ref _state, ByLane, 0) != 0)
         {
             return false;
         }
 
         Perform();
-        lock (_gate)
+        int was = Interlocked.Or(ref _state, Finished);
+        Free();
+        if ((was & GivenUp) != 0)
         {
-            _done = true;
-            Monitor.PulseAll(_gate);
+            Discard();
         }
 
-        Free();
+        if ((was & Awaited) != 0)
+        {
+            if (_onFinished is { } resume)
+            {
+                _onFinished = null;
+                resume();
+            }
+            else
+            {
+                _finished.SetResult(true);
+            }
+        }
+
         return true;
     }
 
-    /// <summary>The work done: here, when no lane has begun it, else once the lane that did has finished.</summary>
-    internal void Complete()
+    /// <summary>
+    /// The work done: here when no lane has begun it, true then; true once a lane has finished it; false while one
+    /// runs it, which the column awaits before the read (<see cref="JoinAsync"/>) or does again itself.
+    /// </summary>
+    internal bool TryComplete()
     {
-        if (Claim())
+        if (Interlocked.CompareExchange(ref _state, ByColumn, 0) == 0)
         {
             Perform();
-            Volatile.Write(ref _done, true);
+            Interlocked.Or(ref _state, Finished);
             Free();
+            return true;
         }
-        else
-        {
-            Join();
-        }
+
+        return Done;
     }
 
-    /// <summary>The work given up, where no lane has begun it; else waited for, as the lane that did may still hold its bytes.</summary>
-    internal void Withdraw()
+    /// <summary>
+    /// Completes once the work is done: at once when it is, or when no lane has begun it, run here then; else as the
+    /// lane running it finishes. The column's alone, one await at a time.
+    /// </summary>
+    internal ValueTask JoinAsync()
     {
-        if (Claim())
+        if (TryComplete())
         {
-            Free();
+            return default;
         }
-        else
-        {
-            Join();
-        }
+
+        _onFinished = null;
+        _finished.Reset();
+        int was = Interlocked.Or(ref _state, Awaited);
+        return (was & Finished) != 0 ? default : new ValueTask(this, _finished.Version);
     }
 
-    /// <summary>Waits for the lane that claimed the work to finish it.</summary>
-    internal void Join()
+    /// <summary>
+    /// Calls <paramref name="resume"/> once the lane running the work finishes it, on that lane's thread, which has its
+    /// result in its cache: something short, which the lane does before the pages after. False, nothing called, when the
+    /// work is done already, or no lane had begun it and it ran here. The column's alone, one wait at a time.
+    /// </summary>
+    internal bool OnFinished(Action resume)
     {
-        lock (_gate)
+        if (TryComplete())
         {
-            while (!_done)
-            {
-                Monitor.Wait(_gate);
-            }
+            return false;
         }
+
+        // Set before the lane can read it as it finishes, and taken back when it had finished already.
+        _onFinished = resume;
+        if ((Interlocked.Or(ref _state, Awaited) & Finished) != 0)
+        {
+            _onFinished = null;
+            return false;
+        }
+
+        return true;
     }
+
+    /// <summary>
+    /// The work given up, its result never taken: true when what it holds is the column's to give back now, no lane
+    /// having begun it or one having finished it; false while a lane runs it, which gives it back as it finishes
+    /// (<see cref="Discard"/>).
+    /// </summary>
+    internal bool Abandon()
+    {
+        if (Interlocked.CompareExchange(ref _state, ByColumn | Finished, 0) == 0)
+        {
+            Free();
+            return true;
+        }
+
+        return (Interlocked.Or(ref _state, GivenUp) & Finished) != 0;
+    }
+
+    void IValueTaskSource.GetResult(short token) => _finished.GetResult(token);
+
+    ValueTaskSourceStatus IValueTaskSource.GetStatus(short token) => _finished.GetStatus(token);
+
+    void IValueTaskSource.OnCompleted(Action<object?> continuation, object? state, short token, ValueTaskSourceOnCompletedFlags flags) =>
+        _finished.OnCompleted(continuation, state, token, flags);
 
     /// <summary>The codec's work, on whichever thread claimed it.</summary>
     protected abstract void Run();
 
-    /// <summary>Claims the work; false when a lane or the column has already.</summary>
-    private bool Claim() => Interlocked.Exchange(ref _claimed, 1) == 0;
+    /// <summary>Gives back what the work holds, its result given up while a lane ran it: on that lane, as it finishes.</summary>
+    protected abstract void Discard();
 
     /// <summary>Gives back the lane a queued work took, once claimed: the pool's later run of it finds nothing to do.</summary>
     private void Free()

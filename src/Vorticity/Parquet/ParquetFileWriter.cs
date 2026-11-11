@@ -471,6 +471,35 @@ public sealed class ParquetFileWriter : IAsyncDisposable
             Abandon();
         }
 
+        // A page a lane still compresses, the file abandoned mid-group, holds a compressor of the writer's: awaited first.
+        foreach (ColumnChunkWriter column in _columns)
+        {
+            ValueTask quiet = column.QuiesceAsync();
+            if (!quiet.IsCompletedSuccessfully)
+            {
+                return ReleaseQuietAsync(quiet);
+            }
+        }
+
+        ReleaseWriter();
+        return ValueTask.CompletedTask;
+    }
+
+    /// <summary><see cref="DisposeAsync"/> once the pages lanes still compress are done, <paramref name="quiet"/> the first column's.</summary>
+    private async ValueTask ReleaseQuietAsync(ValueTask quiet)
+    {
+        await quiet.ConfigureAwait(false);
+        foreach (ColumnChunkWriter column in _columns)
+        {
+            await column.QuiesceAsync().ConfigureAwait(false);
+        }
+
+        ReleaseWriter();
+    }
+
+    /// <summary>What <see cref="DisposeAsync"/> gives back, no lane at work for the writer.</summary>
+    private void ReleaseWriter()
+    {
         ReleaseColumns();
         _encryptor?.Dispose();
         if (_fan is { } fan)
@@ -478,8 +507,6 @@ public sealed class ParquetFileWriter : IAsyncDisposable
             WorkFan.Return(fan);
             _fan = null;
         }
-
-        return ValueTask.CompletedTask;
     }
 
     /// <summary>
@@ -788,7 +815,7 @@ public sealed class ParquetFileWriter : IAsyncDisposable
             }
 
             // The block is whole in every column, its pages closed.
-            if (_groupRows >= _options.RowGroupRows || Filled())
+            if (_groupRows >= _options.RowGroupRows || await FilledAsync().ConfigureAwait(false))
             {
                 await CloseRowGroupAsync(partial: false, cancellationToken).ConfigureAwait(false);
             }
@@ -811,10 +838,15 @@ public sealed class ParquetFileWriter : IAsyncDisposable
 
         await StartAsync(cancellationToken).ConfigureAwait(false);
         WrittenChunk[] chunks = new WrittenChunk[_columns.Length];
+        foreach (ColumnChunkWriter column in _columns)
+        {
+            await column.EndPagesAsync(partial).ConfigureAwait(false);
+        }
+
         for (int c = 0; c < _columns.Length; c++)
         {
             ColumnChunkWriter column = _columns[c];
-            ChunkResult chunk = column.Close(_sink.Position, partial);
+            ChunkResult chunk = column.Close(_sink.Position);
             Debug.Assert(chunk.Rows == rows, "Every column closes the same rows.");
             await column.LendChunkAsync(_sink, cancellationToken).ConfigureAwait(false);
             chunks[c] = new WrittenChunk { Column = column.Column, Chunk = chunk, Codec = column.Codec, Encryptor = column.Encryptor };
@@ -969,7 +1001,7 @@ public sealed class ParquetFileWriter : IAsyncDisposable
     /// the most their pages compressing ahead can store keeps them under it, and otherwise as they
     /// are once stored, so that a row group closes on the same block at every degree.
     /// </summary>
-    private bool Filled()
+    private ValueTask<bool> FilledAsync()
     {
         long bound = 0;
         foreach (ColumnChunkWriter column in _columns)
@@ -977,15 +1009,16 @@ public sealed class ParquetFileWriter : IAsyncDisposable
             bound += column.BufferedBound;
         }
 
-        if (bound < _options.RowGroupBytes)
-        {
-            return false;
-        }
+        return bound < _options.RowGroupBytes ? new ValueTask<bool>(false) : StoredFilledAsync();
+    }
 
+    /// <summary>Whether the row group's pages reach the bound once those compressing ahead are stored, those a lane runs awaited.</summary>
+    private async ValueTask<bool> StoredFilledAsync()
+    {
         long bytes = 0;
         foreach (ColumnChunkWriter column in _columns)
         {
-            column.Settle();
+            await column.SettleAsync().ConfigureAwait(false);
             bytes += column.BufferedBytes;
         }
 

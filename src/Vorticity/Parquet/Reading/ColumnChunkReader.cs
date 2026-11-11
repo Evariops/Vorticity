@@ -1,12 +1,14 @@
 using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO.Hashing;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics.X86;
 using System.Threading;
+using System.Threading.Tasks;
 using ManagedCompressions.Zstd;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
@@ -145,6 +147,9 @@ internal sealed partial class ColumnChunkReader : IDisposable
 
     /// <summary>The data pages after the one read, decompressed or being decompressed on the scan's lanes, in the chunk's order.</summary>
     private readonly Queue<AheadPage> _ahead = new();
+
+    /// <summary>The pages given up while their lane ran them, which <see cref="QuiesceAsync"/> awaits before the chunk goes.</summary>
+    private readonly List<AheadPage> _given = [];
 
     /// <summary>What <see cref="ViewsAt"/> says of a page whose values a lane does not cut into views.</summary>
     private const int NoViews = -2;
@@ -727,15 +732,21 @@ internal sealed partial class ColumnChunkReader : IDisposable
         }
     }
 
-    /// <summary>Gives every page back to the pool: at the end of the row group, or of the scan.</summary>
+    /// <summary>
+    /// Gives every page back to the pool: at the end of the row group, or of the scan, once
+    /// <see cref="QuiesceAsync"/> has completed.
+    /// </summary>
     internal void Release()
     {
-        // The pages decompressed ahead read the chunk's bytes: none is left reading them past its end.
+        // The pages decompressed ahead read the chunk's bytes: none is left reading them past its end, the scan having
+        // awaited every lane still at work on one.
+        Debug.Assert(_ahead.Count == 0 && _given.TrueForAll(page => page.Done), "The lanes are awaited before the chunk goes.");
         while (_ahead.Count > 0)
         {
-            Drop(Dequeue());
+            GiveUp(Dequeue());
         }
 
+        _given.Clear();
         LeaveAhead();
         for (int i = 0; i < _laneZstd.Length; i++)
         {
@@ -784,6 +795,9 @@ internal sealed partial class ColumnChunkReader : IDisposable
 
     public void Dispose()
     {
+        // A page's block a decode had not taken yet, which the release gives back as well.
+        _decompressed?.Dispose();
+        _decompressed = null;
         Release();
         _batchCodes?.Dispose();
         _batchValues?.Dispose();
@@ -1214,7 +1228,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
             // A page decompressed ahead is the one here, or one a skip has stepped past since.
             while (_ahead.Count > 0 && _ahead.Peek().Position < _position)
             {
-                Drop(Dequeue());
+                GiveUp(Dequeue());
             }
 
             PageHeader header;
@@ -1224,8 +1238,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
             {
                 AheadPage ahead = Dequeue();
                 (header, at, stored) = (ahead.Header, ahead.At, ahead.Stored);
-                _decompressed = Wait(ahead);
-                (_cutAhead, _cutAheadViews, _cutAheadBytes) = (ahead.Views, ahead.ViewCount, ahead.ViewBytes);
+                Take(ahead);
             }
             else
             {
@@ -1512,10 +1525,23 @@ internal sealed partial class ColumnChunkReader : IDisposable
         return page;
     }
 
-    /// <summary>The block a page was decompressed into ahead: here, when its lane has not begun it, else once its lane has.</summary>
-    private static NativeSegmentOwner Wait(AheadPage page)
+    /// <summary>
+    /// Takes the page decompressed ahead that the read comes to: its block, decompressed here when its lane has not
+    /// begun it, or by its lane; the views its lane cut, if any. A page its lane still decompresses is decompressed again
+    /// here, into a block of the read's, and given up to its lane: a read cannot await, and the scan awaits such a page
+    /// before the read that takes it first (<see cref="Unready"/>), so only a read that runs on into it meets one.
+    /// </summary>
+    private void Take(AheadPage page)
     {
-        page.Complete();
+        if (!page.TryComplete())
+        {
+            GiveUp(page);
+            _decompressed = DecompressedAgain(page);
+            (_cutAhead, _cutAheadViews, _cutAheadBytes) = (null, -1, 0);
+            Counters?.AddRedone();
+            return;
+        }
+
         if (page.Error is { } error)
         {
             page.Block.Dispose();
@@ -1523,15 +1549,90 @@ internal sealed partial class ColumnChunkReader : IDisposable
             error.Throw();
         }
 
-        return page.Block;
+        _decompressed = page.Block;
+        (_cutAhead, _cutAheadViews, _cutAheadBytes) = (page.Views, page.ViewCount, page.ViewBytes);
     }
 
-    /// <summary>Drops a page decompressed ahead that no read takes: its lane is waited for, if it began, and its block given back.</summary>
-    private static void Drop(AheadPage page)
+    /// <summary>A page its lane still decompresses, decompressed again into a block of the read's.</summary>
+    private NativeSegmentOwner DecompressedAgain(AheadPage page)
     {
-        page.Withdraw();
-        page.Block.Dispose();
-        page.Views?.Dispose();
+        NativeSegmentOwner block = _pool.Rent(page.Size, 64);
+        try
+        {
+            DecompressPage(page.Source.Span, block.WritableSpan);
+            return block;
+        }
+        catch
+        {
+            block.Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Gives up a page decompressed ahead that no read takes: its block and views back now, or by its lane as it
+    /// finishes, the page kept until then for <see cref="QuiesceAsync"/>.
+    /// </summary>
+    private void GiveUp(AheadPage page)
+    {
+        if (page.Abandon())
+        {
+            page.Block.Dispose();
+            page.Views?.Dispose();
+        }
+        else
+        {
+            _given.Add(page);
+        }
+    }
+
+    /// <summary>
+    /// The page decompressing ahead that a read of <paramref name="rows"/> rows takes first, not yet decompressed: the
+    /// scan joins it before the read (<see cref="LaneWork.JoinAsync"/>), awaiting the lane that runs it, or decompressing
+    /// it there when no lane has begun it, which no lane can then begin as the read comes to it. Null when the read begins
+    /// in the page it holds, or the page it takes next is done. A read that runs on past that page may still meet another
+    /// a lane runs, and decompresses it again (<see cref="Take"/>).
+    /// </summary>
+    internal LaneWork? Unready(int rows)
+    {
+        if (_ahead.Count == 0 || (_page is { } page && page.Rows - page.Read >= rows))
+        {
+            return null;
+        }
+
+        foreach (AheadPage ahead in _ahead)
+        {
+            if (ahead.Position >= _position)
+            {
+                return ahead.Done ? null : ahead;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Gives up every page decompressed ahead and awaits the lanes still at work on one: none reads the chunk's bytes
+    /// once it completes, which <see cref="Release"/> lets go.
+    /// </summary>
+    internal ValueTask QuiesceAsync()
+    {
+        while (_ahead.Count > 0)
+        {
+            GiveUp(Dequeue());
+        }
+
+        return _given.Count == 0 ? default : AwaitGivenAsync();
+    }
+
+    private async ValueTask AwaitGivenAsync()
+    {
+        foreach (AheadPage page in _given)
+        {
+            await page.JoinAsync().ConfigureAwait(false);
+        }
+
+        _given.Clear();
     }
 
     /// <summary>
@@ -1557,6 +1658,9 @@ internal sealed partial class ColumnChunkReader : IDisposable
 
         internal NativeSegmentOwner Block { get; } = block;
 
+        /// <summary>The page's stored bytes, in the chunk, which the read decompresses again when it meets the page on its lane.</summary>
+        internal VortexBuffer Source { get; } = source;
+
         /// <summary>The views the page's PLAIN byte arrays are cut into once it is decompressed, where the read takes them: see <see cref="ViewsAt"/>.</summary>
         internal NativeSegmentOwner? Views { get; } = views;
 
@@ -1576,7 +1680,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
             ZstdDecompressor? zstd = codec == CompressionCodec.Zstd ? reader.TakeZstd() : null;
             try
             {
-                PageCodecs.Decompress(codec, source.Span, Block.WritableSpan, zstd);
+                PageCodecs.Decompress(codec, Source.Span, Block.WritableSpan, zstd);
             }
             finally
             {
@@ -1590,6 +1694,13 @@ internal sealed partial class ColumnChunkReader : IDisposable
             {
                 Cut(Block.WritableSpan, cut.WritableSpan);
             }
+        }
+
+        /// <summary>The page given up: its block and views back to the pool.</summary>
+        protected override void Discard()
+        {
+            Block.Dispose();
+            Views?.Dispose();
         }
 
         /// <summary>Cuts the values past the page's levels into views, as many as its bytes hold, up to its value count; nothing where the levels run past the page, which the read then says.</summary>
