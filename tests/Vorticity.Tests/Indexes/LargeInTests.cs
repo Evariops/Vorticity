@@ -215,7 +215,8 @@ public sealed class LargeInTests
     /// <summary>The blocks the Bloom filters leave live under <paramref name="values"/>, and the index segments they read.</summary>
     private static async Task<(int Live, int Segments)> BloomAsync(VortexFile file, long[] values, bool askAll, CancellationToken ct)
     {
-        BloomPruner pruner = Assert.IsType<BloomPruner>(await BloomPruner.BuildAsync(file, Membership(values), Block, ct));
+        // Disposed, as a scan disposes it: it lets go of the segments whose words it read in place.
+        using BloomPruner pruner = Assert.IsType<BloomPruner>(await BloomPruner.BuildAsync(file, Membership(values), Block, ct));
         if (askAll)
         {
             pruner.BlockWorth = long.MaxValue;
@@ -223,6 +224,9 @@ public sealed class LargeInTests
 
         BlockMask live = new BlockMask(file.RowCount, Block);
         await pruner.RefineAsync(file, live, ct);
+
+        // The writer stores the words flat: every region read is read where it lies.
+        Assert.Equal(0, pruner.Copied);
         return (live.LiveCount, pruner.Segments);
     }
 

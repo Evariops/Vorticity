@@ -1,7 +1,47 @@
 using System;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+using Vorticity.Buffers;
 using Vorticity.Serialization.Protobuf;
 
 namespace Vorticity.Indexes;
+
+/// <summary>
+/// A run of a filter tree's words where they lie: in a segment whose owner the reader holds, or in memory that does
+/// not move, as long as whoever made the view keeps it. A pointer and a length, as small as the array, start and
+/// length it replaced, since a question keeps one for every node and leaf it reads.
+/// </summary>
+internal readonly unsafe struct BloomWords
+{
+    private readonly uint* _pointer;
+
+    private BloomWords(uint* pointer, int length)
+    {
+        _pointer = pointer;
+        Length = length;
+    }
+
+    /// <summary>The words of <paramref name="bytes"/>, read where they lie; valid while their owner is held.</summary>
+    /// <param name="bytes">Little-endian words.</param>
+    internal static BloomWords InPlace(VortexBuffer bytes) =>
+        new BloomWords((uint*)Unsafe.AsPointer(ref MemoryMarshal.GetReference(bytes.Span)), bytes.Length / sizeof(uint));
+
+    /// <summary>The words of <paramref name="pinned"/>, which the caller keeps fixed while the view is used.</summary>
+    /// <param name="pinned">Words that do not move: pinned, native, or on the stack of a frame that outlives the view.</param>
+    internal static BloomWords Pinned(ReadOnlySpan<uint> pinned) =>
+        new BloomWords((uint*)Unsafe.AsPointer(ref MemoryMarshal.GetReference(pinned)), pinned.Length);
+
+    /// <summary>How many words.</summary>
+    internal int Length { get; }
+
+    /// <summary>The words.</summary>
+    internal ReadOnlySpan<uint> Span => new ReadOnlySpan<uint>(_pointer, Length);
+
+    /// <summary><paramref name="length"/> words from <paramref name="start"/>, which the caller keeps within these.</summary>
+    /// <param name="start">The first.</param>
+    /// <param name="length">How many.</param>
+    internal BloomWords Slice(int start, int length) => new BloomWords(_pointer + start, length);
+}
 
 /// <summary>
 /// One node of a filter tree, parsed in place over the little-endian words that hold it: a leaf is a
@@ -26,14 +66,12 @@ internal sealed class BloomNode
 
     private const uint BareFlag = 1u << 24;
 
-    private readonly uint[] _words;
-    private readonly int _start;
+    private readonly BloomWords _words;
     private readonly int _childWords;
 
-    private BloomNode(uint[] words, int start, int level, long leaves, int children, bool bare, int filterBlocks, IndexSegment? region)
+    private BloomNode(BloomWords words, int level, long leaves, int children, bool bare, int filterBlocks, IndexSegment? region)
     {
         _words = words;
-        _start = start;
         _childWords = bare ? 0 : children;
         Level = level;
         Leaves = leaves;
@@ -58,10 +96,10 @@ internal sealed class BloomNode
     internal IndexSegment? Children { get; }
 
     /// <summary>Each child's words: a leaf's filter, or a node's own words; empty for a bare node.</summary>
-    internal ReadOnlySpan<uint> ChildWords => _words.AsSpan(_start + HeaderWords, _childWords);
+    internal ReadOnlySpan<uint> ChildWords => _words.Span.Slice(HeaderWords, _childWords);
 
     /// <summary>Its filter's words; empty when it has none.</summary>
-    internal ReadOnlySpan<uint> Filter => _words.AsSpan(_start + HeaderWords + _childWords, FilterBlocks * SplitBlockBloom.WordsPerBlock);
+    internal ReadOnlySpan<uint> Filter => _words.Span.Slice(HeaderWords + _childWords, FilterBlocks * SplitBlockBloom.WordsPerBlock);
 
     /// <summary>
     /// The words of a node with <paramref name="childWords"/> listed and a filter of
@@ -154,22 +192,23 @@ internal sealed class BloomNode
     /// Parses the node held by <paramref name="words"/>[<paramref name="start"/>..], which its parent
     /// says is <paramref name="length"/> words, of <paramref name="level"/>, over <paramref name="leaves"/> blocks.
     /// </summary>
-    /// <param name="words">The region's words; kept, not copied.</param>
+    /// <param name="words">The region's words; kept, not copied, so the node is read only while they are held.</param>
     /// <param name="start">Where the node starts.</param>
     /// <param name="length">Its words.</param>
     /// <param name="level">Its level.</param>
     /// <param name="leaves">Its blocks.</param>
     /// <param name="node">The node.</param>
     /// <returns>Whether the words are that node.</returns>
-    internal static bool TryRead(uint[] words, int start, int length, int level, long leaves, out BloomNode? node)
+    internal static bool TryRead(BloomWords words, int start, int length, int level, long leaves, out BloomNode? node)
     {
         node = null;
-        if (length < HeaderWords || start < 0 || start + length > words.Length || level is < 1 or > MaxLevel || leaves < 1)
+        if (length < HeaderWords || start < 0 || (long)start + length > words.Length || level is < 1 or > MaxLevel || leaves < 1)
         {
             return false;
         }
 
-        ReadOnlySpan<uint> header = words.AsSpan(start, HeaderWords);
+        BloomWords own = words.Slice(start, length);
+        ReadOnlySpan<uint> header = own.Span[..HeaderWords];
         int children = (int)((header[0] >> 16) & 0xFF);
         uint flags = header[0] >> 24;
         bool bare = flags == BareFlag >> 24;
@@ -186,7 +225,7 @@ internal sealed class BloomNode
         }
 
         long total = 0;
-        foreach (uint child in words.AsSpan(start + HeaderWords, listed))
+        foreach (uint child in own.Span.Slice(HeaderWords, listed))
         {
             bool fits = level == 1
                 ? child % SplitBlockBloom.WordsPerBlock == 0 && child <= BloomBuilderLimits.MaxFilterBlocks * SplitBlockBloom.WordsPerBlock
@@ -223,7 +262,7 @@ internal sealed class BloomNode
             return false;
         }
 
-        node = new BloomNode(words, start, level, leaves, children, bare, (int)header[2], region);
+        node = new BloomNode(own, level, leaves, children, bare, (int)header[2], region);
         return true;
     }
 }
