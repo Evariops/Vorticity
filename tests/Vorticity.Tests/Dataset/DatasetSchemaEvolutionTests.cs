@@ -146,6 +146,70 @@ public sealed class DatasetSchemaEvolutionTests
         }
     }
 
+    /// <summary>
+    /// Counts, presences and extremes answered by several lanes at once (one object a lane, each sharing the scan's
+    /// builder), over objects of both schemas with rows marked: under no filter, a filter the earlier objects' own scans
+    /// take through a renamed column, and filters evaluated on their reshaped batches, each question asked again and again so
+    /// that the lanes meet. Every answer is the rows' own, as at one lane.
+    /// </summary>
+    [Theory]
+    [InlineData(4)]
+    [InlineData(8)]
+    public async Task LanesSideBySideAnswerObjectsOfEitherSchemaAsTheRowsSay(int degree)
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        (VortexDataset dataset, List<MeterV2> expected) = await EvolvedAsync(store, clustered: false, ct, marking: true);
+        await using (dataset)
+        {
+            await dataset.DeleteAsync<MeterV2>(r => r.Reading > 2_500L | r.Key < 20L, ct);
+            expected.RemoveAll(row => row.Reading > 2_500 || row.Key < 20);
+
+            Vorticity.Expressions.ColumnFieldExpr reading = Vorticity.Expressions.Expr.Field("Reading");
+            Vorticity.Expressions.ColumnFieldExpr temperature = Vorticity.Expressions.Expr.Field("Temperature");
+            VortexExpr warm = Vorticity.Expressions.Expr.Gt(temperature, Literal(5.0));
+            (VortexExpr? Filter, Func<MeterV2, bool> Oracle)[] filters =
+            [
+                (null, static _ => true),
+                (Vorticity.Expressions.Expr.Eq(Vorticity.Expressions.Expr.Field("Place"), Literal("Lyon")), static row => row.Place == "Lyon"),
+                (Vorticity.Expressions.Expr.Not(warm), static row => Not(Gt(row.Temperature, 5.0)) == true),
+                (
+                    Vorticity.Expressions.Expr.Not(Vorticity.Expressions.Expr.Or(warm, Vorticity.Expressions.Expr.Gt(reading, Literal(100L)))),
+                    static row => Not(Or(Gt(row.Temperature, 5.0), row.Reading > 100)) == true
+                ),
+                (Vorticity.Expressions.Expr.Gt(reading, Literal(3_000_000_000L)), static row => row.Reading > 3_000_000_000L),
+            ];
+
+            for (int round = 0; round < 8; round++)
+            {
+                foreach ((VortexExpr? filter, Func<MeterV2, bool> oracle) in filters)
+                {
+                    List<MeterV2> kept = expected.Where(oracle).ToList();
+                    Assert.Equal(kept.Count, await Scan(filter).CountAsync(ct));
+                    Assert.Equal(kept.Count > 0, await Scan(filter).AnyAsync(ct));
+                    Vorticity.Expressions.FilterLiteral most = await Scan(filter).MaxAsync("Reading", ct);
+                    Vorticity.Expressions.FilterLiteral least = await Scan(filter).MinAsync("Key", ct);
+                    Assert.Equal(kept.Count > 0 ? kept.Max(row => row.Reading) : (long?)null, most.Kind == Vorticity.Expressions.FilterLiteralKind.Null ? (long?)null : most.SignedValue);
+                    Assert.Equal(kept.Count > 0 ? kept.Min(row => row.Key) : (long?)null, least.Kind == Vorticity.Expressions.FilterLiteralKind.Null ? (long?)null : least.SignedValue);
+                }
+            }
+
+            DatasetScanBuilder Scan(VortexExpr? filter)
+            {
+                DatasetScanBuilder scan = dataset.ScanBuilder().WithOptions(new ScanOptions { DegreeOfParallelism = degree }, keepEncodings: false);
+                return filter is null ? scan : scan.Where(filter);
+            }
+        }
+
+        static Vorticity.Expressions.LiteralExpr Literal<T>(T value) => Vorticity.Expressions.Expr.Literal(value switch
+        {
+            double d => Vorticity.Expressions.FilterLiteral.From(d),
+            long l => Vorticity.Expressions.FilterLiteral.From(l),
+            string s => Vorticity.Expressions.FilterLiteral.From(s),
+            _ => throw new ArgumentOutOfRangeException(nameof(value)),
+        });
+    }
+
     [Fact]
     public async Task CompactionWritesTheObjectsItTakesInTheCurrentSchema()
     {
