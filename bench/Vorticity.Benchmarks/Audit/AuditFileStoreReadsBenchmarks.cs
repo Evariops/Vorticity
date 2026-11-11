@@ -1,8 +1,10 @@
-// What a read of a held file costs a store on local disk, from one thread and from sixteen.
+// What a read of a held file costs a store on local disk and on a share, from one thread and from sixteen.
 //
 // A file object store in a temporary directory holds 64 objects of 64 KiB, kept open after their first read. Each
 // operation reads 1 KiB of one of them under its token, as a dataset's reads of segments do: from one thread, and from
-// sixteen at once.
+// sixteen at once. Share reaches the same directory through the machine's own administrative share (\\localhost\C$,
+// Windows only), a round trip of SMB a read: the store reads every object asynchronously there, where on a local disk it
+// reads one of 64 KiB or less in place.
 using System;
 using System.Buffers;
 using System.IO.Pipelines;
@@ -34,12 +36,29 @@ public class AuditFileStoreReadsBenchmarks
     [Params(1, 16)]
     public int Threads { get; set; }
 
+    /// <summary>Whether the store reaches its directory through the machine's own administrative share.</summary>
+    [Params(false, true)]
+    public bool Share { get; set; }
+
     /// <summary>Writes the objects and reads each once, which keeps it open.</summary>
     [GlobalSetup]
     public void Setup()
     {
         _directory = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"vorticity-audit-files-{Guid.NewGuid():N}");
-        _store = new FileObjectStore(_directory);
+        string root = _directory;
+        if (Share)
+        {
+            if (!OperatingSystem.IsWindows())
+            {
+                throw new PlatformNotSupportedException("The share case reads through \\\\localhost\\C$, which only Windows serves.");
+            }
+
+            string full = System.IO.Path.GetFullPath(_directory);
+            root = $@"\\localhost\{full[0]}${full[2..]}";
+        }
+
+        _store = new FileObjectStore(root);
+        Console.WriteLine($"// {root}: {(FileObjectStore.OnShare(root) ? "a share" : "a local disk")}");
         _keys = new string[Objects];
         _tokens = new string[Objects];
         byte[] bytes = new byte[ObjectBytes];
