@@ -319,7 +319,9 @@ internal sealed class CountsMerge
                 slot = encoded;
                 break;
             case byte[] first:
-                QuantileSketch open = new QuantileSketch(ColumnCountsBuilder.SketchBits);
+                // Its arrays from the process's shelf, given back once it is sealed: an entry's sketch opened at its second
+                // sight made a window of 4 KiB each, two thirds of the bytes a merge of a day's hourly counts allocated.
+                QuantileSketch open = new QuantileSketch(ColumnCountsBuilder.SketchBits, ArrayShelf.Retained);
                 open.MergeEncoded(first);
                 open.MergeEncoded(encoded);
                 slot = open;
@@ -377,6 +379,7 @@ internal sealed class CountsMerge
                         break;
                     default:
                         ((QuantileSketch)into).Merge(open);
+                        open.Release();
                         break;
                 }
 
@@ -423,6 +426,7 @@ internal sealed class CountsMerge
             _sealing.ResetWrittenCount();
             sketch.Encode(_sealing);
             slot = _sealing.WrittenSpan.ToArray();
+            sketch.Release();
         }
         else if (slot is Ranks ranks)
         {
