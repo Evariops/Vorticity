@@ -1170,11 +1170,20 @@ internal static partial class ComparisonKernels
     /// <summary>
     /// The answers of the first 64 integers of <paramref name="values"/> to <c>value &lt;= bound</c>, or to
     /// <c>value &gt;= bound</c> when not <paramref name="atMost"/>, bit <c>i</c> for value <c>i</c>: the lane masks of
-    /// the widest vectors there are gathered into a word, as the column comparisons gather theirs.
+    /// the widest vectors there are gathered into a word, as the column comparisons gather theirs. Integers alone: a
+    /// float's NaN answers false to a lane's comparison and comes first to <see cref="IComparable{T}.CompareTo"/>, so the
+    /// vectors and the loop would differ on it. A caller generic over keys of every type (<c>FixedKeys</c>) cannot say so
+    /// by a constraint, so a float is refused here, a test the compiler folds away for every other type.
     /// </summary>
+    /// <exception cref="NotSupportedException"><typeparamref name="T"/> is a floating-point type.</exception>
     internal static ulong Bounded<T>(ReadOnlySpan<T> values, T bound, bool atMost)
         where T : unmanaged, IComparable<T>
     {
+        if (typeof(T) == typeof(double) || typeof(T) == typeof(float) || typeof(T) == typeof(Half))
+        {
+            throw new NotSupportedException("A bound over vectors compares integers: a float's NaN would answer two ways.");
+        }
+
         values = values[..64];
         ref T at = ref MemoryMarshal.GetReference(values);
         if (Vector512.IsHardwareAccelerated && Vector512<T>.IsSupported)
