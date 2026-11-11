@@ -284,7 +284,22 @@ internal sealed class ScanSegments : IDisposable
                 }
             }
 
+            // The batch publishes the set it claimed with, so each of its claims is among the slots just walked: one left
+            // would stay claimed and unread, and every batch waiting for it parked. Checked in debug builds, where the
+            // walk of every entry costs nothing a release pays.
+            AssertNoClaimLeft(batch);
             WakeUnblocked();
+        }
+    }
+
+    [System.Diagnostics.Conditional("DEBUG")]
+    private void AssertNoClaimLeft(long batch)
+    {
+        for (int i = 0; i < _count; i++)
+        {
+            System.Diagnostics.Debug.Assert(
+                _entries[i].Dead || _entries[i].Owner is not null || _entries[i].Claimant != batch,
+                $"Batch {batch} published without the segment it claimed at {_entries[i].Offset}: its set is not the one it claimed with.");
         }
     }
 
