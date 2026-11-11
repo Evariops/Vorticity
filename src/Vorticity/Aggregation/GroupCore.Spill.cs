@@ -363,6 +363,7 @@ internal sealed partial class GroupCore
                         applier.Apply(part, batch, burst: false);
                         offset += bytes;
                         left -= entries;
+                        await RoomAsync(cancellationToken).ConfigureAwait(false);
                     }
                 }
             }
@@ -379,6 +380,7 @@ internal sealed partial class GroupCore
                         PartBatch batch = new PartBatch(_words, 0, copied) { Count = copied };
                         Pend(copied);
                         applier.Apply(part, batch, burst: false);
+                        await RoomAsync(cancellationToken).ConfigureAwait(false);
                     }
                 }
             }
@@ -394,6 +396,10 @@ internal sealed partial class GroupCore
         part.Silent = false;
         part.Runs = null;
     }
+
+    /// <summary>A page applied, a <c>Distinct</c>'s reader waited for when the values told it pass what may wait for it.</summary>
+    private ValueTask RoomAsync(CancellationToken cancellationToken) =>
+        Emitter is { Overflowing: true } emitter ? emitter.RoomAsync(cancellationToken) : ValueTask.CompletedTask;
 
     /// <summary>
     /// The part's sub-tables let go once delivered: their arrays on the shelf, where the parts still

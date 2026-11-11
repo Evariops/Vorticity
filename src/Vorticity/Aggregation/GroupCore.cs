@@ -681,8 +681,10 @@ internal sealed partial class GroupCore
         lane.Deposited(batch.Count);
 
         // A lane turning to the core deposits its table and bursts nothing: the sub-tables would grow
-        // before the table they replace is given back. The next lane's deposit applies them.
-        if (pending > Threshold(part) && !lane.Turning)
+        // before the table they replace is given back. The next lane's deposit applies them. Nor does a lane burst while
+        // a Distinct's reader is behind: the values a burst tells would pass what may wait for it, and the lane awaits the
+        // reader after its batch.
+        if (pending > Threshold(part) && !lane.Turning && Emitter is not { Overflowing: true })
         {
             if (Waits(pending))
             {
@@ -1350,7 +1352,8 @@ internal sealed partial class GroupCore
     /// the pass under pressure, whose entries become groups while the memory its table gave
     /// back is free, and whose batches the next lane fills again.
     /// </summary>
-    internal void ApplyAll(LaneCore lane)
+    /// <remarks>Between two parts, out of their locks, it waits for a <c>Distinct</c>'s reader when the values told it pass what may wait.</remarks>
+    internal async ValueTask ApplyAllAsync(LaneCore lane, CancellationToken cancellationToken)
     {
         CoreApplier applier = lane.Applier;
         foreach (CorePart part in _parts)
@@ -1360,16 +1363,26 @@ internal sealed partial class GroupCore
                 continue;
             }
 
-            part.Gate.Enter();
-            try
+            ApplyHeld(part, applier);
+            if (Emitter is { Overflowing: true } emitter)
             {
-                int applied = applier.Apply(part, Interlocked.Exchange(ref part.Head.Value, null), burst: true);
-                Interlocked.Add(ref part.Pending.Value, -applied);
+                await emitter.RoomAsync(cancellationToken).ConfigureAwait(false);
             }
-            finally
-            {
-                part.Gate.Exit();
-            }
+        }
+    }
+
+    /// <summary>A part's stack applied under its lock, as a burst applies it.</summary>
+    private static void ApplyHeld(CorePart part, CoreApplier applier)
+    {
+        part.Gate.Enter();
+        try
+        {
+            int applied = applier.Apply(part, Interlocked.Exchange(ref part.Head.Value, null), burst: true);
+            Interlocked.Add(ref part.Pending.Value, -applied);
+        }
+        finally
+        {
+            part.Gate.Exit();
         }
     }
 
@@ -1386,6 +1399,13 @@ internal sealed partial class GroupCore
         {
             cancellationToken.ThrowIfCancellationRequested();
             await ApplyPartAsync(_parts[index], applier, cancellationToken).ConfigureAwait(false);
+
+            // A Distinct's values told past what may wait for its reader: the worker waits for it between two parts, on a
+            // task, where the application under the part's lock could not.
+            if (Emitter is { Overflowing: true } emitter)
+            {
+                await emitter.RoomAsync(cancellationToken).ConfigureAwait(false);
+            }
         }
 
         applier.Release();
@@ -1779,6 +1799,17 @@ internal abstract class CoreEmitter
 
     /// <summary>The groups [<paramref name="from"/>, <paramref name="to"/>) of <paramref name="keys"/> copied out and handed on at once: the null group, which no batch carries.</summary>
     internal abstract void EmitAlone(GroupKeys keys, int from, int to);
+
+    /// <summary>
+    /// Whether the values handed on and not yet read pass what they may hold. A flush never waits, since it runs under a
+    /// part's lock: an applier past the bound awaits <see cref="RoomAsync"/> at its next point free of locks, a lane before
+    /// its next batch and a worker before its next part.
+    /// </summary>
+    internal virtual bool Overflowing => false;
+
+    /// <summary>Completes once the reader has read enough of the values handed on for more to come, holding no thread meanwhile.</summary>
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was cancelled while it waited.</exception>
+    internal virtual ValueTask RoomAsync(CancellationToken cancellationToken) => ValueTask.CompletedTask;
 }
 
 /// <summary>

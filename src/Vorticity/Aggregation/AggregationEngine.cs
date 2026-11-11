@@ -1937,15 +1937,18 @@ internal sealed class AggregationPartition
     /// its end: its table emptied into the core and let go, then every part's stack applied, with no
     /// table left to give back.
     /// </summary>
-    internal void TurnAtEnd(GroupCore core)
+    internal async ValueTask TurnAtEndAsync(GroupCore core, CancellationToken cancellationToken)
     {
         if (_core is null && Keys is { Count: > 0 })
         {
             TurnTo(core);
             core.Pressure?.Settle();
-            core.ApplyAll(_core!);
+            await core.ApplyAllAsync(_core!, cancellationToken).ConfigureAwait(false);
         }
     }
+
+    /// <summary>What the core tells of each group it makes, a <c>Distinct</c>'s reader; null for none.</summary>
+    internal CoreEmitter? Emitter => _plan.Emitter;
 
     /// <summary>
     /// Whether the lane turns to the core before its next batch: its budget could not
@@ -3885,9 +3888,9 @@ internal static class AggregationEngine
             if (pressure is not null && tables.Length > 1 && (pressure.Turned || !memory.CanGrow(2 * MergeAhead(tables))))
             {
                 AggregationPartition? largest = MergeUnturned(tables);
-                if (pressure.Made is { Engaged: true } pressed)
+                if (pressure.Made is { Engaged: true } pressed && largest is not null)
                 {
-                    largest?.TurnAtEnd(pressed);
+                    await largest.TurnAtEndAsync(pressed, cancellationToken).ConfigureAwait(false);
                 }
                 else if (largest is not null)
                 {
@@ -5180,6 +5183,13 @@ internal static class AggregationEngine
             if (partition.Core is { Starved: true })
             {
                 await partition.RoomAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            // The values the lane's bursts told a Distinct's reader, past what may wait for it: the lane waits here, on a
+            // task, where a burst under its part's lock could not.
+            if (partition.Emitter is { Overflowing: true } emitter)
+            {
+                await emitter.RoomAsync(cancellationToken).ConfigureAwait(false);
             }
         }
 
