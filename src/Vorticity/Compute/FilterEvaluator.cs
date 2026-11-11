@@ -1069,9 +1069,9 @@ internal sealed class FilterEvaluator
         Validity validity = Validity.AllInvalid;
         if (!outer.AllInvalid && !own.AllInvalid)
         {
-            // A word of 64 rows at a time, the two bitmaps read at their offsets and and-ed, where each row tested both.
-            VortexBuffer bits = arena.Allocate(Math.Max((rows + 7) / 8, 1), 1, out Span<byte> raw);
-            raw.Clear();
+            // A word of 64 rows at a time, the two bitmaps read at their offsets and and-ed, where each row tested both; each
+            // byte of the bitmap written, none cleared before.
+            VortexBuffer bits = arena.AllocateUninitialized(Math.Max((rows + 7) / 8, 1), 1, out Span<byte> raw);
             for (int first = 0; first < rows; first += 64)
             {
                 int span = Math.Min(64, rows - first);

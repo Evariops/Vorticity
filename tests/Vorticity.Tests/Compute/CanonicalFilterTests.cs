@@ -2,6 +2,7 @@ using System;
 using System.Buffers.Binary;
 
 using Vorticity.Arrays;
+using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Buffers;
 using Vorticity.Compute;
 using Vorticity.Types;
@@ -70,6 +71,44 @@ public sealed class CanonicalFilterTests
         for (int i = 0; i < order.Length; i++)
         {
             Assert.True(result.Slice(i * 16, 16).SequenceEqual(bytes.Slice(order[i] * 16, 16)), $"view {i}");
+        }
+    }
+
+    // A nullable column gathered by scattered rows, in an arena whose blocks held set bits before: each taken row keeps its
+    // validity, every byte of the new bitmap written, for counts on and off a byte's width.
+    [Theory]
+    [InlineData(1)]
+    [InlineData(8)]
+    [InlineData(101)]
+    [InlineData(299)]
+    public void AGatherKeepsEachTakenRowsValidity(int taken)
+    {
+        DTypeArena types = new DTypeArena();
+        CanonicalArena arena = new CanonicalArena();
+        arena.Allocate(1 << 16, 8, out Span<byte> dirty);
+        dirty.Fill(0xFF);
+        arena.ResetKeepingBlocks();
+
+        VortexBuffer values = arena.Allocate(Rows * sizeof(long), sizeof(long), out _);
+        VortexBuffer bits = arena.Allocate((Rows + 7) / 8, 1, out Span<byte> bitBytes);
+        bitBytes.Clear();
+        for (int row = 0; row < Rows; row++)
+        {
+            if (row % 3 != 1)
+            {
+                bitBytes[row >> 3] |= (byte)(1 << (row & 7));
+            }
+        }
+
+        int validity = arena.AddBool(types.Bool(Nullability.NonNullable), Rows, Validity.NonNullable, bits, 0);
+        int node = arena.AddPrimitive(types.Primitive(PType.I64, Nullability.Nullable), Rows, Validity.Bitmap(validity), PType.I64, values);
+        int[] order = Scattered()[..taken];
+
+        Validity gathered = arena.GetNode(CanonicalFilter.Apply(arena, node, order)).Validity;
+        ValidityMask mask = ValidityMask.From(arena, gathered);
+        for (int i = 0; i < order.Length; i++)
+        {
+            Assert.True(mask.IsValid(i) == (order[i] % 3 != 1), $"row {i}, source row {order[i]}");
         }
     }
 

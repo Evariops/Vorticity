@@ -427,18 +427,25 @@ internal static class CanonicalFilter
             return Validity.Bitmap(arena.AddBool(bitmap.DType, indices.Length, Validity.NonNullable, packed, 0));
         }
 
-        // One pass: the bits set and counted together, where a count of the rows taken came first and the bits after.
+        // One pass: the bits set and counted together, where a count of the rows taken came first and the bits after; each
+        // byte of the bitmap written whole, none cleared before.
         ValidityMask mask = ValidityMask.From(arena, validity);
         int count = indices.Length;
         int bytes = CanonicalSupport.BitmapByteCount(count);
-        VortexBuffer bits = arena.Allocate(Math.Max(bytes, 1), 1, out Span<byte> destination);
-        destination.Clear();
+        VortexBuffer bits = arena.AllocateUninitialized(Math.Max(bytes, 1), 1, out Span<byte> destination);
         int valid = 0;
-        for (int i = 0; i < count; i++)
+        for (int at = 0; at < bytes; at++)
         {
-            int set = mask.IsValid(indices[i]) ? 1 : 0;
-            destination[i >> 3] |= (byte)(set << (i & 7));
-            valid += set;
+            int packed = 0;
+            int end = Math.Min((at << 3) + 8, count);
+            for (int i = at << 3; i < end; i++)
+            {
+                int set = mask.IsValid(indices[i]) ? 1 : 0;
+                packed |= set << (i & 7);
+                valid += set;
+            }
+
+            destination[at] = (byte)packed;
         }
 
         if (valid == count)
