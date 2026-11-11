@@ -272,6 +272,34 @@ public sealed partial class GroupOrderTests
     }
 
     [Fact]
+    public void AFullSortByKeysItsBudgetRefusesLeavesThePositionsToComparisons()
+    {
+        // A hundred thousand groups, whose keys and second array of positions, 1.5 MB, a budget of 64 KiB refuses: the sort
+        // by keys says so rather than throw, the positions in their first order for comparisons to sort, nothing held of the
+        // budget; under one that grants them, the positions come out sorted, the budget given back.
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        const int Count = 100_000;
+        long[] values = new long[Count];
+        for (int i = 0; i < Count; i++)
+        {
+            values[i] = i * 7_919L % Count;
+        }
+
+        int[] positions = [.. Enumerable.Range(0, Count)];
+        using (QueryMemory tight = new QueryMemory(new QueryMemoryBudget(64 << 10)))
+        {
+            Assert.False(GroupSort.TrySortByKeys(positions, Count, [ValuesOrder.Over<long>([.. values], Count, false, null)], tight, ct));
+            Assert.Equal(Enumerable.Range(0, Count), positions);
+            Assert.Equal(0, tight.Held);
+        }
+
+        using QueryMemory ample = new QueryMemory(new QueryMemoryBudget(64 << 20));
+        Assert.True(GroupSort.TrySortByKeys(positions, Count, [ValuesOrder.Over<long>([.. values], Count, false, null)], ample, ct));
+        Assert.Equal(Enumerable.Range(0, Count).OrderBy(i => values[i]), positions);
+        Assert.Equal(0, ample.Held);
+    }
+
+    [Fact]
     public void AnAggregatesNumbersRankAsTheirColumnInBothDirections()
     {
         // Read into the pool for an order, integers and floats rank as keys of 64 bits: the

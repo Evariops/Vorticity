@@ -21,19 +21,28 @@ internal static class QueryArrays
 
     /// <summary>An array of <paramref name="length"/> elements at least, from the process's shelf (<see cref="ArrayShelf.Rent{T}"/>), reserved first under <paramref name="memory"/> for <paramref name="what"/>.</summary>
     /// <exception cref="VortexMemoryException">The query's budget does not grant the array.</exception>
-    internal static T[] Rent<T>(QueryMemory? memory, int length, string what)
+    internal static T[] Rent<T>(QueryMemory? memory, int length, string what) =>
+        TryRent(memory, length, out T[] array) ? array : throw memory!.Exceeded(what, -1, Bytes<T>(Pooled(length)));
+
+    /// <summary>
+    /// <see cref="Rent{T}"/> for a caller that has a way of its own when the query's budget does not grant the array:
+    /// false then, nothing reserved and <paramref name="array"/> empty.
+    /// </summary>
+    internal static bool TryRent<T>(QueryMemory? memory, int length, out T[] array)
     {
         if (memory is not null && Bytes<T>(Pooled(length)) is long bytes and >= LeastCounted)
         {
             if (!memory.TryGrow(bytes))
             {
-                throw memory.Exceeded(what, -1, bytes);
+                array = [];
+                return false;
             }
 
             memory.Measure(bytes);
         }
 
-        return ArrayShelf.Rent<T>(length);
+        array = ArrayShelf.Rent<T>(length);
+        return true;
     }
 
     /// <summary>An array <see cref="Rent{T}"/> handed out, back to the process's shelf, its bytes given back to <paramref name="memory"/>.</summary>

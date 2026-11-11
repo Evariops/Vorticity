@@ -563,7 +563,9 @@ internal static class GroupSort
     /// Orders <paramref name="positions"/>, which hold every position from 0 to <paramref name="count"/>, by the chain
     /// <paramref name="orders"/> when each of them keys its positions (<see cref="ColumnOrder.TryKeys"/>): a radix sort,
     /// stable, by the last order's keys first and the first's last, a pass for each byte of a key that differs among the
-    /// positions. False, the positions in their first order again, when an order gives no keys: the caller compares.
+    /// positions. False, the positions in their first order again, when an order gives no keys, or when the query's budget
+    /// does not grant the keys and a second array of positions, twelve bytes a group where comparisons take four: the
+    /// caller compares.
     /// </summary>
     /// <remarks>
     /// A million groups by their count, their ties by their key, took 226 ms through comparisons, nearly every one a tie
@@ -576,8 +578,16 @@ internal static class GroupSort
             return true;
         }
 
-        ulong[] keys = QueryArrays.Rent<ulong>(memory, count, "order of a group by");
-        int[] spare = QueryArrays.Rent<int>(memory, count, "order of a group by");
+        if (!QueryArrays.TryRent(memory, count, out ulong[] keys))
+        {
+            return false;
+        }
+
+        if (!QueryArrays.TryRent(memory, count, out int[] spare))
+        {
+            QueryArrays.Return(memory, keys);
+            return false;
+        }
         int[] from = positions;
         int[] into = spare;
         Span<int> histogram = stackalloc int[256];
