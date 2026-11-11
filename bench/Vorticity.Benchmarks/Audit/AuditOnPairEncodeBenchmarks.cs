@@ -1,5 +1,5 @@
 // What OnPair's encoding of a chunk of text costs, a dictionary trained on a sample and every row's bytes cut
-// into the longest tokens it holds. 65,536 log lines of 60 to 120 characters, words drawn among 2,000 and numbers.
+// into the longest tokens it holds. 512 or 65,536 log lines of 60 to 120 characters, words drawn among 2,000 and numbers.
 using System;
 using System.Buffers.Binary;
 using System.Linq;
@@ -19,7 +19,9 @@ namespace Vorticity.Benchmarks.Audit;
 [BenchmarkCategory(BenchmarkConfig.Explore)]
 public class AuditOnPairEncodeBenchmarks
 {
-    private const int Rows = 65_536;
+    /// <summary>The chunk's rows: a short column, whose dictionary's fixed costs show, or a long one.</summary>
+    [Params(512, 65_536)]
+    public int Rows { get; set; } = 65_536;
 
     private CanonicalArena _arena = null!;
     private int _node;
