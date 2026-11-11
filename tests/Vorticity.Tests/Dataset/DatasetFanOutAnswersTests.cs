@@ -66,6 +66,55 @@ public sealed class DatasetFanOutAnswersTests
         }
     }
 
+    // More objects than an extreme lists at a time, each answered by its exact summary: the walk is taken a list at a time,
+    // the best so far carried from one list to the next, and the answer is every object's best whichever list holds it:
+    // the last, for a maximum of keys rising, the first for a minimum, with the lists after it refuted by their summaries.
+    [Theory]
+    [InlineData(1)]
+    [InlineData(4)]
+    public async Task AnExtremeOverMoreObjectsThanAListIsEveryObjectsBest(int degree)
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        DTypeArena types = new DTypeArena();
+        DType schema = types.Struct(
+            ["key", "measure"],
+            [types.Primitive(PType.I64, Nullability.NonNullable), types.Primitive(PType.F64, Nullability.NonNullable)],
+            Nullability.NonNullable);
+        DatasetOptions options = new DatasetOptions { Seed = 0xFA_0017, Layout = new DatasetLayout { SortKey = [LayoutValue.Column("key")] } };
+        await using (VortexDataset created = await VortexDataset.CreateAsync(store, schema, options, ct))
+        {
+        }
+
+        int objects = (2 * DatasetScanBuilder.ListedObjects) + 100;
+        List<DatasetOperation> added = [];
+        for (int i = 0; i < objects; i++)
+        {
+            (ReadOnlyMemory<byte> key, ObjectEntry entry) = Summarised(i * 100L, (i * 100L) + 50);
+            added.Add(new DatasetOperation.AddObject(key, entry) { Level = 1 });
+        }
+
+        await DatasetCommitter.CommitAsync(store, added, new CommitOptions { Seed = 0xFA_0017 }, ct);
+        await using VortexDataset dataset = await VortexDataset.OpenAsync(store, options, ct);
+        DatasetScanBuilder scan = dataset.ScanBuilder().WithOptions(new ScanOptions { DegreeOfParallelism = degree }, keepEncodings: false);
+        Assert.Equal(((objects - 1) * 100L) + 50, (await scan.MaxAsync("key", ct)).SignedValue);
+        Assert.Equal(0L, (await dataset.ScanBuilder().WithOptions(new ScanOptions { DegreeOfParallelism = degree }, keepEncodings: false).MinAsync("key", ct)).SignedValue);
+    }
+
+    /// <summary>An object's entry at level 1 whose exact summary of <c>key</c> runs from <paramref name="low"/> to <paramref name="high"/>, its rows those keys.</summary>
+    private static (ReadOnlyMemory<byte> Key, ObjectEntry Entry) Summarised(long low, long high)
+    {
+        UInt128 uid = ((UInt128)(ulong)low << 32) | (uint)high;
+        ObjectSummaries summaries = ObjectSummaries.From(
+            [new ColumnSummary("key", FilterLiteral.From(low), true, FilterLiteral.From(high), true, IsExact: true, 0, true)]);
+        ObjectEntry entry = new ObjectEntry(CommitKey.ForData($"01{low:x12}{high:x12}"), uid, high - low + 1, 1_000, uid, [], summaries);
+        byte[] key = new byte[24];
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt64BigEndian(key, (ulong)low ^ (1UL << 63));
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt64BigEndian(key.AsSpan(8), (ulong)(uid >> 64));
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt64BigEndian(key.AsSpan(16), (ulong)uid);
+        return (key, entry);
+    }
+
     [Fact]
     public async Task ACancelledQuestionThrowsAtEveryDegree()
     {

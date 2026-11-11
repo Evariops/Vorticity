@@ -194,27 +194,15 @@ internal sealed partial class DatasetScanBuilder
     /// likeliest to hold the answer, and the value it gives refutes the others by their summaries alone, where in key order
     /// every object of a column rising with the key beat the one before it and was opened. Under a degree of parallelism
     /// above one, as many objects as the degree are opened at once in that order, each asked again whether it loses as its
-    /// turn comes (<see cref="FanOutAsync"/>).
+    /// turn comes (<see cref="FanOutAsync"/>). The walk is taken <see cref="ListedObjects"/> objects at a time, each such
+    /// list ordered and answered before the next is read, the best so far carried from one to the next: a dataset of a
+    /// million objects holds a list's worth, not every one, and loses at most an open a list to the order.
     /// </remarks>
     private async ValueTask<FilterLiteral> ExtremeAsync(
         string path, bool wantMin, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(path);
         FieldMask projection = new FieldMaskBuilder().Include(ToolPaths.Resolve(_version.Schema.Columns, path)).Build();
-        List<PositionedObject> objects = [];
-        await foreach (PositionedObject held in WalkAsync(cancellationToken).ConfigureAwait(false))
-        {
-            if (Covered(held) > 0)
-            {
-                objects.Add(held);
-            }
-        }
-
-        if (_summaries)
-        {
-            BestFirst(objects, path, wantMin);
-        }
-
         Lock gate = new Lock();
         FilterLiteral best = FilterLiteral.Null;
 
@@ -270,24 +258,53 @@ internal sealed partial class DatasetScanBuilder
             return false;
         }
 
-        if (ScanDegree > 1 && objects.Count > 2)
+        List<PositionedObject> objects = [];
+        ConfiguredCancelableAsyncEnumerable<PositionedObject>.Enumerator walk = WalkAsync(cancellationToken).ConfigureAwait(false).GetAsyncEnumerator();
+        try
         {
-            // The best summary's object first, alone: the bound it sets refutes most of the others before a lane opens them,
-            // where the first lanes all opened theirs before any bound was known.
-            await OpenAsync(objects[0], cancellationToken).ConfigureAwait(false);
-            await FanOutAsync(held => Settles(held) ? Visit.Pass : Visit.Open, OpenAsync, objects.GetRange(1, objects.Count - 1), cancellationToken)
-                .ConfigureAwait(false);
-        }
-        else
-        {
-            foreach (PositionedObject held in objects)
+            for (bool more = true; more;)
             {
-                await OpenAsync(held, cancellationToken).ConfigureAwait(false);
+                objects.Clear();
+                while (objects.Count < ListedObjects && (more = await walk.MoveNextAsync()))
+                {
+                    if (Covered(walk.Current) > 0)
+                    {
+                        objects.Add(walk.Current);
+                    }
+                }
+
+                if (_summaries)
+                {
+                    BestFirst(objects, path, wantMin);
+                }
+
+                if (ScanDegree > 1 && objects.Count > 2)
+                {
+                    // The best summary's object first, alone: the bound it sets refutes most of the others before a lane
+                    // opens them, where the first lanes all opened theirs before any bound was known.
+                    await OpenAsync(objects[0], cancellationToken).ConfigureAwait(false);
+                    await FanOutAsync(held => Settles(held) ? Visit.Pass : Visit.Open, OpenAsync, objects.GetRange(1, objects.Count - 1), cancellationToken)
+                        .ConfigureAwait(false);
+                }
+                else
+                {
+                    foreach (PositionedObject held in objects)
+                    {
+                        await OpenAsync(held, cancellationToken).ConfigureAwait(false);
+                    }
+                }
             }
+        }
+        finally
+        {
+            await walk.DisposeAsync();
         }
 
         return best;
     }
+
+    /// <summary>The objects an extreme orders and answers at a time (<see cref="ExtremeAsync"/>).</summary>
+    internal const int ListedObjects = 4_096;
 
     /// <summary>
     /// Orders <paramref name="objects"/> best summary first for the extreme of <paramref name="path"/>: by their summary's
