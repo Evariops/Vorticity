@@ -19,6 +19,15 @@ public sealed class FileObjectStoreTests : IDisposable
 
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
 
+    // A store on a share reads every object asynchronously, its round trip off the pool's threads: a UNC path is one on
+    // Windows, the temporary directory a local disk; elsewhere every mount is taken for a local disk.
+    [Fact]
+    public void AShareIsToldFromALocalDisk()
+    {
+        Assert.Equal(OperatingSystem.IsWindows(), FileObjectStore.OnShare(@"\\server\share\objects"));
+        Assert.False(FileObjectStore.OnShare(Path.GetTempPath()));
+    }
+
     public void Dispose()
     {
         if (Directory.Exists(_root))

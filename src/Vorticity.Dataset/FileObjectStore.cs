@@ -119,6 +119,10 @@ public sealed class FileObjectStore : IObjectStore
     private readonly string _root;
     private bool _disposed;
 
+    // The bytes below which a read takes the file in place: SmallRead on a local disk; none on a share, whose round trip
+    // would hold a thread of the pool, past the reach of the cancellation token.
+    private readonly int _inPlaceBelow;
+
     // The objects read lately, held open, the most recently read first; under the gate.
     private readonly Dictionary<string, HeldFile> _held = new Dictionary<string, HeldFile>(StringComparer.Ordinal);
     private readonly LinkedList<HeldFile> _recent = [];
@@ -131,6 +135,33 @@ public sealed class FileObjectStore : IObjectStore
         ArgumentException.ThrowIfNullOrWhiteSpace(root);
         _root = Path.GetFullPath(root);
         Directory.CreateDirectory(_root);
+        _inPlaceBelow = OnShare(_root) ? 0 : SmallRead;
+    }
+
+    /// <summary>
+    /// Whether <paramref name="root"/> lies on a network share, a UNC path or a mapped drive on Windows: there a read waits
+    /// for its file asynchronously whatever its size. Elsewhere a mount is taken for a local disk.
+    /// </summary>
+    internal static bool OnShare(string root)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return false;
+        }
+
+        if (root.StartsWith(@"\\", StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        try
+        {
+            return Path.GetPathRoot(root) is { Length: > 0 } drive && new DriveInfo(drive).DriveType == DriveType.Network;
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
     }
 
     /// <summary>The directory the objects live in.</summary>
@@ -198,7 +229,7 @@ public sealed class FileObjectStore : IObjectStore
         {
             try
             {
-                return await ReadAtAsync(held.Handle, key, offset, destination, held.Length, held.Token, tail: false, cancellationToken).ConfigureAwait(false);
+                return await ReadAtAsync(held.Handle, key, offset, destination, held.Length, held.Token, tail: false, _inPlaceBelow, cancellationToken).ConfigureAwait(false);
             }
             finally
             {
@@ -233,7 +264,7 @@ public sealed class FileObjectStore : IObjectStore
                 throw ObjectStoreExtensions.Changed(key, ifToken, token);
             }
 
-            ObjectRead read = await ReadAtAsync(handle, key, offset, destination, size, token, tail, cancellationToken).ConfigureAwait(false);
+            ObjectRead read = await ReadAtAsync(handle, key, offset, destination, size, token, tail, _inPlaceBelow, cancellationToken).ConfigureAwait(false);
             kept = Hold(key, handle, size, token);
             return read;
         }
@@ -254,7 +285,7 @@ public sealed class FileObjectStore : IObjectStore
     /// <paramref name="size"/> bytes under <paramref name="token"/>, or its last bytes with <paramref name="tail"/>.
     /// </summary>
     private static async ValueTask<ObjectRead> ReadAtAsync(
-        SafeFileHandle handle, string key, long offset, Memory<byte> destination, long size, string token, bool tail, CancellationToken cancellationToken)
+        SafeFileHandle handle, string key, long offset, Memory<byte> destination, long size, string token, bool tail, int inPlaceBelow, CancellationToken cancellationToken)
     {
         if (tail)
         {
@@ -267,9 +298,15 @@ public sealed class FileObjectStore : IObjectStore
 
         int available = (int)Math.Min(destination.Length, size - offset);
         int read = 0;
+        if (available <= inPlaceBelow)
+        {
+            // In place, the token looked at once before, as the read past it would.
+            cancellationToken.ThrowIfCancellationRequested();
+        }
+
         while (read < available)
         {
-            int got = available <= SmallRead
+            int got = available <= inPlaceBelow
                 ? RandomAccess.Read(handle, destination.Span[read..available], offset + read)
                 : await RandomAccess.ReadAsync(handle, destination[read..available], offset + read, cancellationToken).ConfigureAwait(false);
             if (got == 0)
