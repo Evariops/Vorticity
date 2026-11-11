@@ -1245,6 +1245,42 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>, IPairedSl
         }
     }
 
+    internal override bool CountsPairs => _set is null && _sets is null;
+
+    internal override void ReadStates(ref SpillReader reader, int count, PairPass pass)
+    {
+        if (pass.Whole)
+        {
+            ReadStates(ref reader, count);
+            return;
+        }
+
+        EnsureGroups(count);
+        for (int group = 0; group < count; group++)
+        {
+            int values = reader.Read<int>();
+            for (int v = 0; v < values; v++)
+            {
+                TValue value = reader.Read<TValue>();
+                if (pass.Keeps(PairPass.Of(value)))
+                {
+                    Add(group, value);
+                }
+            }
+        }
+    }
+
+    internal override void PassDone(bool last)
+    {
+        if (last)
+        {
+            ReleasePairs(_groups);
+            return;
+        }
+
+        _pairs.Clear();
+    }
+
     internal override bool SpillsAlone => _set is not null;
 
     internal override bool Spilled => _runs is not null;

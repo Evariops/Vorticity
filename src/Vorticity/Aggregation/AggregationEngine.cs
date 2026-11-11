@@ -632,6 +632,9 @@ internal sealed record AggregationRun(AggregationRun.Lane[] Lanes, long MergeTic
     /// <summary>What the query held of its budget's ceiling when the first run was written; -1 without one.</summary>
     internal double FirstSpillShare { get; init; } = -1;
 
+    /// <summary>The most passes a part read back from those runs took, its distinct pairs a share at a time; 1 when every part fit at once.</summary>
+    internal int MergePasses { get; init; } = 1;
+
     /// <summary>The run's counts with what <paramref name="spill"/> wrote and read, when it wrote anything.</summary>
     internal AggregationRun Spilled(SpillScope? spill) => spill is not { Runs: > 0 } ? this : this with
     {
@@ -639,6 +642,7 @@ internal sealed record AggregationRun(AggregationRun.Lane[] Lanes, long MergeTic
         SpilledBytes = spill.WrittenBytes,
         SpillReadBytes = spill.ReadBytes,
         FirstSpillShare = spill.FirstShare,
+        MergePasses = spill.MergePasses,
     };
 
     /// <summary>One lane's counts.</summary>

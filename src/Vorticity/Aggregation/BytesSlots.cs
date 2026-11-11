@@ -733,6 +733,46 @@ internal sealed class BytesDistinctSlot : AggregateSlot<long>, IPairedSlot
         }
     }
 
+    internal override bool CountsPairs => true;
+
+    internal override void ReadStates(ref SpillReader reader, int count, PairPass pass)
+    {
+        if (pass.Whole)
+        {
+            ReadStates(ref reader, count);
+            return;
+        }
+
+        EnsureGroups(count);
+        for (int group = 0; group < count; group++)
+        {
+            int values = reader.Read<int>();
+            for (int v = 0; v < values; v++)
+            {
+                ReadOnlySpan<byte> value = reader.Bytes();
+                if (pass.Keeps(PairPass.Of(value)))
+                {
+                    Add(group, value);
+                }
+            }
+        }
+    }
+
+    internal override void PassDone(bool last)
+    {
+        Array.Clear(_first);
+        if (!last)
+        {
+            _seen.Clear();
+            return;
+        }
+
+        _seen.Release();
+        _seen = new ByteKeyTable(_shelf);
+        _shelf?.Give(_next);
+        _next = [];
+    }
+
     public long Pairs => _seen.Count;
 
     public async Task MergeInPartsAsync(AggregateSlot[] slots, int[][] maps, int groups, int parts, int degree, QueryMemory? memory, CancellationToken cancellationToken)

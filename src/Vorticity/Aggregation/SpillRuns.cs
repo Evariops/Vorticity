@@ -135,6 +135,7 @@ internal sealed class SpillScope : IDisposable
     private long _written;
     private long _read;
     private int _runs;
+    private int _passes = 1;
     private long _firstHeld = -1;
 
     internal SpillScope(VortexSessionOptions options, QueryMemory memory)
@@ -210,6 +211,19 @@ internal sealed class SpillScope : IDisposable
 
     /// <summary><paramref name="bytes"/> read back.</summary>
     internal void Read(long bytes) => Interlocked.Add(ref _read, bytes);
+
+    /// <summary>The most passes a part read back took (<see cref="RunMerge.MostPasses"/>); 1 when every part fit at once.</summary>
+    internal int MergePasses => Volatile.Read(ref _passes);
+
+    /// <summary>A part about to be merged again in <paramref name="passes"/> passes, its pairs a share at a time.</summary>
+    internal void Passed(int passes)
+    {
+        int seen = Volatile.Read(ref _passes);
+        while (passes > seen && Interlocked.CompareExchange(ref _passes, passes, seen) is var was && was != seen)
+        {
+            seen = was;
+        }
+    }
 
     /// <summary>Every file closed and gone, the scratch they held given back.</summary>
     public void Dispose()
@@ -690,7 +704,39 @@ internal sealed class RunMerge(
 
     internal (GroupKeys Keys, AggregateSlot[] Slots) Empty() => (kind.ForSpill(null), AggregationPartition.NewSlots(plan, settled, source));
 
+    // Whether the plan counts distinct pairs (AggregateSlot.CountsPairs), known at the first merge.
+    private bool? _countsPairs;
+
+    /// <summary>The most passes a part's distinct pairs are merged in, each a read of the part's runs.</summary>
+    internal const int MostPasses = 1024;
+
+    /// <summary>
+    /// A part merged in one pass, as its runs hold it; when its budget cannot hold it and the plan counts distinct pairs, in
+    /// four times as many passes, and so on, each a read of the part's runs that keeps a share of the values alone
+    /// (<see cref="PairPass"/>): a group whose distinct values outweigh the budget, one customer's of all, is counted a
+    /// share at a time where its pairs, which go whole to its part, were refused whatever the parts.
+    /// </summary>
     internal override async ValueTask<(GroupKeys Keys, AggregateSlot[] Slots, long Reserved, long Measured)> MergeAsync(int part, CancellationToken cancellationToken)
+    {
+        for (int passes = 1; ; passes *= 4)
+        {
+            try
+            {
+                return await MergeAsync(part, passes, cancellationToken).ConfigureAwait(false);
+            }
+            catch (VortexMemoryException) when (passes < MostPasses && CountsPairs())
+            {
+                // Everything the attempt took is given back: the next reads the runs again, in more passes.
+                spill.Passed(passes * 4);
+            }
+        }
+    }
+
+    /// <summary>Whether a slot of the plan counts distinct pairs.</summary>
+    private bool CountsPairs() =>
+        _countsPairs ??= Array.Exists(AggregationPartition.NewSlots(plan, settled, source), static slot => slot.CountsPairs);
+
+    private async ValueTask<(GroupKeys Keys, AggregateSlot[] Slots, long Reserved, long Measured)> MergeAsync(int part, int passes, CancellationToken cancellationToken)
     {
         (int first, int past) = SpillRun.Of(part, bits);
 
@@ -704,26 +750,42 @@ internal sealed class RunMerge(
         try
         {
             buffer = new SpillBuffer(memory);
-            foreach (SpillRun run in runs)
+            for (int pass = 0; pass < passes; pass++)
             {
-                // As many of the run's sections at a time as a read of readBytes takes, one at least.
-                int section = first;
-                while (section < past)
+                PairPass which = new PairPass(pass, passes);
+                foreach (SpillRun run in runs)
                 {
-                    int end = section + 1;
-                    while (end < past && run.Starts[end + 1] - run.Starts[section] <= readBytes)
+                    // As many of the run's sections at a time as a read of readBytes takes, one at least.
+                    int section = first;
+                    while (section < past)
                     {
-                        end++;
-                    }
+                        int end = section + 1;
+                        while (end < past && run.Starts[end + 1] - run.Starts[section] <= readBytes)
+                        {
+                            end++;
+                        }
 
-                    int length = checked((int)(run.Starts[end] - run.Starts[section]));
-                    if (length > 0)
+                        int length = checked((int)(run.Starts[end] - run.Starts[section]));
+                        if (length > 0)
+                        {
+                            await run.File.ReadAsync(run.Starts[section], buffer.Ensure(length), cancellationToken).ConfigureAwait(false);
+                            MergeSections(run, section, end, buffer.Span(length), keys, slots, which);
+                        }
+
+                        section = end;
+                    }
+                }
+
+                // The pass's pairs forgotten, their counts kept; the last's arrays given back, the counts all that answers.
+                if (passes > 1)
+                {
+                    foreach (AggregateSlot slot in slots)
                     {
-                        await run.File.ReadAsync(run.Starts[section], buffer.Ensure(length), cancellationToken).ConfigureAwait(false);
-                        MergeSections(run, section, end, buffer.Span(length), keys, slots);
+                        if (slot.CountsPairs)
+                        {
+                            slot.PassDone(last: pass == passes - 1);
+                        }
                     }
-
-                    section = end;
                 }
             }
 
@@ -749,8 +811,12 @@ internal sealed class RunMerge(
         }
     }
 
-    /// <summary>The groups of sections [<paramref name="first"/>, <paramref name="past"/>) of a run, read back into <paramref name="bytes"/>, merged into the part's table.</summary>
-    private void MergeSections(SpillRun run, int first, int past, ReadOnlySpan<byte> bytes, GroupKeys keys, AggregateSlot[] slots)
+    /// <summary>
+    /// The groups of sections [<paramref name="first"/>, <paramref name="past"/>) of a run, read back into
+    /// <paramref name="bytes"/>, merged into the part's table: in a pass past the first (<paramref name="pass"/>), the
+    /// distinct pairs of its share alone, the other states merged once already.
+    /// </summary>
+    private void MergeSections(SpillRun run, int first, int past, ReadOnlySpan<byte> bytes, GroupKeys keys, AggregateSlot[] slots, PairPass pass)
     {
         SpillReader reader = new SpillReader(bytes);
         int[] map = [];
@@ -773,7 +839,7 @@ internal sealed class RunMerge(
             {
                 if (inputs[i] != AggregationPartition.Settled && read[i].StateBytes == 0)
                 {
-                    read[i].ReadStates(ref reader, count);
+                    read[i].ReadStates(ref reader, count, pass);
                 }
             }
 
@@ -781,7 +847,7 @@ internal sealed class RunMerge(
             for (int i = 0; i < slots.Length; i++)
             {
                 slots[i].EnsureGroups(keys.Count);
-                if (inputs[i] != AggregationPartition.Settled)
+                if (inputs[i] != AggregationPartition.Settled && (pass.Pass == 0 || slots[i].CountsPairs))
                 {
                     slots[i].MergeFrom(read[i], all, into);
                 }

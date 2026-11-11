@@ -1,5 +1,6 @@
 using System;
 using System.Runtime.CompilerServices;
+using Vorticity.Writing;
 
 namespace Vorticity.Aggregating;
 
@@ -418,4 +419,38 @@ internal sealed class DistinctPairs<TValue>
         public int Group;
         public int Next;
     }
+}
+
+/// <summary>
+/// One of the passes a merge of spilled distinct pairs takes when a part's pairs do not fit its budget at once: pass
+/// <see cref="Pass"/> of <see cref="Passes"/> keeps the values whose hash falls in its share, the same share for every
+/// group and every run, so that each (group, value) pair is counted in one pass alone and a group's count is the sum of
+/// the passes'. One pass keeps every value.
+/// </summary>
+internal readonly record struct PairPass(int Pass, int Passes)
+{
+    // A seed of its own, so that the values a pass keeps do not gather in the homes of a table their pairs fill.
+    private const ulong Seed = 0x6A09_E667_F3BC_C909UL;
+
+    /// <summary>The one pass of a merge whose pairs fit: every value.</summary>
+    internal static PairPass All => new PairPass(0, 1);
+
+    /// <summary>Whether the merge takes one pass, which keeps every value.</summary>
+    internal bool Whole => Passes == 1;
+
+    /// <summary>Whether the pass keeps the value of hash <paramref name="hash"/> (<see cref="Of{TValue}"/>, <see cref="Of(ReadOnlySpan{byte})"/>).</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal bool Keeps(ulong hash) => (int)(((hash >> 32) * (ulong)(uint)Passes) >> 32) == Pass;
+
+    /// <summary>The hash a pass is chosen by, of a fixed-width value.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static ulong Of<TValue>(TValue value)
+        where TValue : unmanaged
+    {
+        (ulong low, ulong high) = KeyWords.Of(value);
+        return KeyHash.SeededMix(KeyHash.Fold(low, high), Seed);
+    }
+
+    /// <summary>The hash a pass is chosen by, of a value of bytes.</summary>
+    internal static ulong Of(ReadOnlySpan<byte> value) => KeyHash.SeededMix(KeyHash.Bytes(value), Seed);
 }

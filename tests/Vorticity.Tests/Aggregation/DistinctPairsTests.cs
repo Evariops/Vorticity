@@ -151,14 +151,14 @@ public sealed partial class DistinctPairsTests
         }
     }
 
-    // A group that holds half the rows' distinct values, under the whole budget and under a fifth of the group by's peak.
-    // Under the whole budget each value counts once a group. Under the fifth the query is refused, and cleanly: a spill
-    // cuts its parts by group, and the one group's pairs, which go whole to one part, pass what the budget holds at any
-    // part; the budget is whole again and no file is left. (Groups of even size under the same fifth spill and end exact.)
+    // A group that holds half the rows' distinct values, under the whole budget and under a fifth and a tenth of the group
+    // by's peak. A spill cuts its parts by group, and the one group's pairs go whole to one part, which no budget below
+    // them holds: that part is merged in passes, each counting a share of the values, and each value still counts once a
+    // group; the budget is whole again and no file is left.
     [Theory]
     [InlineData(2)]
     [InlineData(4)]
-    public async Task AGroupWhosePairsPassTheBudgetIsRefusedCleanly(int degree)
+    public async Task AGroupWhosePairsPassTheBudgetIsCountedInPasses(int degree)
     {
         Row[] rows = Rows_(sorted: false);
         for (int row = 0; row < rows.Length; row += 2)
@@ -171,9 +171,9 @@ public sealed partial class DistinctPairsTests
         try
         {
             long peak = 0;
-            foreach (long ceiling in new[] { 1L << 30, 0 })
+            foreach (int share in (int[])[1, 5, 10])
             {
-                QueryMemoryBudget budget = new QueryMemoryBudget(ceiling > 0 ? ceiling : peak / 5);
+                QueryMemoryBudget budget = new QueryMemoryBudget(share == 1 ? 1L << 30 : peak / share);
                 await using VortexSession session = VortexSession.Create(options =>
                 {
                     options.MaxDegreeOfParallelism = degree;
@@ -186,14 +186,14 @@ public sealed partial class DistinctPairsTests
                     .GroupBy(r => r.Key)
                     .Select(g => (g.Key, g.CountDistinct(x => x.Value), g.CountDistinct(x => x.Text)));
                 query.Plan.MergeInParts = false;
-                if (ceiling > 0)
+                Assert.Equal(Expected(rows), (await ListAsync(query.As<KeyCounts>())).ToDictionary(c => c.Key));
+                if (share == 1)
                 {
-                    Assert.Equal(Expected(rows), (await ListAsync(query.As<KeyCounts>())).ToDictionary(c => c.Key));
                     peak = budget.PeakBytes;
                 }
                 else
                 {
-                    await Assert.ThrowsAsync<VortexMemoryException>(async () => await ListAsync(query.As<KeyCounts>()));
+                    Assert.True(query.Plan.LastRun?.MergePasses > 1, $"one pass under {budget.CeilingBytes:N0} bytes of {peak:N0}");
                 }
 
                 Assert.Equal(0, budget.ReservedBytes);

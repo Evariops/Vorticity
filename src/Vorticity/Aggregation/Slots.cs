@@ -258,7 +258,7 @@ internal abstract class AggregateSlot
 
     /// <summary>
     /// Writes the states of <paramref name="groups"/>, in order, that the slot keeps apart from the
-    /// records: what <see cref="ReadStates"/> reads back. Nothing for a slot whose states lie in records.
+    /// records: what <see cref="ReadStates(ref SpillReader, int)"/> reads back. Nothing for a slot whose states lie in records.
     /// </summary>
     internal virtual void WriteStates(ReadOnlySpan<int> groups, SpillBuffer buffer)
     {
@@ -270,6 +270,26 @@ internal abstract class AggregateSlot
     /// a lane's would. Nothing for a slot whose states lie in records, which its partition reads.
     /// </summary>
     internal virtual void ReadStates(ref SpillReader reader, int count)
+    {
+    }
+
+    /// <summary>
+    /// Whether the slot counts distinct (group, value) pairs, which a merge of spilled parts can take in passes
+    /// (<see cref="PairPass"/>): a group's pairs need not fit its budget at once, its count the sum of the passes'.
+    /// </summary>
+    internal virtual bool CountsPairs => false;
+
+    /// <summary>
+    /// <see cref="ReadStates(ref SpillReader, int)"/>, a slot that counts pairs keeping the values of <paramref name="pass"/>
+    /// alone, the others read past; any other slot reads its states whole.
+    /// </summary>
+    internal virtual void ReadStates(ref SpillReader reader, int count, PairPass pass) => ReadStates(ref reader, count);
+
+    /// <summary>
+    /// A pass of a merge in passes done (<see cref="CountsPairs"/>): the pairs forgotten and the counts kept, for the next
+    /// pass to count its own; after the <paramref name="last"/>, the pairs' arrays given back, the counts all that answers.
+    /// </summary>
+    internal virtual void PassDone(bool last)
     {
     }
 
