@@ -155,7 +155,9 @@ internal sealed class OnPairDecoder : ArrayDecoder
 
         // The other kernels read every token through a table of them, which the dictionary's check, the table and
         // the sweep of the dictionary for ASCII each cost a pass over the tokens: a range of a node bigger than its
-        // batch reads the table its first range built and kept, with the check's end and the sweep's verdict.
+        // batch reads the table its first range built and kept, with the check's end and the sweep's verdict. What
+        // tells the node's table from another's is the key the context keeps it under, the segment and the node, which
+        // its recycling forgets; the tag, the tokens and the dictionary's length, only checks the shape is the same.
         long tag = ((long)tokenCount << 32) | (uint)dictionary.Length;
         ReadOnlySpan<long> tokens = default;
         long[]? built = null;
