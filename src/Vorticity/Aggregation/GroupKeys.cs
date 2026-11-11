@@ -448,8 +448,9 @@ internal abstract class GroupKeys
 
     /// <summary>
     /// Writes into <paramref name="into"/>, for each group of <paramref name="groups"/>, a key of 64 bits whose unsigned order
-    /// is <see cref="CompareKeys(int, int, int)"/>'s for component <paramref name="component"/>, the null group last; false,
-    /// <paramref name="into"/> left as it is, when the keys give none: a sort by them then compares.
+    /// is <see cref="CompareKeys(int, int, int)"/>'s for component <paramref name="component"/>, the null group last; false
+    /// when the keys give none, <paramref name="into"/> then holding nothing to read, written in part or not at all (a key
+    /// of 64 bits finds out at its null group that it leaves no key past its values): a sort by them then compares.
     /// </summary>
     internal virtual bool TryOrderKeys(ReadOnlySpan<int> groups, int component, Span<ulong> into) => false;
 
