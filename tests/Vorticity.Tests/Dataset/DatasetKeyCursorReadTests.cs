@@ -240,27 +240,75 @@ public sealed class DatasetKeyCursorReadTests
         Assert.True(counted.DependentSteps * 3 <= reads, $"{counted.DependentSteps} round trips one after another for {reads} reads over {dataset.ObjectCount} objects");
     }
 
-    /// <summary>A store whose reads each wait 5 ms before the store below serves them: reads asked together overlap.</summary>
+    /// <summary>
+    /// A store whose reads each wait 5 ms before the store below serves them: reads asked together overlap. A read asked
+    /// with none in flight waits besides for the next one, 50 ms at most, so that a pause of the machine between the reads
+    /// of one wave does not part them; a read that follows another's answer still waits alone.
+    /// </summary>
     private sealed class DelayedReads(IObjectStore inner) : IObjectStore
     {
+        private readonly Lock _gate = new Lock();
+        private TaskCompletionSource? _alone;
+        private int _inFlight;
+
         public ObjectStoreCapabilities Capabilities => inner.Capabilities;
 
         public async ValueTask<ObjectRead> ReadAsync(string key, long offset, Memory<byte> destination, string? ifToken, CancellationToken cancellationToken)
         {
-            await Task.Delay(5, cancellationToken);
-            return await inner.ReadAsync(key, offset, destination, ifToken, cancellationToken);
+            try
+            {
+                await HoldAsync(cancellationToken);
+                return await inner.ReadAsync(key, offset, destination, ifToken, cancellationToken);
+            }
+            finally
+            {
+                Interlocked.Decrement(ref _inFlight);
+            }
         }
 
         public async ValueTask<ObjectRead> ReadTailAsync(string key, Memory<byte> destination, CancellationToken cancellationToken)
         {
-            await Task.Delay(5, cancellationToken);
-            return await inner.ReadTailAsync(key, destination, cancellationToken);
+            try
+            {
+                await HoldAsync(cancellationToken);
+                return await inner.ReadTailAsync(key, destination, cancellationToken);
+            }
+            finally
+            {
+                Interlocked.Decrement(ref _inFlight);
+            }
         }
 
         public async ValueTask<ObjectHead?> HeadAsync(string key, CancellationToken cancellationToken)
         {
-            await Task.Delay(5, cancellationToken);
-            return await inner.HeadAsync(key, cancellationToken);
+            try
+            {
+                await HoldAsync(cancellationToken);
+                return await inner.HeadAsync(key, cancellationToken);
+            }
+            finally
+            {
+                Interlocked.Decrement(ref _inFlight);
+            }
+        }
+
+        private async Task HoldAsync(CancellationToken cancellationToken)
+        {
+            Task companion = Task.CompletedTask;
+            lock (_gate)
+            {
+                if (Interlocked.Increment(ref _inFlight) == 1)
+                {
+                    _alone = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                    companion = _alone.Task;
+                }
+                else
+                {
+                    _alone?.TrySetResult();
+                }
+            }
+
+            await Task.WhenAll(Task.Delay(5, cancellationToken), Task.WhenAny(companion, Task.Delay(50, cancellationToken)));
         }
 
         public ValueTask<PutOutcome> PutAsync(string key, System.IO.Pipelines.PipeReader content, long length, PutCondition condition, CancellationToken cancellationToken) =>

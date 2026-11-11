@@ -1235,10 +1235,14 @@ public sealed class SortedRunsCursorTests
 
     /// <summary>
     /// A source that counts the reads asked of it and the round trips: the reads that found none in flight. Each read waits
-    /// 20 ms before it is served, so that a read asked while another is out rides its round trip.
+    /// 20 ms before it is served, so that a read asked while another is out rides its round trip; one that found none in
+    /// flight waits besides for the next read, a second at most, so that a pause of the machine between two reads asked
+    /// together does not part them.
     /// </summary>
     private sealed class StepsCounted(ISegmentReader inner) : ISegmentReader
     {
+        private readonly Lock _gate = new Lock();
+        private TaskCompletionSource? _alone;
         private int _inFlight;
         private long _requests;
         private long _steps;
@@ -1299,12 +1303,22 @@ public sealed class SortedRunsCursorTests
         private async Task BeginAsync(CancellationToken cancellationToken)
         {
             Interlocked.Increment(ref _requests);
-            if (Interlocked.Increment(ref _inFlight) == 1)
+            Task companion = Task.CompletedTask;
+            lock (_gate)
             {
-                Interlocked.Increment(ref _steps);
+                if (Interlocked.Increment(ref _inFlight) == 1)
+                {
+                    Interlocked.Increment(ref _steps);
+                    _alone = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                    companion = _alone.Task;
+                }
+                else
+                {
+                    _alone?.TrySetResult();
+                }
             }
 
-            await Task.Delay(20, cancellationToken);
+            await Task.WhenAll(Task.Delay(20, cancellationToken), Task.WhenAny(companion, Task.Delay(1_000, cancellationToken)));
         }
     }
 
