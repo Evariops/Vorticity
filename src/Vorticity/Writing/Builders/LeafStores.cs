@@ -541,8 +541,7 @@ internal sealed unsafe class VarBinStore : ColumnStore
             ReadOnlySpan<byte> value = block[row];
             if (check && !Utf8.IsValid(value))
             {
-                Count = first + row;
-                ThrowInvalid();
+                Refuse(first, row, valid);
             }
 
             int size = value.Length;
@@ -838,4 +837,21 @@ internal sealed unsafe class VarBinStore : ColumnStore
 
     [DoesNotReturn]
     private void ThrowInvalid() => throw new VortexSchemaException($"The column is {Type}: the bytes appended to it must be valid UTF-8.");
+
+    /// <summary>
+    /// Refuses row <paramref name="row"/> of a block appended from <paramref name="first"/>, whose text is not UTF-8: the rows
+    /// before it kept, with their nulls, as an append of each row leaves them. Out of the block's loop, which it would slow.
+    /// </summary>
+    [DoesNotReturn]
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void Refuse(int first, int row, ReadOnlySpan<ulong> valid)
+    {
+        Count = first + row;
+        if (!valid.IsEmpty)
+        {
+            CopyValidity(first, valid, row);
+        }
+
+        ThrowInvalid();
+    }
 }
