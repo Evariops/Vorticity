@@ -92,11 +92,14 @@ internal sealed class ClockMemo<TKey, TValue>
             _order.Enqueue(slot);
             long held = _held + bytes;
 
-            // Every slot passed is unmarked, so the walk ends; the slot just kept is passed over, so that a value is never let
-            // go by its own keeping, and the walk ends before it is alone, since it fits the budget.
+            // Every slot passed is unmarked; the slot just kept is passed over, so that a value is never let go by its own
+            // keeping, and the walk ends before it is alone, since it fits the budget. Lookups beside the walk may mark the
+            // slots again, which takes no lock: past one turn of the queue's marks, a mark is no longer heeded, and the walk
+            // ends within two turns whatever the lookups do. Alone, it never heeds more than a turn's marks.
+            int chances = _order.Count;
             while (held > Budget && _order.TryDequeue(out Slot? oldest))
             {
-                if (oldest.Used || ReferenceEquals(oldest, slot))
+                if (ReferenceEquals(oldest, slot) || (oldest.Used && chances-- > 0))
                 {
                     oldest.Used = false;
                     _order.Enqueue(oldest);

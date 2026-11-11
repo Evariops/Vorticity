@@ -105,4 +105,41 @@ public sealed class ClockMemoTests
         Assert.InRange(memo.Held, 0, memo.Budget);
         Assert.Equal(memo.Held, memo.Count * 8L);
     }
+
+    // Keepers side by side over keys they share, a few hot ones among many, with readers marking every key they find: each
+    // keep gives back the one value its key holds, each lookup finds it, and the bytes held are the values' and within the
+    // budget once all stop. The readers mark slots while an eviction walks past them; it ends all the same.
+    [Fact]
+    public async Task KeepersSideBySideKeepEachKeysOneValueWithinTheBudget()
+    {
+        ClockMemo<int, int> memo = new ClockMemo<int, int>(64 * 8);
+        Task[] tasks = new Task[8];
+        for (int t = 0; t < tasks.Length; t++)
+        {
+            int lane = t;
+            tasks[t] = Task.Run(
+                () =>
+                {
+                    Random random = new Random(lane);
+                    for (int i = 0; i < 100_000; i++)
+                    {
+                        int key = random.Next(4) == 0 ? random.Next(4_096) : random.Next(96);
+                        if (lane % 2 == 0)
+                        {
+                            Assert.True(memo.Keep(key, key * 3, 8, out int kept));
+                            Assert.Equal(key * 3, kept);
+                        }
+                        else if (memo.TryGet(key, out int value))
+                        {
+                            Assert.Equal(key * 3, value);
+                        }
+                    }
+                },
+                TestContext.Current.CancellationToken);
+        }
+
+        await Task.WhenAll(tasks);
+        Assert.InRange(memo.Held, 0, memo.Budget);
+        Assert.Equal(memo.Held, memo.Count * 8L);
+    }
 }
