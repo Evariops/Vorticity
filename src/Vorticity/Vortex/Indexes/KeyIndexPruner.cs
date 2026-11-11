@@ -1534,6 +1534,12 @@ internal sealed class KeyIndexPruner
         /// in the same block passed over by a search for the first row of the next one, where each row took a division
         /// and a marking. A key of many rows in few blocks costs its blocks, not its rows.
         /// </summary>
+        /// <remarks>
+        /// The format holds a key's rows ascending (vorticity.sorted.runs.v1), which the search trusts: rows that went
+        /// back would leave blocks unmarked and their rows out of the answer. The row each step lands on is checked against
+        /// the one it marked, a comparison a block, and a run whose rows are seen to go back is refused.
+        /// </remarks>
+        /// <exception cref="VortexFormatException">The key's rows go back from one block to the next.</exception>
         private void MarkRows(
             int literal, int lo, int hi, ReadOnlySpan<uint> rows, ulong firstBlock, long blockRows)
         {
@@ -1541,7 +1547,13 @@ internal sealed class KeyIndexPruner
             {
                 ulong block = rows[e] / (ulong)blockRows;
                 Present(literal, firstBlock + block);
-                e = FirstAtOrPast(rows, e + 1, hi, (block + 1) * (ulong)blockRows);
+                int next = FirstAtOrPast(rows, e + 1, hi, (block + 1) * (ulong)blockRows);
+                if (next < hi && rows[next] < rows[next - 1])
+                {
+                    throw Descending();
+                }
+
+                e = next;
             }
         }
 
@@ -1553,9 +1565,18 @@ internal sealed class KeyIndexPruner
             {
                 ulong block = rows[e] / (ulong)blockRows;
                 Present(literal, firstBlock + block);
-                e = FirstAtOrPast(rows, e + 1, hi, (block + 1) * (ulong)blockRows);
+                int next = FirstAtOrPast(rows, e + 1, hi, (block + 1) * (ulong)blockRows);
+                if (next < hi && rows[next] < rows[next - 1])
+                {
+                    throw Descending();
+                }
+
+                e = next;
             }
         }
+
+        private static VortexFormatException Descending() =>
+            new VortexFormatException("A sorted run's rows of one key go back: the format holds them ascending.");
 
         /// <summary>
         /// The first of <c>[from, to)</c> whose row is at or past <paramref name="row"/>, <paramref name="to"/> for none, the
