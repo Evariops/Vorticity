@@ -73,6 +73,9 @@ internal abstract class SketchSlot<TSketch, TResult> : AggregateSlot<TResult>
     /// <summary>Counts <paramref name="bytes"/> more that the sketches hold.</summary>
     private protected void Grew(long bytes) => _bytes += bytes;
 
+    /// <summary>The groups the slot holds.</summary>
+    private protected int Groups => _groups;
+
     internal override void Govern(ArrayShelf shelf) => _shelf = shelf;
 
     internal override void EnsureGroups(int groups)

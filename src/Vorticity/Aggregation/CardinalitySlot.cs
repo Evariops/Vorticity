@@ -100,11 +100,14 @@ internal abstract class CardinalitySlot : SketchSlot<CardinalitySketch, long>
         base.EnsureGroups(groups);
         if (groups > _held.Length)
         {
-            int capacity = Math.Max(groups, Math.Min(2 * _held.Length, int.MaxValue / Firsts));
+            int capacity = Capacity(groups);
             ArrayShelf.Resize(Shelf, ref _held, capacity);
             ArrayShelf.Resize(Shelf, ref _firsts, capacity * Firsts);
         }
     }
+
+    /// <summary>The groups the arrays of first hashes make room for once they hold <paramref name="groups"/>: twice those they did, or as many.</summary>
+    private int Capacity(long groups) => (int)Math.Max(groups, Math.Min(2L * _held.Length, int.MaxValue / Firsts));
 
     internal override bool StepStates(in StateInput input, ReadOnlySpan<ulong> selection, ReadOnlySpan<int> groups)
     {
@@ -176,7 +179,16 @@ internal abstract class CardinalitySlot : SketchSlot<CardinalitySketch, long>
 
     internal override long Footprint => base.Footprint + ((long)_firsts.Length * sizeof(ulong)) + _held.Length;
 
-    internal override long GrowthFor(int more) => base.GrowthFor(more) + ((long)more * ((Firsts * sizeof(ulong)) + 1));
+    /// <remarks>
+    /// The arrays of first hashes grow by doubling, which takes their whole new length from the shelf: asked as such. Asked
+    /// as a few bytes a group more, a doubling of a lane's arrays went past the budget by a megabyte, overdrawn at a
+    /// tenth of the peak.
+    /// </remarks>
+    internal override long GrowthFor(int more)
+    {
+        long groups = Groups + (long)more;
+        return base.GrowthFor(more) + (groups <= _held.Length ? 0 : (long)Capacity(groups) * ((Firsts * sizeof(ulong)) + 1));
+    }
 
     /// <summary>
     /// Each group's state as its sketch writes it, a group that holds its first hashes in line writing them as an exact

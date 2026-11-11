@@ -160,7 +160,8 @@ public sealed partial class GroupSpillTests
 
     // An approximate distinct count by a key of a few values each, its groups' hashes held in line: spilled, they are
     // written as the exact sketches they make, with no sketch made for them, and the answers are those of no spill, the
-    // budget given back and no file left. (Its lanes' peak passes their ceiling, as it did before: apart.)
+    // budget given back, no file left, and the peak within the ceiling: the doubling of a lane's arrays of first hashes
+    // is asked whole before it comes.
     [Theory]
     [InlineData(1, 10)]
     [InlineData(4, 10)]
@@ -198,6 +199,7 @@ public sealed partial class GroupSpillTests
             Assert.Equal(expected, await AnswersAsync(session, path));
             Assert.Equal(0, budget.ReservedBytes);
             Assert.Empty(Directory.EnumerateFileSystemEntries(scratch));
+            Assert.True(budget.PeakBytes <= budget.CeilingBytes * 106 / 100, $"peak {budget.PeakBytes:N0} of {budget.CeilingBytes:N0}");
         }
         finally
         {
