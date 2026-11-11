@@ -477,13 +477,25 @@ internal sealed class ArrayShelf : ISweptAfterCollections
         if (Lane)
         {
             long bytes = (long)length * Unsafe.SizeOf<T>();
+            Handed++;
+            HandedBytes += bytes;
+
+            // A small one its tables gave back, kept on the lane: no lock.
+            if (TakeSpare<T>(length) is { } spare)
+            {
+                if (zeroed)
+                {
+                    Array.Clear(spare);
+                }
+
+                return spare;
+            }
+
             if (bytes >= LeastCounted)
             {
                 Reserve(_memory!, bytes);
             }
 
-            Handed++;
-            HandedBytes += bytes;
             return Retained.Take<T>(length, zeroed, counted: bytes >= LeastCounted);
         }
 
@@ -569,6 +581,13 @@ internal sealed class ArrayShelf : ISweptAfterCollections
                 return;
             }
 
+            // A small one kept on the lane for its tables' next array of that length: a quantile's stores, which take and
+            // give arrays of a few lengths as they grow, met every other lane on the process's lock at 32 clients.
+            if (KeepSpare(array))
+            {
+                return;
+            }
+
             if ((long)array.Length * Unsafe.SizeOf<T>() is long bytes and >= LeastCounted)
             {
                 Unreserve(_memory!, bytes);
@@ -603,6 +622,87 @@ internal sealed class ArrayShelf : ISweptAfterCollections
     {
         Clean(array);
         Give(typeof(T), array, Unsafe.SizeOf<T>(), since);
+    }
+
+    // A lane's small arrays its tables gave back, which no query's memory counts, kept for their next of the same length:
+    // taking one back takes no lock; a few, of 64 KiB at most together, handed to the process's shelf when the lane's tables
+    // are let go (LetGo) or delivered (Forget). One lane uses its shelf at a time.
+    private (Type Type, int ElementBytes, Array Array)?[]? _spares;
+    private long _spareBytes;
+    private const int Spares = 8;
+    private const long SpareBytes = 64 * 1024;
+
+    /// <summary>An array of <paramref name="length"/> a lane's tables gave back, kept on the lane; null for none.</summary>
+    private T[]? TakeSpare<T>(int length)
+    {
+        if (_spares is not { } spares)
+        {
+            return null;
+        }
+
+        for (int i = 0; i < spares.Length; i++)
+        {
+            if (spares[i] is { Array: T[] array } && array.Length == length)
+            {
+                spares[i] = null;
+                _spareBytes -= (long)length * Unsafe.SizeOf<T>();
+                return array;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>Keeps <paramref name="array"/>, which a lane's table gave back, on the lane when there is room; whether it did.</summary>
+    private bool KeepSpare<T>(T[] array)
+    {
+        // The small arrays alone, which the query's memory does not count: a counted one kept would hold its count past the
+        // table that gave it, and raise the lane's peak.
+        long bytes = (long)array.Length * Unsafe.SizeOf<T>();
+        if (bytes == 0 || bytes >= LeastCounted || _spareBytes + bytes > SpareBytes)
+        {
+            return false;
+        }
+
+        (Type Type, int ElementBytes, Array Array)?[] spares = _spares ??= new (Type, int, Array)?[Spares];
+        for (int i = 0; i < spares.Length; i++)
+        {
+            if (spares[i] is null)
+            {
+                Clean(array);
+                spares[i] = (typeof(T), Unsafe.SizeOf<T>(), array);
+                _spareBytes += bytes;
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Hands the arrays kept on a lane to the process's shelf: offered as a delivered result's are, counted nowhere, when
+    /// <paramref name="since"/> says from when; given as any lane's otherwise, their count left to the caller.
+    /// </summary>
+    private void HandSpares(long since = long.MaxValue)
+    {
+        if (_spares is not { } spares)
+        {
+            return;
+        }
+
+        for (int i = 0; i < spares.Length; i++)
+        {
+            if (spares[i] is (Type type, int elementBytes, Array array))
+            {
+                spares[i] = null;
+                if (!Retained.Drops)
+                {
+                    Retained.Give(type, array, elementBytes, since);
+                }
+            }
+        }
+
+        _spareBytes = 0;
     }
 
     /// <summary>An array given back made safe to keep: poisoned under the tests, its references cleared.</summary>
@@ -710,6 +810,8 @@ internal sealed class ArrayShelf : ISweptAfterCollections
     /// </summary>
     internal void LetGo()
     {
+        // The small arrays kept on the lane go to the process's shelf.
+        HandSpares();
         if (_memory is { } memory)
         {
             memory.Shrink(_out + _credit);
@@ -730,6 +832,7 @@ internal sealed class ArrayShelf : ISweptAfterCollections
         _credit = 0;
         _keepsAhead = false;
         _forgotten = true;
+        HandSpares(_memory?.Started ?? long.MaxValue);
     }
 
     /// <summary>The bytes of an array a lane's shelf hands out, reserved from what it holds ahead, or else <see cref="Ahead"/> more.</summary>
