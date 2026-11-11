@@ -52,11 +52,7 @@ public sealed class WholeSpanNumbersTests
     [Fact]
     public void TheGatheredPassReadsEachRowsGroupFromThePage()
     {
-        if (!System.Runtime.Intrinsics.X86.Avx2.IsSupported)
-        {
-            return;
-        }
-
+        Assert.SkipUnless(System.Runtime.Intrinsics.X86.Avx2.IsSupported, "The gathered pass is AVX2's, which this machine or run lacks.");
         Gather<sbyte>(-100, 100);
         Gather<byte>(20, 230);
         Gather<short>(-1_000, 3_000);

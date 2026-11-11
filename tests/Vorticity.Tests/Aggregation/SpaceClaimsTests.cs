@@ -13,11 +13,9 @@ public sealed class SpaceClaimsTests
     public void AClaimPastTheFreeSpaceIsRefusedAndTheOthersAreCounted()
     {
         string directory = Path.GetTempPath();
-        if (GroupCore.Free(directory) is not long free)
-        {
-            return;
-        }
-
+        long? space = GroupCore.Free(directory);
+        Assert.SkipWhen(space is null, $"The free space of {directory} cannot be read here.");
+        long free = space!.Value;
         SpaceClaims claims = default;
         Assert.False(claims.TryClaim(directory, free));
         Assert.True(claims.TryClaim(directory, 4_096));
