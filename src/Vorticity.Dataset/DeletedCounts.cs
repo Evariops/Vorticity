@@ -551,10 +551,17 @@ internal sealed class DeletedCounts
                 CanonicalKind kind = node.Kind;
                 if (kind is not (CanonicalKind.Constant or CanonicalKind.Primitive or CanonicalKind.VarBinView))
                 {
-                    throw new NotSupportedException($"A counted column of {dtype} holds a {kind} array, whose values no counts key.");
+                    // Refused at the first row taken that holds a value, as a row at a time refused it: its nulls count as nulls.
+                    RefuseValues(key, count, selection);
                 }
 
-                ReadOnlySpan<byte> values = kind == CanonicalKind.Constant ? node.ConstantElement : kind == CanonicalKind.Primitive ? node.Values.Span : node.Views.Span;
+                ReadOnlySpan<byte> values = kind switch
+                {
+                    CanonicalKind.Constant => node.ConstantElement,
+                    CanonicalKind.Primitive => node.Values.Span,
+                    CanonicalKind.VarBinView => node.Views.Span,
+                    _ => default,
+                };
                 ReadOnlySpan<VortexBuffer> buffers = kind == CanonicalKind.VarBinView ? node.DataBuffers : default;
                 int width = kind == CanonicalKind.Primitive ? node.PType.ByteWidth() : 0;
                 Dictionary<byte[], long[]>.AlternateLookup<ReadOnlySpan<byte>> lookup = _entries.GetAlternateLookup<ReadOnlySpan<byte>>();
@@ -606,6 +613,19 @@ internal sealed class DeletedCounts
                 }
 
                 Measures(arena, root, entries.AsSpan(0, taken), rows[..taken]);
+            }
+
+            /// <summary>Throws when a row of <paramref name="count"/> that <paramref name="selection"/> takes holds a value of <paramref name="key"/>, an array no counts key.</summary>
+            [MethodImpl(MethodImplOptions.NoInlining)]
+            private void RefuseValues(in Stored key, int count, ReadOnlySpan<ulong> selection)
+            {
+                for (int row = 0; row < count; row++)
+                {
+                    if ((selection.IsEmpty || ((selection[row >> 6] >> (row & 63)) & 1) != 0) && key.Valid(row))
+                    {
+                        throw new NotSupportedException($"A counted column of {dtype} holds a {key.Node.Kind} array, whose values no counts key.");
+                    }
+                }
             }
 
             /// <summary>Folds each measure of the rows <paramref name="rows"/> into their entries <paramref name="entries"/>.</summary>
