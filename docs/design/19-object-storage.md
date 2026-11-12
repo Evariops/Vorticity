@@ -423,6 +423,7 @@ hashed with SHA-256. The small XML bodies the client builds itself are signed.
 | store operation | S3 request |
 |---|---|
 | `ReadAsync` | `GET` with `Range: bytes=a-b`, and `If-Match` when the token is known. S3 serves one range per request, so a coalesced range is one request |
+| `ReadIfPresentAsync` | the same `GET`, its `404` answered `null` without an exception; so on Azure and Cloud Storage |
 | `ReadTailAsync` | `GET` with `Range: bytes=-n`, whose `Content-Range` says the object's length in the same answer, on a service whose suffix reads are proven. Elsewhere a `HEAD`, then the range |
 | `HeadAsync` | `HEAD`, which also says the Object Lock retention date and the legal hold |
 | `PutAsync`, up to the part threshold | `PUT` with `If-None-Match: *` when the key must be absent, `If-Match` when the token must match, and the content's checksum in a header (see [writing](#11-writing)) |

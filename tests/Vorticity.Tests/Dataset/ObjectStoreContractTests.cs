@@ -139,6 +139,27 @@ public sealed class ObjectStoreContractTests : IDisposable
 
     [Theory]
     [MemberData(nameof(Stores))]
+    public async Task AReadIfPresentAnswersAnAbsentKeyNullAndReadsAPresentOneAsAReadDoes(string kind)
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using IObjectStore store = Open(kind);
+        byte[] buffer = new byte[16];
+        Assert.Null(await store.ReadIfPresentAsync("data/none.vortex", 0, buffer, null, ct));
+
+        byte[] content = Encoding.ASCII.GetBytes("present and read");
+        Assert.Equal(PutOutcome.Created, await store.PutIfAbsentAsync("data/some.vortex", PipeReader.Create(new ReadOnlySequence<byte>(content)), content.Length, ct));
+        ObjectRead read = await store.ReadAsync("data/some.vortex", 4, buffer, null, ct);
+        byte[] again = new byte[16];
+        Assert.Equal(read, await store.ReadIfPresentAsync("data/some.vortex", 4, again, read.Token, ct));
+        Assert.Equal(buffer, again);
+
+        // What a read refuses of a present key, it refuses alike: an offset past the end, another token.
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(async () => await store.ReadIfPresentAsync("data/some.vortex", content.Length + 1, buffer, null, ct));
+        await Assert.ThrowsAsync<VortexFormatException>(async () => await store.ReadIfPresentAsync("data/some.vortex", 0, buffer, "another token", ct));
+    }
+
+    [Theory]
+    [MemberData(nameof(Stores))]
     public async Task ARangeIsClampedToTheObjectAndRefusedPastItsEnd(string kind)
     {
         CancellationToken ct = TestContext.Current.CancellationToken;

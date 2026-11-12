@@ -551,16 +551,19 @@ internal static class DatasetCommitter
         return held is not null ? (known, held) : throw ObjectNotFoundException.For(CommitKey.For(known));
     }
 
-    /// <summary>The commit object of <paramref name="version"/>, or null when the store holds none; a torn one reported against it.</summary>
+    /// <summary>
+    /// The commit object of <paramref name="version"/>, or null when the store holds none; a torn one reported against it.
+    /// Its absence, what a refresh that finds nothing new meets each time, is the store's answer and no exception.
+    /// </summary>
     private static async Task<CommitObject?> ReadIfThereAsync(IObjectStore store, ulong version, CancellationToken cancellationToken)
     {
         try
         {
-            return await OpenAsync(store, version, cancellationToken).ConfigureAwait(false);
+            return await CommitObject.OpenIfPresentAsync(store, CommitKey.For(version), cancellationToken).ConfigureAwait(false);
         }
-        catch (ObjectNotFoundException)
+        catch (CommitFormatException torn)
         {
-            return null;
+            throw TornCommitException.Of(version, torn);
         }
     }
 

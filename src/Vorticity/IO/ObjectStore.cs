@@ -54,6 +54,31 @@ public interface IObjectStore : IAsyncDisposable
     ValueTask<ObjectRead> ReadAsync(string key, long offset, Memory<byte> destination, string? ifToken, CancellationToken cancellationToken);
 
     /// <summary>
+    /// Reads as <see cref="ReadAsync"/> does, an absent key answered null rather than thrown: the read of a caller that
+    /// finds the key missing as often as not, as a reader that asks for the next commit of a dataset does. A store that
+    /// tells an absent key without an exception says so here; the default reads and catches, as a caller would.
+    /// </summary>
+    /// <param name="key">The object's key.</param>
+    /// <param name="offset">The first byte; at or past the end is refused, except 0 on an empty object.</param>
+    /// <param name="destination">Where the bytes go, written from its start.</param>
+    /// <param name="ifToken">The token the object must still have, or null for any.</param>
+    /// <param name="cancellationToken">Cancels the read.</param>
+    /// <returns>The bytes read, the object's length and its token; null when no object has that key.</returns>
+    /// <exception cref="ArgumentOutOfRangeException">The offset is past the object's end.</exception>
+    /// <exception cref="VortexFormatException">The object's token is not <paramref name="ifToken"/>: it changed under the reader.</exception>
+    async ValueTask<ObjectRead?> ReadIfPresentAsync(string key, long offset, Memory<byte> destination, string? ifToken, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await ReadAsync(key, offset, destination, ifToken, cancellationToken).ConfigureAwait(false);
+        }
+        catch (ObjectNotFoundException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
     /// Reads the last bytes of an object into <paramref name="destination"/>, as many as it holds or as
     /// the object has, whichever is fewer, with the object's length and token from the same answer. A
     /// store that reads suffixes (<see cref="ObjectStoreCapabilities.ReadsSuffix"/>) answers in one
