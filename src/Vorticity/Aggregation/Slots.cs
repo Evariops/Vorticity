@@ -11,12 +11,14 @@ namespace Vorticity.Aggregating;
 /// <summary>One column of one batch, as an aggregate is handed it.</summary>
 internal readonly ref struct BatchInput
 {
-    internal BatchInput(long batch, CanonicalArena arena, int node, int rows, ReadOnlySpan<ulong> selection, long startRow = 0, bool settled = true)
-        : this(batch, arena, node, rows, selection, startRow, 0, rows, settled)
+    internal BatchInput(
+        long batch, CanonicalArena arena, int node, int rows, ReadOnlySpan<ulong> selection, long startRow = 0, bool settled = true, int orderNode = -1, int piece = 0)
+        : this(batch, arena, node, rows, selection, startRow, 0, rows, settled, orderNode, piece)
     {
     }
 
-    private BatchInput(long batch, CanonicalArena arena, int node, int rows, ReadOnlySpan<ulong> selection, long startRow, int start, int end, bool settled)
+    private BatchInput(
+        long batch, CanonicalArena arena, int node, int rows, ReadOnlySpan<ulong> selection, long startRow, int start, int end, bool settled, int orderNode, int piece)
     {
         Batch = batch;
         Arena = arena;
@@ -27,7 +29,19 @@ internal readonly ref struct BatchInput
         Start = start;
         End = end;
         Settled = settled;
+        OrderNode = orderNode;
+        Piece = piece;
     }
+
+    /// <summary>The node of the column an aggregate over an order takes its points in the order of; -1 for any other aggregate.</summary>
+    internal int OrderNode { get; }
+
+    /// <summary>
+    /// The piece of the source the batch belongs to: the number of the range its lane took from the queue, the same for
+    /// every batch of one range, 0 for a pass read as one stream. A lane takes its ranges in order, so that two batches of
+    /// pieces that follow each other lie side by side in the source, with no row read elsewhere between them.
+    /// </summary>
+    internal int Piece { get; }
 
     /// <summary>
     /// Whether the partition's groups have each seen many rows, their extremes moved rarely: a slot then
@@ -46,7 +60,7 @@ internal readonly ref struct BatchInput
     internal int End { get; }
 
     /// <summary>The same column, the rows of [<paramref name="start"/>, <paramref name="end"/>) folded alone.</summary>
-    internal BatchInput Window(int start, int end) => new BatchInput(Batch, Arena, Node, Rows, Selection, StartRow, start, end, Settled);
+    internal BatchInput Window(int start, int end) => new BatchInput(Batch, Arena, Node, Rows, Selection, StartRow, start, end, Settled, OrderNode, Piece);
 
     /// <summary>The source's row the batch's first row is: what a chosen row is kept as, its position.</summary>
     internal long StartRow { get; }
@@ -152,6 +166,13 @@ internal abstract class AggregateSlot
     /// <c>g - offsets[p]</c> of <c>parts[p]</c>, <c>p</c> the last whose offset is at or below it.
     /// </summary>
     internal abstract AggregateSlot Joined(AggregateSlot[] parts, int[] offsets);
+
+    /// <summary>The slot that holds <paramref name="group"/>'s state, and its number there: this one, or the part of a joined slot.</summary>
+    internal virtual AggregateSlot PartOf(int group, out int local)
+    {
+        local = group;
+        return this;
+    }
 
     /// <summary>
     /// Keeps the states of <paramref name="groups"/> alone, group <c>groups[i]</c> becoming group
@@ -452,6 +473,12 @@ internal sealed class JoinedSlot<TResult>(AggregateSlot[] parts, int[] offsets) 
     {
         int part = JoinedParts.PartOf(offsets, group);
         return ((AggregateSlot<TResult>)parts[part]).Result(group - offsets[part]);
+    }
+
+    internal override AggregateSlot PartOf(int group, out int local)
+    {
+        int part = JoinedParts.PartOf(offsets, group);
+        return parts[part].PartOf(group - offsets[part], out local);
     }
 
     /// <summary>

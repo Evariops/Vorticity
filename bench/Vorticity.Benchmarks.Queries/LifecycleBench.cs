@@ -28,14 +28,14 @@ namespace Vorticity.Benchmarks.Queries;
 /// and of the tiers' merges (10 and 8 by default), and <c>--trace-overlaps N</c> prints the first N jobs that rewrite
 /// rather than move, with what the other levels hold inside their range.
 /// </remarks>
-internal static class LifecycleBench
+internal static partial class LifecycleBench
 {
     private static readonly (string Name, TimeSpan Width)[] Windows =
         [("15 min", TimeSpan.FromMinutes(15)), ("1 h", TimeSpan.FromHours(1)), ("1 day", TimeSpan.FromDays(1)), ("30 days", TimeSpan.FromDays(30))];
 
     internal static async Task<int> Run(
         int hours, double rate, int writers, int batchSeconds, string partition, int deletesPerHour, int fanout, bool late,
-        bool neighbours, long maxObjectBytes, string? pick, int traceOverlaps)
+        bool neighbours, long maxObjectBytes, string? pick, int traceOverlaps, bool growth = false)
     {
         await using MemoryObjectStore memory = new MemoryObjectStore();
         await using CountingObjectStore store = new CountingObjectStore(memory);
@@ -70,7 +70,7 @@ internal static class LifecycleBench
         };
         TimeUnit unit = UnitOf(compactor);
 
-        Ledger ledger = new Ledger { TraceLeft = traceOverlaps, Tracing = traceOverlaps > 0 };
+        Ledger ledger = new Ledger { TraceLeft = traceOverlaps, Tracing = traceOverlaps > 0, Growth = growth };
         RequestGenerator generator = new RequestGenerator(41);
         Random random = new Random(43);
         Queue<string> recent = new Queue<string>();
@@ -340,6 +340,44 @@ internal static class LifecycleBench
         }
 
         ledger.Samples.Add((objects, counts));
+        if (ledger.Growth)
+        {
+            await GrowthSampleAsync(dataset, newest, ledger);
+        }
+    }
+
+    /// <summary>
+    /// The growth of each service's durations by hour over the day ending at the newest row, and its twin, the last duration
+    /// of each in the order of the instants, which reads the same rows and keeps no run: the groups whose runs crossed, a
+    /// late row among them, the rows and the time their second read took.
+    /// </summary>
+    private static async Task GrowthSampleAsync(VortexDataset dataset, DateTimeOffset newest, Ledger ledger)
+    {
+        DateTimeOffset from = newest.AddDays(-1);
+        long started = Stopwatch.GetTimestamp();
+        Aggregation growth = dataset.Scan<GeneratedRequest>()
+            .Where(r => r.At >= from)
+            .GroupBy(r => (r.Service, Hour: r.At.Truncate(CalendarUnit.Hour)))
+            .Select(g => (g.Key.Service, g.Key.Hour, g.OrderedBy(r => r.At).Increase(r => r.DurationNs)));
+        long groups = 0;
+        await foreach (ServiceGrowth _ in growth.As<ServiceGrowth>().ToRecordsAsync())
+        {
+            groups++;
+        }
+
+        double ms = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+        Aggregating.AggregationPlan plan = growth.Plan;
+        started = Stopwatch.GetTimestamp();
+        Aggregation twin = dataset.Scan<GeneratedRequest>()
+            .Where(r => r.At >= from)
+            .GroupBy(r => (r.Service, Hour: r.At.Truncate(CalendarUnit.Hour)))
+            .Select(g => (g.Key.Service, g.Key.Hour, g.OrderedBy(r => r.At).Last(r => r.DurationNs)));
+        await foreach (ServiceGrowth _ in twin.As<ServiceGrowth>().ToRecordsAsync())
+        {
+        }
+
+        double twinMs = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+        ledger.Growths.Add((groups, plan.LastGroupsReadAgain, plan.LastRowsReadAgain, ms, plan.LastSettleTicks * 1e3 / Stopwatch.Frequency, plan.LastReadAgainTicks * 1e3 / Stopwatch.Frequency, twinMs));
     }
 
     private static void Print(
@@ -388,7 +426,33 @@ internal static class LifecycleBench
 
             Console.WriteLine($"  {"all",-8} {ledger.Samples.Average(s => s.Objects),7:F1} {ledger.Samples.Max(s => s.Objects),5}");
         }
+
+        if (ledger.Growths.Count > 0)
+        {
+            // The first sample, before a day of data is in, and the last, once every job ran, apart from the hourly ones.
+            Console.WriteLine($"growth by service and hour over the last day, {ledger.Growths.Count} samples:");
+            Console.WriteLine($"  {"",-10} {"groups",7} {"read again",11} {"rows again",11} {"ms",8} {"settle ms",10} {"again ms",9} {"twin ms",8}");
+            (string, (long Groups, long Crossed, long Rows, double Ms, double SettleMs, double AgainMs, double TwinMs))[] lines =
+                [("mean", Mean(ledger.Growths)), ("max", Max(ledger.Growths)), ("last", ledger.Growths[^1])];
+            foreach ((string name, (long Groups, long Crossed, long Rows, double Ms, double SettleMs, double AgainMs, double TwinMs) sample) in lines)
+            {
+                Console.WriteLine(
+                    $"  {name,-10} {sample.Groups,7} {sample.Crossed,11} {sample.Rows,11} {sample.Ms,8:F1} {sample.SettleMs,10:F1} {sample.AgainMs,9:F1} {sample.TwinMs,8:F1}");
+            }
+        }
+
+        static (long, long, long, double, double, double, double) Mean(List<(long Groups, long Crossed, long Rows, double Ms, double SettleMs, double AgainMs, double TwinMs)> all) => (
+            (long)all.Average(s => s.Groups), (long)all.Average(s => s.Crossed), (long)all.Average(s => s.Rows),
+            all.Average(s => s.Ms), all.Average(s => s.SettleMs), all.Average(s => s.AgainMs), all.Average(s => s.TwinMs));
+
+        static (long, long, long, double, double, double, double) Max(List<(long Groups, long Crossed, long Rows, double Ms, double SettleMs, double AgainMs, double TwinMs)> all) => (
+            all.Max(s => s.Groups), all.Max(s => s.Crossed), all.Max(s => s.Rows), all.Max(s => s.Ms), all.Max(s => s.SettleMs), all.Max(s => s.AgainMs),
+            all.Max(s => s.TwinMs));
     }
+
+    /// <summary>A service's hour and a value of it, the growth's or the twin's.</summary>
+    [VortexRecord]
+    public partial record struct ServiceGrowth(string Service, DateTimeOffset Hour, long? Value);
 
     /// <summary>The handles' clock: the newest row appended, as data time runs.</summary>
     private sealed class DataClock : TimeProvider
@@ -411,6 +475,12 @@ internal static class LifecycleBench
         internal long Deleted { get; set; }
 
         internal bool Tracing { get; init; }
+
+        /// <summary>Whether each hourly sample also asks a growth (<c>--growth</c>).</summary>
+        internal bool Growth { get; init; }
+
+        /// <summary>Each growth sample: its groups, those read again, the rows read again, its time, that of the reads, the twin's.</summary>
+        internal List<(long Groups, long Crossed, long Rows, double Ms, double SettleMs, double AgainMs, double TwinMs)> Growths { get; } = [];
 
         internal int TraceLeft { get; set; }
 

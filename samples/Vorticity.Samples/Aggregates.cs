@@ -221,6 +221,33 @@ internal static class Aggregates
         {
             Console.WriteLine(line);
         }
+
+        // Counters of the requests served, which a restart sets back to zero: the requests of each hour, the restart's
+        // included, and the counter's first and last readings in it.
+        string counters = await Demo.CountersAsync();
+        await using VortexFile counterFile = await VortexFile.OpenAsync(counters);
+        await BestOfThreeAsync("OrderedBy(At).Increase", async () =>
+        {
+            lines = new string[6];
+            int hours = 0;
+            await foreach (ServedHour hour in counterFile.Scan<Served>()
+                .Where(r => r.Service == "checkout")
+                .GroupBy(r => r.At.Truncate(CalendarUnit.Hour))
+                .OrderBy(g => g.Key)
+                .Select(g => (g.Key, g.OrderedBy(r => r.At).Increase(r => r.Requests), g.OrderedBy(r => r.At).First(r => r.Requests), g.OrderedBy(r => r.At).Last(r => r.Requests)))
+                .As<ServedHour>()
+                .ToRecordsAsync())
+            {
+                lines[hours++] = $"  {hour.Hour:HH:mm}  {hour.Requests} requests, read {hour.First} then {hour.Last}";
+            }
+
+            return $"{hours} hours";
+        });
+
+        foreach (string line in lines)
+        {
+            Console.WriteLine(line);
+        }
     }
 
     private static string Describe(WelfordState s, Scan<Reading> scan) =>
@@ -404,3 +431,11 @@ public partial record struct VisitHour(DateTime Hour, long Visits, double? MeanM
 /// <summary>A bucket of durations, from its lower end: how many visits fell in it.</summary>
 [VortexRecord]
 public partial record struct DurationBucket(int From, long Visits);
+
+/// <summary>A reading of the requests a service served, a counter since its last start.</summary>
+[VortexRecord]
+public partial record struct Served(string Service, DateTimeOffset At, long Requests);
+
+/// <summary>The requests a service served in an hour, and its counter's first and last readings in it.</summary>
+[VortexRecord]
+public partial record struct ServedHour(DateTimeOffset Hour, long? Requests, long? First, long? Last);

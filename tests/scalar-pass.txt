@@ -22,6 +22,8 @@ Vorticity.Tests.Compute.*
 Vorticity.Tests.RowEncoding.*
 Vorticity.Tests.Parquet.*
 Vorticity.Tests.Aggregation.DirectGroupKeysTests
+Vorticity.Tests.Aggregation.GrowthKernelTests
+Vorticity.Tests.Aggregation.GrowthTests
 Vorticity.Tests.Aggregation.IndexedSumTests
 Vorticity.Tests.Aggregation.MaskedAccumulateTests
 Vorticity.Tests.Aggregation.SumKernelsTests

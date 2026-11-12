@@ -57,6 +57,7 @@ Dictionary<string, (string Help, Func<Task<int>> Run)> micros = new Dictionary<s
     ["words"] = ("a short text key's groups found alone, in memory (WordMicro.cs)", () => Task.FromResult(WordMicro.Run(rounds))),
     ["keyindex"] = ("the search of one object's sparse index alone, in memory, by three filters; with --store, the indexes of a dataset weighed (KeyIndexMicro.cs)", () => KeyIndexMicro.Run(rounds, Text(args, "--store"))),
     ["floatsum"] = ("a grouped exact float sum alone, in memory (FloatSumMicro.cs)", () => Task.FromResult(FloatSumMicro.Run(rounds))),
+    ["growth"] = ("a growth over points in order alone, beside its twin's least instant and greatest value, in memory (GrowthMicro.cs)", () => Task.FromResult(GrowthMicro.Run(rounds))),
     ["variants"] = ("a variant's path extracted alone, in memory (VariantMicro.cs)", () => Task.FromResult(VariantMicro.Run(rounds))),
     ["sketches"] = ("the grids of a distribution weighed, in buckets and speed (SketchMicro.cs)", () => Task.FromResult(SketchMicro.Run(rounds))),
     ["sheets"] = ("what a sheet of each column costs the writer, a column a row, one thread (SheetMicro.cs)", () =>
@@ -104,7 +105,7 @@ Dictionary<string, (string Help, Func<Task<int>> Run)> micros = new Dictionary<s
             (int)Option(args, "--hours", 48), Option(args, "--rate", 20), (int)Option(args, "--writers", 4), (int)Option(args, "--batch", 30),
             Text(args, "--partition") ?? "hour", Text(args, "--deletes") == "off" ? 0 : (int)Option(args, "--deletes", 2), (int)Option(args, "--fanout", 0),
             Text(args, "--late") != "off", Text(args, "--neighbours") != "off", (long)Option(args, "--max-object-mib", 0) << 20,
-            Text(args, "--pick"), (int)Option(args, "--trace-overlaps", 0))),
+            Text(args, "--pick"), (int)Option(args, "--trace-overlaps", 0), args.Contains("--growth"))),
     ["qp-dashboard"] = ("the client's questions of a --qp run's TSV against the review's targets, a Markdown table (QpDashboard.cs)", () =>
     {
         if (Text(args, "--tsv") is not { } qpTsv)

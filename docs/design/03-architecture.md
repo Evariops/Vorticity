@@ -222,7 +222,9 @@ Each one is a test, not a guideline:
    groups (`LiveMemoryTests`).
 8. Answers do not depend on how the data is split. Every aggregate whose definition does not depend
    on row order, float sums included, gives the same bits at every degree, in every row order, and
-   under every split into chunks, files or objects.
+   under every split into chunks, files or objects. An order declared on a column, a growth's, is a
+   value's and not the rows': a growth's points are taken in it whatever pieces they come in
+   (`GrowthTests`).
 
 ## 5. Error handling
 

@@ -99,6 +99,12 @@ internal sealed class AggregationQuery : ResultQuery
     internal int ChosenReader { get; }
 
     /// <summary>
+    /// The first operator on groups that reads a growth, before which the growths of the groups left are settled; the
+    /// number of operators when none does, the growths being settled then for the groups delivered alone.
+    /// </summary>
+    internal int GrowthReader => GroupSelection.GrowthReader(Operators);
+
+    /// <summary>
     /// The most groups the last run held at once: every group of a blocking one, the open ones and a
     /// batch's closed ones of a streaming one. Kept with the plan, which the query a record's columns
     /// read it through (<c>As</c>) shares.
@@ -211,7 +217,7 @@ internal sealed class AggregationQuery : ResultQuery
     /// as the read goes when they nearly sort; once the pass has run, on any other.
     /// </summary>
     internal IAsyncEnumerator<RecordBatch> Groups(CancellationToken cancellationToken) =>
-        Plan.Blocking ? new GroupBatches(this, cancellationToken)
+        Plan.HoldsGroups ? new GroupBatches(this, cancellationToken)
         : States is { } states ? new StatesOrStreams(this, states, cancellationToken)
         : Streamed(cancellationToken);
 
@@ -854,10 +860,31 @@ internal static class GroupSelection
         return operators.Length;
     }
 
+    /// <summary>The first of <paramref name="operators"/> that reads a growth (<see cref="AggregateKind.Increase"/>); their number when none does.</summary>
+    internal static int GrowthReader(GroupOperator[] operators)
+    {
+        for (int o = 0; o < operators.Length; o++)
+        {
+            bool reads = operators[o] switch
+            {
+                GroupFilter filter => Array.Exists(filter.Fields, field => field.Result is IAggregateNode { Kind: AggregateKind.Increase }),
+                GroupOrder order => Array.Exists(order.Keys, key => key.Field.Result is IAggregateNode { Kind: AggregateKind.Increase }),
+                _ => false,
+            };
+            if (reads)
+            {
+                return o;
+            }
+        }
+
+        return operators.Length;
+    }
+
     /// <summary>
     /// The groups the query delivers, in order: its operators applied to the groups the pass found,
     /// and the columns of the chosen rows fetched for the groups left before the first operator that
-    /// reads one, or else for the groups the result delivers.
+    /// reads one, or else for the groups the result delivers. The growths are settled the same way:
+    /// for the groups left before the first operator that reads one, or else for the groups delivered.
     /// </summary>
     /// <param name="query">The query, whose operators and window apply.</param>
     /// <param name="outcome">The pass's groups and states, where the chosen rows' columns go.</param>
@@ -875,10 +902,33 @@ internal static class GroupSelection
         AggregationQuery query, AggregationOutcome outcome, ScanSpec spec, CancellationToken cancellationToken, bool windowed = true, int? until = null)
     {
         int operators = until ?? query.Operators.Length;
-        bool chosen = query.Plan.Chosen.Length > 0;
-        int reader = chosen ? Math.Min(query.ChosenReader, operators) : operators;
         int degree = spec.Options.DegreeOfParallelism > 0 ? spec.Options.DegreeOfParallelism : query.Session.Options.MaxDegreeOfParallelism;
-        (int[] groups, int count) = await OperatorsAsync(query, outcome, 0, reader, outcome.Order, outcome.Count, degree, cancellationToken).ConfigureAwait(false);
+        (int[] groups, int count) = (outcome.Order, outcome.Count);
+        int done = 0;
+
+        // The growths settled for the groups the first operator that reads one is given, or else for those delivered.
+        bool growing = query.Plan.Ordered;
+        int grower = growing ? Math.Min(query.GrowthReader, operators) : operators;
+        if (growing && grower < operators)
+        {
+            (groups, count) = await OperatorsAsync(query, outcome, 0, grower, groups, count, degree, cancellationToken).ConfigureAwait(false);
+            await GrowthReads.SettleAsync(outcome, query.Host.Source, spec, query.Host.Counters, groups.AsMemory(0, count), cancellationToken).ConfigureAwait(false);
+            done = grower;
+        }
+
+        bool chosen = query.Plan.Chosen.Length > 0;
+        int reader = chosen ? Math.Clamp(query.ChosenReader, done, operators) : operators;
+        (groups, count) = await OperatorsAsync(query, outcome, done, reader, groups, count, degree, cancellationToken).ConfigureAwait(false);
+        if (growing && grower == operators)
+        {
+            // No operator reads them: the result's window alone, or, before operators that read chosen rows, the groups
+            // those are given.
+            bool all = (chosen && reader < operators) || !windowed;
+            int first = all ? 0 : (int)Math.Min(query.Skip, count);
+            int last = all ? count : (int)Math.Min(count, Saturated(query.Skip, query.Take));
+            await GrowthReads.SettleAsync(outcome, query.Host.Source, spec, query.Host.Counters, groups.AsMemory(first, last - first), cancellationToken).ConfigureAwait(false);
+        }
+
         if (!chosen)
         {
             return (groups, count);

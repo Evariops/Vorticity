@@ -38,6 +38,12 @@ internal static class AggregationPartials
     /// <summary>Throws unless a state answers every aggregate of <paramref name="plan"/> whole, and the states of each have a row's form.</summary>
     internal static void Check(AggregationPlan plan)
     {
+        if (plan.Ordered)
+        {
+            throw new NotSupportedException(
+                "A growth takes no parts and no estimate: its states are runs of points, which a row of states does not hold, and a share of the rows has no growth of its own.");
+        }
+
         if (StateRequest.Of(plan, new AggregateSlot?[plan.Aggregates.Length], top: null) is null)
         {
             throw new NotSupportedException(

@@ -201,6 +201,68 @@ until the record reads it. It is read through a record, `As<TRecord>()` or `Aggr
 is a column of the result rather than one value. A `Where` after the group by can test it, `IsNull` say; an
 `OrderBy` cannot, a list and a variant having no order.
 
+## Points in order
+
+```csharp
+await foreach (ServedHour hour in counterFile.Scan<Served>()
+    .Where(r => r.Service == "checkout")
+    .GroupBy(r => r.At.Truncate(CalendarUnit.Hour))
+    .OrderBy(g => g.Key)
+    .Select(g => (g.Key, g.OrderedBy(r => r.At).Increase(r => r.Requests), g.OrderedBy(r => r.At).First(r => r.Requests), g.OrderedBy(r => r.At).Last(r => r.Requests)))
+    .As<ServedHour>()
+    .ToRecordsAsync())
+
+[VortexRecord]
+public partial record struct Served(string Service, DateTimeOffset At, long Requests);
+
+[VortexRecord]
+public partial record struct ServedHour(DateTimeOffset Hour, long? Requests, long? First, long? Last);
+```
+
+```
+OrderedBy(At).Increase             0.4 ms  6 hours
+  00:00  3590 requests, read 13 then 3603
+  01:00  3588 requests, read 3613 then 7201
+  02:00  3574 requests, read 7219 then 2989
+  ...
+```
+
+`g.OrderedBy(r => e)` takes the group's points in the order of `e`, an integer or an instant, a date or
+a time, then in the order of their values. A point is a row where both `e` and the value hold one; a
+float's NaN or infinity is none, and its −0 reads as +0. `Increase(r => v)` is the growth of a counter
+that counts since its process started: for each point after the first, its rise from the point before
+it, or its whole value where it fell, the counter having started again from zero. For 100, 130, 160, 5,
+20 it is 30 + 30 + 5 + 15 = 80. The checkout service restarts at 02:10, and its hour still counts 3 574
+requests. `First(r => v)` and `Last(r => v)` are the values of the first and the last point. A rate is
+the growth over the step, here an hour.
+
+The growth from one hour to the next, from the last reading of one to the first of the other, is the
+caller's to add: each hour gives both, and it is `next.First - previous.Last`, or `next.First` where it
+fell. The growth is exact, rounded once to the column's type: a float's through the exact sum of a
+`Sum`, an integer's in 128 bits, which `OverflowException` says does not fit the type. It is null for a
+group of no point and 0 for one of one, and the same bits at every degree, however the rows lie in
+files, objects or levels.
+
+Each group keeps the exact sum of the values its falls came from and its runs of points, the points of
+a piece of the source read in order: 120 bytes a group of floats, 96 of integers, whatever its points.
+Two thousand series of 24 and of 240 points allocated 97 216 and 97 272 bytes a query. A group's points
+side by side, as a dataset sorted by its series then its instant keeps them, are folded four at a time
+where they rise: 4.8 million points of 20 000 groups in 6.8 ms, where the least instant and the
+greatest value of each took 7.1 (`vortex-queries --micro growth`).
+
+A group whose runs cross is read again after the pass, from the rows those runs lie between alone, and
+its points sorted, in shares when the query's memory does not hold them. A late row appended into a
+later object crosses its group's run, and so do rows in no order. On a day of requests appended by four
+writers, a row in fifty a few seconds late, the growth of each service's hours read 1 077 of 7 759
+groups again on the mean, 138 000 rows, and took 42 ms where the last value of each group in the same
+order, read from the same rows, took 11 (`vortex-queries --micro lifecycle --growth`, 32 lanes). Only
+the groups read are settled: an `OrderBy(g => g.Key).Take(10)` settles ten, an order or a filter on the
+growth every group it reads.
+
+A group by that holds a growth waits for the end of its pass, its groups not streamed. A growth takes no
+parts and no estimate, which say so: its states are runs of points, which a row of states does not hold,
+and a share of the rows has no growth of its own.
+
 ## Buckets of time and of numbers
 
 ```csharp

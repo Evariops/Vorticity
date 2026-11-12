@@ -20,7 +20,7 @@ internal static class GroupPlans
             most = most is long groups && values is long distinct ? Times(groups, distinct + (keys[k].Type.IsNullable ? 1 : 0)) : null;
         }
 
-        int streaming = plan.Blocking ? -1 : StreamingGroupBatches.Streaming(query);
+        int streaming = plan.HoldsGroups ? -1 : StreamingGroupBatches.Streaming(query);
         (GroupOrdering order, long? kept) = Ordering(query, streaming);
         ScanSpec spec = query.Host.Spec();
         int degree = spec.Options.DegreeOfParallelism > 0 ? spec.Options.DegreeOfParallelism : source.Session.Options.MaxDegreeOfParallelism;
@@ -56,6 +56,11 @@ internal static class GroupPlans
         if (query.Plan.Blocking)
         {
             return "the plan holds every group to the end of the pass";
+        }
+
+        if (query.Plan.Ordered)
+        {
+            return "an aggregate over an order settles its groups once the pass has run";
         }
 
         for (int k = 0; k < facts.Sorted.Length; k++)
