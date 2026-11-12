@@ -141,8 +141,10 @@ public sealed partial class GroupAllocationTests
         // The hashed integers' distinct values, a million, told by the core as they enter its sub-tables, which are the
         // result read whole and go back to the process's shelf once it is delivered: left to the collector, every query
         // made them again, 53.7 MB against 1.6. Its appliers copy values through one outcome each, pointed at each
-        // sub-table, where they made one a copy: 1.6 MB to 0.68.
-        ("distinct integers", 4, GroupCoreReason.Asked, 983_040, DistinctAsync),
+        // sub-table, where they made one a copy: 1.6 MB to 0.68. Its ceiling is the runner's highest floor (2026-11-12): the
+        // same code reads 0.81 MB or 1.0 to 1.26 MB there from one process to the next, the shelf the tests before it left,
+        // and 0.62 to 0.69 MB here.
+        ("distinct integers", 4, GroupCoreReason.Asked, 1_572_864, DistinctAsync),
     ];
 
     [Fact]
