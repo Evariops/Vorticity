@@ -1,5 +1,6 @@
 using System;
 using System.Runtime.CompilerServices;
+using Vorticity.Writing;
 
 namespace Vorticity.Aggregating;
 
@@ -85,7 +86,16 @@ internal sealed class DistinctPairs<TValue>
     }
 
     /// <summary>Adds the pair (<paramref name="group"/>, <paramref name="value"/>); whether it was new.</summary>
-    internal bool Add(int group, TValue value)
+    internal bool Add(int group, TValue value) => Add(group, value, chained: true);
+
+    /// <summary>
+    /// Adds the pair (<paramref name="group"/>, <paramref name="value"/>) to a table that only counts them, its groups' chains
+    /// not kept: no room for them asked (<see cref="EnsureGroups"/>), and no pair of it walked by its group after; whether it
+    /// was new.
+    /// </summary>
+    internal bool AddCounted(int group, TValue value) => Add(group, value, chained: false);
+
+    private bool Add(int group, TValue value, bool chained)
     {
         // The tags first: a new pair, every row of a count of
         // distinct values that are distinct, reads no pair of its chain, each a miss to memory.
@@ -122,8 +132,17 @@ internal sealed class DistinctPairs<TValue>
             pairs = _pairs;
         }
 
-        pairs[_count] = new Pair { Value = value, Group = group, Next = _first[group] };
-        _first[group] = ++_count;
+        if (chained)
+        {
+            pairs[_count] = new Pair { Value = value, Group = group, Next = _first[group] };
+            _first[group] = ++_count;
+        }
+        else
+        {
+            pairs[_count] = new Pair { Value = value, Group = group };
+            ++_count;
+        }
+
         tags[at] = tag;
         _slots[at] = _count;
         if (_count * 2 > tags.Length)
@@ -235,18 +254,22 @@ internal sealed class DistinctPairs<TValue>
     internal TValue ValueAt(int number) => _pairs[number].Value;
 
     /// <summary>
-    /// The pairs placed by part, the part of a pair the top bits past <paramref name="shift"/> of its
-    /// hash under its group's target <c>map[g]</c>: the same pair in every lane falls in one part.
+    /// Each pair's part, into <paramref name="partOf"/>, of <see cref="Count"/> entries: the top bits past
+    /// <paramref name="shift"/> of its hash under its group's target <c>map[g]</c>, so that the same pair in every lane falls
+    /// in one part; or, with <paramref name="byGroup"/>, of its group's target alone, every pair of a group from every lane
+    /// in one part, which owns the group (<see cref="PairedParts.CutAsync"/>).
     /// </summary>
-    /// <returns>The pairs' numbers, part after part, and where each part's start, then the end.</returns>
-    internal (int[] Placed, int[] Starts) Cut(ReadOnlySpan<int> map, int shift, int parts)
+    /// <returns>Where each part's pairs start once placed, then the end.</returns>
+    internal int[] PartsOf(ReadOnlySpan<int> map, int shift, int parts, bool byGroup, int[] partOf)
     {
-        int[] partOf = GC.AllocateUninitializedArray<int>(_count);
         int[] starts = new int[parts + 1];
         Pair[] pairs = _pairs;
         for (int number = 0; number < _count; number++)
         {
-            int part = (int)(DistinctEntry<TValue>.Hash(map[pairs[number].Group], pairs[number].Value) >> shift);
+            int target = map[pairs[number].Group];
+            int part = byGroup
+                ? (int)(((ulong)(uint)target * Spreading) >> shift)
+                : (int)(DistinctEntry<TValue>.Hash(target, pairs[number].Value) >> shift);
             partOf[number] = part;
             starts[part + 1]++;
         }
@@ -256,14 +279,7 @@ internal sealed class DistinctPairs<TValue>
             starts[part + 1] += starts[part];
         }
 
-        int[] next = starts[..^1];
-        int[] placed = GC.AllocateUninitializedArray<int>(_count);
-        for (int number = 0; number < _count; number++)
-        {
-            placed[next[partOf[number]]++] = number;
-        }
-
-        return (placed, starts);
+        return starts;
     }
 
     /// <summary>
@@ -403,4 +419,38 @@ internal sealed class DistinctPairs<TValue>
         public int Group;
         public int Next;
     }
+}
+
+/// <summary>
+/// One of the passes a merge of spilled distinct pairs takes when a part's pairs do not fit its budget at once: pass
+/// <see cref="Pass"/> of <see cref="Passes"/> keeps the values whose hash falls in its share, the same share for every
+/// group and every run, so that each (group, value) pair is counted in one pass alone and a group's count is the sum of
+/// the passes'. One pass keeps every value.
+/// </summary>
+internal readonly record struct PairPass(int Pass, int Passes)
+{
+    // A seed of its own, so that the values a pass keeps do not gather in the homes of a table their pairs fill.
+    private const ulong Seed = 0x6A09_E667_F3BC_C909UL;
+
+    /// <summary>The one pass of a merge whose pairs fit: every value.</summary>
+    internal static PairPass All => new PairPass(0, 1);
+
+    /// <summary>Whether the merge takes one pass, which keeps every value.</summary>
+    internal bool Whole => Passes == 1;
+
+    /// <summary>Whether the pass keeps the value of hash <paramref name="hash"/> (<see cref="Of{TValue}"/>, <see cref="Of(ReadOnlySpan{byte})"/>).</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal bool Keeps(ulong hash) => (int)(((hash >> 32) * (ulong)(uint)Passes) >> 32) == Pass;
+
+    /// <summary>The hash a pass is chosen by, of a fixed-width value.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static ulong Of<TValue>(TValue value)
+        where TValue : unmanaged
+    {
+        (ulong low, ulong high) = KeyWords.Of(value);
+        return KeyHash.SeededMix(KeyHash.Fold(low, high), Seed);
+    }
+
+    /// <summary>The hash a pass is chosen by, of a value of bytes.</summary>
+    internal static ulong Of(ReadOnlySpan<byte> value) => KeyHash.SeededMix(KeyHash.Bytes(value), Seed);
 }

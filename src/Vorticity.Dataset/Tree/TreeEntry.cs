@@ -24,6 +24,9 @@ internal readonly record struct TreeEntry(ReadOnlyMemory<byte> Key, ReadOnlyMemo
 /// </summary>
 internal readonly record struct PositionedEntry(TreeEntry Entry, long FirstRow);
 
+/// <summary>One leaf page's bytes and the position among all the level's rows of its first entry's first row.</summary>
+internal readonly record struct PositionedLeaf(ReadOnlyMemory<byte> Page, long FirstRow);
+
 /// <summary>One child page, as an internal page carries it.</summary>
 /// <param name="MinKey">The smallest key of the subtree.</param>
 /// <param name="MaxKey">Its largest.</param>

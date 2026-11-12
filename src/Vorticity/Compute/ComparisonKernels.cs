@@ -726,6 +726,26 @@ internal static partial class ComparisonKernels
                     .StoreUnsafe(ref into, (nuint)i);
             }
         }
+        else if (WordBytes.IsAccelerated128)
+        {
+            // The same, sixteen rows a shuffle: a row a bit test and a branch otherwise.
+            Vector128<byte> unknown = Vector128.Create(Trilean.Unknown);
+            ref byte into = ref MemoryMarshal.GetReference(destination);
+            for (; i <= destination.Length - 64; i += 64)
+            {
+                ulong word = BitWords.Load(validity, offset + i);
+                if (word == ulong.MaxValue)
+                {
+                    continue;
+                }
+
+                for (int k = 0; k < 64; k += 16)
+                {
+                    Vector128.ConditionalSelect(WordBytes.Clear128((ushort)(word >> k)), unknown, Vector128.LoadUnsafe(ref into, (nuint)(i + k)))
+                        .StoreUnsafe(ref into, (nuint)(i + k));
+                }
+            }
+        }
 
         for (; i < destination.Length; i++)
         {
@@ -764,6 +784,21 @@ internal static partial class ComparisonKernels
             {
                 ulong word = BitWords.Load(bits, offset + i);
                 Vector512.ConditionalSelect(spread.Clear(word), clear, set).StoreUnsafe(ref into, (nuint)i);
+            }
+        }
+        else if (WordBytes.IsAccelerated128)
+        {
+            // The same, sixteen rows a shuffle, where the bytes below took eight selects a byte of the bitmap.
+            Vector128<byte> clear = Vector128.Create(whenFalse);
+            Vector128<byte> set = Vector128.Create(whenTrue);
+            ref byte into = ref MemoryMarshal.GetReference(destination);
+            for (; i <= destination.Length - 64; i += 64)
+            {
+                ulong word = BitWords.Load(bits, offset + i);
+                for (int k = 0; k < 64; k += 16)
+                {
+                    Vector128.ConditionalSelect(WordBytes.Clear128((ushort)(word >> k)), clear, set).StoreUnsafe(ref into, (nuint)(i + k));
+                }
             }
         }
 
@@ -1053,6 +1088,10 @@ internal static partial class ComparisonKernels
         {
             done = Lanes<TValue, TOp>(values, literal, mask, destination);
         }
+        else if (WordBytes.IsAccelerated128 && Vector128<TValue>.IsSupported && InLanes(wanted, out literal))
+        {
+            done = NarrowLanes<TValue, TOp>(values, literal, mask, destination);
+        }
 
         if (mask.AllValid)
         {
@@ -1128,6 +1167,53 @@ internal static partial class ComparisonKernels
         return i;
     }
 
+    /// <summary>
+    /// The answers of the first 64 integers of <paramref name="values"/> to <c>value &lt;= bound</c>, or to
+    /// <c>value &gt;= bound</c> when not <paramref name="atMost"/>, bit <c>i</c> for value <c>i</c>: the lane masks of
+    /// the widest vectors there are gathered into a word, as the column comparisons gather theirs. Integers alone: a
+    /// float's NaN answers false to a lane's comparison and comes first to <see cref="IComparable{T}.CompareTo"/>, so the
+    /// vectors and the loop would differ on it. A caller generic over keys of every type (<c>FixedKeys</c>) cannot say so
+    /// by a constraint, so a float is refused here, a test the compiler folds away for every other type.
+    /// </summary>
+    /// <exception cref="NotSupportedException"><typeparamref name="T"/> is a floating-point type.</exception>
+    internal static ulong Bounded<T>(ReadOnlySpan<T> values, T bound, bool atMost)
+        where T : unmanaged, IComparable<T>
+    {
+        if (typeof(T) == typeof(double) || typeof(T) == typeof(float) || typeof(T) == typeof(Half))
+        {
+            throw new NotSupportedException("A bound over vectors compares integers: a float's NaN would answer two ways.");
+        }
+
+        values = values[..64];
+        ref T at = ref MemoryMarshal.GetReference(values);
+        if (Vector512.IsHardwareAccelerated && Vector512<T>.IsSupported)
+        {
+            Vector512<T> right = Vector512.Create(bound);
+            return atMost ? Verdicts<T, LessOrEqualOp>(ref at, right) : Verdicts<T, GreaterOrEqualOp>(ref at, right);
+        }
+
+        if (Vector256.IsHardwareAccelerated && Vector256<T>.IsSupported)
+        {
+            Vector256<T> right = Vector256.Create(bound);
+            return atMost ? Verdicts256<T, LessOrEqualOp>(ref at, right) : Verdicts256<T, GreaterOrEqualOp>(ref at, right);
+        }
+
+        if (Vector128.IsHardwareAccelerated && Vector128<T>.IsSupported)
+        {
+            Vector128<T> right = Vector128.Create(bound);
+            return atMost ? Verdicts128<T, LessOrEqualOp>(ref at, right) : Verdicts128<T, GreaterOrEqualOp>(ref at, right);
+        }
+
+        ulong held = 0;
+        for (int i = 0; i < values.Length; i++)
+        {
+            int order = values[i].CompareTo(bound);
+            held |= ((atMost ? order <= 0 : order >= 0) ? 1UL : 0UL) << i;
+        }
+
+        return held;
+    }
+
     /// <summary>Sixty-four rows' verdicts from <paramref name="at"/>, bit <c>i</c> for row <c>i</c>.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static ulong Verdicts<T, TOp>(ref T at, Vector512<T> right)
@@ -1138,6 +1224,76 @@ internal static partial class ComparisonKernels
         for (int row = 0; row < 64; row += lanes)
         {
             held |= TOp.Lanes(Vector512.LoadUnsafe(ref at, (nuint)row), right).ExtractMostSignificantBits() << row;
+        }
+
+        return held;
+    }
+
+    /// <summary>
+    /// <see cref="Lanes{T, TOp}"/> where AVX-512 is not: the operator over 256-bit vectors where they are, 128-bit ones
+    /// elsewhere, their lanes' masks gathered into a word of 64 rows as there, and the word spread to a verdict a row by
+    /// 128-bit shuffles (<see cref="WordBytes.Store128"/>). The scalar loop took a branch and a byte store a row: a byte
+    /// mask narrowed out of a compare costs more than the compare saves, a word spread by a shuffle does not.
+    /// </summary>
+    /// <returns>The rows answered, a multiple of 64; the rest are the caller's.</returns>
+    private static int NarrowLanes<T, TOp>(ReadOnlySpan<T> values, T literal, ValidityMask mask, Span<byte> destination)
+        where TOp : struct, IOrderOp
+    {
+        int rows = destination.Length;
+        ref T from = ref MemoryMarshal.GetReference(values);
+        ref byte into = ref MemoryMarshal.GetReference(destination);
+        bool wide = Vector256.IsHardwareAccelerated && Vector256<T>.IsSupported;
+        Vector256<T> right256 = Vector256.Create(literal);
+        Vector128<T> right128 = Vector128.Create(literal);
+        bool allValid = mask.AllValid;
+        ReadOnlySpan<byte> bits = allValid ? default : mask.Bits;
+        int offset = allValid ? 0 : mask.BitOffset;
+        int i = 0;
+        for (; i <= rows - 64; i += 64)
+        {
+            ulong held = wide
+                ? Verdicts256<T, TOp>(ref Unsafe.Add(ref from, i), right256)
+                : Verdicts128<T, TOp>(ref Unsafe.Add(ref from, i), right128);
+            ulong unknown = 0;
+            if (!allValid)
+            {
+                // A null row is compared like any other and its verdict made unknown, as the 512-bit lanes do.
+                ulong valid = BitWords.Load(bits, offset + i);
+                held &= valid;
+                unknown = ~valid;
+            }
+
+            WordBytes.Store128(held, unknown, ref Unsafe.Add(ref into, i));
+        }
+
+        return i;
+    }
+
+    /// <summary>Sixty-four rows' verdicts from <paramref name="at"/> over 256-bit vectors, bit <c>i</c> for row <c>i</c>.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static ulong Verdicts256<T, TOp>(ref T at, Vector256<T> right)
+        where TOp : struct, IOrderOp
+    {
+        int lanes = Vector256<T>.Count;
+        ulong held = 0;
+        for (int row = 0; row < 64; row += lanes)
+        {
+            held |= (ulong)TOp.Lanes256(Vector256.LoadUnsafe(ref at, (nuint)row), right).ExtractMostSignificantBits() << row;
+        }
+
+        return held;
+    }
+
+    /// <summary>Sixty-four rows' verdicts from <paramref name="at"/> over 128-bit vectors, bit <c>i</c> for row <c>i</c>.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static ulong Verdicts128<T, TOp>(ref T at, Vector128<T> right)
+        where TOp : struct, IOrderOp
+    {
+        int lanes = Vector128<T>.Count;
+        ulong held = 0;
+        for (int row = 0; row < 64; row += lanes)
+        {
+            held |= (ulong)TOp.Lanes128(Vector128.LoadUnsafe(ref at, (nuint)row), right).ExtractMostSignificantBits() << row;
         }
 
         return held;
@@ -1237,6 +1393,12 @@ internal static partial class ComparisonKernels
         /// <param name="left">The column's values.</param>
         /// <param name="right">The literal in every lane.</param>
         static abstract Vector512<T> Lanes<T>(Vector512<T> left, Vector512<T> right);
+
+        /// <summary>The operator over 256-bit vectors, as <see cref="Lanes{T}"/>.</summary>
+        static abstract Vector256<T> Lanes256<T>(Vector256<T> left, Vector256<T> right);
+
+        /// <summary>The operator over 128-bit vectors, as <see cref="Lanes{T}"/>.</summary>
+        static abstract Vector128<T> Lanes128<T>(Vector128<T> left, Vector128<T> right);
     }
 
     private readonly struct EqualOp : IOrderOp
@@ -1246,6 +1408,12 @@ internal static partial class ComparisonKernels
 
         public static Vector512<T> Lanes<T>(Vector512<T> left, Vector512<T> right) =>
             Vector512.Equals(left, right);
+
+        public static Vector256<T> Lanes256<T>(Vector256<T> left, Vector256<T> right) =>
+            Vector256.Equals(left, right);
+
+        public static Vector128<T> Lanes128<T>(Vector128<T> left, Vector128<T> right) =>
+            Vector128.Equals(left, right);
     }
 
     private readonly struct NotEqualOp : IOrderOp
@@ -1255,6 +1423,12 @@ internal static partial class ComparisonKernels
 
         public static Vector512<T> Lanes<T>(Vector512<T> left, Vector512<T> right) =>
             ~Vector512.Equals(left, right);
+
+        public static Vector256<T> Lanes256<T>(Vector256<T> left, Vector256<T> right) =>
+            ~Vector256.Equals(left, right);
+
+        public static Vector128<T> Lanes128<T>(Vector128<T> left, Vector128<T> right) =>
+            ~Vector128.Equals(left, right);
     }
 
     private readonly struct LessOp : IOrderOp
@@ -1264,6 +1438,12 @@ internal static partial class ComparisonKernels
 
         public static Vector512<T> Lanes<T>(Vector512<T> left, Vector512<T> right) =>
             Vector512.LessThan(left, right);
+
+        public static Vector256<T> Lanes256<T>(Vector256<T> left, Vector256<T> right) =>
+            Vector256.LessThan(left, right);
+
+        public static Vector128<T> Lanes128<T>(Vector128<T> left, Vector128<T> right) =>
+            Vector128.LessThan(left, right);
     }
 
     private readonly struct LessOrEqualOp : IOrderOp
@@ -1273,6 +1453,12 @@ internal static partial class ComparisonKernels
 
         public static Vector512<T> Lanes<T>(Vector512<T> left, Vector512<T> right) =>
             Vector512.LessThanOrEqual(left, right);
+
+        public static Vector256<T> Lanes256<T>(Vector256<T> left, Vector256<T> right) =>
+            Vector256.LessThanOrEqual(left, right);
+
+        public static Vector128<T> Lanes128<T>(Vector128<T> left, Vector128<T> right) =>
+            Vector128.LessThanOrEqual(left, right);
     }
 
     private readonly struct GreaterOp : IOrderOp
@@ -1282,6 +1468,12 @@ internal static partial class ComparisonKernels
 
         public static Vector512<T> Lanes<T>(Vector512<T> left, Vector512<T> right) =>
             Vector512.GreaterThan(left, right);
+
+        public static Vector256<T> Lanes256<T>(Vector256<T> left, Vector256<T> right) =>
+            Vector256.GreaterThan(left, right);
+
+        public static Vector128<T> Lanes128<T>(Vector128<T> left, Vector128<T> right) =>
+            Vector128.GreaterThan(left, right);
     }
 
     private readonly struct GreaterOrEqualOp : IOrderOp
@@ -1291,6 +1483,12 @@ internal static partial class ComparisonKernels
 
         public static Vector512<T> Lanes<T>(Vector512<T> left, Vector512<T> right) =>
             Vector512.GreaterThanOrEqual(left, right);
+
+        public static Vector256<T> Lanes256<T>(Vector256<T> left, Vector256<T> right) =>
+            Vector256.GreaterThanOrEqual(left, right);
+
+        public static Vector128<T> Lanes128<T>(Vector128<T> left, Vector128<T> right) =>
+            Vector128.GreaterThanOrEqual(left, right);
     }
 
     /// <summary>

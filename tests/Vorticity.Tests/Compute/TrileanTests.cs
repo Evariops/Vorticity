@@ -119,6 +119,13 @@ public sealed class TrileanTests
         }
 
         Assert.Throws<ArgumentException>(() => Trilean.And(new byte[rows + 1], right.AsSpan(0, rows)));
+
+        // The conjunction that counts the rows it leaves false as it goes: the same states, and their false ones.
+        byte[] counted = (byte[])left.Clone();
+        int falses = Trilean.AndCountingFalse(counted, right);
+        Assert.Equal(and, counted);
+        Assert.Equal(and.AsSpan().Count(Trilean.False), falses);
+        Assert.Throws<ArgumentException>(() => Trilean.AndCountingFalse(new byte[rows + 1], right.AsSpan(0, rows)));
     }
 
     /// <summary>

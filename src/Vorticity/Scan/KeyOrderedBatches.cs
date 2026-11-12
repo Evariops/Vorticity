@@ -134,7 +134,10 @@ internal sealed class KeyOrderedBatches : IAsyncEnumerable<RecordBatch>
             // chunk, and the source's zones are windows of it too.
             _held = new ScanSegments(Math.Max(_scan.Degree, 1));
             _retained = RetainedChunks.Create((_read.IsAll ? _scan.Tree.Root.ChildCount : _read.NamedFieldCount) + 1, Math.Max(_scan.Degree, 1));
-            _context = new ScanContext(_scan.File) { Metrics = _scan.Metrics };
+
+            // The contexts from the process's pool, given back recycled, as a terminal scan's are: made new a key-ordered
+            // read and a lane, each its arenas and buffers.
+            _context = Lent();
             _context.ShareRetained(_retained);
 
             // Rented rather than allocated: a window is the batch size, and two arrays of that many
@@ -151,11 +154,19 @@ internal sealed class KeyOrderedBatches : IAsyncEnumerable<RecordBatch>
                 _waiters = new GroupWaiter[_scan.Degree];
                 for (int i = 0; i < _lanes.Length; i++)
                 {
-                    _lanes[i] = new ScanContext(_scan.File) { Metrics = _scan.Metrics };
+                    _lanes[i] = Lent();
                     _lanes[i].ShareRetained(_retained);
                     _waiters[i] = new GroupWaiter();
                 }
             }
+        }
+
+        /// <summary>A context of the process's pool bound to the scan's file, counting into its metrics.</summary>
+        private ScanContext Lent()
+        {
+            ScanContext context = ScanContexts.Shared.Rent(_scan.File);
+            context.Metrics = _scan.Metrics;
+            return context;
         }
 
         public RecordBatch Current =>
@@ -248,12 +259,12 @@ internal sealed class KeyOrderedBatches : IAsyncEnumerable<RecordBatch>
                 await _source.DisposeAsync().ConfigureAwait(false);
             }
 
-            _context.Dispose();
+            ScanContexts.Shared.Return(_context);
             if (_lanes is not null)
             {
                 foreach (ScanContext lane in _lanes)
                 {
-                    lane.Dispose();
+                    ScanContexts.Shared.Return(lane);
                 }
             }
 

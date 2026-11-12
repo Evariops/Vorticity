@@ -15,6 +15,25 @@ namespace Vorticity.Tests.Api;
 [Trait("Category", "ApiContract")]
 public sealed class SinkContractTests
 {
+    // A record's binding, kept by a schema and by a result's type, is the one of the registry of extensions it is asked
+    // under: another registry binds the record again, and the first one's binding is its own again after.
+    [Fact]
+    public async Task ARecordsBindingIsTheRegistrysItIsAskedUnder()
+    {
+        await using VortexFile file = await VortexFile.OpenAsync(await ContractFile.PathAsync(), TestContext.Current.CancellationToken);
+        VortexSchema schema = file.Schema;
+        VortexType type = VortexType.Struct(schema.FieldArray);
+        VortexExtensionRegistry first = new VortexExtensionRegistry();
+        VortexExtensionRegistry second = new VortexExtensionRegistry();
+        foreach (VortexExtensionRegistry? registry in (VortexExtensionRegistry?[])[first, second, null, first])
+        {
+            Assert.Same(registry, RecordBinding.For<Reading>(schema, registry).Extensions);
+            Assert.Same(registry, RecordBinding.ForType<Reading>(type, registry).Extensions);
+        }
+
+        Assert.Same(RecordBinding.ForType<Reading>(type, first), RecordBinding.ForType<Reading>(type, first));
+    }
+
     [Fact]
     public async Task OwnedBatchesShareTheScansSchema()
     {

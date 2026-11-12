@@ -240,7 +240,7 @@ internal sealed class InSet : CandidateSet
     internal void Apply(
         PType ptype, ReadOnlySpan<byte> values, ValidityMask mask, Span<byte> destination)
     {
-        if (_keys is not null && WordBytes.IsAccelerated)
+        if (_keys is not null && (WordBytes.IsAccelerated || WordBytes.IsAccelerated128))
         {
             switch (ptype)
             {
@@ -497,8 +497,9 @@ internal sealed class InSet : CandidateSet
         }
 
         int rows = destination.Length;
-        int lanes = Vector512<TValue>.Count;
-        WordBytes spread = WordBytes.Create();
+        bool wide = WordBytes.IsAccelerated && Vector512<TValue>.IsSupported;
+        bool half = !wide && Vector256.IsHardwareAccelerated && Vector256<TValue>.IsSupported;
+        WordBytes spread = wide ? WordBytes.Create() : default;
         ref TValue from = ref MemoryMarshal.GetReference(values);
         ref TValue key0 = ref MemoryMarshal.GetReference(keys);
         ref byte into = ref MemoryMarshal.GetReference(destination);
@@ -509,26 +510,88 @@ internal sealed class InSet : CandidateSet
         int i = 0;
         for (; i <= rows - 64; i += 64)
         {
-            ulong hits = 0;
-            for (int row = 0; row < 64; row += lanes)
-            {
-                Vector512<TValue> block = Vector512.LoadUnsafe(ref from, (nuint)(i + row));
-                Vector512<TValue> any = Vector512<TValue>.Zero;
-                for (int k = 0; k < count; k++)
-                {
-                    any |= Vector512.Equals(block, Vector512.Create(Unsafe.Add(ref key0, k)));
-                }
-
-                hits |= any.ExtractMostSignificantBits() << row;
-            }
+            ref TValue at = ref Unsafe.Add(ref from, i);
+            ulong hits = wide ? Hits512(ref at, ref key0, count) : half ? Hits256(ref at, ref key0, count) : Hits128(ref at, ref key0, count);
 
             // A match is true and a valid miss the no-match state; a null row is unknown whatever
             // it held. Unknown is 2, so its ones are doubled.
             ulong valid = allValid ? ulong.MaxValue : BitWords.Load(bits, offset + i);
-            Vector512<byte> unknown = spread.Ones(~valid | (~hits & missUnknown));
-            (spread.Ones(hits & valid) | (unknown + unknown)).StoreUnsafe(ref into, (nuint)i);
+            ulong unknownRows = ~valid | (~hits & missUnknown);
+            if (wide)
+            {
+                Vector512<byte> unknown = spread.Ones(unknownRows);
+                (spread.Ones(hits & valid) | (unknown + unknown)).StoreUnsafe(ref into, (nuint)i);
+            }
+            else
+            {
+                // Where AVX-512 is not: the word spread sixteen rows a 128-bit shuffle.
+                WordBytes.Store128(hits & valid, unknownRows, ref Unsafe.Add(ref into, i));
+            }
         }
 
         return i;
+    }
+
+    /// <summary>The rows of 64 from <paramref name="at"/> that equal one of the <paramref name="count"/> keys, over 512-bit vectors.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static ulong Hits512<TValue>(ref TValue at, ref TValue key0, int count)
+        where TValue : unmanaged, IBinaryInteger<TValue>
+    {
+        ulong hits = 0;
+        for (int row = 0; row < 64; row += Vector512<TValue>.Count)
+        {
+            Vector512<TValue> block = Vector512.LoadUnsafe(ref at, (nuint)row);
+            Vector512<TValue> any = Vector512<TValue>.Zero;
+            for (int k = 0; k < count; k++)
+            {
+                any |= Vector512.Equals(block, Vector512.Create(Unsafe.Add(ref key0, k)));
+            }
+
+            hits |= any.ExtractMostSignificantBits() << row;
+        }
+
+        return hits;
+    }
+
+    /// <summary>As <see cref="Hits512"/>, over 256-bit vectors.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static ulong Hits256<TValue>(ref TValue at, ref TValue key0, int count)
+        where TValue : unmanaged, IBinaryInteger<TValue>
+    {
+        ulong hits = 0;
+        for (int row = 0; row < 64; row += Vector256<TValue>.Count)
+        {
+            Vector256<TValue> block = Vector256.LoadUnsafe(ref at, (nuint)row);
+            Vector256<TValue> any = Vector256<TValue>.Zero;
+            for (int k = 0; k < count; k++)
+            {
+                any |= Vector256.Equals(block, Vector256.Create(Unsafe.Add(ref key0, k)));
+            }
+
+            hits |= (ulong)any.ExtractMostSignificantBits() << row;
+        }
+
+        return hits;
+    }
+
+    /// <summary>As <see cref="Hits512"/>, over 128-bit vectors.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static ulong Hits128<TValue>(ref TValue at, ref TValue key0, int count)
+        where TValue : unmanaged, IBinaryInteger<TValue>
+    {
+        ulong hits = 0;
+        for (int row = 0; row < 64; row += Vector128<TValue>.Count)
+        {
+            Vector128<TValue> block = Vector128.LoadUnsafe(ref at, (nuint)row);
+            Vector128<TValue> any = Vector128<TValue>.Zero;
+            for (int k = 0; k < count; k++)
+            {
+                any |= Vector128.Equals(block, Vector128.Create(Unsafe.Add(ref key0, k)));
+            }
+
+            hits |= (ulong)any.ExtractMostSignificantBits() << row;
+        }
+
+        return hits;
     }
 }

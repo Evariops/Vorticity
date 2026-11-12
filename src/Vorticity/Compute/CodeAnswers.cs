@@ -3,6 +3,7 @@ using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.Arm;
 using System.Runtime.Intrinsics.X86;
 
 using Vorticity.Arrays.Decoders.Canonical;
@@ -81,6 +82,11 @@ internal static class CodeAnswers
                 return bad;
             }
         }
+        else if (Unsafe.SizeOf<T>() == 1 && answers.Length <= 16 && limit > 0 && WordBytes.IsAccelerated128)
+        {
+            // Without VBMI: a dictionary of sixteen values or fewer coded in bytes, sixteen rows a byte shuffle.
+            row = Shuffled(answers, MemoryMarshal.AsBytes(codes), (byte)limit, validity, validityOffset, allValid, destination);
+        }
 
         if (limit == 0)
         {
@@ -90,6 +96,48 @@ internal static class CodeAnswers
         return allValid
             ? Dense(answers, codes, limit, destination, row, rows)
             : Clamped(answers, codes, limit, validity, validityOffset, destination, row, rows);
+    }
+
+    /// <summary>
+    /// The rows of a dictionary of sixteen values or fewer coded in bytes, sixteen rows a 128-bit byte shuffle of the
+    /// answers by the codes (<c>pshufb</c> on x64, <c>tbl</c> on ARM64), the nulls made unknown from their bits; where AVX-512
+    /// VBMI's permute is not, the rows took a load and a store each.
+    /// </summary>
+    /// <returns>
+    /// The rows answered, a multiple of sixteen: the block where a valid row's code is at or past
+    /// <paramref name="limit"/> is left to the scalar loops, which report it.
+    /// </returns>
+    private static int Shuffled(
+        ReadOnlySpan<byte> answers, ReadOnlySpan<byte> codes, byte limit,
+        ReadOnlySpan<byte> validity, int validityOffset, bool allValid, Span<byte> destination)
+    {
+        Span<byte> padded = stackalloc byte[16];
+        answers.CopyTo(padded);
+        Vector128<byte> table = Vector128.LoadUnsafe(ref MemoryMarshal.GetReference(padded));
+        Vector128<byte> top = Vector128.Create(limit);
+        Vector128<byte> lowest = Vector128.Create((byte)(limit - 1));
+        Vector128<byte> unknown = Vector128.Create(Trilean.Unknown);
+        ref byte code0 = ref MemoryMarshal.GetReference(codes);
+        ref byte into = ref MemoryMarshal.GetReference(destination);
+        int rows = destination.Length;
+        int row = 0;
+        for (; row <= rows - 16; row += 16)
+        {
+            Vector128<byte> code = Vector128.LoadUnsafe(ref code0, (nuint)row);
+            Vector128<byte> past = Vector128.GreaterThanOrEqual(code, top);
+            Vector128<byte> nulls = allValid ? Vector128<byte>.Zero : WordBytes.Clear128((ushort)BitWords.Load(validity, validityOffset + row));
+            if ((past & ~nulls) != Vector128<byte>.Zero)
+            {
+                break;
+            }
+
+            // A null row's code may be anything: it is held to the table before the lookup, and its verdict is unknown.
+            Vector128<byte> looked = Vector128.Min(code, lowest);
+            Vector128<byte> verdicts = Ssse3.IsSupported ? Ssse3.Shuffle(table, looked) : AdvSimd.Arm64.VectorTableLookup(table, looked);
+            Vector128.ConditionalSelect(nulls, unknown, verdicts).StoreUnsafe(ref into, (nuint)row);
+        }
+
+        return row;
     }
 
     /// <summary>Rows <c>[from, to)</c> of a column without nulls, a load and a store each.</summary>

@@ -155,6 +155,8 @@ internal sealed class ColumnSketches
         byte[] bytes = new byte[head.Length + chunks.Length];
         head.Span.CopyTo(bytes);
         chunks.Span.CopyTo(bytes.AsSpan(head.Length));
+        head.Return();
+        chunks.Return();
         return bytes;
     }
 

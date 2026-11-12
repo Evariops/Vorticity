@@ -99,7 +99,8 @@ public class BloomPruneBenchmarks
 
     private async Task<int> PruneAsync()
     {
-        BloomPruner pruner = await BloomPruner.BuildAsync(_file, _filter, BlockRows, default).ConfigureAwait(false)
+        // Disposed, as a scan disposes it: its words go back to where they came from.
+        using BloomPruner pruner = await BloomPruner.BuildAsync(_file, _filter, BlockRows, default).ConfigureAwait(false)
             ?? throw new InvalidOperationException("The file offers no Bloom index.");
         if (Asking == "always")
         {

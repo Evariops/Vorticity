@@ -136,9 +136,22 @@ internal sealed class ColumnLocate : IValueGranules
 
             default:
             {
+                // The value's map or-ed in a vector at a time: a prefix ors in every value of its range.
                 ReadOnlySpan<byte> map = _bytes.AsSpan(_offsets[place], (count + 7) / 8);
                 Span<byte> into = System.Runtime.InteropServices.MemoryMarshal.AsBytes(granules);
-                for (int i = 0; i < map.Length; i++)
+                int i = 0;
+                if (System.Numerics.Vector.IsHardwareAccelerated)
+                {
+                    ref byte from = ref System.Runtime.InteropServices.MemoryMarshal.GetReference(map);
+                    ref byte to = ref System.Runtime.InteropServices.MemoryMarshal.GetReference(into);
+                    for (; i <= map.Length - System.Numerics.Vector<byte>.Count; i += System.Numerics.Vector<byte>.Count)
+                    {
+                        (System.Numerics.Vector.LoadUnsafe(ref from, (nuint)i) | System.Numerics.Vector.LoadUnsafe(ref to, (nuint)i))
+                            .StoreUnsafe(ref to, (nuint)i);
+                    }
+                }
+
+                for (; i < map.Length; i++)
                 {
                     into[i] |= map[i];
                 }

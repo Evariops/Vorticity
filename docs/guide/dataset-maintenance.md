@@ -100,6 +100,14 @@ brings it to the current one. Keys that arrive in order, as when time leads the 
 overlap, so every row is rewritten once, by the merge that takes it out of level 0: on a stream of a
 thousand appends at the tail, compaction wrote half the bytes it wrote without the moves.
 
+A dataset without a sort key or a partition concatenates a level's objects into the next one, in
+their order. An object already at least half the size the next level aims at moves there whole too,
+since a concatenation would only cut it or write it again: the levels past the cap on an object all
+aim at the cap, and an append of half the cap or more climbs them without a row rewritten. Over the
+life of such a dataset,
+compaction wrote 58 % fewer bytes with small appends and 80 % fewer with large ones, its objects
+ending a tenth under their target rather than at it.
+
 Compaction writes only the live rows. Rows a delete marked in an input object disappear with it, and
 the outputs carry no marks. An object whose marks reach half a delete's limits (a sixteenth of its
 rows, or half of its vector's bound, a thousandth of its bytes and at least a kilobyte) is

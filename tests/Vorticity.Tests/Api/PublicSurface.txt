@@ -2311,12 +2311,12 @@ Vorticity:     method Predicate In(IEnumerable<ValueTuple<$T0, $T1, $T2>>)
 Vorticity:     method Predicate In(ReadOnlySpan<ValueTuple<$T0, $T1, $T2>>)
 Vorticity: static class Vorticity.SymTuples.<G>$F3AAA5670BEF08CE2D29EB7F3BF29CE9<$T0, $T1, $T2>.<M>$7DE23B740C9DD69503232D1E5EC0F799<T1, T2, T3>
 Vorticity:     method void <Extension>$(ValueTuple<Sym<T1>, Sym<T2>, Sym<T3>>)
-Vorticity: sealed class Vorticity.SynopsisCache : IDisposable
+Vorticity: sealed class Vorticity.SynopsisCache : IAsyncDisposable
 Vorticity:     ctor SynopsisCache(string, long)
 Vorticity:     ctor SynopsisCache(string, long, long)
 Vorticity:     method SynopsisCache OpenShared(string, long)
 Vorticity:     method SynopsisCache OpenShared(string, long, long)
-Vorticity:     method void Dispose()
+Vorticity:     method ValueTask DisposeAsync()
 Vorticity:     property long CapacityBytes { get; }
 Vorticity:     property long DataCapacityBytes { get; }
 Vorticity:     property long DataHeldBytes { get; }
@@ -3235,6 +3235,7 @@ Vorticity.Dataset:     property int SummaryColumnLimit { get; init; }
 Vorticity.Dataset:     property long AppendBufferBytes { get; init; }
 Vorticity.Dataset:     property long InlineCompactionBytes { get; init; }
 Vorticity.Dataset:     property long MaxObjectBytes { get; init; }
+Vorticity.Dataset:     property long MaxOpenObjectBytes { get; init; }
 Vorticity.Dataset:     property long PageCacheBytes { get; init; }
 Vorticity.Dataset: sealed class Vorticity.Dataset.DatasetVerification : IEquatable<DatasetVerification>
 Vorticity.Dataset:     ctor DatasetVerification()

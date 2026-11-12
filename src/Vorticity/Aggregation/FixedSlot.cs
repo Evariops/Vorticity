@@ -997,10 +997,59 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>, IPairedSl
             all[p] = ((FixedDistinctSlot<TValue>)slots[p])._pairs;
         }
 
-        // Each lane's pairs placed by part, then each part's pairs from every lane made distinct.
+        // Each lane's pairs placed by part, then each part's pairs from every lane made distinct. With many more groups than
+        // parts, a part owns its groups whole, every lane's pairs of them, and counts them where the slot keeps them: no
+        // count of every group a part, a gigabyte at a million groups and 128 parts, nor a sum of them all. Unless a group
+        // holds so many pairs that its part outweighs the others (PairedParts.Lopsided): then by the pairs' hash.
         int shift = 64 - BitOperations.Log2((uint)parts);
-        (int[] Placed, int[] Starts)[] cuts = new (int[], int[])[all.Length];
-        await SideBySide.RunAsync(all.Length, p => cuts[p] = all[p].Cut(maps[p], shift, parts), degree, cancellationToken).ConfigureAwait(false);
+        ((int[] Placed, int[] Starts)[] cuts, bool byGroup) = await PairedParts.CutAsync(
+            Array.ConvertAll(all, static lane => lane.Count),
+            (p, group, partOf) => all[p].PartsOf(maps[p], shift, parts, group, partOf),
+            groups,
+            parts,
+            degree,
+            cancellationToken).ConfigureAwait(false);
+        if (byGroup)
+        {
+            EnsureGroups(groups);
+            Array.Clear(_counts, 0, groups);
+            long[] owned = _counts;
+            await SideBySide.RunAsync(
+                parts,
+                part =>
+                {
+                    DistinctPairs<TValue> distinct = new DistinctPairs<TValue>();
+                    for (int p = 0; p < all.Length; p++)
+                    {
+                        (int[] placed, int[] starts) = cuts[p];
+                        int[] map = maps[p];
+                        DistinctPairs<TValue> lane = all[p];
+                        for (int i = starts[part]; i < starts[part + 1]; i++)
+                        {
+                            int group = map[lane.GroupAt(placed[i])];
+                            if (distinct.AddCounted(group, lane.ValueAt(placed[i])))
+                            {
+                                owned[group]++;
+                            }
+                        }
+                    }
+
+                    // The part's table, held until its pairs are counted.
+                    long bytes = distinct.Footprint;
+                    if (memory is not null && !memory.TryGrow(bytes))
+                    {
+                        throw memory.Exceeded("merge of a distinct count", groups, bytes);
+                    }
+
+                    memory?.Shrink(bytes);
+                    memory?.Discard(bytes);
+                },
+                degree,
+                cancellationToken).ConfigureAwait(false);
+            ReleasePairs(groups);
+            return;
+        }
+
         long[][] counts = new long[parts][];
         await SideBySide.RunAsync(
             parts,
@@ -1048,7 +1097,12 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>, IPairedSl
             }
         }
 
-        // The pairs are counted: let go, their arrays given back.
+        ReleasePairs(groups);
+    }
+
+    /// <summary>The pairs, counted: let go, their arrays given back, a table for <paramref name="groups"/> groups made.</summary>
+    private void ReleasePairs(int groups)
+    {
         _pairs.Release();
         _pairs = new DistinctPairs<TValue>();
         _pairs.Govern(_shelf);
@@ -1189,6 +1243,42 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>, IPairedSl
                 Add(group, reader.Read<TValue>());
             }
         }
+    }
+
+    internal override bool CountsPairs => _set is null && _sets is null;
+
+    internal override void ReadStates(ref SpillReader reader, int count, PairPass pass)
+    {
+        if (pass.Whole)
+        {
+            ReadStates(ref reader, count);
+            return;
+        }
+
+        EnsureGroups(count);
+        for (int group = 0; group < count; group++)
+        {
+            int values = reader.Read<int>();
+            for (int v = 0; v < values; v++)
+            {
+                TValue value = reader.Read<TValue>();
+                if (pass.Keeps(PairPass.Of(value)))
+                {
+                    Add(group, value);
+                }
+            }
+        }
+    }
+
+    internal override void PassDone(bool last)
+    {
+        if (last)
+        {
+            ReleasePairs(_groups);
+            return;
+        }
+
+        _pairs.Clear();
     }
 
     internal override bool SpillsAlone => _set is not null;

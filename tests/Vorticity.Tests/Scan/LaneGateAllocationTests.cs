@@ -8,7 +8,7 @@ using Xunit;
 namespace Vorticity.Tests.Scan;
 
 /// <summary>
-/// The lanes of a scan wait for one another and block on the locks they share without allocating:
+/// The lanes of a scan meet in the tables they share and block on their locks without allocating:
 /// a lock made per scan allocates the first time two threads meet in it or one blocks on it, 40 to
 /// 160 bytes, at whatever batch that happens, while one the process lends pays it once. Every
 /// thread's allocations are counted, so the class runs alone, and each case takes the floor over a
@@ -25,7 +25,7 @@ public sealed class LaneGateAllocationTests : IDisposable
     public void Dispose() => _lane.Dispose();
 
     [Fact]
-    public void ALaneWaitingForAChunkAnotherLaneDecodesAllocatesNothing()
+    public void ALaneMeetingAChunkAnotherLaneDecodesAllocatesNothing()
     {
         using ScanContext first = new ScanContext(["vortex.primitive"]);
         using ScanContext second = new ScanContext(["vortex.primitive"]);
@@ -34,17 +34,17 @@ public sealed class LaneGateAllocationTests : IDisposable
         {
             using RetainedChunks table = RetainedChunks.Create(columns: 2, lanes: 2);
             Assert.False(table.TryGet(7, first, batch: 1, out RetainedChunk? claim, out _, out _));
-            Action wait = () => table.TryGet(7, second, batch: 1, out _, out _, out _);
 
-            // The second lane asks for the chunk the first is decoding, and waits until it is published.
+            // The second lane asks for the chunk the first is decoding: it takes a claim of its own, an entry of the
+            // process's, rather than wait.
             long start = GC.GetTotalAllocatedBytes(precise: true);
-            _lane.StartAndBlock(wait);
+            Assert.False(table.TryGet(7, second, batch: 1, out RetainedChunk? own, out _, out _));
+            table.Publish(own!, nodeIndex: 0, batch: 1);
             table.Publish(claim!, nodeIndex: 0, batch: 1);
-            _lane.Finish();
             rounds[round] = GC.GetTotalAllocatedBytes(precise: true) - start;
         }
 
-        Assert.True(rounds.Min() == 0, $"a wait allocated at least {rounds.Min()} B: {string.Join(" ", rounds)}");
+        Assert.True(rounds.Min() == 0, $"a claim of its own allocated at least {rounds.Min()} B: {string.Join(" ", rounds)}");
     }
 
     [Fact]

@@ -33,7 +33,7 @@ public sealed partial class DatasetDataCacheTests
         string directory = CacheDirectory();
         try
         {
-            using SynopsisCache cache = new SynopsisCache(directory, Regions, Data);
+            await using SynopsisCache cache = new SynopsisCache(directory, Regions, Data);
             byte[] bytes = [.. Enumerable.Range(0, 4_096).Select(static i => (byte)(i * 7))];
             UInt128 uid = new UInt128(7, 11);
             ISegmentReader reader = SynopsisCacheReader.Over(new Vorticity.Tests.File.TestSegmentSource(bytes), cache, uid, contents: null);
@@ -112,7 +112,7 @@ public sealed partial class DatasetDataCacheTests
         {
             await using VortexSession owner = VortexSession.Create(options => options.SynopsisCache = SynopsisCache.OpenShared(root, Regions, Data));
             double first = await AskAsync(store, owner);
-            owner.Options.SynopsisCache!.Flush();
+            await owner.Options.SynopsisCache!.FlushAsync();
 
             store.Reads = 0;
             SynopsisCache peer = SynopsisCache.OpenShared(root, Regions, Data);
@@ -174,9 +174,9 @@ public sealed partial class DatasetDataCacheTests
             string all = CacheDirectory();
             try
             {
-                await AskAsync(store, new SynopsisCache(all, Regions, Data), cache =>
+                await AskAsync(store, new SynopsisCache(all, Regions, Data), async cache =>
                 {
-                    cache.Flush();
+                    await cache.FlushAsync();
                     unbounded = cache.DataHeldBytes;
                 });
             }
@@ -186,18 +186,18 @@ public sealed partial class DatasetDataCacheTests
             }
 
             Assert.True(unbounded > 2 * Quota, $"the question's data takes {unbounded} bytes, too few to try a quota of {Quota}");
-            double first = await AskAsync(store, new SynopsisCache(directory, Regions, Quota), cache =>
+            double first = await AskAsync(store, new SynopsisCache(directory, Regions, Quota), async cache =>
             {
-                cache.Flush();
+                await cache.FlushAsync();
                 Assert.InRange(cache.DataHeldBytes, 1, Quota);
             });
 
             string none = CacheDirectory();
             try
             {
-                Assert.Equal(first, await AskAsync(store, new SynopsisCache(none, Regions), cache =>
+                Assert.Equal(first, await AskAsync(store, new SynopsisCache(none, Regions), async cache =>
                 {
-                    cache.Flush();
+                    await cache.FlushAsync();
                     Assert.Equal(0, cache.DataHeldBytes);
                 }));
                 Assert.Empty(Directory.GetFiles(none, "*-data", SearchOption.AllDirectories));
@@ -232,6 +232,14 @@ public sealed partial class DatasetDataCacheTests
         await using VortexSession session = VortexSession.Create(options => options.SynopsisCache = cache);
         double answer = await AskAsync(store, session);
         check?.Invoke(cache);
+        return answer;
+    }
+
+    private static async Task<double> AskAsync(IObjectStore store, SynopsisCache cache, Func<SynopsisCache, Task> check)
+    {
+        await using VortexSession session = VortexSession.Create(options => options.SynopsisCache = cache);
+        double answer = await AskAsync(store, session);
+        await check(cache);
         return answer;
     }
 

@@ -107,15 +107,25 @@ public sealed record DatasetOptions
     public int SummaryColumnLimit { get; init; } = ColumnSummary.DefaultLimit;
 
     /// <summary>
-    /// How many data objects stay open between scans; 32 by default. A data object is immutable, so
-    /// an open handle never goes stale: this only bounds the descriptors and parsed footers held.
+    /// How many data objects stay open between scans at most; 4 096 by default, past which
+    /// <see cref="MaxOpenObjectBytes"/> bounds them first. A data object is immutable, so an open
+    /// handle never goes stale: this only bounds the parsed footers held, an open holding no
+    /// descriptor of its own.
     /// </summary>
     /// <remarks>
     /// A scan in key order holds open at once every object whose keys interleave with another's,
     /// whatever this bound, and the next such scan opens again those the bound did not keep: a
     /// bound at the number of objects spares it every open.
     /// </remarks>
-    public int MaxOpenObjects { get; init; } = 32;
+    public int MaxOpenObjects { get; init; } = 4_096;
+
+    /// <summary>
+    /// The bytes the data objects open between scans keep, least recently used first out; 64 MiB by
+    /// default. An open object keeps the tail its open read and its footer parsed, some 30 KB for an
+    /// object of a thousand rows and 90 KB for one of a few thousand, which a question that opens it
+    /// again parses again: two to three times what the same question costs on the objects kept open.
+    /// </summary>
+    public long MaxOpenObjectBytes { get; init; } = 64L << 20;
 
     /// <summary>
     /// The bytes of tree pages read from the store that the handle keeps from one version it reads to
@@ -217,6 +227,12 @@ public sealed record DatasetOptions
     /// object.
     /// </summary>
     internal int ChunkBytes { get; init; } = 1 << 20;
+
+    /// <summary>
+    /// The bytes a handle keeps of the granules its filters kept rows in (<see cref="PredicatePages"/>), least used first
+    /// out: 16 MiB by default; 0 keeps none, the session's synopsis cache, when it has one, then holding them alone.
+    /// </summary>
+    internal long PredicatePageBytes { get; init; } = PredicatePages.DefaultBudget;
 
     /// <summary>
     /// The rows after which the chunks of every column of an object end together, at least: 2^22 by default. A lane's

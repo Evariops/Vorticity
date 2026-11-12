@@ -54,6 +54,24 @@ internal sealed record PartitionIndexEntry(
         return false;
     }
 
+    /// <summary>
+    /// The ranks in <paramref name="index"/>, the directory of the object the entry names, of the objects the entry covers, a
+    /// bit a rank: what a lookup asks of each object it meets, where it ran through every uid covered.
+    /// </summary>
+    internal ulong[] RanksIn(PartitionIndex index)
+    {
+        ulong[] ranks = new ulong[(index.Objects.Count + 63) >> 6];
+        for (int i = 0; i < Covered.Count; i++)
+        {
+            if (index.RankOf(Covered[i]) is int rank and >= 0)
+            {
+                ranks[rank >> 6] |= 1UL << (rank & 63);
+            }
+        }
+
+        return ranks;
+    }
+
     /// <summary>The entry's value: its format's version, the version that wrote it, the object's key, uid and bytes, the uids it covers.</summary>
     internal byte[] ToBytes()
     {

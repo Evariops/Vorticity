@@ -199,7 +199,7 @@ internal sealed class PartitionPostings : IDisposable
         if (previous is not null)
         {
             before = await SealedObjectStore.OpenDataAsync(dataset.Store, previous.ObjectKey, previous.Uid, previous.Bytes, cancellationToken).ConfigureAwait(false);
-            old = await ReadAsync(before, previous.Bytes, cancellationToken).ConfigureAwait(false);
+            old = await ReadAsync(before, cancellationToken).ConfigureAwait(false);
         }
 
         try
@@ -339,24 +339,37 @@ internal sealed class PartitionPostings : IDisposable
         return covered;
     }
 
-    /// <summary>The index an object holds (<see cref="OpenAsync"/>), its last bytes let go.</summary>
+    /// <summary>The index an object holds (<see cref="OpenAsync(ISegmentReader, CancellationToken)"/>), its last bytes let go.</summary>
     /// <exception cref="VortexFormatException">The object holds no index this version reads.</exception>
-    internal static async ValueTask<PartitionIndex> ReadAsync(ISegmentReader reader, long length, CancellationToken cancellationToken)
+    internal static async ValueTask<PartitionIndex> ReadAsync(ISegmentReader reader, CancellationToken cancellationToken)
     {
-        using OpenedIndex opened = await OpenAsync(reader, length, cancellationToken).ConfigureAwait(false);
-        return opened.Index;
+        OpenedIndex opened = await OpenAsync(reader, cancellationToken).ConfigureAwait(false);
+        await using (opened.ConfigureAwait(false))
+        {
+            return opened.Index;
+        }
     }
 
     /// <summary>
-    /// The index an object of <paramref name="length"/> bytes holds, from its last bytes, an open's tail of them at most
+    /// The index the object <paramref name="reader"/> reads holds, from its last bytes, an open's tail of them at most
     /// (<see cref="ObjectStoreSource.TailBytes"/>), read in one request: its tail, then its directory, a request more when it
     /// starts before them; the pages that lie in them are served from them (<see cref="OpenedIndex.LoadAsync"/>). An index of
-    /// a few pages is read whole in that request.
+    /// a few pages is read whole in that request. Its bytes are the reader's, a sealed object's plaintext, shorter than the
+    /// store holds.
     /// </summary>
     /// <exception cref="VortexFormatException">The object holds no index this version reads.</exception>
-    internal static async ValueTask<OpenedIndex> OpenAsync(
-        ISegmentReader reader, long length, CancellationToken cancellationToken, PartitionIndexCache? cache = null, string? key = null, UInt128 uid = default)
+    internal static ValueTask<OpenedIndex> OpenAsync(ISegmentReader reader, CancellationToken cancellationToken) =>
+        OpenAsync(reader, null, null, cancellationToken);
+
+    /// <summary>
+    /// The index <paramref name="reader"/> reads (<see cref="OpenAsync(ISegmentReader, CancellationToken)"/>), kept in
+    /// <paramref name="cache"/> when one is given; the reader given to the index opened when <paramref name="owned"/> names
+    /// the object it reads.
+    /// </summary>
+    private static async ValueTask<OpenedIndex> OpenAsync(
+        ISegmentReader reader, (IObjectStore Store, PartitionIndexEntry Entry)? owned, PartitionIndexCache? cache, CancellationToken cancellationToken)
     {
+        long length = await reader.GetLengthAsync(cancellationToken).ConfigureAwait(false);
         if (length < PartitionIndex.TailBytes)
         {
             throw new VortexFormatException("An index of a partition ends with no tail this version reads.");
@@ -390,8 +403,10 @@ internal sealed class PartitionPostings : IDisposable
                 throw new VortexFormatException("The directory of an index of a partition does not decode.");
             }
 
-            PartitionIndexCache.Held? held = cache?.Keep(key!, uid, index, bytes, last.Buffer.Span.ToArray(), start);
-            return new OpenedIndex(reader, index, last, null, start, held);
+            PartitionIndexCache.Held? held = cache is null || owned is not { } named
+                ? null
+                : cache.Keep(named.Entry.ObjectKey, named.Entry.Uid, index, bytes, last.Buffer.Span.ToArray(), start);
+            return new OpenedIndex(reader, owned, index, last, null, start, held);
         }
         catch
         {
@@ -401,82 +416,140 @@ internal sealed class PartitionPostings : IDisposable
     }
 
     /// <summary>
-    /// The index object <paramref name="key"/> of uid <paramref name="uid"/> and <paramref name="length"/> bytes, as
-    /// <see cref="OpenAsync"/> opens it, from <paramref name="cache"/> when it holds
-    /// it: its directory parsed and its last bytes, with no request; kept there when read.
+    /// The index object <paramref name="entry"/> names in <paramref name="store"/>, as
+    /// <see cref="OpenAsync(ISegmentReader, CancellationToken)"/> opens it, kept in <paramref name="cache"/>; from the cache
+    /// when it holds it, its directory parsed and its last bytes, with no open of the object, which a page the cache does not
+    /// hold opens then. Sealed, an open read the envelope's trailer and unwrapped its key: a request each partition each
+    /// question, though the cache held all it read.
     /// </summary>
     /// <exception cref="VortexFormatException">The object holds no index this version reads.</exception>
-    internal static ValueTask<OpenedIndex> OpenCachedAsync(
-        ISegmentReader reader, string key, UInt128 uid, long length, PartitionIndexCache cache, CancellationToken cancellationToken) =>
-        cache.Of(key, uid) is { } held
-            ? ValueTask.FromResult(new OpenedIndex(reader, held.Index, null, held.Tail, held.Start, held))
-            : OpenAsync(reader, length, cancellationToken, cache, key, uid);
+    internal static async ValueTask<OpenedIndex> OpenCachedAsync(
+        IObjectStore store, PartitionIndexEntry entry, PartitionIndexCache cache, CancellationToken cancellationToken)
+    {
+        if (cache.Of(entry.ObjectKey, entry.Uid) is { } held)
+        {
+            return new OpenedIndex(null, (store, entry), held.Index, null, held.Tail, held.Start, held);
+        }
+
+        ISegmentReader reader = await SealedObjectStore.OpenDataAsync(store, entry.ObjectKey, entry.Uid, entry.Bytes, cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return await OpenAsync(reader, (store, entry), cache, cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            await reader.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
+    }
 
     /// <summary>
-    /// An index of a partition as a lookup opened it (<see cref="OpenAsync"/>): its directory, and the object's last bytes,
-    /// which serve the pages lying in them; a page before them is read in one request.
+    /// An index of a partition as a lookup opened it (<see cref="OpenAsync(ISegmentReader, CancellationToken)"/>): its
+    /// directory, and the object's last bytes, which serve the pages lying in them; a page before them is read in one
+    /// request.
     /// </summary>
-    /// <param name="reader">The index object, for the pages its last bytes do not hold.</param>
+    /// <param name="reader">The index object, for the pages its last bytes do not hold; null until one is read, when <paramref name="owned"/> opens it.</param>
+    /// <param name="owned">The store and the entry of the index object, whose reader the index opens and disposes; null for a reader the caller's.</param>
     /// <param name="index">Its directory.</param>
     /// <param name="last">Its last bytes, from <paramref name="start"/>, read for it and disposed with it; null for those a cache holds.</param>
     /// <param name="tail">Its last bytes a handle's cache holds, when <paramref name="last"/> is null.</param>
     /// <param name="start">Where its last bytes start.</param>
     /// <param name="held">What a handle's cache holds of it, which keeps the pages loaded; null for none.</param>
     internal sealed class OpenedIndex(
-        ISegmentReader reader, PartitionIndex index, Buffers.SegmentOwner? last, byte[]? tail, long start, PartitionIndexCache.Held? held = null)
-        : IDisposable
+        ISegmentReader? reader, (IObjectStore Store, PartitionIndexEntry Entry)? owned, PartitionIndex index, Buffers.SegmentOwner? last, byte[]? tail,
+        long start, PartitionIndexCache.Held? held = null)
+        : IAsyncDisposable
     {
-        // The page loaded last, when read before the last bytes or kept by the cache; where it starts, -1 for none, and its
-        // length.
+        private ISegmentReader? _reader = reader;
+
+        // The page loaded last: read before the last bytes, or what the cache holds of it; where it starts, -1 for none, its
+        // length, and whether its bytes hold its checksum.
         private Buffers.SegmentOwner? _read;
-        private byte[]? _kept;
+        private PartitionIndexCache.KnownPage? _known;
         private long _offset = -1;
         private int _length;
+        private bool _checked;
 
         /// <summary>The index's directory.</summary>
         internal PartitionIndex Index => index;
 
         /// <summary>The bytes of the page loaded last (<see cref="LoadAsync"/>).</summary>
         internal ReadOnlySpan<byte> Page =>
-            _read is { } read ? read.Buffer.Span : _kept is { } kept ? kept : Last.Slice((int)(_offset - start), _length);
+            _read is { } read ? read.Buffer.Span : _known?.Bytes is { } kept ? kept : Last.Slice((int)(_offset - start), _length);
 
         private ReadOnlySpan<byte> Last => last is not null ? last.Buffer.Span : tail;
 
         /// <summary>
         /// Loads <paramref name="page"/>, unless it is the one loaded: from the object's last bytes when it lies in them, from
-        /// the handle's cache when it kept it, in one request otherwise, which the cache keeps after. Whether its bytes hold
-        /// its checksum.
+        /// the handle's cache when it kept it, in one request otherwise. Whether its bytes hold its checksum, which a page the
+        /// cache holds was checked against once, when kept.
         /// </summary>
         internal async ValueTask<bool> LoadAsync(PartitionIndex.Page page, CancellationToken cancellationToken)
         {
             if (page.Offset != _offset)
             {
                 _read?.Dispose();
-                (_read, _kept, _offset) = (null, null, -1);
-                if (page.Offset < start || page.Offset + page.Length > start + Last.Length)
+                (_read, _known, _offset, _checked) = (null, held?.Page(page.Offset), -1, false);
+                if ((page.Offset < start || page.Offset + page.Length > start + Last.Length) && _known?.Bytes is null)
                 {
-                    _kept = held?.Page(page.Offset);
-                    if (_kept is null)
-                    {
-                        _read = await reader.ReadAsync(
-                            new Serialization.Schemas.SegmentSpec((ulong)page.Offset, (uint)page.Length, 0, 0, 0), cancellationToken).ConfigureAwait(false);
-                        if (held is not null && System.IO.Hashing.XxHash3.HashToUInt64(_read.Buffer.Span) == page.Checksum)
-                        {
-                            held.Keep(page.Offset, _read.Buffer.Span);
-                        }
-                    }
+                    _known = null;
+                    _reader ??= await SealedObjectStore.OpenDataAsync(
+                        owned!.Value.Store, owned.Value.Entry.ObjectKey, owned.Value.Entry.Uid, owned.Value.Entry.Bytes, cancellationToken).ConfigureAwait(false);
+                    _read = await _reader.ReadAsync(
+                        new Serialization.Schemas.SegmentSpec((ulong)page.Offset, (uint)page.Length, 0, 0, 0), cancellationToken).ConfigureAwait(false);
                 }
 
                 (_offset, _length) = (page.Offset, page.Length);
             }
 
-            return System.IO.Hashing.XxHash3.HashToUInt64(Page) == page.Checksum;
+            if (!_checked)
+            {
+                if (_known is null)
+                {
+                    if (System.IO.Hashing.XxHash3.HashToUInt64(Page) != page.Checksum)
+                    {
+                        return false;
+                    }
+
+                    _known = held?.Keep(page.Offset, _read is null ? default : _read.Buffer.Span);
+                }
+
+                _checked = true;
+            }
+
+            return true;
         }
 
-        public void Dispose()
+        /// <summary>
+        /// Where the strides of the page loaded start, as <paramref name="entry"/> reads <paramref name="page"/>
+        /// (<see cref="PartitionIndex.Entry.Restarts"/>): made by the first lookup of a page the cache holds, and kept with
+        /// it; empty for a page it does not hold, whose lookups sum its gaps from its first.
+        /// </summary>
+        internal ReadOnlySpan<ulong> Restarts(PartitionIndex.Entry entry, PartitionIndex.Page page)
+        {
+            if (_known is not { } known || held is null)
+            {
+                return default;
+            }
+
+            if (known.Restarts is { } made)
+            {
+                return made;
+            }
+
+            ulong[] restarts = entry.Restarts(Page, page);
+            held.KeepRestarts(known, restarts);
+            return restarts;
+        }
+
+        public async ValueTask DisposeAsync()
         {
             _read?.Dispose();
             last?.Dispose();
+            if (owned is not null && _reader is not null)
+            {
+                await _reader.DisposeAsync().ConfigureAwait(false);
+            }
         }
     }
 

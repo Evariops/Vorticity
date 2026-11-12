@@ -63,8 +63,9 @@ public sealed class VortexDataset : IAsyncDisposable
     {
         _store = store;
         _options = options;
-        _objects = new ObjectCache(store, options.MaxOpenObjects, options.Session);
+        _objects = new ObjectCache(store, options.MaxOpenObjects, options.Session, options.MaxOpenObjectBytes);
         _pageCache = new PageCache(options.PageCacheBytes);
+        Predicates = new PredicatePages(options.PredicatePageBytes);
         _snapshot = new DatasetSnapshot(commit, PagesOf(version, commit), _objects, knownAt, Costs);
     }
 
@@ -133,6 +134,9 @@ public sealed class VortexDataset : IAsyncDisposable
 
     /// <summary>How many of its open objects a read holds: none once every read has given its objects back.</summary>
     internal int LeasedObjects => _objects.Leased;
+
+    /// <summary>What the objects open between scans weigh, as <see cref="DatasetOptions.MaxOpenObjectBytes"/> bounds them.</summary>
+    internal long OpenObjectBytes => _objects.HeldBytes;
 
     /// <summary>Its levels, where level 0 is the one an append lands in.</summary>
     internal DatasetLevels Levels => Snapshot.Levels;
@@ -2456,7 +2460,8 @@ public sealed class VortexDataset : IAsyncDisposable
     private ValueTask<ISegmentReader> OpenFooterlessAsync(ObjectEntry entry, Indexes.ObjectContents contents, CancellationToken cancellationToken) =>
         SealedObjectStore.OpenDataAsync(
             _store, entry.Key, entry.Uid, entry.Bytes, cancellationToken,
-            _store is SealedObjectStore { Seals: true } ? SealedSynopsisCache.Over(Session.Options.SynopsisCache, entry.Uid, contents) : null);
+            _store is SealedObjectStore { Seals: true } ? SealedSynopsisCache.Over(Session.Options.SynopsisCache, entry.Uid, contents) : null,
+            footerless: true);
 
     /// <summary>
     /// The reader of an object read with no open of it, from the store's reader <paramref name="source"/>: the
@@ -3004,7 +3009,7 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <paramref name="named"/> of its locating indexes alone, or, when null, the directory whole, its entries on the columns
     /// <paramref name="indexed"/> keeps; null when it does not parse.
     /// </summary>
-    private static Task<Indexes.IndexDirectory?> LocatingAsync(
+    private Task<Indexes.IndexDirectory?> LocatingAsync(
         ObjectEntry entry, Indexes.IndexSegment region, ISegmentReader reader, Func<uint, bool>? indexed, List<Indexes.IndexSegment>? named,
         CancellationToken cancellationToken)
     {
@@ -3023,21 +3028,49 @@ public sealed class VortexDataset : IAsyncDisposable
 
         // The entries alone, a directory of them over the object's rows: each checked against its own checksum, one that fails
         // costing itself, as in a directory read whole.
+        // The entries alone, each parsed once for the object it lies in and kept (IndexEntries), read only when none is.
         async Task<Indexes.IndexDirectory?> EntriesAsync(List<Indexes.IndexSegment> regions)
         {
-            using SegmentRequestSet requests = new SegmentRequestSet(regions.Count);
-            int[] slots = new int[regions.Count];
+            Indexes.IndexEntry?[] found = new Indexes.IndexEntry?[regions.Count];
+            int missing = 0;
             for (int i = 0; i < regions.Count; i++)
             {
-                slots[i] = requests.Add(new Serialization.Schemas.SegmentSpec(regions[i].Offset, regions[i].Length, regions[i].AlignmentExponent, 0, 0));
+                missing += _indexEntries.TryGet((entry.Uid, regions[i].Offset), out Indexes.IndexEntry known) ? 0 : 1;
+                found[i] = known;
             }
 
-            await reader.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
-            List<Indexes.IndexEntry> kept = new List<Indexes.IndexEntry>(regions.Count);
-            for (int i = 0; i < regions.Count; i++)
+            if (missing > 0)
             {
-                ReadOnlySpan<byte> bytes = requests.GetBuffer(slots[i]).Span;
-                if (regions[i].Holds(bytes) && Indexes.IndexDirectory.TryParseEntry(bytes, region.Offset, out Indexes.IndexEntry? index))
+                using SegmentRequestSet requests = new SegmentRequestSet(missing);
+                int[] slots = new int[regions.Count];
+                for (int i = 0; i < regions.Count; i++)
+                {
+                    slots[i] = found[i] is null
+                        ? requests.Add(new Serialization.Schemas.SegmentSpec(regions[i].Offset, regions[i].Length, regions[i].AlignmentExponent, 0, 0))
+                        : -1;
+                }
+
+                await reader.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
+                for (int i = 0; i < regions.Count; i++)
+                {
+                    if (slots[i] < 0)
+                    {
+                        continue;
+                    }
+
+                    ReadOnlySpan<byte> bytes = requests.GetBuffer(slots[i]).Span;
+                    if (regions[i].Holds(bytes) && Indexes.IndexDirectory.TryParseEntry(bytes, region.Offset, out Indexes.IndexEntry? index))
+                    {
+                        _indexEntries.Keep((entry.Uid, regions[i].Offset), index, IndexEntryBytes + (2L * regions[i].Length), out index);
+                        found[i] = index;
+                    }
+                }
+            }
+
+            List<Indexes.IndexEntry> kept = new List<Indexes.IndexEntry>(regions.Count);
+            foreach (Indexes.IndexEntry? index in found)
+            {
+                if (index is not null)
                 {
                     kept.Add(index);
                 }
@@ -3081,7 +3114,7 @@ public sealed class VortexDataset : IAsyncDisposable
     internal PartitionIndexCache PartitionIndexes { get; } = new PartitionIndexCache(PartitionIndexBytes);
 
     /// <summary>The granules where the filters this handle evaluated on its objects' rows kept a row (<see cref="PredicatePages"/>).</summary>
-    internal PredicatePages Predicates { get; } = new PredicatePages();
+    internal PredicatePages Predicates { get; }
 
     /// <summary>
     /// What reading the dataset costs (spec B, 2.3): its options' profile when they give one, its store's otherwise, a remote
@@ -3353,18 +3386,70 @@ public sealed class VortexDataset : IAsyncDisposable
     /// contents names, side by side in one round trip, none once this handle read them. A column the object keeps no
     /// counts or sketches of, or an object with no table of contents this library reads, has none.
     /// </summary>
-    internal async ValueTask<(Indexes.ColumnCounts? Counts, Indexes.ColumnSketches? Sketches)> ReadCountsAsync(
+    internal ValueTask<(Indexes.ColumnCounts? Counts, Indexes.ColumnSketches? Sketches)> ReadCountsAsync(
         ObjectEntry entry, int field, bool sketches, CancellationToken cancellationToken)
     {
         if (entry.Contents is not { Counts.Count: > 0 } contents)
         {
-            return (null, null);
+            return new((null, null));
         }
 
+        // Both regions in the memo, or not asked: no read, and no arrays to read them by, which every object of a question
+        // its counts answer took once warm.
+        Indexes.IndexSegment? counted = contents.CountsOf(field);
+        Indexes.IndexSegment? sketched = sketches ? contents.SketchesOf(field) : null;
+        Indexes.ColumnCounts? counts = null;
+        Indexes.ColumnSketches? held = null;
+        return (counted is not { } region || _synopses.TryGet(entry.Uid, region.Offset, out counts))
+            && (sketched is not { } sketchRegion || _synopses.TryGet(entry.Uid, sketchRegion.Offset, out held))
+                ? new((counts, held))
+                : ReadCountsUnheldAsync(entry, contents, counted, sketched, cancellationToken);
+    }
+
+    /// <summary><see cref="ReadCountsAsync"/>'s regions, one at least not in the memo, read side by side in one round trip.</summary>
+    private async ValueTask<(Indexes.ColumnCounts? Counts, Indexes.ColumnSketches? Sketches)> ReadCountsUnheldAsync(
+        ObjectEntry entry, Indexes.ObjectContents contents, Indexes.IndexSegment? counted, Indexes.IndexSegment? sketched, CancellationToken cancellationToken)
+    {
         object?[] read = new object?[2];
-        Indexes.IndexSegment?[] regions = [contents.CountsOf(field), sketches ? contents.SketchesOf(field) : null];
+        Indexes.IndexSegment?[] regions = [counted, sketched];
         await ReadSynopsesAsync(entry, contents, regions, read, CountsOrSketches, cancellationToken).ConfigureAwait(false);
         return (read[0] as Indexes.ColumnCounts, read[1] as Indexes.ColumnSketches);
+    }
+
+    /// <summary>
+    /// The counts of every column the object <paramref name="entry"/> names keeps them of, with their sketches, as
+    /// <see cref="ReadCountsAsync"/> reads one column's, every column's regions side by side in one round trip where a column
+    /// at a time took one each: a column whose counts do not read is left out.
+    /// </summary>
+    internal async ValueTask<List<(int Field, Indexes.ColumnCounts Counts, Indexes.ColumnSketches? Sketches)>> ReadCountsWithSketchesAsync(
+        ObjectEntry entry, CancellationToken cancellationToken)
+    {
+        List<(int Field, Indexes.ColumnCounts Counts, Indexes.ColumnSketches? Sketches)> counted = [];
+        if (entry.Contents is not { Counts.Count: > 0 } contents)
+        {
+            return counted;
+        }
+
+        int fields = contents.Counts.Count;
+        Indexes.IndexSegment?[] regions = new Indexes.IndexSegment?[2 * fields];
+        for (int i = 0; i < fields; i++)
+        {
+            regions[2 * i] = contents.Counts[i].Region;
+            regions[(2 * i) + 1] = contents.SketchesOf(contents.Counts[i].Field);
+        }
+
+        object?[] read = new object?[regions.Length];
+        await ReadSynopsesAsync(entry, contents, regions, read, static (position, bytes) => CountsOrSketches(position % 2, bytes), cancellationToken)
+            .ConfigureAwait(false);
+        for (int i = 0; i < fields; i++)
+        {
+            if (read[2 * i] is Indexes.ColumnCounts counts)
+            {
+                counted.Add((contents.Counts[i].Field, counts, read[(2 * i) + 1] as Indexes.ColumnSketches));
+            }
+        }
+
+        return counted;
     }
 
     /// <summary>
@@ -4061,13 +4146,14 @@ public sealed class VortexDataset : IAsyncDisposable
 
         // Read out of the chunks the sink still holds, before the put: the entry's bounds and the
         // smallest key its leaf is ordered by then cost no request at all. An object that went to the
-        // store as it was written is read from there once put, its footer in a request or two: an object
-        // past the part threshold took a request a part anyway. Should that read fail, the object is
-        // left unnamed, as an abandoned job's are, for a vacuum to take.
+        // store as it was written is read out of the tail its sink kept, or, when its description reads
+        // before the tail, from the store once put, its footer in a request or two. Should that read
+        // fail, the object is left unnamed, as an abandoned job's are, for a vacuum to take.
         ObjectSummaries summaries;
         byte[] prefix;
         byte[] last;
         bool streamed = draft.Sink.IsStreamed;
+        bool described = !streamed;
         try
         {
             if (!streamed)
@@ -4078,6 +4164,20 @@ public sealed class VortexDataset : IAsyncDisposable
             else
             {
                 (summaries, prefix, last) = (ObjectSummaries.Empty, [], []);
+
+                // A streamed object's tail, which the sink kept: its statistics are read out of it, with no request, unless
+                // its description reads before it, a key's bounds read from its rows.
+                if (draft.Sink.Tail(_options.Session.Options.EnginePool) is { } kept)
+                {
+                    try
+                    {
+                        (summaries, prefix, last) = await DescribeAsync(kept, firstRow, draft, cancellationToken).ConfigureAwait(false);
+                        described = true;
+                    }
+                    catch (Exception missed) when (Missed(missed))
+                    {
+                    }
+                }
             }
 
             if (await draft.Sink.CommitAsync(cancellationToken).ConfigureAwait(false) != PutOutcome.Created)
@@ -4094,7 +4194,7 @@ public sealed class VortexDataset : IAsyncDisposable
 
         // What the store holds, sealed bytes included: what a head reports, and verification checks.
         long bytes = draft.Sink.StoredLength;
-        if (streamed)
+        if (!described)
         {
             ISegmentReader stored = await SealedObjectStore.OpenDataAsync(_store, draft.Key, Uid(draft.Identity), bytes, cancellationToken).ConfigureAwait(false);
             (summaries, prefix, last) = await DescribeAsync(stored, firstRow, draft, cancellationToken, draft.Writer.TailBytes).ConfigureAwait(false);
@@ -4105,6 +4205,20 @@ public sealed class VortexDataset : IAsyncDisposable
             .WithLastKey(last)
             .WithArrival(draft.Arrival > 0 ? draft.Arrival : Math.Max(_options.TimeProvider.GetUtcNow().ToUnixTimeSeconds(), 1));
         return new WrittenObject(entry, KeyOf(prefix, entry), draft.Writer.DataBytes, draft.StartedAt, draft.KeyGeneration);
+    }
+
+    /// <summary>Whether <paramref name="failure"/> is a read before a streamed object's kept tail, however wrapped.</summary>
+    private static bool Missed(Exception failure)
+    {
+        for (Exception? at = failure; at is not null; at = at.InnerException)
+        {
+            if (at is ObjectSegmentSink.TailMissedException)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>
@@ -4123,14 +4237,12 @@ public sealed class VortexDataset : IAsyncDisposable
 
         foreach ((int _, DatasetTree tree) in version.Levels.Occupied())
         {
-            // The partitions lead the tree, and the positions of each run on from those of the others: every leaf's.
+            // The partitions lead the tree, and the positions of each run on from those of the others: every leaf's, a
+            // subtree's end kept by its page, which no version changes, so that an append reads the pages its commit
+            // wrote again, not every page.
             if (version.Schema.Partitioned)
             {
-                await foreach (PositionedEntry held in tree.WalkAsync(version.Pages, 0, long.MaxValue, null, cancellationToken).ConfigureAwait(false))
-                {
-                    end = Math.Max(end, PositionAt(held.Entry.Key.Span) + held.Entry.Rows);
-                }
-
+                end = Math.Max(end, await SubtreeEndAsync(version, tree.Root, tree.Depth, cancellationToken).ConfigureAwait(false));
                 continue;
             }
 
@@ -4149,6 +4261,55 @@ public sealed class VortexDataset : IAsyncDisposable
 
         return end;
     }
+
+    /// <summary>
+    /// The end of the positions of the rows the subtree under <paramref name="page"/>, of <paramref name="depth"/> levels of
+    /// pages, holds: the greatest of its leaves' places past their rows; kept by the page, which is never rewritten in place.
+    /// </summary>
+    private async ValueTask<long> SubtreeEndAsync(DatasetSnapshot version, PageReference page, int depth, CancellationToken cancellationToken)
+    {
+        if (_subtreeEnds.TryGet(page, out long known))
+        {
+            return known;
+        }
+
+        ReadOnlyMemory<byte> node = await version.Pages.ReadPageAsync(page, cancellationToken).ConfigureAwait(false);
+        long end = 0;
+        if (depth > 1)
+        {
+            foreach (InternalEntry child in TreePage.ReadInternal(node))
+            {
+                end = Math.Max(end, await SubtreeEndAsync(version, child.Child, depth - 1, cancellationToken).ConfigureAwait(false));
+            }
+        }
+        else
+        {
+            foreach (TreeEntry leaf in TreePage.ReadLeaf(node))
+            {
+                end = Math.Max(end, PositionAt(leaf.Key.Span) + leaf.Rows);
+            }
+        }
+
+        _subtreeEnds.Keep(page, end, SubtreeEndBytes, out _);
+        return end;
+    }
+
+    /// <summary>The bytes a subtree's end is counted at in <see cref="_subtreeEnds"/>: its page's reference, its value and a slot.</summary>
+    private const int SubtreeEndBytes = 96;
+
+    // The end of each subtree a keyless partitioned dataset's appends found (SubtreeEndAsync), by its page: a megabyte's worth.
+    private readonly ClockMemo<PageReference, long> _subtreeEnds = new ClockMemo<PageReference, long>(1L << 20);
+
+    /// <summary>
+    /// The entries of objects' index directories a lookup read, parsed, by object and region, which do not change: each
+    /// locating index's entry of every object a lookup reached was read and parsed at every question, 15 % of what a search
+    /// of one identifier allocated. Within 4 MiB, an entry weighed twice its bytes.
+    /// </summary>
+    private readonly ClockMemo<(UInt128 Uid, ulong Offset), Indexes.IndexEntry> _indexEntries =
+        new ClockMemo<(UInt128 Uid, ulong Offset), Indexes.IndexEntry>(4L << 20);
+
+    /// <summary>What an entry kept weighs besides its bytes: the record, its lists and the memo's slot.</summary>
+    private const long IndexEntryBytes = 256;
 
     /// <summary>What a change reports when its filter can match no row: nothing read, nothing committed.</summary>
     private RowChangeResult Unchanged() => new RowChangeResult { Version = Version, Outcome = OperationOutcome.AlreadyThere };

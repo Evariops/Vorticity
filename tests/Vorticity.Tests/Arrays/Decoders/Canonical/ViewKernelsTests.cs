@@ -56,6 +56,33 @@ public sealed class ViewKernelsTests
         }
     }
 
+    /// <summary>
+    /// A selected text of 1 to 24 bytes, ASCII but for one byte that is no UTF-8, wherever it lies, is refused; the same
+    /// text with "é" there is taken.
+    /// </summary>
+    [Fact]
+    public void ASelectedTextIsCheckedAtEveryByte()
+    {
+        for (int length = 1; length <= 24; length++)
+        {
+            for (int at = 0; at < length; at++)
+            {
+                byte[] bad = Encoding.ASCII.GetBytes(new string('a', length));
+                bad[at] = 0xFF;
+                byte[] offsets = new byte[8];
+                BinaryPrimitives.WriteInt32LittleEndian(offsets.AsSpan(4), length);
+                Assert.Throws<VortexFormatException>(() =>
+                    ViewKernels.BuildFromOffsetsSelected(offsets, PType.U32, bad, new byte[16], [0], requireUtf8: true, ValidityMask.NonNullable));
+
+                byte[] good = Encoding.UTF8.GetBytes(new string('a', at) + "é" + new string('a', length - at - 1));
+                BinaryPrimitives.WriteInt32LittleEndian(offsets.AsSpan(4), good.Length);
+                byte[] views = new byte[16];
+                ViewKernels.BuildFromOffsetsSelected(offsets, PType.U32, good, views, [0], requireUtf8: true, ValidityMask.NonNullable);
+                Assert.Equal(good.Length, BinaryPrimitives.ReadInt32LittleEndian(views));
+            }
+        }
+    }
+
     [Fact]
     public void AUtf8RowMustStartOnACharacter()
     {

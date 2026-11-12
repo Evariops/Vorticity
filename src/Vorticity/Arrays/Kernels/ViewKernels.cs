@@ -345,7 +345,22 @@ internal static class ViewKernels
         ulong total = 0;
         int i = 0;
 
-        if (Vector.IsHardwareAccelerated)
+        if (Avx2.IsSupported && values.Length >= 64)
+        {
+            // Eight bytes summed into a 64-bit lane by one sum of absolute differences against zero, where widening to
+            // 64 bits took seven steps a vector.
+            ref byte source = ref MemoryMarshal.GetReference(values);
+            Vector256<ulong> first = Vector256<ulong>.Zero;
+            Vector256<ulong> second = Vector256<ulong>.Zero;
+            for (; i <= values.Length - 64; i += 64)
+            {
+                first += Avx2.SumAbsoluteDifferences(Vector256.LoadUnsafe(ref source, (nuint)i), Vector256<byte>.Zero).AsUInt64();
+                second += Avx2.SumAbsoluteDifferences(Vector256.LoadUnsafe(ref source, (nuint)(i + 32)), Vector256<byte>.Zero).AsUInt64();
+            }
+
+            total = Vector256.Sum(first + second);
+        }
+        else if (Vector.IsHardwareAccelerated)
         {
             int lanes = Vector<byte>.Count;
             ref byte source = ref MemoryMarshal.GetReference(values);
@@ -1772,6 +1787,36 @@ internal static class ViewKernels
         }
     }
 
+    /// <summary>
+    /// Whether the <paramref name="size"/> bytes at <paramref name="value"/>, a selected row's, are UTF-8: ASCII, every
+    /// high bit clear, told by or-ing them a word at a time inline, the full check called only for a row that is not.
+    /// Called for every row, the check cost 3.1 ns a short text, three times the row's view.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static bool IsUtf8(ref byte value, int size)
+    {
+        ulong high;
+        if (size >= sizeof(ulong))
+        {
+            // Whole words, then the last eight bytes, which may overlap the words before.
+            high = Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref value, size - sizeof(ulong)));
+            for (int i = 0; i < size - sizeof(ulong); i += sizeof(ulong))
+            {
+                high |= Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref value, i));
+            }
+        }
+        else
+        {
+            high = 0;
+            for (int i = 0; i < size; i++)
+            {
+                high |= Unsafe.Add(ref value, i);
+            }
+        }
+
+        return (high & 0x8080_8080_8080_8080UL) == 0 || Utf8.IsValid(MemoryMarshal.CreateReadOnlySpan(ref value, size));
+    }
+
     private static void SelectedFromOffsets<TOff>(
         ReadOnlySpan<byte> offsets, ReadOnlySpan<byte> heap, Span<byte> views,
         ReadOnlySpan<int> wanted, bool requireUtf8, in ValidityMask mask)
@@ -1807,7 +1852,7 @@ internal static class ViewKernels
             }
 
             ref byte value = ref Unsafe.Add(ref heapRef, start);
-            if (requireUtf8 && !Utf8.IsValid(MemoryMarshal.CreateReadOnlySpan(ref value, size)))
+            if (requireUtf8 && !IsUtf8(ref value, size))
             {
                 ThrowInvalidRow(row);
             }
@@ -1869,7 +1914,7 @@ internal static class ViewKernels
 
             int size = (int)(end - start);
             ref byte value = ref Unsafe.Add(ref heapRef, (nint)start);
-            if (requireUtf8 && !Utf8.IsValid(MemoryMarshal.CreateReadOnlySpan(ref value, size)))
+            if (requireUtf8 && !IsUtf8(ref value, size))
             {
                 return false;
             }
@@ -1921,7 +1966,7 @@ internal static class ViewKernels
             }
 
             ref byte value = ref Unsafe.Add(ref heapRef, start);
-            if (requireUtf8 && !Utf8.IsValid(MemoryMarshal.CreateReadOnlySpan(ref value, size)))
+            if (requireUtf8 && !IsUtf8(ref value, size))
             {
                 ThrowInvalidRow(i);
             }

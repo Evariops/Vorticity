@@ -28,10 +28,14 @@ internal static class Trigrams
     {
         for (int i = 0; i < Length; i++)
         {
-            byte b = trigram[i];
-            destination[i] = fold && b is >= (byte)'A' and <= (byte)'Z' ? (byte)(b | 0x20) : b;
+            destination[i] = Folded(trigram[i], fold);
         }
     }
+
+    /// <summary>A byte of a trigram, ASCII-lower-cased when <paramref name="fold"/>, as <see cref="Copy"/> folds each.</summary>
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
+    internal static byte Folded(byte value, bool fold) =>
+        fold && value is >= (byte)'A' and <= (byte)'Z' ? (byte)(value | 0x20) : value;
 
     /// <summary>
     /// The distinct trigrams a string predicate requires of a matching value, or none when it claims
@@ -44,15 +48,16 @@ internal static class Trigrams
         List<byte[]> runs = match.Op == StringMatchOp.Like
             ? BytePattern.LiteralRuns(match.Pattern.BytesValue, match.Escape)
             : [match.Pattern.BytesValue.ToArray()];
+        // Told apart by their three bytes in an integer, where a hexadecimal text of each was made and hashed.
         List<byte[]> trigrams = [];
-        HashSet<string> seen = new HashSet<string>(StringComparer.Ordinal);
+        HashSet<int> seen = [];
         Span<byte> scratch = stackalloc byte[Length];
         foreach (byte[] run in runs)
         {
             for (int i = 0; i + Length <= run.Length; i++)
             {
                 Copy(run.AsSpan(i, Length), fold, scratch);
-                if (seen.Add(Convert.ToHexString(scratch)))
+                if (seen.Add(scratch[0] | (scratch[1] << 8) | (scratch[2] << 16)))
                 {
                     trigrams.Add(scratch.ToArray());
                 }

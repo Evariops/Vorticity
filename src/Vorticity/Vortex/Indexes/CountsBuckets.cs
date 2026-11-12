@@ -64,10 +64,20 @@ internal static class CountsBuckets
             return null;
         }
 
-        // Each group's entries, bucket by bucket: the bucket and its entry there.
+        // Each group's entries, bucket by bucket: the bucket and its entry there. A bucket's values follow its nulls and
+        // those left out in the order of their bytes: the buckets are merged, their next values in a heap by their bytes,
+        // the bucket breaking a tie, where every group of every bucket went through a sorted dictionary of its bytes.
         List<(int Bucket, int Entry)> nulls = [];
         List<(int Bucket, int Entry)> others = [];
-        SortedDictionary<byte[], List<(int Bucket, int Entry)>> values = new SortedDictionary<byte[], List<(int Bucket, int Entry)>>(Ordinal.Instance);
+        int valuedEntries = 0;
+        foreach ((ColumnCounts Counts, ColumnSketches? Sketches)? held in buckets)
+        {
+            valuedEntries += held?.Counts.Entries ?? 0;
+        }
+
+        List<(int Bucket, int Entry)> valued = new List<(int Bucket, int Entry)>(valuedEntries);
+        List<(byte[] Value, int Entries)> found = [];
+        PriorityQueue<(int Bucket, int Group), (byte[] Value, int Bucket)> heads = new PriorityQueue<(int Bucket, int Group), (byte[] Value, int Bucket)>(ByValue.Instance);
         for (int b = 0; b < buckets.Count; b++)
         {
             if (buckets[b] is not ({ } counts, _))
@@ -75,38 +85,72 @@ internal static class CountsBuckets
                 continue;
             }
 
-            foreach (CountGroup group in counts.Groups)
+            CountGroup[] held = counts.Groups;
+            int first = -1;
+            for (int i = 0; i < held.Length; i++)
             {
-                List<(int Bucket, int Entry)> into = group.Kind switch
+                CountGroup group = held[i];
+                if (group.Kind == CountedValue.Value)
                 {
-                    CountedValue.Null => nulls,
-                    CountedValue.Others => others,
-                    _ => values.TryGetValue(group.Value!, out List<(int Bucket, int Entry)>? held) ? held : values[group.Value!] = [],
-                };
+                    first = first < 0 ? i : first;
+                    continue;
+                }
+
+                List<(int Bucket, int Entry)> into = group.Kind == CountedValue.Null ? nulls : others;
                 for (int e = group.FirstEntry; e < group.FirstEntry + group.Entries; e++)
                 {
                     into.Add((b, e));
                 }
             }
+
+            if (first >= 0)
+            {
+                heads.Enqueue((b, first), (held[first].Value!, b));
+            }
+        }
+
+        while (heads.TryDequeue(out (int Bucket, int Group) head, out (byte[] Value, int Bucket) key))
+        {
+            CountGroup[] held = buckets[head.Bucket]!.Value.Counts.Groups;
+            CountGroup group = held[head.Group];
+            if (found.Count > 0 && found[^1].Value.AsSpan().SequenceEqual(key.Value))
+            {
+                found[^1] = (found[^1].Value, found[^1].Entries + group.Entries);
+            }
+            else
+            {
+                found.Add((key.Value, group.Entries));
+            }
+
+            for (int e = group.FirstEntry; e < group.FirstEntry + group.Entries; e++)
+            {
+                valued.Add((head.Bucket, e));
+            }
+
+            int following = head.Group + 1;
+            while (following < held.Length && held[following].Kind != CountedValue.Value)
+            {
+                following++;
+            }
+
+            if (following < held.Length)
+            {
+                heads.Enqueue((head.Bucket, following), (held[following].Value!, head.Bucket));
+            }
         }
 
         int width = StateWords.Count(kinds);
-        int entries = nulls.Count + others.Count;
-        foreach (List<(int Bucket, int Entry)> list in values.Values)
-        {
-            entries += list.Count;
-        }
-
-        CountGroup[] groups = new CountGroup[(nulls.Count > 0 ? 1 : 0) + (others.Count > 0 ? 1 : 0) + values.Count];
+        int entries = nulls.Count + others.Count + valued.Count;
+        CountGroup[] groups = new CountGroup[(nulls.Count > 0 ? 1 : 0) + (others.Count > 0 ? 1 : 0) + found.Count];
         long[] words = new long[entries * width];
         int[] entryBuckets = new int[entries];
         byte[]?[]? sketchBytes = sketched && fields.Length > 0 ? new byte[]?[entries * fields.Length] : null;
         byte[]?[]? registerBytes = attached is { Length: > 0 } ? new byte[]?[entries * attached.Length] : null;
         int next = 0;
         int g = 0;
-        void Place(CountedValue kind, byte[]? value, List<(int Bucket, int Entry)> list)
+        void Place(CountedValue kind, byte[]? value, ReadOnlySpan<(int Bucket, int Entry)> list)
         {
-            groups[g++] = new CountGroup(kind, value, next, list.Count);
+            groups[g++] = new CountGroup(kind, value, next, list.Length);
             foreach ((int bucket, int entry) in list)
             {
                 (ColumnCounts counts, ColumnSketches? sketches) = buckets[bucket]!.Value;
@@ -127,17 +171,20 @@ internal static class CountsBuckets
 
         if (nulls.Count > 0)
         {
-            Place(CountedValue.Null, null, nulls);
+            Place(CountedValue.Null, null, System.Runtime.InteropServices.CollectionsMarshal.AsSpan(nulls));
         }
 
         if (others.Count > 0)
         {
-            Place(CountedValue.Others, null, others);
+            Place(CountedValue.Others, null, System.Runtime.InteropServices.CollectionsMarshal.AsSpan(others));
         }
 
-        foreach ((byte[] value, List<(int Bucket, int Entry)> list) in values)
+        ReadOnlySpan<(int Bucket, int Entry)> merged = System.Runtime.InteropServices.CollectionsMarshal.AsSpan(valued);
+        int at = 0;
+        foreach ((byte[] value, int count) in found)
         {
-            Place(CountedValue.Value, value, list);
+            Place(CountedValue.Value, value, merged.Slice(at, count));
+            at += count;
         }
 
         ColumnCounts together = new ColumnCounts(fields, kinds, groups, words)
@@ -227,11 +274,15 @@ internal static class CountsBuckets
         }
     }
 
-    /// <summary>The order of values' bytes, a group's.</summary>
-    private sealed class Ordinal : IComparer<byte[]>
+    /// <summary>The order of buckets' next values: their bytes, then the bucket, so that a value's entries come bucket by bucket.</summary>
+    private sealed class ByValue : IComparer<(byte[] Value, int Bucket)>
     {
-        internal static readonly Ordinal Instance = new Ordinal();
+        internal static readonly ByValue Instance = new ByValue();
 
-        public int Compare(byte[]? left, byte[]? right) => left.AsSpan().SequenceCompareTo(right);
+        public int Compare((byte[] Value, int Bucket) left, (byte[] Value, int Bucket) right)
+        {
+            int order = left.Value.AsSpan().SequenceCompareTo(right.Value);
+            return order != 0 ? order : left.Bucket.CompareTo(right.Bucket);
+        }
     }
 }

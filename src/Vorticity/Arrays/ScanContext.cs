@@ -1,4 +1,5 @@
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
@@ -198,6 +199,12 @@ internal sealed class ScanContext : IDisposable
     public VortexReadOptions Options { get; private set; }
 
     /// <summary>
+    /// The pool the context goes back to when a batch that took it over is disposed (<see cref="RecordBatch.Adopt"/>), the
+    /// pool of contexts over an encoding table that lent it; null for a context disposed with its batch.
+    /// </summary>
+    internal ScanContexts? Home { get; set; }
+
+    /// <summary>
     /// The arena every DType derived during decoding is built in: the validity child's
     /// non-nullable <c>Bool</c>, a <c>Primitive(ptype, NonNullable)</c> read out of metadata, and
     /// so on.
@@ -219,6 +226,12 @@ internal sealed class ScanContext : IDisposable
     public DTypeArena Types => _types ??= new DTypeArena();
 
     private DTypeArena? _types;
+
+    /// <summary>
+    /// The plans of the shredded variants this context's decodes put back together, which the next batch's decodes take
+    /// again (<see cref="Types.Variants.ShreddedVariant.For"/>); each kept with the arena of <see cref="Types"/> it was made in.
+    /// </summary>
+    internal Types.Variants.ShreddedVariant.ShreddedPlans? ShreddedPlans;
 
     /// <summary>
     /// The batch's scalar store. Cleared by <see cref="ResetBatch"/>, so a
@@ -1193,9 +1206,99 @@ internal sealed class ScanContext : IDisposable
         }
     }
 
+    /// <summary>
+    /// How many tables derived from nodes a context keeps (<see cref="KeepNodeTable"/>): one per column read a range at a
+    /// time whose encoding builds one, as a batch of a few text columns does; past it, the oldest is let go and rebuilt
+    /// when its node is read again.
+    /// </summary>
+    private const int NodeTableSlots = 4;
+
+    /// <summary>
+    /// The table a decoder built from the node named by <paramref name="key"/> and kept with
+    /// <see cref="KeepNodeTable"/>, when it is kept under the same <paramref name="tag"/>.
+    /// </summary>
+    /// <param name="key">From <see cref="NodeCheckKey"/>.</param>
+    /// <param name="tag">What the table was built against, which must match: the decoder's own check.</param>
+    /// <param name="table">The table's array, the context's.</param>
+    /// <param name="length">Its entries.</param>
+    /// <param name="facts">What the decoder kept with it.</param>
+    internal bool TryNodeTable(long key, long tag, out long[] table, out int length, out long facts)
+    {
+        if (_memory?.Tables is { } tables)
+        {
+            foreach (ref readonly NodeTable kept in tables.AsSpan())
+            {
+                if (kept.Key == key + 1 && kept.Tag == tag)
+                {
+                    (table, length, facts) = (kept.Array!, kept.Length, kept.Facts);
+                    return true;
+                }
+            }
+        }
+
+        (table, length, facts) = ([], 0, 0);
+        return false;
+    }
+
+    /// <summary>
+    /// Keeps <paramref name="table"/>, rented from <see cref="ArrayPool{T}.Shared"/> and built from the node named by
+    /// <paramref name="key"/>, for the next ranges of that node this context reads, until the context is recycled.
+    /// </summary>
+    /// <param name="key">From <see cref="NodeCheckKey"/>.</param>
+    /// <param name="tag">What the table was built against.</param>
+    /// <param name="facts">What the decoder keeps with it.</param>
+    /// <param name="table">The table, which the context then owns and gives back to the pool.</param>
+    /// <param name="length">Its entries.</param>
+    /// <remarks>
+    /// Like a passed check, a table is a fact of the file's bytes, not of the batch, and the reader only names a node
+    /// within a scan: <see cref="Recycle"/> gives every table back, so none outlives the scan that read its node. A
+    /// kernel that reads through a kept table still bounds what it reads by the table, never by the bytes again.
+    /// </remarks>
+    internal void KeepNodeTable(long key, long tag, long facts, long[] table, int length)
+    {
+        BatchMemory memory = _memory ??= new BatchMemory();
+        NodeTable[] tables = memory.Tables ??= new NodeTable[NodeTableSlots];
+        ref NodeTable slot = ref tables[memory.NextTable];
+        memory.NextTable = (memory.NextTable + 1) % NodeTableSlots;
+        if (slot.Array is { } evicted)
+        {
+            ArrayPool<long>.Shared.Return(evicted);
+        }
+
+        slot = new NodeTable(key + 1, tag, facts, table, length);
+    }
+
+    /// <summary>Gives every kept table back to the pool.</summary>
+    private void ForgetNodeTables()
+    {
+        if (_memory?.Tables is { } tables)
+        {
+            foreach (ref NodeTable kept in tables.AsSpan())
+            {
+                if (kept.Array is { } array)
+                {
+                    ArrayPool<long>.Shared.Return(array);
+                }
+
+                kept = default;
+            }
+
+            _memory.NextTable = 0;
+        }
+    }
+
+    /// <summary>A table a decoder built from a node: its key plus one (0: empty), its tag, its facts and its entries.</summary>
+    private readonly record struct NodeTable(long Key, long Tag, long Facts, long[]? Array, int Length);
+
     /// <summary>See <see cref="_memory"/>.</summary>
     private sealed class BatchMemory
     {
+        /// <summary>The tables decoders kept (<see cref="KeepNodeTable"/>), made at the first.</summary>
+        internal NodeTable[]? Tables;
+
+        /// <summary>The slot the next table kept takes.</summary>
+        internal int NextTable;
+
         /// <summary>
         /// The open scope in slot 0 and the passed checks in slots 1 and up, each stored as its value
         /// plus one so that 0 means empty.
@@ -1424,8 +1527,8 @@ internal sealed class ScanContext : IDisposable
     /// <param name="nodeIndex">The child's node in <paramref name="arena"/>.</param>
     /// <returns><see langword="true"/> when the child is retained.</returns>
     /// <remarks>
-    /// Another context decoding the same child is waited for, which is safe while this context
-    /// holds its one entry's claim: see <see cref="RetainedChunks"/>.
+    /// Another context decoding the same child at that moment is not waited for: this one decodes
+    /// the child too, into an entry of its own (see <see cref="RetainedChunks"/>).
     /// </remarks>
     /// <exception cref="InvalidOperationException">No retained decode is in flight, or a child's is.</exception>
     internal bool TryGetRetainedChild(long key, out CanonicalArena arena, out int nodeIndex)
@@ -1511,8 +1614,9 @@ internal sealed class ScanContext : IDisposable
     /// <remarks>
     /// Touching an entry is what keeps it from eviction while the batch in flight borrows it, so it
     /// happens on the hit path and not only when the entry is created. A miss claims the key: when
-    /// another context of the scan is decoding it, the call waits for that decode and returns it,
-    /// so a chunk is decoded once per scan. A claim still held from an earlier miss is given up
+    /// another context of the scan is decoding it at that moment, the claim is on an entry of this
+    /// context's own, which it decodes too rather than wait (<see cref="RetainedChunks"/>); a chunk
+    /// is otherwise decoded once per scan. A claim still held from an earlier miss is given up
     /// first, since this context has moved on without decoding it; inside a retained decode the
     /// table is only looked at, never claimed, because the context already holds one claim.
     /// </remarks>
@@ -1757,6 +1861,35 @@ internal sealed class ScanContext : IDisposable
         KeepTypes();
     }
 
+    /// <summary>
+    /// Readies a context made over an encoding table (the constructor of ids), given back by a read, for the next read over
+    /// <paramref name="arrayEncodingIds"/>: the ids resolved again only when they are not the ones the context holds, as the
+    /// objects of one dataset share theirs; under <paramref name="options"/>, the default when null.
+    /// </summary>
+    internal void RebindEncodings(ReadOnlySpan<string> arrayEncodingIds, VortexReadOptions? options = null)
+    {
+        Options = options ?? VortexReadOptions.Default;
+        KeepTypes();
+        if (arrayEncodingIds.SequenceEqual(_arrayEncodingIds))
+        {
+            return;
+        }
+
+        int count = arrayEncodingIds.Length;
+        _arrayEncodings = count == 0 ? [] : new ArrayEncodingId[count];
+        _arrayEncodingIds = count == 0 ? [] : new string[count];
+        Span<byte> scratch = stackalloc byte[64];
+        for (int i = 0; i < count; i++)
+        {
+            string id = arrayEncodingIds[i] ?? throw new ArgumentNullException(nameof(arrayEncodingIds));
+            _arrayEncodingIds[i] = id;
+            int byteCount = Encoding.UTF8.GetByteCount(id);
+            Span<byte> utf8 = byteCount <= scratch.Length ? scratch : new byte[byteCount];
+            int written = Encoding.UTF8.GetBytes(id, utf8);
+            _arrayEncodings[i] = EncodingRegistry.ResolveArray(utf8[..written]);
+        }
+    }
+
     /// <summary>The nodes past which a context starts another arena of dtypes, having met many schemas.</summary>
     private const int MostTypeNodes = 1024;
 
@@ -1803,6 +1936,7 @@ internal sealed class ScanContext : IDisposable
         ApartKeys = null;
         FewRowsOfChunks = false;
         Along?.Clear();
+        ForgetNodeTables();
         if (_memory is { } memory)
         {
             memory.Checks = default;
@@ -1841,6 +1975,7 @@ internal sealed class ScanContext : IDisposable
         _disposed = true;
         _batchCanonical.Reset();
         _memory?.Slice?.Reset();
+        ForgetNodeTables();
         AbandonRetained();
         if (_ownsRetained)
         {

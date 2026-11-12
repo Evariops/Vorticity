@@ -87,7 +87,7 @@ internal sealed class ExternalSort : IAsyncDisposable
     internal async ValueTask AddAsync(RecordBatch batch, CancellationToken cancellationToken)
     {
         StructStore store = Store();
-        StoreRows.Append(store, batch.Arena, batch.RootIndex);
+        StoreRows.Append(store, batch.Arena, batch.RootIndex, validated: true);
         store.Commit();
         long reserved = Reserved(store.CommittedBytes, store.Rows);
         if (reserved <= _held)
@@ -316,7 +316,7 @@ internal sealed class ExternalSort : IAsyncDisposable
         CanonicalNode node = cut.GetNode(window);
         for (int c = 0; c < _delivered.Length; c++)
         {
-            StoreRows.Append(into.Children[c], cut, node.GetFieldIndex(_delivered[c]));
+            StoreRows.Append(into.Children[c], cut, node.GetFieldIndex(_delivered[c]), validated: true);
         }
     }
 

@@ -7,6 +7,7 @@ using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.X86;
 using ManagedCompressions.Zstd;
 using Vorticity.Aggregating;
 using Vorticity.Arrays;
@@ -586,7 +587,7 @@ internal static class ArrayBlobWriter
     }
 
     /// <summary>The bytes <paramref name="length"/> rows take packed at <paramref name="bitWidth"/> bits: whole blocks.</summary>
-    private static int PackedBytes(int length, int bitWidth)
+    internal static int PackedBytes(int length, int bitWidth)
     {
         int blocks = (length + FastLanes.BlockSize - 1) / FastLanes.BlockSize;
         return checked((int)((long)blocks * FastLanes.BlockByteLength(bitWidth)));
@@ -611,7 +612,7 @@ internal static class ArrayBlobWriter
     /// </param>
     /// <param name="patchIndices">The rows the exceptions are at, exactly as many as the plan counted.</param>
     /// <param name="patchValues">Their values in the encoded domain, as many.</param>
-    private static void Pack(
+    internal static void Pack(
         CanonicalArena arena, CanonicalNode node, in BitPackPlan plan, PType ptype, int length,
         Span<byte> destination, Span<int> patchIndices, Span<ulong> patchValues)
     {
@@ -762,6 +763,17 @@ internal static class ArrayBlobWriter
                     .StoreUnsafe(ref into, (nuint)i);
             }
         }
+        else if (Vector256.IsHardwareAccelerated)
+        {
+            int lanes = Vector256<T>.Count;
+            Vector256<T> origin = Vector256.Create(reference);
+            for (; i <= count - lanes; i += lanes)
+            {
+                Vector256<T> value = Vector256.LoadUnsafe(ref from, (nuint)i);
+                (frame ? value - origin : (value << 1) ^ (Vector256<T>.Zero - (value >>> shift)))
+                    .StoreUnsafe(ref into, (nuint)i);
+            }
+        }
         else if (Vector128.IsHardwareAccelerated)
         {
             int lanes = Vector128<T>.Count;
@@ -797,6 +809,7 @@ internal static class ArrayBlobWriter
         int offset = mask.BitOffset + start;
         ref T value = ref MemoryMarshal.GetReference(block);
         bool wide = WordBytes.IsAccelerated;
+        bool lanes256 = !wide && Avx2.IsSupported;
         WordBytes spread = wide ? WordBytes.Create() : default;
         for (int i = 0; i < block.Length; i += 64)
         {
@@ -819,6 +832,12 @@ internal static class ArrayBlobWriter
                 continue;
             }
 
+            if (lanes256 && take == 64)
+            {
+                ClearLanes256(ref Unsafe.Add(ref value, i), word);
+                continue;
+            }
+
             for (int k = 0; k < take; k++)
             {
                 Unsafe.Add(ref value, i + k) &= T.CreateTruncating(0UL - ((word >> k) & 1));
@@ -836,6 +855,19 @@ internal static class ArrayBlobWriter
         {
             nuint at = (nuint)(group * lanes);
             (Vector512.LoadUnsafe(ref rows, at) & spread.Lanes<T>(word, group)).StoreUnsafe(ref rows, at);
+        }
+    }
+
+    /// <summary>Sixty-four rows anded with a mask of their validity bits, a 256-bit vector at a time, where AVX2 is.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void ClearLanes256<T>(ref T rows, ulong word)
+        where T : unmanaged, IBinaryInteger<T>, IUnsignedNumber<T>
+    {
+        int lanes = Vector256<T>.Count;
+        for (int group = 0; group * lanes < 64; group++)
+        {
+            nuint at = (nuint)(group * lanes);
+            (Vector256.LoadUnsafe(ref rows, at) & WordBytes.Lanes256<T>(word >> (group * lanes))).StoreUnsafe(ref rows, at);
         }
     }
 
@@ -862,6 +894,18 @@ internal static class ArrayBlobWriter
             for (; i <= block.Length - lanes; i += lanes)
             {
                 if (Vector512.GreaterThanAny(Vector512.LoadUnsafe(ref first, (nuint)i), bound))
+                {
+                    found = CollectPatches(block.Slice(i, lanes), largest, start + i, indices, values, found);
+                }
+            }
+        }
+        else if (Vector256.IsHardwareAccelerated)
+        {
+            int lanes = Vector256<T>.Count;
+            Vector256<T> bound = Vector256.Create(largest);
+            for (; i <= block.Length - lanes; i += lanes)
+            {
+                if (Vector256.GreaterThanAny(Vector256.LoadUnsafe(ref first, (nuint)i), bound))
                 {
                     found = CollectPatches(block.Slice(i, lanes), largest, start + i, indices, values, found);
                 }
@@ -1858,47 +1902,12 @@ internal static class ArrayBlobWriter
     /// other index arrays are one a patch or a dictionary entry. The host is little-endian, which
     /// the writer checks once at start-up, so the indices are written as the typed words they are.
     /// </remarks>
-    private static void WriteIndices(ReadOnlySpan<int> values, int width, Span<byte> destination)
+    internal static void WriteIndices(ReadOnlySpan<int> values, int width, Span<byte> destination)
     {
-        switch (width)
-        {
-            case 1:
-            {
-                Span<byte> into = destination[..values.Length];
-                for (int i = 0; i < into.Length; i++)
-                {
-                    into[i] = (byte)values[i];
-                }
-
-                break;
-            }
-
-            case 2:
-            {
-                Span<ushort> into = MemoryMarshal.Cast<byte, ushort>(destination)[..values.Length];
-                for (int i = 0; i < into.Length; i++)
-                {
-                    into[i] = (ushort)values[i];
-                }
-
-                break;
-            }
-
-            case 8:
-            {
-                Span<ulong> into = MemoryMarshal.Cast<byte, ulong>(destination)[..values.Length];
-                for (int i = 0; i < into.Length; i++)
-                {
-                    into[i] = (uint)values[i];
-                }
-
-                break;
-            }
-
-            default:
-                MemoryMarshal.AsBytes(values).CopyTo(destination);
-                break;
-        }
+        // Indices are never negative: truncated to a narrower signed type, or widened, they keep their bits, a register at
+        // a time where the vector narrowing covers the pair.
+        PType to = width switch { 1 => PType.I8, 2 => PType.I16, 4 => PType.I32, _ => PType.I64 };
+        Compute.IntegerNarrowing.Truncate(values, to, destination);
     }
 
     /// <summary>Writes indices at <paramref name="ptype"/>'s width as a raw primitive node, in a rental the blob hands back.</summary>
@@ -3200,9 +3209,6 @@ internal static class ArrayBlobWriter
         /// </summary>
         internal int FrameRows { get; init; }
 
-        /// <summary>The writer's threads, which a column's zstd frames may be compressed on; none for one thread.</summary>
-        internal WorkFan? Fan { get; init; }
-
         /// <summary>
         /// Whether every array the workspace writes is priced by its bytes alone, a column's
         /// children -- an ALP's integers, a dictionary's codes, a run's ends -- as well as the
@@ -3216,14 +3222,6 @@ internal static class ArrayBlobWriter
         /// variant's shredded keys as well as the columns (<see cref="ColumnCompressor"/>).
         /// </summary>
         internal int GranuleRows { get; init; }
-
-        private ZstdFrames? _frames;
-
-        /// <summary>The frame table of a column compressed on <see cref="Fan"/>, rented by the first column that uses it.</summary>
-        internal ZstdFrames Frames => _frames ??= ZstdFrames.Rent();
-
-        /// <summary>The zstd trials whose frames were compressed across threads.</summary>
-        internal int ColumnsAcross => _frames?.Columns ?? 0;
 
         /// <summary>The buffers the blob being written has queued, in order.</summary>
         internal List<PendingBuffer> Buffers => _buffers;
@@ -3268,7 +3266,7 @@ internal static class ArrayBlobWriter
             // Never size first: what it measures is the plan every other profile writes.
             _measure ??= new Workspace
             {
-                FrameRows = FrameRows, GranuleRows = GranuleRows, Fan = Fan, OwnTypes = OwnTypes, ZstdLevel = ZstdLevel,
+                FrameRows = FrameRows, GranuleRows = GranuleRows, OwnTypes = OwnTypes, ZstdLevel = ZstdLevel,
             };
             _measure.ColumnLevel = ColumnLevel;
             if (_measureEncodings is null || _measureEncodings.Target != target)
@@ -3369,12 +3367,6 @@ internal static class ArrayBlobWriter
             _metadata.Dispose();
             _leaves?.Reset();
             ReturnCompressors();
-            if (_frames is { } frames)
-            {
-                _frames = null;
-                ZstdFrames.Return(frames);
-            }
-
             _measure?.Dispose();
             _measure = null;
         }

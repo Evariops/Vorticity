@@ -31,7 +31,11 @@ internal sealed class ObjectStoreSource : ISegmentReader
     /// <summary>The tail an open reads first, and the slack that lets the open start it on a 64-byte boundary.</summary>
     internal const int TailBytes = 65_536;
 
+    // The store reads go to and the key they name, under every prefix of the store given, made once; the store given,
+    // which an owning source disposes, and the key given, which its messages name.
     private readonly IObjectStore _store;
+    private readonly string _readKey;
+    private readonly IObjectStore _given;
 
     /// <summary>What reading the store costs (<see cref="IObjectStore.CostProfile"/>).</summary>
     internal CostProfile Profile => _store.CostProfile;
@@ -57,12 +61,16 @@ internal sealed class ObjectStoreSource : ISegmentReader
         ArgumentNullException.ThrowIfNull(store);
         ArgumentException.ThrowIfNullOrEmpty(key);
         ArgumentOutOfRangeException.ThrowIfLessThan(length, -1);
-        _store = store;
+        (_store, _readKey) = PrefixedObjectStore.Resolve(store, key);
+        _given = store;
         _key = key;
         _length = length;
         _givenLength = length;
         _options = options ?? store.CostProfile.ReadOptions;
         _ownsStore = ownsStore;
+        _hash = length >= 0
+            ? HashCode.Combine(System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(_store), StringComparer.Ordinal.GetHashCode(_readKey), length)
+            : System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(this);
     }
 
     /// <summary>
@@ -75,16 +83,21 @@ internal sealed class ObjectStoreSource : ISegmentReader
     public override bool Equals(object? obj) =>
         ReferenceEquals(this, obj)
         || (obj is ObjectStoreSource other && _givenLength >= 0 && other._givenLength == _givenLength && ReferenceEquals(other._store, _store)
-            && string.Equals(other._key, _key, StringComparison.Ordinal));
+            && string.Equals(other._readKey, _readKey, StringComparison.Ordinal));
 
     /// <inheritdoc/>
-    public override int GetHashCode() => _givenLength >= 0
-        ? HashCode.Combine(System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(_store), StringComparer.Ordinal.GetHashCode(_key), _givenLength)
-        : System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(this);
+    /// <remarks>
+    /// Worked out once, as the source is made: a session's cache hashes the source at every lookup of each segment, under
+    /// its lock, and the key's characters were hashed again every time.
+    /// </remarks>
+    public override int GetHashCode() => _hash;
 
     // The length the caller gave, -1 for none: what equality reads, since the length learned later would
     // change the hash of a key already kept.
     private readonly long _givenLength;
+
+    // What GetHashCode answers: of the store, the key and the length given, or of the reader itself when no length is.
+    private readonly int _hash;
 
     /// <summary>
     /// The object's token as of the first answer that gave it, or null before any. A caller holding a
@@ -114,7 +127,7 @@ internal sealed class ObjectStoreSource : ISegmentReader
 
         if ((_store.Capabilities & ObjectStoreCapabilities.ReadsSuffix) == 0)
         {
-            ObjectHead head = await _store.HeadAsync(_key, cancellationToken).ConfigureAwait(false)
+            ObjectHead head = await _store.HeadAsync(_readKey, cancellationToken).ConfigureAwait(false)
                 ?? throw ObjectNotFoundException.For(_key);
             Note(head.Token);
             NoteLength(head.Length);
@@ -356,7 +369,7 @@ internal sealed class ObjectStoreSource : ISegmentReader
         }
 
         Interlocked.Exchange(ref _tail, null)?.Release();
-        return _ownsStore ? _store.DisposeAsync() : ValueTask.CompletedTask;
+        return _ownsStore ? _given.DisposeAsync() : ValueTask.CompletedTask;
     }
 
     /// <summary>
@@ -400,11 +413,11 @@ internal sealed class ObjectStoreSource : ISegmentReader
 
     /// <summary>One request for a range, bound to the object's token once it is known.</summary>
     private ValueTask<ObjectRead> RangeAsync(long offset, Memory<byte> destination, string? token, CancellationToken cancellationToken) =>
-        _store.ReadAsync(_key, offset, destination, token, cancellationToken);
+        _store.ReadAsync(_readKey, offset, destination, token, cancellationToken);
 
     /// <summary>The request for the tail, which says the object's length with it.</summary>
     private ValueTask<ObjectRead> TailAsync(Memory<byte> destination, CancellationToken cancellationToken) =>
-        _store.ReadTailAsync(_key, destination, cancellationToken);
+        _store.ReadTailAsync(_readKey, destination, cancellationToken);
 
     /// <summary>A 64-byte aligned block of <paramref name="length"/> bytes: pooled up to the pool's largest size class.</summary>
     private NativeSegmentOwner Rent(int length) =>

@@ -8,6 +8,7 @@
 // DIFFERENT bytes and require the results to be identical. A byte the encoder never wrote is the
 // one thing that would differ.
 using System;
+using System.Linq;
 using Vorticity.Types;
 using Vorticity.Types.Numerics;
 using Vorticity.RowEncoding;
@@ -117,6 +118,38 @@ public sealed class RowTwoPassTests
         Assert.Equal(offsets, keys.Offsets.ToArray());
     }
 
+    /// <summary>
+    /// Keys encoded into the keys of another batch, a stream's, are those a new encoding gives: of more rows and longer
+    /// texts than the keys held, which grow, then of fewer and shorter, which the buffers hold; nothing of the keys before
+    /// is read past what the new ones hold.
+    /// </summary>
+    [Fact]
+    public void KeysEncodedIntoAnotherBatchsAreThoseANewEncodingGives()
+    {
+        using RowFixture fixture = new RowFixture();
+        int[] small = EveryPath(fixture, out RowSortField[] fields);
+        Random random = new Random(2026_11_11);
+        byte[]?[] texts = [.. Enumerable.Range(0, 3_000).Select(i => i % 17 == 0 ? null : System.Text.Encoding.UTF8.GetBytes(new string('k', random.Next(0, 80))))];
+        int text = fixture.VarBin(texts);
+        int number = fixture.Primitive<long>(PType.I64, [.. Enumerable.Range(0, 3_000).Select(_ => random.NextInt64())]);
+        int few = fixture.VarBin([RowTestHelp.Utf8("x"), null]);
+        int fewNumbers = fixture.Primitive<long>(PType.I64, [7, -7]);
+        RowSortField[] two = [RowSortField.Ascending, new RowSortField(descending: true, nullsFirst: true)];
+
+        using RowKeys stream = RowEncoder.Encode(fixture.Arena, small, fields);
+        foreach ((int[] columns, RowSortField[] order) in ((int[], RowSortField[])[])[([text, number], two), ([few, fewNumbers], two), (small, fields)])
+        {
+            using RowKeys fresh = RowEncoder.Encode(fixture.Arena, columns, order);
+            Assert.Same(stream, RowEncoder.Encode(fixture.Arena, columns, order, stream));
+            Assert.Equal(fresh.RowCount, stream.RowCount);
+            Assert.Equal(fresh.TotalBytes, stream.TotalBytes);
+            Assert.Equal(fresh.Elements.ToArray(), stream.Elements.ToArray());
+            Assert.Equal(fresh.Sizes.ToArray(), stream.Sizes.ToArray());
+            Assert.Equal(fresh.Offsets.ToArray(), stream.Offsets.ToArray());
+            Assert.Throws<ArgumentOutOfRangeException>(() => stream.Row(fresh.RowCount).Length);
+        }
+    }
+
     /// <summary>Encoding is deterministic: the same input twice gives the same bytes.</summary>
     [Fact]
     public void EncodingTheSameInputTwiceGivesTheSameBytes()
@@ -218,6 +251,37 @@ public sealed class RowTwoPassTests
         Assert.True(keys.Compare(indices[0], indices[1]) <= 0);
         Assert.True(keys.Compare(indices[1], indices[2]) <= 0);
         Assert.True(keys.Compare(indices[2], indices[3]) <= 0);
+    }
+
+    /// <summary>
+    /// Thousands of rows, keys of a text sharing long prefixes, some null, then an integer, their indices shuffled: sorted,
+    /// they are a permutation of the indices, in the order a comparison of the keys gives.
+    /// </summary>
+    [Fact]
+    public void SortingManyShuffledIndicesPutsThemInKeyOrder()
+    {
+        using RowFixture fixture = new RowFixture();
+        Random random = new Random(2026_11_11);
+        const int Rows = 5_000;
+        byte[]?[] texts = new byte[]?[Rows];
+        int[] numbers = new int[Rows];
+        for (int i = 0; i < Rows; i++)
+        {
+            texts[i] = random.Next(20) == 0 ? null : System.Text.Encoding.UTF8.GetBytes($"service-name-shared-prefix-{random.Next(30)}/{new string('x', random.Next(0, 12))}");
+            numbers[i] = random.Next(-50, 50);
+        }
+
+        int text = fixture.VarBin(texts);
+        int number = fixture.Primitive<int>(PType.I32, numbers);
+        using RowKeys keys = RowEncoder.Encode(fixture.Arena, [text, number], [RowSortField.Ascending, new RowSortField(descending: true, nullsFirst: false)]);
+        int[] indices = [.. Enumerable.Range(0, Rows).OrderBy(_ => random.Next())];
+        keys.SortIndices(indices);
+
+        Assert.Equal(Enumerable.Range(0, Rows), indices.Order());
+        for (int i = 1; i < Rows; i++)
+        {
+            Assert.True(keys.Compare(indices[i - 1], indices[i]) <= 0, $"rows {indices[i - 1]} and {indices[i]} at {i}");
+        }
     }
 
     [Fact]

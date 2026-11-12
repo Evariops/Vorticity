@@ -201,11 +201,12 @@ internal static partial class DatasetCompactor
             Postings = postings,
         };
 
-        // A consolidation of several objects' worth runs in ranges of the key side by side, on the session's lanes, each
-        // reading of its inputs the granules of its range alone (KeyRanges); one of a value, since each object of a
-        // range shreds the paths of the first.
+        // A merge of several objects' worth runs in ranges of the key side by side, on the session's lanes, each reading of
+        // its inputs the granules of its range alone (KeyRanges): a consolidation's, and a level's, which ran on one lane
+        // whatever the session gave it, 336 ms for level 0's sixteen objects of 2 M rows at eight lanes, 93 ms in ranges.
+        // Not one of a value, since each object of a range shreds the paths of the first.
         KeyRanges? ranges = null;
-        if (late is null && merge && job.Trigger == CompactionTrigger.Consolidation && shreddings is not { Count: > 1 })
+        if (late is null && merge && shreddings is not { Count: > 1 })
         {
             using Activity? cutting = DatasetTelemetry.StartCompactionPass("ranges");
             ranges = await KeyRangesAsync(dataset, schema, job, cancellationToken).ConfigureAwait(false);
@@ -435,34 +436,36 @@ internal static partial class DatasetCompactor
     }
 
     /// <summary>
-    /// A trivial move: the one input's entry taken out of its level and put, byte for byte, into the
-    /// level above, where nothing overlaps it, so that no row is read or written. Null when the object
-    /// holds an earlier schema, which only a rewrite brings to the current one; its tail, which the
-    /// open reads to say so, is the move's one request.
+    /// A trivial move: each input's entry taken out of its level and put, byte for byte, into the level
+    /// above, so that no row is read or written; a leveled job's one object, where nothing overlaps it,
+    /// a tiered job's objects as large as the level above aims at. Null when an object holds an earlier
+    /// schema, which only a rewrite brings to the current one: the whole job is then rewritten. The
+    /// objects' tails, which their opens read to say so, are the move's requests, a wave of them side by
+    /// side (<see cref="OpenedAhead"/>).
     /// </summary>
     /// <remarks>
-    /// The commit checks what a merge's does: the entry is still the one planned, and nothing came into
-    /// the part of the level above that its bounds cover. An index fragment attached to the object in
-    /// between goes up with it, since the object is not rewritten to fold it.
+    /// The commit checks what a merge's does: the entries are still the ones planned, and nothing came
+    /// into the part of the level above that their bounds cover. An index fragment attached to an object
+    /// in between goes up with it, since the object is not rewritten to fold it.
     /// </remarks>
     private static async ValueTask<CompactionResult?> MoveAsync(VortexDataset dataset, CompactionJob job, CancellationToken cancellationToken)
     {
-        // Each object moves whole, its entry taken out of one tree and put into the other byte for byte; one written under
-        // an earlier schema is rewritten instead, and with it the whole job.
+        // The objects opened a wave at a time side by side, each only to read the schema it holds: one at a time, a job that
+        // moves a run of many objects paid a round trip each.
+        for (int from = 0; from < job.Inputs.Count; from += OpenedAhead)
+        {
+            if (await WrittenEarlierAsync(dataset, job.Inputs, from, Math.Min(OpenedAhead, job.Inputs.Count - from), cancellationToken).ConfigureAwait(false))
+            {
+                return null;
+            }
+        }
+
+        // Each object moves whole, its entry taken out of one tree and put into the other byte for byte.
         List<(int Level, ReadOnlyMemory<byte> Key)> consumed = new List<(int, ReadOnlyMemory<byte>)>(job.Inputs.Count);
         List<(int Level, ReadOnlyMemory<byte> Key, ObjectEntry Entry)> produced = new List<(int, ReadOnlyMemory<byte>, ObjectEntry)>(job.Inputs.Count);
         List<ObjectEntry> expected = new List<ObjectEntry>(job.Inputs.Count);
         foreach (CompactionInput input in job.Inputs)
         {
-            ObjectLease lease = await dataset.RentAsync(input.Entry, cancellationToken).ConfigureAwait(false);
-            await using (lease.ConfigureAwait(false))
-            {
-                if (dataset.Snapshot.Schema.ColumnsOf(lease.File.DType, input.Entry.Key) is not null)
-                {
-                    return null;
-                }
-            }
-
             consumed.Add((input.Level, input.Key));
             produced.Add((job.ToLevel, input.Key, input.Entry));
             expected.Add(input.Entry);
@@ -487,6 +490,46 @@ internal static partial class DatasetCompactor
             ObjectsMoved = job.Inputs.Count,
             Outcome = commit.Outcomes[0],
         };
+    }
+
+    /// <summary>The objects a move opens side by side at most, to read the schema each holds.</summary>
+    private const int OpenedAhead = 32;
+
+    /// <summary>
+    /// Whether one of the <paramref name="count"/> inputs from <paramref name="from"/> holds an earlier schema than the
+    /// version's: each opened, all side by side, and let go once read; the first failure to open is thrown once all are.
+    /// </summary>
+    private static async ValueTask<bool> WrittenEarlierAsync(
+        VortexDataset dataset, IReadOnlyList<CompactionInput> inputs, int from, int count, CancellationToken cancellationToken)
+    {
+        Task<ObjectLease>[] opening = new Task<ObjectLease>[count];
+        for (int i = 0; i < count; i++)
+        {
+            opening[i] = dataset.RentAsync(inputs[from + i].Entry, cancellationToken).AsTask();
+        }
+
+        bool earlier = false;
+        try
+        {
+            await ((Task)Task.WhenAll(opening)).ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
+            for (int i = 0; i < count; i++)
+            {
+                ObjectLease lease = await opening[i].ConfigureAwait(false);
+                earlier |= dataset.Snapshot.Schema.ColumnsOf(lease.File.DType, inputs[from + i].Entry.Key) is not null;
+            }
+        }
+        finally
+        {
+            foreach (Task<ObjectLease> open in opening)
+            {
+                if (open.IsCompletedSuccessfully)
+                {
+                    await (await open.ConfigureAwait(false)).DisposeAsync().ConfigureAwait(false);
+                }
+            }
+        }
+
+        return earlier;
     }
 
     /// <summary>
@@ -1370,13 +1413,15 @@ internal static partial class DatasetCompactor
             // lanes to spare, on another while the writer takes the same rows, the census reading them alone once their
             // nodes are canonical; the census and its spans as counted in turn. Counted first, it held a merge of log
             // records a fifth of its time.
-            PathCensus.Counting[] ready = new PathCensus.Counting[census.Length];
+            // The stream's one array of countings, which each batch fills once the one before is counted; a run of a few rows,
+            // a merge of keys that interleave cutting one a row, counted in place, where a task a run cost more than it.
+            PathCensus.Counting[] ready = _ready ??= new PathCensus.Counting[census.Length];
             for (int v = 0; v < census.Length; v++)
             {
                 ready[v] = PathCensus.Prepare(batch, _variants![v]);
             }
 
-            if (_dataset.Session.Options.MaxDegreeOfParallelism <= 1)
+            if (_dataset.Session.Options.MaxDegreeOfParallelism <= 1 || batch.RowCount < CountedApartRows)
             {
                 Count(census, ready);
                 await output.Writer.WriteBatchAsync(batch, cancellationToken).ConfigureAwait(false);
@@ -1465,6 +1510,11 @@ internal static partial class DatasetCompactor
                 writer.DeclareDirectory(name, VariantDirectory.From(census[v], shredded.GetValueOrDefault(name), _groupRows));
             }
         }
+
+        // The countings of a batch's variant columns, the stream's one array; the rows under which a batch is counted in
+        // place rather than beside its write.
+        private PathCensus.Counting[]? _ready;
+        private const int CountedApartRows = 64;
 
         // The place among the shreddings of the value being written and its first key; the paths of the object being
         // written, a census a variant column, the columns, and the rows of the groups its directory names.

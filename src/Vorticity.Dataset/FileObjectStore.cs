@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
+using System.IO.Enumeration;
 using System.IO.Pipelines;
 using System.Text;
 using System.Threading;
@@ -118,6 +119,10 @@ public sealed class FileObjectStore : IObjectStore
     private readonly string _root;
     private bool _disposed;
 
+    // The bytes below which a read takes the file in place: SmallRead on a local disk; none on a share, whose round trip
+    // would hold a thread of the pool, past the reach of the cancellation token.
+    private readonly int _inPlaceBelow;
+
     // The objects read lately, held open, the most recently read first; under the gate.
     private readonly Dictionary<string, HeldFile> _held = new Dictionary<string, HeldFile>(StringComparer.Ordinal);
     private readonly LinkedList<HeldFile> _recent = [];
@@ -130,6 +135,33 @@ public sealed class FileObjectStore : IObjectStore
         ArgumentException.ThrowIfNullOrWhiteSpace(root);
         _root = Path.GetFullPath(root);
         Directory.CreateDirectory(_root);
+        _inPlaceBelow = OnShare(_root) ? 0 : SmallRead;
+    }
+
+    /// <summary>
+    /// Whether <paramref name="root"/> lies on a network share, a UNC path or a mapped drive on Windows: there a read waits
+    /// for its file asynchronously whatever its size. Elsewhere a mount is taken for a local disk.
+    /// </summary>
+    internal static bool OnShare(string root)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return false;
+        }
+
+        if (root.StartsWith(@"\\", StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        try
+        {
+            return Path.GetPathRoot(root) is { Length: > 0 } drive && new DriveInfo(drive).DriveType == DriveType.Network;
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
     }
 
     /// <summary>The directory the objects live in.</summary>
@@ -197,7 +229,7 @@ public sealed class FileObjectStore : IObjectStore
         {
             try
             {
-                return await ReadAtAsync(held.Handle, key, offset, destination, held.Length, held.Token, tail: false, cancellationToken).ConfigureAwait(false);
+                return await ReadAtAsync(held.Handle, key, offset, destination, held.Length, held.Token, tail: false, _inPlaceBelow, cancellationToken).ConfigureAwait(false);
             }
             finally
             {
@@ -232,7 +264,7 @@ public sealed class FileObjectStore : IObjectStore
                 throw ObjectStoreExtensions.Changed(key, ifToken, token);
             }
 
-            ObjectRead read = await ReadAtAsync(handle, key, offset, destination, size, token, tail, cancellationToken).ConfigureAwait(false);
+            ObjectRead read = await ReadAtAsync(handle, key, offset, destination, size, token, tail, _inPlaceBelow, cancellationToken).ConfigureAwait(false);
             kept = Hold(key, handle, size, token);
             return read;
         }
@@ -245,12 +277,15 @@ public sealed class FileObjectStore : IObjectStore
         }
     }
 
+    /// <summary>The bytes past which a read waits for its file asynchronously; below, it reads in place.</summary>
+    private const int SmallRead = 64 << 10;
+
     /// <summary>
     /// Reads <paramref name="destination"/> from <paramref name="offset"/> of the file <paramref name="handle"/> opened, of
     /// <paramref name="size"/> bytes under <paramref name="token"/>, or its last bytes with <paramref name="tail"/>.
     /// </summary>
     private static async ValueTask<ObjectRead> ReadAtAsync(
-        SafeFileHandle handle, string key, long offset, Memory<byte> destination, long size, string token, bool tail, CancellationToken cancellationToken)
+        SafeFileHandle handle, string key, long offset, Memory<byte> destination, long size, string token, bool tail, int inPlaceBelow, CancellationToken cancellationToken)
     {
         if (tail)
         {
@@ -263,11 +298,17 @@ public sealed class FileObjectStore : IObjectStore
 
         int available = (int)Math.Min(destination.Length, size - offset);
         int read = 0;
+        if (available <= inPlaceBelow)
+        {
+            // In place, the token looked at once before, as the read past it would.
+            cancellationToken.ThrowIfCancellationRequested();
+        }
+
         while (read < available)
         {
-            int got = await RandomAccess
-                .ReadAsync(handle, destination[read..available], offset + read, cancellationToken)
-                .ConfigureAwait(false);
+            int got = available <= inPlaceBelow
+                ? RandomAccess.Read(handle, destination.Span[read..available], offset + read)
+                : await RandomAccess.ReadAsync(handle, destination[read..available], offset + read, cancellationToken).ConfigureAwait(false);
             if (got == 0)
             {
                 throw new ObjectStoreException(
@@ -907,29 +948,50 @@ public sealed class FileObjectStore : IObjectStore
             }
         }
 
+        // Each file's key read from its directory, relative to the root, made once a directory, and its name: a string for a
+        // key kept alone. The full path, made relative and its separators replaced, a file at a time, took three strings a
+        // file and more than the walk itself: the newest of 20,000 commits listed in 16.7 ms and 7.83 MB, the walk 6.9 ms.
         List<string> keys = [];
         List<string>? abandoned = null;
         DateTime aged = DateTime.UtcNow - AbandonedAfter;
-        foreach (string file in Directory.EnumerateFiles(walked, "*", SearchOption.AllDirectories))
+        string? directory = null;
+        string relative = string.Empty;
+        FileSystemEnumerable<string> files = new FileSystemEnumerable<string>(
+            walked, (ref FileSystemEntry entry) => KeyOf(Relative(ref entry), entry.FileName), Walked)
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            string key = Path.GetRelativePath(_root, file).Replace(Path.DirectorySeparatorChar, '/');
-
-            // An object being written lies beside its key, under a name no key can have. One a day old
-            // was left by a put that died, and goes once the walk is over.
-            if (key.Contains(Beside, StringComparison.Ordinal))
+            ShouldIncludePredicate = (ref FileSystemEntry entry) =>
             {
-                if (System.IO.File.GetLastWriteTimeUtc(file) < aged)
+                if (entry.IsDirectory)
                 {
-                    (abandoned ??= []).Add(file);
+                    return false;
                 }
 
-                continue;
-            }
+                cancellationToken.ThrowIfCancellationRequested();
+                string at = Relative(ref entry);
+                ReadOnlySpan<char> name = entry.FileName;
+                int length = (at.Length == 0 ? 0 : at.Length + 1) + name.Length;
+                Span<char> key = length <= 512 ? stackalloc char[length] : new char[length];
+                WriteKey(key, at, name);
 
-            if (key.StartsWith(prefix, StringComparison.Ordinal)
-                && (startAfter is not { } after || string.CompareOrdinal(key, after) > 0)
-                && ObjectKey.IsValid(key))
+                // An object being written lies beside its key, under a name no key can have. One a day old
+                // was left by a put that died, and goes once the walk is over.
+                if (key.IndexOf(Beside, StringComparison.Ordinal) >= 0)
+                {
+                    if (entry.LastWriteTimeUtc.UtcDateTime < aged)
+                    {
+                        (abandoned ??= []).Add(entry.ToFullPath());
+                    }
+
+                    return false;
+                }
+
+                return key.StartsWith(prefix, StringComparison.Ordinal) && (startAfter is not { } after || key.SequenceCompareTo(after) > 0);
+            },
+        };
+
+        foreach (string key in files)
+        {
+            if (ObjectKey.IsValid(key))
             {
                 keys.Add(key);
             }
@@ -948,6 +1010,47 @@ public sealed class FileObjectStore : IObjectStore
         {
             yield return key;
         }
+
+        // The directory of the entry relative to the root, '/' between its names, made once a directory; empty for the root.
+        string Relative(ref FileSystemEntry entry)
+        {
+            ReadOnlySpan<char> at = entry.Directory;
+            if (directory is null || !at.SequenceEqual(directory))
+            {
+                directory = at.ToString();
+                relative = Path.GetRelativePath(_root, directory).Replace(Path.DirectorySeparatorChar, '/');
+                relative = relative == "." ? string.Empty : relative;
+            }
+
+            return relative;
+        }
+    }
+
+    /// <summary>What a walk of the store's files skips: nothing, as <see cref="Directory.EnumerateFiles(string, string, SearchOption)"/> did, in every directory.</summary>
+    private static readonly EnumerationOptions Walked = new EnumerationOptions { RecurseSubdirectories = true, AttributesToSkip = 0, IgnoreInaccessible = false };
+
+    /// <summary>The key of the file <paramref name="name"/> in the directory <paramref name="directory"/>, relative to the root.</summary>
+    private static string KeyOf(string directory, ReadOnlySpan<char> name)
+    {
+        int length = (directory.Length == 0 ? 0 : directory.Length + 1) + name.Length;
+        Span<char> key = length <= 512 ? stackalloc char[length] : new char[length];
+        WriteKey(key, directory, name);
+        return key.ToString();
+    }
+
+    /// <summary>Writes into <paramref name="key"/> the key of the file <paramref name="name"/> in the directory <paramref name="directory"/>.</summary>
+    private static void WriteKey(Span<char> key, string directory, ReadOnlySpan<char> name)
+    {
+        int at = 0;
+        if (directory.Length > 0)
+        {
+            directory.CopyTo(key);
+            key[directory.Length] = '/';
+            at = directory.Length + 1;
+        }
+
+        name.CopyTo(key[at..]);
+        key[at..].Replace(Path.DirectorySeparatorChar, '/');
     }
 
     /// <inheritdoc/>

@@ -87,16 +87,16 @@ internal sealed partial class DatasetScanBuilder
         }
 
         /// <summary>The object; default for a rollup.</summary>
-        internal PositionedObject Held { get; }
+        internal PositionedObject Held { get; private set; }
 
         /// <summary>The rollup; null for an object.</summary>
-        internal RollupEntry? Run { get; }
+        internal RollupEntry? Run { get; private set; }
 
         /// <summary>The summaries of the buckets of a rollup taken by bucket; null otherwise.</summary>
-        internal ObjectSummaries?[]? Buckets { get; }
+        internal ObjectSummaries?[]? Buckets { get; private set; }
 
         /// <summary>The column whose counts answer it; null when none does.</summary>
-        internal int? Field { get; }
+        internal int? Field { get; private set; }
 
         internal UnitLevel Level => Run is null ? UnitLevel.Object : UnitLevel.Run;
 
@@ -121,15 +121,138 @@ internal sealed partial class DatasetScanBuilder
         /// <summary>Whether its reads began (<see cref="Begin"/>).</summary>
         internal bool Begun { get; set; }
 
-        /// <summary>The read of its counts, begun ahead; null before or after.</summary>
-        internal Task<(ColumnCounts?, ColumnSketches?)>? Counts { get; set; }
+        /// <summary>
+        /// The read of its counts, begun ahead, awaited once; null before or after. A read its memo answers completes as it
+        /// begins, and takes no task.
+        /// </summary>
+        internal ValueTask<(ColumnCounts?, ColumnSketches?)>? Counts { get; set; }
 
         /// <summary>The read of its columns' statistics over its granules and its measures' histograms, begun ahead; null before or after.</summary>
         internal Task<(GranuleStats?[] Stats, GranuleHistograms?[] Histograms, GranuleKeyRuns?[] Runs)>? Statistics { get; set; }
 
         /// <summary>Its open, begun ahead; null before or after.</summary>
         internal Task? Opened { get; set; }
+
+        /// <summary>Makes this unit, chosen before or given back, the object <paramref name="held"/>'s, as new: nothing chosen or begun.</summary>
+        internal Planned Of(in PositionedObject held, int? field)
+        {
+            Clear();
+            (Held, Field) = (held, field);
+            return this;
+        }
+
+        /// <summary>Lets go of everything it holds: its object, its choice and its reads, as a unit given back keeps nothing alive.</summary>
+        internal void Clear()
+        {
+            (Held, Run, Buckets, Field, Chosen, Cost, Weight, Kept, Rejected) = (default, null, null, null, null!, default, 0, 1, null);
+            (Begun, Counts, Statistics, Opened) = (false, null, null, null);
+        }
     }
+
+    /// <summary>
+    /// The units of a question's states, given back for the next question's (<see cref="StatesAsync"/>): the list its units
+    /// fill, and the units, each made again for an object (<see cref="Planned.Of"/>), which a question of 512 objects made
+    /// anew at 225 bytes each. A process keeps one shelf a processor at most, each of <see cref="KeptUnits"/> units, some
+    /// 230 KB, and a list of <see cref="KeptUnits"/> times four.
+    /// </summary>
+    private sealed class UnitShelf
+    {
+        /// <summary>The units a shelf keeps at most.</summary>
+        private const int KeptUnits = 1024;
+
+        private static readonly UnitShelf?[] Kept = new UnitShelf?[Environment.ProcessorCount];
+        private static readonly Lock Gate = new Lock();
+        private static int _count;
+
+        private readonly Stack<Planned> _free = new Stack<Planned>();
+
+        /// <summary>The list the question's units fill, empty when rented.</summary>
+        internal List<Planned> Units { get; private set; } = [];
+
+        /// <summary>A shelf a question gave back, or a new one.</summary>
+        internal static UnitShelf Rent()
+        {
+            lock (Gate)
+            {
+                if (_count > 0)
+                {
+                    UnitShelf kept = Kept[--_count]!;
+                    Kept[_count] = null;
+                    return kept;
+                }
+            }
+
+            return new UnitShelf();
+        }
+
+        /// <summary>A unit of the object <paramref name="held"/>, a unit given back made again or a new one.</summary>
+        internal Planned Of(in PositionedObject held, int? field) =>
+            _free.TryPop(out Planned? unit) ? unit.Of(held, field) : new Planned(held, field);
+
+        /// <summary>
+        /// Takes back the units of the list, which no read begun holds any more, each cleared, as many as it keeps, and keeps
+        /// the shelf for the next question, past the bound left to the collector.
+        /// </summary>
+        internal void Return()
+        {
+            foreach (Planned unit in Units)
+            {
+                if (_free.Count >= KeptUnits)
+                {
+                    break;
+                }
+
+                unit.Clear();
+                _free.Push(unit);
+            }
+
+            Units.Clear();
+            if (Units.Capacity > 4 * KeptUnits)
+            {
+                Units = [];
+            }
+
+            lock (Gate)
+            {
+                if (_count < Kept.Length)
+                {
+                    Kept[_count++] = this;
+                }
+            }
+        }
+    }
+
+    // What the alternatives of the unit being chosen ask two or three times, found once a choice (Choose): how its summaries
+    // judge it for its granules, the cost of its rows at a share of them, and of its sheets. A builder chooses one unit at a
+    // time, each choice to its end with no await (its walks, AnswersAnyAsync, PiecesAsync's plan, SpreadAsync); nothing of
+    // it is kept on the unit, which a question makes one of an object.
+    private Planned? _choosing;
+    private GranuleAnswer.Judgment _choiceJudged;
+    private PathCosts.Cost? _choiceRows;
+    private double _choiceRowsAt;
+    private PathCosts.Cost? _choiceSheets;
+
+    /// <summary>What reading the rows of <paramref name="unit"/> costs at the share of them it keeps (<see cref="RowsCost(in PositionedObject, double)"/>), found once a choice for that share.</summary>
+    private PathCosts.Cost RowsCostOf(Planned unit)
+    {
+        bool choosing = ReferenceEquals(_choosing, unit);
+        if (choosing && _choiceRows is { } known && _choiceRowsAt.Equals(unit.Kept))
+        {
+            return known;
+        }
+
+        PathCosts.Cost cost = RowsCost(unit.Held, unit.Kept, SheetsCostOf(unit));
+        if (choosing)
+        {
+            (_choiceRows, _choiceRowsAt) = (cost, unit.Kept);
+        }
+
+        return cost;
+    }
+
+    /// <summary>What reading the sheets of <paramref name="unit"/> costs (<see cref="SheetsCost"/>), found once a choice.</summary>
+    private PathCosts.Cost SheetsCostOf(Planned unit) =>
+        !ReferenceEquals(_choosing, unit) ? SheetsCost(unit.Held) : _choiceSheets ??= SheetsCost(unit.Held);
 
     /// <summary>
     /// One way of answering a unit (spec B, 6.1): whether it covers the unit from the entries alone, and what it costs at the
@@ -272,12 +395,22 @@ internal sealed partial class DatasetScanBuilder
     /// </summary>
     private sealed class GranulesAlternative(DatasetScanBuilder scan) : Alternative(scan, AnswerPath.Granules, UnitLevel.Object)
     {
-        internal override Coverage Covers(Planned unit) =>
-            Scan.Answer() is not null && unit.Held.Entry.Contents is { GranuleStats.Count: > 0 } && Scan.Covered(unit.Held) > 0
-            && Scan.GranuleAnswer() is { } granules && (granules.Exclusion is not { } excluded || !excluded.Identifier || excluded.Placed(unit.Held.Entry.Uid))
-            && granules.Covers(unit.Held)
-                ? Coverage.Part
-                : Coverage.None;
+        internal override Coverage Covers(Planned unit)
+        {
+            if (Scan.Answer() is not null && unit.Held.Entry.Contents is { GranuleStats.Count: > 0 } && Scan.Covered(unit.Held) > 0
+                && Scan.GranuleAnswer() is { } granules && (granules.Exclusion is not { } excluded || !excluded.Identifier || excluded.Placed(unit.Held.Entry.Uid))
+                && granules.Covers(unit.Held, out GranuleAnswer.Judgment judged))
+            {
+                if (ReferenceEquals(Scan._choosing, unit))
+                {
+                    Scan._choiceJudged = judged;
+                }
+
+                return Coverage.Part;
+            }
+
+            return Coverage.None;
+        }
 
         internal override string Uncovered(Planned unit) =>
             Scan.Answer() is null ? Scan._answerDeclined ?? "does not cover it"
@@ -289,15 +422,19 @@ internal sealed partial class DatasetScanBuilder
 
         internal override PathCosts.Cost Cost(Planned unit)
         {
-            // Under a value left out, the places its indexes give it (GranuleAnswer.Placing).
-            (PathCosts.Cost statistics, PathCosts.Cost unanswered, _) = Scan.GranuleAnswer()!.Costs(unit.Held, unit.Kept);
-            PathCosts.Cost placing = Scan.GranuleAnswer()!.Placing(unit.Held);
-            return statistics + unanswered + placing + Scan.SheetsCost(unit.Held);
+            // Under a value left out, the places its indexes give it (GranuleAnswer.Placing). Its summaries were judged as the
+            // choice found it covered (Choose covers each alternative before it costs it).
+            GranuleAnswer granules = Scan.GranuleAnswer()!;
+            (PathCosts.Cost statistics, PathCosts.Cost unanswered) = ReferenceEquals(Scan._choosing, unit)
+                ? granules.Costs(unit.Held, unit.Kept, Scan._choiceJudged)
+                : granules.Costs(unit.Held, unit.Kept);
+            PathCosts.Cost placing = granules.Placing(unit.Held);
+            return statistics + unanswered + placing + Scan.SheetsCostOf(unit);
         }
 
         internal override string Describe(Planned unit, PathCosts.Cost cost)
         {
-            (PathCosts.Cost statistics, PathCosts.Cost unanswered, _) = Scan.GranuleAnswer()!.Costs(unit.Held, unit.Kept);
+            (PathCosts.Cost statistics, PathCosts.Cost unanswered) = Scan.GranuleAnswer()!.Costs(unit.Held, unit.Kept);
             return $"the statistics over the granules of {Scan.GranuleAnswer()!.Fields.Length} columns, {statistics.Bytes} bytes in {statistics.Requests} requests, "
                 + $"and the rows of the granules they do not answer, about {unanswered.Bytes} bytes in {unanswered.Requests}"
                 + (Scan.GranuleAnswer()!.Exclusion is { } exclusion && exclusion.Placed(unit.Held.Entry.Uid)
@@ -324,7 +461,7 @@ internal sealed partial class DatasetScanBuilder
             : !Scan._version.Schema.Holds(unit.Held.Entry) ? "its columns are an earlier schema's"
             : "its summaries do not prove the filter true over its rows, or the filter reads another column than the key's first";
 
-        internal override PathCosts.Cost Cost(Planned unit) => Scan.RowsCost(unit.Held, unit.Kept);
+        internal override PathCosts.Cost Cost(Planned unit) => Scan.RowsCostOf(unit);
 
         internal override string Describe(Planned unit, PathCosts.Cost cost) =>
             $"{RowsOf(unit)}, {cost.Bytes} bytes in {cost.Requests} requests, the blocks its zone maps settle taken from them";
@@ -335,7 +472,7 @@ internal sealed partial class DatasetScanBuilder
     {
         internal override Coverage Covers(Planned unit) => Coverage.Whole;
 
-        internal override PathCosts.Cost Cost(Planned unit) => Scan.RowsCost(unit.Held, unit.Kept);
+        internal override PathCosts.Cost Cost(Planned unit) => Scan.RowsCostOf(unit);
 
         internal override string Describe(Planned unit, PathCosts.Cost cost) => $"{RowsOf(unit)}, {cost.Bytes} bytes in {cost.Requests} requests";
     }
@@ -360,6 +497,21 @@ internal sealed partial class DatasetScanBuilder
     /// dataset's profile, the first in their order at a tie; with <paramref name="explain"/>, why each other lost.
     /// </summary>
     private void Choose(Planned unit, bool explain)
+    {
+        // What the alternatives ask more than once of the unit, found once this choice (_choosing).
+        (_choosing, _choiceRows, _choiceSheets) = (unit, null, null);
+        try
+        {
+            ChooseOnce(unit, explain);
+        }
+        finally
+        {
+            (_choosing, _choiceRows, _choiceSheets) = (null, null, null);
+        }
+    }
+
+    /// <summary>What <see cref="Choose"/> does, the unit's memo in place.</summary>
+    private void ChooseOnce(Planned unit, bool explain)
     {
         Alternative? best = null;
         PathCosts.Cost cost = default;
@@ -429,14 +581,17 @@ internal sealed partial class DatasetScanBuilder
     /// <paramref name="kept"/> share of its rows its key's sparse index keeps alone; and its sheets, read first when the
     /// filter asks values of a column.
     /// </summary>
-    private PathCosts.Cost RowsCost(in PositionedObject held, double kept = 1)
+    private PathCosts.Cost RowsCost(in PositionedObject held, double kept = 1) => RowsCost(held, kept, SheetsCost(held));
+
+    /// <summary>What <see cref="RowsCost(in PositionedObject, double)"/> says, its sheets costing <paramref name="sheets"/>.</summary>
+    private PathCosts.Cost RowsCost(in PositionedObject held, double kept, PathCosts.Cost sheets)
     {
         PathCosts costs = _version.Costs;
         int[] fields = FieldsRead();
         double share = Math.Clamp(kept, 0, 1);
         PathCosts.Cost rows = share < 1 ? costs.Share(held.Entry, fields, share) : costs.Rows(held.Entry, fields);
         double processing = share * costs.Processing(held.Entry, default, FieldsJudged(), _states is not null || _settles is not null ? fields.Length : 0);
-        return rows with { Nanoseconds = rows.Nanoseconds + processing } + SheetsCost(held);
+        return rows with { Nanoseconds = rows.Nanoseconds + processing } + sheets;
     }
 
     /// <summary>What reading the sheets of the object <paramref name="held"/> costs, when the scan reads them (<see cref="ReadsSheets"/>); nothing otherwise.</summary>
@@ -526,11 +681,13 @@ internal sealed partial class DatasetScanBuilder
     /// its objects (<see cref="KeepsAsync"/>), then the objects the walk meets that no rollup covers. With
     /// <paramref name="read"/>, the units whose choice reads rows are passed through their sheets, as a read does
     /// (<see cref="SheetsKeptAsync"/>); without, nothing but the entries is read, and the sheets weigh in each object's cost.
+    /// The objects' units come from <paramref name="shelf"/>, and fill its list, when there is one.
     /// </summary>
-    private async ValueTask<(RollupChoice? Rollups, List<Planned> Units)> UnitsAsync(CountsAnswer? answer, bool explain, bool read, CancellationToken cancellationToken)
+    private async ValueTask<(RollupChoice? Rollups, List<Planned> Units)> UnitsAsync(
+        CountsAnswer? answer, bool explain, bool read, UnitShelf? shelf, CancellationToken cancellationToken)
     {
         RollupChoice? rollups = answer is null ? null : await RollupsAsync(answer, cancellationToken).ConfigureAwait(false);
-        List<Planned> units = [];
+        List<Planned> units = shelf?.Units ?? [];
         foreach ((RollupEntry rollup, int field, ObjectSummaries?[]? buckets) in rollups?.Chosen ?? [])
         {
             Planned unit = new Planned(rollup, field, buckets);
@@ -563,7 +720,8 @@ internal sealed partial class DatasetScanBuilder
                     await PlacedAsync(held, cancellationToken).ConfigureAwait(false);
                 }
 
-                Planned unit = new Planned(held, answer is null ? null : AnsweredBy(answer, held));
+                int? field = answer is null ? null : AnsweredBy(answer, held);
+                Planned unit = shelf?.Of(held, field) ?? new Planned(held, field);
                 Choose(unit, explain);
                 units.Add(unit);
 
@@ -649,13 +807,13 @@ internal sealed partial class DatasetScanBuilder
             }
         }
 
-        List<Planned> kept = new List<Planned>(units.Count);
+        // The units kept move down the list, in their order, past the rollups, which stay first.
         int first = 0;
         for (; first < units.Count && units[first].Run is not null; first++)
         {
-            kept.Add(units[first]);
         }
 
+        int kept = first;
         List<PositionedObject> batch = new List<PositionedObject>(SheetBatch);
         DatasetScanCounters? metrics = _considers ? _metrics : null;
         PartitionLocates? partitions = LocatesOf(filter, columns);
@@ -675,13 +833,14 @@ internal sealed partial class DatasetScanBuilder
             {
                 if (p < passed.Count && passed[p].FirstRow == units[u].Held.FirstRow)
                 {
-                    kept.Add(units[u]);
+                    units[kept++] = units[u];
                     p++;
                 }
             }
         }
 
-        return kept;
+        units.RemoveRange(kept, units.Count - kept);
+        return units;
     }
 
     /// <summary>

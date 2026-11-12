@@ -219,6 +219,109 @@ public sealed class DatasetKeyCursorReadTests
     /// deep, with rows marked deleted in every level: keys drawn from a range not much wider than the
     /// rows, so that many repeat across objects, and a city from a few.
     /// </summary>
+    /// <summary>
+    /// A walk off the clustering key opens every object at its first seek, a few at once: its round trips one after another
+    /// are a fraction of its reads, where each object's lease, open and seek waited in turn.
+    /// </summary>
+    [Fact]
+    public async Task AWalkOfAnotherColumnOpensItsObjectsAFewAtOnce()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using MemoryObjectStore memory = new MemoryObjectStore();
+        DatasetOptions options = await ManyPagesAsync(memory, ct);
+        await using CountingObjectStore counted = new CountingObjectStore(new DelayedReads(memory));
+        await using VortexDataset dataset = await VortexDataset.OpenAsync(counted, options, ct);
+        await using DatasetKeyCursor cursor = await DatasetKeyCursor.OpenAsync(dataset.Snapshot, "City", distinct: false, indexes: true, ct);
+        counted.Reset();
+        Assert.True(await cursor.SeekFirstAsync(ct));
+        Assert.Equal(dataset.ObjectCount, cursor.Cursors);
+        long reads = counted.CountOf(ObjectOperation.Read);
+        Assert.True(reads >= dataset.ObjectCount, $"{reads} reads for {dataset.ObjectCount} objects");
+        Assert.True(counted.DependentSteps * 3 <= reads, $"{counted.DependentSteps} round trips one after another for {reads} reads over {dataset.ObjectCount} objects");
+    }
+
+    /// <summary>
+    /// A store whose reads each wait 5 ms before the store below serves them: reads asked together overlap. A read asked
+    /// with none in flight waits besides for the next one, 50 ms at most, so that a pause of the machine between the reads
+    /// of one wave does not part them; a read that follows another's answer still waits alone.
+    /// </summary>
+    private sealed class DelayedReads(IObjectStore inner) : IObjectStore
+    {
+        private readonly Lock _gate = new Lock();
+        private TaskCompletionSource? _alone;
+        private int _inFlight;
+
+        public ObjectStoreCapabilities Capabilities => inner.Capabilities;
+
+        public async ValueTask<ObjectRead> ReadAsync(string key, long offset, Memory<byte> destination, string? ifToken, CancellationToken cancellationToken)
+        {
+            try
+            {
+                await HoldAsync(cancellationToken);
+                return await inner.ReadAsync(key, offset, destination, ifToken, cancellationToken);
+            }
+            finally
+            {
+                Interlocked.Decrement(ref _inFlight);
+            }
+        }
+
+        public async ValueTask<ObjectRead> ReadTailAsync(string key, Memory<byte> destination, CancellationToken cancellationToken)
+        {
+            try
+            {
+                await HoldAsync(cancellationToken);
+                return await inner.ReadTailAsync(key, destination, cancellationToken);
+            }
+            finally
+            {
+                Interlocked.Decrement(ref _inFlight);
+            }
+        }
+
+        public async ValueTask<ObjectHead?> HeadAsync(string key, CancellationToken cancellationToken)
+        {
+            try
+            {
+                await HoldAsync(cancellationToken);
+                return await inner.HeadAsync(key, cancellationToken);
+            }
+            finally
+            {
+                Interlocked.Decrement(ref _inFlight);
+            }
+        }
+
+        private async Task HoldAsync(CancellationToken cancellationToken)
+        {
+            Task companion = Task.CompletedTask;
+            lock (_gate)
+            {
+                if (Interlocked.Increment(ref _inFlight) == 1)
+                {
+                    _alone = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                    companion = _alone.Task;
+                }
+                else
+                {
+                    _alone?.TrySetResult();
+                }
+            }
+
+            await Task.WhenAll(Task.Delay(5, cancellationToken), Task.WhenAny(companion, Task.Delay(50, cancellationToken)));
+        }
+
+        public ValueTask<PutOutcome> PutAsync(string key, System.IO.Pipelines.PipeReader content, long length, PutCondition condition, CancellationToken cancellationToken) =>
+            inner.PutAsync(key, content, length, condition, cancellationToken);
+
+        public ValueTask DeleteAsync(IReadOnlyList<string> keys, CancellationToken cancellationToken) => inner.DeleteAsync(keys, cancellationToken);
+
+        public IAsyncEnumerable<ObjectListing> ListAsync(string prefix, string? startAfter, CancellationToken cancellationToken) =>
+            inner.ListAsync(prefix, startAfter, cancellationToken);
+
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
     private static async Task<DatasetOptions> ManyPagesAsync(IObjectStore store, CancellationToken ct)
     {
         Decoders.EnsureRegistered();

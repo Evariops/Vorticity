@@ -50,8 +50,14 @@ internal sealed class CardinalitySketch : IGroupSketch<CardinalitySketch>
     // Densely: every register's rank.
     private byte[]? _dense;
 
+    // The bytes of the three arrays, kept as each changes: a slot reads them before and after every value it adds.
+    private long _held;
+
     /// <summary>The bytes the sketch holds.</summary>
-    public long Bytes =>
+    public long Bytes => _held;
+
+    /// <summary>The bytes the sketch holds, counted from its arrays: what <see cref="Bytes"/> keeps.</summary>
+    internal long CountedBytes =>
         ((long)(_hashes?.Length ?? 0) * sizeof(ulong)) + ((long)(_table?.Length ?? 0) * sizeof(int)) + (_dense?.Length ?? 0);
 
     /// <summary>Whether the sketch still counts exactly.</summary>
@@ -78,6 +84,7 @@ internal sealed class CardinalitySketch : IGroupSketch<CardinalitySketch>
             if (_exact == hashes.Length)
             {
                 Array.Resize(ref _hashes, Math.Max(4, hashes.Length * 2));
+                _held += (long)(_hashes.Length - hashes.Length) * sizeof(ulong);
                 hashes = _hashes;
             }
 
@@ -251,20 +258,48 @@ internal sealed class CardinalitySketch : IGroupSketch<CardinalitySketch>
     /// </summary>
     public void Encode(IBufferWriter<byte> into)
     {
-        if (_hashes is { } hashes)
+        if (_hashes is { } held)
         {
-            Span<byte> exact = into.GetSpan(1 + Varint.MaxLength64 + (_exact * sizeof(ulong)));
-            exact[0] = ExactForm;
-            int at = 1 + Varint.Write(exact[1..], (ulong)_exact);
-            for (int i = 0; i < _exact; i++, at += sizeof(ulong))
-            {
-                BinaryPrimitives.WriteUInt64LittleEndian(exact[at..], hashes[i]);
-            }
-
-            into.Advance(at);
+            into.Advance(EncodeExact(held.AsSpan(0, _exact), into.GetSpan(ExactBytes(_exact))));
             return;
         }
 
+        EncodeRegisters(into);
+    }
+
+    /// <summary>The bytes <see cref="Encode"/> writes of an exact sketch of <paramref name="hashes"/> at most.</summary>
+    internal static int ExactBytes(int hashes) => 1 + Varint.MaxLength64 + (hashes * sizeof(ulong));
+
+    /// <summary>
+    /// What <see cref="Encode"/> writes of an exact sketch of <paramref name="hashes"/>, distinct and ascending, into
+    /// <paramref name="into"/>, with no sketch made: its form, its count, its hashes. The bytes written.
+    /// </summary>
+    internal static int EncodeExact(ReadOnlySpan<ulong> hashes, Span<byte> into)
+    {
+        into[0] = ExactForm;
+        int at = 1 + Varint.Write(into[1..], (ulong)hashes.Length);
+        foreach (ulong hash in hashes)
+        {
+            BinaryPrimitives.WriteUInt64LittleEndian(into[at..], hash);
+            at += sizeof(ulong);
+        }
+
+        return at;
+    }
+
+    /// <summary>What <see cref="Write"/> hands out of an exact sketch of <paramref name="hashes"/>, distinct and ascending, with no sketch made.</summary>
+    internal static void WriteExact(ReadOnlySpan<ulong> hashes, SpillBuffer into)
+    {
+        into.Write(0L);
+        into.Write((long)hashes.Length);
+        foreach (ulong hash in hashes)
+        {
+            into.Write(unchecked((long)hash));
+        }
+    }
+
+    private void EncodeRegisters(IBufferWriter<byte> into)
+    {
         int set = _dense is { } counted ? Registers - counted.AsSpan().Count((byte)0) : _set;
         if (set > Registers / 2)
         {
@@ -401,6 +436,7 @@ internal sealed class CardinalitySketch : IGroupSketch<CardinalitySketch>
         _table = null;
         _set = 0;
         _dense = null;
+        _held = (long)_hashes.Length * sizeof(ulong);
     }
 
     /// <summary>Every register's rank into <paramref name="ranks"/>, of <see cref="Registers"/> bytes, the empty ones zero.</summary>
@@ -449,6 +485,7 @@ internal sealed class CardinalitySketch : IGroupSketch<CardinalitySketch>
         _hashes = null;
         _exact = 0;
         _table = new int[FirstTable];
+        _held += ((long)FirstTable * sizeof(int)) - ((long)hashes.Length * sizeof(ulong));
         for (int i = 0; i < exact; i++)
         {
             Set(hashes[i]);
@@ -536,6 +573,7 @@ internal sealed class CardinalitySketch : IGroupSketch<CardinalitySketch>
             table[slot] = entry;
         }
 
+        _held += (long)(table.Length - old.Length) * sizeof(int);
         _table = table;
     }
 
@@ -550,6 +588,7 @@ internal sealed class CardinalitySketch : IGroupSketch<CardinalitySketch>
             }
         }
 
+        _held += dense.Length - ((long)_table!.Length * sizeof(int));
         _dense = dense;
         _table = null;
         _set = 0;

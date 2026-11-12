@@ -207,6 +207,9 @@ internal sealed class PartSlate(StructStore store, CanonicalArena arena)
     /// <summary>The batch's groups.</summary>
     internal int Rows { get; private set; }
 
+    /// <summary>What the query's memory holds for the batch while it waits to be read; 0 when nothing.</summary>
+    internal long Held { get; set; }
+
     /// <summary>The values of <paramref name="groups"/> of <paramref name="outcome"/> written in the store, its batch built over them.</summary>
     internal void Build(ResultColumn[] columns, AggregationOutcome outcome, ReadOnlySpan<int> groups)
     {

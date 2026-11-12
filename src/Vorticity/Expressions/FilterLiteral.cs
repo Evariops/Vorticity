@@ -1,4 +1,6 @@
 using System;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 
 namespace Vorticity.Expressions;
 
@@ -35,6 +37,8 @@ internal enum FilterLiteralKind : byte
 /// </summary>
 internal readonly struct FilterLiteral : IEquatable<FilterLiteral>
 {
+    // A byte string's bits are where its bytes lie in the array, the offset low and the length high: a bound read out of
+    // a page is then a view of the page's own array (View), where a copy cost an array per bound per node a walk passed.
     private readonly ulong _bits;
     private readonly byte[]? _bytes;
 
@@ -64,7 +68,10 @@ internal readonly struct FilterLiteral : IEquatable<FilterLiteral>
     public bool BoolValue => _bits != 0;
 
     /// <summary>The bytes. Only meaningful for <see cref="FilterLiteralKind.Bytes"/>.</summary>
-    public ReadOnlySpan<byte> BytesValue => _bytes ?? [];
+    public ReadOnlySpan<byte> BytesValue => _bytes is null
+        ? []
+        : MemoryMarshal.CreateReadOnlySpan(
+            ref Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(_bytes), (nint)(uint)_bits), (int)(_bits >> 32));
 
     /// <summary>A boolean constant.</summary>
     /// <param name="value">The value.</param>
@@ -100,20 +107,37 @@ internal readonly struct FilterLiteral : IEquatable<FilterLiteral>
     public static FilterLiteral From(string value)
     {
         ArgumentNullException.ThrowIfNull(value);
-        return new FilterLiteral(
-            FilterLiteralKind.Bytes, 0, System.Text.Encoding.UTF8.GetBytes(value));
+        return Owning(System.Text.Encoding.UTF8.GetBytes(value));
     }
 
     /// <summary>A byte-string constant.</summary>
     /// <param name="value">The bytes; copied, so the caller's array may change afterwards.</param>
-    public static FilterLiteral From(ReadOnlySpan<byte> value) =>
-        new FilterLiteral(FilterLiteralKind.Bytes, 0, value.ToArray());
+    public static FilterLiteral From(ReadOnlySpan<byte> value) => Owning(value.ToArray());
 
     /// <summary>A byte-string constant over <paramref name="value"/> itself, which the caller made for it and never changes after.</summary>
-    internal static FilterLiteral Owning(byte[] value) => new FilterLiteral(FilterLiteralKind.Bytes, 0, value);
+    internal static FilterLiteral Owning(byte[] value) => new FilterLiteral(FilterLiteralKind.Bytes, Where(0, value.Length), value);
 
-    /// <summary>The array a byte string holds its bytes in, which no one changes; null for another kind.</summary>
-    internal byte[]? OwnedBytes => Kind == FilterLiteralKind.Bytes ? _bytes : null;
+    /// <summary>
+    /// A byte-string constant over <paramref name="length"/> bytes of <paramref name="array"/> from <paramref name="offset"/>,
+    /// neither copied nor owned: good for as long as nobody changes those bytes, which a page read once and never written
+    /// again guarantees for as long as the literal is used.
+    /// </summary>
+    /// <exception cref="ArgumentOutOfRangeException">The bytes do not lie inside the array.</exception>
+    internal static FilterLiteral View(byte[] array, int offset, int length)
+    {
+        ArgumentNullException.ThrowIfNull(array);
+        if ((uint)offset > (uint)array.Length || (uint)length > (uint)(array.Length - offset))
+        {
+            throw new ArgumentOutOfRangeException(nameof(length), "The bytes do not lie inside the array.");
+        }
+
+        return new FilterLiteral(FilterLiteralKind.Bytes, Where(offset, length), array);
+    }
+
+    /// <summary>The array a byte string holds its bytes in, all of it, which no one changes; null for another kind or a view.</summary>
+    internal byte[]? OwnedBytes => Kind == FilterLiteralKind.Bytes && _bytes is { } bytes && _bits == Where(0, bytes.Length) ? bytes : null;
+
+    private static ulong Where(int offset, int length) => (uint)offset | ((ulong)(uint)length << 32);
 
     /// <inheritdoc/>
     public bool Equals(FilterLiteral other)

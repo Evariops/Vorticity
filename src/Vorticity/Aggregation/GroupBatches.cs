@@ -913,6 +913,7 @@ internal static class GroupSelection
             {
                 case GroupFilter filter:
                     (groups, count) = Filter(query, outcome, filter, groups, count, cancellationToken);
+                    outcome.HoldOperated(groups);
                     break;
                 case GroupOrder order:
                 {
@@ -926,6 +927,7 @@ internal static class GroupSelection
                     (groups, count) = chunks > 1
                         ? await TopInChunksAsync(query, outcome, order, groups, count, (int)keep, chunks, cancellationToken).ConfigureAwait(false)
                         : Order(query, outcome, order, groups, count, keep, cancellationToken);
+                    outcome.HoldOperated(groups);
                     break;
                 }
 
@@ -933,8 +935,11 @@ internal static class GroupSelection
                 {
                     int from = (int)Math.Min(window.Skip, count);
                     int kept = (int)Math.Min(count - from, window.Take);
-                    groups = groups.AsSpan(from, kept).ToArray();
+                    int[] windowed = Lent(outcome.Memory, kept, counted: 0);
+                    groups.AsSpan(from, kept).CopyTo(windowed);
+                    groups = windowed;
                     count = kept;
+                    outcome.HoldOperated(groups);
                     break;
                 }
 
@@ -944,6 +949,36 @@ internal static class GroupSelection
         }
 
         return (groups, count);
+    }
+
+    /// <summary>
+    /// An array of the process's shelf for <paramref name="length"/> groups an operator leaves, a power of two long, as the
+    /// whole order is (<see cref="AggregationEngine.LentOrder"/>): the result holds it until it is delivered
+    /// (<see cref="AggregationOutcome.HoldOperated"/>). An array a question was 4 MB for a million groups ordered. Its
+    /// bytes, its whole length's, are measured under <paramref name="memory"/> beyond the <paramref name="counted"/> the
+    /// caller reserved for it, until the operator after it gives it back or the result is delivered: what the process's
+    /// budget tells its queries' memory by. Measured, not reserved: counted against the query's ceiling, a filter's array
+    /// of the groups in memory took the room a spilled order's sort then asked for, and failed the question.
+    /// </summary>
+    private static int[] Lent(QueryMemory? memory, int length, long counted)
+    {
+        if (length == 0)
+        {
+            return [];
+        }
+
+        int[] lent = ArrayShelf.Retained.Take<int>(Scratch.Capacity(length, 0), zeroed: false, overdraw: true);
+        memory?.Measure(((long)lent.Length * sizeof(int)) - counted);
+        return lent;
+    }
+
+    /// <summary>Gives back an array of groups an operator made (<see cref="Order"/>, <see cref="Filter"/>) once read, when no result holds it.</summary>
+    internal static void GiveBack(int[] groups)
+    {
+        if (groups.Length > 0)
+        {
+            ArrayShelf.Retained.Give(groups);
+        }
     }
 
     private static long Saturated(long skip, long take) => take == long.MaxValue || skip > long.MaxValue - take ? long.MaxValue : skip + take;
@@ -1018,18 +1053,29 @@ internal static class GroupSelection
             candidates += (await chunk.ConfigureAwait(false)).Count;
         }
 
-        int[] best = new int[candidates];
+        int[] best = Lent(null, candidates, counted: 0);
         int at = 0;
+        long rounded = 0;
         foreach (Task<(int[] Groups, int Count)> chunk in ranking)
         {
             (int[] kept, int n) = await chunk.ConfigureAwait(false);
             kept.AsSpan(0, n).CopyTo(best.AsSpan(at));
             at += n;
+            rounded += (long)(kept.Length - n) * sizeof(int);
+            GiveBack(kept);
         }
 
-        // Each chunk's ranking held its groups as a result's: the last one alone is.
+        // Each chunk's ranking held its groups as a result's, and measured its array past them: the last one alone is.
         outcome.Memory?.LetGo((long)candidates * sizeof(int));
-        return Order(query, outcome, order, best, candidates, keep, cancellationToken);
+        outcome.Memory?.Measure(-rounded);
+        try
+        {
+            return Order(query, outcome, order, best, candidates, keep, cancellationToken);
+        }
+        finally
+        {
+            GiveBack(best);
+        }
     }
 
     /// <summary>The first <paramref name="keep"/> of a chunk of <paramref name="groups"/>, in order, its groups in an array of the pool while it ranks.</summary>
@@ -1151,6 +1197,11 @@ internal static class GroupSelection
                     ? GroupSort.TopK(ties, new IndexOrder(index!, groups, keys.Length), need, memory, cancellationToken)
                     : GroupSort.TopK(ties, new ChainOrder(orders[order.Keys.Length..]), need, memory, cancellationToken));
             }
+            else if (keep >= count && GroupSort.TrySortByKeys(positions, count, orders, memory, cancellationToken))
+            {
+                // Every group, each order of the chain keying its positions: sorted by their keys, with no comparison.
+                kept = count;
+            }
             else
             {
                 kept = GroupSort.Sort(positions, count, new ChainOrder(orders), keep, memory, cancellationToken);
@@ -1158,7 +1209,7 @@ internal static class GroupSelection
 
             // The groups in their order, the result's until it is delivered.
             memory?.Hold((long)kept * sizeof(int), "order of a group by");
-            int[] ordered = new int[kept];
+            int[] ordered = Lent(memory, kept, counted: (long)kept * sizeof(int));
             for (int i = 0; i < kept; i++)
             {
                 ordered[i] = groups[positions[i]];
@@ -1185,7 +1236,8 @@ internal static class GroupSelection
         AggregationQuery query, AggregationOutcome outcome, GroupFilter filter, int[] groups, int count, CancellationToken cancellationToken)
     {
         using GroupFilterRun run = new GroupFilterRun(query, filter);
-        int[] kept = groups.AsSpan(0, count).ToArray();
+        int[] kept = Lent(outcome.Memory, count, counted: 0);
+        groups.AsSpan(0, count).CopyTo(kept);
         return (kept, run.Keep(outcome, kept, count, cancellationToken));
     }
 

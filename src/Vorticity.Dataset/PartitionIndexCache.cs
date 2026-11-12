@@ -90,10 +90,29 @@ internal sealed class PartitionIndexCache(long budget)
         }
     }
 
+    /// <summary>
+    /// A page of an index the cache holds, checked against its checksum when kept: its bytes when they lie before the
+    /// object's last bytes, null when those hold them; and where its strides start, once a lookup made it
+    /// (<see cref="PartitionIndex.Entry.Restarts"/>).
+    /// </summary>
+    internal sealed class KnownPage(byte[]? bytes)
+    {
+        private ulong[]? _restarts;
+
+        /// <summary>Its bytes, null when the object's last bytes hold them.</summary>
+        internal byte[]? Bytes => bytes;
+
+        /// <summary>Where its strides start, null until a lookup made it.</summary>
+        internal ulong[]? Restarts => Volatile.Read(ref _restarts);
+
+        /// <summary>Sets <see cref="Restarts"/>; under the cache's lock.</summary>
+        internal void SetRestarts(ulong[] restarts) => Volatile.Write(ref _restarts, restarts);
+    }
+
     /// <summary>What the cache holds of one index object: its directory, its last bytes, and the pages loaded since.</summary>
     internal sealed class Held(PartitionIndexCache cache, PartitionIndex index, byte[] tail, long start, long bytes)
     {
-        private readonly Dictionary<long, byte[]> _pages = [];
+        private readonly Dictionary<long, KnownPage> _pages = [];
 
         /// <summary>The index's directory.</summary>
         internal PartitionIndex Index => index;
@@ -113,8 +132,8 @@ internal sealed class PartitionIndexCache(long budget)
         /// <summary>Whether the cache let it go: a page loaded after is kept no more.</summary>
         internal bool Gone { get; set; }
 
-        /// <summary>The bytes of the page at <paramref name="offset"/>, loaded before; null for none.</summary>
-        internal byte[]? Page(long offset)
+        /// <summary>The page at <paramref name="offset"/>, loaded and checked before; null for none.</summary>
+        internal KnownPage? Page(long offset)
         {
             lock (cache._gate)
             {
@@ -122,19 +141,45 @@ internal sealed class PartitionIndexCache(long budget)
             }
         }
 
-        /// <summary>Keeps <paramref name="page"/>, the bytes of the page at <paramref name="offset"/>, while the index is held.</summary>
-        internal void Keep(long offset, ReadOnlySpan<byte> page)
+        /// <summary>
+        /// Keeps the page at <paramref name="offset"/>, checked against its checksum, while the index is held: a copy of
+        /// <paramref name="page"/>, its bytes, or none when they are empty, the object's last bytes holding them. The page the
+        /// cache holds after, null when the index went.
+        /// </summary>
+        internal KnownPage? Keep(long offset, ReadOnlySpan<byte> page)
         {
-            byte[] kept = page.ToArray();
+            KnownPage kept = new KnownPage(page.IsEmpty ? null : page.ToArray());
             lock (cache._gate)
             {
-                if (Gone || !_pages.TryAdd(offset, kept))
+                if (Gone)
+                {
+                    return null;
+                }
+
+                if (!_pages.TryAdd(offset, kept))
+                {
+                    return _pages[offset];
+                }
+
+                Bytes += page.Length;
+                cache.Grow(page.Length);
+                return kept;
+            }
+        }
+
+        /// <summary>Keeps <paramref name="restarts"/>, where the strides of <paramref name="page"/> start, while the index is held.</summary>
+        internal void KeepRestarts(KnownPage page, ulong[] restarts)
+        {
+            lock (cache._gate)
+            {
+                if (Gone || page.Restarts is not null)
                 {
                     return;
                 }
 
-                Bytes += kept.Length;
-                cache.Grow(kept.Length);
+                page.SetRestarts(restarts);
+                Bytes += (long)restarts.Length * sizeof(ulong);
+                cache.Grow((long)restarts.Length * sizeof(ulong));
             }
         }
     }

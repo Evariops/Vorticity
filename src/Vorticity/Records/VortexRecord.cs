@@ -34,7 +34,7 @@ public interface IVortexRecord<TSelf> : IVortexRecord
 
     void IVortexRecord.ReadRecords(RecordBatch? batch, CanonicalArena arena, int node, VortexType type, VortexExtensionRegistry? extensions, Array rows, int count)
     {
-        RecordBinding binding = RecordBinding.For<TSelf>(VortexSchema.Create(type.FieldArray), extensions);
+        RecordBinding binding = RecordBinding.ForType<TSelf>(type, extensions);
         TSelf.ReadRows(new Columns<TSelf>(batch!, arena, node, binding, 0, default, 0, projected: false), ((TSelf[])rows).AsSpan(0, count));
     }
 

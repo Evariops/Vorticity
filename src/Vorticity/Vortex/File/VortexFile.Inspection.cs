@@ -7,6 +7,7 @@ using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Metadata;
 using Vorticity.Buffers;
+using Vorticity.IO;
 using Vorticity.Layouts;
 using Vorticity.Serialization.Schemas;
 
@@ -173,35 +174,103 @@ public sealed partial class VortexFile
             return;
         }
 
-        if (flat.Segments.Length != 1)
-        {
-            throw new VortexFormatException($"A flat layout of {flat.Segments.Length} segments holds no one array tree.");
-        }
-
-        SegmentSpec spec = SegmentSpecs[(int)flat.Segments[0]];
-        long end = (long)spec.Offset + spec.Length;
-        int window = (int)Math.Min(spec.Length, ArrayTreeTailBytes);
+        (SegmentSpec spec, long end, int window) = TreeTail(flat);
         int length;
         using (SegmentOwner tail = await Segments.ReadRangeAsync(end - window, window, 1, cancellationToken).ConfigureAwait(false))
         {
-            ReadOnlySpan<byte> bytes = tail.Buffer.Span;
-            uint declared = window < 4 ? uint.MaxValue : System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes[^4..]);
-            if (declared + 4L > spec.Length)
+            if (TryLoadTree(spec, tail.Buffer.Span, arena, out length))
             {
-                throw new VortexFormatException(
-                    $"An array blob of {spec.Length} bytes declares a {declared}-byte FlatBuffer before its length.");
-            }
-
-            length = (int)declared;
-            if (length + 4 <= window)
-            {
-                ArrayBlobReader.LoadTree(arena, bytes.Slice(window - 4 - length, length), ResolvedArrayEncodings);
                 return;
             }
         }
 
         using SegmentOwner tree = await Segments.ReadRangeAsync(end - 4 - length, length, 1, cancellationToken).ConfigureAwait(false);
         ArrayBlobReader.LoadTree(arena, tree.Buffer.Span, ResolvedArrayEncodings);
+    }
+
+    /// <summary>
+    /// Loads the array tree of each flat chunk of <paramref name="flats"/> into <paramref name="arena"/> in turn and hands it
+    /// to <paramref name="visit"/> with its place: the tails of the segments that hold them asked for together, a few hundred
+    /// at a time, where each was a round trip of its own; a tree longer than its tail then read alone.
+    /// </summary>
+    /// <exception cref="VortexFormatException">A layout is not one flat segment, or its tree is malformed.</exception>
+    internal async ValueTask VisitArrayTreesAsync<TState>(
+        IReadOnlyList<LayoutNode> flats, ArrayNodeArena arena, TState state, Action<TState, int, ArrayNodeArena> visit,
+        CancellationToken cancellationToken)
+    {
+        const int Batch = 256;
+        int[] slots = new int[Math.Min(flats.Count, Batch)];
+        for (int first = 0; first < flats.Count; first += Batch)
+        {
+            int count = Math.Min(Batch, flats.Count - first);
+            using SegmentRequestSet requests = new SegmentRequestSet(count);
+            for (int i = 0; i < count; i++)
+            {
+                LayoutNode flat = flats[first + i];
+                if (FlatLayoutMetadata.Read(flat.Metadata).HasArrayEncodingTree)
+                {
+                    slots[i] = -1;
+                    continue;
+                }
+
+                (_, long end, int window) = TreeTail(flat);
+                slots[i] = requests.Add(new SegmentSpec((ulong)(end - window), (uint)window, 0, 0, 0));
+            }
+
+            if (requests.Count > 0)
+            {
+                await Segments.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
+            }
+
+            for (int i = 0; i < count; i++)
+            {
+                LayoutNode flat = flats[first + i];
+                if (slots[i] < 0 || !TryLoadTree(TreeTail(flat).Spec, requests.GetBuffer(slots[i]).Span, arena, out _))
+                {
+                    await LoadArrayTreeAsync(flat, arena, cancellationToken).ConfigureAwait(false);
+                }
+
+                visit(state, first + i, arena);
+            }
+        }
+    }
+
+    /// <summary>The one segment of a flat chunk, where it ends, and the bytes off its end read for its tree.</summary>
+    /// <exception cref="VortexFormatException">The layout is not one flat segment.</exception>
+    private (SegmentSpec Spec, long End, int Window) TreeTail(LayoutNode flat)
+    {
+        if (flat.Segments.Length != 1)
+        {
+            throw new VortexFormatException($"A flat layout of {flat.Segments.Length} segments holds no one array tree.");
+        }
+
+        SegmentSpec spec = SegmentSpecs[(int)flat.Segments[0]];
+        return (spec, (long)spec.Offset + spec.Length, (int)Math.Min(spec.Length, ArrayTreeTailBytes));
+    }
+
+    /// <summary>
+    /// Loads the tree a segment's tail <paramref name="tail"/> ends with, when it holds it whole; else the tree's
+    /// <paramref name="length"/>, which a read of its own fetches.
+    /// </summary>
+    /// <exception cref="VortexFormatException">The tail declares a tree longer than its segment.</exception>
+    private bool TryLoadTree(SegmentSpec spec, ReadOnlySpan<byte> tail, ArrayNodeArena arena, out int length)
+    {
+        int window = tail.Length;
+        uint declared = window < 4 ? uint.MaxValue : System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(tail[^4..]);
+        if (declared + 4L > spec.Length)
+        {
+            throw new VortexFormatException(
+                $"An array blob of {spec.Length} bytes declares a {declared}-byte FlatBuffer before its length.");
+        }
+
+        length = (int)declared;
+        if (length + 4 > window)
+        {
+            return false;
+        }
+
+        ArrayBlobReader.LoadTree(arena, tail.Slice(window - 4 - length, length), ResolvedArrayEncodings);
+        return true;
     }
 
     private async ValueTask<string> ArrayEncodingOfAsync(LayoutNode node, ArrayNodeArena arena, CancellationToken cancellationToken)

@@ -230,46 +230,52 @@ public sealed class SegmentCacheTests
     }
 
     [Fact]
-    public void KeptSegmentsLeaveInTheirOrderOfUseAndWithTheirFile()
+    public void KeptSegmentsLeaveInTheirClockOrderAndWithTheirFile()
     {
         // Keeps, lookups and file closes drawn at random, against a model of what the cache must
-        // hold: past the budget the least recently used leaves first, a lookup makes a segment the
-        // most recently used and keeping it again does not, and a file that closes takes its
-        // segments and no other.
+        // hold: past the budget the oldest kept leaves first unless a lookup used it since an
+        // eviction last passed it, which then passes it over once and makes it the newest
+        // (a clock, or second chance); keeping it again changes nothing; and a file that closes
+        // takes its segments and no other.
         Random random = new Random(42);
         object[] files = [new object(), new object(), new object(), new object(), new object(), new object()];
         const long capacity = 64 * 40;
         SegmentCache cache = new SegmentCache(capacity);
-        List<(object File, long Offset)> model = [];
+        List<(object File, long Offset, bool Used)> model = [];
         for (int step = 0; step < 5_000; step++)
         {
             object file = files[random.Next(files.Length)];
             long offset = random.Next(30) * 64L;
             int what = random.Next(10);
+            int at = model.FindIndex(entry => ReferenceEquals(entry.File, file) && entry.Offset == offset);
             if (what < 5)
             {
                 NativeSegmentOwner owner = AlignedBufferPool.Shared.Rent(64, 64);
                 cache.Add(file, offset, owner, owner.Buffer);
                 owner.Release();
-                if (!model.Contains((file, offset)))
+                if (at < 0)
                 {
                     while ((model.Count + 1) * 64L > capacity)
                     {
+                        (object File, long Offset, bool Used) oldest = model[^1];
                         model.RemoveAt(model.Count - 1);
+                        if (oldest.Used)
+                        {
+                            model.Insert(0, oldest with { Used = false });
+                        }
                     }
 
-                    model.Insert(0, (file, offset));
+                    model.Insert(0, (file, offset, false));
                 }
             }
             else if (what < 9)
             {
                 bool found = cache.TryGet(file, offset, 64, out SegmentOwner kept, out _);
-                Assert.Equal(model.Contains((file, offset)), found);
+                Assert.Equal(at >= 0, found);
                 if (found)
                 {
                     kept.Release();
-                    model.Remove((file, offset));
-                    model.Insert(0, (file, offset));
+                    model[at] = model[at] with { Used = true };
                 }
             }
             else
@@ -281,10 +287,9 @@ public sealed class SegmentCacheTests
             Assert.Equal(model.Count * 64L, cache.HeldBytes);
         }
 
-        // Each segment the model holds is there; looked up from the oldest, they leave again in
-        // the order the model says once the budget is spent.
+        // Each segment the model holds is there.
         Assert.NotEmpty(model);
-        foreach ((object file, long offset) in model)
+        foreach ((object file, long offset, _) in model)
         {
             Assert.True(cache.TryGet(file, offset, 64, out SegmentOwner kept, out _));
             kept.Release();

@@ -213,7 +213,12 @@ public sealed class PathAllocationTests
         // the handle through once they wait on one another on Windows, where a handle runs its
         // reads one at a time: 16 bytes an open, on every axis. The twin itself, 72 bytes, only a
         // scan whose reads waited on 2 MiB opens.
-        ("open, footer only", File, 3_952, FooterOnly),
+        //
+        // A file keeps how many bytes of its structures the open parsed, which a dataset weighs the
+        // objects it keeps open by (ObjectCache, MaxOpenObjectBytes): an int, 8 bytes an open on the
+        // axes whose file had no spare room for it (2026-11-10). A question over many small objects
+        // opens each again no more, some 18 KB and 11 µs an object.
+        ("open, footer only", File, 3_960, FooterOnly),
         // `VortexFile` holds one reference to the lazily parsed `LayoutTree` that every scan of
         // an open file shares instead of re-deriving: eight bytes once per OPEN, against a
         // layout-tree parse once per `ExecuteAsync`. This axis opens the file and reads one batch,
@@ -418,16 +423,16 @@ public sealed class PathAllocationTests
         // rather than 39: version 2 of FoR, of bit-packing and of decimal byte parts joined, and
         // fastlanes.transposed_bool left. The open resolves each declared id into two tables, a
         // ushort and an 8-byte location: 24 bytes more, the file's and not the path's.
-        ("scan, fastlanes.delta", "encodings/fastlanes_delta", 3_016, FullScan),
+        ("scan, fastlanes.delta", "encodings/fastlanes_delta", 3_024, FullScan),
         // The page sizes are read in place from the node's metadata rather than into a list a
         // chunk, and the chunk metadata with its ANS tables and the latent states are kept from one
         // decode to the next rather than built by each: 1 536 bytes less on this file's one chunk,
         // and on a column of many chunks of many-bin tables a few hundred kilobytes a chunk.
-        ("scan, vortex.pco", "encodings/pco", 2_944, FullScan),
+        ("scan, vortex.pco", "encodings/pco", 2_952, FullScan),
         // A node's frames go through one ManagedCompressions.Zstd decompressor rather than one each,
         // and the decompressor is the process's, taken for each decode and given back after it,
         // so a warm scan builds none: its tables and buffers are 160 KB at least.
-        ("scan, vortex.zstd", "encodings/zstd", 2_944, FullScan),
+        ("scan, vortex.zstd", "encodings/zstd", 2_952, FullScan),
         // The tail an open reads is 64 KiB, which puts this file's tail at an offset the mapping can
         // lend as it is: the open holds a 48-byte owner of the view where it would copy the tail.
         // The walk of the reads along is behind a reference of the enumerator, 8 bytes, as on every

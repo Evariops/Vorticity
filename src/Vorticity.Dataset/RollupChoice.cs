@@ -47,21 +47,15 @@ internal sealed class RollupChoice
             return null;
         }
 
+        // The highest rank first, then each level's rollups in the order of their keys: the version's, decoded once.
         List<RollupEntry> candidates = [];
-        await foreach (TreeEntry entry in version.Levels.Rollups.EnumerateAsync(version.Pages, cancellationToken).ConfigureAwait(false))
+        foreach (RollupEntry rollup in await version.RollupsAsync(cancellationToken).ConfigureAwait(false))
         {
-            RollupEntry rollup = RollupEntry.FromBytes(entry.Key.Span, entry.Value.Span);
             if (pruner is null || pruner.MayMatch(rollup.Summaries.Columns, rollup.Rows))
             {
                 candidates.Add(rollup);
             }
         }
-
-        // The highest rank first, then each level's rollups in the order of their keys.
-        candidates.Sort(static (left, right) =>
-            left.Rank != right.Rank ? right.Rank.CompareTo(left.Rank)
-            : left.Level != right.Level ? left.Level.CompareTo(right.Level)
-            : left.FirstKey.Span.SequenceCompareTo(right.FirstKey.Span));
         DatasetKey? key = version.Schema.RollupKey;
         List<(RollupEntry Rollup, int Field, ObjectSummaries?[]? Buckets)> chosen = [];
         foreach (RollupEntry rollup in candidates)

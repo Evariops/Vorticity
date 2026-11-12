@@ -67,6 +67,8 @@ public sealed class CodeAnswersTests
 
     [Theory]
     [InlineData(PType.U8, 40, 200)]
+    [InlineData(PType.U8, 9, 9)]
+    [InlineData(PType.U8, 16, 255)]
     [InlineData(PType.U16, 100, 100)]
     [InlineData(PType.U32, 64, 1_000_000)]
     [InlineData(PType.U64, 7, 7)]

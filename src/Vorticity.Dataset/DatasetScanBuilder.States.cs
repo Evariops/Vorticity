@@ -26,7 +26,8 @@ internal sealed partial class DatasetScanBuilder
     /// </summary>
     internal (AnswerPath Path, bool AsksKept) ChosenOnOneLane(in PositionedObject held, double kept)
     {
-        Planned unit = new Planned(held, Answer() is { } answer ? AnsweredBy(answer, held) : null) { Kept = kept };
+        Planned unit = Scratch(held, Answer() is { } answer ? AnsweredBy(answer, held) : null);
+        unit.Kept = kept;
         Choose(unit, explain: false);
         return (unit.Chosen.Path, kept >= 1 && unit.Weight > _version.Costs.Weight(RowsCost(held, double.Epsilon)));
     }
@@ -201,7 +202,7 @@ internal sealed partial class DatasetScanBuilder
         return statistics;
     }
 
-    /// <summary>The rows of the object <paramref name="held"/> its granules' statistics are expected to leave, read as rows (<see cref="Dataset.GranuleAnswer.Unanswered"/>).</summary>
+    /// <summary>The rows of the object <paramref name="held"/> its granules' statistics are expected to leave, read as rows (<see cref="Dataset.GranuleAnswer.Unanswered(in PositionedObject, bool)"/>).</summary>
     internal long GranulesLeave(in PositionedObject held) => (long)Math.Ceiling(GranuleAnswer()!.Unanswered(held, edges: true) * held.Entry.Rows);
 
     /// <summary>
@@ -265,7 +266,7 @@ internal sealed partial class DatasetScanBuilder
                 await PlacedAsync(held, cancellationToken).ConfigureAwait(false);
             }
 
-            Planned unit = new Planned(held, AnsweredBy(answer, held));
+            Planned unit = Scratch(held, AnsweredBy(answer, held));
             Choose(unit, explain: false);
             if (unit.Chosen.Path is not (AnswerPath.Rows or AnswerPath.Zones))
             {
@@ -277,6 +278,14 @@ internal sealed partial class DatasetScanBuilder
     }
 
     /// <summary>
+    /// The builder's one unit for a choice whose answer is read at once and kept nowhere, made the object
+    /// <paramref name="held"/>'s: a builder chooses one unit at a time (<see cref="_choosing"/>).
+    /// </summary>
+    private Planned Scratch(in PositionedObject held, int? field) => _scratch is { } unit ? unit.Of(held, field) : _scratch = new Planned(held, field);
+
+    private Planned? _scratch;
+
+    /// <summary>
     /// The scan as states where the objects' synopses answer: each unit as its weight chose it (<see cref="UnitsAsync"/>), a
     /// rollup's totals or an object's counts as batches of states, an object's blocks through their statistics and the rows
     /// of the blocks they do not answer, or its rows, the objects read as rows side by side a part of the scan, which reads
@@ -286,7 +295,9 @@ internal sealed partial class DatasetScanBuilder
     /// </summary>
     private async IAsyncEnumerable<RecordBatch> StatesAsync(CountsAnswer answer, [EnumeratorCancellation] CancellationToken cancellationToken)
     {
-        (RollupChoice? rollups, List<Planned> units) = await UnitsAsync(answer, explain: false, read: true, cancellationToken).ConfigureAwait(false);
+        // The units come from a shelf a question gave back, and go back to it once no read begun holds them.
+        UnitShelf shelf = UnitShelf.Rent();
+        (RollupChoice? rollups, List<Planned> units) = await UnitsAsync(answer, explain: false, read: true, shelf, cancellationToken).ConfigureAwait(false);
         using CancellationTokenSource stopped = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         int width = Math.Max(1, _dataset.Session.Options.MaxConcurrentReads);
         CanonicalArena arena = new CanonicalArena(answer.Nodes);
@@ -295,14 +306,21 @@ internal sealed partial class DatasetScanBuilder
         // after the reads of the one before; left open in the handle's cache for the read that comes to them.
         int opensAhead = Math.Clamp(_dataset.Options.MaxOpenObjects / 4, 1, 8);
         int openSeen = 0;
+        int begunUpTo = 0;
+
+        // The rows of states of one object's counts after another, and the batch of states the stream gave last, bound
+        // again into the next: the consumer is done with a batch when it asks for the next, as the arena's reset says.
+        StateRows? objectRows = null;
+        RecordBatch? spare = null;
         try
         {
             for (int o = 0; o < units.Count; o++)
             {
-                // The counts and statistics of the next units read ahead, as many ahead as the session reads at once.
-                for (int ahead = o; ahead < units.Count && ahead < o + width; ahead++)
+                // The counts and statistics of the next units read ahead, as many ahead as the session reads at once: from the
+                // last begun on, where each unit asked again every unit of its window whether it had begun.
+                for (; begunUpTo < units.Count && begunUpTo < o + width; begunUpTo++)
                 {
-                    Begin(units[ahead], answer, stopped.Token);
+                    Begin(units[begunUpTo], answer, stopped.Token);
                 }
 
                 // Each object that reads rows looked at once, as the window of those ahead reaches it.
@@ -322,13 +340,14 @@ internal sealed partial class DatasetScanBuilder
                 {
                     StateRows? rows = null;
                     List<StateRows>? byBucket = null;
-                    Task<(Indexes.ColumnCounts?, Indexes.ColumnSketches?)> read = unit.Counts!;
+                    ValueTask<(Indexes.ColumnCounts?, Indexes.ColumnSketches?)> read = unit.Counts!.Value;
                     unit.Counts = null;
                     if (await read.ConfigureAwait(false) is ({ } counts, var sketched))
                     {
                         if (unit.Buckets is null)
                         {
-                            rows = answer.Rows(counts, sketched, unit.Run is { } run ? run.Summaries : answer.SummariesOf(held));
+                            objectRows ??= new StateRows(answer);
+                            rows = answer.Fill(objectRows, counts, sketched, unit.Run is { } run ? run.Summaries : answer.SummariesOf(held)) ? objectRows : null;
                         }
                         else
                         {
@@ -351,17 +370,21 @@ internal sealed partial class DatasetScanBuilder
 
                         for (int at = 0; rows is not null && at < rows.Count; at += StateRows.BatchRows)
                         {
+                            spare?.Dispose();
                             arena.Reset();
-                            yield return rows.Batch(arena, at, Math.Min(StateRows.BatchRows, rows.Count - at), held.FirstRow);
+                            yield return spare = rows.Batch(arena, at, Math.Min(StateRows.BatchRows, rows.Count - at), held.FirstRow, spare);
                         }
 
                         for (int b = 0; b < (byBucket?.Count ?? 0); b++)
                         {
                             for (int at = 0; at < byBucket![b].Count; at += StateRows.BatchRows)
                             {
+                                spare?.Dispose();
                                 arena.Reset();
-                                yield return byBucket[b].Batch(arena, at, Math.Min(StateRows.BatchRows, byBucket[b].Count - at), held.FirstRow);
+                                yield return spare = byBucket[b].Batch(arena, at, Math.Min(StateRows.BatchRows, byBucket[b].Count - at), held.FirstRow, spare);
                             }
+
+                            byBucket[b].Release();
                         }
 
                         continue;
@@ -405,8 +428,9 @@ internal sealed partial class DatasetScanBuilder
                     {
                         for (int at = 0; settled is not null && at < settled.Count; at += StateTable.BatchRows)
                         {
+                            spare?.Dispose();
                             arena.Reset();
-                            yield return settled.Batch(arena, at, Math.Min(StateTable.BatchRows, settled.Count - at), Math.Max(_from, held.FirstRow));
+                            yield return spare = settled.Batch(arena, at, Math.Min(StateTable.BatchRows, settled.Count - at), Math.Max(_from, held.FirstRow), spare);
                         }
                     }
                     finally
@@ -465,12 +489,18 @@ internal sealed partial class DatasetScanBuilder
             List<Task> begun = [];
             foreach (Planned left in units)
             {
-                foreach (Task? task in (ReadOnlySpan<Task?>)[left.Opened, left.Statistics, left.Counts])
+                foreach (Task? task in (ReadOnlySpan<Task?>)[left.Opened, left.Statistics])
                 {
                     if (task is not null)
                     {
                         begun.Add(task);
                     }
+                }
+
+                if (left.Counts is { } counting)
+                {
+                    left.Counts = null;
+                    begun.Add(counting.AsTask());
                 }
             }
 
@@ -485,7 +515,10 @@ internal sealed partial class DatasetScanBuilder
                 }
             }
 
+            spare?.Dispose();
+            objectRows?.Release();
             arena.Reset();
+            shelf.Return();
         }
     }
 
@@ -501,17 +534,20 @@ internal sealed partial class DatasetScanBuilder
         }
 
         unit.Begun = true;
+
+        // A unit's counts are kept to be awaited once, by the loop that comes to it or by the cleanup that follows a stop.
+#pragma warning disable CA2012
         switch (unit.Chosen.Path)
         {
             case AnswerPath.Rollup:
-                unit.Counts = _dataset.ReadRollupCountsAsync(unit.Run!, unit.Field!.Value, answer.AsksSketches, answer.Values, unit.Buckets is not null, cancellationToken).AsTask();
+                unit.Counts = _dataset.ReadRollupCountsAsync(unit.Run!, unit.Field!.Value, answer.AsksSketches, answer.Values, unit.Buckets is not null, cancellationToken);
                 break;
             case AnswerPath.Counts:
                 ObjectEntry entry = unit.Held.Entry;
                 int field = unit.Field!.Value;
-                unit.Counts = entry.HasDeletions ? LiveCountsAsync(entry, field, cancellationToken)
-                    : answer.Exclusion is { } exclusion ? KeptCountsAsync(answer, unit.Held, field, exclusion.Field, exclusion.Found, cancellationToken)
-                    : _dataset.ReadCountsAsync(entry, field, answer.AsksSketches, cancellationToken).AsTask();
+                unit.Counts = entry.HasDeletions ? new(LiveCountsAsync(entry, field, cancellationToken))
+                    : answer.Exclusion is { } exclusion ? new(KeptCountsAsync(answer, unit.Held, field, exclusion.Field, exclusion.Found, cancellationToken))
+                    : _dataset.ReadCountsAsync(entry, field, answer.AsksSketches, cancellationToken);
                 break;
             case AnswerPath.Granules:
                 unit.Statistics = GranuleAnswer()!.Exclusion is { } excluded && excluded.Placed(unit.Held.Entry.Uid)
@@ -521,6 +557,7 @@ internal sealed partial class DatasetScanBuilder
                         GranuleAnswer()!.Unread(unit.Held)).AsTask();
                 break;
         }
+#pragma warning restore CA2012
     }
 
     /// <summary>

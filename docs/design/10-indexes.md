@@ -579,7 +579,10 @@ also the key source of a cursor and of key-ordered delivery ([12-index-reads.md]
 Keys follow the total order described in [key order per
 dtype](12-index-reads.md#34-key-order-per-dtype). The run is built by sorting each chunk's distinct
 keys, counting-sorting its rows by rank, and k-way merging the chunk runs, so memory is one chunk plus
-the merge's buffers, never the whole column.
+the merge's buffers, never the whole column. The entries of one key hold their rows ascending, which
+the counting sort and the merge in chunk order give, and which a reader may rely on: the blocks a key
+lies in are marked by a search for each next block's first row, not a division a row, and a run whose
+rows are seen to go back from one block to the next is refused as malformed.
 
 An `IN` is answered by walking the run and the filter's sorted values together, as two sorted lists
 are merged, in this run and in a postings run alike. A value past the segment at hand is reached by

@@ -97,6 +97,19 @@ public sealed class RecordBatch : IDisposable
         new RecordBatch(arena, rootCanonicalIndex, startRow) { CarriesStates = true };
 
     /// <summary>
+    /// A batch of states as <see cref="OfStates(CanonicalArena, int, long)"/> makes one, bound into
+    /// <paramref name="spare"/>, the stream's previous one, disposed, on the terms of <see cref="Over"/>; a new one when
+    /// there is no spare yet.
+    /// </summary>
+    /// <exception cref="InvalidOperationException"><paramref name="spare"/> is live, or owns its storage.</exception>
+    internal static RecordBatch OfStates(CanonicalArena arena, int rootCanonicalIndex, long startRow, RecordBatch? spare)
+    {
+        RecordBatch batch = Over(arena, rootCanonicalIndex, startRow, spare);
+        batch.CarriesStates = true;
+        return batch;
+    }
+
+    /// <summary>
     /// A batch of a partial's states (<see cref="KeysApplied"/>) over <paramref name="arena"/>'s root
     /// <paramref name="rootCanonicalIndex"/>: an aggregation's groups, their keys as its functions gave them, as a merge
     /// of partials reads them.
@@ -259,7 +272,10 @@ public sealed class RecordBatch : IDisposable
         }
     }
 
-    /// <summary>A batch that takes over <paramref name="context"/>: its arena and segments are released when the batch is disposed.</summary>
+    /// <summary>
+    /// A batch that takes over <paramref name="context"/>: its arena and segments are released when the batch is disposed,
+    /// the context given back to the pool it came from when it names one (<see cref="ScanContext.Home"/>), disposed otherwise.
+    /// </summary>
     internal static RecordBatch Adopt(ScanContext context, int root, long startRow, VortexSchema? schema, VortexSession? session) =>
         new RecordBatch(context.Canonical, root, startRow, context, owns: true) { _publicSchema = schema, Session = session };
 
@@ -270,7 +286,8 @@ public sealed class RecordBatch : IDisposable
     /// Whether the batch holds states of rows rather than rows, as a dataset's synopsis keeps them: its
     /// key columns by their names, then per row the rows it stands for and each aggregate's states
     /// (<see cref="Aggregating.StateInput"/>). Only an aggregation that asked for states is sent one, made by
-    /// <see cref="OfStates"/>; a batch bound again carries rows.
+    /// <see cref="OfStates(Arrays.CanonicalArena, int, long)"/>; a batch bound again carries rows, but one bound again
+    /// as states.
     /// </summary>
     internal bool CarriesStates { get; private set; }
 
@@ -682,7 +699,14 @@ public sealed class RecordBatch : IDisposable
         {
             if (_context is not null)
             {
-                _context.Dispose();
+                if (_context.Home is { } home)
+                {
+                    home.Return(_context);
+                }
+                else
+                {
+                    _context.Dispose();
+                }
             }
             else
             {

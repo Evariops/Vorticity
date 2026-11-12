@@ -109,7 +109,7 @@ internal static class SumKernels
     {
         long total = 0;
         int i = 0;
-        if (Vector512.IsHardwareAccelerated && Avx512BW.IsSupported)
+        if (Avx2.IsSupported)
         {
             i = PairSums(values, 0, out total);
         }
@@ -144,7 +144,7 @@ internal static class SumKernels
     {
         long total = 0;
         int i = 0;
-        if (Vector512.IsHardwareAccelerated && Avx512BW.IsSupported)
+        if (Avx2.IsSupported)
         {
             // Each byte biased by 128 is the unsigned byte `vpsadbw` sums; the bias comes off at
             // the end, 128 a value.
@@ -180,64 +180,118 @@ internal static class SumKernels
     }
 
     /// <summary>
-    /// The sum of whole 64-byte blocks of <paramref name="values"/>, each byte xor-ed with
-    /// <paramref name="bias"/> first, and how many bytes that was.
+    /// The sum of whole 32-byte blocks of <paramref name="values"/>, each byte xor-ed with
+    /// <paramref name="bias"/> first, and how many bytes that was; the caller has AVX2.
     /// </summary>
     /// <remarks>
     /// <c>vpsadbw</c> against zero sums a block's eight bytes of each 64-bit lane into it, 64 bytes
-    /// an instruction, into lanes wide enough never to overflow; the ladder of widens it replaces
-    /// took four and had to be cut into blocks before a narrow lane could.
+    /// an instruction with AVX-512 BW and 32 with AVX2, into lanes wide enough never to overflow;
+    /// the ladder of widens it replaces took four and had to be cut into blocks before a narrow
+    /// lane could.
     /// </remarks>
     private static int ByteSums(ReadOnlySpan<byte> values, byte bias, out ulong sum)
     {
         ref byte first = ref MemoryMarshal.GetReference(values);
-        Vector512<byte> flip = Vector512.Create(bias);
-        Vector512<ulong> a = Vector512<ulong>.Zero;
-        Vector512<ulong> b = Vector512<ulong>.Zero;
+        ulong total = 0;
         int i = 0;
-        for (; i <= values.Length - 128; i += 128)
+        if (Vector512.IsHardwareAccelerated && Avx512BW.IsSupported)
         {
-            a += Avx512BW.SumAbsoluteDifferences(Vector512.LoadUnsafe(ref first, (nuint)i) ^ flip, Vector512<byte>.Zero).AsUInt64();
-            b += Avx512BW.SumAbsoluteDifferences(Vector512.LoadUnsafe(ref first, (nuint)(i + 64)) ^ flip, Vector512<byte>.Zero).AsUInt64();
+            Vector512<byte> flip = Vector512.Create(bias);
+            Vector512<ulong> a = Vector512<ulong>.Zero;
+            Vector512<ulong> b = Vector512<ulong>.Zero;
+            for (; i <= values.Length - 128; i += 128)
+            {
+                a += Avx512BW.SumAbsoluteDifferences(Vector512.LoadUnsafe(ref first, (nuint)i) ^ flip, Vector512<byte>.Zero).AsUInt64();
+                b += Avx512BW.SumAbsoluteDifferences(Vector512.LoadUnsafe(ref first, (nuint)(i + 64)) ^ flip, Vector512<byte>.Zero).AsUInt64();
+            }
+
+            for (; i <= values.Length - 64; i += 64)
+            {
+                a += Avx512BW.SumAbsoluteDifferences(Vector512.LoadUnsafe(ref first, (nuint)i) ^ flip, Vector512<byte>.Zero).AsUInt64();
+            }
+
+            total = Vector512.Sum(a + b);
         }
 
+        // AVX2's blocks, or the one 32-byte block the wide ones left.
+        Vector256<byte> flip256 = Vector256.Create(bias);
+        Vector256<ulong> c = Vector256<ulong>.Zero;
+        Vector256<ulong> d = Vector256<ulong>.Zero;
         for (; i <= values.Length - 64; i += 64)
         {
-            a += Avx512BW.SumAbsoluteDifferences(Vector512.LoadUnsafe(ref first, (nuint)i) ^ flip, Vector512<byte>.Zero).AsUInt64();
+            c += Avx2.SumAbsoluteDifferences(Vector256.LoadUnsafe(ref first, (nuint)i) ^ flip256, Vector256<byte>.Zero).AsUInt64();
+            d += Avx2.SumAbsoluteDifferences(Vector256.LoadUnsafe(ref first, (nuint)(i + 32)) ^ flip256, Vector256<byte>.Zero).AsUInt64();
         }
 
-        sum = Vector512.Sum(a + b);
+        for (; i <= values.Length - 32; i += 32)
+        {
+            c += Avx2.SumAbsoluteDifferences(Vector256.LoadUnsafe(ref first, (nuint)i) ^ flip256, Vector256<byte>.Zero).AsUInt64();
+        }
+
+        sum = total + Vector256.Sum(c + d);
         return i;
     }
 
     /// <summary>
-    /// The sum of whole 32-value blocks of <paramref name="values"/>, each xor-ed with
-    /// <paramref name="bias"/> first, and how many values that was.
+    /// The sum of whole 16-value blocks of <paramref name="values"/>, each xor-ed with
+    /// <paramref name="bias"/> first, and how many values that was; the caller has AVX2.
     /// </summary>
     /// <remarks>
     /// <c>vpmaddwd</c> against ones adds each pair of words into a doubleword, 32 values an
-    /// instruction; a doubleword gains at most 65 536 a step, so the lanes are widened and summed
-    /// every <see cref="NarrowBlock"/> steps, before one could overflow.
+    /// instruction with AVX-512 BW and 16 with AVX2; a doubleword gains at most 65 536 a step, so
+    /// the lanes are widened and summed every <see cref="NarrowBlock"/> steps, before one could
+    /// overflow.
     /// </remarks>
     private static int PairSums(ReadOnlySpan<short> values, ushort bias, out long sum)
     {
         ref short first = ref MemoryMarshal.GetReference(values);
-        Vector512<short> flip = Vector512.Create((short)bias);
-        Vector512<short> ones = Vector512.Create((short)1);
         long total = 0;
         int i = 0;
-        int whole = values.Length & ~31;
-        while (i < whole)
+        if (Vector512.IsHardwareAccelerated && Avx512BW.IsSupported)
         {
-            int stop = Math.Min(whole, i + (32 * NarrowBlock));
-            Vector512<int> acc = Vector512<int>.Zero;
+            Vector512<short> flip = Vector512.Create((short)bias);
+            Vector512<short> ones = Vector512.Create((short)1);
+            int whole = values.Length & ~31;
+            while (i < whole)
+            {
+                int stop = Math.Min(whole, i + (32 * NarrowBlock));
+                Vector512<int> acc = Vector512<int>.Zero;
+                for (; i < stop; i += 32)
+                {
+                    acc += Avx512BW.MultiplyAddAdjacent(Vector512.LoadUnsafe(ref first, (nuint)i) ^ flip, ones);
+                }
+
+                (Vector512<long> low, Vector512<long> high) = Vector512.Widen(acc);
+                total += Vector512.Sum(low + high);
+            }
+        }
+
+        // AVX2's blocks, two a step, or the one 16-value block the wide ones left; each of the two
+        // accumulators takes a block a step, so both stay within NarrowBlock steps between widens.
+        Vector256<short> flip256 = Vector256.Create((short)bias);
+        Vector256<short> ones256 = Vector256.Create((short)1);
+        int pairs = values.Length & ~31;
+        while (i < pairs)
+        {
+            int stop = Math.Min(pairs, i + (32 * NarrowBlock));
+            Vector256<int> a = Vector256<int>.Zero;
+            Vector256<int> b = Vector256<int>.Zero;
             for (; i < stop; i += 32)
             {
-                acc += Avx512BW.MultiplyAddAdjacent(Vector512.LoadUnsafe(ref first, (nuint)i) ^ flip, ones);
+                a += Avx2.MultiplyAddAdjacent(Vector256.LoadUnsafe(ref first, (nuint)i) ^ flip256, ones256);
+                b += Avx2.MultiplyAddAdjacent(Vector256.LoadUnsafe(ref first, (nuint)(i + 16)) ^ flip256, ones256);
             }
 
-            (Vector512<long> low, Vector512<long> high) = Vector512.Widen(acc);
-            total += Vector512.Sum(low + high);
+            (Vector256<long> al, Vector256<long> ah) = Vector256.Widen(a);
+            (Vector256<long> bl, Vector256<long> bh) = Vector256.Widen(b);
+            total += Vector256.Sum((al + ah) + (bl + bh));
+        }
+
+        if (i <= values.Length - 16)
+        {
+            (Vector256<long> low, Vector256<long> high) = Vector256.Widen(Avx2.MultiplyAddAdjacent(Vector256.LoadUnsafe(ref first, (nuint)i) ^ flip256, ones256));
+            total += Vector256.Sum(low + high);
+            i += 16;
         }
 
         sum = total;
@@ -340,7 +394,7 @@ internal static class SumKernels
     {
         ulong total = 0;
         int i = 0;
-        if (Vector512.IsHardwareAccelerated && Avx512BW.IsSupported)
+        if (Avx2.IsSupported)
         {
             // Each value less 32 768 is the signed word `vpmaddwd` adds in pairs; the bias comes
             // back at the end, 32 768 a value.
@@ -378,7 +432,7 @@ internal static class SumKernels
     {
         ulong total = 0;
         int i = 0;
-        if (Vector512.IsHardwareAccelerated && Avx512BW.IsSupported)
+        if (Avx2.IsSupported)
         {
             i = ByteSums(values, 0, out total);
         }

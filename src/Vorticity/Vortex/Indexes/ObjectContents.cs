@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Text;
+using System.Threading;
 using Vorticity.Serialization.Protobuf;
 using Vorticity.Types;
 using Vorticity.Types.Serialization;
@@ -85,7 +86,7 @@ internal sealed class ObjectContents(
     internal IReadOnlyList<(int Field, IndexSegment Region)> Sheets { get; init; } = [];
 
     /// <summary>The region of column <paramref name="field"/>'s sheet, or null when the object keeps none of it.</summary>
-    internal IndexSegment? SheetOf(int field) => RegionOf(Sheets, field);
+    internal IndexSegment? SheetOf(int field) => ByField(ref _sheetsByField, Sheets, field);
 
     /// <summary>
     /// Each top-level column's counts (<see cref="ColumnCounts"/>), and its region: what a question on that column
@@ -94,7 +95,7 @@ internal sealed class ObjectContents(
     internal IReadOnlyList<(int Field, IndexSegment Region)> Counts { get; init; } = [];
 
     /// <summary>The region of column <paramref name="field"/>'s counts, or null when the object keeps none of it.</summary>
-    internal IndexSegment? CountsOf(int field) => RegionOf(Counts, field);
+    internal IndexSegment? CountsOf(int field) => ByField(ref _countsByField, Counts, field);
 
     /// <summary>
     /// Each top-level column's sketches of its counts (<see cref="ColumnSketches"/>), and its region, right after the
@@ -103,7 +104,7 @@ internal sealed class ObjectContents(
     internal IReadOnlyList<(int Field, IndexSegment Region)> Sketches { get; init; } = [];
 
     /// <summary>The region of the sketches of column <paramref name="field"/>'s counts, or null when the object keeps none of it.</summary>
-    internal IndexSegment? SketchesOf(int field) => RegionOf(Sketches, field);
+    internal IndexSegment? SketchesOf(int field) => ByField(ref _sketchesByField, Sketches, field);
 
     /// <summary>
     /// The statistics of each column over the object's granules (<see cref="Indexes.GranuleStats"/>) and their regions: what a
@@ -112,7 +113,7 @@ internal sealed class ObjectContents(
     internal IReadOnlyList<(int Field, IndexSegment Region)> GranuleStats { get; init; } = [];
 
     /// <summary>The region of column <paramref name="field"/>'s statistics over the granules, or null when the object keeps none of it.</summary>
-    internal IndexSegment? GranuleStatsOf(int field) => RegionOf(GranuleStats, field);
+    internal IndexSegment? GranuleStatsOf(int field) => ByField(ref _granuleStatsByField, GranuleStats, field);
 
     /// <summary>
     /// Each measure's histograms over the object's granules (<see cref="Indexes.GranuleHistograms"/>) and their regions: what a
@@ -121,7 +122,7 @@ internal sealed class ObjectContents(
     internal IReadOnlyList<(int Field, IndexSegment Region)> GranuleHistograms { get; init; } = [];
 
     /// <summary>The region of measure <paramref name="field"/>'s histograms over the granules, or null when the object keeps none of it.</summary>
-    internal IndexSegment? GranuleHistogramsOf(int field) => RegionOf(GranuleHistograms, field);
+    internal IndexSegment? GranuleHistogramsOf(int field) => ByField(ref _granuleHistogramsByField, GranuleHistograms, field);
 
     /// <summary>
     /// Where each value of each column lies, granule by granule (<see cref="ColumnLocate"/>), and their regions: what a filter
@@ -130,7 +131,7 @@ internal sealed class ObjectContents(
     internal IReadOnlyList<(int Field, IndexSegment Region)> Locates { get; init; } = [];
 
     /// <summary>The region of where column <paramref name="field"/>'s values lie, or null when the object keeps none of it.</summary>
-    internal IndexSegment? LocateOf(int field) => RegionOf(Locates, field);
+    internal IndexSegment? LocateOf(int field) => ByField(ref _locatesByField, Locates, field);
 
     /// <summary>
     /// Where each value of each shredded key of a variant column lies, read in its class (spec E, 3.3): the variant column,
@@ -151,32 +152,62 @@ internal sealed class ObjectContents(
     /// <summary>The statistics over the granules of key <paramref name="key"/> of the variant column <paramref name="field"/>, read as <paramref name="class"/>, and the rows of its granules of one value; null for none.</summary>
     internal (IndexSegment Region, long SingleRows)? PathGranuleStatsOf(int field, string key, PathClass @class)
     {
-        for (int i = 0; i < PathGranuleStats.Count; i++)
-        {
-            (int column, string named, PathClass held, IndexSegment region) = PathGranuleStats[i];
-            if (column == field && held == @class && string.Equals(named, key, StringComparison.Ordinal))
-            {
-                return (region, i < PathSingleRows.Count ? PathSingleRows[i] : 0);
-            }
-        }
-
-        return null;
+        int i = PathAt(ref _pathStatsAt, PathGranuleStats, field, key, @class);
+        return i < 0 ? null : (PathGranuleStats[i].Region, i < PathSingleRows.Count ? PathSingleRows[i] : 0);
     }
 
     /// <summary>The region of where key <paramref name="key"/> of the variant column <paramref name="field"/>, read as <paramref name="class"/>, lies; null for none.</summary>
     internal IndexSegment? PathLocateOf(int field, string key, PathClass @class)
     {
-        // By place rather than through the list's enumerator, which an interface boxes: a plan asks it of every object.
-        for (int i = 0; i < PathLocates.Count; i++)
+        int i = PathAt(ref _pathLocatesAt, PathLocates, field, key, @class);
+        return i < 0 ? null : PathLocates[i].Region;
+    }
+
+    // The places of the paths' regions by their (column, key, class), made at the first lookup of a list longer than
+    // ShortPaths: a plan asks them of every object, each a scan with a comparison of texts a path.
+    private Dictionary<(int Field, string Key, PathClass Class), int>? _pathStatsAt;
+    private Dictionary<(int Field, string Key, PathClass Class), int>? _pathLocatesAt;
+
+    /// <summary>The paths a lookup scans, past which a table finds them.</summary>
+    private const int ShortPaths = 8;
+
+    /// <summary>The place of the first path of <paramref name="paths"/> of the column, key and class asked; -1 for none.</summary>
+    private static int PathAt(
+        ref Dictionary<(int Field, string Key, PathClass Class), int>? at,
+        IReadOnlyList<(int Field, string Key, PathClass Class, IndexSegment Region)> paths,
+        int field,
+        string key,
+        PathClass @class)
+    {
+        if (paths.Count <= ShortPaths)
         {
-            (int column, string named, PathClass held, IndexSegment region) = PathLocates[i];
-            if (column == field && held == @class && string.Equals(named, key, StringComparison.Ordinal))
+            // By place rather than through the list's enumerator, which an interface boxes.
+            for (int i = 0; i < paths.Count; i++)
             {
-                return region;
+                (int column, string named, PathClass held, _) = paths[i];
+                if (column == field && held == @class && string.Equals(named, key, StringComparison.Ordinal))
+                {
+                    return i;
+                }
             }
+
+            return -1;
         }
 
-        return null;
+        Dictionary<(int Field, string Key, PathClass Class), int>? table = Volatile.Read(ref at);
+        if (table is null)
+        {
+            table = new Dictionary<(int Field, string Key, PathClass Class), int>(paths.Count);
+            for (int i = 0; i < paths.Count; i++)
+            {
+                (int column, string named, PathClass held, _) = paths[i];
+                table.TryAdd((column, named, held), i);
+            }
+
+            Volatile.Write(ref at, table);
+        }
+
+        return table.TryGetValue((field, key, @class), out int place) ? place : -1;
     }
 
     /// <summary>
@@ -326,17 +357,41 @@ internal sealed class ObjectContents(
     /// </summary>
     internal IReadOnlyList<ColumnDictionary?> Dictionaries { get; init; } = [];
 
-    private static IndexSegment? RegionOf(IReadOnlyList<(int Field, IndexSegment Region)> regions, int field)
+    // Each kind's regions by their field, made at the first lookup: a plan asks them of every object, each a scan of the
+    // list through its interface, a question of many columns over wide objects as many as the columns over each.
+    private IndexSegment?[]? _sheetsByField;
+    private IndexSegment?[]? _countsByField;
+    private IndexSegment?[]? _sketchesByField;
+    private IndexSegment?[]? _granuleStatsByField;
+    private IndexSegment?[]? _granuleHistogramsByField;
+    private IndexSegment?[]? _locatesByField;
+
+    /// <summary>The region of <paramref name="field"/> among <paramref name="regions"/>, through their table by field, made once; the first of a field wins, as a scan finds it.</summary>
+    private static IndexSegment? ByField(ref IndexSegment?[]? byField, IReadOnlyList<(int Field, IndexSegment Region)> regions, int field)
     {
-        for (int i = 0; i < regions.Count; i++)
+        IndexSegment?[]? table = Volatile.Read(ref byField);
+        if (table is null)
         {
-            if (regions[i].Field == field)
+            int most = -1;
+            for (int i = 0; i < regions.Count; i++)
             {
-                return regions[i].Region;
+                most = Math.Max(most, regions[i].Field);
             }
+
+            table = new IndexSegment?[most + 1];
+            for (int i = regions.Count - 1; i >= 0; i--)
+            {
+                (int at, IndexSegment region) = regions[i];
+                if (at >= 0)
+                {
+                    table[at] = region;
+                }
+            }
+
+            Volatile.Write(ref byField, table);
         }
 
-        return null;
+        return (uint)field < (uint)table.Length ? table[field] : null;
     }
 
     /// <summary>
@@ -950,6 +1005,9 @@ internal sealed class ObjectContents(
             List<LocatingEntry>? locating = null;
             ChunkPaging? paging = null;
             byte[]? schema = null;
+
+            // The largest column a region found by its column names, which the chunk directories must name too.
+            int widest = -1;
             while (reader.TryReadTag(out int field, out ProtoWireType wire))
             {
                 switch (field, wire)
@@ -1009,6 +1067,7 @@ internal sealed class ObjectContents(
                         }
 
                         sheets.Add(sheet);
+                        widest = Math.Max(widest, sheet.Item1);
                         break;
                     case (TagCounts, ProtoWireType.LengthDelimited):
                         if (Directory(reader.ReadMessage()) is not { } counted)
@@ -1017,6 +1076,7 @@ internal sealed class ObjectContents(
                         }
 
                         counts.Add(counted);
+                        widest = Math.Max(widest, counted.Item1);
                         break;
                     case (TagSketches, ProtoWireType.LengthDelimited):
                         if (Directory(reader.ReadMessage()) is not { } sketched)
@@ -1025,6 +1085,7 @@ internal sealed class ObjectContents(
                         }
 
                         sketches.Add(sketched);
+                        widest = Math.Max(widest, sketched.Item1);
                         break;
                     case (TagGranuleStats, ProtoWireType.LengthDelimited):
                         if (Directory(reader.ReadMessage()) is not { } stated)
@@ -1033,6 +1094,7 @@ internal sealed class ObjectContents(
                         }
 
                         granuleStats.Add(stated);
+                        widest = Math.Max(widest, stated.Item1);
                         break;
                     case (TagGranuleHistograms, ProtoWireType.LengthDelimited):
                         if (Directory(reader.ReadMessage()) is not { } histogrammed)
@@ -1041,6 +1103,7 @@ internal sealed class ObjectContents(
                         }
 
                         granuleHistograms.Add(histogrammed);
+                        widest = Math.Max(widest, histogrammed.Item1);
                         break;
                     case (TagColumnBytes, ProtoWireType.LengthDelimited):
                         ProtoReader packed = reader.ReadMessage();
@@ -1125,6 +1188,7 @@ internal sealed class ObjectContents(
                         }
 
                         locates.Add(lying);
+                        widest = Math.Max(widest, lying.Item1);
                         break;
                     case (TagPathLocate, ProtoWireType.LengthDelimited):
                         if (PathLocated(reader.ReadMessage()) is not { } pathLying)
@@ -1173,9 +1237,10 @@ internal sealed class ObjectContents(
 
             // The entries of a directory lie within it; a paged column's page table, whose length its pages give, is a chunk
             // directory the contents name, and its pages cover the file's rows.
-            // A dictionary names a column the directories name.
+            // A dictionary names a column the directories name, and so does every region found by its column, whose table
+            // (ByField) then holds a slot a column rather than one up to a field a damaged file names.
             return version == Version && rows is { } held && schema is not null
-                && dictionaries.TrueForAll(d => d.Field < directories.Count)
+                && dictionaries.TrueForAll(d => d.Field < directories.Count) && widest < directories.Count
                 && (locating is null || (indexDirectory is { } named && locating.TrueForAll(l => l.Region.Offset >= named.Offset
                     && l.Region.Offset + l.Region.Length <= named.Offset + named.Length)))
                 && (paging is null || (held > 0 && paging.PageRows[^1] < held && Array.TrueForAll(paging.Columns, c =>

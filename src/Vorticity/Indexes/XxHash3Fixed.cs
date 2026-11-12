@@ -45,6 +45,19 @@ internal static class XxHash3Fixed
         return Avalanche64(keyed);
     }
 
+    /// <summary>
+    /// The hash of a three-byte input whose bytes are the low three of <paramref name="trigram"/>, the first the lowest:
+    /// <see cref="Hash1To3"/> at three bytes, from a trigram a rolling window keeps in a word.
+    /// </summary>
+    /// <param name="trigram">The three bytes, as the low 24 bits of a little-endian word.</param>
+    /// <returns>The hash.</returns>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static ulong Hash3(uint trigram)
+    {
+        uint combined = ((trigram & 0xFF) << 16) | ((trigram & 0xFF00) << 16) | (trigram >> 16) | (3u << 8);
+        return Avalanche64(combined ^ (ulong)(Secret0 ^ Secret4));
+    }
+
     /// <summary>The hash of a four-byte input (<c>len_4to8</c> at 4).</summary>
     /// <param name="value">The four bytes, as their little-endian word.</param>
     /// <returns>The hash.</returns>
@@ -150,5 +163,77 @@ internal static class XxHash3Fixed
         h ^= h >> 37;
         h *= PrimeMx1;
         return h ^ (h >> 32);
+    }
+
+    /// <summary>The rows a vector pass hashes at a time.</summary>
+    internal const int RowBatch = 64;
+
+    /// <summary>
+    /// The hashes of rows <c>[start, stop)</c> of values of <paramref name="width"/> bytes each, as XXH3 hashes their bytes,
+    /// into <paramref name="hashes"/>: by XXH3's own short path for the width, resolved once for the rows, four- and
+    /// eight-byte values <see cref="RowBatch"/> at a time where <see cref="IsVectorized"/>. A Bloom filter, a sheet and
+    /// hashed postings hash their rows through it, so that a probe hashes a literal as every one of them does.
+    /// </summary>
+    internal static void HashRows(ReadOnlySpan<byte> values, int width, int start, int stop, Span<ulong> hashes)
+    {
+        hashes = hashes[..(stop - start)];
+        switch (width)
+        {
+            case 4:
+            {
+                ReadOnlySpan<uint> words = MemoryMarshal.Cast<byte, uint>(values)[start..stop];
+                int i = 0;
+                if (IsVectorized)
+                {
+                    for (; i <= words.Length - RowBatch; i += RowBatch)
+                    {
+                        Hash4(words.Slice(i, RowBatch), hashes.Slice(i, RowBatch));
+                    }
+                }
+
+                for (; i < words.Length; i++)
+                {
+                    hashes[i] = Hash4(words[i]);
+                }
+
+                return;
+            }
+
+            case 8:
+            {
+                ReadOnlySpan<ulong> words = MemoryMarshal.Cast<byte, ulong>(values)[start..stop];
+                int i = 0;
+                if (IsVectorized)
+                {
+                    for (; i <= words.Length - RowBatch; i += RowBatch)
+                    {
+                        Hash8(words.Slice(i, RowBatch), hashes.Slice(i, RowBatch));
+                    }
+                }
+
+                for (; i < words.Length; i++)
+                {
+                    hashes[i] = Hash8(words[i]);
+                }
+
+                return;
+            }
+
+            case <= 3:
+                for (int row = start; row < stop; row++)
+                {
+                    hashes[row - start] = Hash1To3(values.Slice(row * width, width));
+                }
+
+                return;
+
+            default:
+                for (int row = start; row < stop; row++)
+                {
+                    hashes[row - start] = Hash9To16(values.Slice(row * width, width));
+                }
+
+                return;
+        }
     }
 }

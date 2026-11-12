@@ -24,10 +24,52 @@ internal sealed partial class DatasetScanBuilder
     /// summary bounds lie wholly inside it and whose key holds no null; any other object is counted
     /// by its own file's count, from statistics, zone maps and indexes before any decode.
     /// </summary>
+    /// <remarks>
+    /// Under a degree of parallelism above one, as many objects as the degree are counted at once (<see cref="FanOutAsync"/>):
+    /// a sum does not depend on the order its parts come in. Objects counted one after the other left every lane but one idle.
+    /// </remarks>
     public async ValueTask<long> CountAsync(CancellationToken cancellationToken = default)
     {
         long rows = 0;
         KeyRange? range = CountRange();
+        if (ScanDegree > 1)
+        {
+            await FanOutAsync(
+                held =>
+                {
+                    long covered = Covered(held);
+                    if (covered == 0)
+                    {
+                        return Visit.Pass;
+                    }
+
+                    if (!Settled(held, range))
+                    {
+                        return Visit.Open;
+                    }
+
+                    Interlocked.Add(ref rows, covered);
+                    RecordCounted();
+                    return Visit.Pass;
+                },
+                async (held, stop) =>
+                {
+                    ObjectLease lease = await RentAsync(held, stop).ConfigureAwait(false);
+                    await using (lease.ConfigureAwait(false))
+                    {
+                        RecordOpen(lease);
+                        long counted = await CountOfAsync(lease.File, held, PartOf(ColumnsOf(lease, held.Entry), FieldMask.Empty), stopAtOne: false, stop)
+                            .ConfigureAwait(false);
+                        Interlocked.Add(ref rows, counted);
+                    }
+
+                    return false;
+                },
+                null,
+                cancellationToken).ConfigureAwait(false);
+            return rows;
+        }
+
         await foreach (PositionedObject held in WalkAsync(cancellationToken, granules: true).ConfigureAwait(false))
         {
             long covered = Covered(held);
@@ -59,9 +101,45 @@ internal sealed partial class DatasetScanBuilder
     /// Whether the scan would return at least one row; the first object that holds one answers for
     /// the dataset, and one whose entry settles it answers without being opened.
     /// </summary>
+    /// <remarks>
+    /// Under a degree of parallelism above one, as many objects as the degree are asked at once, and the first that holds a
+    /// row stops the others (<see cref="FanOutAsync"/>).
+    /// </remarks>
     public async ValueTask<bool> AnyAsync(CancellationToken cancellationToken = default)
     {
         KeyRange? range = CountRange();
+        if (ScanDegree > 1)
+        {
+            return await FanOutAsync(
+                held =>
+                {
+                    if (Covered(held) == 0)
+                    {
+                        return Visit.Pass;
+                    }
+
+                    if (!Settled(held, range))
+                    {
+                        return Visit.Open;
+                    }
+
+                    RecordCounted();
+                    return Visit.Stop;
+                },
+                async (held, stop) =>
+                {
+                    ObjectLease lease = await RentAsync(held, stop).ConfigureAwait(false);
+                    await using (lease.ConfigureAwait(false))
+                    {
+                        RecordOpen(lease);
+                        return await CountOfAsync(lease.File, held, PartOf(ColumnsOf(lease, held.Entry), FieldMask.Empty), stopAtOne: true, stop)
+                            .ConfigureAwait(false) > 0;
+                    }
+                },
+                null,
+                cancellationToken).ConfigureAwait(false);
+        }
+
         await foreach (PositionedObject held in WalkAsync(cancellationToken, granules: true).ConfigureAwait(false))
         {
             if (Covered(held) == 0)
@@ -110,54 +188,319 @@ internal sealed partial class DatasetScanBuilder
     /// every row the scan keeps in it. A summary's min is at or below the object's true minimum, so
     /// a summary min that already loses cannot hide a winner behind it.
     /// </summary>
+    /// <remarks>
+    /// The objects are visited best summary first: the smallest lower bound first for a minimum, the largest upper bound
+    /// first for a maximum, those whose summary says nothing of the column last. The first object opened is then the one
+    /// likeliest to hold the answer, and the value it gives refutes the others by their summaries alone, where in key order
+    /// every object of a column rising with the key beat the one before it and was opened. Under a degree of parallelism
+    /// above one, as many objects as the degree are opened at once in that order, each asked again whether it loses as its
+    /// turn comes (<see cref="FanOutAsync"/>). The walk is taken <see cref="ListedObjects"/> objects at a time, each such
+    /// list ordered and answered before the next is read, the best so far carried from one to the next: a dataset of a
+    /// million objects holds a list's worth, not every one, and loses at most an open a list to the order.
+    /// </remarks>
     private async ValueTask<FilterLiteral> ExtremeAsync(
         string path, bool wantMin, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(path);
         FieldMask projection = new FieldMaskBuilder().Include(ToolPaths.Resolve(_version.Schema.Columns, path)).Build();
+        Lock gate = new Lock();
         FilterLiteral best = FilterLiteral.Null;
-        await foreach (PositionedObject held in WalkAsync(cancellationToken).ConfigureAwait(false))
+
+        // Whether the object is answered without being opened: its summary loses to the best so far, or gives its extreme.
+        bool Settles(PositionedObject held)
         {
-            if (Covered(held) == 0)
+            lock (gate)
             {
-                continue;
-            }
-
-            if (_summaries && Loses(held.Entry.Summaries, path, best, wantMin))
-            {
-                if (_metrics is { } skipped)
+                if (_summaries && Loses(held.Entry.Summaries, path, best, wantMin))
                 {
-                    skipped.ObjectsSkipped++;
+                    RecordSkipped();
+                    return true;
                 }
 
-                continue;
-            }
-
-            if (_summaries && _filter is null && Whole(held) && Exact(held.Entry.Summaries, path, wantMin, out FilterLiteral bound))
-            {
-                if (Beats(bound, best, wantMin))
+                if (_summaries && _filter is null && Whole(held) && Exact(held.Entry.Summaries, path, wantMin, out FilterLiteral bound))
                 {
-                    best = bound;
+                    if (Beats(bound, best, wantMin))
+                    {
+                        best = bound;
+                    }
+
+                    RecordCounted();
+                    return true;
                 }
 
-                RecordCounted();
-                continue;
-            }
-
-            ObjectLease lease = await RentAsync(held, cancellationToken).ConfigureAwait(false);
-            await using (lease.ConfigureAwait(false))
-            {
-                RecordOpen(lease);
-                FilterLiteral candidate = await ObjectExtremeAsync(lease.File, held, ColumnsOf(lease, held.Entry), path, projection, wantMin, cancellationToken)
-                    .ConfigureAwait(false);
-                if (candidate.Kind != FilterLiteralKind.Null && Beats(candidate, best, wantMin))
-                {
-                    best = candidate;
-                }
+                return false;
             }
         }
 
+        async ValueTask<bool> OpenAsync(PositionedObject held, CancellationToken stop)
+        {
+            // Asked again as its turn comes: an object opened beside it may have set a bound it loses to.
+            if (Settles(held))
+            {
+                return false;
+            }
+
+            ObjectLease lease = await RentAsync(held, stop).ConfigureAwait(false);
+            await using (lease.ConfigureAwait(false))
+            {
+                RecordOpen(lease);
+                FilterLiteral candidate = await ObjectExtremeAsync(lease.File, held, ColumnsOf(lease, held.Entry), path, projection, wantMin, stop)
+                    .ConfigureAwait(false);
+                lock (gate)
+                {
+                    if (candidate.Kind != FilterLiteralKind.Null && Beats(candidate, best, wantMin))
+                    {
+                        best = candidate;
+                    }
+                }
+            }
+
+            return false;
+        }
+
+        List<PositionedObject> objects = [];
+        ConfiguredCancelableAsyncEnumerable<PositionedObject>.Enumerator walk = WalkAsync(cancellationToken).ConfigureAwait(false).GetAsyncEnumerator();
+        try
+        {
+            for (bool more = true; more;)
+            {
+                objects.Clear();
+                while (objects.Count < ListedObjects && (more = await walk.MoveNextAsync()))
+                {
+                    if (Covered(walk.Current) > 0)
+                    {
+                        objects.Add(walk.Current);
+                    }
+                }
+
+                if (_summaries)
+                {
+                    BestFirst(objects, path, wantMin);
+                }
+
+                if (ScanDegree > 1 && objects.Count > 2)
+                {
+                    // The best summary's object first, alone: the bound it sets refutes most of the others before a lane
+                    // opens them, where the first lanes all opened theirs before any bound was known.
+                    await OpenAsync(objects[0], cancellationToken).ConfigureAwait(false);
+                    await FanOutAsync(held => Settles(held) ? Visit.Pass : Visit.Open, OpenAsync, objects.GetRange(1, objects.Count - 1), cancellationToken)
+                        .ConfigureAwait(false);
+                }
+                else
+                {
+                    foreach (PositionedObject held in objects)
+                    {
+                        await OpenAsync(held, cancellationToken).ConfigureAwait(false);
+                    }
+                }
+            }
+        }
+        finally
+        {
+            await walk.DisposeAsync();
+        }
+
         return best;
+    }
+
+    /// <summary>The objects an extreme orders and answers at a time (<see cref="ExtremeAsync"/>).</summary>
+    internal const int ListedObjects = 4_096;
+
+    /// <summary>
+    /// Orders <paramref name="objects"/> best summary first for the extreme of <paramref name="path"/>: by their summary's
+    /// lower bound rising for a minimum, its upper bound falling for a maximum; bounds of one comparison kind side by side,
+    /// and the objects whose summary bounds nothing last, each group in the walk's order.
+    /// </summary>
+    private static void BestFirst(List<PositionedObject> objects, string path, bool wantMin)
+    {
+        if (objects.Count < 2)
+        {
+            return;
+        }
+
+        (FilterLiteral Bound, int Order)[] keys = new (FilterLiteral, int)[objects.Count];
+        for (int i = 0; i < keys.Length; i++)
+        {
+            FilterLiteral bound = objects[i].Entry.Summaries.TryGet(path, out ColumnSummary column) && (wantMin ? column.HasMin : column.HasMax)
+                ? (wantMin ? column.Min : column.Max)
+                : FilterLiteral.Null;
+            keys[i] = (bound, i);
+        }
+
+        PositionedObject[] held = [.. objects];
+        Array.Sort(keys, (left, right) =>
+        {
+            bool leftBounds = left.Bound.Kind != FilterLiteralKind.Null;
+            bool rightBounds = right.Bound.Kind != FilterLiteralKind.Null;
+            if (leftBounds != rightBounds)
+            {
+                return leftBounds ? -1 : 1;
+            }
+
+            if (leftBounds && left.Bound.Kind != right.Bound.Kind)
+            {
+                return left.Bound.Kind.CompareTo(right.Bound.Kind);
+            }
+
+            int order = leftBounds ? KeyCursor.Compare(left.Bound, right.Bound) : 0;
+            return order != 0 ? (wantMin ? order : -order) : left.Order.CompareTo(right.Order);
+        });
+
+        for (int i = 0; i < keys.Length; i++)
+        {
+            objects[i] = held[keys[i].Order];
+        }
+    }
+
+    /// <summary>What a fanned-out object visit does with an object the walk keeps.</summary>
+    private enum Visit
+    {
+        /// <summary>Nothing more: the object is answered, or holds no row the scan keeps.</summary>
+        Pass,
+
+        /// <summary>The object is answered by a lane.</summary>
+        Open,
+
+        /// <summary>The question is answered: the walk stops, and the objects in flight are stopped.</summary>
+        Stop,
+    }
+
+    /// <summary>
+    /// Has <paramref name="answer"/> answer each object <paramref name="visit"/> sends to a lane, as many at once as the
+    /// scan's degree of parallelism, in the order of <paramref name="objects"/>, or of the walk when it is null: for an
+    /// answer whose parts may come in any order. Once <paramref name="visit"/> says <see cref="Visit.Stop"/>, or an answer
+    /// returns true, the walk stops and the objects in flight are cancelled. Whether one did. The first failure of an
+    /// object is thrown once every lane has stopped, unless an answer stopped the question first.
+    /// </summary>
+    private async ValueTask<bool> FanOutAsync(
+        Func<PositionedObject, Visit> visit,
+        Func<PositionedObject, CancellationToken, ValueTask<bool>> answer,
+        IReadOnlyList<PositionedObject>? objects,
+        CancellationToken cancellationToken)
+    {
+        using SemaphoreSlim slots = new SemaphoreSlim(ScanDegree);
+        using CancellationTokenSource stop = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        FanOutState state = new FanOutState();
+        List<Task> running = [];
+        Exception? walkFailure = null;
+        _fannedOut = true;
+        try
+        {
+            IAsyncEnumerable<PositionedObject> walk = objects is null ? WalkAsync(stop.Token, granules: true) : ListedAsync(objects);
+            await foreach (PositionedObject held in walk.ConfigureAwait(false))
+            {
+                Visit next = visit(held);
+                if (next == Visit.Stop)
+                {
+                    state.Stop();
+                    break;
+                }
+
+                if (next == Visit.Open && !state.Ended)
+                {
+                    await slots.WaitAsync(stop.Token).ConfigureAwait(false);
+                    running.Add(Task.Run(() => LaneAsync(held), CancellationToken.None));
+                }
+
+                if (state.Ended)
+                {
+                    break;
+                }
+            }
+        }
+        catch (Exception failure)
+        {
+            walkFailure = failure;
+        }
+
+        if (state.Ended || walkFailure is not null)
+        {
+            await stop.CancelAsync().ConfigureAwait(false);
+        }
+
+        // No lane throws: each keeps its failure in the state.
+        await Task.WhenAll(running).ConfigureAwait(false);
+        _fannedOut = false;
+        if (state.Stopped)
+        {
+            return true;
+        }
+
+        if (state.Failure is { } failed)
+        {
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Throw(failed);
+        }
+
+        if (walkFailure is not null)
+        {
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Throw(walkFailure);
+        }
+
+        return false;
+
+        async Task LaneAsync(PositionedObject held)
+        {
+            try
+            {
+                if (await answer(held, stop.Token).ConfigureAwait(false))
+                {
+                    state.Stop();
+                    await stop.CancelAsync().ConfigureAwait(false);
+                }
+            }
+            catch (Exception failure)
+            {
+                // A lane cancelled because the question was answered fails for nothing; any other failure is the question's.
+                if (state.Fail(failure))
+                {
+                    await stop.CancelAsync().ConfigureAwait(false);
+                }
+            }
+            finally
+            {
+                slots.Release();
+            }
+        }
+
+        static async IAsyncEnumerable<PositionedObject> ListedAsync(IReadOnlyList<PositionedObject> listed)
+        {
+            foreach (PositionedObject held in listed)
+            {
+                yield return held;
+            }
+
+            await Task.CompletedTask.ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>How a fan-out ended: stopped by an answer, or failed by a lane; at most one of the two, the first.</summary>
+    private sealed class FanOutState
+    {
+        private int _ended;
+
+        /// <summary>Whether an answer stopped the question.</summary>
+        internal bool Stopped => Volatile.Read(ref _ended) == 1;
+
+        /// <summary>Whether the fan-out stopped or failed.</summary>
+        internal bool Ended => Volatile.Read(ref _ended) != 0;
+
+        /// <summary>The first failure of a lane, when the question failed.</summary>
+        internal Exception? Failure { get; private set; }
+
+        /// <summary>Records that the question is answered, unless a failure came first.</summary>
+        internal void Stop() => Interlocked.CompareExchange(ref _ended, 1, 0);
+
+        /// <summary>Records a lane's failure; false when the fan-out had already ended, the failure then being for nothing.</summary>
+        internal bool Fail(Exception failure)
+        {
+            if (Interlocked.CompareExchange(ref _ended, 2, 0) != 0)
+            {
+                return false;
+            }
+
+            Failure = failure;
+            return true;
+        }
     }
 
     /// <summary>Whether an object's summary proves it cannot hold a better value than the best.</summary>

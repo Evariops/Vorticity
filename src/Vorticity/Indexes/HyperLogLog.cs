@@ -1,4 +1,6 @@
 using System;
+using System.Buffers;
+using System.Numerics;
 
 namespace Vorticity.Indexes;
 
@@ -71,21 +73,36 @@ internal static class HyperLogLog
         int packed = 1 + (ranks.Length * 3 / 4);
         if (set * 3 + Serialization.Varint.MaxLength32 < packed)
         {
-            byte[] sparse = new byte[1 + Serialization.Varint.MaxLength32 + (set * (Serialization.Varint.MaxLength32 + 1))];
+            // Written on the stack at its longest, then copied once at its length.
+            int longest = 1 + Serialization.Varint.MaxLength32 + (set * (Serialization.Varint.MaxLength32 + 1));
+            byte[]? rented = longest > 4_096 ? ArrayPool<byte>.Shared.Rent(longest) : null;
+            Span<byte> sparse = rented is null ? stackalloc byte[longest] : rented.AsSpan(0, longest);
+            sparse[0] = 0;
             int at = 1;
-            at += Serialization.Varint.Write(sparse.AsSpan(at), (ulong)set);
+            at += Serialization.Varint.Write(sparse[at..], (ulong)set);
+            // The registers set found 64 at a time, a vector compare each, where each register was tested in turn.
             int previous = 0;
-            for (int r = 0; r < ranks.Length; r++)
+            for (int block = 0; block < ranks.Length; block += 64)
             {
-                if (ranks[r] != 0)
+                ulong found = ranks.Length - block >= 64
+                    ? Compute.ComparisonKernels.Bounded(ranks[block..], (byte)1, atMost: false)
+                    : Tail(ranks[block..]);
+                for (; found != 0; found &= found - 1)
                 {
-                    at += Serialization.Varint.Write(sparse.AsSpan(at), (ulong)(r - previous));
+                    int r = block + BitOperations.TrailingZeroCount(found);
+                    at += Serialization.Varint.Write(sparse[at..], (ulong)(r - previous));
                     sparse[at++] = ranks[r];
                     previous = r;
                 }
             }
 
-            return sparse.AsSpan(0, at).ToArray();
+            byte[] written = sparse[..at].ToArray();
+            if (rented is not null)
+            {
+                ArrayPool<byte>.Shared.Return(rented);
+            }
+
+            return written;
         }
 
         byte[] dense = new byte[packed];
@@ -94,17 +111,78 @@ internal static class HyperLogLog
         return dense;
     }
 
+    /// <summary>The registers set of the fewer than 64 of <paramref name="ranks"/>, bit <c>i</c> for register <c>i</c>.</summary>
+    private static ulong Tail(ReadOnlySpan<byte> ranks)
+    {
+        ulong found = 0;
+        for (int r = 0; r < ranks.Length; r++)
+        {
+            found |= ranks[r] != 0 ? 1UL << r : 0;
+        }
+
+        return found;
+    }
+
     /// <summary>The registers <see cref="Encode"/> wrote, into <paramref name="ranks"/>.</summary>
     /// <exception cref="VortexFormatException">The bytes are no registers of that many.</exception>
     internal static void Decode(ReadOnlySpan<byte> bytes, Span<byte> ranks)
     {
-        ranks.Clear();
         if (bytes.Length == 1 + (ranks.Length * 3 / 4) && bytes[0] == 1)
         {
             Unpack(bytes[1..], ranks);
             return;
         }
 
+        ranks.Clear();
+        RaiseSparse(bytes, ranks);
+    }
+
+    /// <summary>
+    /// Raises each of <paramref name="ranks"/> to the register <see cref="Encode"/> wrote in <paramref name="bytes"/> where
+    /// that one is higher, as the registers of two sets' values together: a sparse form's registers read straight into
+    /// theirs, where every register was decoded first.
+    /// </summary>
+    /// <exception cref="VortexFormatException">The bytes are no registers of that many.</exception>
+    internal static void Raise(ReadOnlySpan<byte> bytes, Span<byte> ranks)
+    {
+        if (bytes.Length == 1 + (ranks.Length * 3 / 4) && bytes[0] == 1)
+        {
+            byte[]? rented = ranks.Length > 4_096 ? ArrayPool<byte>.Shared.Rent(ranks.Length) : null;
+            Span<byte> other = rented is null ? stackalloc byte[ranks.Length] : rented.AsSpan(0, ranks.Length);
+            Unpack(bytes[1..], other);
+            Highest(other, ranks);
+            if (rented is not null)
+            {
+                ArrayPool<byte>.Shared.Return(rented);
+            }
+
+            return;
+        }
+
+        RaiseSparse(bytes, ranks);
+    }
+
+    /// <summary>Raises each of <paramref name="ranks"/> to <paramref name="other"/>'s register where that one is higher.</summary>
+    internal static void Highest(ReadOnlySpan<byte> other, Span<byte> ranks)
+    {
+        int r = 0;
+        if (Vector.IsHardwareAccelerated)
+        {
+            for (; r <= ranks.Length - Vector<byte>.Count; r += Vector<byte>.Count)
+            {
+                Vector.Max(new Vector<byte>(ranks[r..]), new Vector<byte>(other[r..])).CopyTo(ranks[r..]);
+            }
+        }
+
+        for (; r < ranks.Length; r++)
+        {
+            ranks[r] = Math.Max(ranks[r], other[r]);
+        }
+    }
+
+    /// <summary>Raises <paramref name="ranks"/> to the registers of the sparse form in <paramref name="bytes"/>.</summary>
+    private static void RaiseSparse(ReadOnlySpan<byte> bytes, Span<byte> ranks)
+    {
         int at = 1;
         ulong set = bytes.Length > 0 && bytes[0] == 0
             ? Serialization.Varint.Read64<Errors>(bytes, ref at)
@@ -118,7 +196,7 @@ internal static class HyperLogLog
                 throw new VortexFormatException("Registers of a sketch name one past their count.");
             }
 
-            ranks[(int)register] = bytes[at++];
+            ranks[(int)register] = Math.Max(ranks[(int)register], bytes[at++]);
         }
     }
 

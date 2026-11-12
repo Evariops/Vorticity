@@ -154,6 +154,65 @@ public sealed partial class DatasetPrefixRunsTests
         }
     }
 
+    /// <summary>
+    /// A granule of more runs than it lists, a host a row of one service, then granules of one service and four hosts each,
+    /// in two appends, one of a lone row of the first granule, merged into one object sorted by the service and the host: the
+    /// first granule lists none, every granule after it its four runs.
+    /// </summary>
+    [Fact]
+    public async Task AGranuleOfTooManyRunsLeavesTheNextOnesTheirs()
+    {
+        Request[] requests = [.. Enumerable.Range(0, 3 * 8192).Select(i => i < 8192
+            ? new Request(Start.AddSeconds(i), "svc-a", $"host-{i:D5}", $"id-{i:D7}")
+            : new Request(Start.AddSeconds(i), i < 2 * 8192 ? "svc-b" : "svc-c", $"host-x{i % 8192 / 2048}", $"id-{i:D7}"))];
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        DatasetOptions options = new DatasetOptions
+        {
+            Layout = new DatasetLayout
+            {
+                SortKey = [LayoutValue.Column(nameof(Request.Service)), LayoutValue.Column(nameof(Request.Host)), LayoutValue.Column(nameof(Request.At))],
+                Partition = LayoutValue.Column(nameof(Request.At)).Truncate(CalendarUnit.Day),
+                IndexedPrefix = 2,
+                MergeFanout = 2,
+                CalmAfter = null,
+            },
+            ContentsObjectBytes = 0,
+            SheetObjectBytes = 0,
+        };
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Request.Schema, options, Ct);
+        foreach (Request[] part in (Request[][])[[.. requests[..5000], .. requests[5001..]], [requests[5000]]])
+        {
+            await using ObjectDraft draft = dataset.StartObject();
+            await draft.Writer.WriteAsync<Request>(part, Ct);
+            await dataset.AppendAsync(draft, Ct);
+        }
+
+        // Merged by a compaction, whose object keeps the runs of its prefix by granule: the merge's run after the lone row
+        // ends on the second granule's first row, which the first granule's overflow must leave to it.
+        while (await dataset.CompactAsync(cancellationToken: Ct) is not null)
+        {
+        }
+
+        await dataset.ConsolidateAsync(Ct);
+        int objects = 0;
+        await foreach (PositionedObject held in dataset.ScanBuilder().ObjectsAsync(Ct))
+        {
+            objects++;
+            Assert.True(held.Entry.Contents!.KeyRunsOf(GranuleKeyRuns.WholePrefix) is not null, "the object keeps no runs of its prefix by granule");
+            (_, _, GranuleKeyRuns?[] read) = await dataset.ReadGranuleStatsAsync(held.Entry, [], [], [GranuleKeyRuns.WholePrefix], Ct);
+            GranuleKeyRuns runs = read[0]!;
+            Assert.Equal(3, runs.Count);
+            Assert.Equal(0, runs.RunsOf(0).Count);
+            for (int g = 1; g < runs.Count; g++)
+            {
+                (int first, int count) = runs.RunsOf(g);
+                Assert.Equal([2048L, 2048L, 2048L, 2048L], Enumerable.Range(first, count).Select(runs.RowsOf));
+            }
+        }
+
+        Assert.Equal(1, objects);
+    }
+
     [VortexRecord]
     public partial record struct Request(DateTime At, string Service, string Host, string RequestId);
 

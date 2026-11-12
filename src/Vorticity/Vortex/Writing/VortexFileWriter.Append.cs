@@ -756,16 +756,22 @@ public sealed partial class VortexFileWriter
             CancellationToken cancellationToken)
         {
             PlanSeed?[] seeds = new PlanSeed?[chunks.Length];
-            ArrayNodeArena tree = new ArrayNodeArena();
+            List<LayoutNode> lasts = new List<LayoutNode>(chunks.Length);
+            List<int> owners = new List<int>(chunks.Length);
             for (int field = 0; field < chunks.Length; field++)
             {
                 if (chunks[field].Count > 0)
                 {
-                    seeds[field] = await SeedAsync(
-                        file, chunks[field][^1].Flat, schema.GetField(field), tree, cancellationToken).ConfigureAwait(false);
+                    lasts.Add(chunks[field][^1].Flat);
+                    owners.Add(field);
                 }
             }
 
+            // Every column's last tree read in one request, where each was a round trip in turn.
+            await file.VisitArrayTreesAsync(
+                lasts, new ArrayNodeArena(), (seeds, owners, schema),
+                static (held, at, tree) => held.seeds[held.owners[at]] = PlanSeed.Of(tree.Root, held.schema.GetField(held.owners[at])),
+                cancellationToken).ConfigureAwait(false);
             return seeds;
         }
 

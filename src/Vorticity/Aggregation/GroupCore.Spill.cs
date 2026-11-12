@@ -24,6 +24,9 @@ internal sealed partial class GroupCore
     private readonly SemaphoreSlim _spilling = new SemaphoreSlim(1, 1);
     private RunScratch? _scratch;
     private string? _scratchDirectory;
+
+    // The free space of the scratch's directory, read once a 64th of it is written, not at every page: the pages are appended one at a time.
+    private SpaceClaims _claims;
     private byte[]? _page;
     private ulong[]? _words;
     private int _spilledParts;
@@ -243,7 +246,7 @@ internal sealed partial class GroupCore
     {
         RunScratch scratch = Scratch();
         int bytes = entries * Shape.Words * sizeof(ulong);
-        if (!SpillSpace.TryClaim(_scratchDirectory!, bytes))
+        if (!_claims.TryClaim(_scratchDirectory!, bytes))
         {
             throw _memory!.Exceeded("spill of a group by", -1, bytes);
         }
@@ -251,7 +254,7 @@ internal sealed partial class GroupCore
         // Under the host's scratch budget, every byte written counted, and given back when the scratch closes.
         if (_source?.Session.Options.ScratchBudget is { } budget && !budget.TryReserve(bytes))
         {
-            SpillSpace.Release(bytes);
+            _claims.Release(bytes);
             throw ScratchExceeded(budget, "spill of a group by", bytes);
         }
 
@@ -360,6 +363,7 @@ internal sealed partial class GroupCore
                         applier.Apply(part, batch, burst: false);
                         offset += bytes;
                         left -= entries;
+                        await RoomAsync(cancellationToken).ConfigureAwait(false);
                     }
                 }
             }
@@ -376,6 +380,7 @@ internal sealed partial class GroupCore
                         PartBatch batch = new PartBatch(_words, 0, copied) { Count = copied };
                         Pend(copied);
                         applier.Apply(part, batch, burst: false);
+                        await RoomAsync(cancellationToken).ConfigureAwait(false);
                     }
                 }
             }
@@ -391,6 +396,10 @@ internal sealed partial class GroupCore
         part.Silent = false;
         part.Runs = null;
     }
+
+    /// <summary>A page applied, a <c>Distinct</c>'s reader waited for when the values told it pass what may wait for it.</summary>
+    private ValueTask RoomAsync(CancellationToken cancellationToken) =>
+        Emitter is { Overflowing: true } emitter ? emitter.RoomAsync(cancellationToken) : ValueTask.CompletedTask;
 
     /// <summary>
     /// The part's sub-tables let go once delivered: their arrays on the shelf, where the parts still
@@ -419,9 +428,10 @@ internal sealed partial class GroupCore
     {
         if (_scratch is not null)
         {
-            long spilled = Interlocked.Read(ref _spilledBytes);
-            SpillSpace.Release(spilled);
-            _source?.Session.Options.ScratchBudget?.Release(spilled);
+            // What the claims counted, the bytes written: given back once, the claims emptied for a spill after this one,
+            // which reads the free space again (SpilledBytes is the count the run reports).
+            long claimed = _claims.ReleaseAll();
+            _source?.Session.Options.ScratchBudget?.Release(claimed);
             _scratch.Dispose();
             _scratch = null;
         }

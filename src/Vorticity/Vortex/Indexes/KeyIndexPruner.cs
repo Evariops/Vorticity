@@ -172,7 +172,7 @@ internal sealed class KeyIndexPruner
                 ? entry.BlockLength / (ulong)blockRows
                 : 1;
             if (stride == 0 || entry.BlockLength != (ulong)blockRows * unit || unit > KeyRunOptions.MostUnitBlocks
-                || !TryResolve(file.DType, entry.ColumnPath, out string path, out DType dtype)
+                || !TryResolveKept(file.DType, entry.ColumnPath, out string path, out DType dtype)
                 || !KeyRunOptions.TryParseEntry(entry.Options, out _, out bool fold))
             {
                 continue;
@@ -623,6 +623,65 @@ internal sealed class KeyIndexPruner
         return true;
     }
 
+    /// <summary>
+    /// The types a column's segments decode to, made once for the process in an arena nothing changes after: a column made
+    /// an arena of its own for three of them at every question.
+    /// </summary>
+    private static class KeyTypes
+    {
+        private static readonly DTypeArena Arena = new DTypeArena();
+
+        /// <summary>Each primitive type, non-nullable, by its <see cref="PType"/>.</summary>
+        internal static readonly DType[] Primitives = MakePrimitives();
+
+        internal static readonly DType Utf8 = Arena.Utf8(Nullability.NonNullable);
+
+        internal static readonly DType Binary = Arena.Binary(Nullability.NonNullable);
+
+        private static DType[] MakePrimitives()
+        {
+            PType[] all = Enum.GetValues<PType>();
+            int most = 0;
+            foreach (PType type in all)
+            {
+                most = Math.Max(most, (int)type);
+            }
+
+            DType[] types = new DType[most + 1];
+            foreach (PType type in all)
+            {
+                types[(int)type] = Arena.Primitive(type, Nullability.NonNullable);
+            }
+
+            return types;
+        }
+    }
+
+    // The path and type each entry's column resolves to in its file's schema, by the entry: a file's index directory, which
+    // holds its entries, is read once, where each question joined the path's names again.
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<IReadOnlyList<uint>, Resolved> s_resolved = new();
+
+    private sealed record Resolved(DType Schema, string Path, DType Type);
+
+    /// <summary><see cref="TryResolve(DType, IReadOnlyList{uint}, out string, out DType)"/>, kept for the entry's fields, which a directory holds.</summary>
+    private static bool TryResolveKept(DType schema, IReadOnlyList<uint> fields, out string path, out DType dtype)
+    {
+        if (s_resolved.TryGetValue(fields, out Resolved? kept) && kept.Schema.Equals(schema))
+        {
+            path = kept.Path;
+            dtype = kept.Type;
+            return true;
+        }
+
+        if (!TryResolve(schema, fields, out path, out dtype))
+        {
+            return false;
+        }
+
+        s_resolved.AddOrUpdate(fields, new Resolved(schema, path, dtype));
+        return true;
+    }
+
     /// <summary>The dotted path and dtype an entry's field indices name, or false when they name nothing.</summary>
     /// <param name="schema">The file's dtype.</param>
     /// <param name="fields">The entry's column path.</param>
@@ -1036,14 +1095,11 @@ internal sealed class KeyIndexPruner
             _rows = placing == Placing.Rows;
             _hashes = placing == Placing.Hashes;
             _layout = asked.Layout;
-            DTypeArena types = new DTypeArena();
             _keyType = storage.Kind == DTypeKind.Primitive
-                ? types.Primitive(storage.PType, Nullability.NonNullable)
-                : storage.Kind == DTypeKind.Utf8
-                    ? types.Utf8(Nullability.NonNullable)
-                    : types.Binary(Nullability.NonNullable);
-            _u32 = types.Primitive(PType.U32, Nullability.NonNullable);
-            _u64 = types.Primitive(PType.U64, Nullability.NonNullable);
+                ? KeyTypes.Primitives[(int)storage.PType]
+                : storage.Kind == DTypeKind.Utf8 ? KeyTypes.Utf8 : KeyTypes.Binary;
+            _u32 = KeyTypes.Primitives[(int)PType.U32];
+            _u64 = KeyTypes.Primitives[(int)PType.U64];
             Runs = runs;
             _blocks = blocks;
             _words = (blocks + 63) >> 6;
@@ -1331,6 +1387,11 @@ internal sealed class KeyIndexPruner
                     return LookupHashes(context, requests, slots, run, fence, low, high, entries);
                 }
 
+                if (Sampled(context, requests, slots, run, low, high, entries, blockRows) is bool answered)
+                {
+                    return answered;
+                }
+
                 int keys = Decode(context, requests.GetBuffer(slots[0]), _keyType, entries);
                 CanonicalNode keyNode = context.Canonical.GetNode(keys);
                 if (!Fits(keyNode, entries))
@@ -1468,22 +1529,88 @@ internal sealed class KeyIndexPruner
             }
         }
 
+        /// <summary>
+        /// Marks the blocks of a key's rows <c>[lo, hi)</c>, which the run holds ascending: a block each, the rows past it
+        /// in the same block passed over by a search for the first row of the next one, where each row took a division
+        /// and a marking. A key of many rows in few blocks costs its blocks, not its rows.
+        /// </summary>
+        /// <remarks>
+        /// The format holds a key's rows ascending (vorticity.sorted.runs.v1), which the search trusts: rows that went
+        /// back would leave blocks unmarked and their rows out of the answer. The row each step lands on is checked against
+        /// the one it marked, a comparison a block, and a run whose rows are seen to go back is refused.
+        /// </remarks>
+        /// <exception cref="VortexFormatException">The key's rows go back from one block to the next.</exception>
         private void MarkRows(
             int literal, int lo, int hi, ReadOnlySpan<uint> rows, ulong firstBlock, long blockRows)
         {
-            for (int e = lo; e < hi; e++)
+            for (int e = lo; e < hi;)
             {
-                Present(literal, firstBlock + (ulong)(rows[e] / blockRows));
+                ulong block = rows[e] / (ulong)blockRows;
+                Present(literal, firstBlock + block);
+                int next = FirstAtOrPast(rows, e + 1, hi, (block + 1) * (ulong)blockRows);
+                if (next < hi && rows[next] < rows[next - 1])
+                {
+                    throw Descending();
+                }
+
+                e = next;
             }
         }
 
+        /// <inheritdoc cref="MarkRows(int, int, int, ReadOnlySpan{uint}, ulong, long)"/>
         private void MarkRows(
             int literal, int lo, int hi, ReadOnlySpan<ulong> rows, ulong firstBlock, long blockRows)
         {
-            for (int e = lo; e < hi; e++)
+            for (int e = lo; e < hi;)
             {
-                Present(literal, firstBlock + (rows[e] / (ulong)blockRows));
+                ulong block = rows[e] / (ulong)blockRows;
+                Present(literal, firstBlock + block);
+                int next = FirstAtOrPast(rows, e + 1, hi, (block + 1) * (ulong)blockRows);
+                if (next < hi && rows[next] < rows[next - 1])
+                {
+                    throw Descending();
+                }
+
+                e = next;
             }
+        }
+
+        private static VortexFormatException Descending() =>
+            new VortexFormatException("A sorted run's rows of one key go back: the format holds them ascending.");
+
+        /// <summary>
+        /// The first of <c>[from, to)</c> whose row is at or past <paramref name="row"/>, <paramref name="to"/> for none, the
+        /// rows ascending: the next few looked at in turn, then a halving search, since the next block's first row is most
+        /// often the next one.
+        /// </summary>
+        private static int FirstAtOrPast<T>(ReadOnlySpan<T> rows, int from, int to, ulong row)
+            where T : unmanaged, IBinaryInteger<T>
+        {
+            int step = Math.Min(to, from + 4);
+            for (; from < step; from++)
+            {
+                if (ulong.CreateTruncating(rows[from]) >= row)
+                {
+                    return from;
+                }
+            }
+
+            int low = from;
+            int high = to;
+            while (low < high)
+            {
+                int middle = (int)(((uint)low + (uint)high) >> 1);
+                if (ulong.CreateTruncating(rows[middle]) >= row)
+                {
+                    high = middle;
+                }
+                else
+                {
+                    low = middle + 1;
+                }
+            }
+
+            return low;
         }
 
         private void Present(int literal, ulong block)
@@ -1659,6 +1786,105 @@ internal sealed class KeyIndexPruner
             context.Decode.LoadBlob(segment);
             ArrayNode root = context.Nodes.Root;
             return context.Decode.DecodeRoot(in root, dtype, length);
+        }
+
+        /// <summary>The entries between two of every 1,024th key a sampled lookup decodes (<see cref="Sampled"/>).</summary>
+        private const int SampleStride = 1_024;
+
+        /// <summary>
+        /// One segment's lookup by samples, when it asks few keys of many entries: every 1,024th key decoded, then for each
+        /// key asked the one stretch of entries the samples leave it, and of the rows or postings the entries it holds
+        /// alone, where the segment's every key, and every row or posting, was decoded for a key or two. Null
+        /// when the lookup asks too many keys for it, which a whole decode then answers.
+        /// </summary>
+        /// <returns>Whether the segment made sense, or null.</returns>
+        private bool? Sampled(ScanContext context, SegmentRequestSet requests, int[] slots, Run run, int low, int high, int entries, long blockRows)
+        {
+            // A key's stretch is two samples apart at most: a whole decode reads every entry, the samples a sixteenth of
+            // a stretch each, so a lookup of a few keys of a segment of many stretches is the one worth it.
+            if (!_rows || entries < 8 * SampleStride || (long)(high - low) * 8 * SampleStride > entries)
+            {
+                return null;
+            }
+
+            int samples = (entries + SampleStride - 1) / SampleStride;
+            int[] wanted = ArrayPool<int>.Shared.Rent(samples);
+            try
+            {
+                for (int i = 0; i < samples; i++)
+                {
+                    wanted[i] = i * SampleStride;
+                }
+
+                context.Decode.LoadBlob(requests.GetBuffer(slots[0]));
+                ArrayNode root = context.Nodes.Root;
+                CanonicalNode sample = context.Canonical.GetNode(context.Decode.DecodeRootSelected(in root, _keyType, entries, wanted.AsSpan(0, samples), keepEncoding: false));
+                if (!Fits(sample, samples))
+                {
+                    return false;
+                }
+
+                // Each key's entries: past the last sample below it, and before the first above it.
+                _matches.Clear();
+                for (int k = low; k < high; k++)
+                {
+                    (int literal, byte[] key, ulong _) = Asked.Sorted[k];
+                    (int below, int above) = Range(sample, key);
+                    int start = Math.Max(below - 1, 0) * SampleStride;
+                    int end = (int)Math.Min((long)above * SampleStride, entries);
+                    if (end <= start)
+                    {
+                        continue;
+                    }
+
+                    root = context.Nodes.Root;
+                    CanonicalNode stretch = context.Canonical.GetNode(context.Decode.DecodeRootRange(in root, _keyType, entries, start, end - start, keepEncoding: false));
+                    if (!Fits(stretch, end - start))
+                    {
+                        return false;
+                    }
+
+                    (int first, int last) = Range(stretch, key);
+                    if (last > first)
+                    {
+                        _matches.Add((literal, start + first, start + last));
+                    }
+                }
+
+                return _matches.Count == 0 || SampledRows(context, requests, slots, run, entries, blockRows);
+            }
+            finally
+            {
+                ArrayPool<int>.Shared.Return(wanted);
+            }
+        }
+
+        /// <summary>The rows of the entries <see cref="Sampled"/> matched, decoded match by match and marked.</summary>
+        private bool SampledRows(ScanContext context, SegmentRequestSet requests, int[] slots, Run run, int entries, long blockRows)
+        {
+            bool wide = run.Table.WideRows;
+            PType width = wide ? PType.U64 : PType.U32;
+            context.Decode.LoadBlob(requests.GetBuffer(slots[1]));
+            foreach ((int literal, int first, int end) in _matches)
+            {
+                ArrayNode root = context.Nodes.Root;
+                CanonicalNode rows = context.Canonical.GetNode(context.Decode.DecodeRootRange(in root, wide ? _u64 : _u32, entries, first, end - first, keepEncoding: false));
+                if (rows.Kind != CanonicalKind.Primitive || rows.PType != width || rows.Length != end - first)
+                {
+                    return false;
+                }
+
+                if (wide)
+                {
+                    MarkRows(literal, 0, end - first, rows.Values.Cast<ulong>(), run.Meta.FirstBlock, blockRows);
+                }
+                else
+                {
+                    MarkRows(literal, 0, end - first, rows.Values.Cast<uint>(), run.Meta.FirstBlock, blockRows);
+                }
+            }
+
+            return true;
         }
     }
 }

@@ -597,6 +597,42 @@ internal static class RowEncodeKernel
             ordered = ~ordered;
         }
 
+        // A primitive's bytes reversed and stored at once where the slot holds them, as the JIT sees the type: the
+        // general write and its checks were most of a fixed column's 3 to 4 ns a row.
+        if (BitConverter.IsLittleEndian && destination.Length == Unsafe.SizeOf<T>())
+        {
+            ref byte into = ref MemoryMarshal.GetReference(destination);
+            if (Unsafe.SizeOf<T>() == 1)
+            {
+                Unsafe.WriteUnaligned(ref into, ordered);
+                return;
+            }
+
+            if (Unsafe.SizeOf<T>() == 2)
+            {
+                Unsafe.WriteUnaligned(ref into, BinaryPrimitives.ReverseEndianness(Unsafe.As<T, ushort>(ref ordered)));
+                return;
+            }
+
+            if (Unsafe.SizeOf<T>() == 4)
+            {
+                Unsafe.WriteUnaligned(ref into, BinaryPrimitives.ReverseEndianness(Unsafe.As<T, uint>(ref ordered)));
+                return;
+            }
+
+            if (Unsafe.SizeOf<T>() == 8)
+            {
+                Unsafe.WriteUnaligned(ref into, BinaryPrimitives.ReverseEndianness(Unsafe.As<T, ulong>(ref ordered)));
+                return;
+            }
+
+            if (Unsafe.SizeOf<T>() == 16)
+            {
+                Unsafe.WriteUnaligned(ref into, BinaryPrimitives.ReverseEndianness(Unsafe.As<T, UInt128>(ref ordered)));
+                return;
+            }
+        }
+
         if (!ordered.TryWriteBigEndian(destination, out int written) || written != destination.Length)
         {
             throw new VortexFormatException(

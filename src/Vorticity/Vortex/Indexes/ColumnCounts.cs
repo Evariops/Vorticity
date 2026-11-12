@@ -1,4 +1,5 @@
 using System;
+using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.Generic;
 using Vorticity.Aggregating;
@@ -248,6 +249,8 @@ internal sealed class ColumnCounts
         byte[] bytes = new byte[head.Length + chunks.Length];
         head.Span.CopyTo(bytes);
         chunks.Span.CopyTo(bytes.AsSpan(head.Length));
+        head.Return();
+        chunks.Return();
         return bytes;
     }
 
@@ -728,7 +731,9 @@ internal sealed class ColumnCounts
     /// <summary>A growing buffer the counts and their sketches are written into.</summary>
     internal struct Output(int capacity)
     {
-        private byte[] _bytes = new byte[capacity];
+        // Rented, grown into a larger one rented, and given back by Return once the bytes are copied out: the bytes
+        // written were grown by doubling into arrays left to the collector, the largest on the large object heap.
+        private byte[] _bytes = ArrayPool<byte>.Shared.Rent(capacity);
 
         internal int Length { get; private set; }
 
@@ -750,12 +755,23 @@ internal sealed class ColumnCounts
         {
             if (Length + bytes > _bytes.Length)
             {
-                Array.Resize(ref _bytes, Math.Max(_bytes.Length * 2, Length + bytes));
+                byte[] larger = ArrayPool<byte>.Shared.Rent(Math.Max(_bytes.Length * 2, Length + bytes));
+                _bytes.AsSpan(0, Length).CopyTo(larger);
+                ArrayPool<byte>.Shared.Return(_bytes);
+                _bytes = larger;
             }
 
             Span<byte> span = _bytes.AsSpan(Length, bytes);
             Length += bytes;
             return span;
+        }
+
+        /// <summary>Gives the bytes' array back; the output holds nothing after.</summary>
+        internal void Return()
+        {
+            ArrayPool<byte>.Shared.Return(_bytes);
+            _bytes = [];
+            Length = 0;
         }
     }
 

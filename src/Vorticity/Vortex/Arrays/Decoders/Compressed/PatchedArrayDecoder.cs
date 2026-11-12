@@ -71,9 +71,11 @@ internal sealed class PatchedArrayDecoder : ArrayDecoder
         CanonicalNode values = Require(context, valuesIndex, ptype, "patch values", patches);
 
         int width = ptype.ByteWidth();
-        VortexBuffer output = CompressedValues.Allocate(
+        // Not zeroed: the unpatched values are copied over every byte, a shorter run's rest cleared.
+        VortexBuffer output = CompressedValues.AllocateUninitialized(
             context, length * width, width, Id, out Span<byte> destination);
         inner.Values.Span.CopyTo(destination);
+        destination[inner.Values.Length..].Clear();
 
         Apply(
             destination,

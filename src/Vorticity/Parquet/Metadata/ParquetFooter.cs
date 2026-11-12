@@ -93,6 +93,17 @@ internal sealed class ParquetFooter
     /// </summary>
     private readonly StrongBox<ReadOnlyMemory<byte>>?[]?[] _decrypted;
 
+    /// <summary>The chunks a file of at most this many keeps decoded (<see cref="Chunk"/>), some 220 bytes each.</summary>
+    private const int MostKeptChunks = 4_096;
+
+    /// <summary>
+    /// The plaintext chunks decoded, by row group then column, each kept once its bit in <see cref="_keptBits"/> is set
+    /// after it is written whole; null until the first is asked for, or for a file of more chunks.
+    /// </summary>
+    private ColumnChunkMetadata[]? _kept;
+    private ulong[]? _keptBits;
+    private int[]? _keptStarts;
+
     /// <summary>Reads a <c>FileMetaData</c>.</summary>
     internal static ParquetFooter Read(ReadOnlyMemory<byte> bytes)
     {
@@ -313,8 +324,28 @@ internal sealed class ParquetFooter
     /// </remarks>
     internal ColumnChunkMetadata Chunk(int rowGroup, int column)
     {
+        // A question asks for a chunk again and again, its pruners and its reads each: 27 times a row group of 8 columns
+        // for a filtered count, 104 ns a decode. A plaintext chunk is decoded once where the file's chunks are few.
+        int slot = KeptSlot(rowGroup, column);
+        if (slot >= 0 && (Volatile.Read(ref _keptBits![slot >> 6]) & (1UL << slot)) != 0)
+        {
+            return _kept![slot];
+        }
+
         ColumnChunkMetadata chunk = ColumnChunkMetadata.Read(_bytes, ChunkStarts(rowGroup)[column]);
-        if (!chunk.EncryptedMetadata.IsPresent || Decryptor is not { } decryptor)
+        if (!chunk.EncryptedMetadata.IsPresent)
+        {
+            if (slot >= 0)
+            {
+                // Two lanes may decode it both, and write the same bytes; it is read only once its bit says it is whole.
+                _kept![slot] = chunk;
+                Interlocked.Or(ref _keptBits![slot >> 6], 1UL << slot);
+            }
+
+            return chunk;
+        }
+
+        if (Decryptor is not { } decryptor)
         {
             return chunk;
         }
@@ -337,6 +368,41 @@ internal sealed class ParquetFooter
 
         chunk.Decrypted(plaintext.Value);
         return chunk;
+    }
+
+    /// <summary>
+    /// The slot of column <paramref name="column"/> of row group <paramref name="rowGroup"/> among the kept chunks; -1 for a
+    /// file of more than <see cref="MostKeptChunks"/>, or a column the group lacks.
+    /// </summary>
+    private int KeptSlot(int rowGroup, int column)
+    {
+        int[]? starts = Volatile.Read(ref _keptStarts);
+        if (starts is null)
+        {
+            starts = new int[RowGroups.Length + 1];
+            for (int g = 0; g < RowGroups.Length; g++)
+            {
+                starts[g + 1] = starts[g] + RowGroups[g].ColumnCount;
+            }
+
+            int total = starts[^1];
+            if (total is > 0 and <= MostKeptChunks)
+            {
+                // The arrays before the starts that publish them.
+                Interlocked.CompareExchange(ref _kept, new ColumnChunkMetadata[total], null);
+                Interlocked.CompareExchange(ref _keptBits, new ulong[(total + 63) >> 6], null);
+            }
+            else
+            {
+                starts = [];
+            }
+
+            starts = Interlocked.CompareExchange(ref _keptStarts, starts, null) ?? starts;
+        }
+
+        return starts.Length == 0 || (uint)rowGroup >= (uint)RowGroups.Length || (uint)column >= (uint)RowGroups[rowGroup].ColumnCount
+            ? -1
+            : starts[rowGroup] + column;
     }
 
     /// <summary>The ordinal of row group <paramref name="rowGroup"/> in its modules' AAD: its own where the footer gives it.</summary>

@@ -107,6 +107,7 @@ public sealed partial class VortexFile : IAsyncDisposable
         _segmentSpecCount = state.SegmentSpecCount;
         _rootLayoutStart = state.RootLayoutStart;
         _rootLayoutLength = state.RootLayoutLength;
+        FooterBytes = state.FooterBytes;
         _statistics = state.Statistics;
         _metadataKeys = state.MetadataKeys;
         _metadataKeysUtf8 = state.MetadataKeysUtf8;
@@ -751,6 +752,7 @@ public sealed partial class VortexFile : IAsyncDisposable
         public required string[] MetadataKeys { get; init; }
         public required byte[][] MetadataKeysUtf8 { get; init; }
         public required SegmentSpec[] MetadataSegments { get; init; }
+        public required int FooterBytes { get; init; }
     }
 
     private static VortexFile Build(
@@ -868,6 +870,7 @@ public sealed partial class VortexFile : IAsyncDisposable
             MetadataKeys = postscript.MetadataKeys,
             MetadataKeysUtf8 = postscript.MetadataKeysUtf8,
             MetadataSegments = postscript.MetadataSegments,
+            FooterBytes = (int)Math.Min(int.MaxValue, fileLength - RequiredOffset(in postscript, fileLength)),
         };
         return new VortexFile(in state);
     }
@@ -1176,6 +1179,15 @@ public sealed partial class VortexFile : IAsyncDisposable
 
     /// <summary>The file length in bytes.</summary>
     internal long FileLength { get; }
+
+    /// <summary>The bytes the open read from the file's end and keeps while the file is open: its footer, and what lay before it in the first read.</summary>
+    internal int RetainedTailBytes => _tail.Length;
+
+    /// <summary>
+    /// The bytes of its structures the open parsed, from the first of them to the file's end: <see cref="TailBytes"/>, found
+    /// once by the open, which an owner weighs what the file keeps by.
+    /// </summary>
+    internal int FooterBytes { get; }
 
     /// <summary>
     /// The bytes from the first structure an open reads to the end of the file, its dtype included:

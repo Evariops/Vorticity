@@ -47,6 +47,9 @@ public sealed class SpanReadAllocationTests
         Assert.True(floor <= Ceiling, $"A span read of {SpanReaderTests.SpanRows} rows allocated {floor} bytes, above {Ceiling}.");
     }
 
-    /// <summary>16 944 bytes measured on arm64 (2026-10-19) for the slice read it replaced, most of it the context's arenas.</summary>
-    private const long Ceiling = 20 * 1024;
+    /// <summary>
+    /// 1 296 bytes measured on x64 (2026-11-10) once the context comes from a pool and goes back with the batch; 18 664 when
+    /// each read made its own, most of it the context's arenas (16 944 on arm64, 2026-10-19).
+    /// </summary>
+    private const long Ceiling = 4 * 1024;
 }

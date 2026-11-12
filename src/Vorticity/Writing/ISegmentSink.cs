@@ -31,4 +31,13 @@ internal interface ISegmentSink
     /// sealing stage's last frame and trailer. Nothing for a plain sink.
     /// </summary>
     ValueTask FinishAsync(CancellationToken cancellationToken) => ValueTask.CompletedTask;
+
+    /// <summary>
+    /// Marks where the file's tail starts, what an open of it reads in one request: its statistics on to its end. A sink
+    /// that sends what it is written on keeps a copy of what comes after, which the file is described from before it is
+    /// put. Nothing for a plain sink.
+    /// </summary>
+    void KeepTail()
+    {
+    }
 }

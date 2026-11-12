@@ -59,6 +59,23 @@ internal sealed class NestedFieldReader
     /// <summary>The readers of the columns under the field, in the columns' order.</summary>
     internal ColumnChunkReader[] Readers { get; }
 
+    /// <summary>
+    /// A page decompressing ahead, not yet decompressed, that a column under the field takes first once the page it holds
+    /// is read, which the scan joins before the read; null for none.
+    /// </summary>
+    internal Codecs.LaneWork? Unready()
+    {
+        foreach (ColumnChunkReader reader in Readers)
+        {
+            if (reader.Unready(1) is { } page)
+            {
+                return page;
+            }
+        }
+
+        return null;
+    }
+
     /// <summary>The field's next <paramref name="rows"/> rows, as a node of <paramref name="context"/>'s arena.</summary>
     internal int Read(ScanContext context, int rows)
     {

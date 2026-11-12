@@ -81,6 +81,9 @@ internal sealed class SealedSegmentReader : ISegmentReader
     /// <summary>What the object's trailer says: its descriptor and its epochs.</summary>
     internal SealedLayout Layout => _layout;
 
+    /// <summary>The trailer's bytes as the store holds them, read by an open asked to keep them; null otherwise.</summary>
+    internal byte[]? Trailer { get; private set; }
+
     /// <summary>
     /// Opens the sealed object <paramref name="inner"/> reads: one read of its trailer and its last
     /// frames, the data key from <paramref name="unwrap"/>, the commitment of every epoch checked, and
@@ -92,12 +95,18 @@ internal sealed class SealedSegmentReader : ISegmentReader
     /// <param name="cancellationToken">Cancels the reads and the unwrap.</param>
     /// <param name="options">The coalescing budgets, the defaults when null.</param>
     /// <param name="cache">What the reader keeps of the object on a local disk, its sealed bytes; null for none.</param>
+    /// <param name="trailer">
+    /// The object's trailer, which an open before read, to open from with no read, as from a cache's: the reader then reads
+    /// no tail ahead, what a read of regions a table of contents declares wants; empty for none.
+    /// </param>
+    /// <param name="keepTrailer">Whether an open that reads the trailer keeps a copy of its bytes (<see cref="Trailer"/>).</param>
     /// <returns>The reader; on failure nothing is left open but <paramref name="inner"/>, which the caller still owns.</returns>
     /// <exception cref="VortexFormatException">The bytes are not a sealed object.</exception>
     /// <exception cref="VortexEncryptionException">A commitment fails, or the key cannot be unwrapped.</exception>
     internal static async ValueTask<SealedSegmentReader> OpenAsync(
         ISegmentReader inner, bool ownsInner, Func<SealDescriptor, CancellationToken, ValueTask<DataKey>> unwrap,
-        CancellationToken cancellationToken, SegmentReadOptions? options = null, ISealedFrameCache? cache = null)
+        CancellationToken cancellationToken, SegmentReadOptions? options = null, ISealedFrameCache? cache = null,
+        ReadOnlyMemory<byte> trailer = default, bool keepTrailer = false)
     {
         ArgumentNullException.ThrowIfNull(inner);
         ArgumentNullException.ThrowIfNull(unwrap);
@@ -110,6 +119,13 @@ internal sealed class SealedSegmentReader : ISegmentReader
         if (cache is not null && await OpenKeptAsync(inner, ownsInner, unwrap, length, options, cache, cancellationToken).ConfigureAwait(false) is { } kept)
         {
             return kept;
+        }
+
+        // A trailer that does not open the object is read again, as a cache's is.
+        if (!trailer.IsEmpty && LayoutOf(trailer.Span, length) is { } known
+            && await FromLayoutAsync(inner, ownsInner, unwrap, known, options, cache, cancellationToken).ConfigureAwait(false) is { } given)
+        {
+            return given;
         }
 
         int window = (int)Math.Min(length, SealedFormat.OpenReadBytes);
@@ -135,20 +151,20 @@ internal sealed class SealedSegmentReader : ISegmentReader
             {
                 // A trailer longer than the read, which only a long key or many epochs make: read it
                 // whole, and leave the last frames to the reads that want them.
-                SegmentOwner trailer = await inner.ReadRangeAsync(length - trailerLength, trailerLength, 1, cancellationToken).ConfigureAwait(false);
+                SegmentOwner whole = await inner.ReadRangeAsync(length - trailerLength, trailerLength, 1, cancellationToken).ConfigureAwait(false);
                 try
                 {
-                    if (trailer.Length != trailerLength)
+                    if (whole.Length != trailerLength)
                     {
-                        SegmentIo.ThrowTruncatedRead(length - trailerLength, trailerLength, trailer.Length);
+                        SegmentIo.ThrowTruncatedRead(length - trailerLength, trailerLength, whole.Length);
                     }
 
-                    layout = SealedLayout.Read(trailer.Buffer.Span, length);
-                    longTrailer = cache is null ? null : trailer.Buffer.Span.ToArray();
+                    layout = SealedLayout.Read(whole.Buffer.Span, length);
+                    longTrailer = cache is null && !keepTrailer ? null : whole.Buffer.Span.ToArray();
                 }
                 finally
                 {
-                    trailer.Release();
+                    whole.Release();
                 }
             }
 
@@ -178,14 +194,17 @@ internal sealed class SealedSegmentReader : ISegmentReader
             // authenticated.
             if (longTrailer is not null)
             {
-                cache!.AdmitTrailer(longTrailer);
+                cache?.AdmitTrailer(longTrailer);
             }
             else
             {
                 cache?.AdmitTrailer(end.Buffer.Span[^trailerLength..]);
             }
 
-            SealedSegmentReader reader = new SealedSegmentReader(inner, ownsInner, layout, ciphers, tail, tailStart, options ?? SegmentReadOptions.Default, cache);
+            SealedSegmentReader reader = new SealedSegmentReader(inner, ownsInner, layout, ciphers, tail, tailStart, options ?? SegmentReadOptions.Default, cache)
+            {
+                Trailer = !keepTrailer ? null : longTrailer ?? end.Buffer.Span[^trailerLength..].ToArray(),
+            };
             ciphers = null;
             tail = null;
             return reader;
@@ -218,27 +237,47 @@ internal sealed class SealedSegmentReader : ISegmentReader
             return null;
         }
 
-        SealedLayout layout;
+        SealedLayout? layout;
         try
         {
-            ReadOnlySpan<byte> bytes = trailer.Buffer.Span;
-            if (SealedLayout.TrailerLength(bytes, length) != bytes.Length)
-            {
-                throw new VortexFormatException("Malformed sealed object: the trailer kept is not the length it says.");
-            }
-
-            layout = SealedLayout.Read(bytes, length);
-        }
-        catch (VortexException)
-        {
-            cache.DropTrailer();
-            return null;
+            layout = LayoutOf(trailer.Buffer.Span, length);
         }
         finally
         {
             trailer.Release();
         }
 
+        SealedSegmentReader? reader = layout is null ? null : await FromLayoutAsync(inner, ownsInner, unwrap, layout, options, cache, cancellationToken).ConfigureAwait(false);
+        if (reader is null)
+        {
+            cache.DropTrailer();
+        }
+
+        return reader;
+    }
+
+    /// <summary>What the trailer <paramref name="bytes"/> of an object of <paramref name="length"/> sealed bytes says; null for one that does not read.</summary>
+    private static SealedLayout? LayoutOf(ReadOnlySpan<byte> bytes, long length)
+    {
+        try
+        {
+            return SealedLayout.TrailerLength(bytes, length) == bytes.Length ? SealedLayout.Read(bytes, length) : null;
+        }
+        catch (VortexException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// The reader of an object whose trailer said <paramref name="layout"/>, with no read: the data key it names, and every
+    /// epoch's commitment checked as an open from the store checks them; null when they fail, the trailer then not the
+    /// object's.
+    /// </summary>
+    private static async ValueTask<SealedSegmentReader?> FromLayoutAsync(
+        ISegmentReader inner, bool ownsInner, Func<SealDescriptor, CancellationToken, ValueTask<DataKey>> unwrap, SealedLayout layout,
+        SegmentReadOptions? options, ISealedFrameCache? cache, CancellationToken cancellationToken)
+    {
         EpochCipher[] ciphers;
         try
         {
@@ -254,7 +293,6 @@ internal sealed class SealedSegmentReader : ISegmentReader
         }
         catch (VortexEncryptionException)
         {
-            cache.DropTrailer();
             return null;
         }
 

@@ -114,6 +114,102 @@ public sealed partial class DatasetKeyPruningTests
         }
     }
 
+    /// <summary>
+    /// Filters drawn at random over the key <c>(Service, At, Sequence)</c>, three columns as they are, on any component:
+    /// equalities, sets, ranges strict or not, contradictions, and conjuncts a box judged on its keys' bytes cannot hold.
+    /// Over an index of each coding, the exclusion search keeps the same granules whether its boxes are judged on their keys'
+    /// bytes or decoded for the summaries' pruner, where no two conjuncts read one column, and every granule a kept row lies
+    /// in. Two conjuncts on one column, which the bytes judge together, keep among the granules the decoded boxes keep, each
+    /// conjunct judged alone: an instant and a later one keep none.
+    /// </summary>
+    [Fact]
+    public async Task BoxesJudgedOnTheirBytesKeepWhatDecodedBoxesKeep()
+    {
+        DatasetSchema schema = await SchemaAsync(new DatasetLayout
+        {
+            SortKey = [LayoutValue.Column(nameof(Row.Service)), LayoutValue.Column(nameof(Row.At)), LayoutValue.Column(nameof(Row.Sequence))],
+            IndexedPrefix = 3,
+        });
+        Random random = new Random(66);
+        List<KeyRow> rows = [.. KeyRows(random, 3_000).OrderBy(static row => row.Service, StringComparer.Ordinal).ThenBy(static row => row.At).ThenBy(static row => row.Sequence)];
+        List<FilterLiteral[]> keys = [];
+        for (int row = 0; row < rows.Count; row += 4)
+        {
+            keys.Add(Plain(rows[row]));
+        }
+
+        using GranuleKeys index = Index(schema, keys, Plain(rows[^1]), granuleRows: 4, pageEntries: 8);
+        int[] widths = SortKey.Of(schema.Layout!, partition: false, 3).Widths.ToArray();
+        List<byte[]> narrowed = [.. keys.Select(key => Vorticity.RowEncoding.UnpaddedKeys.Narrow(Encode(schema, key), widths))];
+        (byte[] table, byte[] pages) = GranuleKeys.Build(
+            4, (long)keys.Count * 4, 3, narrowed, Vorticity.RowEncoding.UnpaddedKeys.Narrow(Encode(schema, Plain(rows[^1])), widths), 8, KeyCoding.UnpaddedTexts);
+        using GranuleKeys unpadded = GranuleKeys.From(table)!;
+        Assert.True(!unpadded.WantsPages || unpadded.TakePages(pages));
+        Assert.Equal(KeyCoding.UnpaddedTexts, unpadded.Coding);
+
+        int onBytes = 0;
+        int apart = 0;
+        for (int question = 0; question < 400; question++)
+        {
+            (string label, VortexExpr filter, Func<KeyRow, bool> keep, bool oneColumnTwice) = Drawn();
+            foreach (GranuleKeys searched in (GranuleKeys[])[index, unpadded])
+            {
+                KeyPruning pruning = KeyPruning.Of(schema, filter)!;
+                List<(int First, int End)> encoded = pruning.Excluded(searched, default);
+                List<(int First, int End)> decoded = pruning.Excluded(searched, default, decoded: true);
+                string said = $"{label} ({searched.Coding}): [{string.Join(", ", encoded)}] on the bytes, [{string.Join(", ", decoded)}] decoded";
+                HashSet<int> boxed = [.. decoded.SelectMany(static range => Enumerable.Range(range.First, range.End - range.First))];
+                Assert.True(oneColumnTwice ? encoded.TrueForAll(range => Enumerable.Range(range.First, range.End - range.First).All(boxed.Contains)) : encoded.SequenceEqual(decoded), said);
+                AssertKept(rows, searched, encoded, keep, label, edges: false);
+                onBytes += pruning.Intervals.Boxes is null ? 0 : 1;
+                apart += pruning.Intervals.Boxes is null || oneColumnTwice ? 0 : 1;
+            }
+        }
+
+        Assert.True(onBytes > 400 && apart > 200, $"{onBytes} searches of 800 judged their boxes on their bytes, {apart} of them on columns read once");
+
+        static FilterLiteral[] Plain(KeyRow row) => [FilterLiteral.From(row.Service), Micros(row.At), FilterLiteral.From(row.Sequence)];
+
+        // A conjunct or two on any of the three columns, and whether the two read one.
+        (string, VortexExpr, Func<KeyRow, bool>, bool) Drawn()
+        {
+            (string, VortexExpr, Func<KeyRow, bool>, string) first = Conjunct();
+            if (random.Next(0, 3) == 0)
+            {
+                return (first.Item1, first.Item2, first.Item3, false);
+            }
+
+            (string, VortexExpr, Func<KeyRow, bool>, string) second = Conjunct();
+            return ($"{first.Item1} and {second.Item1}", Expr.And(first.Item2, second.Item2), row => first.Item3(row) && second.Item3(row), first.Item4 == second.Item4);
+        }
+
+        (string, VortexExpr, Func<KeyRow, bool>, string) Conjunct()
+        {
+            KeyRow at = rows[random.Next(rows.Count)];
+            KeyRow other = rows[random.Next(rows.Count)];
+            string service = random.Next(0, 6) == 0 ? "svc-99" : at.Service;
+            DateTime from = at.At.AddMinutes(random.Next(-90, 30));
+            DateTime to = from.AddMinutes(random.Next(0, 240));
+            long sequence = at.Sequence;
+            return random.Next(0, 11) switch
+            {
+                0 => ($"Service == {service}", Eq(nameof(Row.Service), FilterLiteral.From(service)), row => row.Service == service, nameof(Row.Service)),
+                1 => ($"Service in ({service}, {other.Service})", Expr.In(Expr.Field(nameof(Row.Service)), [FilterLiteral.From(service), FilterLiteral.From(other.Service)]),
+                    row => row.Service == service || row.Service == other.Service, nameof(Row.Service)),
+                2 => ($"Service > {service}", Expr.Gt(Expr.Field(nameof(Row.Service)), Expr.Literal(FilterLiteral.From(service))), row => string.CompareOrdinal(row.Service, service) > 0, nameof(Row.Service)),
+                3 => ($"Service <= {service}", Expr.Le(Expr.Field(nameof(Row.Service)), Expr.Literal(FilterLiteral.From(service))), row => string.CompareOrdinal(row.Service, service) <= 0, nameof(Row.Service)),
+                4 => ($"At in [{from:HH:mm}, {to:HH:mm})", Expr.And(Ge(nameof(Row.At), Micros(from)), Lt(nameof(Row.At), Micros(to))), row => row.At >= from && row.At < to, nameof(Row.At)),
+                5 => ($"At == {at.At:HH:mm:ss.fffffff}", Eq(nameof(Row.At), Micros(at.At)), row => row.At == at.At, nameof(Row.At)),
+                6 => ($"At > {from:HH:mm}", Expr.Gt(Expr.Field(nameof(Row.At)), Expr.Literal(Micros(from))), row => row.At > from, nameof(Row.At)),
+                7 => ($"Sequence >= {sequence}", Expr.Ge(Expr.Field(nameof(Row.Sequence)), Expr.Literal(FilterLiteral.From(sequence))), row => row.Sequence >= sequence, nameof(Row.Sequence)),
+                8 => ($"Sequence in ({sequence}, {other.Sequence})", Expr.In(Expr.Field(nameof(Row.Sequence)), [FilterLiteral.From(sequence), FilterLiteral.From(other.Sequence)]),
+                    row => row.Sequence == sequence || row.Sequence == other.Sequence, nameof(Row.Sequence)),
+                9 => ($"Sequence < {sequence}", Expr.Lt(Expr.Field(nameof(Row.Sequence)), Expr.Literal(FilterLiteral.From(sequence))), row => row.Sequence < sequence, nameof(Row.Sequence)),
+                _ => ($"Service != {other.Service}", Expr.Not(Eq(nameof(Row.Service), FilterLiteral.From(other.Service))), row => row.Service != other.Service, nameof(Row.Service)),
+            };
+        }
+    }
+
     /// <summary>The key of <see cref="KeyRow"/>s: the service, the hour of the instant, the sequence.</summary>
     private static DatasetLayout KeyLayout => new DatasetLayout
     {

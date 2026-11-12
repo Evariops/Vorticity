@@ -2,6 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.Runtime.ExceptionServices;
 using System.Threading;
+using System.Threading.Tasks;
+using System.Threading.Tasks.Sources;
 using Vorticity.Arrays;
 using Vorticity.File;
 using Vorticity.Parquet.Codecs;
@@ -21,7 +23,7 @@ namespace Vorticity.Parquet.Reading;
 /// batches released given back. A lane takes a field it decoded last, of the earliest batch it has
 /// one of, before another's: the field's dictionary and the blocks its contexts keep from batch to
 /// batch lie in that thread's cache. Else it takes the field of the earliest batch that may run. The
-/// read waits for every field of the batch it asks for, rethrows the first error one met, and
+/// read awaits every field of the batch it asks for, rethrows the first error one met, and
 /// releases each batch as it asks for the next.
 /// </para>
 /// <para>
@@ -30,11 +32,23 @@ namespace Vorticity.Parquet.Reading;
 /// batch of which is released before the group ends: the batches the page index leaves, each field
 /// stepping over those it rules out before each of its own.
 /// </para>
+/// <para>
+/// No thread waits. The read awaits its batch (<see cref="WaitAsync"/>) and the lanes' end
+/// (<see cref="FinishAsync"/>), the pipeline itself the source of what it awaits, and goes on on the
+/// lane that completes it. A field whose next batch begins in a page a lane of the scan still
+/// decompresses is put aside until that lane is done, which resumes it: its own lane, still counted,
+/// gives its thread back to the pool meanwhile, as many lanes at work or waiting as when a lane
+/// waited on its thread.
+/// </para>
 /// </remarks>
-internal sealed class FieldPipeline : IThreadPoolWorkItem, IDisposable
+internal sealed class FieldPipeline : IThreadPoolWorkItem, IValueTaskSource<int>, IDisposable
 {
     /// <summary>The batches of a field decoded ahead of the read's, the one it holds included.</summary>
     internal const int Slots = 2;
+
+    // What the read awaits: a batch's slot, every field of it decoded; the lanes' end; or nothing.
+    private const int Nothing = -1;
+    private const int Ending = -2;
 
     private readonly ColumnChunkReader[] _readers;
     private readonly PageLanes? _pages;
@@ -49,7 +63,7 @@ internal sealed class FieldPipeline : IThreadPoolWorkItem, IDisposable
     private readonly int[] _pending = new int[Slots];
     private readonly ExceptionDispatchInfo?[] _errors = new ExceptionDispatchInfo?[Slots];
 
-    /// <summary>The first error a field met, after which its later batches are not decoded: any batch waited for then rethrows it.</summary>
+    /// <summary>The first error a field met, after which its later batches are not decoded: any batch awaited then rethrows it.</summary>
     private ExceptionDispatchInfo? _failed;
     private readonly List<int> _runnable = [];
     private readonly object _gate = new();
@@ -63,6 +77,18 @@ internal sealed class FieldPipeline : IThreadPoolWorkItem, IDisposable
     private (int Skip, int Rows)[] _steps = [];
     private int _released;
     private bool _stopping;
+
+    // What the read awaits, completed past the gate by whichever lane makes it due, which runs the read on, holding no field
+    // meanwhile: the read handed to a thread of the pool's after each batch it awaited took 15.6 ms against 15.1 to scan
+    // five zstd columns (v1 pages) at sixteen lanes.
+    private ManualResetValueTaskSourceCore<int> _ready;
+    private int _awaited = Nothing;
+
+    /// <summary>The fields put aside until a lane finishes the page their next batch begins in.</summary>
+    private int _parked;
+
+    /// <summary>Per field, what makes it runnable again once that page is done.</summary>
+    private readonly Action[] _resume;
 
     /// <summary>
     /// A pipeline of <paramref name="readers"/>, a field each, on <paramref name="lanes"/> lanes at most,
@@ -83,6 +109,12 @@ internal sealed class FieldPipeline : IThreadPoolWorkItem, IDisposable
         _next = new int[readers.Length];
         _idle = new bool[readers.Length];
         _thread = new int[readers.Length];
+        _resume = new Action[readers.Length];
+        for (int field = 0; field < readers.Length; field++)
+        {
+            int resumed = field;
+            _resume[field] = () => Resume(resumed);
+        }
     }
 
     /// <summary>
@@ -127,15 +159,20 @@ internal sealed class FieldPipeline : IThreadPoolWorkItem, IDisposable
         Queue(wake);
     }
 
-    /// <summary>Waits for every field of batch <paramref name="batch"/>; the slot its nodes lie in.</summary>
-    internal int Wait(int batch)
+    /// <summary>
+    /// Completes once every field of batch <paramref name="batch"/> is decoded, with the slot its nodes lie in; rethrows
+    /// the first error a field met.
+    /// </summary>
+    internal ValueTask<int> WaitAsync(int batch)
     {
         int slot = batch % Slots;
         lock (_gate)
         {
-            while (_pending[slot] > 0 && _failed is null)
+            if (_pending[slot] > 0 && _failed is null)
             {
-                Monitor.Wait(_gate);
+                _ready.Reset();
+                _awaited = slot;
+                return new ValueTask<int>(this, _ready.Version);
             }
 
             if (_pending[slot] > 0)
@@ -144,7 +181,7 @@ internal sealed class FieldPipeline : IThreadPoolWorkItem, IDisposable
             }
 
             _errors[slot]?.Throw();
-            return slot;
+            return new ValueTask<int>(slot);
         }
     }
 
@@ -185,26 +222,156 @@ internal sealed class FieldPipeline : IThreadPoolWorkItem, IDisposable
     }
 
     /// <summary>
-    /// Ends the decode: the lanes waited for, the fields' pages held given back. Every batch the read
-    /// asked for must be released first.
+    /// Ends the decode: the lanes awaited, and the fields put aside, then the fields' pages held given
+    /// back. Every batch the read asked for must be released first.
     /// </summary>
-    internal void Finish()
+    internal ValueTask FinishAsync()
     {
         lock (_gate)
         {
             _stopping = true;
             _runnable.Clear();
-            while (_runners > 0)
+            if (_runners > 0 || _parked > 0)
             {
-                Monitor.Wait(_gate);
+                _ready.Reset();
+                _awaited = Ending;
+                return EndAsync(new ValueTask<int>(this, _ready.Version));
             }
         }
 
+        Ended();
+        return default;
+    }
+
+    private async ValueTask EndAsync(ValueTask<int> lanes)
+    {
+        await lanes.ConfigureAwait(false);
+        Ended();
+    }
+
+    /// <summary>The fields' pages held given back, no lane at work.</summary>
+    private void Ended()
+    {
         foreach (ColumnChunkReader reader in _readers)
         {
             reader.ReleaseHeld(long.MaxValue);
             reader.HoldsRetired = false;
         }
+    }
+
+    int IValueTaskSource<int>.GetResult(short token) => _ready.GetResult(token);
+
+    ValueTaskSourceStatus IValueTaskSource<int>.GetStatus(short token) => _ready.GetStatus(token);
+
+    void IValueTaskSource<int>.OnCompleted(Action<object?> continuation, object? state, short token, ValueTaskSourceOnCompletedFlags flags) =>
+        _ready.OnCompleted(continuation, state, token, flags);
+
+    /// <summary>
+    /// Under the gate: whether what the read awaits is due, cleared then, with the slot it completes with or the error it
+    /// rethrows.
+    /// </summary>
+    private bool Due(out int slot, out ExceptionDispatchInfo? error)
+    {
+        slot = _awaited;
+        error = null;
+        if (slot >= 0)
+        {
+            if (_pending[slot] > 0 && _failed is null)
+            {
+                return false;
+            }
+
+            error = _pending[slot] > 0 ? _failed : _errors[slot];
+        }
+        else if (slot != Ending || _runners > 0 || _parked > 0)
+        {
+            return false;
+        }
+
+        _awaited = Nothing;
+        return true;
+    }
+
+    /// <summary>Completes what the read awaits, past the gate.</summary>
+    private void Complete(int slot, ExceptionDispatchInfo? error)
+    {
+        if (error is not null)
+        {
+            _ready.SetException(error.SourceException);
+        }
+        else
+        {
+            _ready.SetResult(slot);
+        }
+    }
+
+    /// <summary>
+    /// Puts field <paramref name="field"/> aside when its next batch begins in a page a lane still decompresses, the read
+    /// being unable to await it: runnable again once the lane is done (<see cref="Resume"/>). Whether it did.
+    /// </summary>
+    private bool Park(int field)
+    {
+        if (_pages is null)
+        {
+            return false;
+        }
+
+        ColumnChunkReader reader = _readers[field];
+        (int skip, int rows) = _steps[_next[field]];
+        if (reader.Unready(skip + rows) is not { } page)
+        {
+            return false;
+        }
+
+        // Counted aside before the lane can finish and resume it.
+        lock (_gate)
+        {
+            _parked++;
+        }
+
+        if (page.OnFinished(_resume[field]))
+        {
+            reader.Counters?.AddAwaited();
+            return true;
+        }
+
+        // Done meanwhile: the field goes now.
+        lock (_gate)
+        {
+            _parked--;
+        }
+
+        return false;
+    }
+
+    /// <summary>The page field <paramref name="field"/> was put aside for is done: the field runnable again, unless the decode ends.</summary>
+    private void Resume(int field)
+    {
+        int wake;
+        bool due;
+        int slot;
+        ExceptionDispatchInfo? error;
+        lock (_gate)
+        {
+            // The lane the field was put aside with, still counted among the runners, starts again.
+            _parked--;
+            _starting++;
+            if (!_stopping)
+            {
+                _runnable.Add(field);
+            }
+
+            wake = Wake();
+            due = Due(out slot, out error);
+        }
+
+        if (due)
+        {
+            Complete(slot, error);
+        }
+
+        Queue(1, here: true);
+        Queue(wake);
     }
 
     /// <summary>
@@ -228,6 +395,9 @@ internal sealed class FieldPipeline : IThreadPoolWorkItem, IDisposable
                     continue;
                 }
 
+                bool due = false;
+                int slot = 0;
+                ExceptionDispatchInfo? error = null;
                 lock (_gate)
                 {
                     if (fresh)
@@ -240,10 +410,27 @@ internal sealed class FieldPipeline : IThreadPoolWorkItem, IDisposable
                     if (field < 0)
                     {
                         _runners--;
-                        Monitor.PulseAll(_gate);
-                        return;
+                        due = Due(out slot, out error);
                     }
                 }
+
+                if (field < 0)
+                {
+                    if (due)
+                    {
+                        Complete(slot, error);
+                    }
+
+                    return;
+                }
+            }
+
+            // A field whose next batch begins in a page a lane still decompresses waits aside for it, and the lane leaves
+            // its thread to the pool, still counted: the scan's degree is the lanes at work or waiting, as when a lane
+            // waited on its thread, and the field's resume takes the lane up again.
+            if (Park(field))
+            {
+                return;
             }
 
             field = Decode(field, thread);
@@ -292,6 +479,9 @@ internal sealed class FieldPipeline : IThreadPoolWorkItem, IDisposable
 
         int wake;
         int next = -1;
+        bool due;
+        int ready;
+        ExceptionDispatchInfo? failed;
         lock (_gate)
         {
             _next[field] = batch + 1;
@@ -299,7 +489,6 @@ internal sealed class FieldPipeline : IThreadPoolWorkItem, IDisposable
             {
                 _errors[slot] ??= error;
                 _failed ??= error;
-                Monitor.PulseAll(_gate);
             }
             else if (batch + 1 < _batches)
             {
@@ -313,12 +502,11 @@ internal sealed class FieldPipeline : IThreadPoolWorkItem, IDisposable
                 }
             }
 
-            if (--_pending[slot] == 0)
-            {
-                Monitor.PulseAll(_gate);
-            }
+            _pending[slot]--;
+            due = Due(out ready, out failed);
 
-            if (!_stopping && _pages?.Waiting != true)
+            // The lane that completes what the read awaits runs the read on, on its thread, and holds no field meanwhile.
+            if (!due && !_stopping && _pages?.Waiting != true)
             {
                 next = Take(thread);
             }
@@ -327,6 +515,11 @@ internal sealed class FieldPipeline : IThreadPoolWorkItem, IDisposable
         }
 
         Queue(wake);
+        if (due)
+        {
+            Complete(ready, failed);
+        }
+
         return next;
     }
 
@@ -382,12 +575,16 @@ internal sealed class FieldPipeline : IThreadPoolWorkItem, IDisposable
         return wake;
     }
 
-    /// <summary>Queues <paramref name="lanes"/> lanes on the pool, past the gate: a queue may wake a thread, microseconds the gate would be held for.</summary>
-    private void Queue(int lanes)
+    /// <summary>
+    /// Queues <paramref name="lanes"/> lanes on the pool, past the gate: a queue may wake a thread, microseconds the gate
+    /// would be held for. <paramref name="here"/>: for a field the lane that finished its page resumed, on that thread's own
+    /// queue, which it runs next with the page in its cache, rather than behind the pages queued for the pool's.
+    /// </summary>
+    private void Queue(int lanes, bool here = false)
     {
         for (int i = 0; i < lanes; i++)
         {
-            ThreadPool.UnsafeQueueUserWorkItem(this, preferLocal: false);
+            ThreadPool.UnsafeQueueUserWorkItem(this, preferLocal: here);
         }
     }
 }

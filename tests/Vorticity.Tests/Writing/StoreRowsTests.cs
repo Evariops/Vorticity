@@ -4,6 +4,7 @@ using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
+using Vorticity.Buffers;
 using Vorticity.Scanning;
 using Vorticity.Types;
 using Vorticity.Writing;
@@ -76,6 +77,54 @@ public sealed partial class StoreRowsTests
         finally
         {
             System.IO.File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void ATextThatIsNotUtf8LeavesTheRowsBeforeItWithTheirNulls()
+    {
+        // "a", null, "b", null, then bytes that are not UTF-8, then "c": the append refuses the fifth row and keeps the four
+        // before it, their nulls marked as an append of each row would have left them, not empty texts.
+        DTypeArena types = new DTypeArena();
+        DType utf8 = types.Utf8(Nullability.Nullable);
+        byte[][] texts = [[(byte)'a'], [], [(byte)'b'], [], [0xFF, 0xFE], [(byte)'c']];
+        bool[] present = [true, false, true, false, true, true];
+        CanonicalArena arena = new CanonicalArena();
+        VortexBuffer views = arena.Allocate(texts.Length * 16, 16, out Span<byte> viewBytes);
+        VortexBuffer bits = arena.Allocate(8, 8, out Span<byte> bitBytes);
+        bitBytes.Clear();
+        viewBytes.Clear();
+        for (int row = 0; row < texts.Length; row++)
+        {
+            System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(viewBytes[(row * 16)..], texts[row].Length);
+            texts[row].CopyTo(viewBytes[((row * 16) + 4)..]);
+            bitBytes[row >> 3] |= present[row] ? (byte)(1 << (row & 7)) : (byte)0;
+        }
+
+        int valid = arena.AddBool(types.Bool(Nullability.NonNullable), texts.Length, Validity.NonNullable, bits, 0);
+        int node = arena.AddVarBinView(utf8, texts.Length, Validity.Bitmap(valid), views, []);
+        VortexSessionOptions options = VortexSession.Default.Options;
+        ColumnStore store = ColumnStores.Create(utf8, options.EnginePool, options.Extensions);
+        try
+        {
+            Assert.Throws<VortexSchemaException>(() => StoreRows.Append(store, arena, node));
+            Assert.Equal(4, store.Rows);
+            CanonicalArena built = new CanonicalArena(16, options.EnginePool);
+            try
+            {
+                // No words, every row valid.
+                ReadOnlySpan<ulong> kept = ArenaWords.Validity(built, store.Build(built, 4));
+                Assert.Equal(0b0101UL, (kept.IsEmpty ? ulong.MaxValue : kept[0]) & 0b1111UL);
+            }
+            finally
+            {
+                built.Reset();
+            }
+        }
+        finally
+        {
+            store.Release();
+            arena.Reset();
         }
     }
 

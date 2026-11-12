@@ -1,5 +1,6 @@
 using System;
 using System.Buffers.Binary;
+using Vorticity.Aggregating;
 
 namespace Vorticity.Indexes;
 
@@ -72,11 +73,8 @@ internal sealed class BinaryFuse8
             return filter;
         }
 
-        ulong[] order = new ulong[size + 1];
-        uint[] alone = new uint[arrayLength];
-        byte[] counts = new byte[arrayLength];
-        byte[] found = new byte[size];
-        ulong[] xors = new ulong[arrayLength];
+        // The working arrays rented, the fingerprints alone the filter's: made for every filter, they were 1.5 MB of a
+        // filter of 65,536 keys.
         int blockBits = 1;
         while ((1u << blockBits) < segmentCount)
         {
@@ -84,7 +82,37 @@ internal sealed class BinaryFuse8
         }
 
         uint block = 1u << blockBits;
-        uint[] starts = new uint[block];
+        ulong[] orderArray = WorkArrays.Rent<ulong>(size + 1);
+        uint[] aloneArray = WorkArrays.Rent<uint>((int)arrayLength);
+        byte[] countsArray = WorkArrays.Rent<byte>((int)arrayLength);
+        byte[] foundArray = WorkArrays.Rent<byte>(size);
+        ulong[] xorsArray = WorkArrays.Rent<ulong>((int)arrayLength);
+        uint[] startsArray = WorkArrays.Rent<uint>((int)block);
+        try
+        {
+            return Place(keys, filter, fingerprints, seed, counter, blockBits, arrayLength, orderArray, aloneArray, countsArray, foundArray, xorsArray, startsArray);
+        }
+        finally
+        {
+            WorkArrays.Return(orderArray);
+            WorkArrays.Return(aloneArray);
+            WorkArrays.Return(countsArray);
+            WorkArrays.Return(foundArray);
+            WorkArrays.Return(xorsArray);
+            WorkArrays.Return(startsArray);
+        }
+    }
+
+    /// <summary>
+    /// The keys placed by <see cref="Build"/>, a seed after another, in its working arrays, rented and so longer than the
+    /// <paramref name="arrayLength"/> slots and the keys they serve; null when no seed places them.
+    /// </summary>
+    private static BinaryFuse8? Place(
+        ReadOnlySpan<ulong> keys, BinaryFuse8 filter, byte[] fingerprints, ulong seed, ulong counter, int blockBits, uint arrayLength,
+        ulong[] order, uint[] alone, byte[] counts, byte[] found, ulong[] xors, uint[] starts)
+    {
+        int size = keys.Length;
+        uint block = 1u << blockBits;
         Span<uint> slots = stackalloc uint[5];
         int placed = 0;
         for (int attempt = 0; ; attempt++)
@@ -94,9 +122,9 @@ internal sealed class BinaryFuse8
                 return null;
             }
 
-            Array.Clear(order);
-            Array.Clear(counts);
-            Array.Clear(xors);
+            Array.Clear(order, 0, size + 1);
+            Array.Clear(counts, 0, (int)arrayLength);
+            Array.Clear(xors, 0, (int)arrayLength);
             order[size] = 1;
             for (uint i = 0; i < block; i++)
             {
@@ -190,7 +218,7 @@ internal sealed class BinaryFuse8
             seed = SplitMix(ref counter);
         }
 
-        filter = new BinaryFuse8(seed, segmentLength, segmentCount, fingerprints);
+        filter = new BinaryFuse8(seed, filter._segmentLength, filter.SegmentCount, fingerprints);
         for (int i = placed - 1; i >= 0; i--)
         {
             ulong hash = order[i];

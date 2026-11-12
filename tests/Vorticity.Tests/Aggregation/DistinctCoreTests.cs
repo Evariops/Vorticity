@@ -175,6 +175,88 @@ public sealed partial class DistinctCoreTests
         }
     }
 
+    /// <summary>
+    /// A reader slower than the appliers, the batches it may have waiting bounded to 64 KiB: the appliers wait for it
+    /// rather than pile the result up in the channel, uncounted; each value told once, every tranche given back.
+    /// </summary>
+    [Theory]
+    [InlineData(4)]
+    [InlineData(14)]
+    public async Task AReaderSlowerThanTheAppliersHoldsThemToTheirBound(int degree)
+    {
+        (Row[] rows, string path) = await WriteAsync();
+        try
+        {
+            QueryMemoryBudget budget = new QueryMemoryBudget(1L << 30);
+            await using VortexSession session = VortexSession.Create(options =>
+            {
+                options.MaxDegreeOfParallelism = degree;
+                options.MemoryBudget = budget;
+            });
+
+            await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
+            const long Bound = 64 << 10;
+            Aggregation<long?> keys = file.Scan<Row>().With(new ScanOptions { BatchRows = 1_024 }).Select(r => r.Key).Distinct();
+            DistinctQuery query = (DistinctQuery)keys.Query;
+            query.Plan.EmittedBytes = Bound;
+            HashSet<long?> read = [];
+            int count = 0;
+            await foreach (long? key in keys.WithCancellation(Ct))
+            {
+                Assert.True(read.Add(key), $"{key} told twice");
+                if (++count % 8_192 == 0)
+                {
+                    await Task.Delay(5, Ct);
+                }
+            }
+
+            Assert.True(read.SetEquals(rows.Select(r => r.Key)));
+            Assert.NotNull(query.LastCore);
+
+            // A batch is 1,024 values of eight bytes and their validity; each applier may pass the bound by one.
+            Assert.InRange(query.PeakEmitted, 1, Bound + (degree * (16L << 10)));
+            Assert.Equal(0, budget.ReservedBytes);
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
+    /// <summary>A reader that stops while the appliers wait for it to read: the pass stops, every tranche given back.</summary>
+    [Fact]
+    public async Task AReaderThatStopsWhileTheAppliersWaitStopsThePass()
+    {
+        (_, string path) = await WriteAsync();
+        try
+        {
+            QueryMemoryBudget budget = new QueryMemoryBudget(1L << 30);
+            await using VortexSession session = VortexSession.Create(options =>
+            {
+                options.MaxDegreeOfParallelism = 14;
+                options.MemoryBudget = budget;
+            });
+
+            await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
+            Aggregation<long?> keys = file.Scan<Row>().With(new ScanOptions { BatchRows = 1_024 }).Select(r => r.Key).Distinct();
+            DistinctQuery query = (DistinctQuery)keys.Query;
+            query.Plan.EmittedBytes = 16 << 10;
+            await foreach (long? _ in keys.WithCancellation(Ct))
+            {
+                // The appliers fill the bound meanwhile, then wait.
+                await Task.Delay(50, Ct);
+                break;
+            }
+
+            Assert.InRange(query.PeakEmitted, 1, (16 << 10) + (14 * (16L << 10)));
+            Assert.Equal(0, budget.ReservedBytes);
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
     /// <summary>What the values reserve at most on the reader's thread alone, its budget large.</summary>
     private static async Task<long> PeakAsync(string path, int degree)
     {

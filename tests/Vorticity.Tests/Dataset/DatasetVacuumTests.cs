@@ -118,6 +118,31 @@ public sealed class DatasetVacuumTests
         Assert.Equal(0, store.CountOf(ObjectOperation.Head));
     }
 
+    // The retained commits are opened a batch at a time side by side: when the first one marked fails to open, the vacuum
+    // fails once the others opened beside it are done, none of its reads left in flight.
+    [Fact]
+    public async Task AVacuumThatFailsToOpenACommitLeavesNoReadInFlight()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Decoders.EnsureRegistered();
+        DTypeArena types = new DTypeArena();
+        DType schema = Schema(types);
+        ManualClock clock = new ManualClock(new DateTimeOffset(2026, 9, 18, 12, 0, 0, TimeSpan.Zero));
+        await using MemoryObjectStore inner = new MemoryObjectStore { TimeProvider = clock };
+        await using FailingCommitStore store = new FailingCommitStore(inner);
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Options(), ct);
+        for (int i = 0; i < Objects; i++)
+        {
+            await dataset.AppendAsync(Of(types, schema, i * PerObject, PerObject), ct);
+        }
+
+        // Every version is inside the window: the latest is marked from the head, the one before it is the first opened.
+        store.Failing = CommitKey.For(dataset.Version - 1);
+        await Assert.ThrowsAsync<System.IO.IOException>(async () => await dataset.VacuumAsync(new VacuumOptions { TimeProvider = clock }, ct));
+        Assert.True(store.Delayed > 0);
+        Assert.Equal(0, store.InFlight);
+    }
+
     [Fact]
     public async Task AHandleWhoseVersionWasSweptRefreshesToTheLatestAndCommitsOnIt()
     {
@@ -503,5 +528,51 @@ public sealed class DatasetVacuumTests
         using RecordBatch batch = new RecordBatch(arena, root, 0);
         yield return batch;
         await Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// A store that, once <see cref="Failing"/> names a commit, fails every read of that one and holds every read of another
+    /// commit a while, counting those in flight.
+    /// </summary>
+    private sealed class FailingCommitStore(IObjectStore inner) : ForwardingStore(inner)
+    {
+        private int _inFlight;
+        private int _delayed;
+
+        internal string? Failing { get; set; }
+
+        internal int InFlight => Volatile.Read(ref _inFlight);
+
+        internal int Delayed => Volatile.Read(ref _delayed);
+
+        public override ValueTask<ObjectRead> ReadAsync(string key, long offset, Memory<byte> destination, string? ifToken, CancellationToken cancellationToken) =>
+            Failing is null || !key.StartsWith(CommitKey.Prefix, StringComparison.Ordinal)
+                ? Inner.ReadAsync(key, offset, destination, ifToken, cancellationToken)
+                : HeldAsync(key, () => Inner.ReadAsync(key, offset, destination, ifToken, cancellationToken));
+
+        public override ValueTask<ObjectRead> ReadTailAsync(string key, Memory<byte> destination, CancellationToken cancellationToken) =>
+            Failing is null || !key.StartsWith(CommitKey.Prefix, StringComparison.Ordinal)
+                ? Inner.ReadTailAsync(key, destination, cancellationToken)
+                : HeldAsync(key, () => Inner.ReadTailAsync(key, destination, cancellationToken));
+
+        private async ValueTask<ObjectRead> HeldAsync(string key, Func<ValueTask<ObjectRead>> read)
+        {
+            if (string.Equals(key, Failing, StringComparison.Ordinal))
+            {
+                throw new System.IO.IOException($"The store failed to read '{key}'.");
+            }
+
+            Interlocked.Increment(ref _inFlight);
+            Interlocked.Increment(ref _delayed);
+            try
+            {
+                await Task.Delay(200).ConfigureAwait(false);
+                return await read().ConfigureAwait(false);
+            }
+            finally
+            {
+                Interlocked.Decrement(ref _inFlight);
+            }
+        }
     }
 }

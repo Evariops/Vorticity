@@ -60,8 +60,12 @@ internal abstract class StateTable
         return KeyOf(row, column, out value);
     }
 
-    /// <summary>The batch of states of rows <c>[start, start + count)</c>, built in <paramref name="arena"/>, its rows counted from <paramref name="firstRow"/>.</summary>
-    internal RecordBatch Batch(CanonicalArena arena, int start, int count, long firstRow)
+    /// <summary>
+    /// The batch of states of rows <c>[start, start + count)</c>, built in <paramref name="arena"/>, its rows counted from
+    /// <paramref name="firstRow"/>: bound into <paramref name="spare"/>, the stream's previous batch of states, disposed,
+    /// when there is one.
+    /// </summary>
+    internal RecordBatch Batch(CanonicalArena arena, int start, int count, long firstRow, RecordBatch? spare = null)
     {
         Span<int> nodes = stackalloc int[_type.FieldCount];
         int at = 0;
@@ -93,7 +97,7 @@ internal abstract class StateTable
         }
 
         int root = arena.AddStruct(_type, count, Validity.NonNullable, nodes);
-        return RecordBatch.OfStates(arena, root, firstRow);
+        return RecordBatch.OfStates(arena, root, firstRow, spare);
     }
 
     /// <summary>A column of one word of each row's states.</summary>

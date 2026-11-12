@@ -45,6 +45,9 @@ internal sealed class ObjectSegmentSink : ISegmentSink, IAsyncDisposable
     /// </summary>
     internal const long DefaultStreamedFromBytes = 32L << 20;
 
+    /// <summary>The most bytes of a streamed object's tail the sink keeps a copy of; past them, it is read back once put.</summary>
+    internal const int MostTailBytes = 16 << 20;
+
     /// <summary>The bytes a pipe to the store holds before the writer waits.</summary>
     private const int PipeBytes = 4 * ChunkBytes;
 
@@ -82,6 +85,21 @@ internal sealed class ObjectSegmentSink : ISegmentSink, IAsyncDisposable
 
     /// <summary>The bytes written into the last chunk.</summary>
     private int _used;
+
+    /// <summary>
+    /// Where the file's tail starts (<see cref="KeepTail"/>), -1 before it is marked or once it passes
+    /// <see cref="MostTailBytes"/>; and the copy of it a streamed object keeps, from the pool, with its bytes.
+    /// </summary>
+    private long _tailFrom = -1;
+    private byte[]? _tail;
+    private int _tailUsed;
+
+    /// <summary>
+    /// The last bytes a streamed object was sent before its tail was marked, those an open reads from the boundary of an
+    /// alignment before the tail's first structure: the tail's copy starts with them.
+    /// </summary>
+    private readonly byte[] _recent = new byte[VortexLimits.MaxAlignment];
+    private int _recentUsed;
     private bool _committed;
     private bool _closed;
     private bool _released;
@@ -207,9 +225,22 @@ internal sealed class ObjectSegmentSink : ISegmentSink, IAsyncDisposable
             _pipe = new Pipe(new PipeOptions(
                 pool: _pool, pauseWriterThreshold: PipeBytes, resumeWriterThreshold: PipeBytes / 2, minimumSegmentSize: ChunkBytes, useSynchronizationContext: false));
             _put = PutStreamedAsync(_pipe.Reader);
+            long at = 0;
             for (int chunk = 0; chunk < _chunks.Count; chunk++)
             {
-                await SendAsync(Held(chunk), cancellationToken).ConfigureAwait(false);
+                // The part of the tail the sink held before it streamed, copied as it goes.
+                ReadOnlyMemory<byte> held = Held(chunk);
+                if (_tailFrom >= 0 && at + held.Length > _tailFrom)
+                {
+                    KeepCopy(held.Span[(int)Math.Max(_tailFrom - at, 0)..]);
+                }
+                else if (_tailFrom < 0)
+                {
+                    Recent(held.Span);
+                }
+
+                at += held.Length;
+                await SendAsync(held, cancellationToken).ConfigureAwait(false);
             }
 
             foreach (IMemoryOwner<byte> chunk in _chunks)
@@ -223,7 +254,91 @@ internal sealed class ObjectSegmentSink : ISegmentSink, IAsyncDisposable
 
         _hash.Append(data.Span);
         _written += data.Length;
+        if (_tailFrom >= 0)
+        {
+            KeepCopy(data.Span);
+        }
+        else
+        {
+            Recent(data.Span);
+        }
+
         await SendAsync(data, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <inheritdoc/>
+    public void KeepTail()
+    {
+        ObjectDisposedException.ThrowIf(_released, this);
+        if (_pipe is null)
+        {
+            // Held still: the copy starts where the bytes are, from an alignment's worth before the tail.
+            _tailFrom = Math.Max(_written - _recent.Length, 0);
+            return;
+        }
+
+        _tailFrom = _written - _recentUsed;
+        KeepCopy(_recent.AsSpan(0, _recentUsed));
+    }
+
+    /// <summary>Keeps the last bytes of <paramref name="data"/>, sent before the tail, in <see cref="_recent"/>.</summary>
+    private void Recent(ReadOnlySpan<byte> data)
+    {
+        if (data.Length >= _recent.Length)
+        {
+            data[^_recent.Length..].CopyTo(_recent);
+            _recentUsed = _recent.Length;
+            return;
+        }
+
+        int kept = Math.Min(_recentUsed, _recent.Length - data.Length);
+        _recent.AsSpan(_recentUsed - kept, kept).CopyTo(_recent);
+        data.CopyTo(_recent.AsSpan(kept));
+        _recentUsed = kept + data.Length;
+    }
+
+    /// <summary>
+    /// A source over the file's tail a streamed object kept a copy of (<see cref="KeepTail"/>), as long as the file, which
+    /// reads that tail alone: what an open reads, so that the dataset reads the file's statistics without reading the
+    /// object back once put. Null when the object is held, or kept no tail. A read past the tail throws
+    /// <see cref="TailMissedException"/>. Not to be used once <see cref="CommitAsync"/> or <see cref="Discard"/> released it,
+    /// nor beside them: the tail is an array of the shared pool, which they give back. A segment read before is the bytes
+    /// copied out of it (<see cref="SourceReader"/> copies a lease over a managed array), and outlives the sink.
+    /// </summary>
+    internal ISegmentReader? Tail(Buffers.AlignedBufferPool pool) =>
+        _pipe is not null && _tailFrom >= 0 && _tail is not null && !_released
+            ? new TailReader(new SourceReader(new TailSource(this), ownsSource: true, pool), _tailUsed)
+            : null;
+
+    /// <summary>Adds <paramref name="data"/> to the tail's copy, which it gives up past <see cref="MostTailBytes"/>.</summary>
+    private void KeepCopy(ReadOnlySpan<byte> data)
+    {
+        if (_tailUsed + (long)data.Length > MostTailBytes)
+        {
+            ReleaseTail();
+            _tailFrom = -1;
+            return;
+        }
+
+        if (_tail is null || _tailUsed + data.Length > _tail.Length)
+        {
+            byte[] grown = ArrayPool<byte>.Shared.Rent(Math.Max(_tailUsed + data.Length, Math.Max((_tail?.Length ?? 0) * 2, 64 << 10)));
+            _tail?.AsSpan(0, _tailUsed).CopyTo(grown);
+            ReleaseTail();
+            _tail = grown;
+        }
+
+        data.CopyTo(_tail.AsSpan(_tailUsed));
+        _tailUsed += data.Length;
+    }
+
+    private void ReleaseTail()
+    {
+        if (_tail is not null)
+        {
+            ArrayPool<byte>.Shared.Return(_tail);
+            _tail = null;
+        }
     }
 
     /// <summary>
@@ -402,6 +517,7 @@ internal sealed class ObjectSegmentSink : ISegmentSink, IAsyncDisposable
         }
 
         _chunks.Clear();
+        ReleaseTail();
     }
 
     /// <summary>One chunk of the sequence <see cref="Bytes"/> hands the store.</summary>
@@ -460,4 +576,73 @@ internal sealed class ObjectSegmentSink : ISegmentSink, IAsyncDisposable
             return new SegmentLease(_bytes.Slice(offset, length));
         }
     }
+
+    /// <summary>
+    /// A streamed object's tail as a file to open (<see cref="Tail"/>): as long as the file, a range of the tail handed out
+    /// in place, any other refused.
+    /// </summary>
+    private sealed class TailSource(ObjectSegmentSink sink) : ISegmentSource
+    {
+        public long Length => sink._written;
+
+        public ValueTask<SegmentLease> ReadAsync(SegmentRange range, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return new ValueTask<SegmentLease>(Lease(range));
+        }
+
+        public ValueTask ReadAsync(ReadOnlyMemory<SegmentRange> ranges, Memory<SegmentLease> leases, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            ReadOnlySpan<SegmentRange> wanted = ranges.Span;
+            Span<SegmentLease> filled = leases.Span;
+            for (int i = 0; i < wanted.Length; i++)
+            {
+                filled[i] = Lease(wanted[i]);
+            }
+
+            return ValueTask.CompletedTask;
+        }
+
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+
+        private SegmentLease Lease(SegmentRange range)
+        {
+            ObjectDisposedException.ThrowIf(sink._released, sink);
+            long from = sink._tailFrom;
+            if (from < 0 || sink._tail is not { } tail || range.Offset < from || range.Offset + range.Length > sink._written)
+            {
+                throw new TailMissedException($"Bytes [{range.Offset}, {range.Offset + range.Length}) of '{sink._key}' lie before the tail it kept, from {from}.");
+            }
+
+            return new SegmentLease(new ReadOnlySequence<byte>(tail, (int)(range.Offset - from), (int)range.Length));
+        }
+    }
+
+    /// <summary>
+    /// The reader of a streamed object's kept tail (<see cref="Tail"/>), which reads in place and asks an open to read first
+    /// within the tail it holds, past a boundary of the tail's alignment, where an open reads at least the format's window,
+    /// and from a boundary of its own: more than the tail of a small footer.
+    /// </summary>
+    private sealed class TailReader(SourceReader inner, int kept) : ISegmentReader
+    {
+        public bool ReadsInPlace => true;
+
+        public int TailReadSize => Math.Max((kept - Vorticity.File.VortexFileFormat.TailAlignment) & -Vorticity.File.VortexFileFormat.TailAlignment, Vorticity.File.VortexFileFormat.TailAlignment);
+
+        public ValueTask<long> GetLengthAsync(CancellationToken cancellationToken) => inner.GetLengthAsync(cancellationToken);
+
+        public ValueTask<Buffers.SegmentOwner> ReadAsync(Serialization.Schemas.SegmentSpec spec, CancellationToken cancellationToken) =>
+            inner.ReadAsync(spec, cancellationToken);
+
+        public ValueTask ReadManyAsync(SegmentRequestSet requests, CancellationToken cancellationToken) => inner.ReadManyAsync(requests, cancellationToken);
+
+        public ValueTask<Buffers.SegmentOwner> ReadRangeAsync(long offset, int length, int alignment, CancellationToken cancellationToken) =>
+            inner.ReadRangeAsync(offset, length, alignment, cancellationToken);
+
+        public ValueTask DisposeAsync() => inner.DisposeAsync();
+    }
+
+    /// <summary>A read of a streamed object's kept tail (<see cref="Tail"/>) reached before it: the object is read back once put.</summary>
+    internal sealed class TailMissedException(string message) : Exception(message);
 }

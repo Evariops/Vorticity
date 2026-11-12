@@ -1,8 +1,11 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Numerics;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
 using Vorticity.Arrays;
 using Vorticity.Buffers;
 using Vorticity.Expressions;
@@ -30,7 +33,10 @@ internal sealed class FunctionFieldExpr : FieldExpr
 
     internal ValueFunction Function { get; }
 
-    internal override string Key => $"{Column.Key}.{Function.Text}";
+    /// <remarks>Made once: the expression does not change, and each zone's decision asked it again.</remarks>
+    internal override string Key => _key ??= $"{Column.Key}.{Function.Text}";
+
+    private string? _key;
 
     /// <summary>The values of the column's node through every function, the innermost first.</summary>
     internal int Apply(CanonicalArena arena, int node) =>
@@ -356,6 +362,9 @@ internal sealed class InstantTruncate : ValueFunction
 
     private readonly ZoneOffsets? _zone;
 
+    /// <summary>A bucket's longest stretch, a unit and an hour, past which an instant lies in the next bucket.</summary>
+    private readonly long _longest;
+
     /// <summary>The instants of the zone's calendar: from the first year a <see cref="DateTime"/> holds to its last.</summary>
     private readonly long _from;
     private readonly long _until;
@@ -368,6 +377,20 @@ internal sealed class InstantTruncate : ValueFunction
         _firstDay = long.MinValue / _day;
         _zone = zone is null || (zone.BaseUtcOffset == TimeSpan.Zero && !zone.SupportsDaylightSavingTime) ? null : ZoneOffsets.For(zone);
         Text = _zone is null ? $"Truncate({unit})" : $"Truncate({unit}, {zone!.Id})";
+
+        // A bucket's longest stretch, a zone's long day's hour with it: an instant that far past a bucket's start lies in
+        // the next bucket.
+        long hour = 3_600 * _second;
+        _longest = unit switch
+        {
+            CalendarUnit.Minute => 60 * _second,
+            CalendarUnit.Hour => hour,
+            CalendarUnit.Day => _day + hour,
+            CalendarUnit.Week => (7 * _day) + hour,
+            CalendarUnit.Month => (31 * _day) + hour,
+            CalendarUnit.Quarter => (92 * _day) + hour,
+            _ => (366 * _day) + hour,
+        };
 
         // Far enough from the storage's ends for an offset and a unit either side.
         Int128 day = _day;
@@ -421,11 +444,102 @@ internal sealed class InstantTruncate : ValueFunction
             return;
         }
 
+        // A calendar's unit, or a zone's: the bucket of the value before kept, [low, next), while the values stay in it. A
+        // value truncated alone took 14 ns (a month), 22 ns (a month in Paris), rows in time order holding one bucket for
+        // thousands of rows; values that leave their bucket more than an eighth of the time are truncated each, as
+        // Civil.FloorRuns does.
         ZoneCursor cursor = default;
+        long low = 0;
+        long next = 0;
+        long image = 0;
+        bool held = false;
+        int misses = 0;
+
+        // The zone's next change of offset past changeFrom, at changeAt: the change past any value between them.
+        long changeFrom = long.MaxValue;
+        long changeAt = long.MinValue;
         for (int i = 0; i < from.Length; i++)
         {
-            into[i] = Truncate(from[i], ref cursor);
+            long value = from[i];
+            if (held && value >= low && value < next)
+            {
+                into[i] = image;
+                continue;
+            }
+
+            long truncated = Truncate(value, ref cursor);
+            into[i] = truncated;
+            if (++misses > (i >> 3) + 16)
+            {
+                for (int j = i + 1; j < from.Length; j++)
+                {
+                    into[j] = Truncate(from[j], ref cursor);
+                }
+
+                return;
+            }
+
+            // A value of the bucket held, below the least one met in it, with no change of offset between it and the end of
+            // what is held: the truncation is monotone over that stretch then, its two ends agreeing.
+            if (held && truncated == image && value < next
+                && (_zone is null || NextChange(value, ref cursor, ref changeFrom, ref changeAt) >= next))
+            {
+                low = Math.Min(low, value);
+                continue;
+            }
+
+            held = TryBucket(value, truncated, ref cursor, ref changeFrom, ref changeAt, out next);
+            low = value;
+            image = truncated;
         }
+    }
+
+    /// <summary>The zone's next change of offset past <paramref name="value"/>, the one kept when it is past the value too.</summary>
+    private long NextChange(long value, ref ZoneCursor cursor, ref long changeFrom, ref long changeAt)
+    {
+        if (value < changeFrom || value >= changeAt)
+        {
+            changeAt = _zone!.NextChange(value, _second, ref cursor);
+            changeFrom = value;
+        }
+
+        return changeAt;
+    }
+
+    /// <summary>
+    /// The end of the stretch of the bucket that starts at <paramref name="truncated"/>, <paramref name="value"/>'s, that
+    /// holds: the start of the next bucket, or the zone's next change of offset when it comes first, when every instant
+    /// from <paramref name="value"/> to the one before that end truncates to <paramref name="truncated"/>. False when it
+    /// does not, or near the storage's ends.
+    /// </summary>
+    /// <remarks>
+    /// The instant before that end tells it alone where the truncation is monotone: under one offset, the local time rises
+    /// with the instant. Across a change of the zone's offset it may not: clocks set back two hours at one in the morning
+    /// of the first of a month take the instants before the change into the month and those after back into the one
+    /// before, a dip of the month inside the bucket of the one before, whose two ends agree. So the stretch held stops at
+    /// the change, and the values past it start a stretch of their own.
+    /// </remarks>
+    private bool TryBucket(long value, long truncated, ref ZoneCursor cursor, ref long changeFrom, ref long changeAt, out long next)
+    {
+        next = 0;
+        if (truncated == long.MinValue || truncated > long.MaxValue - _longest)
+        {
+            return false;
+        }
+
+        long after = Truncate(truncated + _longest, ref cursor);
+        if (_zone is not null)
+        {
+            after = Math.Min(after, NextChange(value, ref cursor, ref changeFrom, ref changeAt));
+        }
+
+        if (after <= value || Truncate(after - 1, ref cursor) != truncated)
+        {
+            return false;
+        }
+
+        next = after;
+        return true;
     }
 
     private long Truncate(long instant, ref ZoneCursor cursor)
@@ -602,6 +716,40 @@ internal sealed class NumberBucket : ValueFunction
     {
         ReadOnlySpan<T> from = MemoryMarshal.Cast<byte, T>(source);
         Span<T> into = MemoryMarshal.Cast<byte, T>(destination);
+
+        // A width a long holds: its reciprocal worked out once, where each value took a division of 128 bits (2.8 to 3.4 ns
+        // a value); and values in order hold their bucket for a run of them (Civil.FloorRuns). A multiple below the
+        // storage's least value is that value, as the 128-bit floor saturated is.
+        if (_integer > 0 && _integer <= long.MaxValue)
+        {
+            long unit = (long)_integer;
+            if (typeof(T) == typeof(long))
+            {
+                Civil.FloorRuns(MemoryMarshal.Cast<T, long>(from), MemoryMarshal.Cast<T, long>(into), unit);
+                return;
+            }
+
+            FloorDivisor divisor = new FloorDivisor(unit);
+            if (typeof(T) == typeof(ulong))
+            {
+                ReadOnlySpan<ulong> unsigned = MemoryMarshal.Cast<T, ulong>(from);
+                Span<ulong> floors = MemoryMarshal.Cast<T, ulong>(into);
+                for (int i = 0; i < unsigned.Length; i++)
+                {
+                    floors[i] = divisor.Quotient(unsigned[i]) * (ulong)unit;
+                }
+
+                return;
+            }
+
+            for (int i = 0; i < from.Length; i++)
+            {
+                into[i] = T.CreateSaturating(divisor.Floor(long.CreateTruncating(from[i])));
+            }
+
+            return;
+        }
+
         for (int i = 0; i < from.Length; i++)
         {
             into[i] = T.CreateSaturating(Floor(Int128.CreateTruncating(from[i])));
@@ -613,7 +761,35 @@ internal sealed class NumberBucket : ValueFunction
     {
         ReadOnlySpan<T> from = MemoryMarshal.Cast<byte, T>(source);
         Span<T> into = MemoryMarshal.Cast<byte, T>(destination);
-        for (int i = 0; i < from.Length; i++)
+        int i = 0;
+        if (Vector256.IsHardwareAccelerated && (typeof(T) == typeof(double) || typeof(T) == typeof(float)))
+        {
+            // The same division, floor and product of doubles, each rounded as the scalar line rounds it, four values a
+            // vector, a float widened to a double and the bucket narrowed back as the scalar line converts it: a value at
+            // a time called the floor for each.
+            Vector256<double> width = Vector256.Create(_float);
+            if (typeof(T) == typeof(double))
+            {
+                ref double at = ref Unsafe.As<T, double>(ref MemoryMarshal.GetReference(from));
+                ref double to = ref Unsafe.As<T, double>(ref MemoryMarshal.GetReference(into));
+                for (; i <= from.Length - 4; i += 4)
+                {
+                    (Vector256.Floor(Vector256.LoadUnsafe(ref at, (nuint)i) / width) * width).StoreUnsafe(ref to, (nuint)i);
+                }
+            }
+            else
+            {
+                ref float at = ref Unsafe.As<T, float>(ref MemoryMarshal.GetReference(from));
+                ref float to = ref Unsafe.As<T, float>(ref MemoryMarshal.GetReference(into));
+                for (; i <= from.Length - 8; i += 8)
+                {
+                    (Vector256<double> low, Vector256<double> high) = Vector256.Widen(Vector256.LoadUnsafe(ref at, (nuint)i));
+                    Vector256.Narrow(Vector256.Floor(low / width) * width, Vector256.Floor(high / width) * width).StoreUnsafe(ref to, (nuint)i);
+                }
+            }
+        }
+
+        for (; i < from.Length; i++)
         {
             into[i] = T.CreateTruncating(Math.Floor(double.CreateTruncating(from[i]) / _float) * _float);
         }
@@ -647,6 +823,7 @@ internal static class Civil
     /// </summary>
     internal static void FloorRuns(ReadOnlySpan<long> from, Span<long> into, long unit)
     {
+        FloorDivisor divisor = new FloorDivisor(unit);
         long start = 0;
         bool held = false;
         int misses = 0;
@@ -661,13 +838,13 @@ internal static class Civil
                 {
                     for (int j = i; j < from.Length; j++)
                     {
-                        into[j] = FloorTo(from[j], unit);
+                        into[j] = divisor.Floor(from[j]);
                     }
 
                     return;
                 }
 
-                start = FloorTo(value, unit);
+                start = divisor.Floor(value);
 
                 // The least value stands for every value below the first multiple the storage holds, not for a unit of them.
                 held = start != long.MinValue;
@@ -758,7 +935,15 @@ internal sealed class ZoneOffsets
     private readonly TimeZoneInfo _zone;
     private readonly ConcurrentDictionary<long, (long[] Starts, long[] Offsets)> _years = new ConcurrentDictionary<long, (long[], long[])>();
 
-    private ZoneOffsets(TimeZoneInfo zone) => _zone = zone;
+    // The year's transitions as the cache makes them, a delegate made once: the method group made one at each year a
+    // cursor entered, 55 to 60 bytes a value of instants in no order over fifty years.
+    private readonly Func<long, (long[] Starts, long[] Offsets)> _transitions;
+
+    private ZoneOffsets(TimeZoneInfo zone)
+    {
+        _zone = zone;
+        _transitions = Transitions;
+    }
 
     internal static ZoneOffsets For(TimeZoneInfo zone) => Zones.GetOrAdd(zone.Id, _ => new ZoneOffsets(zone));
 
@@ -783,12 +968,37 @@ internal sealed class ZoneOffsets
         return OffsetAt(other, second, ref cursor) == found ? other : utc;
     }
 
+    /// <summary>
+    /// The first instant past <paramref name="instant"/> at which the zone's offset changes, in the instant's ticks: of its
+    /// year, or else of the next; <see cref="long.MaxValue"/> when neither changes it.
+    /// </summary>
+    internal long NextChange(long instant, long second, ref ZoneCursor cursor)
+    {
+        long utc = Civil.FloorDiv(instant, second);
+        OffsetSeconds(utc, ref cursor);
+        long[] starts = cursor.Starts!;
+        for (int at = 1; at < starts.Length; at++)
+        {
+            if (starts[at] > utc)
+            {
+                return Math.Min(starts[at], long.MaxValue / second) * second;
+            }
+        }
+
+        // None left in its year: the next year's first, or its start when its offset there is another.
+        long last = cursor.Offsets![^1];
+        long year = Civil.YearMonth(Civil.FloorDiv(utc, 86_400)).Year + 1;
+        (long[] Starts, long[] Offsets) next = _years.TryGetValue(year, out (long[] Starts, long[] Offsets) known) ? known : _years.GetOrAdd(year, _transitions);
+        long change = next.Offsets[0] != last ? next.Starts[0] : next.Starts.Length > 1 ? next.Starts[1] : long.MaxValue;
+        return change == long.MaxValue ? long.MaxValue : Math.Min(change, long.MaxValue / second) * second;
+    }
+
     private long OffsetSeconds(long utc, ref ZoneCursor cursor)
     {
         if (cursor.Starts is null || utc < cursor.From || utc >= cursor.Until)
         {
             long year = Civil.YearMonth(Civil.FloorDiv(utc, 86_400)).Year;
-            (cursor.Starts, cursor.Offsets) = _years.GetOrAdd(year, Transitions);
+            (cursor.Starts, cursor.Offsets) = _years.TryGetValue(year, out (long[] Starts, long[] Offsets) known) ? known : _years.GetOrAdd(year, _transitions);
             cursor.From = Civil.DaysFromCivil(year, 1, 1) * 86_400;
             cursor.Until = Civil.DaysFromCivil(year + 1, 1, 1) * 86_400;
         }
@@ -847,4 +1057,67 @@ internal sealed class ZoneOffsets
     }
 
     private long Offset(DateTime utc) => (long)_zone.GetUtcOffset(utc).TotalSeconds;
+}
+
+/// <summary>
+/// A positive width of 64 bits whose floors take a multiplication and shifts, its reciprocal worked out once: the
+/// processor's division of 64 bits costs a value 1.34 ns, a column's values all floored to the same width.
+/// </summary>
+/// <remarks>
+/// Granlund and Montgomery's unsigned division by an invariant (1994, figure 4.1), right for every dividend of 64 bits:
+/// with <c>l = ceil(log2 d)</c> and <c>m = floor(2^64 (2^l - d) / d) + 1</c>, the quotient is
+/// <c>(t + ((n - t) >> 1)) >> (l - 1)</c> where <c>t</c> is the high half of <c>m n</c>. A negative value is floored
+/// through its complement, <c>floor(v / d) = -((-v - 1) / d) - 1</c>.
+/// </remarks>
+internal readonly struct FloorDivisor
+{
+    private readonly long _unit;
+    private readonly ulong _magic;
+    private readonly int _shift;
+    private readonly bool _power;
+
+    /// <summary>The divisor <paramref name="unit"/>, positive.</summary>
+    internal FloorDivisor(long unit)
+    {
+        Debug.Assert(unit > 0, "A width is positive.");
+        _unit = unit;
+        if (BitOperations.IsPow2(unit))
+        {
+            _power = true;
+            _shift = BitOperations.Log2((ulong)unit);
+            return;
+        }
+
+        // A width below 2^63 that is no power of two: 2 <= l <= 63.
+        int l = 64 - BitOperations.LeadingZeroCount((ulong)unit - 1);
+        _magic = (ulong)((((UInt128)((1UL << l) - (ulong)unit)) << 64) / (ulong)unit) + 1;
+        _shift = l - 1;
+    }
+
+    /// <summary>The quotient of <paramref name="value"/> by the width, rounded down.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal ulong Quotient(ulong value)
+    {
+        if (_power)
+        {
+            return value >> _shift;
+        }
+
+        ulong high = Math.BigMul(_magic, value, out _);
+        return (high + ((value - high) >> 1)) >> _shift;
+    }
+
+    /// <summary>
+    /// The greatest multiple of the width at or below <paramref name="value"/>; <see cref="long.MinValue"/> when that
+    /// multiple lies below it, as <see cref="Civil.FloorTo"/> answers.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal long Floor(long value)
+    {
+        long quotient = value >= 0 ? (long)Quotient((ulong)value) : -(long)Quotient((ulong)(-(value + 1))) - 1;
+        long floor = unchecked(quotient * _unit);
+
+        // Below the least value, the product comes back round above the value.
+        return floor <= value ? floor : long.MinValue;
+    }
 }

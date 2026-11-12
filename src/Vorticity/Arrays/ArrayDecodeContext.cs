@@ -612,6 +612,55 @@ internal sealed class ArrayDecodeContext
     }
 
     /// <summary>
+    /// The table this scan's decoder built from <paramref name="node"/> and kept (<see cref="KeepTable"/>) under
+    /// <paramref name="tag"/>, for a range of the node after its first: a decode of a node bigger than its batch.
+    /// </summary>
+    /// <param name="node">The node about to be read.</param>
+    /// <param name="tag">What the table was built against, which must match.</param>
+    /// <param name="table">The table.</param>
+    /// <param name="facts">What the decoder kept with it.</param>
+    /// <returns><see langword="false"/> outside a reader-opened scope, or when none is kept: the decoder builds it.</returns>
+    /// <remarks>
+    /// A table is held to what <see cref="IsNodeChecked"/> holds a verdict to: a fact of the node's bytes, named within
+    /// one scan, whose kernels still bound what they read by the table.
+    /// </remarks>
+    internal bool TryKeptTable(scoped in ArrayNode node, long tag, out ReadOnlySpan<long> table, out long facts)
+    {
+        if (_scan.NodeCheckScope is uint segment
+            && ScanContext.NodeCheckKey(segment, node.Index) is long key
+            && _scan.TryNodeTable(key, tag, out long[] array, out int length, out facts))
+        {
+            table = array.AsSpan(0, length);
+            return true;
+        }
+
+        table = default;
+        facts = 0;
+        return false;
+    }
+
+    /// <summary>
+    /// Keeps <paramref name="table"/>, built from <paramref name="node"/> and rented from
+    /// <see cref="System.Buffers.ArrayPool{T}.Shared"/>, for this scan's next ranges of the node.
+    /// </summary>
+    /// <param name="node">The node it was built from.</param>
+    /// <param name="tag">What it was built against.</param>
+    /// <param name="facts">What the decoder keeps with it.</param>
+    /// <param name="table">The table, which the context owns when this returns true.</param>
+    /// <param name="length">Its entries.</param>
+    /// <returns>Whether it is kept; when not, outside a reader-opened scope, the caller still owns it.</returns>
+    internal bool KeepTable(in ArrayNode node, long tag, long facts, long[] table, int length)
+    {
+        if (_scan.NodeCheckScope is uint segment && ScanContext.NodeCheckKey(segment, node.Index) is long key)
+        {
+            _scan.KeepNodeTable(key, tag, facts, table, length);
+            return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
     /// The rows set in <paramref name="bits"/> before row <paramref name="start"/>: for a node read
     /// a range at a time, where a range's first value sits among the valid ones alone.
     /// </summary>

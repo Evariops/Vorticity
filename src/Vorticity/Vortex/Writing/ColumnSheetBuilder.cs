@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics.X86;
 using Vorticity.Aggregating;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
@@ -55,6 +56,9 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
 
     /// <summary>The values hashed together, a fixed-width column's.</summary>
     private const int HashBatch = 64;
+
+    // The slots past which the table outgrows the second cache (512 KiB of slots): a batch's slots are fetched ahead.
+    private const int PrefetchSlots = 1 << 15;
 
     /// <summary>
     /// The bits of a slot's word its rows take, some 10^12 of them; the number of its value, in the order the values were
@@ -437,13 +441,20 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
         for (int from = start; from < start + count; from += HashBatch)
         {
             int stop = Math.Min(from + HashBatch, start + count);
-            Hash(values, width, from, stop, hashes);
+            XxHash3Fixed.HashRows(values, width, from, stop, hashes);
             if (_rowHashes is { } rowHashes)
             {
                 for (int row = from; row < stop; row++)
                 {
                     rowHashes[row] = allValid || (own.IsValid(row) && wrapper.IsValid(row)) ? hashes[row - from] : 0;
                 }
+            }
+
+            // A table past the second cache: the batch's slots fetched ahead of their probes, whose misses then overlap
+            // rather than wait one after the other.
+            if (_slots is { Length: >= PrefetchSlots } table)
+            {
+                Prefetch(table, hashes[..(stop - from)]);
             }
 
             if (_slots is null && allValid)
@@ -490,63 +501,6 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
                     ids[row - start] = lastId;
                 }
             }
-        }
-    }
-
-    /// <summary>The hashes of rows <c>[start, stop)</c> of fixed-width values, as XXH3 hashes their bytes, into <paramref name="hashes"/>.</summary>
-    private static void Hash(ReadOnlySpan<byte> values, int width, int start, int stop, Span<ulong> hashes)
-    {
-        switch (width)
-        {
-            case 4:
-            {
-                ReadOnlySpan<uint> words = MemoryMarshal.Cast<byte, uint>(values)[start..stop];
-                if (XxHash3Fixed.IsVectorized && words.Length == HashBatch)
-                {
-                    XxHash3Fixed.Hash4(words, hashes);
-                    return;
-                }
-
-                for (int i = 0; i < words.Length; i++)
-                {
-                    hashes[i] = XxHash3Fixed.Hash4(words[i]);
-                }
-
-                return;
-            }
-
-            case 8:
-            {
-                ReadOnlySpan<ulong> words = MemoryMarshal.Cast<byte, ulong>(values)[start..stop];
-                if (XxHash3Fixed.IsVectorized && words.Length == HashBatch)
-                {
-                    XxHash3Fixed.Hash8(words, hashes);
-                    return;
-                }
-
-                for (int i = 0; i < words.Length; i++)
-                {
-                    hashes[i] = XxHash3Fixed.Hash8(words[i]);
-                }
-
-                return;
-            }
-
-            case <= 3:
-                for (int row = start; row < stop; row++)
-                {
-                    hashes[row - start] = XxHash3Fixed.Hash1To3(values.Slice(row * width, width));
-                }
-
-                return;
-
-            default:
-                for (int row = start; row < stop; row++)
-                {
-                    hashes[row - start] = XxHash3Fixed.Hash9To16(values.Slice(row * width, width));
-                }
-
-                return;
         }
     }
 
@@ -735,6 +689,24 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
         return slot;
     }
 
+    /// <summary>Asks the caches for the slot each of <paramref name="hashes"/> probes first.</summary>
+    private static unsafe void Prefetch(Slot[] table, ReadOnlySpan<ulong> hashes)
+    {
+        if (!Sse.IsSupported)
+        {
+            return;
+        }
+
+        ulong mask = (ulong)table.Length - 1;
+        fixed (Slot* slots = table)
+        {
+            foreach (ulong hash in hashes)
+            {
+                Sse.Prefetch0(slots + (KeyHash.Mix(hash) & mask));
+            }
+        }
+    }
+
     /// <summary>The slot of <paramref name="hash"/>, which the counts hold.</summary>
     private int Find(ulong hash)
     {
@@ -873,38 +845,66 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
         return hashes;
     }
 
-    /// <summary>The most frequent values whose bytes were kept, the most first, ties by their bytes.</summary>
+    /// <summary>
+    /// The most frequent values whose bytes were kept, the most first, ties by their bytes: the values kept so far in a heap
+    /// whose top is the least of them, which a value passes or not by its rows alone, mostly, where every distinct value
+    /// was listed and sorted to keep the first 128.
+    /// </summary>
     private SheetValue[] Frequent()
     {
-        List<(long Rows, int Offset, int Length)> held = new List<(long, int, int)>(_distinct + 1);
+        byte[] heap = _heap;
+        Ranked rank = new Ranked(heap);
+        PriorityQueue<(long Rows, int Offset, int Length), (long Rows, int Offset, int Length)> kept =
+            new PriorityQueue<(long, int, int), (long, int, int)>(ColumnSheet.TopValues + 1, rank);
         Slot[] slots = _slots!;
         for (int i = 0; i < slots.Length; i++)
         {
             if (slots[i].Key != 0 && _offsets[i] >= 0)
             {
-                held.Add((slots[i].Count & RowsMask, _offsets[i], _lengths[i]));
+                Keep(kept, (slots[i].Count & RowsMask, _offsets[i], _lengths[i]), rank);
             }
         }
 
         if (_zeroRows > 0 && _zeroOffset >= 0)
         {
-            held.Add((_zeroRows, _zeroOffset, _zeroLength));
+            Keep(kept, (_zeroRows, _zeroOffset, _zeroLength), rank);
         }
 
-        byte[] heap = _heap;
-        held.Sort((left, right) =>
+        // The least kept leave first: the array fills from its end, the most first.
+        SheetValue[] top = new SheetValue[kept.Count];
+        for (int i = top.Length - 1; i >= 0; i--)
         {
-            int byRows = right.Rows.CompareTo(left.Rows);
-            return byRows != 0 ? byRows : heap.AsSpan(left.Offset, left.Length).SequenceCompareTo(heap.AsSpan(right.Offset, right.Length));
-        });
-
-        SheetValue[] top = new SheetValue[Math.Min(held.Count, ColumnSheet.TopValues)];
-        for (int i = 0; i < top.Length; i++)
-        {
-            top[i] = new SheetValue(heap.AsSpan(held[i].Offset, held[i].Length).ToArray(), held[i].Rows, 0);
+            (long rows, int offset, int length) = kept.Dequeue();
+            top[i] = new SheetValue(heap.AsSpan(offset, length).ToArray(), rows, 0);
         }
 
         return top;
+
+        static void Keep(
+            PriorityQueue<(long Rows, int Offset, int Length), (long Rows, int Offset, int Length)> kept,
+            (long Rows, int Offset, int Length) value, Ranked rank)
+        {
+            if (kept.Count < ColumnSheet.TopValues)
+            {
+                kept.Enqueue(value, value);
+            }
+            else if (rank.Compare(value, kept.Peek()) > 0)
+            {
+                kept.DequeueEnqueue(value, value);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Ranks two kept values, the less frequent below, and of as many rows the greater bytes below: the order a sheet
+    /// lists its frequent values in, reversed, so that a heap's top is the one to leave first.
+    /// </summary>
+    private sealed class Ranked(byte[] heap) : IComparer<(long Rows, int Offset, int Length)>
+    {
+        public int Compare((long Rows, int Offset, int Length) x, (long Rows, int Offset, int Length) y) =>
+            x.Rows != y.Rows
+                ? x.Rows.CompareTo(y.Rows)
+                : heap.AsSpan(y.Offset, y.Length).SequenceCompareTo(heap.AsSpan(x.Offset, x.Length));
     }
     /// <summary>A distinct hash, and its rows with its value's number above them (<see cref="IdShift"/>), side by side in one entry.</summary>
     private struct Slot

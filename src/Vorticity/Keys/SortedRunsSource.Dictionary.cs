@@ -50,24 +50,43 @@ internal sealed partial class SortedRunsSource
             return (null, "the column is not stored as flat chunks, so there is no values child to read");
         }
 
-        List<Run> runs = [];
-        using ScanContext context = new ScanContext(file, ScanContext.MetadataCapacity);
+        // Every run's chunks, in order, read a batch of them a round trip: a read awaited for each chunk was as many round
+        // trips one after another as the column has chunks.
+        List<(IndexRun Meta, LayoutNode Flat, long Start)> wanted = [];
         foreach (IndexRun meta in entry.Runs)
         {
             long first = checked((long)(meta.FirstBlock * entry.BlockLength));
             long end = Math.Min(checked(first + (long)(meta.BlockCount * entry.BlockLength)), file.RowCount);
             foreach ((LayoutNode flat, long start) in chunks)
             {
-                if (start < first || start >= end)
+                if (start >= first && start < end)
                 {
-                    continue;
+                    wanted.Add((meta, flat, start));
                 }
+            }
+        }
 
-                context.ResetBatch();
-                int slot = context.Segments.Add(SpecOf(file, flat));
-                await file.Segments.ReadManyAsync(context.Segments, cancellationToken).ConfigureAwait(false);
-                Diagnostics.VortexEventSource.RunsRead(1);
-                RunSegment? values = Values(context, flat, slot, layout);
+        List<Run> runs = [];
+        using ScanContext context = new ScanContext(file, ScanContext.MetadataCapacity);
+        int[] slots = new int[wanted.Count];
+        for (int at = 0; at < wanted.Count;)
+        {
+            context.ResetBatch();
+            int from = at;
+            long bytes = 0;
+            for (; at < wanted.Count && (at == from || bytes < ProbeBatchBytes); at++)
+            {
+                SegmentSpec spec = SpecOf(file, wanted[at].Flat);
+                slots[at] = context.Segments.Add(spec);
+                bytes += spec.Length;
+            }
+
+            await file.Segments.ReadManyAsync(context.Segments, cancellationToken).ConfigureAwait(false);
+            Diagnostics.VortexEventSource.RunsRead(at - from);
+            for (int c = from; c < at; c++)
+            {
+                (IndexRun meta, LayoutNode flat, long start) = wanted[c];
+                RunSegment? values = Values(context, flat, slots[c], layout);
                 if (values is null)
                 {
                     return (null, $"the chunk at row {start} is claimed by the probe and is not a vortex.dict array");

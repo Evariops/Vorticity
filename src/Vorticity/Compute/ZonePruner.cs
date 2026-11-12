@@ -240,6 +240,22 @@ internal sealed class ZonePruner : IBlockPruner
                 break;
             }
 
+            case ExprKind.In when !negated:
+            {
+                // A few candidates: the OR of each one's equality, answered by the table a word of zones at a time, where the
+                // walk asked each block each candidate, its bounds made again for each.
+                InExpr membership = (InExpr)expr;
+                if (membership.Literals.Length < OrderedCandidates.Least &&
+                    Find(membership.Field) is { HasStatistics: true } column &&
+                    column.ZoneLength == live.BlockRows && column.RowCount == live.RowCount &&
+                    MayWordsIn(column, membership.Literals, scope, words))
+                {
+                    return;
+                }
+
+                break;
+            }
+
             case ExprKind.Not:
                 MayWords(((NotExpr)expr).Operand, !negated, live, scope, words);
                 return;
@@ -293,6 +309,44 @@ internal sealed class ZonePruner : IBlockPruner
             }
 
             words[w] = answer;
+        }
+    }
+
+    /// <summary>
+    /// The blocks of <paramref name="scope"/> where some row may equal one of <paramref name="literals"/>: the OR of each
+    /// one's equality, as the table answers it; a null candidate equals no row. False, and the words left to the walk, when
+    /// the table cannot answer one.
+    /// </summary>
+    private static bool MayWordsIn(ZoneColumn column, FilterLiteral[] literals, ReadOnlySpan<ulong> scope, Span<ulong> words)
+    {
+        ulong[] rented = ArrayPool<ulong>.Shared.Rent(words.Length);
+        try
+        {
+            Span<ulong> one = rented.AsSpan(0, words.Length);
+            words.Clear();
+            foreach (FilterLiteral literal in literals)
+            {
+                if (literal.Kind == FilterLiteralKind.Null)
+                {
+                    continue;
+                }
+
+                if (!column.Table.TryMayMatch(ComparisonOp.Equal, literal, nanMatches: false, one, scope))
+                {
+                    return false;
+                }
+
+                for (int w = 0; w < words.Length; w++)
+                {
+                    words[w] |= one[w];
+                }
+            }
+
+            return true;
+        }
+        finally
+        {
+            ArrayPool<ulong>.Shared.Return(rented);
         }
     }
 
@@ -1660,6 +1714,13 @@ internal sealed class ZonePruner : IBlockPruner
     {
         System.Collections.Concurrent.ConcurrentDictionary<string, ZoneColumn?> through =
             _through ?? System.Threading.Interlocked.CompareExchange(ref _through, new(StringComparer.Ordinal), null) ?? _through!;
+
+        // Found without the closure the first one makes, which each decision made again: one a range of zones, one a block.
+        if (through.TryGetValue(function.Key, out ZoneColumn? held))
+        {
+            return held;
+        }
+
         return through.GetOrAdd(function.Key, _ =>
         {
             if (Find(function.Column) is not { HasStatistics: true } column)
@@ -1767,6 +1828,9 @@ internal sealed class ZonePruner : IBlockPruner
         /// already in cache, and the file-level pruner asks a single zone.
         /// </summary>
         private const int LeastCandidates = 32;
+
+        /// <summary>The fewest candidates ordered for a search; fewer are answered one by one.</summary>
+        internal const int Least = LeastCandidates;
 
         private readonly FilterLiteral[] _sorted;
 

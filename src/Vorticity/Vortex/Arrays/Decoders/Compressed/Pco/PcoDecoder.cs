@@ -245,7 +245,7 @@ internal sealed class PcoDecoder : ArrayDecoder
         // by each chunk, rather than rebuilt, for the same reason as the buffers above; and both are
         // kept for the next decode rather than built by each, since neither holds a file's data
         // past the page or the chunk that refills it.
-        Reused reused = Interlocked.Exchange(ref Spare, null) ?? new Reused();
+        Reused reused = TakeSpare();
         try
         {
             PcoBatchScratch batchScratch = new PcoBatchScratch(
@@ -340,7 +340,7 @@ internal sealed class PcoDecoder : ArrayDecoder
         {
             // A dictionary is rented by its chunk; the metadata kept for the next decode holds none.
             reused.Meta.Release();
-            Volatile.Write(ref Spare, reused);
+            GiveSpare(reused);
             if (pageRental is not null)
             {
                 ArrayPool<byte>.Shared.Return(pageRental);
@@ -354,10 +354,44 @@ internal sealed class PcoDecoder : ArrayDecoder
     }
 
     /// <summary>
-    /// What no decode holds, taken by the next; a decode that finds nothing builds its own, and the
-    /// last to finish leaves what it used here.
+    /// What no decode holds, taken by the next: a slot a processor, up to 64, looked over from the processor the decode
+    /// runs on; a decode that finds nothing builds its own, and one that finds no empty slot leaves what it used to the
+    /// collector. One slot alone left every lane but one building its own: a column of 32 chunks read at eight lanes
+    /// allocated 700 KB a scan.
     /// </summary>
-    private static Reused? Spare;
+    private static readonly Reused?[] Spares = new Reused?[Math.Clamp(Environment.ProcessorCount, 1, 64)];
+
+    /// <summary>A decode's reusable state, from the spares or new.</summary>
+    private static Reused TakeSpare()
+    {
+        Reused?[] spares = Spares;
+        int start = Thread.GetCurrentProcessorId() % spares.Length;
+        for (int i = 0; i < spares.Length; i++)
+        {
+            ref Reused? slot = ref spares[(start + i) % spares.Length];
+            if (Volatile.Read(ref slot) is not null && Interlocked.Exchange(ref slot, null) is { } found)
+            {
+                return found;
+            }
+        }
+
+        return new Reused();
+    }
+
+    /// <summary><paramref name="reused"/> back among the spares, in the first empty slot from the decode's processor.</summary>
+    private static void GiveSpare(Reused reused)
+    {
+        Reused?[] spares = Spares;
+        int start = Thread.GetCurrentProcessorId() % spares.Length;
+        for (int i = 0; i < spares.Length; i++)
+        {
+            ref Reused? slot = ref spares[(start + i) % spares.Length];
+            if (Volatile.Read(ref slot) is null && Interlocked.CompareExchange(ref slot, reused, null) is null)
+            {
+                return;
+            }
+        }
+    }
 
     /// <summary>What a decode keeps for the next: the latent states, and the chunk metadata with its tables.</summary>
     private sealed class Reused

@@ -61,6 +61,7 @@ public sealed partial class VortexFileWriter
     /// the chunk's arena is only read while the threads run.
     /// </para>
     /// </remarks>
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
     private async ValueTask EmitColumnsAcrossAsync(
         CanonicalArena arena, int rootIndex, long rows, int blocks, CancellationToken cancellationToken)
     {
@@ -91,7 +92,7 @@ public sealed partial class VortexFileWriter
         try
         {
             columns.Order(fan.Items(_fieldCount));
-            fan.Run(columns, _fieldCount, arena);
+            await fan.RunAsync(columns, _fieldCount, arena).ConfigureAwait(false);
             await WriteColumnBlobsAsync(columns, firstBlock, blocks, cancellationToken).ConfigureAwait(false);
         }
         finally
@@ -105,6 +106,7 @@ public sealed partial class VortexFileWriter
     /// columns compressed side by side and their blobs written in column order, where a write on
     /// one thread puts them.
     /// </summary>
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
     private async ValueTask EmitGatheredAcrossAsync(Gathering?[] gathering, WorkFan fan, CancellationToken cancellationToken)
     {
         ChunkColumns columns = _chunkColumns ??= ChunkColumns.Take(this);
@@ -137,7 +139,7 @@ public sealed partial class VortexFileWriter
                 }
             }
 
-            fan.Run(columns, count);
+            await fan.RunAsync(columns, count).ConfigureAwait(false);
             await WriteColumnBlobsAsync(columns, 0, 0, cancellationToken).ConfigureAwait(false);
         }
         finally
@@ -168,6 +170,7 @@ public sealed partial class VortexFileWriter
     /// accumulator is, so it need not wait for the others. The blobs then go out in column order,
     /// as they do from <see cref="EmitColumnsAcrossAsync"/>, and the file is the same bytes.
     /// </remarks>
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
     private async ValueTask IngestAndEmitAcrossAsync(
         CanonicalArena arena, int rootIndex, int rows, CancellationToken cancellationToken)
     {
@@ -187,7 +190,7 @@ public sealed partial class VortexFileWriter
             Span<int> items = fan.Items(_fieldCount * 4);
             int count = FeedItems(items, IngestItems(arena, items));
             columns.Fuse(items[..count], rows, firstBlock, blocks);
-            fan.Run(columns, count, arena, rows);
+            await fan.RunAsync(columns, count, arena, rows).ConfigureAwait(false);
             _blockFilled = (_blockFilled + rows) % _blockRows;
             BatchesIngestedAcross++;
             await WriteColumnBlobsAsync(columns, firstBlock, blocks, cancellationToken).ConfigureAwait(false);
@@ -699,15 +702,6 @@ public sealed partial class VortexFileWriter
     {
         private ArrayBlobWriter.Workspace _blobs = new ArrayBlobWriter.Workspace { OwnTypes = true };
 
-        /// <summary>
-        /// The threads the column's zstd frames are compressed on, the column's thread included: a fan
-        /// of the lane's own, apart from the one the chunk's columns run on, which runs one piece at a
-        /// time. A file of few columns then has its costliest one compressed a frame a thread, as a
-        /// column written alone is; a fan whose helpers find no thread free does its work on the
-        /// caller's.
-        /// </summary>
-        private WorkFan? _fan;
-
         private EncodingDictionary _encodings = new EncodingDictionary(ComponentKind.Array, EditionRegistry.Newest);
 
         internal ArrayBlobWriter.Workspace Blobs => _blobs;
@@ -720,24 +714,14 @@ public sealed partial class VortexFileWriter
         internal static CompressionLane Take(VortexFileWriter writer)
         {
             CompressionLane lane = SpareSlots<CompressionLane>.Take() ?? new CompressionLane();
-            if (lane._fan is not { } held || held.Lanes != writer._lanes || held.Budget != writer._budget)
-            {
-                if (lane._fan is { } kept)
-                {
-                    WorkFan.Return(kept);
-                }
-
-                lane._fan = WorkFan.Rent(writer._lanes, writer._budget);
-            }
-
             if (lane._blobs.FrameRows != writer._rowBlock || lane._blobs.GranuleRows != writer.GranuleReadRows
-                || lane._blobs.SizeFirst != writer._sizeFirst || lane._blobs.ZstdLevel != writer._zstdLevel || lane._blobs.Fan != lane._fan)
+                || lane._blobs.SizeFirst != writer._sizeFirst || lane._blobs.ZstdLevel != writer._zstdLevel)
             {
                 lane._blobs.Dispose();
                 lane._blobs = new ArrayBlobWriter.Workspace
                 {
                     FrameRows = writer._rowBlock, GranuleRows = writer.GranuleReadRows, SizeFirst = writer._sizeFirst,
-                    ZstdLevel = writer._zstdLevel, OwnTypes = true, Fan = lane._fan,
+                    ZstdLevel = writer._zstdLevel, OwnTypes = true,
                 };
             }
 
@@ -762,11 +746,6 @@ public sealed partial class VortexFileWriter
             if (!SpareSlots<CompressionLane>.Give(this))
             {
                 _blobs.Dispose();
-                if (_fan is { } fan)
-                {
-                    _fan = null;
-                    WorkFan.Return(fan);
-                }
             }
         }
     }

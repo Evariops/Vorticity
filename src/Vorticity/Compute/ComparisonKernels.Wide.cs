@@ -1,6 +1,7 @@
 using System;
 using System.Buffers.Binary;
 using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Expressions;
@@ -283,7 +284,53 @@ internal static partial class ComparisonKernels
         where TOp : struct, IOrderOp
     {
         bool allValid = mask.AllValid;
-        for (int i = 0; i < destination.Length; i++)
+        int i = 0;
+        if ((typeof(TOp) == typeof(EqualOp) || typeof(TOp) == typeof(NotEqualOp)) && Vector256.IsHardwareAccelerated)
+        {
+            // Equality needs no byte order: the rows' sixteen bytes against the literal's as they lie, four rows a 512-bit
+            // vector or two a 256-bit one, where a row at a time reversed its bytes into a 128-bit integer first.
+            byte hit = typeof(TOp) == typeof(EqualOp) ? Trilean.True : Trilean.False;
+            byte miss = typeof(TOp) == typeof(EqualOp) ? Trilean.False : Trilean.True;
+            Span<byte> raw = stackalloc byte[UuidSize];
+            BinaryPrimitives.WriteUInt128BigEndian(raw, wanted);
+            Vector128<byte> literal = Vector128.Create((ReadOnlySpan<byte>)raw);
+            ref byte from = ref MemoryMarshal.GetReference(values);
+            if (Vector512.IsHardwareAccelerated)
+            {
+                Vector512<byte> expected = Vector512.Create(literal);
+                for (; i <= destination.Length - 4; i += 4)
+                {
+                    ulong same = Vector512.Equals(Vector512.LoadUnsafe(ref from, (nuint)(i * UuidSize)), expected).ExtractMostSignificantBits();
+                    for (int k = 0; k < 4; k++)
+                    {
+                        destination[i + k] = ((same >> (16 * k)) & 0xFFFF) == 0xFFFF ? hit : miss;
+                    }
+                }
+            }
+            else
+            {
+                Vector256<byte> expected = Vector256.Create(literal, literal);
+                for (; i <= destination.Length - 2; i += 2)
+                {
+                    uint same = Vector256.Equals(Vector256.LoadUnsafe(ref from, (nuint)(i * UuidSize)), expected).ExtractMostSignificantBits();
+                    destination[i] = (same & 0xFFFF) == 0xFFFF ? hit : miss;
+                    destination[i + 1] = (same >> 16) == 0xFFFF ? hit : miss;
+                }
+            }
+
+            if (!allValid)
+            {
+                for (int row = 0; row < i; row++)
+                {
+                    if (!mask.IsValid(row))
+                    {
+                        destination[row] = Trilean.Unknown;
+                    }
+                }
+            }
+        }
+
+        for (; i < destination.Length; i++)
         {
             if (!allValid && !mask.IsValid(i))
             {

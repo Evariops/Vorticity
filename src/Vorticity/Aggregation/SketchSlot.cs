@@ -73,6 +73,9 @@ internal abstract class SketchSlot<TSketch, TResult> : AggregateSlot<TResult>
     /// <summary>Counts <paramref name="bytes"/> more that the sketches hold.</summary>
     private protected void Grew(long bytes) => _bytes += bytes;
 
+    /// <summary>The groups the slot holds.</summary>
+    private protected int Groups => _groups;
+
     internal override void Govern(ArrayShelf shelf) => _shelf = shelf;
 
     internal override void EnsureGroups(int groups)
@@ -250,12 +253,14 @@ internal abstract class SketchSlot<TSketch, TResult> : AggregateSlot<TResult>
 
     internal override void WriteStates(ReadOnlySpan<int> groups, SpillBuffer buffer)
     {
+        // One delegate for the groups written, where each sketch was handed a new one: 64 bytes a group spilled.
+        Action<long> write = buffer.Write;
         foreach (int group in groups)
         {
             if (_sketches[group] is { } sketch)
             {
                 buffer.Write(1);
-                sketch.Write(buffer.Write);
+                sketch.Write(write);
             }
             else
             {

@@ -2,18 +2,26 @@ using System;
 using System.Collections.Generic;
 using System.Threading;
 using Vorticity.Buffers;
+using Vorticity.IO;
 
 namespace Vorticity;
 
 /// <summary>
-/// Segments kept across scans, least recently used first out, within one budget in bytes for every
-/// file of the sessions that share it.
+/// Segments kept across scans, the oldest kept first out unless a lookup used it since (a clock, or second chance),
+/// within one budget in bytes for every file of the sessions that share it.
 /// </summary>
 /// <remarks>
+/// <para>
 /// A scan reads each segment it needs once whether or not a cache is set; the cache is what makes a
 /// second scan, or a scan of the same footer and index regions from another request, read nothing.
 /// The budget counts what the cache holds: a segment read as a view of a larger block, one run of
 /// a coalesced read, is copied into a block of its own as it is kept. Thread-safe.
+/// </para>
+/// <para>
+/// A hit marks its entry used and moves nothing: an eviction that meets a used entry at the tail puts it back at the head,
+/// unmarked, and goes on. A hit that relinked its entry, a strict order of use, wrote to two neighbours' lines under the
+/// lock every lane of the process takes, and cost a lookup of 4,096 segments 30 to 40 % more.
+/// </para>
 /// </remarks>
 public sealed class SegmentCache
 {
@@ -111,21 +119,77 @@ public sealed class SegmentCache
         {
             if (_entries.TryGetValue(new Key(source, offset, length), out Entry? entry))
             {
-                Unlink(entry);
-                LinkNewest(entry);
+                entry.Referenced = true;
                 owner = entry.Owner.Retain();
                 buffer = entry.Buffer;
-                Interlocked.Increment(ref _hits);
-                VortexTelemetry.CacheHit();
-                return true;
+            }
+            else
+            {
+                owner = null!;
+                buffer = default;
             }
         }
 
-        Interlocked.Increment(ref _misses);
-        VortexTelemetry.CacheMiss();
-        owner = null!;
-        buffer = default;
-        return false;
+        // Counted out of the lock, which every lane of every question takes.
+        Counted(owner is null ? 0 : 1, owner is null ? 1 : 0);
+        return owner is not null;
+    }
+
+    /// <summary>
+    /// Fills from the cache every slot of <paramref name="requests"/> no one filled yet, the segments of <paramref name="source"/>,
+    /// under one taking of the lock; whether every slot is filled after it.
+    /// </summary>
+    /// <remarks>
+    /// A scan's request set asks for each segment of a split at once, and was looked up a segment at a time: a split of R
+    /// segments took the process's lock R times, with a relinking, a counter and a meter in it at each hit. A hit now only
+    /// marks its entry used (<see cref="Entry.Referenced"/>), and the set's hits and misses are counted once, out of the lock.
+    /// </remarks>
+    internal bool Fill(object source, SegmentRequestSet requests)
+    {
+        int hits = 0;
+        int misses = 0;
+        lock (_gate)
+        {
+            for (int slot = 0; slot < requests.Count; slot++)
+            {
+                if (requests.IsFilled(slot))
+                {
+                    continue;
+                }
+
+                Serialization.Schemas.SegmentSpec spec = requests.GetSpec(slot);
+                if (_entries.TryGetValue(new Key(source, (long)spec.Offset, (int)spec.Length), out Entry? entry))
+                {
+                    entry.Referenced = true;
+                    requests.SetSharedResult(slot, entry.Owner, entry.Buffer);
+                    requests.NoteCacheHit();
+                    hits++;
+                }
+                else
+                {
+                    misses++;
+                }
+            }
+        }
+
+        Counted(hits, misses);
+        return misses == 0;
+    }
+
+    /// <summary>Adds hits and misses to the cache's counts and to the process's meters.</summary>
+    private void Counted(int hits, int misses)
+    {
+        if (hits > 0)
+        {
+            Interlocked.Add(ref _hits, hits);
+            VortexTelemetry.CacheHit(hits);
+        }
+
+        if (misses > 0)
+        {
+            Interlocked.Add(ref _misses, misses);
+            VortexTelemetry.CacheMiss(misses);
+        }
     }
 
     /// <summary>
@@ -151,7 +215,16 @@ public sealed class SegmentCache
             {
                 while (_size + length > CapacityBytes && _oldest is { } last)
                 {
+                    // A second chance (clock): an entry used since it was last passed goes back to the head, unmarked,
+                    // which a hit no longer does itself. Every entry passed is unmarked, so the walk ends.
                     Unlink(last);
+                    if (last.Referenced)
+                    {
+                        last.Referenced = false;
+                        LinkNewest(last);
+                        continue;
+                    }
+
                     UnlinkFromSource(last);
                     _entries.Remove(last.Key);
                     _size -= last.Buffer.Length;
@@ -316,5 +389,8 @@ public sealed class SegmentCache
         internal Entry? NextOfSource { get; set; }
 
         internal Entry? PreviousOfSource { get; set; }
+
+        /// <summary>Whether a hit used the entry since an eviction last passed it, which then passes it over once.</summary>
+        internal bool Referenced { get; set; }
     }
 }

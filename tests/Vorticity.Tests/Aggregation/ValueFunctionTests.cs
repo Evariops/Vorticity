@@ -337,11 +337,29 @@ public sealed partial class ValueFunctionTests
             new InstantTruncate(CalendarUnit.Hour, TimeUnit.Nanoseconds, null),
             new InstantTruncate(CalendarUnit.Day, TimeUnit.Nanoseconds, null),
             new InstantTruncate(CalendarUnit.Day, TimeUnit.Seconds, null),
+
+            // The calendar's units and a zone's, whose block keeps the bucket of the value before while values stay in it.
+            new InstantTruncate(CalendarUnit.Week, TimeUnit.Microseconds, null),
+            new InstantTruncate(CalendarUnit.Month, TimeUnit.Microseconds, null),
+            new InstantTruncate(CalendarUnit.Quarter, TimeUnit.Microseconds, null),
+            new InstantTruncate(CalendarUnit.Year, TimeUnit.Microseconds, null),
+            new InstantTruncate(CalendarUnit.Minute, TimeUnit.Microseconds, Paris),
+            new InstantTruncate(CalendarUnit.Hour, TimeUnit.Microseconds, Paris),
+            new InstantTruncate(CalendarUnit.Day, TimeUnit.Microseconds, Paris),
+            new InstantTruncate(CalendarUnit.Week, TimeUnit.Microseconds, Paris),
+            new InstantTruncate(CalendarUnit.Month, TimeUnit.Microseconds, Paris),
+            new InstantTruncate(CalendarUnit.Year, TimeUnit.Microseconds, Paris),
         ];
 
         Random random = new Random(11);
         long[] ordered = [.. Enumerable.Range(0, 5_000).Select(i => 1_760_000_000_000_000L + (i * 37_000_000L))];
         long[] ends = [long.MinValue, long.MinValue + 1, long.MinValue + 999, -1, 0, 1, long.MaxValue - 1, long.MaxValue, long.MinValue, 0, 0];
+
+        // Every seven minutes across Paris's spring and autumn transitions of 2025, in microseconds, and every 37 hours
+        // over two years: a zone's short and long days and hours, months and years in time order.
+        long[] transitions = [.. Enumerable.Range(0, 1_000).Select(i => 1_743_285_600_000_000L + (i * 420_000_000L))
+            .Concat(Enumerable.Range(0, 1_000).Select(i => 1_761_440_400_000_000L + (i * 420_000_000L)))];
+        long[] years = [.. Enumerable.Range(0, 1_000).Select(i => 1_700_000_000_000_000L + (i * 133_200_000_000L))];
         long[][] blocks =
         [
             ordered,
@@ -349,6 +367,10 @@ public sealed partial class ValueFunctionTests
             [.. ordered.Reverse()],
             ends,
             [.. ordered.Concat(ends).Concat(ordered)],
+            transitions,
+            years,
+            [.. years.Reverse()],
+            [.. transitions.Concat(years).Concat(transitions)],
         ];
 
         Vorticity.Types.DTypeArena types = new Vorticity.Types.DTypeArena();
@@ -370,6 +392,259 @@ public sealed partial class ValueFunctionTests
                 // Its blocks given back once read, the arena held until then.
                 arena.Reset();
             }
+        }
+    }
+
+    /// <summary>
+    /// A zone's truncation keeps the bucket of the value before while values stay in it, which a truncation that is not
+    /// monotone, a clock set back across a unit's boundary, could fool: around every transition of every zone the system
+    /// knows, from 1970 to 2040, up to eight of each zone's kinds of change, every unit maps a block of instants, in time
+    /// order, reversed, shuffled and in a zigzag about the transition, as it maps each instant alone.
+    /// </summary>
+    [Fact]
+    public void ABlockMapsAsTheFunctionAloneAroundEveryZonesTransitions()
+    {
+        Random random = new Random(37);
+        Vorticity.Types.DTypeArena types = new Vorticity.Types.DTypeArena();
+        DType dtype = types.Primitive(PType.I64, Nullability.NonNullable);
+        CalendarUnit[] units = [CalendarUnit.Minute, CalendarUnit.Hour, CalendarUnit.Day, CalendarUnit.Week, CalendarUnit.Month];
+        long[] spans = [180, 3 * 3_600, 3 * 86_400, 9 * 86_400, 40 * 86_400];
+        int transitions = 0;
+        int zones = 0;
+
+        // And zones the system may not hold, whose clocks go back across a unit's boundary: 17 minutes at local midnight,
+        // 30 minutes at ten past midnight, two hours at one, and forward 45 minutes at ten to midnight.
+        TimeZoneInfo Made(string id, int baseMinutes, int deltaMinutes, int backHour, int backMinute)
+        {
+            TimeZoneInfo.TransitionTime start = TimeZoneInfo.TransitionTime.CreateFixedDateRule(new DateTime(1, 1, 1, 2, 0, 0), 4, 1);
+            TimeZoneInfo.TransitionTime end = TimeZoneInfo.TransitionTime.CreateFixedDateRule(new DateTime(1, 1, 1, backHour, backMinute, 0), 10, 1);
+            TimeZoneInfo.AdjustmentRule rule = TimeZoneInfo.AdjustmentRule.CreateAdjustmentRule(
+                new DateTime(1970, 1, 1), new DateTime(2039, 12, 31), TimeSpan.FromMinutes(deltaMinutes), start, end);
+            return TimeZoneInfo.CreateCustomTimeZone(id, TimeSpan.FromMinutes(baseMinutes), id, id, id, [rule]);
+        }
+
+        TimeZoneInfo[] made =
+        [
+            Made("Back-17-at-midnight", 20, 17, 0, 0),
+            Made("Back-30-at-00:10", 90, 30, 0, 10),
+            Made("Back-120-at-01:00", -150, 120, 1, 0),
+            Made("Forward-45-at-23:50", 345, 45, 23, 50),
+        ];
+
+        foreach (TimeZoneInfo zone in TimeZoneInfo.GetSystemTimeZones().Concat(made))
+        {
+            List<long> found = Transitions(zone);
+            if (found.Count == 0)
+            {
+                continue;
+            }
+
+            zones++;
+            foreach (long transition in found)
+            {
+                transitions++;
+                for (int u = 0; u < units.Length; u++)
+                {
+                    InstantTruncate function = new InstantTruncate(units[u], TimeUnit.Seconds, zone);
+                    long span = spans[u];
+                    long step = Math.Max(1, span / 200);
+                    // Over a few units about the transition, and a minute apart over three hours either side of it, where the
+                    // instants a change of offset sends back or forward lie.
+                    long[] around = [.. Enumerable.Range(0, 401).Select(i => transition - span + (i * step) + random.Next((int)step))
+                        .Concat(Enumerable.Range(-180, 361).Select(m => transition + (m * 60L) + random.Next(60)))
+                        .Order()];
+                    long[] zigzag = new long[around.Length];
+                    for (int i = 0; i < zigzag.Length; i++)
+                    {
+                        zigzag[i] = around[i % 2 == 0 ? i / 2 : around.Length - 1 - (i / 2)];
+                    }
+
+                    // And blocks of three that go past the transition, back before it, then between: a bucket held past it
+                    // and stretched down to an instant before it must not answer for one the change sent elsewhere.
+                    List<long[]> blocks = [around, [.. around.Reverse()], [.. around.OrderBy(_ => random.Next())], zigzag];
+                    foreach (long after in (long[])[60, 600, 1_800, 5_400, 9_000])
+                    {
+                        foreach (long before in (long[])[9_000, 5_400, 2_700, 300])
+                        {
+                            foreach (long between in (long[])[3_600, 1_800, 60])
+                            {
+                                if (between < before)
+                                {
+                                    blocks.Add([transition + after, transition - before, transition - between]);
+                                }
+                            }
+                        }
+                    }
+
+                    foreach (long[] values in blocks)
+                    {
+                        Vorticity.Arrays.CanonicalArena arena = new Vorticity.Arrays.CanonicalArena();
+                        Vorticity.Buffers.VortexBuffer buffer = arena.Allocate(values.Length * sizeof(long), sizeof(long), out Span<byte> bytes);
+                        values.AsSpan().CopyTo(System.Runtime.InteropServices.MemoryMarshal.Cast<byte, long>(bytes));
+                        int column = arena.AddPrimitive(dtype, values.Length, Vorticity.Arrays.Validity.NonNullable, PType.I64, buffer);
+                        ReadOnlySpan<long> mapped = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, long>(arena.GetNode(function.Apply(arena, column)).Values.Span);
+                        for (int i = 0; i < values.Length; i++)
+                        {
+                            Int128 alone = Image(function, values[i]);
+                            if (alone != mapped[i])
+                            {
+                                Assert.Fail($"{function.Text} sends {values[i]} to {mapped[i]} in a block, {alone} alone (transition at {transition})");
+                            }
+                        }
+
+                        arena.Reset();
+                    }
+                }
+            }
+        }
+
+        Console.Out.Write(FormattableString.Invariant($"ZONE BLOCKS: {transitions} transitions of {zones} zones, five units, four orders and blocks of three each.\n"));
+        Assert.True(zones > 10, $"only {zones} zones with transitions");
+    }
+
+    /// <summary>
+    /// Up to eight transitions of <paramref name="zone"/> between 1970 and 2040, in Unix seconds, one of each change of offset
+    /// it makes (from an offset to another), found a day at a time and then to the second.
+    /// </summary>
+    private static List<long> Transitions(TimeZoneInfo zone)
+    {
+        List<long> found = [];
+        HashSet<(TimeSpan, TimeSpan)> kinds = [];
+        DateTime day = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        TimeSpan offset = zone.GetUtcOffset(day);
+        while (day.Year < 2040 && found.Count < 8)
+        {
+            DateTime next = day.AddDays(1);
+            TimeSpan now = zone.GetUtcOffset(next);
+            if (now != offset)
+            {
+                if (kinds.Add((offset, now)))
+                {
+                    DateTime from = day;
+                    DateTime to = next;
+                    while ((to - from).TotalSeconds > 1)
+                    {
+                        DateTime middle = from.AddSeconds(Math.Floor((to - from).TotalSeconds / 2));
+                        (from, to) = zone.GetUtcOffset(middle) == offset ? (middle, to) : (from, middle);
+                    }
+
+                    found.Add(new DateTimeOffset(to).ToUnixTimeSeconds());
+                }
+
+                offset = now;
+            }
+
+            day = next;
+        }
+
+        return found;
+    }
+
+    /// <summary>
+    /// The floor by a width's reciprocal against the processor's division: every width from 1 to 1,000, the powers of
+    /// two, a minute, an hour and a day in nanoseconds, widths around 2^31, 2^32 and 2^62, the greatest, and widths drawn
+    /// at random; over values around zero and the width's multiples, at the storage's ends, and drawn at random.
+    /// </summary>
+    [Fact]
+    public void AFloorByAReciprocalIsTheDivisionsFloor()
+    {
+        Random random = new Random(13);
+        List<long> units = [.. Enumerable.Range(1, 1_000).Select(u => (long)u)];
+        units.AddRange([60_000_000_000L, 3_600_000_000_000L, 86_400_000_000_000L, int.MaxValue, (long)int.MaxValue + 2, uint.MaxValue, (long)uint.MaxValue + 2, (1L << 62) - 1, (1L << 62) + 1, long.MaxValue - 1, long.MaxValue]);
+        for (int bit = 0; bit < 63; bit++)
+        {
+            units.Add(1L << bit);
+        }
+
+        for (int i = 0; i < 300; i++)
+        {
+            units.Add(random.NextInt64(1, long.MaxValue));
+        }
+
+        foreach (long unit in units)
+        {
+            FloorDivisor divisor = new FloorDivisor(unit);
+            List<long> values = [0, 1, -1, 2, -2, long.MinValue, long.MinValue + 1, long.MaxValue, long.MaxValue - 1];
+            foreach (long around in new[] { unit, -unit, unit * 3, -unit * 3 })
+            {
+                values.AddRange([around - 1, around, around + 1]);
+            }
+
+            long reach = unit > long.MaxValue / 4 ? long.MaxValue / 4 : 4 * unit;
+            for (int i = 0; i < 64; i++)
+            {
+                values.Add(random.NextInt64(long.MinValue, long.MaxValue));
+                values.Add(random.NextInt64(-reach, reach));
+            }
+
+            foreach (long value in values)
+            {
+                Assert.True(Civil.FloorTo(value, unit) == divisor.Floor(value), $"{value} floored by {unit}: {divisor.Floor(value)}, {Civil.FloorTo(value, unit)} dividing");
+                Assert.True((ulong)value / (ulong)unit == divisor.Quotient((ulong)value), $"{(ulong)value} over {unit}");
+            }
+        }
+    }
+
+    /// <summary>
+    /// A bucket of integers over a block of every storage, signed and not, of widths from one to beyond the storage:
+    /// each value's image in the block is the one the function gives it alone, floored below the storage's least value
+    /// to that value.
+    /// </summary>
+    [Fact]
+    public void ABucketOfIntegersMapsABlockOfEveryStorageAsEachValueAlone()
+    {
+        Random random = new Random(17);
+        PType[] storages = [PType.I8, PType.I16, PType.I32, PType.I64, PType.U8, PType.U16, PType.U32, PType.U64];
+        long[] widths = [1, 3, 10, 1_000, 1 << 20, 1_000_000_000_007, long.MaxValue];
+        Vorticity.Types.DTypeArena types = new Vorticity.Types.DTypeArena();
+        foreach (PType storage in storages)
+        {
+            int width = storage.ByteWidth();
+            (Int128 min, Int128 max) = ValueFunction.Integers(storage);
+            foreach (long bucket in widths)
+            {
+                NumberBucket function = new NumberBucket(storage, bucket, bucket, bucket.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                const int Count = 512;
+                Vorticity.Arrays.CanonicalArena arena = new Vorticity.Arrays.CanonicalArena();
+                Vorticity.Buffers.VortexBuffer buffer = arena.Allocate(Count * width, width, out Span<byte> bytes);
+                random.NextBytes(bytes);
+                Int128[] ends = [min, min + 1, max, max - 1, 0, 1];
+                for (int e = 0; e < ends.Length; e++)
+                {
+                    Write(bytes.Slice(e * width, width), storage, ends[e]);
+                }
+
+                int column = arena.AddPrimitive(types.Primitive(storage, Nullability.NonNullable), Count, Vorticity.Arrays.Validity.NonNullable, storage, buffer);
+                ReadOnlySpan<byte> mapped = arena.GetNode(function.Apply(arena, column)).Values.Span;
+                for (int i = 0; i < Count; i++)
+                {
+                    Int128 value = Read(bytes.Slice(i * width, width), storage);
+                    Int128 image = Read(mapped.Slice(i * width, width), storage);
+                    Assert.True(Image(function, value) == image, $"Bucket({bucket}) of {storage} sends {value} to {image} in a block, {Image(function, value)} alone");
+                }
+
+                arena.Reset();
+            }
+        }
+
+        static Int128 Read(ReadOnlySpan<byte> bytes, PType storage) => storage switch
+        {
+            PType.I8 => (sbyte)bytes[0],
+            PType.I16 => System.Buffers.Binary.BinaryPrimitives.ReadInt16LittleEndian(bytes),
+            PType.I32 => System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(bytes),
+            PType.I64 => System.Buffers.Binary.BinaryPrimitives.ReadInt64LittleEndian(bytes),
+            PType.U8 => bytes[0],
+            PType.U16 => System.Buffers.Binary.BinaryPrimitives.ReadUInt16LittleEndian(bytes),
+            PType.U32 => System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes),
+            _ => System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(bytes),
+        };
+
+        static void Write(Span<byte> bytes, PType storage, Int128 value)
+        {
+            Span<byte> wide = stackalloc byte[16];
+            System.Buffers.Binary.BinaryPrimitives.WriteInt128LittleEndian(wide, value);
+            wide[..bytes.Length].CopyTo(bytes);
+            _ = storage;
         }
     }
 

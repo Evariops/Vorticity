@@ -53,6 +53,23 @@ public sealed class SegmentOwnerTests
     }
 
     [Fact]
+    public void TryRetain_adds_a_reference_while_one_is_held_and_never_after_the_free()
+    {
+        CountingOwner owner = new CountingOwner();
+
+        Assert.True(owner.TryRetain());
+        Assert.Equal(2, owner.RefCount);
+        owner.Release();
+        owner.Release();
+        Assert.Equal(1, owner.Frees);
+
+        // A reader that finds the owner let go of takes no reference, and the count stays where the free left it.
+        Assert.False(owner.TryRetain());
+        Assert.Equal(0, owner.RefCount);
+        Assert.Equal(1, owner.Frees);
+    }
+
+    [Fact]
     public void Retain_returns_the_same_owner_and_defers_the_free()
     {
         CountingOwner owner = new CountingOwner();

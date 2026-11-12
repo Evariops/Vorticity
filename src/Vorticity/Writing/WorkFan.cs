@@ -1,6 +1,8 @@
 using System;
 using System.Runtime.ExceptionServices;
 using System.Threading;
+using System.Threading.Tasks;
+using System.Threading.Tasks.Sources;
 
 namespace Vorticity.Writing;
 
@@ -12,18 +14,19 @@ internal interface IFanWork
 }
 
 /// <summary>
-/// Runs the items of one piece of work on several threads, the calling one included, and returns
+/// Runs the items of one piece of work on several threads, the calling one included, and completes
 /// once every item has run: what the writer spreads over its degree of parallelism.
 /// </summary>
 /// <remarks>
 /// <para>
 /// Rented by a writer, used by it alone, and given back for the next writer. The helpers are made
-/// once and queued again for every piece, so a piece costs no allocation, nor a file once one has
-/// run; the calling thread claims items as well, and the helpers join only a piece that is open.
-/// The caller waits for the last item, closes the piece, then waits for every helper that joined to
-/// leave: a helper the pool runs late finds it closed and touches nothing, or finds the next one
-/// open and works for it, and the caller never waits for one the pool has not run. A helper still
-/// queued is not queued again. One piece runs at a time.
+/// once and queued again for every piece, and the fan is itself what the caller awaits, so a piece
+/// costs no allocation; the calling thread claims items as well, and the helpers join only a piece
+/// that is open. Once the caller has run every item left, it closes the piece and awaits every
+/// helper that joined to leave, the last of which completes the piece: a helper the pool runs late
+/// finds it closed and touches nothing, or finds the next one open and works for it, and the caller
+/// never awaits one the pool has not run. No thread waits: the caller's is free while the helpers
+/// finish. A helper still queued is not queued again. One piece runs at a time.
 /// </para>
 /// <para>
 /// A helper of a fan with a <see cref="Budget"/> is queued only on a lane of the session's it takes
@@ -33,11 +36,11 @@ internal interface IFanWork
 /// works only for a piece of the lanes it took it from.
 /// </para>
 /// <para>
-/// Waiting costs the caller nothing it could have done instead: it waits only for items another
+/// Awaiting costs the caller nothing it could have done instead: it awaits only items another
 /// thread has claimed and is running, since it claims every item left itself.
 /// </para>
 /// </remarks>
-internal sealed class WorkFan
+internal sealed class WorkFan : IValueTaskSource
 {
     /// <summary>The fans kept for later writers: what a few writers at once hold, one each.</summary>
     private const int Kept = 8;
@@ -46,14 +49,15 @@ internal sealed class WorkFan
     private static readonly Lock Gate = new Lock();
     private static int _pooled;
 
-    private readonly ManualResetEventSlim _finished = new ManualResetEventSlim(false);
+    // What the caller awaits once it has run every item left: completed by the last helper to leave, the piece closed.
+    private ManualResetValueTaskSourceCore<bool> _left;
     private Helper[] _helpers = [];
     private int[] _items = [];
     private IFanWork? _work;
     private int _count;
     private int _next;
-    private int _remaining;
     private int _active;
+    private int _awaiting;
     private bool _running;
     private volatile bool _open;
     private Exception? _error;
@@ -133,20 +137,18 @@ internal sealed class WorkFan
             if (_pooled < Kept)
             {
                 Pool[_pooled++] = fan;
-                return;
             }
         }
-
-        fan._finished.Dispose();
     }
 
     /// <summary>
     /// Runs items <c>[0, count)</c> of <paramref name="work"/>, which read
     /// <paramref name="state"/> and <paramref name="value"/> back from the fan, and rethrows the
-    /// first an item threw.
+    /// first an item threw. Completes at once when no helper is still at work once the caller has run
+    /// every item left; else once the last helper leaves, on its thread, the caller's held by nothing.
     /// </summary>
     /// <exception cref="InvalidOperationException">A piece is running already: an item started another.</exception>
-    internal void Run(IFanWork work, int count, object? state = null, int value = 0)
+    internal ValueTask RunAsync(IFanWork work, int count, object? state = null, int value = 0)
     {
         if (_running)
         {
@@ -159,9 +161,8 @@ internal sealed class WorkFan
         _work = work;
         _count = count;
         _next = 0;
-        _remaining = count;
         _error = null;
-        _finished.Reset();
+        _left.Reset();
         _open = true;
 
         // A helper joins on a lane of the session's it holds alone, or not at all: the degree is the lanes at work. One
@@ -188,23 +189,28 @@ internal sealed class WorkFan
             ThreadPool.UnsafeQueueUserWorkItem(helper, preferLocal: false);
         }
 
+        // Every item claimed, the caller's done: the piece closes. The items the helpers claimed run on helpers counted
+        // among the active, each of which leaves once its item is done; one the pool runs late finds the piece closed and
+        // touches nothing, so the caller awaits no work the pool has yet to start. The fences keep the close from passing
+        // the count's read, and the awaiting from passing it: a helper either is counted here or reads the piece closed,
+        // and the last to leave either completes the piece or left it for the caller to.
         Work();
-        if (Volatile.Read(ref _remaining) > 0)
-        {
-            _finished.Wait();
-        }
-
-        // Every helper that joined leaves before the piece does, each running on a thread of its own: one the pool runs late
-        // finds the piece closed and touches nothing, so the caller waits on no work the pool has yet to start. The fence
-        // keeps the close from passing the count's read: a helper either is counted here or reads the piece closed.
         _open = false;
         Interlocked.MemoryBarrier();
-        SpinWait spin = default;
-        while (Volatile.Read(ref _active) != 0)
+        Volatile.Write(ref _awaiting, 1);
+        Interlocked.MemoryBarrier();
+        if (Volatile.Read(ref _active) == 0 && Interlocked.CompareExchange(ref _awaiting, 0, 1) == 1)
         {
-            spin.SpinOnce();
+            End();
+            return default;
         }
 
+        return new ValueTask(this, _left.Version);
+    }
+
+    /// <summary>The piece ended: what it read let go, and the first failure of an item thrown.</summary>
+    private void End()
+    {
         _work = null;
         State = null;
         _running = false;
@@ -213,6 +219,17 @@ internal sealed class WorkFan
             ExceptionDispatchInfo.Throw(error);
         }
     }
+
+    void IValueTaskSource.GetResult(short token)
+    {
+        _left.GetResult(token);
+        End();
+    }
+
+    ValueTaskSourceStatus IValueTaskSource.GetStatus(short token) => _left.GetStatus(token);
+
+    void IValueTaskSource.OnCompleted(Action<object?> continuation, object? state, short token, ValueTaskSourceOnCompletedFlags flags) =>
+        _left.OnCompleted(continuation, state, token, flags);
 
     private void Join(Helper helper)
     {
@@ -228,12 +245,17 @@ internal sealed class WorkFan
         }
         finally
         {
-            // Its lane read before it may be queued again, which sets another.
+            // Its lane read before it may be queued again, which sets another; the piece completed once the lane is given
+            // back, by the last helper to leave a closed piece the caller awaits.
             LaneBudget? budget = helper.Budget;
             long entered = helper.Entered;
             Volatile.Write(ref helper.Queued, 0);
-            Interlocked.Decrement(ref _active);
+            bool last = Interlocked.Decrement(ref _active) == 0;
             budget?.Exit(entered);
+            if (last && Interlocked.CompareExchange(ref _awaiting, 0, 1) == 1)
+            {
+                _left.SetResult(true);
+            }
         }
     }
 
@@ -250,13 +272,6 @@ internal sealed class WorkFan
             catch (Exception error)
             {
                 Interlocked.CompareExchange(ref _error, error, null);
-            }
-            finally
-            {
-                if (Interlocked.Decrement(ref _remaining) == 0)
-                {
-                    _finished.Set();
-                }
             }
         }
     }

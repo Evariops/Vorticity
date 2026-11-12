@@ -169,6 +169,26 @@ public static partial class RowEncoder
     }
 
     /// <summary>
+    /// Encodes columns as <see cref="Encode(CanonicalArena, ReadOnlySpan{int}, ReadOnlySpan{RowSortField})"/> does, into
+    /// <paramref name="into"/>, keys a stream encoded before and holds no more: its buffers kept, grown where too small,
+    /// rather than rented and given back a batch.
+    /// </summary>
+    internal static RowKeys Encode(
+        CanonicalArena arena, ReadOnlySpan<int> columns, ReadOnlySpan<RowSortField> fields, RowKeys into)
+    {
+        int rowCount = Validate(arena, columns, fields);
+        (int[] sizes, int[] offsets) = into.Rows(rowCount);
+        int total = ComputeSizes(arena, columns, fields, sizes.AsSpan(0, rowCount));
+        _ = ComputeOffsets(sizes.AsSpan(0, rowCount), offsets.AsSpan(0, rowCount));
+        byte[] elements = into.Bytes(total);
+        Span<int> cursors = sizes.AsSpan(0, rowCount);
+        cursors.Clear();
+        Encode(arena, columns, fields, offsets.AsSpan(0, rowCount), cursors, elements.AsSpan(0, total));
+        into.Hold(rowCount, total);
+        return into;
+    }
+
+    /// <summary>
     /// Pass 1: fills <paramref name="sizes"/>, one entry per row, and returns the total number of
     /// bytes the encoding needs.
     /// </summary>

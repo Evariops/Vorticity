@@ -122,14 +122,23 @@ public sealed partial class DatasetGranuleReadsTests
     /// <summary>
     /// A needle asked again on the same handle reads nothing of its partition's index: the handle keeps the index's
     /// directory, its last bytes and the page the first asking loaded, where every asking read them again and parsed the
-    /// directory anew. The same row is found each time.
+    /// directory anew; sealed, the index object is not opened either, whose open read its envelope's trailer each time.
+    /// The same row is found each time.
     /// </summary>
-    [Fact]
-    public async Task ANeedleAskedAgainReadsNothingOfItsPartitionsIndex()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ANeedleAskedAgainReadsNothingOfItsPartitionsIndex(bool encrypted)
     {
         await using MemoryObjectStore memory = new MemoryObjectStore();
         KeyReads store = new KeyReads(memory);
-        (VortexDataset dataset, Row[] rows) = await DayAsync(store, identifiers: [nameof(Row.Sequence)], IdentifierLocation.Chunk);
+        using VortexKeyring? keyring = encrypted ? Sealing.SealedObjects.Keyring() : null;
+        await using VortexSession? session = keyring is null ? null : VortexSession.Create(options =>
+        {
+            options.Keyring = keyring;
+            options.SegmentCache = new SegmentCache(0);
+        });
+        (VortexDataset dataset, Row[] rows) = await DayAsync(store, identifiers: [nameof(Row.Sequence)], IdentifierLocation.Chunk, session: session);
         await using (dataset)
         {
             PositionedObject held = await dataset.ScanBuilder().ObjectsAsync(Ct).SingleAsync(Ct);
@@ -373,7 +382,8 @@ public sealed partial class DatasetGranuleReadsTests
     /// <paramref name="shuffled"/>, a rank drawn at random.
     /// </summary>
     private static async Task<(VortexDataset Dataset, Row[] Rows)> DayAsync(
-        IObjectStore store, string[]? identifiers, IdentifierLocation location, CalendarUnit partition = CalendarUnit.Day, bool shuffled = false)
+        IObjectStore store, string[]? identifiers, IdentifierLocation location, CalendarUnit partition = CalendarUnit.Day, bool shuffled = false,
+        VortexSession? session = null)
     {
         Random random = new Random(103);
         long[] sequences = [.. Enumerable.Range(0, 600_000).Select(static i => (long)i)];
@@ -385,7 +395,8 @@ public sealed partial class DatasetGranuleReadsTests
         Row[] rows = [.. Enumerable.Range(0, 600_000).Select(i => new Row(random.Next(0, 7), $"svc-{random.Next(0, 50):D2}", Start.AddMilliseconds(i * 37L), sequences[i], random.NextDouble()))];
         VortexDataset dataset = await VortexDataset.CreateAsync(store, Row.Schema, new DatasetOptions
         {
-            Session = Uncached.Session,
+            Session = session ?? Uncached.Session,
+            Encrypted = session is not null,
             Layout = new DatasetLayout
             {
                 Partition = LayoutValue.Column(nameof(Row.At)).Truncate(partition),

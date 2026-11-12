@@ -157,6 +157,15 @@ internal sealed class KeyIndexBuilder : IndexBuilder
     /// <summary>The buckets read and sorted ahead of the one being fed, at most, each with buffers of its own.</summary>
     private const int BucketsAhead = 4;
 
+    /// <summary>
+    /// The bits of the table of trigrams a text column's values met lately, each held plus one with its id, 0 the empty slot:
+    /// 512 KiB, kept from one batch to the next and emptied where a chunk's cut renumbers the keys carried.
+    /// </summary>
+    private const int RecentTrigramBits = 16;
+
+    // The trigrams met lately and their ids, made at the first trigram; null for a builder of other keys.
+    private ulong[]? _recentTrigrams;
+
     // A view's bytes, and the most of a value's it holds inside it.
     private const int ViewBytes = 16;
     private const int InlineBytes = 12;
@@ -273,16 +282,41 @@ internal sealed class KeyIndexBuilder : IndexBuilder
                 return;
             }
 
+            // The trigram a window of three bytes rolled over the value, each byte folded once, and the id it was interned as
+            // kept for the trigrams met lately: a value's words recur, and each recurring trigram was copied and looked up
+            // in the chunk's keys again.
             Span<byte> trigram = stackalloc byte[Trigrams.Length];
+            Span<ulong> recent = _recentTrigrams ??= Aggregating.ArrayShelf.Retained.Take<ulong>(1 << RecentTrigramBits, zeroed: true);
             for (int row = start; row < start + count; row++)
             {
                 if (allValid || (own.IsValid(row) && wrapper.IsValid(row)))
                 {
                     ReadOnlySpan<byte> value = LiteralReader.ViewAt(node, row);
-                    for (int i = 0; i + Trigrams.Length <= value.Length; i++)
+                    if (value.Length < Trigrams.Length)
                     {
-                        Trigrams.Copy(value.Slice(i, Trigrams.Length), _fold, trigram);
-                        Note(trigram, first + row - start);
+                        continue;
+                    }
+
+                    uint key = ((uint)Trigrams.Folded(value[0], _fold) << 8) | ((uint)Trigrams.Folded(value[1], _fold) << 16);
+                    for (int i = Trigrams.Length - 1; i < value.Length; i++)
+                    {
+                        key = (key >> 8) | ((uint)Trigrams.Folded(value[i], _fold) << 16);
+                        ref ulong met = ref recent[(int)((key * 0x9E37_79B1u) >> (32 - RecentTrigramBits))];
+                        int id;
+                        if ((uint)(met >> 32) == key + 1)
+                        {
+                            id = (int)(uint)met;
+                        }
+                        else
+                        {
+                            trigram[0] = (byte)key;
+                            trigram[1] = (byte)(key >> 8);
+                            trigram[2] = (byte)(key >> 16);
+                            id = Intern(trigram);
+                            met = ((ulong)(key + 1) << 32) | (uint)id;
+                        }
+
+                        NoteId(id, first + row - start);
                     }
                 }
             }
@@ -294,6 +328,27 @@ internal sealed class KeyIndexBuilder : IndexBuilder
         {
             case CanonicalKind.Primitive:
                 ReadOnlySpan<byte> values = node.Values.Span;
+                if (_hashed)
+                {
+                    // The rows hashed together, a batch at a time and in vectors for four- and eight-byte values, as a Bloom
+                    // filter and a sheet hash theirs, where each row's bytes went through XXH3 alone.
+                    Span<ulong> hashes = stackalloc ulong[XxHash3Fixed.RowBatch];
+                    for (int from = start; from < start + count; from += XxHash3Fixed.RowBatch)
+                    {
+                        int stop = Math.Min(from + XxHash3Fixed.RowBatch, start + count);
+                        XxHash3Fixed.HashRows(values, width, from, stop, hashes);
+                        for (int row = from; row < stop; row++)
+                        {
+                            if (allValid || (own.IsValid(row) && wrapper.IsValid(row)))
+                            {
+                                Hashed(hashes[row - from]);
+                            }
+                        }
+                    }
+
+                    return;
+                }
+
                 for (int row = start; row < start + count; row++)
                 {
                     if (allValid || (own.IsValid(row) && wrapper.IsValid(row)))
@@ -490,6 +545,9 @@ internal sealed class KeyIndexBuilder : IndexBuilder
         long end = _rows ? firstRow + rows : (long)firstBlock + blocks;
         ChunkKeys chunk = _spare;
         _table.Cut(end, chunk);
+
+        // The carried keys are interned again under new ids: the trigrams met lately name the old ones.
+        _recentTrigrams?.AsSpan().Clear();
         try
         {
             RunScratch scratch = Scratch ?? throw new InvalidOperationException("A locating builder needs the writer's scratch.");
@@ -636,6 +694,14 @@ internal sealed class KeyIndexBuilder : IndexBuilder
             }
 
             throw;
+        }
+        finally
+        {
+            // Every sort has ended either way: the buffers go back to the shelf, for the next file's buckets.
+            foreach (BucketBuffers? held in buffers)
+            {
+                held?.Release();
+            }
         }
 
         if (main is not null)
@@ -1114,5 +1180,10 @@ internal sealed class KeyIndexBuilder : IndexBuilder
         _spare.Dispose();
         _buckets?.Dispose();
         _buckets = null;
+        if (_recentTrigrams is { } recent)
+        {
+            Aggregating.ArrayShelf.Retained.Give(recent);
+            _recentTrigrams = null;
+        }
     }
 }

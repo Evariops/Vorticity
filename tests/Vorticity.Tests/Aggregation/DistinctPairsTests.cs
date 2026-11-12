@@ -113,6 +113,168 @@ public sealed partial class DistinctPairsTests
         }
     }
 
+    // Sixty thousand groups and one that holds most of the pairs, a dominant customer's: merged in series, the lanes' pairs
+    // go by parts, which a cut by group would leave lopsided, the dominant group's part on one worker; cut by the pairs'
+    // hash instead, each value still counts once a group.
+    [Theory]
+    [InlineData(2)]
+    [InlineData(4)]
+    public async Task AGroupThatHoldsMostPairsCountsEachValueOnce(int degree)
+    {
+        Row[] rows = Rows_(sorted: false);
+        for (int row = 0; row < rows.Length; row += 4)
+        {
+            rows[row] = rows[row] with { Key = 7 };
+        }
+
+        for (int row = 1; row < rows.Length; row += 4)
+        {
+            rows[row] = new Row(7, 1_000 + row, $"w-{row}");
+        }
+
+        string path = await WriteAsync(rows);
+        try
+        {
+            await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = degree);
+            await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
+            Vorticity.Aggregation query = file.Scan<Row>()
+                .GroupBy(r => r.Key)
+                .Select(g => (g.Key, g.CountDistinct(x => x.Value), g.CountDistinct(x => x.Text)));
+            query.Plan.MergeInParts = false;
+            Dictionary<int, KeyCounts> got = (await ListAsync(query.As<KeyCounts>())).ToDictionary(c => c.Key);
+            Assert.Equal(Expected(rows), got);
+            Assert.True(got[7].Values > Rows / 4, $"group 7 holds {got[7].Values} values");
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
+    // A group that holds half the rows' distinct values, under the whole budget and under a fifth and a tenth of the group
+    // by's peak. A spill cuts its parts by group, and the one group's pairs go whole to one part, which no budget below
+    // them holds: that part is merged in passes, each counting a share of the values, and each value still counts once a
+    // group; the budget is whole again and no file is left.
+    [Theory]
+    [InlineData(2)]
+    [InlineData(4)]
+    public async Task AGroupWhosePairsPassTheBudgetIsCountedInPasses(int degree)
+    {
+        Row[] rows = Rows_(sorted: false);
+        for (int row = 0; row < rows.Length; row += 2)
+        {
+            rows[row] = new Row(7, 1_000 + row, $"w-{row}");
+        }
+
+        string path = await WriteAsync(rows);
+        string scratch = TestScratch.Create("vorticity-pairs-");
+        try
+        {
+            long peak = 0;
+            foreach (int share in (int[])[1, 5, 10])
+            {
+                QueryMemoryBudget budget = new QueryMemoryBudget(share == 1 ? 1L << 30 : peak / share);
+                await using VortexSession session = VortexSession.Create(options =>
+                {
+                    options.MaxDegreeOfParallelism = degree;
+                    options.MemoryBudget = budget;
+                    options.ScratchDirectory = scratch;
+                });
+                await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
+                Vorticity.Aggregation query = file.Scan<Row>()
+                    .With(new ScanOptions { BatchRows = 4_096 })
+                    .GroupBy(r => r.Key)
+                    .Select(g => (g.Key, g.CountDistinct(x => x.Value), g.CountDistinct(x => x.Text)));
+                query.Plan.MergeInParts = false;
+                Assert.Equal(Expected(rows), (await ListAsync(query.As<KeyCounts>())).ToDictionary(c => c.Key));
+                if (share == 1)
+                {
+                    peak = budget.PeakBytes;
+                }
+                else
+                {
+                    Assert.True(query.Plan.LastRun?.MergePasses > 1, $"one pass under {budget.CeilingBytes:N0} bytes of {peak:N0}");
+                }
+
+                Assert.Equal(0, budget.ReservedBytes);
+            }
+
+            Assert.Empty(Directory.EnumerateFileSystemEntries(scratch));
+        }
+        finally
+        {
+            Directory.Delete(scratch, recursive: true);
+            System.IO.File.Delete(path);
+        }
+    }
+
+    // The dominant group again, a sum beside its distinct count and the plan as it comes: a part merged in passes merges
+    // the sum in its first pass alone, each value counted once a group and each row summed once.
+    [Theory]
+    [InlineData(1)]
+    [InlineData(4)]
+    public async Task ASumBesideADistinctCountMergedInPassesIsTakenOnce(int degree)
+    {
+        Row[] rows = Rows_(sorted: false);
+        for (int row = 0; row < rows.Length; row += 2)
+        {
+            rows[row] = new Row(7, 1_000 + row, $"w-{row}");
+        }
+
+        Dictionary<int, KeyValuesSum> expected = rows.GroupBy(r => r.Key).ToDictionary(
+            g => g.Key,
+            g => new KeyValuesSum(g.Key, g.Select(r => r.Value).Distinct().Count(), g.Sum(r => r.Value)));
+        string path = await WriteAsync(rows);
+        string scratch = TestScratch.Create("vorticity-pairs-");
+        try
+        {
+            long peak = 0;
+            foreach (int share in (int[])[1, 10])
+            {
+                QueryMemoryBudget budget = new QueryMemoryBudget(share == 1 ? 1L << 30 : peak / share);
+                await using VortexSession session = VortexSession.Create(options =>
+                {
+                    options.MaxDegreeOfParallelism = degree;
+                    options.MemoryBudget = budget;
+                    options.ScratchDirectory = scratch;
+                });
+                await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
+                Vorticity.Aggregation query = file.Scan<Row>()
+                    .With(new ScanOptions { BatchRows = 4_096 })
+                    .GroupBy(r => r.Key)
+                    .Select(g => (g.Key, g.CountDistinct(x => x.Value), g.Sum(x => x.Value)));
+                Assert.Equal(expected, (await ListAsync(query.As<KeyValuesSum>())).ToDictionary(c => c.Key));
+                if (share == 1)
+                {
+                    peak = budget.PeakBytes;
+                }
+                else
+                {
+                    Assert.True(query.Plan.LastRun?.MergePasses > 1, $"one pass under {budget.CeilingBytes:N0} bytes of {peak:N0}");
+                }
+
+                Assert.Equal(0, budget.ReservedBytes);
+            }
+
+            Assert.Empty(Directory.EnumerateFileSystemEntries(scratch));
+        }
+        finally
+        {
+            Directory.Delete(scratch, recursive: true);
+            System.IO.File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void PartsOneOfWhichHoldsMoreThanTwiceTheAverageAreLopsided()
+    {
+        // Two lanes over four parts: 100 pairs in all, an average part of 25.
+        Assert.False(PairedParts.Lopsided([[0, 10, 20, 30, 40], [0, 15, 30, 45, 60]], 4));
+        Assert.False(PairedParts.Lopsided([[0, 25, 30, 35, 40], [0, 25, 40, 50, 60]], 4));
+        Assert.True(PairedParts.Lopsided([[0, 26, 30, 35, 40], [0, 25, 40, 50, 60]], 4));
+        Assert.True(PairedParts.Lopsided([[0, 0, 0, 40, 40], [0, 0, 0, 60, 60]], 4));
+    }
+
     [Theory]
     [InlineData(1)]
     [InlineData(4)]
@@ -326,4 +488,7 @@ public sealed partial class DistinctPairsTests
 
     [VortexRecord]
     public partial record struct KeyCounts(int Key, long Values, long Texts);
+
+    [VortexRecord]
+    public partial record struct KeyValuesSum(int Key, long Values, long Sum);
 }

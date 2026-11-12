@@ -47,9 +47,9 @@ internal static partial class CompactionPolicy
         long[] bytes = new long[dataset.Levels.Count];
         if (dataset.Levels.Count > 0)
         {
-            await foreach (TreeEntry entry in dataset.Levels[0].EnumerateAsync(dataset.Pages, cancellationToken).ConfigureAwait(false))
+            await foreach ((TreeEntry entry, ObjectEntry parsed) in dataset.EntriesAsync(0, cancellationToken).ConfigureAwait(false))
             {
-                CompactionInput input = new CompactionInput(0, entry.Key, ObjectEntry.FromBytes(entry.Value));
+                CompactionInput input = new CompactionInput(0, entry.Key, parsed);
                 ReadOnlySpan<byte> partition = dataset.PartitionOf(entry.Key.Span);
                 if (partitions.Count == 0 || !partitions[^1].Value.AsSpan().SequenceEqual(partition))
                 {

@@ -423,6 +423,21 @@ read only once leaves before one read again and again, so a question over thirte
 through without pushing out the directories of the last days. The cache reports what it does on the
 library's meter, under `vortex.synopsis_cache.*`.
 
+### What a handle keeps in memory
+
+A handle keeps the data objects its questions opened, so that the next question over them parses no
+footer again, and the tree pages it read, so that a refresh asks the store only for the pages that
+changed. Both are bounded per handle, least recently used first out:
+
+| Option | Default | What it bounds |
+|---|---|---|
+| `MaxOpenObjectBytes` | 64 MiB | the objects kept open: the tail each open read, and its footer as questions parse it, counted at six bytes a byte of footer (measured at five to seven) |
+| `MaxOpenObjects` | 4 096 | the same objects, by count |
+| `PageCacheBytes` | 32 MiB | the tree pages kept from one version to the next |
+
+Up to version 0.11 a handle kept 32 objects open, a few hundred kilobytes: a process that holds many
+handles open at once now keeps up to 96 MiB for each, and sets lower bounds where that is too much.
+
 ## Versions
 
 ```csharp

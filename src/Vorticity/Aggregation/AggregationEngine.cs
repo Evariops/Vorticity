@@ -381,6 +381,12 @@ internal sealed class AggregationPlan
     internal bool CoreDistinct { get; set; } = true;
 
     /// <summary>
+    /// The most bytes of a <c>Distinct</c>'s batches its core hands on ahead of the reader, held under the budget; past
+    /// them, its appliers wait for the reader. A setting for the tests to meet that wait.
+    /// </summary>
+    internal long EmittedBytes { get; set; } = 64L << 20;
+
+    /// <summary>
     /// Whether the core asked for (<see cref="Core"/>) is the lean one lanes turn to under pressure: α at 1,
     /// a part applied from 256 entries, batches of a kilobyte, its caches and batches sized on the
     /// budget: a <c>Distinct</c>'s, which tells its values as they enter their sets and spills under its
@@ -626,6 +632,9 @@ internal sealed record AggregationRun(AggregationRun.Lane[] Lanes, long MergeTic
     /// <summary>What the query held of its budget's ceiling when the first run was written; -1 without one.</summary>
     internal double FirstSpillShare { get; init; } = -1;
 
+    /// <summary>The most passes a part read back from those runs took, its distinct pairs a share at a time; 1 when every part fit at once.</summary>
+    internal int MergePasses { get; init; } = 1;
+
     /// <summary>The run's counts with what <paramref name="spill"/> wrote and read, when it wrote anything.</summary>
     internal AggregationRun Spilled(SpillScope? spill) => spill is not { Runs: > 0 } ? this : this with
     {
@@ -633,6 +642,7 @@ internal sealed record AggregationRun(AggregationRun.Lane[] Lanes, long MergeTic
         SpilledBytes = spill.WrittenBytes,
         SpillReadBytes = spill.ReadBytes,
         FirstSpillShare = spill.FirstShare,
+        MergePasses = spill.MergePasses,
     };
 
     /// <summary>One lane's counts.</summary>
@@ -682,6 +692,9 @@ internal sealed class AggregationOutcome
     /// </summary>
     internal AggregationPartition? Kept { get; init; }
 
+    /// <summary>The core whose sub-tables are the result read whole: their arrays go back to the process's shelf once it is delivered.</summary>
+    internal GroupCore? Core { get; init; }
+
     /// <summary>Whether <see cref="Order"/> is lent by the process's shelf, which takes it back once the result is delivered.</summary>
     internal bool OrderLent { get; init; }
 
@@ -706,10 +719,33 @@ internal sealed class AggregationOutcome
         if (Interlocked.Exchange(ref _givenBack, 1) == 0)
         {
             Kept?.Delivered();
+            Core?.LetDelivered();
             if (OrderLent)
             {
                 ArrayShelf.Retained.Give(Order);
             }
+
+            if (Interlocked.Exchange(ref _operated, null) is { Length: > 0 } operated)
+            {
+                ArrayShelf.Retained.Give(operated);
+            }
+        }
+    }
+
+    // The groups the operators on groups left last, in an array of the process's shelf: given back with the result.
+    private int[]? _operated;
+
+    /// <summary>
+    /// Holds <paramref name="groups"/>, the groups an operator on groups left in an array of the process's shelf, until the
+    /// result is delivered; the array the operator before it left, which it read, goes back now, measured no more.
+    /// </summary>
+    internal void HoldOperated(int[] groups)
+    {
+        int[]? previous = Interlocked.Exchange(ref _operated, groups);
+        if (previous is { Length: > 0 } && !ReferenceEquals(previous, groups))
+        {
+            Memory?.Measure(-(long)previous.Length * sizeof(int));
+            ArrayShelf.Retained.Give(previous);
         }
     }
 
@@ -719,7 +755,14 @@ internal sealed class AggregationOutcome
     /// </summary>
     internal ResultParts? Parts { get; set; }
 
-    internal GroupKeys? Keys { get; }
+    internal GroupKeys? Keys { get; private set; }
+
+    /// <summary>
+    /// The outcome pointed at <paramref name="keys"/>, its keys alone read: a <c>Distinct</c>'s, whose applier copies
+    /// values from each sub-table it fills, or whose reader tells a spilled part's. One made for each copy was 8 MB a
+    /// question of 4M values.
+    /// </summary>
+    internal void Over(GroupKeys keys) => Keys = keys;
 
     /// <summary>
     /// The groups in delivery order, its first <see cref="Count"/>; the one group of a scalar aggregation.
@@ -788,7 +831,10 @@ internal sealed class AggregationPartition
     private readonly int[] _nodes;
 
     // The column of distinct sketches of each distinct count's column a batch of states may hold, named at the first.
-    private string?[]? _distinctColumns;
+    private byte[]?[]? _distinctColumns;
+
+    // The names of each measure's columns in a batch of states, made at the first batch.
+    private StateNames?[]? _stateNames;
 
     // The filter of each aggregate, or -1, and the selection of each filter over the batch.
     private readonly int[] _filterOf;
@@ -1895,15 +1941,18 @@ internal sealed class AggregationPartition
     /// its end: its table emptied into the core and let go, then every part's stack applied, with no
     /// table left to give back.
     /// </summary>
-    internal void TurnAtEnd(GroupCore core)
+    internal async ValueTask TurnAtEndAsync(GroupCore core, CancellationToken cancellationToken)
     {
         if (_core is null && Keys is { Count: > 0 })
         {
             TurnTo(core);
             core.Pressure?.Settle();
-            core.ApplyAll(_core!);
+            await core.ApplyAllAsync(_core!, cancellationToken).ConfigureAwait(false);
         }
     }
+
+    /// <summary>What the core tells of each group it makes, a <c>Distinct</c>'s reader; null for none.</summary>
+    internal CoreEmitter? Emitter => _plan.Emitter;
 
     /// <summary>
     /// Whether the lane turns to the core before its next batch: its budget could not
@@ -2611,7 +2660,7 @@ internal sealed class AggregationPartition
             Slots[i].EnsureGroups(count);
         }
 
-        ReadOnlySpan<long> stood = StateColumn(arena, root, StateRequest.RowsColumn);
+        ReadOnlySpan<long> stood = StateColumn(arena, root, StateNames.Rows);
         long number = 0;
         for (int i = 0; i < Slots.Length; i++)
         {
@@ -2625,8 +2674,8 @@ internal sealed class AggregationPartition
                 // A table of sketches holds the sketch of the column's values in each row, in place of the column, which
                 // an approximate count merges.
                 int column = _inputs[i];
-                _distinctColumns ??= new string?[Slots.Length];
-                string sketches = _distinctColumns[i] ??= StateRequest.DistinctOf(StateRequest.NameOf(_columns[column].Field));
+                _distinctColumns ??= new byte[]?[Slots.Length];
+                byte[] sketches = _distinctColumns[i] ??= StateNames.DistinctOf(StateRequest.NameOf(_columns[column].Field));
                 if (Sketched(arena, root, sketches, stood, out StateInput distinct))
                 {
                     if (_plan.Aggregates[i].Kind != AggregateKind.ApproximateCountDistinct || !Slots[i].StepStates(in distinct, selection, groups))
@@ -2652,9 +2701,14 @@ internal sealed class AggregationPartition
                 continue;
             }
 
-            StateInput input = StatesOf(
-                arena, root, _plan.Aggregates[i].Input is { } measured ? StateRequest.NameOf(measured.Field) : null, stood,
-                sketched: _plan.Aggregates[i].Kind is AggregateKind.Distribution or AggregateKind.Quantile);
+            StateNames? names = null;
+            if (_plan.Aggregates[i].Input is { } measured)
+            {
+                _stateNames ??= new StateNames?[Slots.Length];
+                names = _stateNames[i] ??= new StateNames(StateRequest.NameOf(measured.Field));
+            }
+
+            StateInput input = StatesOf(arena, root, names, stood, sketched: _plan.Aggregates[i].Kind is AggregateKind.Distribution or AggregateKind.Quantile);
             if (!Slots[i].StepStates(in input, selection, groups))
             {
                 throw new InvalidOperationException($"A batch of states reached the aggregate {_plan.Aggregates[i].Kind}, which folds none.");
@@ -2676,38 +2730,37 @@ internal sealed class AggregationPartition
     internal ReadOnlySpan<int> StateGroups(int rows) => _rowGroups.AsSpan(0, rows);
 
     /// <summary>
-    /// The states of <paramref name="column"/>'s aggregate in a batch of states, and with <paramref name="sketched"/>, a
-    /// distribution's, its sketches; the rows alone for a count of rows.
+    /// The states of the aggregate whose measure's columns <paramref name="names"/> names in a batch of states, and with
+    /// <paramref name="sketched"/>, a distribution's, its sketches; the rows alone for a count of rows.
     /// </summary>
-    private static StateInput StatesOf(CanonicalArena arena, int root, string? column, ReadOnlySpan<long> rows, bool sketched)
+    private static StateInput StatesOf(CanonicalArena arena, int root, StateNames? names, ReadOnlySpan<long> rows, bool sketched)
     {
-        if (column is null)
+        if (names is null)
         {
             return new StateInput { Rows = rows };
         }
 
         CanonicalNode batch = arena.GetNode(root);
-        bool floats = batch.DType.IndexOfField(StateRequest.SumWord(column, MeasureLayout.SumWords(floats: true)[0])) >= 0;
+        bool floats = batch.DType.IndexOfField(names.FloatSums[0]) >= 0;
 
-        // The columns MeasureLayout.Names lists, named one at a time: a batch of states would otherwise allocate their
-        // array, per measure and per batch.
-        ReadOnlySpan<string> sum = MeasureLayout.SumWords(floats);
+        // The columns MeasureLayout.Names lists, found one at a time by their names in UTF-8, made once for the partition.
+        byte[][] sum = floats ? names.FloatSums : names.IntegerSums;
 
         // A table of sketches holds each measure's besides its states, a binary column of them, which a distribution alone
-        // looks for: its name is made for the batch.
+        // looks for.
         StateInput sketches = default;
-        bool sketch = sketched && Sketched(arena, root, StateRequest.SketchOf(column), rows, out sketches);
+        bool sketch = sketched && Sketched(arena, root, names.Sketch, rows, out sketches);
         return new StateInput
         {
             Rows = rows,
-            Values = StateColumn(arena, root, StateRequest.ValuesOf(column)),
-            Sum0 = StateColumn(arena, root, StateRequest.SumWord(column, sum[0])),
-            Sum1 = StateColumn(arena, root, StateRequest.SumWord(column, sum[1])),
-            Sum2 = floats ? StateColumn(arena, root, StateRequest.SumWord(column, sum[2])) : default,
-            Sum3 = floats ? StateColumn(arena, root, StateRequest.SumWord(column, sum[3])) : default,
-            Sum4 = floats ? StateColumn(arena, root, StateRequest.SumWord(column, sum[4])) : default,
-            Least = StateColumn(arena, root, StateRequest.LeastOf(column)),
-            Greatest = StateColumn(arena, root, StateRequest.GreatestOf(column)),
+            Values = StateColumn(arena, root, names.Values),
+            Sum0 = StateColumn(arena, root, sum[0]),
+            Sum1 = StateColumn(arena, root, sum[1]),
+            Sum2 = floats ? StateColumn(arena, root, sum[2]) : default,
+            Sum3 = floats ? StateColumn(arena, root, sum[3]) : default,
+            Sum4 = floats ? StateColumn(arena, root, sum[4]) : default,
+            Least = StateColumn(arena, root, names.Least),
+            Greatest = StateColumn(arena, root, names.Greatest),
             Floats = floats,
             SketchViews = sketch ? sketches.SketchViews : default,
             SketchData = sketch ? sketches.SketchData : default,
@@ -2718,7 +2771,7 @@ internal sealed class AggregationPartition
     /// The sketches of the binary column <paramref name="name"/> of a batch of states, beside the rows each row of states
     /// stands for, when the batch holds the column.
     /// </summary>
-    private static bool Sketched(CanonicalArena arena, int root, string name, ReadOnlySpan<long> rows, out StateInput sketches)
+    private static bool Sketched(CanonicalArena arena, int root, ReadOnlySpan<byte> name, ReadOnlySpan<long> rows, out StateInput sketches)
     {
         CanonicalNode batch = arena.GetNode(root);
         int field = batch.DType.IndexOfField(name);
@@ -2731,7 +2784,7 @@ internal sealed class AggregationPartition
         CanonicalNode column = arena.GetNode(EncodedForms.Canonical(arena, batch.GetFieldIndex(field)));
         if (column.Kind != CanonicalKind.VarBinView)
         {
-            throw new InvalidOperationException($"The column '{name}' of a batch of states is not binary.");
+            throw new InvalidOperationException($"The column '{System.Text.Encoding.UTF8.GetString(name)}' of a batch of states is not binary.");
         }
 
         sketches = new StateInput { Rows = rows, SketchViews = column.Views.Span, SketchData = column.DataBuffers };
@@ -2739,19 +2792,19 @@ internal sealed class AggregationPartition
     }
 
     /// <summary>The 64-bit integers of the field <paramref name="name"/> of a batch of states.</summary>
-    private static ReadOnlySpan<long> StateColumn(CanonicalArena arena, int root, string name)
+    private static ReadOnlySpan<long> StateColumn(CanonicalArena arena, int root, ReadOnlySpan<byte> name)
     {
         CanonicalNode batch = arena.GetNode(root);
         int field = batch.DType.IndexOfField(name);
         if (field < 0)
         {
-            throw new InvalidOperationException($"A batch of states holds no column '{name}'.");
+            throw new InvalidOperationException($"A batch of states holds no column '{System.Text.Encoding.UTF8.GetString(name)}'.");
         }
 
         CanonicalNode column = arena.GetNode(batch.GetFieldIndex(field));
         if (column.Kind != CanonicalKind.Primitive || column.PType != PType.I64)
         {
-            throw new InvalidOperationException($"The column '{name}' of a batch of states is not 64-bit integers.");
+            throw new InvalidOperationException($"The column '{System.Text.Encoding.UTF8.GetString(name)}' of a batch of states is not 64-bit integers.");
         }
 
         return column.Values.Cast<long>();
@@ -3839,9 +3892,9 @@ internal static class AggregationEngine
             if (pressure is not null && tables.Length > 1 && (pressure.Turned || !memory.CanGrow(2 * MergeAhead(tables))))
             {
                 AggregationPartition? largest = MergeUnturned(tables);
-                if (pressure.Made is { Engaged: true } pressed)
+                if (pressure.Made is { Engaged: true } pressed && largest is not null)
                 {
-                    largest?.TurnAtEnd(pressed);
+                    await largest.TurnAtEndAsync(pressed, cancellationToken).ConfigureAwait(false);
                 }
                 else if (largest is not null)
                 {
@@ -3883,7 +3936,7 @@ internal static class AggregationEngine
                 (GroupKeys held, AggregateSlot[] heldSlots, long heldBytes, CorePart[] spilled) = await engaged.FinishAsync(joined, lanes, cancellationToken).ConfigureAwait(false);
                 plan.LastRun = Gathered(partitions, Stopwatch.GetTimestamp() - merging, 0, heldBytes) with { Core = engaged.Run() };
                 (int[] heldOrder, bool heldLent) = LentWholeOrder(held.Count);
-                AggregationOutcome outcome = new AggregationOutcome(plan, heldSlots, held, heldOrder, held.Count) { OrderLent = heldLent };
+                AggregationOutcome outcome = new AggregationOutcome(plan, heldSlots, held, heldOrder, held.Count) { OrderLent = heldLent, Core = engaged };
                 if (spilled.Length == 0)
                 {
                     foreach (AggregationPartition partition in partitions)
@@ -5134,6 +5187,13 @@ internal static class AggregationEngine
             if (partition.Core is { Starved: true })
             {
                 await partition.RoomAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            // The values the lane's bursts told a Distinct's reader, past what may wait for it: the lane waits here, on a
+            // task, where a burst under its part's lock could not.
+            if (partition.Emitter is { Overflowing: true } emitter)
+            {
+                await emitter.RoomAsync(cancellationToken).ConfigureAwait(false);
             }
         }
 

@@ -65,11 +65,14 @@ internal sealed class RecordBinding
     /// <summary>The file type of member <paramref name="member"/>.</summary>
     internal VortexType TypeOf(int member) => FileFields[FileIndex[member]].Type;
 
-    /// <summary>The binding of <typeparamref name="TRecord"/> to <paramref name="file"/>, built once per schema.</summary>
+    /// <summary>
+    /// The binding of <typeparamref name="TRecord"/> to <paramref name="file"/>, built once per schema; again when it is
+    /// asked under another registry of extensions than the one it was built with, which the binding holds.
+    /// </summary>
     internal static RecordBinding For<TRecord>(VortexSchema file, VortexExtensionRegistry? extensions)
         where TRecord : IVortexRecord<TRecord>
     {
-        if (Cache<TRecord>.Bindings.TryGetValue(file, out RecordBinding? binding))
+        if (Cache<TRecord>.Bindings.TryGetValue(file, out RecordBinding? binding) && ReferenceEquals(binding.Extensions, extensions))
         {
             return binding;
         }
@@ -82,6 +85,24 @@ internal sealed class RecordBinding
 
         binding = Bind(typeof(TRecord), TRecord.Schema, file.FieldArray, [], [], extensions);
         Cache<TRecord>.Bindings.AddOrUpdate(file, binding);
+        return binding;
+    }
+
+    /// <summary>
+    /// <see cref="For{TRecord}(VortexSchema, VortexExtensionRegistry?)"/> over the fields of <paramref name="type"/>, a struct
+    /// a result's batches share: kept by the type, where a schema made of it for each batch missed the cache every time and
+    /// bound the record again. Under another registry of extensions than the one it was built with, bound again.
+    /// </summary>
+    internal static RecordBinding ForType<TRecord>(VortexType type, VortexExtensionRegistry? extensions)
+        where TRecord : IVortexRecord<TRecord>
+    {
+        if (Cache<TRecord>.ByType.TryGetValue(type, out RecordBinding? binding) && ReferenceEquals(binding.Extensions, extensions))
+        {
+            return binding;
+        }
+
+        binding = For<TRecord>(VortexSchema.Create(type.FieldArray), extensions);
+        Cache<TRecord>.ByType.AddOrUpdate(type, binding);
         return binding;
     }
 
@@ -326,5 +347,7 @@ internal sealed class RecordBinding
     private static class Cache<TRecord>
     {
         internal static readonly ConditionalWeakTable<VortexSchema, RecordBinding> Bindings = [];
+
+        internal static readonly ConditionalWeakTable<VortexType, RecordBinding> ByType = [];
     }
 }

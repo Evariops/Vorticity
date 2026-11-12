@@ -2,6 +2,7 @@
 // kinds at row 0, a middle row and the last row.
 using System;
 using System.Buffers.Binary;
+using System.Runtime.InteropServices;
 using System.Text;
 using Vorticity.Arrays;
 using Vorticity.Buffers;
@@ -370,6 +371,37 @@ public sealed class ColumnAccessorTests
 
         Assert.Throws<ArgumentOutOfRangeException>(() => { _ = batch.Root.AsBinary().GetLength(6); });
         Assert.Throws<ArgumentOutOfRangeException>(() => batch.Root.AsBinary().GetString(6));
+    }
+
+    /// <summary>
+    /// A text column of a dictionary, an entry null and rows null, and one of a constant, copied into strings: the strings
+    /// the canonical rows give, each entry made once and shared by its rows.
+    /// </summary>
+    [Fact]
+    public void ADictionarysTextsCopyAsTheirRowsAndShareEachEntry()
+    {
+        using ColumnFixture f = new ColumnFixture();
+        byte[]?[] entries = [Encoding.UTF8.GetBytes("alpha"), null, Encoding.UTF8.GetBytes("a value past twelve bytes"), Encoding.UTF8.GetBytes("élan 名前")];
+        int values = f.Utf8Node(entries, Nullability.Nullable);
+        uint[] codes = [0, 1, 2, 3, 2, 0, 3, 3, 1, 2];
+        DType utf8 = f.Types.Utf8(Nullability.Nullable);
+        int dictionary = f.Arena.AddDictionary(
+            utf8, codes.Length, f.BitmapValidity([true, true, true, false, true, true, true, false, true, true]), f.Bytes(MemoryMarshal.AsBytes(codes.AsSpan()), 4), values);
+        int constant = f.Arena.AddConstant(utf8, 7, f.BitmapValidity([true, false, true, true, true, false, true]), Encoding.UTF8.GetBytes("a constant text"));
+        foreach (int node in (int[])[dictionary, constant])
+        {
+            Column<string?> column = new Column<string?>(f.Arena, node, VortexType.Utf8.Nullable, null);
+            string?[] copied = new string?[column.Length];
+            column.CopyTo(copied);
+            int canonical = EncodedForms.Canonical(f.Arena, node);
+            for (int i = 0; i < copied.Length; i++)
+            {
+                string? expected = ArenaWords.IsValid(f.Arena, canonical, i) ? Encoding.UTF8.GetString(ColumnData.Bytes(f.Arena, canonical, i)) : null;
+                Assert.Equal(expected, copied[i]);
+            }
+
+            Assert.Same(copied[0], node == dictionary ? copied[5] : copied[2]);
+        }
     }
 
     [Fact]

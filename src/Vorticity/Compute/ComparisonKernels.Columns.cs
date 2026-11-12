@@ -1,6 +1,7 @@
 using System;
 using System.Buffers.Binary;
 using System.Numerics;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
 using Vorticity.Arrays;
@@ -155,7 +156,37 @@ internal static partial class ComparisonKernels
         int leftOffset = left.BitOffset;
         int rightOffset = right.BitOffset;
         bool allValid = valid.AllValid;
-        for (int i = 0; i < destination.Length; i++)
+        int i = 0;
+
+        // Sixty-four rows a word: the operator's answer for each of the four pairs of bits is a mask of the two words,
+        // and the word of verdicts is spread as a comparison's is; a row at a time read two bits and looked the pair up.
+        if (WordBytes.IsAccelerated || WordBytes.IsAccelerated128)
+        {
+            bool falseFalse = answers[0] == Trilean.True;
+            bool falseTrue = answers[1] == Trilean.True;
+            bool trueFalse = answers[2] == Trilean.True;
+            bool trueTrue = answers[3] == Trilean.True;
+            WordBytes spread = WordBytes.IsAccelerated ? WordBytes.Create() : default;
+            ref byte into = ref MemoryMarshal.GetReference(destination);
+            for (; i <= destination.Length - 64; i += 64)
+            {
+                ulong l = BitWords.Load(leftBits, leftOffset + i);
+                ulong r = BitWords.Load(rightBits, rightOffset + i);
+                ulong held = (falseFalse ? ~l & ~r : 0) | (falseTrue ? ~l & r : 0) | (trueFalse ? l & ~r : 0) | (trueTrue ? l & r : 0);
+                ulong both = allValid ? ulong.MaxValue : valid.Word(i);
+                if (WordBytes.IsAccelerated)
+                {
+                    Vector512<byte> unknown = spread.Ones(~both);
+                    (spread.Ones(held & both) | (unknown + unknown)).StoreUnsafe(ref into, (nuint)i);
+                }
+                else
+                {
+                    WordBytes.Store128(held & both, ~both, ref Unsafe.Add(ref into, i));
+                }
+            }
+        }
+
+        for (; i < destination.Length; i++)
         {
             if (!allValid && !valid.IsValid(i))
             {
@@ -252,9 +283,11 @@ internal static partial class ComparisonKernels
         ReadOnlySpan<T> right = MemoryMarshal.Cast<byte, T>(rightBytes)[..rows];
         // Where AVX-512 is, 64 rows a step and the rest, fewer, one at a time; elsewhere the test is
         // a constant the jit folds, and the loops below are the whole method.
-        if (WordBytes.IsAccelerated && Vector512<T>.IsSupported)
+        bool wide = WordBytes.IsAccelerated && Vector512<T>.IsSupported;
+        if (wide || (WordBytes.IsAccelerated128 && Vector128<T>.IsSupported))
         {
-            for (int i = PairLanes<T, TOp>(left, right, in valid, destination); i < rows; i++)
+            int from = wide ? PairLanes<T, TOp>(left, right, in valid, destination) : NarrowPairLanes<T, TOp>(left, right, in valid, destination);
+            for (int i = from; i < rows; i++)
             {
                 destination[i] = valid.IsValid(i)
                     ? (TOp.Holds(left[i], right[i]) ? Trilean.True : Trilean.False)
@@ -324,6 +357,51 @@ internal static partial class ComparisonKernels
             ulong both = valid.Word(i);
             Vector512<byte> unknown = spread.Ones(~both);
             (spread.Ones(held & both) | (unknown + unknown)).StoreUnsafe(ref into, (nuint)i);
+        }
+
+        return i;
+    }
+
+    /// <summary>
+    /// <see cref="PairLanes{T, TOp}"/> where AVX-512 is not: each side over 256-bit vectors where they are, 128-bit ones
+    /// elsewhere, the word of 64 verdicts spread by 128-bit shuffles (<see cref="WordBytes.Store128"/>).
+    /// </summary>
+    /// <returns>The rows answered, a multiple of 64; the rest are the caller's.</returns>
+    private static int NarrowPairLanes<T, TOp>(
+        ReadOnlySpan<T> left, ReadOnlySpan<T> right, in BothValid valid, Span<byte> destination)
+        where TOp : struct, IOrderOp
+    {
+        int rows = destination.Length;
+        bool wide = Vector256.IsHardwareAccelerated && Vector256<T>.IsSupported;
+        ref T a0 = ref MemoryMarshal.GetReference(left);
+        ref T b0 = ref MemoryMarshal.GetReference(right);
+        ref byte into = ref MemoryMarshal.GetReference(destination);
+        bool allValid = valid.AllValid;
+        int i = 0;
+        for (; i <= rows - 64; i += 64)
+        {
+            ulong held = 0;
+            if (wide)
+            {
+                for (int row = 0; row < 64; row += Vector256<T>.Count)
+                {
+                    nuint at = (nuint)(i + row);
+                    held |= (ulong)TOp.Lanes256(Vector256.LoadUnsafe(ref a0, at), Vector256.LoadUnsafe(ref b0, at))
+                        .ExtractMostSignificantBits() << row;
+                }
+            }
+            else
+            {
+                for (int row = 0; row < 64; row += Vector128<T>.Count)
+                {
+                    nuint at = (nuint)(i + row);
+                    held |= (ulong)TOp.Lanes128(Vector128.LoadUnsafe(ref a0, at), Vector128.LoadUnsafe(ref b0, at))
+                        .ExtractMostSignificantBits() << row;
+                }
+            }
+
+            ulong both = allValid ? ulong.MaxValue : valid.Word(i);
+            WordBytes.Store128(held & both, ~both, ref Unsafe.Add(ref into, i));
         }
 
         return i;

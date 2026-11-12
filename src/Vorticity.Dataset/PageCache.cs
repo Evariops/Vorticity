@@ -11,8 +11,8 @@ namespace Vorticity.Dataset;
 /// commit, reads again only the pages that changed.
 /// </summary>
 /// <remarks>
-/// Three things, each bounded: the pages read from the store, least recently used first out within
-/// a budget in bytes; the part of the pages region that the read opening each of the last
+/// Three things, each bounded: the pages read from the store, within a budget in bytes, the oldest
+/// kept first out unless a walk read it since, and read without a lock (<see cref="ClockMemo{TKey, TValue}"/>); the part of the pages region that the read opening each of the last
 /// <see cref="HeldVersions"/> versions brought back, where the pages those versions wrote lie; and
 /// where each version's pages region starts, which reading any of its pages needs. A region is kept
 /// by version and not page by page because most of what a version wrote, the next one rewrites:
@@ -27,7 +27,7 @@ internal sealed class PageCache
     internal const int MaxStarts = 4096;
 
     private readonly Lock _gate = new Lock();
-    private readonly Dictionary<PageReference, Entry> _pages = [];
+    private readonly ClockMemo<PageReference, ReadOnlyMemory<byte>> _pages;
     private readonly Dictionary<ulong, ReadOnlyMemory<byte>> _held = [];
 
     // The versions held, the oldest first: a handful, so one forgotten is taken out where it lies.
@@ -35,9 +35,6 @@ internal sealed class PageCache
 
     private readonly Dictionary<ulong, long> _starts = [];
     private readonly Queue<ulong> _startOrder = new Queue<ulong>();
-    private Entry? _newest;
-    private Entry? _oldest;
-    private long _size;
 
     /// <summary>A cache of at most <paramref name="capacityBytes"/> bytes of pages read from the store.</summary>
     /// <param name="capacityBytes">The budget; 0 keeps no page read, and a page larger than it is never kept.</param>
@@ -45,85 +42,27 @@ internal sealed class PageCache
     {
         ArgumentOutOfRangeException.ThrowIfNegative(capacityBytes);
         Capacity = capacityBytes;
+        _pages = new ClockMemo<PageReference, ReadOnlyMemory<byte>>(capacityBytes);
     }
 
     /// <summary>The budget in bytes of the pages read from the store.</summary>
     public long Capacity { get; }
 
     /// <summary>The bytes of the pages read from the store it holds now.</summary>
-    public long Size
-    {
-        get
-        {
-            lock (_gate)
-            {
-                return _size;
-            }
-        }
-    }
+    public long Size => _pages.Held;
 
     /// <summary>The pages read from the store it holds now.</summary>
-    public int Count
-    {
-        get
-        {
-            lock (_gate)
-            {
-                return _pages.Count;
-            }
-        }
-    }
+    public int Count => _pages.Count;
 
     /// <summary>A page read from the store that <paramref name="reference"/> names, when the cache holds it.</summary>
-    public bool TryGet(PageReference reference, out ReadOnlyMemory<byte> page)
-    {
-        lock (_gate)
-        {
-            if (_pages.TryGetValue(reference, out Entry? entry))
-            {
-                Unlink(entry);
-                LinkNewest(entry);
-                page = entry.Bytes;
-                return true;
-            }
-        }
-
-        page = default;
-        return false;
-    }
+    public bool TryGet(PageReference reference, out ReadOnlyMemory<byte> page) => _pages.TryGet(reference, out page);
 
     /// <summary>
-    /// Keeps a page read from the store and checked against <paramref name="reference"/>, evicting the
-    /// least recently used to make room; false when the page is one the budget cannot hold.
+    /// Keeps a page read from the store and checked against <paramref name="reference"/>, letting the
+    /// oldest kept and not read since go to make room; false when the page is one the budget cannot hold.
     /// </summary>
-    public bool Add(PageReference reference, ReadOnlyMemory<byte> page)
-    {
-        if (page.Length > Capacity || page.IsEmpty)
-        {
-            return false;
-        }
-
-        lock (_gate)
-        {
-            if (_pages.ContainsKey(reference))
-            {
-                return true;
-            }
-
-            while (_size + page.Length > Capacity && _oldest is { } last)
-            {
-                Unlink(last);
-                _pages.Remove(last.Reference);
-                _size -= last.Bytes.Length;
-            }
-
-            Entry entry = new Entry(reference, page);
-            _pages[reference] = entry;
-            LinkNewest(entry);
-            _size += page.Length;
-            return true;
-        }
-    }
+    public bool Add(PageReference reference, ReadOnlyMemory<byte> page) =>
+        !page.IsEmpty && _pages.Keep(reference, page, page.Length, out _);
 
     /// <summary>
     /// The start of the pages region of <paramref name="version"/> that the read opening it brought
@@ -212,56 +151,5 @@ internal sealed class PageCache
                 _starts.Remove(_startOrder.Dequeue());
             }
         }
-    }
-
-    /// <summary>Puts <paramref name="entry"/>, out of the order of use, at its head: the most recently used.</summary>
-    private void LinkNewest(Entry entry)
-    {
-        entry.Older = _newest;
-        entry.Newer = null;
-        if (_newest is not null)
-        {
-            _newest.Newer = entry;
-        }
-
-        _newest = entry;
-        _oldest ??= entry;
-    }
-
-    /// <summary>Takes <paramref name="entry"/> out of the order of use.</summary>
-    private void Unlink(Entry entry)
-    {
-        if (entry.Newer is null)
-        {
-            _newest = entry.Older;
-        }
-        else
-        {
-            entry.Newer.Older = entry.Older;
-        }
-
-        if (entry.Older is null)
-        {
-            _oldest = entry.Newer;
-        }
-        else
-        {
-            entry.Older.Newer = entry.Newer;
-        }
-
-        entry.Newer = null;
-        entry.Older = null;
-    }
-
-    /// <summary>A page kept, in the order of use.</summary>
-    private sealed class Entry(PageReference reference, ReadOnlyMemory<byte> bytes)
-    {
-        internal PageReference Reference { get; } = reference;
-
-        internal ReadOnlyMemory<byte> Bytes { get; } = bytes;
-
-        internal Entry? Newer { get; set; }
-
-        internal Entry? Older { get; set; }
     }
 }

@@ -28,15 +28,22 @@ public sealed partial class PartitionIndexTests
     /// identifier, merged and consolidated: an index a day, which covers the day's level 1, places every covered row, and
     /// rules covered objects out of a lookup unread. Late rows of the first day consolidated keep it so; a purge of part
     /// of the second day leaves the objects it rewrites outside its index; a vacuum past the retention keeps the indexes
-    /// the version names and takes the first day's first.
+    /// the version names and takes the first day's first. Sealed, the same: an index is read by its plaintext's length, which
+    /// the store's is not, by a lookup and by the consolidation that merges it.
     /// </summary>
-    [Fact]
-    public async Task AConsolidatedDaysIndexPlacesItsRowsAndKeepsItsCoverage()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AConsolidatedDaysIndexPlacesItsRowsAndKeepsItsCoverage(bool encrypted)
     {
         Random random = new Random(71);
         await using MemoryObjectStore store = new MemoryObjectStore();
+        using VortexKeyring? keyring = encrypted ? Sealing.SealedObjects.Keyring() : null;
+        await using VortexSession? session = keyring is null ? null : VortexSession.Create(options => options.Keyring = keyring);
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Row.Schema, new DatasetOptions
         {
+            Session = session ?? VortexSession.Default,
+            Encrypted = encrypted,
             Layout = new DatasetLayout
             {
                 Partition = LayoutValue.Column(nameof(Row.Day)),
@@ -130,7 +137,7 @@ public sealed partial class PartitionIndexTests
         foreach (PartitionIndexEntry entry in entries)
         {
             await using ISegmentReader reader = await SealedObjectStore.OpenDataAsync(dataset.Store, entry.ObjectKey, entry.Uid, entry.Bytes, Ct);
-            PartitionIndex index = await PartitionPostings.ReadAsync(reader, entry.Bytes, Ct);
+            PartitionIndex index = await PartitionPostings.ReadAsync(reader, Ct);
             PartitionIndex.Entry sequence = index.Of(nameof(Row.Sequence), PartitionIndex.EntryKind.Postings) ?? throw new InvalidOperationException("no postings of Sequence");
             int day = levelOne.Values.Where(held => entry.Covers(held.Held.Entry.Uid)).Select(held => held.Rows[0].Day).FirstOrDefault(-1);
             Assert.True(day >= 0, $"'{entry.ObjectKey}' covers no level 1 object");
@@ -173,6 +180,37 @@ public sealed partial class PartitionIndexTests
 
                     long place = row / ((long)covered.BlockRows * sequence.UnitBlocks);
                     Assert.True(found.Contains((rank, (uint)place)), $"Sequence {value} of day {day} is not placed at rank {rank}, place {place}");
+                }
+            }
+
+            // A lookup that knows where each stride of a page starts begins at the stride its hash lies in: the postings it
+            // finds are those found from the page's first, for the hashes about every stride's start and a sample of the
+            // others, held or not.
+            int shift = 64 - sequence.HashBits;
+            foreach (PartitionIndex.Page at in sequence.Pages)
+            {
+                using Vorticity.Buffers.SegmentOwner owner = await reader.ReadAsync(
+                    new Vorticity.Serialization.Schemas.SegmentSpec((ulong)at.Offset, (uint)at.Length, 0, 0, 0), Ct);
+                List<PartitionIndex.Posting> postings = [];
+                sequence.Decode(owner.Buffer.Span, at, postings);
+                ulong[] restarts = sequence.Restarts(owner.Buffer.Span, at);
+                Assert.Equal((postings.Count + 1023) / 1024, restarts.Length);
+                for (int i = 0; i < postings.Count; i++)
+                {
+                    if (i % 1024 is not (0 or 1 or 1023) && i % 61 != 0)
+                    {
+                        continue;
+                    }
+
+                    foreach (ulong cut in (ulong[])[postings[i].Hash, postings[i].Hash + 1])
+                    {
+                        List<(int Rank, uint Block)> fromFirst = [];
+                        List<(int Rank, uint Block)> resumed = [];
+                        sequence.Find(owner.Buffer.Span, at, cut << shift, fromFirst);
+                        sequence.Find(owner.Buffer.Span, at, cut << shift, resumed, restarts);
+                        Assert.True(cut != postings[i].Hash || fromFirst.Count > 0, $"posting {i} of a page of day {day} is not found");
+                        Assert.Equal(fromFirst, resumed);
+                    }
                 }
             }
         }

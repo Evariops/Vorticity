@@ -490,7 +490,7 @@ internal readonly struct ZstdPlan
     /// left, and every row elsewhere, are written whether valid or not and the count moves by the
     /// row's bit, a store and an add where a copy a row was a call.
     /// </remarks>
-    private static int Compact<T>(
+    internal static int Compact<T>(
         ReadOnlySpan<byte> source, in ValidityReader valid, int from, int to, Span<byte> stream, int count)
         where T : unmanaged
     {
@@ -530,6 +530,25 @@ internal readonly struct ZstdPlan
                     };
                     packed.StoreUnsafe(ref target, (nuint)count);
                     count += BitOperations.PopCount((word >> (group * lanes)) & groupBits);
+                }
+            }
+        }
+        else if (Avx2.IsSupported && Unsafe.SizeOf<T>() is 4 or 8
+            && (long)into.Length * Unsafe.SizeOf<T>() >= ((long)count + (to - from)) * Unsafe.SizeOf<T>() + CompactSlack)
+        {
+            // AVX2 has no compress: a permutation of a 256-bit row's lanes chosen by its bits does it (Compute.LeftPack),
+            // eight 32-bit or four 64-bit lanes; a row at a time took 0.64 ns a long, against 0.14 on AVX-512.
+            int lanes = Vector256<T>.Count;
+            uint laneBits = (1u << lanes) - 1;
+            for (; i + 64 <= to; i += 64)
+            {
+                ulong word = allValid ? ulong.MaxValue : BitWords.Load(bits, offset + i);
+                for (int group = 0; group < 64 / lanes; group++)
+                {
+                    uint kept = (uint)(word >> (group * lanes)) & laneBits;
+                    Vector256<T> row = Vector256.LoadUnsafe(ref value, (nuint)(i + (group * lanes)));
+                    Compute.LeftPack.Pack256(row, kept).StoreUnsafe(ref target, (nuint)count);
+                    count += BitOperations.PopCount(kept);
                 }
             }
         }
@@ -671,11 +690,6 @@ internal readonly struct ZstdPlan
             from = to;
         }
 
-        if (workspace is { Fan.Lanes: > 1 } && blocks > 1 && stream.Length >= AcrossBytes)
-        {
-            return CompressAcross(workspace, stream, frames, blocks, bound, canonicalSize, numerator, denominator);
-        }
-
         byte[] destination = WorkArrays.Rent<byte>(checked((int)bound));
         bool kept = false;
         try
@@ -726,97 +740,6 @@ internal readonly struct ZstdPlan
             }
         }
     }
-
-    /// <summary>
-    /// <see cref="Compress"/> on the workspace's threads: each frame compressed into a room of its
-    /// own, sized for its worst case, then the frames closed up in order and described as one thread
-    /// describes them, so the bytes and the table are the ones one thread writes.
-    /// </summary>
-    private static unsafe ZstdPlan? CompressAcross(
-        ArrayBlobWriter.Workspace workspace, ReadOnlySpan<byte> stream, int[] frames, int blocks, long bound,
-        long canonicalSize, int numerator, int denominator)
-    {
-        ZstdFrames across = workspace.Frames;
-        Span<int> plan = across.Plan(blocks);
-        int count = 0;
-        long at = 0;
-        for (int block = 0, from = 0, before = 0; block < blocks; block++)
-        {
-            int to = frames[(block * FrameFields) + 1];
-            int through = frames[(block * FrameFields) + 2];
-            if (through == before)
-            {
-                // A block of nulls stores no value, and a frame of none would cost its header.
-                continue;
-            }
-
-            int room = ZstdCompressor.GetMaxCompressedLength(to - from);
-            int slot = count * ZstdFrames.Fields;
-            plan[slot] = from;
-            plan[slot + 1] = to;
-            plan[slot + 2] = (int)at;
-            plan[slot + 3] = room;
-            plan[slot + 4] = 0;
-            plan[slot + 5] = through - before;
-            at += room;
-            count++;
-            from = to;
-            before = through;
-        }
-
-        byte[] destination = WorkArrays.Rent<byte>(checked((int)bound));
-        bool kept = false;
-        try
-        {
-            bool compressed;
-            fixed (byte* input = stream)
-            fixed (byte* output = destination)
-            {
-                compressed = across.Compress(workspace.Fan!, input, output, count, workspace.Level);
-            }
-
-            if (!compressed)
-            {
-                return null;
-            }
-
-            // Closed up left to right: a frame's room starts at or after the end of the frames
-            // before it, so each move reads what no earlier move has written over.
-            int written = 0;
-            for (int frame = 0; frame < count; frame++)
-            {
-                int slot = frame * ZstdFrames.Fields;
-                int produced = plan[slot + 4];
-                destination.AsSpan(plan[slot + 2], produced).CopyTo(destination.AsSpan(written));
-                written += produced;
-                frames[frame * FrameFields] = written;
-                frames[(frame * FrameFields) + 1] = plan[slot + 1] - plan[slot];
-                frames[(frame * FrameFields) + 2] = plan[slot + 5];
-            }
-
-            if (written * (long)denominator >= canonicalSize * (long)numerator)
-            {
-                return null;
-            }
-
-            kept = true;
-            return new ZstdPlan(destination, frames, count);
-        }
-        finally
-        {
-            if (!kept)
-            {
-                WorkArrays.Return(destination);
-                WorkArrays.Return(frames);
-            }
-        }
-    }
-
-    /// <summary>
-    /// The values below which a column's frames are compressed on the calling thread alone: a
-    /// frame's worth of work is a few tens of microseconds, the hand-off to the pool about as much.
-    /// </summary>
-    private const int AcrossBytes = 256 << 10;
 
     /// <summary>
     /// One frame of <paramref name="input"/> into <paramref name="destination"/>, which holds the

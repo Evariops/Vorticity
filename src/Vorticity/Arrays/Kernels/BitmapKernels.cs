@@ -5,6 +5,7 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
 using System.Runtime.Intrinsics.Arm;
+using System.Runtime.Intrinsics.X86;
 
 namespace Vorticity.Arrays.Decoders.Canonical;
 
@@ -206,6 +207,11 @@ internal static class BitmapKernels
             total += CountBlocks(middle, out int counted);
             middle = middle[counted..];
         }
+        else if ((Avx512BW.IsSupported && middle.Length >= 128) || (Avx2.IsSupported && middle.Length >= 64))
+        {
+            total += CountNibbles(middle, out int counted);
+            middle = middle[counted..];
+        }
 
         // Four sums, so that no count waits on the one before: one sum chains every popcount to the
         // last and holds the loop to a word a cycle.
@@ -235,6 +241,63 @@ internal static class BitmapKernels
         }
 
         return total;
+    }
+
+    /// <summary>
+    /// The set bits of the whole pairs of vectors of <paramref name="bytes"/>, 512-bit on AVX-512 where the runtime takes
+    /// such vectors (as <see cref="Compute.WordBytes.IsAccelerated"/> says), 256-bit on AVX2, and how many bytes those are:
+    /// each byte's two nibbles counted by a table shuffle, the bytes' counts summed by eight with a sum of absolute
+    /// differences, in two accumulators. A popcount a word took 1.63 us a 64 KB bitmap, 8 bytes a cycle.
+    /// </summary>
+    /// <remarks>
+    /// Of 64 to 127 bytes on AVX-512 the 512-bit pairs count none, and the words count them all. Sending them to the
+    /// 256-bit pairs instead took a hundred bytes from 6.66 to 6.29 ns, but a test of the length here took a bitmap of
+    /// 1 KB from 15.7 to 23.8 ns, the loop's code laid out otherwise, and a method of its own for them cost 6 % on 1 KB
+    /// and 9 to 11 % on AVX2.
+    /// </remarks>
+    private static int CountNibbles(ReadOnlySpan<byte> bytes, out int counted)
+    {
+        ref byte from = ref MemoryMarshal.GetReference(bytes);
+        if (Vector512.IsHardwareAccelerated && Avx512BW.IsSupported)
+        {
+            Vector512<byte> table = Vector512.Create(Vector128.Create((byte)0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4));
+            Vector512<byte> nibble = Vector512.Create((byte)0x0F);
+            Vector512<ulong> first = Vector512<ulong>.Zero;
+            Vector512<ulong> second = Vector512<ulong>.Zero;
+            int at = 0;
+            for (; at <= bytes.Length - 128; at += 128)
+            {
+                Vector512<byte> a = Vector512.LoadUnsafe(ref from, (nuint)at);
+                Vector512<byte> b = Vector512.LoadUnsafe(ref from, (nuint)(at + 64));
+                Vector512<byte> countsA = Avx512BW.Shuffle(table, a & nibble) + Avx512BW.Shuffle(table, (a.AsUInt16() >> 4).AsByte() & nibble);
+                Vector512<byte> countsB = Avx512BW.Shuffle(table, b & nibble) + Avx512BW.Shuffle(table, (b.AsUInt16() >> 4).AsByte() & nibble);
+                first += Avx512BW.SumAbsoluteDifferences(countsA, Vector512<byte>.Zero).AsUInt64();
+                second += Avx512BW.SumAbsoluteDifferences(countsB, Vector512<byte>.Zero).AsUInt64();
+            }
+
+            counted = at;
+            return (int)Vector512.Sum(first + second);
+        }
+
+        {
+            Vector256<byte> table = Vector256.Create(Vector128.Create((byte)0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4));
+            Vector256<byte> nibble = Vector256.Create((byte)0x0F);
+            Vector256<ulong> first = Vector256<ulong>.Zero;
+            Vector256<ulong> second = Vector256<ulong>.Zero;
+            int at = 0;
+            for (; at <= bytes.Length - 64; at += 64)
+            {
+                Vector256<byte> a = Vector256.LoadUnsafe(ref from, (nuint)at);
+                Vector256<byte> b = Vector256.LoadUnsafe(ref from, (nuint)(at + 32));
+                Vector256<byte> countsA = Avx2.Shuffle(table, a & nibble) + Avx2.Shuffle(table, (a.AsUInt16() >> 4).AsByte() & nibble);
+                Vector256<byte> countsB = Avx2.Shuffle(table, b & nibble) + Avx2.Shuffle(table, (b.AsUInt16() >> 4).AsByte() & nibble);
+                first += Avx2.SumAbsoluteDifferences(countsA, Vector256<byte>.Zero).AsUInt64();
+                second += Avx2.SumAbsoluteDifferences(countsB, Vector256<byte>.Zero).AsUInt64();
+            }
+
+            counted = at;
+            return (int)Vector256.Sum(first + second);
+        }
     }
 
     /// <summary>Bytes <see cref="CountBlocks"/> counts at a time: four vectors.</summary>
@@ -337,10 +400,30 @@ internal static class BitmapKernels
             }
             else
             {
+                // Thirty-two output bytes a step where vectors are the machine's: four words of source
+                // shifted, each with the word after it, loaded eight bytes on, for the bits the shift
+                // brings in; its reads end eight bytes short of the last byte the pairs below read.
+                int b = 0;
+                if (Vector256.IsHardwareAccelerated && wholeBytes >= 40)
+                {
+                    ref byte from = ref Unsafe.Add(ref MemoryMarshal.GetReference(source), sourceByte);
+                    ref byte to = ref Unsafe.Add(ref MemoryMarshal.GetReference(destination), destinationByte);
+                    if ((uint)(sourceByte + wholeBytes) >= (uint)source.Length || (uint)(destinationByte + wholeBytes) > (uint)destination.Length)
+                    {
+                        ThrowShortBitmap(destination.Length, count);
+                    }
+
+                    for (; b + 40 <= wholeBytes; b += 32)
+                    {
+                        Vector256<ulong> words = Vector256.LoadUnsafe(ref Unsafe.Add(ref from, b)).AsUInt64();
+                        Vector256<ulong> after = Vector256.LoadUnsafe(ref Unsafe.Add(ref from, b + 8)).AsUInt64();
+                        ((words >> shift) | (after << (64 - shift))).AsByte().StoreUnsafe(ref Unsafe.Add(ref to, b));
+                    }
+                }
+
                 // Eight output bytes at a time: the next eight source bytes as a word, shifted, and
                 // the byte after them for the bits the shift brings in. The last word reads the
                 // byte the last pair below would, so the reads end where the bytes' did.
-                int b = 0;
                 for (; b + 8 <= wholeBytes; b += 8)
                 {
                     ulong word = BinaryPrimitives.ReadUInt64LittleEndian(source.Slice(sourceByte + b, 8));
@@ -512,6 +595,17 @@ internal static class BitmapKernels
                 ulong zeros = Vector512.Equals(Vector512.LoadUnsafe(ref input, (uint)i), Vector512<byte>.Zero)
                     .ExtractMostSignificantBits();
                 BinaryPrimitives.WriteUInt64LittleEndian(destination.Slice(i >> 3, 8), ~zeros);
+            }
+        }
+
+        if (Vector256.IsHardwareAccelerated && length - i >= Vector256<byte>.Count)
+        {
+            // Thirty-two bytes to four of bits on AVX2, where 128-bit vectors made two.
+            ref byte input = ref MemoryMarshal.GetReference(source);
+            for (; i <= length - Vector256<byte>.Count; i += Vector256<byte>.Count)
+            {
+                uint zeros = Vector256.Equals(Vector256.LoadUnsafe(ref input, (uint)i), Vector256<byte>.Zero).ExtractMostSignificantBits();
+                BinaryPrimitives.WriteUInt32LittleEndian(destination.Slice(i >> 3, 4), ~zeros);
             }
         }
 

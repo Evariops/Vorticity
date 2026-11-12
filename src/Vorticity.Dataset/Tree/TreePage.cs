@@ -91,65 +91,138 @@ internal static class TreePage
     /// <summary>Reads a leaf page's entries, in key order.</summary>
     public static IReadOnlyList<TreeEntry> ReadLeaf(ReadOnlyMemory<byte> page)
     {
-        if (KindOf(page.Span) != TreePageKind.Leaf)
+        LeafReader reader = new LeafReader(page);
+        List<TreeEntry> entries = new List<TreeEntry>(Math.Min(reader.Count, 1 << 16));
+        while (reader.TryRead(out TreeEntry entry))
         {
-            throw new CommitFormatException("This page is not a leaf page.");
-        }
-
-        int at = 1;
-        int count = checked((int)ReadVarint(page.Span, ref at));
-        List<TreeEntry> entries = new List<TreeEntry>(Math.Min(count, 1 << 16));
-        for (int i = 0; i < count; i++)
-        {
-            ReadOnlyMemory<byte> key = ReadBytes(page, ref at);
-            long rows = (long)ReadVarint(page.Span, ref at);
-            ReadOnlyMemory<byte> value = ReadBytes(page, ref at);
-            entries.Add(new TreeEntry(key, value, rows));
-        }
-
-        if (at != page.Length)
-        {
-            throw new CommitFormatException(
-                $"A leaf page of {page.Length} bytes has {page.Length - at} bytes after its {count} entries.");
+            entries.Add(entry);
         }
 
         return entries;
     }
 
+    /// <summary>
+    /// A leaf page's entries read one at a time where they lie: a walk that passes a page makes no list of its entries,
+    /// which cost a walk 40 bytes an object, and stops reading where it stops walking.
+    /// </summary>
+    internal struct LeafReader
+    {
+        private readonly ReadOnlyMemory<byte> _page;
+        private int _at;
+        private int _left;
+
+        /// <summary>A reader of <paramref name="page"/>'s entries, from its first.</summary>
+        /// <exception cref="CommitFormatException">The bytes are not a leaf page.</exception>
+        internal LeafReader(ReadOnlyMemory<byte> page)
+        {
+            if (KindOf(page.Span) != TreePageKind.Leaf)
+            {
+                throw new CommitFormatException("This page is not a leaf page.");
+            }
+
+            _page = page;
+            _at = 1;
+            Count = checked((int)ReadVarint(page.Span, ref _at));
+            _left = Count;
+        }
+
+        /// <summary>How many entries the page says it holds.</summary>
+        internal readonly int Count { get; }
+
+        /// <summary>The entry after the last one read; false past the last, once the page is checked to end there.</summary>
+        /// <exception cref="CommitFormatException">The page is cut short, or has bytes past its last entry.</exception>
+        internal bool TryRead(out TreeEntry entry)
+        {
+            if (_left == 0)
+            {
+                if (_at != _page.Length)
+                {
+                    throw new CommitFormatException(
+                        $"A leaf page of {_page.Length} bytes has {_page.Length - _at} bytes after its {Count} entries.");
+                }
+
+                entry = default;
+                return false;
+            }
+
+            ReadOnlyMemory<byte> key = ReadBytes(_page, ref _at);
+            long rows = (long)ReadVarint(_page.Span, ref _at);
+            ReadOnlyMemory<byte> value = ReadBytes(_page, ref _at);
+            entry = new TreeEntry(key, value, rows);
+            _left--;
+            return true;
+        }
+    }
+
     /// <summary>Reads an internal page's entries, in key order.</summary>
     public static IReadOnlyList<InternalEntry> ReadInternal(ReadOnlyMemory<byte> page)
     {
-        if (KindOf(page.Span) != TreePageKind.Internal)
+        InternalReader reader = new InternalReader(page);
+        List<InternalEntry> entries = new List<InternalEntry>(Math.Min(reader.Count, 1 << 16));
+        while (reader.TryRead(out InternalEntry entry))
         {
-            throw new CommitFormatException("This page is not an internal page.");
+            entries.Add(entry);
         }
 
-        int at = 1;
-        int count = checked((int)ReadVarint(page.Span, ref at));
-        List<InternalEntry> entries = new List<InternalEntry>(Math.Min(count, 1 << 16));
-        for (int i = 0; i < count; i++)
+        return entries;
+    }
+
+    /// <summary>An internal page's entries read one at a time where they lie, as <see cref="LeafReader"/> reads a leaf's.</summary>
+    internal struct InternalReader
+    {
+        private readonly ReadOnlyMemory<byte> _page;
+        private int _at;
+        private int _left;
+
+        /// <summary>A reader of <paramref name="page"/>'s entries, from its first.</summary>
+        /// <exception cref="CommitFormatException">The bytes are not an internal page.</exception>
+        internal InternalReader(ReadOnlyMemory<byte> page)
         {
-            ReadOnlyMemory<byte> min = ReadBytes(page, ref at);
-            ReadOnlyMemory<byte> max = ReadBytes(page, ref at);
-            long rows = (long)ReadVarint(page.Span, ref at);
-            if (at + PageReference.Bytes > page.Length)
+            if (KindOf(page.Span) != TreePageKind.Internal)
+            {
+                throw new CommitFormatException("This page is not an internal page.");
+            }
+
+            _page = page;
+            _at = 1;
+            Count = checked((int)ReadVarint(page.Span, ref _at));
+            _left = Count;
+        }
+
+        /// <summary>How many entries the page says it holds.</summary>
+        internal readonly int Count { get; }
+
+        /// <summary>The entry after the last one read; false past the last, once the page is checked to end there.</summary>
+        /// <exception cref="CommitFormatException">The page is cut short, or has bytes past its last entry.</exception>
+        internal bool TryRead(out InternalEntry entry)
+        {
+            if (_left == 0)
+            {
+                if (_at != _page.Length)
+                {
+                    throw new CommitFormatException(
+                        $"An internal page of {_page.Length} bytes has {_page.Length - _at} bytes after its {Count} entries.");
+                }
+
+                entry = default;
+                return false;
+            }
+
+            ReadOnlyMemory<byte> min = ReadBytes(_page, ref _at);
+            ReadOnlyMemory<byte> max = ReadBytes(_page, ref _at);
+            long rows = (long)ReadVarint(_page.Span, ref _at);
+            if (_at + PageReference.Bytes > _page.Length)
             {
                 throw new CommitFormatException("An internal entry's reference is cut short.");
             }
 
-            PageReference child = PageReference.Read(page.Span[at..]);
-            at += PageReference.Bytes;
-            ReadOnlyMemory<byte> summary = ReadBytes(page, ref at);
-            entries.Add(new InternalEntry(min, max, rows, child, summary));
+            PageReference child = PageReference.Read(_page.Span[_at..]);
+            _at += PageReference.Bytes;
+            ReadOnlyMemory<byte> summary = ReadBytes(_page, ref _at);
+            entry = new InternalEntry(min, max, rows, child, summary);
+            _left--;
+            return true;
         }
-
-        if (at != page.Length)
-        {
-            throw new CommitFormatException(
-                $"An internal page of {page.Length} bytes has {page.Length - at} bytes after its {count} entries.");
-        }
-
-        return entries;
     }
 
     /// <summary>The bytes a varint of this value takes, 1 to 10.</summary>

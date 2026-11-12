@@ -1,6 +1,5 @@
 using System;
 using System.Buffers.Binary;
-using System.Collections.Concurrent;
 using System.Globalization;
 using System.IO.Hashing;
 using System.Numerics;
@@ -10,7 +9,8 @@ namespace Vorticity.Dataset;
 
 /// <summary>
 /// The granules of an object where a filter evaluated on its rows kept one, a filter's pages (spec D, 5): a bit a granule of
-/// the object's scan, kept by the handle and the session's synopsis cache, so that the filter asked again starts its scan's
+/// the object's scan, kept by the session's synopsis cache when it has one, by the handle within a budget otherwise (no
+/// table that grows for the handle's life), so that the filter asked again starts its scan's
 /// pruning from them, a source of the granules' algebra (spec D, 4.1), the granules between never read. An object never
 /// changes, so its pages stay exact as long as it lives, under the identity its postscript carries.
 /// </summary>
@@ -21,13 +21,31 @@ namespace Vorticity.Dataset;
 /// </remarks>
 internal sealed class PredicatePages
 {
-    private readonly ConcurrentDictionary<(UInt128 Object, UInt128 Filter), ulong[]> _held = new();
+    /// <summary>The bytes a filter's pages in an object are counted at besides its words: its key, its array and its slot.</summary>
+    private const int PagesOverhead = 96;
+
+    /// <summary>The bytes a note that a filter is wide in an object is counted at.</summary>
+    private const int WideBytes = 64;
+
+    // The pages the handle keeps, least used first out within the budget: a filter whose literals change at every question,
+    // a sliding window of time, made a table that grew for the handle's life, objects compacted away included.
+    private readonly ClockMemo<(UInt128 Object, UInt128 Filter), ulong[]> _held;
 
     // The filters whose pages in an object would spare little: their questions read the object whole, in one pass.
-    private readonly ConcurrentDictionary<(UInt128 Object, UInt128 Filter), bool> _wide = new();
+    private readonly ClockMemo<(UInt128 Object, UInt128 Filter), bool> _wide;
+
+    /// <summary>Pages kept in <paramref name="budget"/> bytes at most, an eighth more for the wide notes; none for 0, the session's cache then alone.</summary>
+    internal PredicatePages(long budget = DefaultBudget)
+    {
+        _held = new ClockMemo<(UInt128, UInt128), ulong[]>(budget);
+        _wide = new ClockMemo<(UInt128, UInt128), bool>(budget / 8);
+    }
+
+    /// <summary>The bytes a handle keeps of its filters' pages by default.</summary>
+    internal const long DefaultBudget = 16L << 20;
 
     /// <summary>Whether filter <paramref name="filter"/> kept rows in too much of the object <paramref name="uid"/> for its pages to spare a read.</summary>
-    internal bool Wide(UInt128 uid, UInt128 filter) => _wide.ContainsKey((uid, filter));
+    internal bool Wide(UInt128 uid, UInt128 filter) => _wide.TryGet((uid, filter), out _);
 
     /// <summary>
     /// The pages of filter <paramref name="filter"/> in the object <paramref name="uid"/> of <paramref name="granules"/>
@@ -36,7 +54,7 @@ internal sealed class PredicatePages
     internal ulong[]? Of(UInt128 uid, UInt128 filter, int granules, SynopsisCache? cache)
     {
         int words = (granules + 63) / 64;
-        if (_held.TryGetValue((uid, filter), out ulong[]? held))
+        if (_held.TryGet((uid, filter), out ulong[]? held))
         {
             return held.Length == words ? held : null;
         }
@@ -62,9 +80,12 @@ internal sealed class PredicatePages
             }
         }
 
-        _held[(uid, filter)] = held;
+        // Read from the disk cache, they stay there: none of them in memory beside it (Keep).
         return held;
     }
+
+    /// <summary>The bytes <paramref name="words"/> are counted at in the handle's budget.</summary>
+    private static long Weight(ulong[] words) => ((long)words.Length * sizeof(ulong)) + PagesOverhead;
 
     /// <summary>
     /// Keeps <paramref name="kept"/>, a bit for each of the <paramref name="granules"/> granules of the object
@@ -83,14 +104,20 @@ internal sealed class PredicatePages
         {
             if (!byPlaces)
             {
-                _wide.TryAdd((uid, filter), true);
+                _wide.Keep((uid, filter), true, WideBytes, out _);
             }
 
             return;
         }
 
-        _held[(uid, filter)] = kept;
-        if (cache is not null)
+        // In the session's disk cache when it has one, and then there alone: read from it again, a filter's pages cost a
+        // question as much as kept in memory (2.24 against 2.24 ms over 4 objects), where kept nowhere it read every
+        // object again (16 ms). In memory otherwise, within the handle's budget.
+        if (cache is null)
+        {
+            _held.Keep((uid, filter), kept, Weight(kept), out _);
+        }
+        else
         {
             byte[] bytes = new byte[(kept.Length * sizeof(ulong)) + 16];
             for (int i = 0; i < kept.Length; i++)

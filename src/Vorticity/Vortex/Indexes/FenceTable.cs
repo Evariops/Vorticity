@@ -426,24 +426,59 @@ internal sealed class FenceTable
     /// <summary>The pages a table keeps once read: two levels of a lookup, many times over.</summary>
     private const int PageCache = 64;
 
-    private FenceTable(IndexRun? run, int stride, KeyLayout layout, KeySegment[]? inline, FencePage? root, byte[][] dtypes)
+    /// <summary>
+    /// A run's segment table held in its options, parsed, and where each segment's entries start: the same for every
+    /// question, which parsed it again, an array of bounds and an object a segment, most of what building a key index's
+    /// pruner allocated.
+    /// </summary>
+    private sealed class InlineTable(KeySegment[] segments)
     {
+        internal KeySegment[] Segments { get; } = segments;
+
+        internal long[] Starts { get; } = StartsOf(segments);
+
+        private static long[] StartsOf(KeySegment[] segments)
+        {
+            long[] starts = new long[segments.Length + 1];
+            for (int i = 0; i < segments.Length; i++)
+            {
+                starts[i + 1] = checked(starts[i] + (long)segments[i].Entries);
+            }
+
+            return starts;
+        }
+    }
+
+    // The runs' inline tables parsed so far, by the run: a file's index directory, which holds its runs, is read once.
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<IndexRun, InlineTable?> s_inline = new();
+
+    /// <summary>The run's inline segment table, parsed once; null when its options hold none.</summary>
+    private static InlineTable? Inline(IndexRun run)
+    {
+        if (s_inline.TryGetValue(run, out InlineTable? known))
+        {
+            return known;
+        }
+
+        InlineTable? parsed = KeyRunOptions.TryParseRun(run.OptionBytes, out List<KeySegment> segments) ? new InlineTable([.. segments]) : null;
+        s_inline.TryAdd(run, parsed);
+        return parsed;
+    }
+
+    private FenceTable(IndexRun? run, int stride, KeyLayout layout, InlineTable? table, FencePage? root, byte[][] dtypes)
+    {
+        KeySegment[]? inline = table?.Segments;
         _run = run;
         _stride = stride;
         _layout = layout;
         _inline = inline;
         _root = root;
         _dtypes = dtypes;
-        if (inline is not null)
+        if (table is not null)
         {
-            _inlineStarts = new long[inline.Length + 1];
-            for (int i = 0; i < inline.Length; i++)
-            {
-                _inlineStarts[i + 1] = checked(_inlineStarts[i] + (long)inline[i].Entries);
-            }
-
+            _inlineStarts = table.Starts;
             Entries = _inlineStarts[^1];
-            SegmentCount = inline.Length;
+            SegmentCount = inline!.Length;
         }
         else
         {
@@ -493,7 +528,7 @@ internal sealed class FenceTable
 
     /// <summary>A table over bounds held in memory, with no regions: a dictionary's run.</summary>
     internal static FenceTable InMemory(KeySegment[] bounds, KeyLayout layout) =>
-        new FenceTable(null, 0, layout, bounds, null, []);
+        new FenceTable(null, 0, layout, new InlineTable(bounds), null, []);
 
     /// <summary>
     /// The table of <paramref name="run"/>, or why it has none: inline bounds that match the payload,
@@ -502,9 +537,9 @@ internal sealed class FenceTable
     internal static bool TryOpen(IndexRun run, int stride, KeyLayout layout, out FenceTable? table, out string? reason)
     {
         table = null;
-        if (KeyRunOptions.TryParseRun(run.OptionBytes, out List<KeySegment> segments))
+        if (Inline(run) is { } parsed)
         {
-            if (run.Payload.Count != stride * segments.Count)
+            if (run.Payload.Count != stride * parsed.Segments.Length)
             {
                 reason = "its segment table does not match its payload";
                 return false;
@@ -516,7 +551,7 @@ internal sealed class FenceTable
                 dtypes[a] = a < run.PayloadDTypes.Count ? run.PayloadDTypes[a] : [];
             }
 
-            table = new FenceTable(run, stride, layout, [.. segments], null, dtypes);
+            table = new FenceTable(run, stride, layout, parsed, null, dtypes);
         }
         else if (KeyRunOptions.TryParsePagedRun(run.OptionBytes, stride, layout, out FencePage? root, out byte[][]? paged))
         {

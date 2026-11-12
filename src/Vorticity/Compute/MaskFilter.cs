@@ -46,7 +46,15 @@ internal static class MaskFilter
         int lanes = Vector512<T>.Count;
         int written = 0;
         int w = 0;
-        if (IsAccelerated)
+
+        // Lanes of 4 and 8 bytes compress with AVX-512F alone; VBMI2 is for those of 1 and 2.
+        bool wide = Unsafe.SizeOf<T>() >= 4 ? WordBytes.IsAccelerated && Avx512F.IsSupported : IsAccelerated;
+        if (!wide && Unsafe.SizeOf<T>() >= 4 && Avx2.IsSupported)
+        {
+            (w, written) = Packed256(source, mask, destination);
+        }
+
+        if (wide)
         {
             WordBytes spread = WordBytes.Create();
             ulong groupBits = lanes == 64 ? ulong.MaxValue : (1UL << lanes) - 1;
@@ -91,6 +99,47 @@ internal static class MaskFilter
     }
 
     /// <summary>
+    /// <see cref="Compress{T}"/>'s whole words for lanes of 4 and 8 bytes where AVX-512 is not: a left-pack of each 256-bit
+    /// vector by its lanes' bits (<see cref="LeftPack.Pack256{T}"/>), stored whole, the next store writing over the lanes
+    /// past the kept ones; a word walked a set bit at a time copied a value a kept row. The words it answered and the values
+    /// it wrote, returned rather than passed by reference, which would keep the caller's count out of a register.
+    /// </summary>
+    private static (int Words, int Written) Packed256<T>(ReadOnlySpan<T> source, ReadOnlySpan<ulong> mask, Span<T> destination)
+        where T : unmanaged
+    {
+        ref T from = ref MemoryMarshal.GetReference(source);
+        ref T to = ref MemoryMarshal.GetReference(destination);
+        int lanes = Vector256<T>.Count;
+        uint groupBits = (1u << lanes) - 1;
+        int written = 0;
+        int w = 0;
+
+        // A whole word of rows in the source, and a vector of room past what the word keeps.
+        for (; ((w + 1) << 6) <= source.Length; w++)
+        {
+            ulong word = mask[w];
+            if (written + BitOperations.PopCount(word) + lanes > destination.Length)
+            {
+                break;
+            }
+
+            for (int group = 0; group < 64 / lanes; group++)
+            {
+                uint kept = (uint)(word >> (group * lanes)) & groupBits;
+                if (kept == 0)
+                {
+                    continue;
+                }
+
+                LeftPack.Pack256(Vector256.LoadUnsafe(ref from, (nuint)((w << 6) + (group * lanes))), kept).StoreUnsafe(ref to, (nuint)written);
+                written += BitOperations.PopCount(kept);
+            }
+        }
+
+        return (w, written);
+    }
+
+    /// <summary>
     /// <see cref="Compress{T}"/> for rows of sixteen bytes, a view or a 128-bit decimal, as two
     /// 64-bit lanes each: <paramref name="source"/> and <paramref name="destination"/> hold two
     /// words a row.
@@ -104,7 +153,8 @@ internal static class MaskFilter
         ref ulong to = ref MemoryMarshal.GetReference(destination);
         int written = 0;
         int w = 0;
-        if (IsAccelerated && Bmi2.X64.IsSupported)
+        // Lanes of 8 bytes: AVX-512F's compress, VBMI2 not needed.
+        if (WordBytes.IsAccelerated && Avx512F.IsSupported && Bmi2.X64.IsSupported)
         {
             WordBytes spread = WordBytes.Create();
             for (; ((w + 1) << 6) <= rows; w++)

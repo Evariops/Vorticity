@@ -29,14 +29,14 @@ public sealed class WorkFanTests
         LaneBudget budget = new LaneBudget(3);
         int[] runs = new int[Writers * Pieces * Items];
         Task[] writers = [.. Enumerable.Range(0, Writers).Select(writer => Task.Run(
-            () =>
+            async () =>
             {
                 WorkFan fan = WorkFan.Rent(4, budget);
                 try
                 {
                     for (int piece = 0; piece < Pieces; piece++)
                     {
-                        fan.Run(Counting.Instance, Items, runs, ((writer * Pieces) + piece) * Items);
+                        await fan.RunAsync(Counting.Instance, Items, runs, ((writer * Pieces) + piece) * Items);
                     }
                 }
                 finally

@@ -264,7 +264,7 @@ public sealed partial class IdentifierPostingsTests
                 Assert.Equal(paged && hour.Rows > 16_384, postings.Runs.Any(run => KeyRunOptions.IsPaged(run.OptionBytes)));
             }
 
-            session.Options.SynopsisCache!.Flush();
+            await session.Options.SynopsisCache!.FlushAsync();
             string[] files = [.. System.IO.Directory.GetFiles(directory, "*", System.IO.SearchOption.AllDirectories)
                 .Select(System.IO.Path.GetFileName)
                 .Where(file => file != ".lock")!];

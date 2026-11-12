@@ -550,14 +550,19 @@ public static class VortexFileIndexer
             List<long> chunkRows = [];
             bool[] dict = new bool[fields * chunkCount];
             ArrayNodeArena probe = new ArrayNodeArena();
+            List<LayoutNode> probed = new List<LayoutNode>(fields * chunkCount);
             for (int field = 0; field < fields; field++)
             {
                 for (int c = 0; c < chunkCount; c++)
                 {
-                    dict[(field * chunkCount) + c] = await IsDictionaryAsync(
-                        file, VortexFileWriter.AppendPlan.Chunk(columnNodes[field], c), probe, cancellationToken).ConfigureAwait(false);
+                    probed.Add(VortexFileWriter.AppendPlan.Chunk(columnNodes[field], c));
                 }
             }
+
+            // Every chunk's tree read in one request, where each was a round trip in turn.
+            await file.VisitArrayTreesAsync(
+                probed, probe, dict, static (dict, at, tree) => dict[at] = tree.Root.Encoding == ArrayEncodingId.Dict, cancellationToken)
+                .ConfigureAwait(false);
 
             for (int field = 0; field < fields; field++)
             {
@@ -711,17 +716,6 @@ public static class VortexFileIndexer
                 indexes.Placed(payload!, segment, sink.Position - before, sink.Position);
             }
         }
-    }
-
-    /// <summary>
-    /// Whether a flat chunk's root array is a dictionary, from its array tree alone: the tree its
-    /// layout inlines, or the tail of its segment, and never the values the scan reads after.
-    /// </summary>
-    private static async ValueTask<bool> IsDictionaryAsync(
-        VortexFile file, LayoutNode flat, ArrayNodeArena tree, CancellationToken cancellationToken)
-    {
-        await file.LoadArrayTreeAsync(flat, tree, cancellationToken).ConfigureAwait(false);
-        return tree.Root.Encoding == ArrayEncodingId.Dict;
     }
 
     /// <summary>The statistics, directory, dtype, layout, footer, postscript and EOF, after the runs.</summary>

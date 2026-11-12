@@ -545,7 +545,7 @@ public sealed class DatasetPageCacheTests
             store.Reset();
             Assert.Equal(Objects, await CountAsync(reader, ct));
             Assert.True(store.Requests > 10, $"the walk asked for {store.Requests} pages: the tree should outgrow its header");
-            session.Options.SynopsisCache!.Flush();
+            await session.Options.SynopsisCache!.FlushAsync();
             Assert.Empty(PagesIn(directory));
         }
         finally

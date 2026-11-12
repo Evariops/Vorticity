@@ -1,4 +1,5 @@
 using System;
+using System.Buffers;
 using System.Numerics;
 using System.Runtime.InteropServices;
 
@@ -263,7 +264,7 @@ internal ref struct ShreddedSlices
         {
             if (_plan is null)
             {
-                _plan = ShreddedVariant.Compile(VortexTypes.FromDType(type), context.Types);
+                _plan = ShreddedVariant.For(context.Scan, type);
                 _plan.BeginSlices();
                 _planned = type;
             }
@@ -384,7 +385,7 @@ internal static class ShreddedTree
         int node = Group(context, variant, core, shredded, out DType group);
         try
         {
-            return ShreddedVariant.Compile(VortexTypes.FromDType(group), context.Types).Assemble(context.Canonical, variant, node);
+            return ShreddedVariant.For(context.Scan, group).Assemble(context.Canonical, variant, node);
         }
         catch (VortexFormatException malformed)
         {
@@ -458,14 +459,24 @@ internal static class ShreddedTree
                 Span<int> nameStack = stackalloc int[StackFields];
                 using Scratch<int> fields = new(count, fieldStack);
                 using Scratch<int> names = new(count, nameStack);
-                DType[] groups = new DType[count];
-                for (int i = 0; i < count; i++)
+                // The groups' types rented: the arena copies them, and an array of them a batch was 7 MB of a read of
+                // 65,536 rows of 200 shredded keys.
+                DType[] groups = ArrayPool<DType>.Shared.Rent(count);
+                try
                 {
-                    fields.Span[i] = Group(arena, types, n.GetFieldIndex(i), depth + 1, out groups[i]);
-                    names.Span[i] = types.InternName(n.DType.GetFieldNameUtf8(i));
+                    for (int i = 0; i < count; i++)
+                    {
+                        fields.Span[i] = Group(arena, types, n.GetFieldIndex(i), depth + 1, out groups[i]);
+                        names.Span[i] = types.InternName(n.DType.GetFieldNameUtf8(i));
+                    }
+
+                    typed = types.Struct(names.Span, groups.AsSpan(0, count), n.DType.Nullability);
+                }
+                finally
+                {
+                    ArrayPool<DType>.Shared.Return(groups, clearArray: true);
                 }
 
-                typed = types.Struct(names.Span, groups, n.DType.Nullability);
                 return arena.AddStruct(typed, n.Length, n.Validity, fields.Span);
             }
 
@@ -721,8 +732,7 @@ internal sealed class ParquetVariantDecoder : ArrayDecoder
         int groupNode = context.Canonical.AddStruct(group, produced, validity, children[..(width + 1)]);
         try
         {
-            return ShreddedVariant.Compile(VortexTypes.FromDType(group), types)
-                .Assemble(context.Canonical, dtype, groupNode);
+            return ShreddedVariant.For(context.Scan, group).Assemble(context.Canonical, dtype, groupNode);
         }
         catch (VortexFormatException malformed)
         {

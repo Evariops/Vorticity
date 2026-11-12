@@ -2,6 +2,8 @@ using System;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.X86;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
@@ -325,7 +327,20 @@ internal sealed class PackedKeys<TKey> : GroupKeys
         {
             ReadOnlySpan<int> ids = _ids[p].AsSpan(0, rows);
             int shift = _shifts[p];
-            for (int row = 0; row < rows; row++)
+            int row = 0;
+            if (Vector.IsHardwareAccelerated)
+            {
+                ref int slot = ref MemoryMarshal.GetReference(slots);
+                ref int id = ref MemoryMarshal.GetReference(ids);
+                Vector<int> masks = new Vector<int>(mask);
+                for (; row <= rows - Vector<int>.Count; row += Vector<int>.Count)
+                {
+                    Vector<int> placed = Vector.LoadUnsafe(ref slot, (nuint)row) | Vector.ShiftLeft(Vector.LoadUnsafe(ref id, (nuint)row), shift);
+                    (placed & masks).StoreUnsafe(ref slot, (nuint)row);
+                }
+            }
+
+            for (; row < rows; row++)
             {
                 slots[row] = (slots[row] | (ids[row] << shift)) & mask;
             }
@@ -333,23 +348,65 @@ internal sealed class PackedKeys<TKey> : GroupKeys
 
         int[] table = _table!;
         Span<int> tuple = stackalloc int[_parts.Length];
-        RowCursor cursor = new RowCursor(selection, 0, rows);
+        int start = selection.IsEmpty && Avx2.IsSupported ? Gathered(table, slots, rowGroups, tuple) : 0;
+        RowCursor cursor = new RowCursor(selection, start, rows);
         while (cursor.Next(out int row))
         {
-            int slot = slots[row];
-            int group = table[slot];
-            if (group < 0)
-            {
-                for (int p = 0; p < _parts.Length; p++)
-                {
-                    tuple[p] = _ids[p][row];
-                }
+            rowGroups[row] = GroupAt(table, slots[row], row, tuple);
+        }
+    }
 
-                group = table[slot] = Lookup(Pack(tuple));
+    /// <summary>The group at a row's slot, the tuple looked up in the hash once when the table holds none yet.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private int GroupAt(int[] table, int slot, int row, Span<int> tuple)
+    {
+        int group = table[slot];
+        if (group < 0)
+        {
+            for (int p = 0; p < _parts.Length; p++)
+            {
+                tuple[p] = _ids[p][row];
             }
 
-            rowGroups[row] = group;
+            group = table[slot] = Lookup(Pack(tuple));
         }
+
+        return group;
+    }
+
+    /// <summary>
+    /// Every row's group gathered from the table at its slot, eight rows a step with AVX2, the rows all selected; a step
+    /// one of whose slots holds no group yet goes a row at a time, the table learning each new tuple before the next row
+    /// reads it.
+    /// </summary>
+    /// <returns>The rows taken, a multiple of eight.</returns>
+    private unsafe int Gathered(int[] table, ReadOnlySpan<int> slots, int[] rowGroups, Span<int> tuple)
+    {
+        int rows = slots.Length;
+        ref int slot = ref MemoryMarshal.GetReference(slots);
+        ref int into = ref MemoryMarshal.GetArrayDataReference(rowGroups);
+        Vector256<int> within = Vector256.Create(table.Length - 1);
+        int row = 0;
+        fixed (int* groups = table)
+        {
+            for (; row <= rows - 8; row += 8)
+            {
+                Vector256<int> found = Avx2.GatherVector256(groups, Vector256.LoadUnsafe(ref slot, (nuint)row) & within, 4);
+                if (Vector256.LessThanAny(found, Vector256<int>.Zero))
+                {
+                    for (int r = row; r < row + 8; r++)
+                    {
+                        rowGroups[r] = GroupAt(table, slots[r], r, tuple);
+                    }
+
+                    continue;
+                }
+
+                found.StoreUnsafe(ref into, (nuint)row);
+            }
+        }
+
+        return row;
     }
 
     /// <summary>The group of a tuple, through the table when there is one.</summary>

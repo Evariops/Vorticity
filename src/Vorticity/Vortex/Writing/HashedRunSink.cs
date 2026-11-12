@@ -1,9 +1,9 @@
 using System;
-using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
+using Vorticity.Aggregating;
 using Vorticity.Indexes;
 
 namespace Vorticity.Writing;
@@ -125,8 +125,8 @@ internal sealed class HashedRunSink : IRunSink
         }
         else
         {
-            ArrayPool<uint>.Shared.Return(_gaps);
-            ArrayPool<uint>.Shared.Return(_blocks);
+            ArrayShelf.Retained.Give(_gaps);
+            ArrayShelf.Retained.Give(_blocks);
             _gaps = [];
             _blocks = [];
         }
@@ -140,11 +140,15 @@ internal sealed class HashedRunSink : IRunSink
         return new KeyRun(_firstBlock, _blockCount, _entries, _segments, _payloads);
     }
 
+    /// <summary>
+    /// Opens a segment, its arrays from the process's shelf at the one length every segment takes: the shared pool kept a
+    /// few arrays of a length a core, and a file's segments, all held until the writer lays them, came new each file.
+    /// </summary>
     private void Open()
     {
         int capacity = Math.Min(_segmentEntries, 1 << 16) + 64;
-        _gaps = ArrayPool<uint>.Shared.Rent(capacity);
-        _blocks = ArrayPool<uint>.Shared.Rent(capacity);
+        _gaps = ArrayShelf.Retained.Take<uint>(capacity, zeroed: false);
+        _blocks = ArrayShelf.Retained.Take<uint>(capacity, zeroed: false);
         _count = 0;
     }
 
@@ -153,8 +157,8 @@ internal sealed class HashedRunSink : IRunSink
     {
         int count = _count;
         _segments.Add(new KeySegment((ulong)count, count == 0 ? [] : Key(_first), count == 0 ? [] : Key(_last)));
-        _payloads.Add(PendingPayload.RentedU32(_gaps, count, compress: true));
-        _payloads.Add(PendingPayload.RentedU32(_blocks, count, compress: true));
+        _payloads.Add(PendingPayload.ShelvedU32(_gaps, count, compress: true));
+        _payloads.Add(PendingPayload.ShelvedU32(_blocks, count, compress: true));
         _gaps = [];
         _blocks = [];
         _count = 0;
@@ -167,11 +171,11 @@ internal sealed class HashedRunSink : IRunSink
         return key;
     }
 
-    private static uint[] Grown(uint[] rented, int count, int size)
+    private static uint[] Grown(uint[] shelved, int count, int size)
     {
-        uint[] grown = ArrayPool<uint>.Shared.Rent(size);
-        rented.AsSpan(0, count).CopyTo(grown);
-        ArrayPool<uint>.Shared.Return(rented);
+        uint[] grown = ArrayShelf.Retained.Take<uint>(size, zeroed: false);
+        shelved.AsSpan(0, count).CopyTo(grown);
+        ArrayShelf.Retained.Give(shelved);
         return grown;
     }
 }

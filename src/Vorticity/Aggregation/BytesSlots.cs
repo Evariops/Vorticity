@@ -733,6 +733,46 @@ internal sealed class BytesDistinctSlot : AggregateSlot<long>, IPairedSlot
         }
     }
 
+    internal override bool CountsPairs => true;
+
+    internal override void ReadStates(ref SpillReader reader, int count, PairPass pass)
+    {
+        if (pass.Whole)
+        {
+            ReadStates(ref reader, count);
+            return;
+        }
+
+        EnsureGroups(count);
+        for (int group = 0; group < count; group++)
+        {
+            int values = reader.Read<int>();
+            for (int v = 0; v < values; v++)
+            {
+                ReadOnlySpan<byte> value = reader.Bytes();
+                if (pass.Keeps(PairPass.Of(value)))
+                {
+                    Add(group, value);
+                }
+            }
+        }
+    }
+
+    internal override void PassDone(bool last)
+    {
+        Array.Clear(_first);
+        if (!last)
+        {
+            _seen.Clear();
+            return;
+        }
+
+        _seen.Release();
+        _seen = new ByteKeyTable(_shelf);
+        _shelf?.Give(_next);
+        _next = [];
+    }
+
     public long Pairs => _seen.Count;
 
     public async Task MergeInPartsAsync(AggregateSlot[] slots, int[][] maps, int groups, int parts, int degree, QueryMemory? memory, CancellationToken cancellationToken)
@@ -744,18 +784,32 @@ internal sealed class BytesDistinctSlot : AggregateSlot<long>, IPairedSlot
         }
 
         // Each lane's pairs placed by part, the hash of the value under its group's target, then each
-        // part's pairs from every lane made distinct.
+        // part's pairs from every lane made distinct. With many more groups than parts, a part owns its
+        // groups whole and counts them where the slot keeps them: no count of every group a part; unless
+        // a group's pairs outweigh the other parts (PairedParts.Lopsided), cut by the pairs' hash then.
         int shift = 64 - BitOperations.Log2((uint)parts);
-        (int[] Placed, int[] Starts)[] cuts = new (int[], int[])[all.Length];
-        await SideBySide.RunAsync(all.Length, p => cuts[p] = all[p].Cut(maps[p], shift, parts), degree, cancellationToken).ConfigureAwait(false);
+        ((int[] Placed, int[] Starts)[] cuts, bool byGroup) = await PairedParts.CutAsync(
+            Array.ConvertAll(all, static lane => lane._seen.Count),
+            (p, group, partOf) => all[p].PartsOf(maps[p], shift, parts, group, partOf),
+            groups,
+            parts,
+            degree,
+            cancellationToken).ConfigureAwait(false);
         long[][] counts = new long[parts][];
+        if (byGroup)
+        {
+            EnsureGroups(groups);
+            Array.Clear(_counts, 0, groups);
+        }
+
+        long[] owned = _counts;
         await SideBySide.RunAsync(
             parts,
             part =>
             {
                 ByteKeyTable distinct = new ByteKeyTable();
                 byte[] key = new byte[64];
-                long[] count = new long[groups];
+                long[] count = byGroup ? owned : new long[groups];
                 for (int p = 0; p < all.Length; p++)
                 {
                     (int[] placed, int[] starts) = cuts[p];
@@ -790,13 +844,16 @@ internal sealed class BytesDistinctSlot : AggregateSlot<long>, IPairedSlot
             degree,
             cancellationToken).ConfigureAwait(false);
 
-        EnsureGroups(groups);
-        Array.Clear(_counts);
-        foreach (long[] count in counts)
+        if (!byGroup)
         {
-            for (int group = 0; group < groups; group++)
+            EnsureGroups(groups);
+            Array.Clear(_counts);
+            foreach (long[] count in counts)
             {
-                _counts[group] += count[group];
+                for (int group = 0; group < groups; group++)
+                {
+                    _counts[group] += count[group];
+                }
             }
         }
 
@@ -804,16 +861,22 @@ internal sealed class BytesDistinctSlot : AggregateSlot<long>, IPairedSlot
         Array.Clear(_first);
     }
 
-    /// <summary>The table's pairs placed by part, the part of a pair the top bits past <paramref name="shift"/> of its value's hash under its group's target.</summary>
-    private (int[] Placed, int[] Starts) Cut(int[] map, int shift, int parts)
+    /// <summary>
+    /// Each of the table's pairs' part, into <paramref name="partOf"/>: the top bits past <paramref name="shift"/> of its
+    /// value's hash under its group's target, or with <paramref name="byGroup"/> of its group's target alone; where each
+    /// part starts once placed (<see cref="PairedParts.CutAsync"/>).
+    /// </summary>
+    private int[] PartsOf(int[] map, int shift, int parts, bool byGroup, int[] partOf)
     {
         int count = _seen.Count;
-        int[] partOf = GC.AllocateUninitializedArray<int>(count);
         int[] starts = new int[parts + 1];
         for (int number = 0; number < count; number++)
         {
             ReadOnlySpan<byte> pair = _seen.KeyOf(number);
-            int part = (int)(KeyHash.Pair(KeyHash.Bytes(pair[4..]), 0, map[BinaryPrimitives.ReadInt32LittleEndian(pair)]) >> shift);
+            int target = map[BinaryPrimitives.ReadInt32LittleEndian(pair)];
+            int part = byGroup
+                ? (int)(((ulong)(uint)target * 0x9E37_79B9_7F4A_7C15UL) >> shift)
+                : (int)(KeyHash.Pair(KeyHash.Bytes(pair[4..]), 0, target) >> shift);
             partOf[number] = part;
             starts[part + 1]++;
         }
@@ -823,14 +886,7 @@ internal sealed class BytesDistinctSlot : AggregateSlot<long>, IPairedSlot
             starts[part + 1] += starts[part];
         }
 
-        int[] next = starts[..^1];
-        int[] placed = GC.AllocateUninitializedArray<int>(count);
-        for (int number = 0; number < count; number++)
-        {
-            placed[next[partOf[number]]++] = number;
-        }
-
-        return (placed, starts);
+        return starts;
     }
 
     /// <summary>The table of its (group, value) pairs, their chains, and the counts.</summary>

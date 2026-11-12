@@ -164,7 +164,7 @@ internal sealed class VarBinViewDecoder : ArrayDecoder
 
     /// <summary>
     /// Every view of a column without nulls, bounds checked as it goes; true when every prefix
-    /// matched and, for Utf8, every inline value and every referenced value is ASCII.
+    /// matched and, for Utf8, every inline value is ASCII and every referenced value UTF-8.
     /// </summary>
     /// <remarks>
     /// The values a buffer's views name are checked by one sweep of the span they reach, which is
@@ -290,6 +290,7 @@ internal sealed class VarBinViewDecoder : ArrayDecoder
         }
 
         ulong scattered = 0;
+        ulong wide = 0;
         for (int b = 0; b < dataBuffers.Length; b++)
         {
             if (highest[b] <= lowest[b])
@@ -302,14 +303,64 @@ internal sealed class VarBinViewDecoder : ArrayDecoder
             if ((ulong)(highest[b] - lowest[b]) > (ulong)length * SweptGapPerView && Scattered(views, length, b))
             {
                 scattered |= 1UL << b;
+                continue;
             }
-            else if (!System.Text.Ascii.IsValid(dataBuffers[b].Span[(int)lowest[b]..(int)highest[b]]))
+
+            // A span past ASCII is swept as UTF-8, its values' edges checked after (Bounded).
+            ReadOnlySpan<byte> span = dataBuffers[b].Span[(int)lowest[b]..(int)highest[b]];
+            if (!System.Text.Ascii.IsValid(span))
+            {
+                if (!Utf8.IsValid(span))
+                {
+                    return false;
+                }
+
+                wide |= 1UL << b;
+            }
+        }
+
+        return (wide == 0 || Bounded(views, dataBuffers, length, wide, highest))
+            && (scattered == 0 || ScatteredUtf8(views, dataBuffers, length, scattered));
+    }
+
+    /// <summary>
+    /// Whether every value the views name in the buffers of <paramref name="wide"/>, whose swept spans are valid UTF-8,
+    /// begins and ends where a character does: then each is whole characters of that span, and valid UTF-8 itself.
+    /// </summary>
+    /// <remarks>
+    /// In valid UTF-8 a character begins at every byte that is not a continuation byte (<c>10xxxxxx</c>) and at no other,
+    /// so a value is whole characters when its first byte is not one and the byte past its last is not one either, or is
+    /// past the span. Two bytes a view, where a check of each value cost a call: 17 ns a row of 24 bytes with one
+    /// character past ASCII.
+    /// </remarks>
+    private static bool Bounded(ReadOnlySpan<byte> views, ReadOnlySpan<VortexBuffer> dataBuffers, int length, ulong wide, ReadOnlySpan<uint> highest)
+    {
+        ref byte view = ref MemoryMarshal.GetReference(views);
+        for (int i = 0; i < length; i++, view = ref Unsafe.Add(ref view, CanonicalSupport.ViewSize))
+        {
+            uint size = Unsafe.ReadUnaligned<uint>(ref view);
+            if (size <= CanonicalSupport.MaxInlineViewLength)
+            {
+                continue;
+            }
+
+            // The sweep bounds checked every view: its buffer is one of the data buffers, and its value lies in its span.
+            uint bufferIndex = Unsafe.ReadUnaligned<uint>(ref Unsafe.Add(ref view, 8));
+            if ((wide & (1UL << (int)bufferIndex)) == 0)
+            {
+                continue;
+            }
+
+            uint offset = Unsafe.ReadUnaligned<uint>(ref Unsafe.Add(ref view, 12));
+            ReadOnlySpan<byte> data = dataBuffers[(int)bufferIndex].Span;
+            uint end = offset + size;
+            if ((data[(int)offset] & 0xC0) == 0x80 || (end < highest[(int)bufferIndex] && (data[(int)end] & 0xC0) == 0x80))
             {
                 return false;
             }
         }
 
-        return scattered == 0 || ScatteredAscii(views, dataBuffers, length, scattered);
+        return true;
     }
 
     /// <summary>Views read to tell a buffer's values scattered from long ones in row order.</summary>
@@ -347,10 +398,10 @@ internal sealed class VarBinViewDecoder : ArrayDecoder
     }
 
     /// <summary>
-    /// Whether every value the views name in the buffers of <paramref name="scattered"/> is ASCII,
-    /// checked value by value: the views were bounds checked by the sweep.
+    /// Whether every value the views name in the buffers of <paramref name="scattered"/> is UTF-8,
+    /// checked value by value, ASCII first: the views were bounds checked by the sweep.
     /// </summary>
-    private static bool ScatteredAscii(ReadOnlySpan<byte> views, ReadOnlySpan<VortexBuffer> dataBuffers, int length, ulong scattered)
+    private static bool ScatteredUtf8(ReadOnlySpan<byte> views, ReadOnlySpan<VortexBuffer> dataBuffers, int length, ulong scattered)
     {
         for (int i = 0; i < length; i++)
         {
@@ -368,7 +419,8 @@ internal sealed class VarBinViewDecoder : ArrayDecoder
             }
 
             int offset = (int)System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(view[12..16]);
-            if (!System.Text.Ascii.IsValid(dataBuffers[bufferIndex].Span.Slice(offset, (int)size)))
+            ReadOnlySpan<byte> value = dataBuffers[bufferIndex].Span.Slice(offset, (int)size);
+            if (!System.Text.Ascii.IsValid(value) && !Utf8.IsValid(value))
             {
                 return false;
             }

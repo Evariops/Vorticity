@@ -256,7 +256,27 @@ internal sealed class SummaryPruner
         return may;
     }
 
-    /// <summary>Whether the predicate selects every row behind these summaries: the dual of <see cref="MayMatch"/>.</summary>
+    /// <summary>
+    /// <see cref="MayMatch(IReadOnlyList{ColumnSummary}, long)"/> of summaries a caller holds in a buffer of its own, which
+    /// a walk fills again at every node it passes rather than making a list of each.
+    /// </summary>
+    /// <param name="summaries">What is known about the columns, in any order.</param>
+    /// <param name="rows">How many rows the summaries cover.</param>
+    /// <returns><see langword="false"/> only when the summaries prove no row can match.</returns>
+    public bool MayMatch(ReadOnlySpan<ColumnSummary> summaries, long rows)
+    {
+        if (summaries.IsEmpty || rows <= 0 || _paths.Count == 0)
+        {
+            return true;
+        }
+
+        Scratch scratch = Interlocked.Exchange(ref _spare, null) ?? new Scratch(_filter, _paths);
+        bool may = !scratch.Set(summaries, rows) || scratch.Pruner.MayMatch(new RowRange(0, rows));
+        Return(scratch);
+        return may;
+    }
+
+    /// <summary>Whether the predicate selects every row behind these summaries: the dual of <see cref="MayMatch(IReadOnlyList{ColumnSummary}, long)"/>.</summary>
     /// <param name="summaries">What is known about the columns, in any order.</param>
     /// <param name="rows">How many rows the summaries cover.</param>
     /// <returns>
@@ -286,7 +306,7 @@ internal sealed class SummaryPruner
     }
 
     /// <summary>
-    /// <see cref="MayMatch"/> and, when a row may match, <see cref="MustMatch"/> of the same summaries, which the pruner is set
+    /// <see cref="MayMatch(IReadOnlyList{ColumnSummary}, long)"/> and, when a row may match, <see cref="MustMatch"/> of the same summaries, which the pruner is set
     /// to once for both: a granule asked both questions set it twice, each column's summary looked up by name each time.
     /// </summary>
     /// <param name="summaries">What is known about the columns, in any order.</param>
@@ -360,33 +380,56 @@ internal sealed class SummaryPruner
         /// <summary>Sets each column's zone to its summary among <paramref name="summaries"/> over <paramref name="rows"/> rows, or none; false when none is summarised.</summary>
         internal bool Set(IReadOnlyList<ColumnSummary> summaries, long rows)
         {
+            Clear();
+            bool any = false;
+            for (int i = 0; i < summaries.Count; i++)
+            {
+                any |= Take(summaries[i], rows);
+            }
+
+            return any;
+        }
+
+        /// <inheritdoc cref="Set(IReadOnlyList{ColumnSummary}, long)"/>
+        internal bool Set(ReadOnlySpan<ColumnSummary> summaries, long rows)
+        {
+            Clear();
+            bool any = false;
+            foreach (ref readonly ColumnSummary summary in summaries)
+            {
+                any |= Take(summary, rows);
+            }
+
+            return any;
+        }
+
+        private void Clear()
+        {
             Pruner.Forget();
             foreach (ZoneColumn column in _columns)
             {
                 column.SetSingle(default, 0);
             }
+        }
 
-            bool any = false;
-            for (int i = 0; i < summaries.Count; i++)
+        /// <summary>Sets the zone of the column <paramref name="summary"/> summarises, if the predicate reads it; whether it did.</summary>
+        private bool Take(in ColumnSummary summary, long rows)
+        {
+            if (summary.IsEmpty)
             {
-                ColumnSummary summary = summaries[i];
-                if (summary.IsEmpty)
-                {
-                    continue;
-                }
+                return false;
+            }
 
-                for (int c = 0; c < _columns.Length; c++)
+            for (int c = 0; c < _columns.Length; c++)
+            {
+                if (string.Equals(_columns[c].Field.Path, summary.Path, StringComparison.Ordinal))
                 {
-                    if (string.Equals(_columns[c].Field.Path, summary.Path, StringComparison.Ordinal))
-                    {
-                        _columns[c].SetSingle(ColumnSummaries.Bounds(summary, rows), rows);
-                        any = true;
-                        break;
-                    }
+                    _columns[c].SetSingle(ColumnSummaries.Bounds(summary, rows), rows);
+                    return true;
                 }
             }
 
-            return any;
+            return false;
         }
     }
 }

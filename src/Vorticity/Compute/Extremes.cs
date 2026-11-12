@@ -229,6 +229,15 @@ internal static class Extremes
         ReadOnlySpan<T> values = MemoryMarshal.Cast<byte, T>(bytes);
         int count = listed ? rows.Length : values.Length;
         bool allValid = mask.AllValid;
+        if (!listed && allValid && IsInteger<T>() && Vector.IsHardwareAccelerated && Vector<T>.IsSupported && count >= Vector<T>.Count)
+        {
+            // Integers of every row, which hold no NaN and no signed zero: the extreme by vectors, then its first row,
+            // where a row at a time compared and branched on each.
+            T extreme = Extreme(values[..count], wantMin);
+            bestRow = values[..count].IndexOf(extreme);
+            return true;
+        }
+
         bestRow = -1;
         T best = default;
         for (int i = 0; i < count; i++)
@@ -256,6 +265,39 @@ internal static class Extremes
         }
 
         return bestRow >= 0;
+    }
+
+    /// <summary>Whether <typeparamref name="T"/> is a primitive integer, whose order has no NaN and no signed zero.</summary>
+    private static bool IsInteger<T>() =>
+        typeof(T) == typeof(sbyte) || typeof(T) == typeof(byte) || typeof(T) == typeof(short) || typeof(T) == typeof(ushort)
+        || typeof(T) == typeof(int) || typeof(T) == typeof(uint) || typeof(T) == typeof(long) || typeof(T) == typeof(ulong);
+
+    /// <summary>The least or the greatest of <paramref name="values"/>, at least a vector of them, a vector at a time.</summary>
+    private static T Extreme<T>(ReadOnlySpan<T> values, bool wantMin)
+        where T : unmanaged, INumber<T>
+    {
+        ref T at = ref MemoryMarshal.GetReference(values);
+        int lanes = Vector<T>.Count;
+        Vector<T> held = Vector.LoadUnsafe(ref at);
+        int i = lanes;
+        for (; i <= values.Length - lanes; i += lanes)
+        {
+            Vector<T> next = Vector.LoadUnsafe(ref at, (nuint)i);
+            held = wantMin ? Vector.Min(held, next) : Vector.Max(held, next);
+        }
+
+        T best = held[0];
+        for (int lane = 1; lane < lanes; lane++)
+        {
+            best = wantMin ? T.Min(best, held[lane]) : T.Max(best, held[lane]);
+        }
+
+        for (; i < values.Length; i++)
+        {
+            best = wantMin ? T.Min(best, values[i]) : T.Max(best, values[i]);
+        }
+
+        return best;
     }
 
     private static bool Bytes(

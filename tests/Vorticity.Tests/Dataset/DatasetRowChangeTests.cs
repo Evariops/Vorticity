@@ -33,13 +33,17 @@ public sealed class DatasetRowChangeTests
     private static readonly string[] Cities = ["Paris", "Lyon", "Nice", "Lille"];
 
     [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public async Task ADeleteTakesTheRowsItsFilterIsTrueForAndKeepsTheUnknownOnes(bool clustered)
+    [InlineData(true, 1)]
+    [InlineData(false, 1)]
+    [InlineData(true, 4)]
+    [InlineData(false, 4)]
+    public async Task ADeleteTakesTheRowsItsFilterIsTrueForAndKeepsTheUnknownOnes(bool clustered, int lanes)
     {
+        // On a session of several lanes, the objects the delete rewrites are rewritten side by side: the same rows go.
         CancellationToken ct = TestContext.Current.CancellationToken;
         await using MemoryObjectStore store = new MemoryObjectStore();
-        (VortexDataset dataset, List<ChangeRow> written) = await CreateAsync(store, clustered, interleaved: true, ct);
+        await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = lanes);
+        (VortexDataset dataset, List<ChangeRow> written) = await CreateAsync(store, clustered, interleaved: true, ct, session: session);
         await using (dataset)
         {
             List<ChangeRow> before = await RowsAsync(dataset, ct);
@@ -290,10 +294,11 @@ public sealed class DatasetRowChangeTests
     /// <paramref name="interleaved"/> the keys congruent to its number, appended out of order.
     /// </summary>
     private static async Task<(VortexDataset Dataset, List<ChangeRow> Written)> CreateAsync(
-        IObjectStore store, bool clustered, bool interleaved, CancellationToken ct, long objectBytes = 1L << 30)
+        IObjectStore store, bool clustered, bool interleaved, CancellationToken ct, long objectBytes = 1L << 30, VortexSession? session = null)
     {
         Decoders.EnsureRegistered();
-        VortexDataset dataset = await VortexDataset.CreateAsync(store, ChangeRow.Schema, Options(clustered, objectBytes), ct);
+        VortexDataset dataset = await VortexDataset.CreateAsync(
+            store, ChangeRow.Schema, Options(clustered, objectBytes) with { Session = session ?? VortexSession.Default }, ct);
         List<ChangeRow> written = [];
         foreach (int part in (int[])[3, 0, 4, 1, 2])
         {

@@ -332,10 +332,23 @@ internal sealed class ExactCover : IAsyncDisposable
                 // The literals are looked up in key order, which turns the lookups into a merge
                 // join: each one lands in the segment the one before it left decoded, so a long
                 // list reads each segment once instead of once per literal.
-                FilterLiteral[] ordered = [.. @in.Values];
-                Array.Sort(ordered, (left, right) => left.Kind == right.Kind ? KeyOrder.Total(left, right) : 0);
+                FilterLiteral[] ordered = Ordered(@in.Values);
                 foreach (FilterLiteral value in ordered)
                 {
+                    // An integer's or a text's slice is its two ranks, taken here; a float's equality, whose zeros
+                    // and NaN are its own, is the comparison's.
+                    if (value.Kind == source.KeyKind && value.Kind != FilterLiteralKind.Float)
+                    {
+                        long first = await source.RankAsync(value, cancellationToken).ConfigureAwait(false);
+                        long past = await source.UpperRankAsync(value, cancellationToken).ConfigureAwait(false);
+                        if (first < past)
+                        {
+                            points.Add((first, past));
+                        }
+
+                        continue;
+                    }
+
                     List<(long, long)>? point =
                         await ComparisonAsync(ComparisonOp.Equal, value, source, cancellationToken).ConfigureAwait(false);
                     if (point is null)
@@ -478,11 +491,49 @@ internal sealed class ExactCover : IAsyncDisposable
     private static List<(long, long)> Union(List<(long, long)> left, List<(long, long)> right) =>
         Merge([.. left, .. right]);
 
+    /// <summary>
+    /// The literals of an IN in key order, integers sorted by their values with no comparer, where a delegate's comparison
+    /// a pair took a tenth of a long IN's scan; floats, texts and mixed kinds by the total order.
+    /// </summary>
+    private static FilterLiteral[] Ordered(IReadOnlyList<FilterLiteral> values)
+    {
+        FilterLiteral[] ordered = [.. values];
+        FilterLiteralKind kind = ordered.Length > 0 ? ordered[0].Kind : FilterLiteralKind.Signed;
+        bool one = Array.TrueForAll(ordered, value => value.Kind == kind);
+        if (one && kind == FilterLiteralKind.Signed)
+        {
+            long[] keys = Array.ConvertAll(ordered, value => value.SignedValue);
+            Array.Sort(keys, ordered);
+        }
+        else if (one && kind == FilterLiteralKind.Unsigned)
+        {
+            ulong[] keys = Array.ConvertAll(ordered, value => value.UnsignedValue);
+            Array.Sort(keys, ordered);
+        }
+        else
+        {
+            Array.Sort(ordered, (left, right) => left.Kind == right.Kind ? KeyOrder.Total(left, right) : 0);
+        }
+
+        return ordered;
+    }
+
     /// <summary>The slices of <paramref name="all"/>, in row order, with the overlaps folded in.</summary>
     /// <param name="all">The slices, in any order; the list is sorted in place.</param>
     private static List<(long, long)> Merge(List<(long, long)> all)
     {
-        all.Sort((a, b) => a.Item1.CompareTo(b.Item1));
+        // The slices of literals looked up in key order come in order already: sorted only when they do not.
+        bool sorted = true;
+        for (int i = 1; i < all.Count && sorted; i++)
+        {
+            sorted = all[i - 1].Item1 <= all[i].Item1;
+        }
+
+        if (!sorted)
+        {
+            all.Sort((a, b) => a.Item1.CompareTo(b.Item1));
+        }
+
         List<(long, long)> result = [];
         foreach ((long low, long high) in all)
         {

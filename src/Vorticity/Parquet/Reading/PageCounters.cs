@@ -16,6 +16,8 @@ internal sealed class PageCounters
     private long _ahead;
     private long _viewsAhead;
     private long _piped;
+    private long _awaited;
+    private long _redone;
 
     /// <summary>Data pages decoded: their levels and values made into the page's slots.</summary>
     internal long Pages => Interlocked.Read(ref _pages);
@@ -41,6 +43,15 @@ internal sealed class PageCounters
     /// <summary>Batches the scan read whose fields decoded ahead of it, a field at a time.</summary>
     internal long Piped => Interlocked.Read(ref _piped);
 
+    /// <summary>Pages decompressing ahead that the scan awaited, their lane at work on them, before the read that took them.</summary>
+    internal long Awaited => Interlocked.Read(ref _awaited);
+
+    /// <summary>
+    /// Pages decompressing ahead that a read met while their lane was at work on them, past the one it awaits: decompressed
+    /// again where they were read, the lane's work given up.
+    /// </summary>
+    internal long Redone => Interlocked.Read(ref _redone);
+
     internal void AddPage() => Interlocked.Increment(ref _pages);
 
     internal void AddDictionary() => Interlocked.Increment(ref _dictionaries);
@@ -55,6 +66,10 @@ internal sealed class PageCounters
 
     internal void AddPiped() => Interlocked.Increment(ref _piped);
 
+    internal void AddAwaited() => Interlocked.Increment(ref _awaited);
+
+    internal void AddRedone() => Interlocked.Increment(ref _redone);
+
     /// <summary>Starts every count again from zero.</summary>
     internal void Reset()
     {
@@ -65,5 +80,7 @@ internal sealed class PageCounters
         Interlocked.Exchange(ref _ahead, 0);
         Interlocked.Exchange(ref _viewsAhead, 0);
         Interlocked.Exchange(ref _piped, 0);
+        Interlocked.Exchange(ref _awaited, 0);
+        Interlocked.Exchange(ref _redone, 0);
     }
 }

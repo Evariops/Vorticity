@@ -18,7 +18,8 @@ internal interface IPayloadLayout
 /// is laid only when the file writer can take it, between two chunks, so a builder may hold its
 /// results in whatever shape it likes until then. The estimate is the uncompressed size, an upper
 /// bound that judges a builder before its payloads go out, and the writer replaces it with the
-/// real length once placed. A payload never laid leaves its rentals to the collector.
+/// real length once placed. A payload whose index is abandoned gives its rentals back unlaid
+/// (<see cref="Forsake"/>).
 /// </summary>
 internal sealed class PendingPayload(
     Func<CanonicalArena, DTypeArena, int>? build, bool compress, long estimate, Action? release = null)
@@ -44,6 +45,19 @@ internal sealed class PendingPayload(
         return node;
     }
 
+    /// <summary>
+    /// Gives the payload's arrays back without laying it, for an index abandoned before it went out: an index over its
+    /// budget is built whole before the budget judges it, and its run segments, megabytes of them, went to the collector.
+    /// A payload forsaken is never laid.
+    /// </summary>
+    internal void Forsake()
+    {
+        _build = null;
+        Action? release = _release;
+        _release = null;
+        release?.Invoke();
+    }
+
     /// <summary>Whether the column compressor may choose its encoding.</summary>
     internal bool Compress { get; } = compress;
 
@@ -67,8 +81,12 @@ internal sealed class PendingPayload(
 
     /// <summary>
     /// A payload over the first <paramref name="length"/> words of a rented array, given back to
-    /// <see cref="ArrayPool{T}.Shared"/> once laid.
+    /// <see cref="ArrayPool{T}.Shared"/> once laid or forsaken.
     /// </summary>
+    /// <remarks>
+    /// The array is the payload's from here: the caller neither gives it back nor reads or writes it again, and drops its
+    /// own reference to it, since the payload gives it back once, and an array given back twice is handed to two renters.
+    /// </remarks>
     internal static PendingPayload RentedU32(uint[] rented, int length, bool compress) =>
         new PendingPayload(
             (arena, types) => LayU32(arena, types, rented, length),
@@ -77,9 +95,24 @@ internal sealed class PendingPayload(
             () => ArrayPool<uint>.Shared.Return(rented));
 
     /// <summary>
+    /// A payload over the first <paramref name="length"/> words of an array of the process's shelf
+    /// (<see cref="Aggregating.ArrayShelf.Retained"/>), given back to it once laid or forsaken: the shelf keeps the arrays of
+    /// a length a writer takes again from one file to the next, where the shared pool kept a few of a length and let the rest
+    /// go.
+    /// </summary>
+    /// <remarks>The array is the payload's from here, as <see cref="RentedU32"/>'s is.</remarks>
+    internal static PendingPayload ShelvedU32(uint[] shelved, int length, bool compress) =>
+        new PendingPayload(
+            (arena, types) => LayU32(arena, types, shelved, length),
+            compress,
+            (long)length * sizeof(uint),
+            () => Aggregating.ArrayShelf.Retained.Give(shelved));
+
+    /// <summary>
     /// A payload over the first <paramref name="length"/> words of a rented <see cref="ulong"/>
     /// array, laid at 64 bits: a run's rows when it spans 2³² rows or more.
     /// </summary>
+    /// <remarks>The array is the payload's from here, as <see cref="RentedU32"/>'s is.</remarks>
     internal static PendingPayload RentedU64(ulong[] rented, int length, bool compress) =>
         new PendingPayload(
             (arena, types) =>

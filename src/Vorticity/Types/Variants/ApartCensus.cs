@@ -37,8 +37,9 @@ internal static class ApartCensus
     {
         int words = (rows + 63) >> 6;
         Walker walker = new Walker(arena, into);
-        ulong[] keep = new ulong[words];
-        ulong[] other = new ulong[words];
+        Span<ulong> level = into.Level(0, 4 * words);
+        Span<ulong> keep = level[..words];
+        Span<ulong> other = level.Slice(words, words);
         ReadOnlySpan<ulong> valid = ArenaWords.Validity(arena, group);
         for (int w = 0; w < words; w++)
         {
@@ -49,7 +50,7 @@ internal static class ApartCensus
 
         CanonicalNode node = arena.GetNode(group);
         walker.Metadata = new ViewValues(arena.GetNode(EncodedForms.Canonical(arena, node.GetFieldIndex(0))));
-        walker.Root(EncodedForms.Canonical(arena, node.GetFieldIndex(1)), arena.Decoded(node.GetFieldIndex(2)), keep, other);
+        walker.Root(EncodedForms.Canonical(arena, node.GetFieldIndex(1)), arena.Decoded(node.GetFieldIndex(2)), keep, other, level[(2 * words)..]);
     }
 
     /// <summary>The class a question reads the variant value <paramref name="value"/> as, from its header, as a census counts it.</summary>
@@ -91,21 +92,25 @@ internal static class ApartCensus
         _ => PathClass.Other,
     };
 
-    /// <summary>A walk of a group's columns, its path built in a key, its counts added to the edges.</summary>
+    /// <summary>
+    /// A walk of a group's columns, its path built in the edges' key, its counts added to them; the selections of each depth
+    /// in the edges' block for it, which a batch's walk takes again where a selection a field and a batch took 404 KB a batch
+    /// of 8,192 rows of 200 shredded keys.
+    /// </summary>
     private ref struct Walker(CanonicalArena arena, EdgeCounts into)
     {
-        private readonly PathKey _key = new PathKey();
+        private readonly PathKey _key = into.Key;
 
         /// <summary>The rows' metadata, which the keys of a value walked as it lies are named by.</summary>
         internal ViewValues Metadata;
 
         /// <summary>The group's value and typed value: an object's typed fields and its residual's, or a value whole.</summary>
-        internal void Root(int value, int typed, ReadOnlySpan<ulong> keep, ReadOnlySpan<ulong> other)
+        internal void Root(int value, int typed, ReadOnlySpan<ulong> keep, ReadOnlySpan<ulong> other, Span<ulong> scratch)
         {
             int words = keep.Length;
             ReadOnlySpan<ulong> typedValid = ArenaWords.Validity(arena, typed);
-            ulong[] typedKeep = new ulong[words];
-            ulong[] typedOther = new ulong[words];
+            Span<ulong> typedKeep = scratch[..words];
+            Span<ulong> typedOther = scratch.Slice(words, words);
             for (int w = 0; w < words; w++)
             {
                 ulong held = typedValid.IsEmpty ? ulong.MaxValue : typedValid[w];
@@ -114,7 +119,7 @@ internal static class ApartCensus
             }
 
             // A row the typed value holds: its class, and below it an object's typed fields; its residual's fields beside them.
-            Typed(0, typed, typedKeep, typedOther);
+            Typed(0, 0, typed, typedKeep, typedOther);
             Values(0, value, keep, other, typedKeep, typedOther, root: true);
         }
 
@@ -122,7 +127,7 @@ internal static class ApartCensus
         /// The rows of the typed column <paramref name="typed"/> the selections keep, already within its validity, counted at the
         /// path built so far: by its class, and an object's fields below it.
         /// </summary>
-        private void Typed(int length, int typed, ReadOnlySpan<ulong> keep, ReadOnlySpan<ulong> other)
+        private void Typed(int depth, int length, int typed, ReadOnlySpan<ulong> keep, ReadOnlySpan<ulong> other)
         {
             CanonicalNode node = arena.GetNode(typed);
             PathClass @class = ClassOf(node.DType);
@@ -135,7 +140,7 @@ internal static class ApartCensus
             for (int f = 0; f < node.FieldCount; f++)
             {
                 int at = _key.Append(length, node.DType.GetFieldNameUtf8(f));
-                Field(at, arena.Decoded(node.GetFieldIndex(f)), keep, other);
+                Field(depth + 1, at, arena.Decoded(node.GetFieldIndex(f)), keep, other);
             }
         }
 
@@ -143,7 +148,7 @@ internal static class ApartCensus
         /// A field's group, a struct of its <c>value</c>, its <c>typed_value</c> or both, over the rows the object holds: those
         /// whose typed value it holds counted as typed, those whose value it holds as values.
         /// </summary>
-        private void Field(int length, int group, ReadOnlySpan<ulong> keep, ReadOnlySpan<ulong> other)
+        private void Field(int depth, int length, int group, ReadOnlySpan<ulong> keep, ReadOnlySpan<ulong> other)
         {
             CanonicalNode node = arena.GetNode(group);
             int value = -1;
@@ -163,11 +168,12 @@ internal static class ApartCensus
 
             // The rows the object holds the field in: a group of its value alone wears the absent rows as its own nulls.
             int words = keep.Length;
+            Span<ulong> level = into.Level(depth, 4 * words);
             ReadOnlySpan<ulong> present = ArenaWords.Validity(arena, group);
             if (!present.IsEmpty)
             {
-                ulong[] heldKeep = new ulong[words];
-                ulong[] heldOther = new ulong[words];
+                Span<ulong> heldKeep = level[..words];
+                Span<ulong> heldOther = level.Slice(words, words);
                 for (int w = 0; w < words; w++)
                 {
                     heldKeep[w] = keep[w] & present[w];
@@ -178,9 +184,14 @@ internal static class ApartCensus
                 other = heldOther;
             }
 
-            ulong[] typedKeep = new ulong[words];
-            ulong[] typedOther = new ulong[words];
-            if (typed >= 0)
+            Span<ulong> typedKeep = level.Slice(2 * words, words);
+            Span<ulong> typedOther = level.Slice(3 * words, words);
+            if (typed < 0)
+            {
+                typedKeep.Clear();
+                typedOther.Clear();
+            }
+            else
             {
                 ReadOnlySpan<ulong> held = ArenaWords.Validity(arena, typed);
                 for (int w = 0; w < words; w++)
@@ -190,7 +201,7 @@ internal static class ApartCensus
                     typedOther[w] = other[w] & valid;
                 }
 
-                Typed(length, typed, typedKeep, typedOther);
+                Typed(depth, length, typed, typedKeep, typedOther);
             }
 
             if (value >= 0)

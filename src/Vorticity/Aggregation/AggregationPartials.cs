@@ -9,6 +9,7 @@ using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Expressions;
 using Vorticity.Keys;
+using Vorticity.Parquet.Writing;
 using Vorticity.Scanning;
 using Vorticity.Types;
 using Vorticity.Writing;
@@ -109,11 +110,15 @@ internal static class AggregationPartials
         return parts;
     }
 
-    /// <summary>Runs <paramref name="query"/>, the partial's (<see cref="AggregationQuery.Partial"/>), and writes its rows of states to a file in memory.</summary>
+    /// <summary>
+    /// Runs <paramref name="query"/>, the partial's (<see cref="AggregationQuery.Partial"/>), and writes its rows of states to
+    /// a file in memory: a block of the engine's pool, which the partial copies once into its own memory and gives back. A
+    /// memory stream behind a pipe made 58.5 MB of a partial of 8.8 MB (a million groups), copying it four times.
+    /// </summary>
     internal static async ValueTask<AggregationPartial> ExportAsync(AggregationQuery query, CancellationToken cancellationToken)
     {
-        using MemoryStream stream = new MemoryStream();
-        VortexFileWriter writer = query.Session.CreateWriter(PipeWriter.Create(stream, new StreamPipeWriterOptions(leaveOpen: true)), query.Schema, VortexWriteOptions.Partial);
+        using PooledBytes file = new PooledBytes(query.Session.Options.EnginePool);
+        VortexFileWriter writer = query.Session.CreateWriter(new BufferPipeWriter(file), query.Schema, VortexWriteOptions.Partial);
         await using (writer.ConfigureAwait(false))
         {
             IAsyncEnumerator<RecordBatch> groups = query.Groups(cancellationToken);
@@ -128,7 +133,7 @@ internal static class AggregationPartials
             await writer.CompleteAsync(cancellationToken).ConfigureAwait(false);
         }
 
-        return AggregationPartial.Of(stream.ToArray());
+        return AggregationPartial.Of(file.Written);
     }
 
     /// <summary>

@@ -13,7 +13,9 @@ namespace Vorticity.Tests.Layouts;
 
 /// <summary>
 /// A dictionary of many values in a chunk read in windows decodes its values once for the chunk,
-/// lent to every window that reads them, whatever runs the windows.
+/// lent to every window that reads them, whatever runs the windows: once more for a context that
+/// reaches the chunk while another decodes it, which decodes it too rather than hold its thread,
+/// and never once a window.
 /// </summary>
 /// <remarks>
 /// In the collection that runs alone, because the count it reads is the process's.
@@ -39,8 +41,9 @@ public sealed class SharedChildTests
     [MemberData(nameof(Lanes))]
     public async Task ADictionarysValuesAreDecodedOnceForEveryWindowOfTheChunk(int prefetch, int degree)
     {
-        Assert.True(Rows > 2 * FlatLayoutReader.WindowRows, "the chunk must span several windows");
-        string path = await WriteAsync();
+        // Twelve windows, more than the contexts that can reach the chunk at once, so that a copy per window would show.
+        const int windowed = 12 * FlatLayoutReader.WindowRows;
+        string path = await WriteAsync(rows: windowed);
         try
         {
             await using VortexFile file = await VortexFile.OpenAsync(path, TestContext.Current.CancellationToken);
@@ -60,9 +63,12 @@ public sealed class SharedChildTests
                 seen += rows.Length;
             }
 
-            Assert.Equal(Rows, seen);
-            Assert.Equal(2L * Rows, scan.Counters.ValuesDecoded);
-            Assert.Equal(1, ArrayDecodeContext.SharedChildrenDecoded - before);
+            Assert.Equal(windowed, seen);
+            Assert.Equal(2L * windowed, scan.Counters.ValuesDecoded);
+
+            // Once on one lane; past that, at most once a context the scan decodes on, those that reached the chunk while
+            // another decoded it, every later window borrowing the copy published.
+            Assert.InRange(ArrayDecodeContext.SharedChildrenDecoded - before, 1, prefetch + degree);
         }
         finally
         {
@@ -121,7 +127,7 @@ public sealed class SharedChildTests
     private static Tagged Row(int row) =>
         new Tagged(row, "tag-" + (row * 7_919 % Tags).ToString(System.Globalization.CultureInfo.InvariantCulture));
 
-    private static async Task<string> WriteAsync(bool contents = false)
+    private static async Task<string> WriteAsync(bool contents = false, int rows = Rows)
     {
         string directory = Path.Combine(AppContext.BaseDirectory, "windows");
         Directory.CreateDirectory(directory);
@@ -136,9 +142,9 @@ public sealed class SharedChildTests
         };
         await using VortexFileWriter writer = VortexSession.Default.CreateWriter<Tagged>(path, options);
         Tagged[] block = new Tagged[writer.BlockRows];
-        for (int start = 0; start < Rows; start += writer.BlockRows)
+        for (int start = 0; start < rows; start += writer.BlockRows)
         {
-            int count = Math.Min(writer.BlockRows, Rows - start);
+            int count = Math.Min(writer.BlockRows, rows - start);
             for (int i = 0; i < count; i++)
             {
                 block[i] = Row(start + i);

@@ -111,6 +111,25 @@ internal sealed class SortedRows(SortKey keys, int prefix, int skip = 0)
 
         for (int row = from; row < to && (_prefixRuns is not null || _runs.Length > 0);)
         {
+            // With no component a function of a column, a granule whose prefix runs passed what it lists takes no more, nor
+            // does any granule once the prefix is given up: its rows are passed over to the next granule's, where a key that
+            // a component makes unique to its row made a run of every row. A key's prefix cut, which a row could give up,
+            // depends on the key's types alone, and the first row settled it (_runCut).
+            if (_runs.Length == 0)
+            {
+                long granuleOf = (_rows + (row - from)) / granuleRows;
+                if (_prefixGivenUp)
+                {
+                    break;
+                }
+
+                if (_prefixRuns!.Over(granuleOf))
+                {
+                    row = (int)Math.Min(to, from + (((granuleOf + 1) * granuleRows) - _rows));
+                    continue;
+                }
+            }
+
             int end = RunEnd(source, row, to, _runCut);
             ReadOnlySpan<byte> key = source.KeyAt(row);
             int length = keys.PrefixLength(key, _runCut);

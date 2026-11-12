@@ -23,6 +23,57 @@ namespace Vorticity.Tests.Arrays.Decoders.Compressed;
 
 public sealed class FastLanesVectorTests
 {
+    /// <summary>
+    /// Codes of every width up to 8 bits answer a set as the scalar loop does and as each code's bit says, for sets empty,
+    /// full and of every density: the byte kernels under AVX-512 VBMI, or AVX2 when run with DOTNET_EnableAVX512=0.
+    /// </summary>
+    [Fact]
+    public void CodesOfAByteAnswerASetAsTheScalarLoop()
+    {
+        Random random = new Random(0xDE22);
+        const int Blocks = 3;
+        for (int bitWidth = 0; bitWidth <= 8; bitWidth++)
+        {
+            int values = 1 << bitWidth;
+            int bytesPerBlock = FastLanes.BlockSize / 8 * bitWidth;
+            byte[] packed = new byte[Blocks * bytesPerBlock];
+            byte[] codes = new byte[Blocks * FastLanes.BlockSize];
+            for (int b = 0; b < Blocks; b++)
+            {
+                Span<byte> block = codes.AsSpan(b * FastLanes.BlockSize, FastLanes.BlockSize);
+                for (int i = 0; i < block.Length; i++)
+                {
+                    block[i] = (byte)random.Next(values);
+                }
+
+                FastLanes.PackBlock<byte>(block, bitWidth, packed.AsSpan(b * bytesPerBlock, bytesPerBlock));
+            }
+
+            foreach (double density in (ReadOnlySpan<double>)[0, 1, 0.03, 0.5, 0.97])
+            {
+                ulong[] set = new ulong[Math.Max(1, values / 64)];
+                for (int value = 0; value < values; value++)
+                {
+                    if (density == 1 || random.NextDouble() < density)
+                    {
+                        set[value >> 6] |= 1UL << (value & 63);
+                    }
+                }
+
+                ulong[] vector = new ulong[Blocks * 16];
+                ulong[] scalar = new ulong[Blocks * 16];
+                FastLanes.InSet<byte>(packed, bitWidth, set, vector, Blocks);
+                FastLanes.InSetScalar<byte>(packed, bitWidth, set, scalar, Blocks);
+                Assert.Equal(scalar, vector);
+                for (int row = 0; row < codes.Length; row++)
+                {
+                    bool held = ((set[codes[row] >> 6] >> (codes[row] & 63)) & 1) != 0;
+                    Assert.True(held == (((vector[row >> 6] >> (row & 63)) & 1) != 0), $"width {bitWidth}, density {density}, row {row}");
+                }
+            }
+        }
+    }
+
     [Fact]
     public void EveryBitWidthUnpacksIdenticallyToTheScalarLoop()
     {

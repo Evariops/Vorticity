@@ -27,7 +27,7 @@ internal sealed partial class DatasetScanBuilder
     internal async ValueTask<PathCosts.Cost> CostAsync(CancellationToken cancellationToken)
     {
         CountsAnswer? answer = Answer() is { } asked && await _version.KeepsCountsAsync(cancellationToken).ConfigureAwait(false) ? asked : null;
-        (_, List<Planned> units) = await UnitsAsync(answer, explain: false, read: false, cancellationToken).ConfigureAwait(false);
+        (_, List<Planned> units) = await UnitsAsync(answer, explain: false, read: false, shelf: null, cancellationToken).ConfigureAwait(false);
         PathCosts.Cost cost = default;
         foreach (Planned unit in units)
         {
@@ -130,7 +130,7 @@ internal sealed partial class DatasetScanBuilder
         long entries = 0;
         KeyRange? range = CountRange();
         CountsAnswer? answer = Answer() is { } asked && await _version.KeepsCountsAsync(cancellationToken).ConfigureAwait(false) ? asked : null;
-        (_, List<Planned> units) = await UnitsAsync(answer, explain: true, read: analyze, cancellationToken).ConfigureAwait(false);
+        (_, List<Planned> units) = await UnitsAsync(answer, explain: true, read: analyze, shelf: null, cancellationToken).ConfigureAwait(false);
         List<UnitStep> explained = new List<UnitStep>(units.Count);
         PathCosts.Cost total = default;
         foreach (Planned unit in units)

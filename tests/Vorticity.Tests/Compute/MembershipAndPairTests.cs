@@ -151,6 +151,69 @@ public sealed class MembershipAndPairTests
         }
     }
 
+    [Fact]
+    public void TwoBooleanColumnsAreComparedAsTheirBitsCompare()
+    {
+        // Their bits read 64 rows a word, each side's data and validity starting at any bit of a byte.
+        Random random = new Random(20261110);
+        foreach (int rows in Lengths)
+        {
+            foreach ((int leftOffset, int rightOffset) in new[] { (-1, -1), (-1, 3), (0, -1), (5, 2) })
+            {
+                CanonicalArena arena = new CanonicalArena();
+                DTypeArena types = new DTypeArena();
+                bool[] left = new bool[rows];
+                bool[] right = new bool[rows];
+                bool[] leftValid = new bool[rows];
+                bool[] rightValid = new bool[rows];
+                for (int i = 0; i < rows; i++)
+                {
+                    left[i] = random.Next(2) == 0;
+                    right[i] = random.Next(2) == 0;
+                    leftValid[i] = leftOffset < 0 || random.Next(4) != 0;
+                    rightValid[i] = rightOffset < 0 || random.Next(4) != 0;
+                }
+
+                int a = Bools(arena, types, left, leftValid, leftOffset);
+                int b = Bools(arena, types, right, rightValid, rightOffset);
+                foreach (ComparisonOp op in Ops)
+                {
+                    byte[] answer = new byte[rows];
+                    ComparisonKernels.CompareColumns(arena, a, op, b, answer);
+                    for (int i = 0; i < rows; i++)
+                    {
+                        byte expected = leftValid[i] && rightValid[i]
+                            ? (Holds(op, left[i] ? 1 : 0, right[i] ? 1 : 0) ? Trilean.True : Trilean.False)
+                            : Trilean.Unknown;
+                        if (expected != answer[i])
+                        {
+                            Assert.Fail(
+                                $"booleans rows={rows} offsets=({leftOffset},{rightOffset}) {op}: row {i} " +
+                                $"({left[i]} vs {right[i]}) answered {answer[i]}, expected {expected}.");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// <summary>A boolean column whose bits start <paramref name="bitOffset"/> bits in (none when negative), as its validity does.</summary>
+    private static int Bools(CanonicalArena arena, DTypeArena types, bool[] values, bool[] valid, int bitOffset)
+    {
+        int shift = Math.Max(bitOffset, 0);
+        VortexBuffer buffer = arena.Allocate(Math.Max((values.Length + shift + 7) / 8, 1), 1, out Span<byte> bits);
+        bits.Fill(0xA5);
+        for (int i = 0; i < values.Length; i++)
+        {
+            int at = shift + i;
+            bits[at >> 3] = values[i] ? (byte)(bits[at >> 3] | (1 << (at & 7))) : (byte)(bits[at >> 3] & ~(1 << (at & 7)));
+        }
+
+        return arena.AddBool(
+            types.Bool(bitOffset < 0 ? Nullability.NonNullable : Nullability.Nullable),
+            values.Length, ValidityOf(arena, types, valid, bitOffset), buffer, shift);
+    }
+
     private static bool Holds(ComparisonOp op, double left, double right) => op switch
     {
         ComparisonOp.Equal => left == right,

@@ -196,7 +196,33 @@ internal sealed class EdgeCounts
     private readonly Dictionary<byte[], Edge>.AlternateLookup<ReadOnlySpan<byte>> _byBytes;
     private readonly PathKey _key = new PathKey();
 
+    /// <summary>The selections of a census of a shredded column, a block a depth of its walk (<see cref="Level"/>).</summary>
+    private ulong[]?[] _levels = [];
+
     internal EdgeCounts() => _byBytes = _paths.GetAlternateLookup<ReadOnlySpan<byte>>();
+
+    /// <summary>The key a census of a shredded column builds its paths in, between the censuses this one adds.</summary>
+    internal PathKey Key => _key;
+
+    /// <summary>
+    /// The <paramref name="length"/> words a census of a shredded column selects its rows by at <paramref name="depth"/> of its
+    /// walk, as they were left: the walk's own while it is at that depth, taken again by the next batch's.
+    /// </summary>
+    internal Span<ulong> Level(int depth, int length)
+    {
+        if (depth >= _levels.Length)
+        {
+            Array.Resize(ref _levels, depth + 4);
+        }
+
+        ref ulong[]? level = ref _levels[depth];
+        if (level is null || level.Length < length)
+        {
+            level = new ulong[length];
+        }
+
+        return level.AsSpan(0, length);
+    }
 
     /// <summary>Whether a census stopped counting keys: a path the rows held may be missing.</summary>
     internal bool Partial { get; private set; }

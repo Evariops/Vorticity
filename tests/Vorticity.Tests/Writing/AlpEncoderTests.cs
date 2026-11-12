@@ -179,7 +179,7 @@ public sealed class AlpEncoderTests
         double[] edges =
         [
             -0.0, double.NaN, double.PositiveInfinity, double.NegativeInfinity, 9.2233720368547758E18,
-            -9.2233720368547758E18, 1e300, double.Epsilon, 123456789.123, -2.5, 0.5,
+            -9.2233720368547758E18, 1e300, double.Epsilon, 123456789.123, -2.5, 0.5, 3e13, -2.5e13, 8.9e13,
         ];
         double[] doubles = new double[length];
         float[] singles = new float[length];

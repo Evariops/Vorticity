@@ -245,6 +245,40 @@ store for one page, where reading every leaf would ask for 71. A dataset ordered
 level's objects together, a run of level 0 moving up whole and the next landing past it, so the two
 picks take the same runs there, and the round robin is a tiered dataset's default.
 
+A tiered job rewrites nothing a concatenation would give back as it was. From the level whose target
+first reaches the cap on an object up, each level aims at the size of the one below, and concatenating
+its full objects writes them again unchanged: once a level, past the first gigabyte at the defaults,
+three of a row's seven rewrites at a tebibyte. So the job takes of its run what `TieredPart` says. Its
+leading objects of at least half the destination's target, holding no marks or fragments, move whole,
+their entries changing level, as do an append's objects that large out of level 0. Half, because a
+writer rolls an object on an estimate that misses by what a batch or a chunk weighs, so an object
+rolled full can fall short of its target, and a concatenation of objects of half the target or more
+pays every byte of them to save at most every other object. Otherwise its leading objects under that
+are concatenated, a whole number of targets of them when they hold one, the rest waiting in the level,
+so that the last object written is about full rather than a remainder every level above keeps; one
+object alone, which a concatenation would write again as itself, moves. Below the cap it meets objects
+that do not stand yet a level or two up, and goes with their concatenation. From the cap up, where the
+objects about it stand for good, it would climb alone to the top, an object for every small append
+between large ones: there it joins the object after it when the two fit the target, and moves alone
+only before an object that leaves it no room. Appends alternating 32 768 rows and 1 024 at scale 1
+ended in 35 objects rather than 49, for 33.4 MB rewritten rather than 19.5.
+
+Over the life of a dataset without a key, appends each followed by the compactions they make due,
+scaled down from the defaults to a fan-out of 4, 64 KiB at level 1 and a cap of 1 MiB from level 3 up
+(`AuditTieredMovesBenchmarks`), and at four times those sizes:
+
+| 8 M rows, 81 MB, scale 4 | rewritten | time | allocated | objects | top level, of its target |
+|---|---|---|---|---|---|
+| appends of 16 384 rows, concatenated | 379 MB | 1 456 ms | 509 MB | 30 | 1.02 |
+| moved | 158 MB | 922 ms | 292 MB | 37 | 0.91 |
+| appends of 131 072 rows, concatenated | 379 MB | 1 266 ms | 466 MB | 20 | 1.02 |
+| moved | 76.5 MB | 468 ms | 162 MB | 24 | 0.91 |
+
+The objects stay at the size their writer gave them rather than being repacked at every level: the
+first level at the cap concatenates objects a quarter of its target here, a whole number of targets of
+them, so its last object falls between three quarters of the target and the target. At the defaults'
+fan-out of 10 they are a fifth of it, and the objects nearer their target.
+
 ### Tiers and consolidation
 
 A dataset with a partition, or without a sort key, keeps each partition's objects in size classes

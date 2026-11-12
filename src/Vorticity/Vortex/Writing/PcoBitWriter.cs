@@ -23,7 +23,7 @@ internal sealed class PcoBitWriter : IDisposable
     /// <summary>Creates a writer whose buffer starts at <paramref name="capacity"/> bytes.</summary>
     internal PcoBitWriter(int capacity)
     {
-        _buffer = ArrayPool<byte>.Shared.Rent(Math.Max(capacity, 64));
+        _buffer = Aggregating.WorkArrays.Rent<byte>(Math.Max(capacity, 64));
     }
 
     /// <summary>Bytes written; the position of the next section once <see cref="Align"/> has run.</summary>
@@ -81,7 +81,7 @@ internal sealed class PcoBitWriter : IDisposable
     {
         if (_buffer.Length > 0)
         {
-            ArrayPool<byte>.Shared.Return(_buffer);
+            Aggregating.WorkArrays.Return(_buffer);
             _buffer = [];
         }
     }
@@ -100,11 +100,11 @@ internal sealed class PcoBitWriter : IDisposable
             return;
         }
 
-        byte[] grown = ArrayPool<byte>.Shared.Rent(Math.Max(_buffer.Length * 2, _bytes + bytes));
+        byte[] grown = Aggregating.WorkArrays.Rent<byte>(Math.Max(_buffer.Length * 2, _bytes + bytes));
         _buffer.AsSpan(0, _bytes).CopyTo(grown);
         if (_buffer.Length > 0)
         {
-            ArrayPool<byte>.Shared.Return(_buffer);
+            Aggregating.WorkArrays.Return(_buffer);
         }
 
         _buffer = grown;

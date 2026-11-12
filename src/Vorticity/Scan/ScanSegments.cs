@@ -103,16 +103,31 @@ internal sealed class ScanSegments : IDisposable
     {
         using (Enter())
         {
+            // Each slot the batch has not filled, looked up by its hash among what the scan holds: filled from a segment held,
+            // waited for when another batch reads it, claimed when nobody does. The batch's slots, not every segment the
+            // batches in flight hold: at 64 columns and 16 lanes, a thousand entries walked at each step under the lock.
             bool blocked = false;
-            for (int i = 0; i < _count; i++)
+            for (int slot = 0; slot < requests.Count; slot++)
             {
-                ref Entry entry = ref _entries[i];
-                int slot = requests.IndexOf(entry.Offset, entry.Length);
-                if (slot < 0 || requests.IsFilled(slot))
+                if (requests.IsFilled(slot))
                 {
                     continue;
                 }
 
+                SegmentSpec spec = requests.GetSpec(slot);
+                int hash = SegmentRequestSet.HashOf(spec.Offset, spec.Length);
+                int held = Find(spec.Offset, spec.Length, hash);
+                if (held < 0)
+                {
+                    if (!_failed)
+                    {
+                        Add(new Entry { Offset = spec.Offset, Length = spec.Length, Hash = hash, Claimant = batch, LastUse = batch });
+                    }
+
+                    continue;
+                }
+
+                ref Entry entry = ref _entries[held];
                 entry.LastUse = Math.Max(entry.LastUse, batch);
                 if (entry.Owner is { } owner)
                 {
@@ -126,21 +141,6 @@ internal sealed class ScanSegments : IDisposable
 
             if (!_failed)
             {
-                for (int slot = 0; slot < requests.Count; slot++)
-                {
-                    if (requests.IsFilled(slot))
-                    {
-                        continue;
-                    }
-
-                    SegmentSpec spec = requests.GetSpec(slot);
-                    int hash = SegmentRequestSet.HashOf(spec.Offset, spec.Length);
-                    if (Find(spec.Offset, spec.Length, hash) < 0)
-                    {
-                        Add(new Entry { Offset = spec.Offset, Length = spec.Length, Hash = hash, Claimant = batch, LastUse = batch });
-                    }
-                }
-
                 for (int a = 0; a < along.Length; a++)
                 {
                     SegmentSpec spec = along[a];
@@ -224,18 +224,19 @@ internal sealed class ScanSegments : IDisposable
     {
         using (Enter())
         {
-            for (int i = 0; i < _count; i++)
+            // The batch's unfilled slots, each looked up by its hash, in the order of its set.
+            for (int slot = 0; slot < requests.Count; slot++)
             {
-                ref Entry entry = ref _entries[i];
-                if (entry.Owner is not null || entry.Claimant != batch)
+                if (requests.IsFilled(slot))
                 {
                     continue;
                 }
 
-                int slot = requests.IndexOf(entry.Offset, entry.Length);
-                if (slot >= 0 && !requests.IsFilled(slot))
+                SegmentSpec spec = requests.GetSpec(slot);
+                int held = Find(spec.Offset, spec.Length, SegmentRequestSet.HashOf(spec.Offset, spec.Length));
+                if (held >= 0 && _entries[held].Owner is null && _entries[held].Claimant == batch)
                 {
-                    own.AddTouched(requests.GetSpec(slot), requests.TouchesLittle(slot) ? 0 : long.MaxValue);
+                    own.AddTouched(spec, requests.TouchesLittle(slot) ? 0 : long.MaxValue);
                 }
             }
         }
@@ -250,40 +251,55 @@ internal sealed class ScanSegments : IDisposable
     {
         using (Enter())
         {
-            int kept = 0;
-            for (int i = 0; i < _count; i++)
+            // The batch's slots, each looked up by its hash: those it claimed take what it read.
+            for (int slot = 0; slot < requests.Count; slot++)
             {
-                ref Entry entry = ref _entries[i];
-                if (entry.Owner is null && entry.Claimant == batch)
+                SegmentSpec spec = requests.GetSpec(slot);
+                int held = Find(spec.Offset, spec.Length, SegmentRequestSet.HashOf(spec.Offset, spec.Length));
+                if (held < 0)
                 {
-                    int slot = requests.IndexOf(entry.Offset, entry.Length);
-                    if (slot < 0)
-                    {
-                        continue;
-                    }
-
-                    // A segment read along for a batch ahead, a view of a run of this batch's read, is copied into a block
-                    // of its own: the run then goes back with this batch, not with the last batch the segment waits for.
-                    SegmentOwner owner = requests.GetOwner(slot);
-                    VortexBuffer view = requests.GetBuffer(slot);
-                    if (entry.Along && owner.Buffer.Length > view.Length)
-                    {
-                        NativeSegmentOwner copy = SegmentCache.Copy(view);
-                        entry.Owner = copy;
-                        entry.View = copy.Buffer;
-                    }
-                    else
-                    {
-                        entry.Owner = owner.Retain();
-                        entry.View = view;
-                    }
+                    continue;
                 }
 
-                Keep(i, ref kept);
+                ref Entry entry = ref _entries[held];
+                if (entry.Owner is not null || entry.Claimant != batch)
+                {
+                    continue;
+                }
+
+                // A segment read along for a batch ahead, a view of a run of this batch's read, is copied into a block
+                // of its own: the run then goes back with this batch, not with the last batch the segment waits for.
+                SegmentOwner owner = requests.GetOwner(slot);
+                VortexBuffer view = requests.GetBuffer(slot);
+                if (entry.Along && owner.Buffer.Length > view.Length)
+                {
+                    NativeSegmentOwner copy = SegmentCache.Copy(view);
+                    entry.Owner = copy;
+                    entry.View = copy.Buffer;
+                }
+                else
+                {
+                    entry.Owner = owner.Retain();
+                    entry.View = view;
+                }
             }
 
-            Truncate(kept);
+            // The batch publishes the set it claimed with, so each of its claims is among the slots just walked: one left
+            // would stay claimed and unread, and every batch waiting for it parked. Checked in debug builds, where the
+            // walk of every entry costs nothing a release pays.
+            AssertNoClaimLeft(batch);
             WakeUnblocked();
+        }
+    }
+
+    [System.Diagnostics.Conditional("DEBUG")]
+    private void AssertNoClaimLeft(long batch)
+    {
+        for (int i = 0; i < _count; i++)
+        {
+            System.Diagnostics.Debug.Assert(
+                _entries[i].Dead || _entries[i].Owner is not null || _entries[i].Claimant != batch,
+                $"Batch {batch} published without the segment it claimed at {_entries[i].Offset}: its set is not the one it claimed with.");
         }
     }
 
@@ -297,7 +313,7 @@ internal sealed class ScanSegments : IDisposable
             int kept = 0;
             for (int i = 0; i < _count; i++)
             {
-                if (_entries[i].Owner is null && _entries[i].Claimant == batch)
+                if (_entries[i].Dead || (_entries[i].Owner is null && _entries[i].Claimant == batch))
                 {
                     continue;
                 }
@@ -321,19 +337,41 @@ internal sealed class ScanSegments : IDisposable
 
         using (Enter())
         {
-            int kept = 0;
+            // Released in place and marked dead; dropped from the array once the dead are half of it. A batch drops its
+            // predecessors' segments, the oldest, at the front: moving every other entry down and chaining them anew at
+            // each batch cost the whole held set under the lock, a thousand entries at 64 columns and 16 lanes. The dead
+            // are counted here rather than kept in a field, which would make every scan's set 8 bytes larger.
+            int dead = 0;
             for (int i = 0; i < _count; i++)
             {
-                if (_entries[i].Owner is { } owner && _entries[i].LastUse < batch)
+                ref Entry entry = ref _entries[i];
+                if (entry.Dead)
+                {
+                    dead++;
+                }
+                else if (entry.Owner is { } owner && entry.LastUse < batch)
                 {
                     owner.Release();
-                    continue;
+                    entry.Owner = null;
+                    entry.View = default;
+                    entry.Dead = true;
+                    dead++;
                 }
-
-                Keep(i, ref kept);
             }
 
-            Truncate(kept);
+            if (dead * 2 > _count)
+            {
+                int kept = 0;
+                for (int i = 0; i < _count; i++)
+                {
+                    if (!_entries[i].Dead)
+                    {
+                        Keep(i, ref kept);
+                    }
+                }
+
+                Truncate(kept);
+            }
         }
     }
 
@@ -461,7 +499,7 @@ internal sealed class ScanSegments : IDisposable
         int bucket = hash & (Buckets(entries) - 1);
         for (int e = entries[bucket].Head - 1; e >= 0; e = entries[e].Next - 1)
         {
-            if (entries[e].Offset == offset && entries[e].Length == length)
+            if (entries[e].Offset == offset && entries[e].Length == length && !entries[e].Dead)
             {
                 return e;
             }
@@ -567,19 +605,20 @@ internal sealed class ScanSegments : IDisposable
         }
     }
 
+    /// <summary>Whether a slot <paramref name="waiter"/> has not filled names a segment another batch claimed and has not read: its slots, each looked up by its hash.</summary>
     private bool Blocked(SegmentWaiter waiter)
     {
         SegmentRequestSet requests = waiter.Requests!;
-        for (int i = 0; i < _count; i++)
+        for (int slot = 0; slot < requests.Count; slot++)
         {
-            ref Entry entry = ref _entries[i];
-            if (entry.Owner is not null || entry.Claimant == waiter.Batch)
+            if (requests.IsFilled(slot))
             {
                 continue;
             }
 
-            int slot = requests.IndexOf(entry.Offset, entry.Length);
-            if (slot >= 0 && !requests.IsFilled(slot))
+            SegmentSpec spec = requests.GetSpec(slot);
+            int held = Find(spec.Offset, spec.Length, SegmentRequestSet.HashOf(spec.Offset, spec.Length));
+            if (held >= 0 && _entries[held].Owner is null && _entries[held].Claimant != waiter.Batch)
             {
                 return true;
             }
@@ -608,6 +647,9 @@ internal sealed class ScanSegments : IDisposable
 
         /// <summary>Whether the claimant reads the segment along with its own, for a batch after it.</summary>
         internal bool Along;
+
+        /// <summary>Whether it was released, and waits in the array for the next compaction (<see cref="Release"/>), which no lookup finds.</summary>
+        internal bool Dead;
 
         internal SegmentOwner? Owner;
         internal VortexBuffer View;

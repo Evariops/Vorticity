@@ -181,28 +181,62 @@ internal static class DatasetVacuum
         HashSet<PageReference> fragmentsSeen = [];
         Dictionary<ulong, long> live = [];
         CommitPageSource pages = new CommitPageSource(store);
-        foreach (ulong version in retained)
+
+        // The retained versions' commits opened a batch at a time side by side, then marked in turn: one after the other, a
+        // round trip each, a dataset that keeps thousands of versions waited for each.
+        const int OpenedAhead = 32;
+        Task<CommitObject>?[] opening = new Task<CommitObject>?[retained.Count];
+        try
         {
-            CommitObject commit = version == latest
-                ? head
-                : await CommitObject.OpenAsync(store, CommitKey.For(version), cancellationToken).ConfigureAwait(false);
-            pages.Open(version, commit);
-            DatasetLevels trees = DatasetLevels.Of(commit.Header);
-            foreach ((int _, DatasetTree tree) in trees.Occupied())
+            for (int at = 0; at < retained.Count; at++)
             {
-                await MarkAsync(tree.Root, tree.Depth).ConfigureAwait(false);
+                if (at % OpenedAhead == 0)
+                {
+                    for (int ahead = at; ahead < Math.Min(at + OpenedAhead, retained.Count); ahead++)
+                    {
+                        opening[ahead] = retained[ahead] == latest
+                            ? null
+                            : CommitObject.OpenAsync(store, CommitKey.For(retained[ahead]), cancellationToken).AsTask();
+                    }
+                }
+
+                ulong version = retained[at];
+                CommitObject commit = opening[at] is { } open ? await open.ConfigureAwait(false) : head;
+                opening[at] = null;
+                pages.Open(version, commit);
+                DatasetLevels trees = DatasetLevels.Of(commit.Header);
+                foreach ((int _, DatasetTree tree) in trees.Occupied())
+                {
+                    await MarkAsync(tree.Root, tree.Depth).ConfigureAwait(false);
+                }
+
+                // The tree of rollups, whose leaves name the rollups' objects; the tree of partition indexes, theirs.
+                if (!trees.Rollups.IsEmpty)
+                {
+                    await MarkAsync(trees.Rollups.Root, trees.Rollups.Depth, Leaves.Rollups).ConfigureAwait(false);
+                }
+
+                if (!trees.PartitionIndexes.IsEmpty)
+                {
+                    await MarkAsync(trees.PartitionIndexes.Root, trees.PartitionIndexes.Depth, Leaves.PartitionIndexes).ConfigureAwait(false);
+                }
+            }
+        }
+        catch (Exception)
+        {
+            // The commits opened ahead and not yet marked, the batch's that failed, are waited for, their failures observed:
+            // the vacuum fails with no request of its own still in flight.
+            List<Task> pending = [];
+            foreach (Task<CommitObject>? open in opening)
+            {
+                if (open is not null)
+                {
+                    pending.Add(open);
+                }
             }
 
-            // The tree of rollups, whose leaves name the rollups' objects; the tree of partition indexes, theirs.
-            if (!trees.Rollups.IsEmpty)
-            {
-                await MarkAsync(trees.Rollups.Root, trees.Rollups.Depth, Leaves.Rollups).ConfigureAwait(false);
-            }
-
-            if (!trees.PartitionIndexes.IsEmpty)
-            {
-                await MarkAsync(trees.PartitionIndexes.Root, trees.PartitionIndexes.Depth, Leaves.PartitionIndexes).ConfigureAwait(false);
-            }
+            await Task.WhenAll(pending).ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
+            throw;
         }
 
         List<string> deleted = [];
@@ -349,6 +383,8 @@ internal static class DatasetVacuum
                 return;
             }
 
+            // The children walked in turn, their pages not asked for side by side: reads side by side each fetched the region of
+            // their commit that a read after another finds held.
             foreach (InternalEntry child in TreePage.ReadInternal(page))
             {
                 await MarkAsync(child.Child, depth - 1, leaves).ConfigureAwait(false);

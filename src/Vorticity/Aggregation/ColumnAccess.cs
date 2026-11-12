@@ -387,6 +387,10 @@ internal readonly ref struct BytesBlock
     // Whether the views are this library's, zero past each inline value (CanonicalRecord.PaddedViews).
     private readonly bool _padded;
 
+    /// <summary>The length row <paramref name="row"/>'s view states, read alone; undefined for a null row.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal int SizeOf(int row) => (int)BinaryPrimitives.ReadUInt32LittleEndian(_views.Slice(row * ViewSize, sizeof(uint)));
+
     /// <summary>The block of <paramref name="node"/> in canonical form, decoding it when it is encoded, and its validity.</summary>
     internal static BytesBlock Canonical(CanonicalArena arena, int node, out ReadOnlySpan<ulong> validity)
     {

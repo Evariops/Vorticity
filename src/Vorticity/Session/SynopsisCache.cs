@@ -76,8 +76,12 @@ namespace Vorticity;
 /// main queue. A replay of question traces chose it over SIEVE and W-TinyLFU
 /// (<c>vortex-queries --micro cachetrace</c>).
 /// </para>
+/// <para>
+/// Disposed asynchronously: what waits for its write is written before the directory's lock goes, and the dispose awaits
+/// the cache's writers rather than hold a thread for them.
+/// </para>
 /// </remarks>
-public sealed class SynopsisCache : IDisposable
+public sealed class SynopsisCache : IAsyncDisposable
 {
     private const string LockName = ".lock";
     private const string TemporaryExtension = ".tmp";
@@ -85,8 +89,14 @@ public sealed class SynopsisCache : IDisposable
     /// <summary>The reads an entry counts at most, which the main queue gives back one at a time.</summary>
     private const int MaxHits = 3;
 
-    /// <summary>The files the cache keeps open at most, the least recently opened closed first.</summary>
-    private const int MaxOpenHandles = 4096;
+    /// <summary>
+    /// The files the cache keeps open at most, each mapped once read, the least recently opened closed first. Past them,
+    /// each read opens, maps and lets go of a file: on Windows 160 µs where a hit costs 150 ns (16,384 regions of a
+    /// kibibyte read in turn, one thread), and a file kept open and mapped holds about 135 bytes of the kernel's
+    /// non-paged pool there: 65,536 of them, 9 MB. Elsewhere 4,096: each file is a descriptor under a limit of the
+    /// process the cache does not know, the sockets' too, and a mapping of a count Linux bounds (65,530 by default).
+    /// </summary>
+    private static readonly int MaxOpenHandles = OperatingSystem.IsWindows() ? 65_536 : 4_096;
 
     /// <summary>The files of the other caches of the root the cache keeps open at most, the least recently read closed first.</summary>
     private const int MaxPeerHandles = 1024;
@@ -117,7 +127,8 @@ public sealed class SynopsisCache : IDisposable
     private long _peersListed;
 
     private readonly object _gate = new object();
-    private readonly Dictionary<string, Entry> _entries = new Dictionary<string, Entry>(StringComparer.Ordinal);
+    // The entries, found without the gate (Find), added and removed under it.
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, Entry> _entries = new System.Collections.Concurrent.ConcurrentDictionary<string, Entry>(StringComparer.Ordinal);
     private readonly LinkedList<Entry> _open = new LinkedList<Entry>();
 
     // The files of the other caches of the root read, kept open, the most recently read first, each with whether its bytes
@@ -137,7 +148,13 @@ public sealed class SynopsisCache : IDisposable
     private readonly Queue<Pending> _queue = new Queue<Pending>();
     private long _pendingHeld;
     private int _writers;
-    private long _hits;
+
+    // What a flush awaits while writers run, completed by the last to stop; null when none awaits.
+    private TaskCompletionSource? _drained;
+
+    // Counted by every lane at every hit, alone on its line: beside the fields a read looks at, the entries and the count
+    // of writes waiting, it made a hit of sixteen threads 36 or 55 ns as the object's place in memory fell.
+    private HitsLine _hits;
     private long _peerHits;
     private long _misses;
     private long _corrupt;
@@ -299,7 +316,7 @@ public sealed class SynopsisCache : IDisposable
     }
 
     /// <summary>Regions read from the disk.</summary>
-    internal long Hits => Count(ref _hits);
+    internal long Hits => Count(ref _hits.Value);
 
     /// <summary>Regions read from the directory of another cache of the root, counted among the <see cref="Hits"/> too.</summary>
     internal long PeerHits => Count(ref _peerHits);
@@ -574,18 +591,26 @@ public sealed class SynopsisCache : IDisposable
     }
 
     /// <summary>
-    /// Waits for every region waiting for its write to be written: what the cache's dispose waits on, and a reader of
-    /// its directory from outside it, a test.
+    /// Completes once every region waiting for its write is written: what the cache's dispose awaits, and a reader of its
+    /// directory from outside it, a test. It holds no thread meanwhile.
     /// </summary>
-    internal void Flush()
+    internal async ValueTask FlushAsync()
     {
-        lock (_gate)
+        while (true)
         {
-            // A writer stops once no region waits, and one starts whenever a region comes to wait.
-            while (_writers > 0)
+            Task drained;
+            lock (_gate)
             {
-                Monitor.Wait(_gate);
+                // A writer stops once no region waits, and one starts whenever a region comes to wait.
+                if (_writers == 0)
+                {
+                    return;
+                }
+
+                drained = (_drained ??= new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously)).Task;
             }
+
+            await drained.ConfigureAwait(false);
         }
     }
 
@@ -654,9 +679,10 @@ public sealed class SynopsisCache : IDisposable
             {
                 if (!_queue.TryDequeue(out pending))
                 {
-                    if (--_writers == 0)
+                    if (--_writers == 0 && _drained is { } drained)
                     {
-                        Monitor.PulseAll(_gate);
+                        _drained = null;
+                        drained.TrySetResult();
                     }
 
                     return;
@@ -852,23 +878,26 @@ public sealed class SynopsisCache : IDisposable
     private Entry? Find(string name) => Find(name.AsSpan());
 
     /// <summary>As <see cref="Find(string)"/>, the name as characters a caller made where it liked.</summary>
+    /// <remarks>
+    /// Without the gate: the lanes of a question each found their regions under it, and sixteen read no faster than one
+    /// (189 ns a hit across them, 151 ns from one thread). An entry found as it is dropped is read as the gate let it be
+    /// before: its mapping, once let go, is not taken (LeaseMap), and its handle is leased under the gate. Its hits are
+    /// counted by a plain write, a count a race leaves one short.
+    /// </remarks>
     private Entry? Find(ReadOnlySpan<char> name)
     {
-        lock (_gate)
+        if (!_entries.GetAlternateLookup<ReadOnlySpan<char>>().TryGetValue(name, out Entry? entry))
         {
-            if (!_entries.GetAlternateLookup<ReadOnlySpan<char>>().TryGetValue(name, out Entry? entry))
+            if (_root is null)
             {
-                if (_root is null)
-                {
-                    Missed();
-                }
-
-                return null;
+                Missed();
             }
 
-            entry.Hits = Math.Min(MaxHits, entry.Hits + 1);
-            return entry;
+            return null;
         }
+
+        entry.Hits = Math.Min(MaxHits, entry.Hits + 1);
+        return entry;
     }
 
     /// <summary>Whether the file of <paramref name="entry"/> holds exactly as many bytes as <paramref name="bytes"/>, read into it.</summary>
@@ -971,6 +1000,13 @@ public sealed class SynopsisCache : IDisposable
     /// </summary>
     private IO.MappedFileOwner? LeaseMap(Entry entry)
     {
+        // The mapping the entry keeps, taken without the gate while it holds a reference: one the gate let go of meanwhile
+        // is not taken again, and the gate then decides.
+        if (Volatile.Read(ref entry.MapField) is { } mapped && mapped.TryRetain())
+        {
+            return mapped;
+        }
+
         lock (_gate)
         {
             if (entry.Map is { } held)
@@ -1423,7 +1459,7 @@ public sealed class SynopsisCache : IDisposable
     private void Served(int length)
     {
         // Counted with no gate: a read the cache serves took it to find its region, and every lane reads.
-        Interlocked.Increment(ref _hits);
+        Interlocked.Increment(ref _hits.Value);
         VortexTelemetry.SynopsisHit(length);
     }
 
@@ -1576,9 +1612,9 @@ public sealed class SynopsisCache : IDisposable
     /// read from them are: what a writer of the files from outside the cache, a test's, waits on, a mapped file being
     /// one no one writes.
     /// </summary>
-    internal void CloseFiles()
+    internal async ValueTask CloseFilesAsync()
     {
-        Flush();
+        await FlushAsync().ConfigureAwait(false);
         List<SafeFileHandle> closed = [];
         lock (_gate)
         {
@@ -1611,13 +1647,15 @@ public sealed class SynopsisCache : IDisposable
         _peerFiles.Clear();
     }
 
-    /// <summary>Releases the directory's lock; the entries stay on the disk for the next cache that opens it.</summary>
-    public void Dispose()
+    /// <summary>
+    /// Releases the directory's lock once what waits for its write is written, which the next cache to open the directory
+    /// finds; the entries stay on the disk. It awaits the cache's writers, holding no thread meanwhile.
+    /// </summary>
+    public async ValueTask DisposeAsync()
     {
         if (Interlocked.Exchange(ref _disposed, 1) == 0)
         {
-            // What waits for its write is written: the next cache to open the directory finds it.
-            Flush();
+            await FlushAsync().ConfigureAwait(false);
             List<SafeFileHandle> peers = [];
             lock (_gate)
             {
@@ -1844,7 +1882,7 @@ public sealed class SynopsisCache : IDisposable
     private void Evicted(Entry entry, List<Entry> evicted)
     {
         Close(entry)?.Dispose();
-        _entries.Remove(entry.Name);
+        _entries.TryRemove(entry.Name, out _);
         entry.Tier.Held -= entry.Bytes;
         VortexTelemetry.SynopsisHolds(-entry.Bytes);
         evicted.Add(entry);
@@ -1853,7 +1891,7 @@ public sealed class SynopsisCache : IDisposable
 
     private void Remove(Entry entry)
     {
-        if (entry.Node is null || !_entries.Remove(entry.Name))
+        if (entry.Node is null || !_entries.TryRemove(entry.Name, out _))
         {
             return;
         }
@@ -2005,7 +2043,16 @@ public sealed class SynopsisCache : IDisposable
         internal LinkedListNode<Entry>? OpenNode { get; set; }
 
         /// <summary>Its file mapped, while its handle is kept open: what a region read is a view of; null before.</summary>
-        internal IO.MappedFileOwner? Map { get; set; }
+        internal IO.MappedFileOwner? Map
+        {
+            get => Volatile.Read(ref MapField);
+            set => Volatile.Write(ref MapField, value);
+        }
+
+        /// <summary>What <see cref="Map"/> keeps, read without the gate (<see cref="LeaseMap"/>).</summary>
+#pragma warning disable SA1401 // A field, for Volatile.Read without the gate.
+        internal IO.MappedFileOwner? MapField;
+#pragma warning restore SA1401
 
         /// <summary>The mapping whose bytes a read found to hold their region's checksum; null before one did.</summary>
         internal IO.MappedFileOwner? Verified { get; set; }
@@ -2088,4 +2135,12 @@ public sealed class SynopsisCache : IDisposable
 
         internal long GhostHeld { get; set; }
     }
+}
+
+/// <summary>The cache's count of hits, alone on its line whatever the place of the line's 128 bytes: 64 before it, 56 after.</summary>
+[System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Explicit, Size = 128)]
+internal struct HitsLine
+{
+    [System.Runtime.InteropServices.FieldOffset(64)]
+    internal long Value;
 }

@@ -89,6 +89,13 @@ internal sealed class SpanReader : IDisposable
     /// <summary>Whether a read of a span reads the granules of its chunks that hold it alone: the file keeps their marks.</summary>
     internal bool ReadsGranules => _markRegions is not null;
 
+    /// <summary>
+    /// The pool the reads take their contexts from, contexts over the file's encoding table, which the batches made give back
+    /// as they are disposed: a lookup's read of the rows an object holds made a context a span, its arenas, segments and
+    /// scalars, fifteen kilobytes of a forty-kilobyte lookup over a month's days (2026-11-10).
+    /// </summary>
+    private static ScanContexts Contexts => ScanContexts.Footerless;
+
     /// <summary>Column <paramref name="field"/>'s object dictionary, or null when its chunks hold its values.</summary>
     private ColumnDictionary? DictionaryOf(int field) => field < _dictionaries.Count ? _dictionaries[field] : null;
 
@@ -272,7 +279,7 @@ internal sealed class SpanReader : IDisposable
             HashSet<ulong>? several = Several(spans, fields);
             for (int s = 0; s < spans.Count; s++)
             {
-                contexts[s] = new ScanContext(_encodings, _options);
+                contexts[s] = Contexts.RentEncodings(_encodings, _options);
                 if (retained is not null)
                 {
                     contexts[s].HoldShare(retained);
@@ -302,7 +309,10 @@ internal sealed class SpanReader : IDisposable
 
             foreach (ScanContext? context in contexts)
             {
-                context?.Dispose();
+                if (context is not null)
+                {
+                    Contexts.Return(context);
+                }
             }
 
             // The shares no context took.
@@ -328,7 +338,7 @@ internal sealed class SpanReader : IDisposable
             return null;
         }
 
-        ScanContext context = new ScanContext(_encodings, _options);
+        ScanContext context = Contexts.RentEncodings(_encodings, _options);
         try
         {
             int request = context.Segments.Add(new SegmentSpec(named.Offset, named.Length, named.AlignmentExponent, 0, 0));
@@ -341,7 +351,7 @@ internal sealed class SpanReader : IDisposable
         }
         finally
         {
-            context.Dispose();
+            Contexts.Return(context);
         }
     }
 
@@ -351,7 +361,7 @@ internal sealed class SpanReader : IDisposable
         // The span a paged column reads the pages of; none for a file whose directories are all read whole.
         await LoadAsync(fields, _paged is null ? [] : [span], cancellationToken).ConfigureAwait(false);
 
-        ScanContext context = new ScanContext(_encodings, _options);
+        ScanContext context = Contexts.RentEncodings(_encodings, _options);
         try
         {
             ChunkRead[] reads = ChunksOf(context.Segments, context, span, fields, new GranuleBytes { Variants = true });
@@ -361,7 +371,7 @@ internal sealed class SpanReader : IDisposable
         }
         catch
         {
-            context.Dispose();
+            Contexts.Return(context);
             throw;
         }
     }

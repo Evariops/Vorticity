@@ -152,18 +152,18 @@ internal static class DatasetRowChanges
             try
             {
                 SummaryPruner? pruner = filter is null ? null : new SummaryPruner(filter);
+                List<PositionedObject> touched = [];
                 await foreach (PositionedObject held in version
                     .WalkAsync(pruner, 0, long.MaxValue, null, cancellationToken).ConfigureAwait(false))
                 {
-                    // An object whose summaries prove every row selected goes whole, unopened, when no
-                    // sink wants its rows: bounds only loosen under marks, so its live rows are selected too.
-                    // So does an object whose partition the filter covers whole, every value its column takes
-                    // there selected: the days before an instant under a partition by day, whatever the object holds.
-                    Change change = changed is null && (pruner is null ? whole : Covers(pruner, version.Schema, held))
-                        ? new Change(held.Entry.Rows, null, null)
-                        : whole
-                            ? new Change(0, null, null)
-                            : await RewriteAsync(dataset, version, held, filter, changed, doublings, cancellationToken).ConfigureAwait(false);
+                    touched.Add(held);
+                }
+
+                Change[] changes = await ChangesAsync(dataset, version, touched, pruner, filter, changed, whole, doublings, cancellationToken).ConfigureAwait(false);
+                for (int o = 0; o < touched.Count; o++)
+                {
+                    PositionedObject held = touched[o];
+                    Change change = changes[o];
                     if (change.Taken == 0)
                     {
                         continue;
@@ -282,6 +282,82 @@ internal static class DatasetRowChanges
         throw new ObjectStoreException(
             $"The change lost {attempts} times to commits that rewrote the objects it read; a coordinator " +
             "that serialises the dataset's writers is the answer to contention, not more attempts.");
+    }
+
+    /// <summary>
+    /// The change of each object of <paramref name="touched"/>, in its order. An object whose summaries prove every row
+    /// selected goes whole, unopened, when no sink wants its rows: bounds only loosen under marks, so its live rows are
+    /// selected too. So does an object whose partition the filter covers whole, every value its column takes there
+    /// selected: the days before an instant under a partition by day, whatever the object holds. The others are read,
+    /// marked or rewritten (<see cref="RewriteAsync"/>): one after another when a sink takes their rows, in the order it
+    /// writes them; otherwise side by side, as many at once as the session's lanes and the jobs' memory admit, a lane
+    /// reckoned at an object's bytes held while it is rewritten, where a delete over eight objects rewrote them one by one.
+    /// </summary>
+    private static async ValueTask<Change[]> ChangesAsync(
+        VortexDataset dataset,
+        DatasetSnapshot version,
+        List<PositionedObject> touched,
+        SummaryPruner? pruner,
+        VortexExpr? filter,
+        ChangedRows? changed,
+        bool whole,
+        int doublings,
+        CancellationToken cancellationToken)
+    {
+        Change[] changes = new Change[touched.Count];
+        List<int> read = [];
+        for (int o = 0; o < touched.Count; o++)
+        {
+            PositionedObject held = touched[o];
+            if (changed is null && (pruner is null ? whole : Covers(pruner, version.Schema, held)))
+            {
+                changes[o] = new Change(held.Entry.Rows, null, null);
+            }
+            else if (whole)
+            {
+                changes[o] = new Change(0, null, null);
+            }
+            else
+            {
+                read.Add(o);
+            }
+        }
+
+        if (changed is not null || read.Count <= 1)
+        {
+            foreach (int o in read)
+            {
+                changes[o] = await RewriteAsync(dataset, version, touched[o], filter, changed, doublings, cancellationToken).ConfigureAwait(false);
+            }
+
+            return changes;
+        }
+
+        // A lane holds the object it rewrites, at most as much as the store takes in one request, a window of its rows
+        // decoded besides; the first is admitted whatever the budget grants.
+        using Aggregating.QueryMemory memory = new Aggregating.QueryMemory(dataset.Session.Options.JobMemoryBudget ?? Vorticity.QueryMemoryBudget.Jobs);
+        long largest = 0;
+        foreach (int o in read)
+        {
+            largest = Math.Max(largest, touched[o].Entry.Bytes);
+        }
+
+        long perLane = Math.Min(largest, dataset.Options.StreamedObjectBytes) + Math.Min(largest, File.VortexReadOptions.DefaultVariantSliceBytes);
+        memory.TryGrow(perLane);
+        int most = Math.Min(Math.Max(1, dataset.Session.Options.MaxDegreeOfParallelism), read.Count);
+        int admitted = 1;
+        while (admitted < most && memory.TryGrow(perLane))
+        {
+            admitted++;
+        }
+
+        ParallelOptions lanes = new ParallelOptions { MaxDegreeOfParallelism = admitted, CancellationToken = cancellationToken };
+        await Parallel.ForAsync(0, read.Count, lanes, async (i, token) =>
+        {
+            int o = read[i];
+            changes[o] = await RewriteAsync(dataset, version, touched[o], filter, null, doublings, token).ConfigureAwait(false);
+        }).ConfigureAwait(false);
+        return changes;
     }
 
     /// <summary>

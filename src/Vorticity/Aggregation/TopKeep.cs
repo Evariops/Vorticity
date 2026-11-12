@@ -38,6 +38,7 @@ internal sealed class TopKeep : IDisposable
     private ColumnOrder? _edge;
     private int _edgeRoot;
     private long _edgePlace;
+    private FilterLiteral? _edgeInteger;
     private int[] _rows = [];
     private long _held;
 
@@ -78,9 +79,12 @@ internal sealed class TopKeep : IDisposable
     internal void Add(CanonicalArena arena, int node, int rows, ReadOnlySpan<ulong> selection, long startRow, CancellationToken cancellationToken)
     {
         Scratch.Grow(ref _rows, rows);
-        ColumnOrder? order = _edge is null ? null : ColumnOrder.For(arena, node, _type, _descending);
-        int count = 0;
-        for (int row = 0; row < rows; row++)
+
+        // Against an integer edge, the rows that beat it are judged on vectors; otherwise one comparison a row.
+        bool vectors = _edgeInteger is not null && IsInteger(arena, node);
+        ColumnOrder? order = _edge is null || vectors ? null : ColumnOrder.For(arena, node, _type, _descending);
+        int count = vectors ? Beating(arena, node, rows, selection, startRow, _edgeInteger!.Value) : 0;
+        for (int row = 0; !vectors && row < rows; row++)
         {
             if (!selection.IsEmpty && ((selection[row >> 6] >> (row & 63)) & 1) == 0)
             {
@@ -116,7 +120,7 @@ internal sealed class TopKeep : IDisposable
         int placeNode = arena.AddPrimitive(_placeType, count, Validity.NonNullable, PType.I64, placesBuffer);
         Span<int> children = [values, placeNode];
         int root = arena.AddStruct(_dtype, count, Validity.NonNullable, children);
-        StoreRows.Append(_store, arena, root);
+        StoreRows.Append(_store, arena, root, validated: true);
         _store.Commit();
         Reserve();
         if (_store.Rows >= (2 * _keep) + LeastSlack)
@@ -173,7 +177,7 @@ internal sealed class TopKeep : IDisposable
         places.Release();
         int gathered = CanonicalFilter.Apply(_arena, root, _rows.AsSpan(0, kept));
         (StructStore store, CanonicalArena arena) = Create();
-        StoreRows.Append(store, _arena, gathered);
+        StoreRows.Append(store, _arena, gathered, validated: true);
         store.Commit();
         if (kept == _keep)
         {
@@ -195,12 +199,73 @@ internal sealed class TopKeep : IDisposable
         VortexSessionOptions options = _session.Options;
         _edgeStore = (StructStore)ColumnStores.Create(_dtype, options.EnginePool, options.Extensions);
         _edgeArena = new CanonicalArena(8, options.EnginePool);
-        StoreRows.Append(_edgeStore, arena, CanonicalFilter.Apply(arena, root, [row]));
+        StoreRows.Append(_edgeStore, arena, CanonicalFilter.Apply(arena, root, [row]), validated: true);
         _edgeStore.Commit();
         _edgeRoot = _edgeStore.Build(_edgeArena, 1);
         CanonicalNode edge = _edgeArena.GetNode(_edgeRoot);
         _edge = ColumnOrder.For(_edgeArena, edge.GetFieldIndex(0), _type, _descending);
         _edgePlace = _edgeArena.GetNode(edge.GetFieldIndex(1)).Values.Cast<long>()[0];
+
+        // An integer edge, the literal the rows are compared with on vectors (Beating); null for another, or a null value.
+        _edgeInteger = IsInteger(_edgeArena, edge.GetFieldIndex(0))
+            && LiteralReader.TryRead(_edgeArena, edge.GetFieldIndex(0), 0, out FilterLiteral literal) && literal.Kind != FilterLiteralKind.Null
+                ? literal
+                : null;
+    }
+
+    /// <summary>Whether <paramref name="node"/>, its extension unwrapped, is a column of integers: its comparison with a literal is its order's.</summary>
+    private static bool IsInteger(CanonicalArena arena, int node)
+    {
+        CanonicalNode unwrapped = arena.GetNode(ComparisonKernels.Unwrap(arena, node));
+        return unwrapped.Kind == CanonicalKind.Primitive && unwrapped.PType is PType.I8 or PType.I16 or PType.I32 or PType.I64
+            or PType.U8 or PType.U16 or PType.U32 or PType.U64;
+    }
+
+    /// <summary>
+    /// Writes into <see cref="_rows"/> the rows of <paramref name="node"/> that <paramref name="selection"/> keeps and that
+    /// beat the edge: a value before the edge's in the order, or the edge's own at a place no later, as the comparison by
+    /// <see cref="ColumnOrder.CompareAcross"/> keeps them; judged on vectors against the edge as a literal, the ties only
+    /// over the rows at places no later than the edge's. A null row does not beat a value. Returns how many.
+    /// </summary>
+    private int Beating(CanonicalArena arena, int node, int rows, ReadOnlySpan<ulong> selection, long startRow, FilterLiteral edge)
+    {
+        // The verdicts a byte a row, then a bit a row: the ties and the selection joined a word of 64 rows at a time.
+        int wordCount = (rows + 63) >> 6;
+        byte[] states = System.Buffers.ArrayPool<byte>.Shared.Rent(rows);
+        ulong[] held = System.Buffers.ArrayPool<ulong>.Shared.Rent(2 * wordCount);
+        try
+        {
+            Span<byte> verdicts = states.AsSpan(0, rows);
+            Span<ulong> words = held.AsSpan(0, wordCount);
+            ComparisonKernels.Compare(arena, node, _descending ? ComparisonOp.Greater : ComparisonOp.Less, edge, verdicts);
+            Trilean.ToWords(verdicts, Trilean.True, equal: true, words);
+
+            // The rows that tie with the edge beat it at a place no later than its: the first rows of the batch alone.
+            int tied = (int)Math.Clamp(_edgePlace - startRow + 1, 0, rows);
+            if (tied > 0)
+            {
+                Span<byte> equal = verdicts[..tied];
+                Span<ulong> ties = held.AsSpan(wordCount, (tied + 63) >> 6);
+                ComparisonKernels.Compare(arena, node, ComparisonOp.Equal, edge, equal);
+                Trilean.ToWords(equal, Trilean.True, equal: true, ties);
+                for (int w = 0; w < ties.Length; w++)
+                {
+                    words[w] |= ties[w];
+                }
+            }
+
+            for (int w = 0; !selection.IsEmpty && w < wordCount; w++)
+            {
+                words[w] &= selection[w];
+            }
+
+            return RowIndices.FromBits(MemoryMarshal.AsBytes(words), 0, default, 0, allValid: true, rows, _rows);
+        }
+        finally
+        {
+            System.Buffers.ArrayPool<byte>.Shared.Return(states);
+            System.Buffers.ArrayPool<ulong>.Shared.Return(held);
+        }
     }
 
     private (StructStore Store, CanonicalArena Arena) Create()

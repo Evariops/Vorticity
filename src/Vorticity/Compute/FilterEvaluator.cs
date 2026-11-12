@@ -43,20 +43,6 @@ internal sealed class FilterEvaluator
 
     private readonly VortexExpr _filter;
 
-    /// <summary>
-    /// One entry per <c>IN</c> met so far, or null while none has been.
-    /// </summary>
-    /// <remarks>
-    /// Nothing is allocated until an <c>IN</c> is actually reached, which is what keeps a filter
-    /// without one free: the read paths are held to a ceiling in bytes, and a table nobody puts
-    /// anything in still costs more than the evaluator that owns it.
-    ///
-    /// Grown by replacement rather than mutated, so a reader never sees a half-written array and no
-    /// lock is needed: batches of one scan can be evaluated from several threads. Two racing here
-    /// build equal sets and one of the arrays is dropped, which costs a rebuild on a later batch
-    /// and nothing else.
-    /// </remarks>
-    private volatile Prepared[]? _prepared;
 
     /// <summary>
     /// The columns the filter reads, when it can be evaluated on them alone, planned by the first
@@ -304,11 +290,6 @@ internal sealed class FilterEvaluator
         }
     }
 
-    /// <summary>One <c>IN</c>'s candidates, hashed for the column they were met over.</summary>
-    /// <param name="Node">The expression node the set belongs to.</param>
-    /// <param name="Kind">The kind of column it was built for.</param>
-    /// <param name="Set">The set, or null when an OR of equalities is the better answer.</param>
-    private sealed record Prepared(InExpr Node, CandidateKind Kind, CandidateSet? Set);
 
     /// <summary>
     /// Evaluates <paramref name="filter"/> once, keeping nothing. For a caller that has one batch
@@ -435,8 +416,7 @@ internal sealed class FilterEvaluator
                     Evaluate(conjuncts[next], arena, rootIndex, rows, default, other, 2);
                 }
 
-                Trilean.And(destination, other);
-                int now = destination.Count(Trilean.False);
+                int now = Trilean.AndCountingFalse(destination, other);
                 Observe(next, now - ruledOut, evaluated - ruledOut);
                 ruledOut = now;
             }
@@ -515,31 +495,7 @@ internal sealed class FilterEvaluator
     private CandidateSet? PreparedFor(InExpr membership, CanonicalArena arena, int column)
     {
         CandidateKind kind = ComparisonKernels.CandidatesFor(arena, column);
-        if (kind == CandidateKind.None)
-        {
-            return null;
-        }
-
-        Prepared[]? held = _prepared;
-        if (held is not null)
-        {
-            for (int i = 0; i < held.Length; i++)
-            {
-                Prepared entry = held[i];
-                if (ReferenceEquals(entry.Node, membership) && entry.Kind == kind)
-                {
-                    return entry.Set;
-                }
-            }
-        }
-
-        Prepared fresh = new Prepared(membership, kind, CandidateSet.For(membership.Literals, kind));
-        int length = held?.Length ?? 0;
-        Prepared[] grown = new Prepared[length + 1];
-        held?.CopyTo(grown, 0);
-        grown[length] = fresh;
-        _prepared = grown;
-        return fresh.Set;
+        return kind == CandidateKind.None ? null : membership.SetFor(kind);
     }
 
     /// <summary>
@@ -1113,13 +1069,21 @@ internal sealed class FilterEvaluator
         Validity validity = Validity.AllInvalid;
         if (!outer.AllInvalid && !own.AllInvalid)
         {
-            VortexBuffer bits = arena.Allocate(Math.Max((rows + 7) / 8, 1), 1, out Span<byte> raw);
-            raw.Clear();
-            for (int row = 0; row < rows; row++)
+            // A word of 64 rows at a time, the two bitmaps read at their offsets and and-ed, where each row tested both; each
+            // byte of the bitmap written, none cleared before.
+            VortexBuffer bits = arena.AllocateUninitialized(Math.Max((rows + 7) / 8, 1), 1, out Span<byte> raw);
+            for (int first = 0; first < rows; first += 64)
             {
-                if (outer.IsValid(row) && own.IsValid(row))
+                int span = Math.Min(64, rows - first);
+                ulong word = BitWords.Load(outer.Bits, outer.BitOffset + first) & BitWords.Mask(span);
+                if (!own.AllValid)
                 {
-                    raw[row >> 3] |= (byte)(1 << (row & 7));
+                    word &= BitWords.Load(own.Bits, own.BitOffset + first);
+                }
+
+                for (int b = 0; b < (span + 7) >> 3; b++)
+                {
+                    raw[(first >> 3) + b] = (byte)(word >> (8 * b));
                 }
             }
 

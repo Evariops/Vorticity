@@ -19,62 +19,24 @@ public sealed class ZstdFramesTests
     private static readonly Guid Pinned = new Guid("5a5a5a5a-5a5a-4a5a-8a5a-5a5a5a5a5a5a");
 
     [Fact]
-    public void FramesCompressedAcrossThreadsAreTheBytesOneThreadWrites()
+    public void AColumnsZstdFramesAreItsBlocks()
     {
-        // Eight blocks a column, each column's values past the size below which one thread
-        // compresses them alone: a nullable column with a block of nulls, a text column, a dense
-        // one written as it lies, and noise no frame beats the plain form on.
+        // Eight blocks a column: a nullable column with a block of nulls, a text column, a dense one written as it lies, and
+        // noise no frame beats the plain form on.
         Columns columns = Build(8 * BlockRows);
-        WorkFan fan = WorkFan.Rent(4);
-        try
-        {
-            Compare(columns, fan);
-        }
-        finally
-        {
-            WorkFan.Return(fan);
-        }
-    }
-
-    private static void Compare(Columns columns, WorkFan fan)
-    {
-        using ArrayBlobWriter.Workspace alone = new ArrayBlobWriter.Workspace { FrameRows = BlockRows };
-        using ArrayBlobWriter.Workspace across = new ArrayBlobWriter.Workspace { FrameRows = BlockRows, Fan = fan };
+        using ArrayBlobWriter.Workspace workspace = new ArrayBlobWriter.Workspace { FrameRows = BlockRows };
         int[] frameCounts = new int[columns.Nodes.Length];
         for (int column = 0; column < columns.Nodes.Length; column++)
         {
-            ZstdPlan? one = ZstdPlan.TryBuild(columns.Arena, columns.Nodes[column], columns.Plain[column], alone);
-            ZstdPlan? many = ZstdPlan.TryBuild(columns.Arena, columns.Nodes[column], columns.Plain[column], across);
-            Assert.Equal(one.HasValue, many.HasValue);
-            if (one is not { } expected || many is not { } actual)
+            if (ZstdPlan.TryBuild(columns.Arena, columns.Nodes[column], columns.Plain[column], workspace) is { } plan)
             {
-                continue;
-            }
-
-            try
-            {
-                frameCounts[column] = actual.FrameCount;
-                Assert.Equal(expected.FrameCount, actual.FrameCount);
-                for (int frame = 0; frame < expected.FrameCount; frame++)
-                {
-                    Assert.Equal(expected.FrameAt(frame), actual.FrameAt(frame));
-                }
-
-                Assert.Equal(
-                    expected.Data.AsSpan(0, expected.CompressedLength).ToArray(),
-                    actual.Data.AsSpan(0, actual.CompressedLength).ToArray());
-            }
-            finally
-            {
-                expected.Release();
-                actual.Release();
+                frameCounts[column] = plan.FrameCount;
+                plan.Release();
             }
         }
 
         // The block of nulls has no frame, and the noise none kept.
         Assert.Equal([7, 8, 8, 0], frameCounts);
-        Assert.Equal(0, alone.ColumnsAcross);
-        Assert.Equal(columns.Nodes.Length, across.ColumnsAcross);
     }
 
     [Fact]
@@ -127,7 +89,7 @@ public sealed class ZstdFramesTests
         }
 
         WriteReport report = await writer.CompleteAsync(ct);
-        return (report, writer.ColumnsCompressedAcross);
+        return (report, writer.ColumnChunksAcross);
     }
 
     /// <summary>

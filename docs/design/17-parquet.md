@@ -521,7 +521,11 @@ LZ4_RAW, 16 KiB under ZSTD, 4 KiB under GZIP and BROTLI — is decompressed wher
 report's projection of one column takes 0.28 ms on 32 lanes as on one, where taking its small pages
 ahead made it 0.47. A page whose lane has not begun when its read comes to it is decompressed by the
 read itself, which never waits for a lane the pool has not run, and a page a skip steps over is
-dropped. A chunk read in windows has its own read-ahead (§5.3), an encrypted one none.
+dropped. No thread waits for a lane either: a page a lane is still decompressing is awaited before
+the read that takes it first, and a read that runs on into another decompresses it again; a page
+given up while its lane runs is given back by that lane, and the scan awaits every lane still at
+work on a chunk before the chunk's bytes go. A chunk read in windows has its own read-ahead (§5.3),
+an encrypted one none.
 
 The fields of a batch decode side by side on the scan's lanes, each into a context and an arena of
 its own, the longest first by what each took the batch before; the batch's arena then references
@@ -543,11 +547,13 @@ dictionary and the blocks its contexts keep from batch to batch stay in one core
 against 0.31 on one lane. The fields decode on the degree's lanes, one for two of the machine's
 threads at most: the read waits on the chains of its slowest fields, not on the sum of their work,
 and a chain whose lane shares its core runs slower, ClickBench's timestamps taking 8.5 ms of each
-scan on 32 lanes of sixteen cores against 3.7 on 10. The read waits for every field of the batch it
-asks for and releases each batch as it asks for the next, which frees its slot for the batch two
-on; a reader holds the pages a batch retires until the read releases it, and a row group ends with
-every batch released. A row group read in windows (§5.3), a take's among them, decodes a batch at a
-time.
+scan on 32 lanes of sixteen cores against 3.7 on 10. The read awaits every field of the batch it
+asks for, goes on on the lane that completes it, and releases each batch as it asks for the next,
+which frees its slot for the batch two on; a reader holds the pages a batch retires until the read
+releases it, and a row group ends with every batch released. A field whose next batch begins in a
+page a lane still decompresses is put aside, its lane counted still but its thread given back to the
+pool, and the lane that finishes the page resumes it, on the thread that has the page in its cache.
+A row group read in windows (§5.3), a take's among them, decodes a batch at a time.
 
 A lane of the pipeline runs, before each field, the pages that wait for a lane: they queue to the
 lanes' own queue as well as the pool's, and the pipeline's lanes would otherwise hold the pool's
@@ -740,9 +746,10 @@ the staging they share: ClickBench's first file wrote back in 381 ms on 32 lanes
 eight.
 A page then compresses on a lane of the writer's while its column encodes the next, its levels and
 values copied out of the column's buffers into a block of its own, and goes into its chunk in page
-order. A row group closes on its bytes as they are once stored, which are waited for only when the
+order. A row group closes on its bytes as they are once stored, which are awaited only when the
 most the pages still compressing could store reaches the bound: the bytes do not depend on the
-degree. On 32 lanes, the report's file of a million rows (§10) is written back in 14.4 to 14.7 ms
+degree. No thread waits for a page's lane: the writer awaits it, and a page let go while its lane
+runs, the file abandoned, is given back by that lane. On 32 lanes, the report's file of a million rows (§10) is written back in 14.4 to 14.7 ms
 a call, against 20 when only the pages' closes ran side by side; on one lane, 22.4 to 22.9.
 
 ### 6.5 Pages out without copies

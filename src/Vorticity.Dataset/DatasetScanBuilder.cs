@@ -161,6 +161,7 @@ internal sealed partial class DatasetScanBuilder
     public DatasetScanBuilder Where(VortexExpr filter)
     {
         _filter = Compute.FunctionFieldExpr.Ranges(filter);
+        _pruner = null;
         return this;
     }
 
@@ -168,6 +169,7 @@ internal sealed partial class DatasetScanBuilder
     public DatasetScanBuilder Project(in FieldMask mask)
     {
         _mask = mask;
+        _lookupColumns = null;
         return this;
     }
 
@@ -733,13 +735,15 @@ internal sealed partial class DatasetScanBuilder
     /// The scan of rows <c>[from, to)</c> <paramref name="filter"/> keeps, as this scan reads rows, with no states asked and
     /// none of its objects counted again: an answered object's edges, or the objects between those its counts answer.
     /// </summary>
-    private DatasetScanBuilder Part(VortexExpr? filter, long from, long to) =>
-        new DatasetScanBuilder(_dataset, _version)
+    private DatasetScanBuilder Part(VortexExpr? filter, long from, long to)
+    {
+        DatasetScanBuilder part = new DatasetScanBuilder(_dataset, _version)
         {
             _filter = filter,
             _mask = _mask,
             _indexes = _indexes,
             _summaries = _summaries,
+            _lookupColumns = _lookupColumns,
             _from = from,
             _to = to,
             _rowsSet = true,
@@ -758,6 +762,24 @@ internal sealed partial class DatasetScanBuilder
             _question = _question,
             _reads = _question is null ? LazyInitializer.EnsureInitialized(ref _reads) : null,
         };
+
+        // A part of the scan's own filter takes what the scan worked out of it, of the filter, the projection and the
+        // schema alone, rather than work it out again: the filter's paths and columns, its pruner, the key of its pages
+        // (the filter's text formatted, the schema hashed whole). LookupColumns checks the filter itself.
+        if (ReferenceEquals(filter, _filter))
+        {
+            part._pruner = _pruner;
+            part._filterPaths = _filterPaths;
+            part._filterColumns = _filterColumns;
+            part._fieldsRead = _fieldsRead;
+            part._fieldsJudged = _fieldsJudged;
+            part._predicateKey = _predicateKey;
+            part._sheetColumns = _sheetColumns;
+            part._sheetColumnsKnown = _sheetColumnsKnown;
+        }
+
+        return part;
+    }
 
     /// <summary>
     /// The objects this scan will read, in key order, each with its first row: the walk with its
@@ -816,7 +838,15 @@ internal sealed partial class DatasetScanBuilder
 
     private static int Narrow(long value) => (int)Math.Min(value, int.MaxValue);
 
-    private SummaryPruner? Pruner() => _summaries && _filter is { } filter ? new SummaryPruner(filter) : null;
+    /// <summary>
+    /// The pruner of the scan's filter over summaries, made once a builder: six walks of a question asked for it, and each
+    /// made its own, the filter's columns collected and a zone pruner set up each time. It is safe beside itself: a lane
+    /// that finds its scratch taken makes one of its own.
+    /// </summary>
+    private SummaryPruner? Pruner() => _summaries && _filter is { } filter ? _pruner ??= new SummaryPruner(filter) : null;
+
+    // The filter's pruner, made at the first walk; Where lets it go with the filter it was made of.
+    private SummaryPruner? _pruner;
 
     /// <summary>
     /// The objects the scan walks: those the summaries keep; with <paramref name="granules"/>, those whose key range the

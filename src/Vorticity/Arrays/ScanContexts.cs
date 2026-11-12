@@ -86,6 +86,36 @@ internal sealed class ScanContexts : ISweptAfterCollections
     internal static ScanContexts Metadata { get; } =
         new ScanContexts(Math.Max(16, Environment.ProcessorCount), Math.Max(64, 8 * Environment.ProcessorCount), metadata: true).Swept();
 
+    /// <summary>
+    /// The pool the readers of indexes read with no open file take their contexts from, contexts over an encoding table: a
+    /// dataset's search by key decoded each object's key index in a context made for it and disposed, 44 % of the bytes a
+    /// search allocated (2026-11-10).
+    /// </summary>
+    internal static ScanContexts Footerless { get; } =
+        new ScanContexts(Math.Max(16, Environment.ProcessorCount), Math.Max(64, 8 * Environment.ProcessorCount), metadata: true).Swept();
+
+    /// <summary>
+    /// A context an earlier read over an encoding table gave back, over <paramref name="arrayEncodingIds"/> and under
+    /// <paramref name="options"/>, the default when null, or a new one.
+    /// </summary>
+    internal ScanContext RentEncodings(string[] arrayEncodingIds, VortexReadOptions? options = null)
+    {
+        ScanContext? context = null;
+        lock (_gate)
+        {
+            context = Take();
+        }
+
+        if (context is null)
+        {
+            return new ScanContext(arrayEncodingIds, options) { Home = this };
+        }
+
+        context.Home = this;
+        context.RebindEncodings(arrayEncodingIds, options);
+        return context;
+    }
+
     /// <summary>The most contexts the scans took at once since the pool last let its contexts go, for tests and the bench.</summary>
     internal int MostLent
     {

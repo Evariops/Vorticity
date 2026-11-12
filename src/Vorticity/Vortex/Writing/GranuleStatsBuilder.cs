@@ -298,20 +298,15 @@ internal sealed class GranuleStatsBuilder : IndexBuilder
             return;
         }
 
-        ReadOnlySpan<int> entries = Zeros(count);
         ReadOnlySpan<byte> valid = measure.Valid is { } flags ? flags.AsSpan(start, count) : default;
         ref long state = ref MemoryMarshal.GetArrayDataReference(_state);
-        switch (measure.Kind)
+        if (measure.Kind == MeasureKind.Float)
         {
-            case MeasureKind.Float:
-                ColumnCountsBuilder.FoldFloats(ref state, entries, measure.Splits.AsSpan(start, count), measure.Floats.AsSpan(start, count), valid);
-                break;
-            case MeasureKind.Signed:
-                ColumnCountsBuilder.FoldSigned(ref state, entries, measure.Integers.AsSpan(start, count), valid);
-                break;
-            default:
-                ColumnCountsBuilder.FoldUnsigned(ref state, entries, measure.Integers.AsSpan(start, count), valid);
-                break;
+            ColumnCountsBuilder.FoldFloats(ref state, Zeros(count), measure.Splits.AsSpan(start, count), measure.Floats.AsSpan(start, count), valid);
+        }
+        else
+        {
+            ColumnCountsBuilder.Reduce(ref state, measure.Integers.AsSpan(start, count), valid, measure.Kind == MeasureKind.Signed);
         }
 
         if (_histogram is { } histogram)
@@ -410,15 +405,7 @@ internal sealed class GranuleStatsBuilder : IndexBuilder
             flags[i] = valid.AllInvalid ? (byte)0 : valid.AllValid || valid.IsValid(row) ? (byte)1 : (byte)0;
         }
 
-        ref long state = ref MemoryMarshal.GetArrayDataReference(_state);
-        if (signed)
-        {
-            ColumnCountsBuilder.FoldSigned(ref state, Zeros(count), into, flags);
-        }
-        else
-        {
-            ColumnCountsBuilder.FoldUnsigned(ref state, Zeros(count), into, flags);
-        }
+        ColumnCountsBuilder.Reduce(ref MemoryMarshal.GetArrayDataReference(_state), into, flags, signed);
     }
 
     /// <summary>Folds <paramref name="values"/>, every one valid, into the open granule's record of a signed measure: their count, exact sum and extremes.</summary>
@@ -452,9 +439,11 @@ internal sealed class GranuleStatsBuilder : IndexBuilder
         GranuleStats.WriteRows(ref _rowsSection, rows, _granuleNulls);
         if (_values)
         {
+            // The values are put in order for the listing alone: a granule of more than it lists writes their count, and
+            // sorted them all the same, a granule of a measure of many values thousands of them.
             Span<int> met = _met.AsSpan(0, _metCount);
-            met.Sort();
             int listed = met.Length <= GranuleStats.ListedValues ? met.Length : 0;
+            met[..listed].Sort();
             if (met.Length <= GranuleStats.ListedValues)
             {
                 _listing++;

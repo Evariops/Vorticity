@@ -158,6 +158,55 @@ public sealed partial class GroupSpillTests
             expected);
     }
 
+    // An approximate distinct count by a key of a few values each, its groups' hashes held in line: spilled, they are
+    // written as the exact sketches they make, with no sketch made for them, and the answers are those of no spill, the
+    // budget given back, no file left, and the peak within the ceiling: the doubling of a lane's arrays of first hashes
+    // is asked whole before it comes.
+    [Theory]
+    [InlineData(1, 10)]
+    [InlineData(4, 10)]
+    [InlineData(14, 50)]
+    public async Task AnApproximateDistinctCountByAnIntegerSpillsAndEndsAsItWould(int degree, int percent)
+    {
+        (string path, _) = await Fixture.Async;
+        static async Task<Dictionary<int, KeyCount>> AnswersAsync(VortexSession session, string path)
+        {
+            await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
+            Dictionary<int, KeyCount> answers = [];
+            await foreach (KeyCount count in file.Scan<Row>().GroupBy(r => r.Key).Select(g => (g.Key, g.ApproximateCountDistinct(x => x.Value)))
+                .As<KeyCount>().ToRecordsAsync(Ct))
+            {
+                answers.Add(count.Key, count);
+            }
+
+            return answers;
+        }
+
+        Dictionary<int, KeyCount> expected = await SharedAsync("approximate distinct values by key, unspilled", async () =>
+        {
+            await using VortexSession whole = VortexSession.Create(options => options.MemoryBudget = new QueryMemoryBudget(1L << 30));
+            return await AnswersAsync(whole, path);
+        });
+
+        long peak = await SharedAsync(
+            "peak of approximate distinct values by key",
+            () => PeakAsync<KeyCount>(path, file => file.Scan<Row>().GroupBy(r => r.Key).Select(g => (g.Key, g.ApproximateCountDistinct(x => x.Value)))));
+        string scratch = TestScratch.Create("vorticity-group-spill-");
+        try
+        {
+            QueryMemoryBudget budget = new QueryMemoryBudget(peak / 100 * percent);
+            await using VortexSession session = Session(degree, budget, scratch);
+            Assert.Equal(expected, await AnswersAsync(session, path));
+            Assert.Equal(0, budget.ReservedBytes);
+            Assert.Empty(Directory.EnumerateFileSystemEntries(scratch));
+            Assert.True(budget.PeakBytes <= budget.CeilingBytes * 106 / 100, $"peak {budget.PeakBytes:N0} of {budget.CeilingBytes:N0}");
+        }
+        finally
+        {
+            Directory.Delete(scratch, recursive: true);
+        }
+    }
+
     [Theory]
     [InlineData(1, 10)]
     [InlineData(14, 10)]

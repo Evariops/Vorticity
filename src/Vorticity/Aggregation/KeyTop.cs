@@ -1,7 +1,9 @@
 using System;
 using System.Numerics;
+using System.Runtime.CompilerServices;
 using System.Threading;
 using Vorticity.Arrays;
+using Vorticity.Compute;
 using Vorticity.Types;
 
 namespace Vorticity.Aggregating;
@@ -239,6 +241,7 @@ internal sealed class KeyTop
                 Array.Sort(best, 0, kept);
                 partition.Keep(best.AsSpan(0, kept));
                 partition.TopFrontier = _narrows && kept == _keep ? Array.BinarySearch(best, 0, kept, worst) : -1;
+                GroupSelection.GiveBack(best);
 
                 // The order the lane kept by is let go, not delivered.
                 memory?.LetGo((long)kept * sizeof(int));
@@ -364,31 +367,27 @@ internal static class ValueFrontier
 
     /// <summary>
     /// The bits of the 64 <paramref name="values"/> of a word every row of which is kept that reach the
-    /// edge, compared with no branch: taken from its bits a row at a time, each row waited on the one
-    /// before it to clear its bit, and the frontier took three quarters of a top by a column's largest
-    /// value.
+    /// edge, compared in the column's own type over vectors: built a row at a time, each row waited on
+    /// the one before it to set its bit, and the frontier took three quarters of a top by a column's
+    /// largest value.
     /// </summary>
     private static ulong Reached<T>(ReadOnlySpan<T> values, long edge, bool descending)
         where T : unmanaged, IBinaryInteger<T>, ISignedNumber<T>
     {
-        // From the largest, a value's key is its complement: at most the edge when the value is at least the edge's.
-        ulong reached = 0;
-        if (descending)
+        // From the largest, a value's key is its complement: at most the edge when the value is at
+        // least the edge's complement. A bound past the type's range answers every value alike.
+        long bound = descending ? ~edge : edge;
+        long least = -1L << ((Unsafe.SizeOf<T>() * 8) - 1);
+        if (bound < least)
         {
-            long least = ~edge;
-            for (int i = 0; i < values.Length; i++)
-            {
-                reached |= (long.CreateTruncating(values[i]) >= least ? 1UL : 0UL) << i;
-            }
-        }
-        else
-        {
-            for (int i = 0; i < values.Length; i++)
-            {
-                reached |= (long.CreateTruncating(values[i]) <= edge ? 1UL : 0UL) << i;
-            }
+            return descending ? ulong.MaxValue : 0;
         }
 
-        return reached;
+        if (bound > ~least)
+        {
+            return descending ? 0 : ulong.MaxValue;
+        }
+
+        return ComparisonKernels.Bounded(values, T.CreateTruncating(bound), atMost: !descending);
     }
 }

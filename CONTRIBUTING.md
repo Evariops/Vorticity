@@ -55,6 +55,7 @@ the row that matches what moved. Doing more is always allowed, doing less is not
 | what moved | run |
 |---|---|
 | a decoder, a canonical form, the scan, the filter | the suite, `tests/scalar-pass.sh`, `bench/gate.sh`, `--throughput --check` |
+| a kernel's vector paths | the suite, `tests/scalar-pass.sh` with `PASS=avx2` and `PASS=vector128` as well as without, `bench/gate.sh` |
 | the compressor, a plan, the blob, the writer, with no intent to change a byte | the same, plus `bench/crosscheck.sh` and `--throughput --write --check` |
 | bytes on disk, deliberately | the same, plus the corpus byte count before and after in the commit message |
 | indexes, keys, the dataset | the suite, `tests/scalar-pass.sh`, `bench/gate.sh` |

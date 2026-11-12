@@ -71,50 +71,70 @@ public sealed class BloomTreeTests
         IndexSegment region = new IndexSegment(0x1_2345_6789, 4_000, 6, 0xDEAD_BEEF_0123_4567);
         uint[] filter = [.. Enumerable.Range(1, 16).Select(i => (uint)(i * 0x01010101))];
         int[] children = [30, 30, 25];
-        uint[] words = new uint[BloomNode.WordsOf(children.Length, 2)];
+        // A node reads its words where they lie: arrays that do not move, kept alive by the locals below.
+        uint[] words = GC.AllocateArray<uint>(BloomNode.WordsOf(children.Length, 2), pinned: true);
         BloomNode.Write(words, 2, 40, region, children, filter);
 
-        Assert.True(BloomNode.TryRead(words, 0, words.Length, 2, 40, out BloomNode? node));
-        Assert.Equal((2, 40L, 3, 2), (node!.Level, node.Leaves, node.ChildCount, node.FilterBlocks));
+        Assert.True(TryRead(words, 0, words.Length, 2, 40, out BloomNode node));
+        Assert.Equal((2, 40L, 3, 2), (node.Level, node.Leaves, node.ChildCount, node.FilterBlocks));
         Assert.Equal(region, node.Children);
         Assert.Equal([30u, 30u, 25u], node.ChildWords.ToArray());
         Assert.Equal(filter, node.Filter.ToArray());
 
         // Anything its parent does not say it is.
-        Assert.False(BloomNode.TryRead(words, 0, words.Length, 1, 40, out _));
-        Assert.False(BloomNode.TryRead(words, 0, words.Length, 2, 41, out _));
-        Assert.False(BloomNode.TryRead(words, 0, words.Length - 1, 2, 40, out _));
-        Assert.False(BloomNode.TryRead(words, 1, words.Length - 1, 2, 40, out _));
+        Assert.False(TryRead(words, 0, words.Length, 1, 40, out _));
+        Assert.False(TryRead(words, 0, words.Length, 2, 41, out _));
+        Assert.False(TryRead(words, 0, words.Length - 1, 2, 40, out _));
+        Assert.False(TryRead(words, 1, words.Length - 1, 2, 40, out _));
+        Assert.False(TryRead(words, 0, words.Length + 1, 2, 40, out _), "past the words");
         foreach ((int at, uint value) in (ReadOnlySpan<(int, uint)>)[(0, words[0] + 1), (0, words[0] | (2u << 24)), (0, words[0] ^ (1u << 16)), (2, 3), (5, 3), (9, 3)])
         {
-            uint[] lie = (uint[])words.Clone();
+            uint[] lie = Pinned(words);
             lie[at] = value;
-            Assert.False(BloomNode.TryRead(lie, 0, lie.Length, 2, 40, out _), $"word {at} = {value:X}");
+            Assert.False(TryRead(lie, 0, lie.Length, 2, 40, out _), $"word {at} = {value:X}");
         }
 
         // A bare level-1 node lists no child, names no region, and a non-bare one lists a word.
         int[] none = new int[16];
-        uint[] bare = new uint[BloomNode.WordsOf(0, 1)];
+        uint[] bare = GC.AllocateArray<uint>(BloomNode.WordsOf(0, 1), pinned: true);
         BloomNode.Write(bare, 1, 16, null, none, filter.AsSpan(0, 8));
-        Assert.True(BloomNode.TryRead(bare, 0, bare.Length, 1, 16, out BloomNode? leafless));
-        Assert.True(leafless!.ChildWords.IsEmpty);
+        Assert.True(TryRead(bare, 0, bare.Length, 1, 16, out BloomNode leafless));
+        Assert.True(leafless.ChildWords.IsEmpty);
         Assert.Null(leafless.Children);
         Assert.Equal(16, leafless.ChildCount);
-        uint[] named = (uint[])bare.Clone();
+        uint[] named = Pinned(bare);
         named[3] = 64;
-        Assert.False(BloomNode.TryRead(named, 0, named.Length, 1, 16, out _));
-        uint[] listed = new uint[BloomNode.WordsOf(16, 1)];
+        Assert.False(TryRead(named, 0, named.Length, 1, 16, out _));
+        uint[] listed = GC.AllocateArray<uint>(BloomNode.WordsOf(16, 1), pinned: true);
         BloomNode.Write(listed, 1, 16, null, [8, .. new int[15]], filter.AsSpan(0, 8));
-        Assert.False(BloomNode.TryRead(listed, 0, listed.Length, 1, 16, out _), "a leaf's words with no region");
+        Assert.False(TryRead(listed, 0, listed.Length, 1, 16, out _), "a leaf's words with no region");
         listed[BloomNode.HeaderWords] = 0;
-        Assert.False(BloomNode.TryRead(listed, 0, listed.Length, 1, 16, out _), "an all-zero list");
+        Assert.False(TryRead(listed, 0, listed.Length, 1, 16, out _), "an all-zero list");
         listed[BloomNode.HeaderWords] = 7;
-        Assert.False(BloomNode.TryRead(listed, 0, listed.Length, 1, 16, out _), "a leaf of seven words");
+        Assert.False(TryRead(listed, 0, listed.Length, 1, 16, out _), "a leaf of seven words");
+        GC.KeepAlive(words);
+        GC.KeepAlive(bare);
 
         // The shape's arithmetic.
         Assert.Equal((1, 1, 2, 2, 3), (BloomNode.LevelFor(1), BloomNode.LevelFor(16), BloomNode.LevelFor(17), BloomNode.LevelFor(256), BloomNode.LevelFor(257)));
         Assert.Equal((16, 1), (BloomNode.ChildrenOf(1, 16), BloomNode.ChildrenOf(2, 16)));
         Assert.Equal((16L, 9L), (BloomNode.ChildLeaves(2, 41, 1), BloomNode.ChildLeaves(2, 41, 2)));
+    }
+
+    /// <summary>The node <paramref name="pinned"/> holds, read in place: an array allocated pinned.</summary>
+    private static bool TryRead(uint[] pinned, int start, int length, int level, long leaves, out BloomNode node) =>
+        BloomNode.TryRead(Words(pinned), start, length, level, leaves, out node);
+
+    /// <summary>The words of <paramref name="pinned"/>, an array allocated pinned, as a buffer of the reader views them.</summary>
+    private static BloomWords Words(uint[] pinned) =>
+        BloomWords.InPlace(VortexBuffer.FromPinned(MemoryMarshal.AsBytes(pinned.AsSpan()), 2));
+
+    /// <summary>A copy of <paramref name="words"/> that does not move.</summary>
+    private static uint[] Pinned(uint[] words)
+    {
+        uint[] copy = GC.AllocateArray<uint>(words.Length, pinned: true);
+        words.CopyTo(copy, 0);
+        return copy;
     }
 
     // ------------------------------------------------------------------------------ the tree
@@ -450,25 +470,25 @@ public sealed class BloomTreeTests
 
     // ------------------------------------------------------------------------------ the walk
 
-    /// <summary>A node read from a file, where its blocks start, and a level-1 node's leaves.</summary>
-    private sealed record Walked(BloomNode Node, long FirstBlock, uint[][] Leaves);
+    /// <summary>A node read from a file, where its blocks start, a level-1 node's leaves, and the words it lies in, kept alive with it.</summary>
+    private sealed record Walked(BloomNode Node, long FirstBlock, uint[][] Leaves, uint[] Words);
 
     /// <summary>Every node of a run's tree, root first, and every level-1 node's leaves.</summary>
     private static async Task<List<Walked>> WalkAsync(VortexFile file, IndexRun run)
     {
         uint[] rootWords = await WordsAsync(file, run.Payload[0], BloomTreeRun.RootWords(run.OptionBytes));
-        Assert.True(BloomNode.TryRead(rootWords, 0, rootWords.Length, (int)((rootWords[0] >> 8) & 0xFF), rootWords[1], out BloomNode? root));
+        Assert.True(BloomNode.TryRead(Words(rootWords), 0, rootWords.Length, (int)((rootWords[0] >> 8) & 0xFF), rootWords[1], out BloomNode root));
         List<Walked> nodes = [];
-        await AddAsync(root!, (long)run.FirstBlock);
+        await AddAsync(root, (long)run.FirstBlock, rootWords);
         return nodes;
 
-        async Task AddAsync(BloomNode node, long first)
+        async Task AddAsync(BloomNode node, long first, uint[] words)
         {
             uint[] children = node.Children is { } region
                 ? await WordsAsync(file, region, (int)node.ChildWords.ToArray().Sum(w => (long)w))
                 : [];
             uint[][] leaves = new uint[node.Level == 1 ? node.ChildCount : 0][];
-            nodes.Add(new Walked(node, first, leaves));
+            nodes.Add(new Walked(node, first, leaves, words));
             int at = 0;
             for (int c = 0; c < node.ChildCount; c++)
             {
@@ -479,8 +499,8 @@ public sealed class BloomTreeTests
                 }
                 else
                 {
-                    Assert.True(BloomNode.TryRead(children, at, length, node.Level - 1, BloomNode.ChildLeaves(node.Level, node.Leaves, c), out BloomNode? child));
-                    await AddAsync(child!, first + (c * BloomNode.ChildSpan(node.Level)));
+                    Assert.True(BloomNode.TryRead(Words(children), at, length, node.Level - 1, BloomNode.ChildLeaves(node.Level, node.Leaves, c), out BloomNode child));
+                    await AddAsync(child, first + (c * BloomNode.ChildSpan(node.Level)), children);
                 }
 
                 at += length;
@@ -517,7 +537,10 @@ public sealed class BloomTreeTests
         context.Decode.LoadBlob(requests.GetBuffer(slot));
         ArrayNode root = context.Nodes.Root;
         int node = context.Decode.DecodeRoot(in root, Types.Primitive(PType.U32, Nullability.NonNullable), words);
-        return context.Canonical.GetNode(node).Values.Cast<uint>()[..words].ToArray();
+        // Pinned: a node read from them reads them where they lie.
+        uint[] copy = GC.AllocateArray<uint>(words, pinned: true);
+        context.Canonical.GetNode(node).Values.Cast<uint>()[..words].CopyTo(copy);
+        return copy;
     }
 
     private static bool Holds(ReadOnlySpan<uint> filter, long value)

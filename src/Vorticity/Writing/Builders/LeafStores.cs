@@ -181,6 +181,36 @@ internal sealed unsafe class FixedStore : ColumnStore
         CopyValidity(row, validity, values.Length);
     }
 
+    /// <summary>
+    /// Appends the values <paramref name="bytes"/> hold, of this store's width, with their validity, a null row's value
+    /// zeroed as <see cref="AppendNull"/> zeroes it: a column copied in two copies and a pass over its null rows, where
+    /// a row at a time took a call and, at a null, a marking of its bit.
+    /// </summary>
+    internal void AppendBytes(ReadOnlySpan<byte> bytes, ReadOnlySpan<ulong> validity)
+    {
+        int row = Count;
+        int count = bytes.Length / Width;
+        AppendBytes(bytes);
+        if (validity.IsEmpty)
+        {
+            return;
+        }
+
+        for (int word = 0; word << 6 < count; word++)
+        {
+            int left = Math.Min(64, count - (word << 6));
+            ulong nulls = ~validity[word] & (left == 64 ? ulong.MaxValue : (1UL << left) - 1);
+            while (nulls != 0)
+            {
+                int at = (word << 6) + System.Numerics.BitOperations.TrailingZeroCount(nulls);
+                new Span<byte>(_data + ((long)(row + at) * Width), Width).Clear();
+                nulls &= nulls - 1;
+            }
+        }
+
+        CopyValidity(row, validity, count);
+    }
+
     internal override void AppendNull() => AppendNulls(1);
 
     internal void AppendNulls(int count)
@@ -307,6 +337,35 @@ internal sealed unsafe class BoolStore : ColumnStore
         GrowTo(Count + count);
         BitmapKernels.CopyRange(MemoryMarshal.AsBytes(bits), 0, new Span<byte>(_bits, _capacityBytes), Count, count);
         Count += count;
+    }
+
+    /// <summary>
+    /// Appends <paramref name="count"/> values <paramref name="bits"/> hold with their validity, a null row's value false as
+    /// <see cref="AppendNull"/> makes it: one copy of the bits and a pass over the null rows, where a row at a time took a
+    /// call and, at a null, a marking of its bit.
+    /// </summary>
+    internal void AppendBits(ReadOnlySpan<ulong> bits, int count, ReadOnlySpan<ulong> validity)
+    {
+        int row = Count;
+        AppendBits(bits, count);
+        if (validity.IsEmpty)
+        {
+            return;
+        }
+
+        for (int word = 0; word << 6 < count; word++)
+        {
+            int left = Math.Min(64, count - (word << 6));
+            ulong nulls = ~validity[word] & (left == 64 ? ulong.MaxValue : (1UL << left) - 1);
+            while (nulls != 0)
+            {
+                int bit = row + (word << 6) + System.Numerics.BitOperations.TrailingZeroCount(nulls);
+                _bits[bit >> 3] &= (byte)~(1 << (bit & 7));
+                nulls &= nulls - 1;
+            }
+        }
+
+        CopyValidity(row, validity, count);
     }
 
     internal override void AppendNull()
@@ -445,6 +504,70 @@ internal sealed unsafe class VarBinStore : ColumnStore
 
         Count += count;
     }
+
+    /// <summary>
+    /// Appends the rows of <paramref name="block"/> with their validity <paramref name="valid"/>, a null row's view empty as
+    /// <see cref="AppendNull"/> leaves it; a text's bytes checked unless <paramref name="validated"/> says a reader checked
+    /// them. The room of every view and of every value kept out of line is made once, then each view written where it lies:
+    /// a row at a time, each value's append checked the room it needed, and each null marked its bit.
+    /// </summary>
+    /// <exception cref="VortexSchemaException">A text's bytes are not UTF-8; the rows before it are appended.</exception>
+    internal void AppendBlock(scoped in Aggregating.BytesBlock block, ReadOnlySpan<ulong> valid, bool validated)
+    {
+        int rows = block.Length;
+        int first = Count;
+        long outOfLine = 0;
+        for (int row = 0; row < rows; row++)
+        {
+            if (IsValid(valid, row) && block.SizeOf(row) is int size and > MaxInline)
+            {
+                outOfLine += size;
+            }
+        }
+
+        InlineViews(rows);
+        EnsureData(checked((int)Math.Max(outOfLine, 1)));
+        bool check = !validated && IsUtf8;
+        for (int row = 0; row < rows; row++)
+        {
+            ref byte view = ref _views[(long)(first + row) * ViewSize];
+            if (!IsValid(valid, row))
+            {
+                Unsafe.WriteUnaligned(ref view, 0UL);
+                Unsafe.WriteUnaligned(ref Unsafe.Add(ref view, sizeof(ulong)), 0UL);
+                continue;
+            }
+
+            ReadOnlySpan<byte> value = block[row];
+            if (check && !Utf8.IsValid(value))
+            {
+                Refuse(first, row, valid);
+            }
+
+            int size = value.Length;
+            if (size <= MaxInline)
+            {
+                CanonicalSupport.WriteView(ref view, ref MemoryMarshal.GetReference(value), size, 0, 0);
+            }
+            else
+            {
+                byte* at = _data + _dataLength;
+                value.CopyTo(new Span<byte>(at, size));
+                CanonicalSupport.WriteView(ref view, ref *at, size, 0, _dataLength);
+                _dataLength += size;
+            }
+        }
+
+        Count = first + rows;
+        if (!valid.IsEmpty)
+        {
+            CopyValidity(first, valid, rows);
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static bool IsValid(ReadOnlySpan<ulong> valid, int row) =>
+        valid.IsEmpty || ((valid[row >> 6] >> (row & 63)) & 1) != 0;
 
     internal void AppendValidated(ReadOnlySpan<byte> value)
     {
@@ -714,4 +837,21 @@ internal sealed unsafe class VarBinStore : ColumnStore
 
     [DoesNotReturn]
     private void ThrowInvalid() => throw new VortexSchemaException($"The column is {Type}: the bytes appended to it must be valid UTF-8.");
+
+    /// <summary>
+    /// Refuses row <paramref name="row"/> of a block appended from <paramref name="first"/>, whose text is not UTF-8: the rows
+    /// before it kept, with their nulls, as an append of each row leaves them. Out of the block's loop, which it would slow.
+    /// </summary>
+    [DoesNotReturn]
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void Refuse(int first, int row, ReadOnlySpan<ulong> valid)
+    {
+        Count = first + row;
+        if (!valid.IsEmpty)
+        {
+            CopyValidity(first, valid, row);
+        }
+
+        ThrowInvalid();
+    }
 }

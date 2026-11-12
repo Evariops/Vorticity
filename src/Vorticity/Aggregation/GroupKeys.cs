@@ -4,6 +4,8 @@ using System.Collections.Generic;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.X86;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
@@ -443,6 +445,14 @@ internal abstract class GroupKeys
     /// <exception cref="NotSupportedException">The keys are not ordered here (<see cref="Orders"/>).</exception>
     internal virtual int CompareKeys(int a, int b, int component) =>
         throw new NotSupportedException("These keys are ordered by the column of their values.");
+
+    /// <summary>
+    /// Writes into <paramref name="into"/>, for each group of <paramref name="groups"/>, a key of 64 bits whose unsigned order
+    /// is <see cref="CompareKeys(int, int, int)"/>'s for component <paramref name="component"/>, the null group last; false
+    /// when the keys give none, <paramref name="into"/> then holding nothing to read, written in part or not at all (a key
+    /// of 64 bits finds out at its null group that it leaves no key past its values): a sort by them then compares.
+    /// </summary>
+    internal virtual bool TryOrderKeys(ReadOnlySpan<int> groups, int component, Span<ulong> into) => false;
 
     /// <summary>Forgets the groups the codes of the last dictionary were given: they were numbered again.</summary>
     private protected void Renumbered() => _codeOrigin = default;
@@ -1034,30 +1044,12 @@ internal sealed class FixedKeys<TValue> : GroupKeys
     }
 
     /// <summary>
-    /// The bits of the 64 <paramref name="values"/> of a word every row of which is kept that reach the
-    /// edge, compared with no branch, as <see cref="ValueFrontier"/> compares its values: from the
-    /// word's bits a row at a time, each row waited on the one before it.
+    /// The bits of the 64 integer <paramref name="values"/> of a word every row of which is kept that
+    /// reach the edge, compared over vectors as <see cref="ValueFrontier"/> compares its values: built
+    /// a row at a time, each row waited on the one before it.
     /// </summary>
-    private static ulong Reached(ReadOnlySpan<TValue> values, TValue edge, bool descending)
-    {
-        ulong reached = 0;
-        if (descending)
-        {
-            for (int i = 0; i < values.Length; i++)
-            {
-                reached |= (values[i].CompareTo(edge) >= 0 ? 1UL : 0UL) << i;
-            }
-        }
-        else
-        {
-            for (int i = 0; i < values.Length; i++)
-            {
-                reached |= (values[i].CompareTo(edge) <= 0 ? 1UL : 0UL) << i;
-            }
-        }
-
-        return reached;
-    }
+    private static ulong Reached(ReadOnlySpan<TValue> values, TValue edge, bool descending) =>
+        ComparisonKernels.Bounded(values, edge, atMost: !descending);
 
     internal override bool Assign(CanonicalArena arena, ReadOnlySpan<int> nodes, int rows, ReadOnlySpan<ulong> selection, int[] rowGroups, GroupRanges ranges)
     {
@@ -1402,7 +1394,13 @@ internal sealed class FixedKeys<TValue> : GroupKeys
                 // A span of one page, a few thousand values: its numbers read from the page itself, taken once
                 // a chunk, where the page and its start read again at every row made a chain of three loads.
                 ref int numbers = ref Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(pages[0]), starts[0]);
-                for (int i = 0; i < values.Length; i++)
+                int i = 0;
+                if (Avx2.IsSupported)
+                {
+                    i = Gathered(values, groups, ref numbers, min, span, out missed);
+                }
+
+                for (; i < values.Length; i++)
                 {
                     ulong number = (ulong)(Integer(values[i]) - min);
                     bool inside = number < span;
@@ -1617,25 +1615,93 @@ internal sealed class FixedKeys<TValue> : GroupKeys
 
     /// <summary>The first pass of a chunk once every value of a span numbered whole is met: a row's group is its number, -1 past the bounds.</summary>
     /// <returns>The groups or-ed together: negative when a row is left for the lookup.</returns>
-    private static int Numbers(ReadOnlySpan<TValue> values, Span<int> groups, long min, ulong span)
+    internal static int Numbers(ReadOnlySpan<TValue> values, Span<int> groups, long min, ulong span)
     {
         int left = 0;
         int i = 0;
         ref int group = ref MemoryMarshal.GetReference(groups);
-        if (Vector.IsHardwareAccelerated && Unsafe.SizeOf<TValue>() == sizeof(int) && values.Length >= Vector<int>.Count)
+        int size = Unsafe.SizeOf<TValue>();
+        if (Vector.IsHardwareAccelerated && values.Length >= Vector<int>.Count)
         {
-            // Four bytes, an int or a uint: the number less the least wraps as the value does, and the span
+            // The number less the least wraps as the value does, and the span, which a group number holds,
             // never does, so that one comparison of the difference as unsigned tells a value within it.
-            ref int value = ref Unsafe.As<TValue, int>(ref MemoryMarshal.GetReference(values));
             Vector<int> least = new Vector<int>((int)min);
             Vector<uint> width = new Vector<uint>((uint)span);
             Vector<int> lefts = Vector<int>.Zero;
-            for (; i <= values.Length - Vector<int>.Count; i += Vector<int>.Count)
+            if (size == sizeof(int))
             {
-                Vector<int> number = Vector.LoadUnsafe(ref value, (nuint)i) - least;
-                Vector<int> numbered = number | Vector.AsVectorInt32(Vector.GreaterThanOrEqual(Vector.AsVectorUInt32(number), width));
-                numbered.StoreUnsafe(ref group, (nuint)i);
-                lefts |= numbered;
+                ref int value = ref Unsafe.As<TValue, int>(ref MemoryMarshal.GetReference(values));
+                for (; i <= values.Length - Vector<int>.Count; i += Vector<int>.Count)
+                {
+                    Vector<int> numbered = Numbered(Vector.LoadUnsafe(ref value, (nuint)i), least, width);
+                    numbered.StoreUnsafe(ref group, (nuint)i);
+                    lefts |= numbered;
+                }
+            }
+            else if (size == sizeof(long))
+            {
+                // Eight bytes: the difference taken and weighed in 64 bits, a number or -1 kept in 32.
+                ref long value = ref Unsafe.As<TValue, long>(ref MemoryMarshal.GetReference(values));
+                Vector<long> least64 = new Vector<long>(min);
+                Vector<ulong> width64 = new Vector<ulong>(span);
+                for (; i <= values.Length - Vector<int>.Count; i += Vector<int>.Count)
+                {
+                    Vector<long> a = Vector.LoadUnsafe(ref value, (nuint)i) - least64;
+                    Vector<long> b = Vector.LoadUnsafe(ref value, (nuint)(i + Vector<long>.Count)) - least64;
+                    a |= Vector.AsVectorInt64(Vector.GreaterThanOrEqual(Vector.AsVectorUInt64(a), width64));
+                    b |= Vector.AsVectorInt64(Vector.GreaterThanOrEqual(Vector.AsVectorUInt64(b), width64));
+                    Vector<int> numbered = Vector.Narrow(a, b);
+                    numbered.StoreUnsafe(ref group, (nuint)i);
+                    lefts |= numbered;
+                }
+            }
+            else if (size == sizeof(short))
+            {
+                // Two bytes, widened to 32 bits as the type extends them, then weighed as four.
+                ref short value = ref Unsafe.As<TValue, short>(ref MemoryMarshal.GetReference(values));
+                for (; i <= values.Length - Vector<short>.Count; i += Vector<short>.Count)
+                {
+                    (Vector<int> low, Vector<int> high) = Widened(Vector.LoadUnsafe(ref value, (nuint)i));
+                    Vector<int> a = Numbered(low, least, width);
+                    Vector<int> b = Numbered(high, least, width);
+                    a.StoreUnsafe(ref group, (nuint)i);
+                    b.StoreUnsafe(ref group, (nuint)(i + Vector<int>.Count));
+                    lefts |= a | b;
+                }
+            }
+            else
+            {
+                // One byte, widened twice.
+                ref sbyte value = ref Unsafe.As<TValue, sbyte>(ref MemoryMarshal.GetReference(values));
+                int quarter = Vector<int>.Count;
+                for (; i <= values.Length - Vector<sbyte>.Count; i += Vector<sbyte>.Count)
+                {
+                    Vector<sbyte> bytes = Vector.LoadUnsafe(ref value, (nuint)i);
+                    Vector<short> lowHalf;
+                    Vector<short> highHalf;
+                    if (typeof(TValue) == typeof(sbyte))
+                    {
+                        Vector.Widen(bytes, out lowHalf, out highHalf);
+                    }
+                    else
+                    {
+                        Vector.Widen(Vector.AsVectorByte(bytes), out Vector<ushort> l, out Vector<ushort> h);
+                        lowHalf = Vector.AsVectorInt16(l);
+                        highHalf = Vector.AsVectorInt16(h);
+                    }
+
+                    (Vector<int> a, Vector<int> b) = Widened(lowHalf);
+                    (Vector<int> c, Vector<int> d) = Widened(highHalf);
+                    a = Numbered(a, least, width);
+                    b = Numbered(b, least, width);
+                    c = Numbered(c, least, width);
+                    d = Numbered(d, least, width);
+                    a.StoreUnsafe(ref group, (nuint)i);
+                    b.StoreUnsafe(ref group, (nuint)(i + quarter));
+                    c.StoreUnsafe(ref group, (nuint)(i + (2 * quarter)));
+                    d.StoreUnsafe(ref group, (nuint)(i + (3 * quarter)));
+                    lefts |= (a | b) | (c | d);
+                }
             }
 
             left = Vector.LessThanAny(lefts, Vector<int>.Zero) ? -1 : 0;
@@ -1650,6 +1716,104 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         }
 
         return left;
+    }
+
+    /// <summary>
+    /// The first pass of a chunk over a span of one page not numbered whole, eight rows a step with AVX2: each row's
+    /// group gathered from the page at its number, -1 past the span (a value not met yet reads the page's own -1).
+    /// </summary>
+    /// <remarks>
+    /// A row at a time, the number, its bound and the page's load took 0.9 to 1.0 ns a row, nine tenths of a key of two
+    /// bounded columns, whose columns are never numbered whole.
+    /// </remarks>
+    /// <returns>The rows taken, a multiple of eight; <paramref name="missed"/> negative when one is left for the lookup.</returns>
+    internal static unsafe int Gathered(ReadOnlySpan<TValue> values, Span<int> groups, ref int numbers, long min, ulong span, out int missed)
+    {
+        int i = 0;
+        Vector256<int> lefts = Vector256<int>.Zero;
+        ref int group = ref MemoryMarshal.GetReference(groups);
+        int size = Unsafe.SizeOf<TValue>();
+        fixed (int* table = &numbers)
+        {
+            if (size == sizeof(long))
+            {
+                // The difference taken and weighed in 64 bits, as the numbering whole does, then narrowed to the index.
+                ref long value = ref Unsafe.As<TValue, long>(ref MemoryMarshal.GetReference(values));
+                Vector256<long> least = Vector256.Create(min);
+                Vector256<ulong> width = Vector256.Create(span);
+                for (; i <= values.Length - 8; i += 8)
+                {
+                    Vector256<long> a = Vector256.LoadUnsafe(ref value, (nuint)i) - least;
+                    Vector256<long> b = Vector256.LoadUnsafe(ref value, (nuint)(i + 4)) - least;
+                    Vector256<int> outside = Vector256.Narrow(
+                        Vector256.GreaterThanOrEqual(a.AsUInt64(), width).AsInt64(),
+                        Vector256.GreaterThanOrEqual(b.AsUInt64(), width).AsInt64());
+                    Vector256<int> found = Avx2.GatherVector256(table, Vector256.AndNot(Vector256.Narrow(a, b), outside), 4) | outside;
+                    found.StoreUnsafe(ref group, (nuint)i);
+                    lefts |= found;
+                }
+            }
+            else
+            {
+                // Four bytes or fewer, widened to 32 bits as the type extends them: the difference wraps as the value
+                // does, and the span never does.
+                Vector256<int> least = Vector256.Create((int)min);
+                Vector256<uint> width = Vector256.Create((uint)span);
+                for (; i <= values.Length - 8; i += 8)
+                {
+                    Vector256<int> number = Eight(values, i) - least;
+                    Vector256<int> outside = Vector256.GreaterThanOrEqual(number.AsUInt32(), width).AsInt32();
+                    Vector256<int> found = Avx2.GatherVector256(table, Vector256.AndNot(number, outside), 4) | outside;
+                    found.StoreUnsafe(ref group, (nuint)i);
+                    lefts |= found;
+                }
+            }
+        }
+
+        missed = Vector256.LessThanAny(lefts, Vector256<int>.Zero) ? -1 : 0;
+        return i;
+    }
+
+    /// <summary>Eight values of four bytes or fewer from <paramref name="at"/>, widened to 32 bits as their type extends them.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static Vector256<int> Eight(ReadOnlySpan<TValue> values, int at)
+    {
+        ref TValue first = ref Unsafe.Add(ref MemoryMarshal.GetReference(values), at);
+        if (Unsafe.SizeOf<TValue>() == sizeof(int))
+        {
+            return Vector256.LoadUnsafe(ref Unsafe.As<TValue, int>(ref first));
+        }
+
+        if (Unsafe.SizeOf<TValue>() == sizeof(short))
+        {
+            Vector128<short> words = Vector128.LoadUnsafe(ref Unsafe.As<TValue, short>(ref first));
+            return typeof(TValue) == typeof(ushort) ? Avx2.ConvertToVector256Int32(words.AsUInt16()) : Avx2.ConvertToVector256Int32(words);
+        }
+
+        Vector128<byte> bytes = Vector128.CreateScalarUnsafe(Unsafe.ReadUnaligned<ulong>(ref Unsafe.As<TValue, byte>(ref first))).AsByte();
+        return typeof(TValue) == typeof(byte) ? Avx2.ConvertToVector256Int32(bytes) : Avx2.ConvertToVector256Int32(bytes.AsSByte());
+    }
+
+    /// <summary>Each value's number, the value less the least, or -1 past the span.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static Vector<int> Numbered(Vector<int> values, Vector<int> least, Vector<uint> width)
+    {
+        Vector<int> number = values - least;
+        return number | Vector.AsVectorInt32(Vector.GreaterThanOrEqual(Vector.AsVectorUInt32(number), width));
+    }
+
+    /// <summary>Two-byte values widened to 32 bits as the key's type extends them (a byte's, already widened, are never negative).</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static (Vector<int> Low, Vector<int> High) Widened(Vector<short> values)
+    {
+        if (typeof(TValue) == typeof(ushort))
+        {
+            Vector.Widen(Vector.AsVectorUInt16(values), out Vector<uint> l, out Vector<uint> h);
+            return (Vector.AsVectorInt32(l), Vector.AsVectorInt32(h));
+        }
+
+        Vector.Widen(values, out Vector<int> low, out Vector<int> high);
+        return (low, high);
     }
 
     /// <summary>The value of <paramref name="integer"/> as a key, the inverse of <see cref="Integer"/>.</summary>
@@ -1925,6 +2089,77 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         }
 
         return _keys[a].CompareTo(_keys[b]);
+    }
+
+    /// <inheritdoc/>
+    /// <remarks>
+    /// An integer's value, its sign bit flipped when it has one, so that its unsigned order is its order; the null group
+    /// past every value, which a value of 64 bits leaves no room for: those keys give none when the null group is asked.
+    /// </remarks>
+    internal override bool TryOrderKeys(ReadOnlySpan<int> groups, int component, Span<ulong> into)
+    {
+        if (Floats || !Integers)
+        {
+            return false;
+        }
+
+        bool wide = Unsafe.SizeOf<TValue>() == sizeof(ulong);
+        TValue[] keys = _keys;
+        int none = _null;
+        for (int i = 0; i < groups.Length; i++)
+        {
+            int group = groups[i];
+            if (group == none)
+            {
+                if (wide)
+                {
+                    return false;
+                }
+
+                into[i] = ulong.MaxValue;
+                continue;
+            }
+
+            into[i] = OrderKey(keys[group]);
+        }
+
+        return true;
+    }
+
+    /// <summary>An integer as a key whose unsigned order is its order: its sign bit flipped, or its value when it has none.</summary>
+    private static ulong OrderKey(TValue value)
+    {
+        if (typeof(TValue) == typeof(long))
+        {
+            return (ulong)Unsafe.As<TValue, long>(ref value) ^ (1UL << 63);
+        }
+
+        if (typeof(TValue) == typeof(int))
+        {
+            return (uint)(Unsafe.As<TValue, int>(ref value) ^ int.MinValue);
+        }
+
+        if (typeof(TValue) == typeof(short))
+        {
+            return (ushort)(Unsafe.As<TValue, short>(ref value) ^ short.MinValue);
+        }
+
+        if (typeof(TValue) == typeof(sbyte))
+        {
+            return (byte)(Unsafe.As<TValue, sbyte>(ref value) ^ sbyte.MinValue);
+        }
+
+        if (typeof(TValue) == typeof(ulong))
+        {
+            return Unsafe.As<TValue, ulong>(ref value);
+        }
+
+        if (typeof(TValue) == typeof(uint))
+        {
+            return Unsafe.As<TValue, uint>(ref value);
+        }
+
+        return typeof(TValue) == typeof(ushort) ? Unsafe.As<TValue, ushort>(ref value) : Unsafe.As<TValue, byte>(ref value);
     }
 
     internal override void Keep(ReadOnlySpan<int> groups) => Keep(groups, room: 0);

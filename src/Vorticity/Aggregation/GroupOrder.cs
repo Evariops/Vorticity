@@ -92,6 +92,13 @@ internal abstract class ColumnOrder
     /// <summary>The key of 64 bits the order ranks <paramref name="position"/> by, the direction folded in; null when it holds none, or the value is null.</summary>
     internal virtual long? KeyAt(int position) => null;
 
+    /// <summary>
+    /// Writes into <paramref name="into"/> a key of 64 bits for each position from 0 to its length, whose unsigned order is
+    /// this order's, its direction and its nulls folded in; false, when the order gives none, which a sort of its positions
+    /// then compares (<see cref="GroupSort.TrySortByKeys"/>).
+    /// </summary>
+    internal virtual bool TryKeys(Span<ulong> into) => false;
+
     /// <summary>Whether <paramref name="position"/>'s value is present: not a null the validity marks.</summary>
     protected bool Present(int position) => _validity.Length == 0 || ((_validity[position >> 6] >> (position & 63)) & 1) != 0;
 
@@ -115,6 +122,8 @@ internal abstract class ColumnOrder
     private sealed class KeyOrder(GroupKeys keys, int[] groups, int component) : ColumnOrder([], descending: false)
     {
         protected override int CompareValues(int a, int b) => keys.CompareKeys(groups[a], groups[b], component);
+
+        internal override bool TryKeys(Span<ulong> into) => keys.TryOrderKeys(groups.AsSpan(0, into.Length), component, into);
     }
 
     /// <summary>The order of <paramref name="node"/>, a canonical column of <paramref name="type"/>, held over its buffers while the arena keeps them.</summary>
@@ -166,6 +175,16 @@ internal abstract class ColumnOrder
     private sealed class PositionOrder() : ColumnOrder([], descending: false)
     {
         protected override int CompareValues(int a, int b) => a.CompareTo(b);
+
+        internal override bool TryKeys(Span<ulong> into)
+        {
+            for (int i = 0; i < into.Length; i++)
+            {
+                into[i] = (ulong)i;
+            }
+
+            return true;
+        }
     }
 
     private sealed class IntegerOrder<T>(Buffers.VortexBuffer values, ulong[] validity, bool descending) : ColumnOrder(validity, descending)
@@ -406,6 +425,23 @@ internal static class ValuesOrder
 
         internal override long? KeyAt(int position) => Present(position) ? keys[position] : null;
 
+        /// <summary>The keys, their sign flipped into an unsigned order; none when a value is null, which a long has no key past.</summary>
+        internal override bool TryKeys(Span<ulong> into)
+        {
+            if (!_whole)
+            {
+                return false;
+            }
+
+            ReadOnlySpan<long> held = keys.AsSpan(0, into.Length);
+            for (int i = 0; i < held.Length; i++)
+            {
+                into[i] = (ulong)held[i] ^ (1UL << 63);
+            }
+
+            return true;
+        }
+
         internal override (int Before, int Tied) TopTied(int[] positions, int count, int keep, QueryMemory? memory, CancellationToken cancellationToken) =>
             _whole
                 ? GroupSort.TopTied(positions, count, new KeysOrder(keys), keep, memory, cancellationToken)
@@ -520,6 +556,106 @@ internal static class GroupSort
         finally
         {
             QueryArrays.Return(memory, merged);
+        }
+    }
+
+    /// <summary>
+    /// Orders <paramref name="positions"/>, which hold every position from 0 to <paramref name="count"/>, by the chain
+    /// <paramref name="orders"/> when each of them keys its positions (<see cref="ColumnOrder.TryKeys"/>): a radix sort,
+    /// stable, by the last order's keys first and the first's last, a pass for each byte of a key that differs among the
+    /// positions. False, the positions in their first order again, when an order gives no keys, or when the query's budget
+    /// does not grant the keys and a second array of positions, twelve bytes a group where comparisons take four: the
+    /// caller compares.
+    /// </summary>
+    /// <remarks>
+    /// A million groups by their count, their ties by their key, took 226 ms through comparisons, nearly every one a tie
+    /// of counts broken by the keys' index through two calls; four passes over them here.
+    /// </remarks>
+    internal static bool TrySortByKeys(int[] positions, int count, ColumnOrder[] orders, QueryMemory? memory, CancellationToken cancellationToken)
+    {
+        if (count < 2)
+        {
+            return true;
+        }
+
+        if (!QueryArrays.TryRent(memory, count, out ulong[] keys))
+        {
+            return false;
+        }
+
+        if (!QueryArrays.TryRent(memory, count, out int[] spare))
+        {
+            QueryArrays.Return(memory, keys);
+            return false;
+        }
+        int[] from = positions;
+        int[] into = spare;
+        Span<int> histogram = stackalloc int[256];
+        try
+        {
+            for (int o = orders.Length - 1; o >= 0; o--)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                Span<ulong> keyed = keys.AsSpan(0, count);
+                if (!orders[o].TryKeys(keyed))
+                {
+                    // The positions back in their first order, which every order before kept them in.
+                    for (int i = 0; i < count; i++)
+                    {
+                        positions[i] = i;
+                    }
+
+                    return false;
+                }
+
+                // The bytes the keys differ in: a pass for each, the others the same for every key.
+                ulong first = keyed[0];
+                ulong differ = 0;
+                foreach (ulong key in keyed)
+                {
+                    differ |= key ^ first;
+                }
+
+                for (int shift = 0; shift < 64; shift += 8)
+                {
+                    if (((differ >> shift) & 0xFF) == 0)
+                    {
+                        continue;
+                    }
+
+                    histogram.Clear();
+                    for (int i = 0; i < count; i++)
+                    {
+                        histogram[(int)(keyed[from[i]] >> shift) & 0xFF]++;
+                    }
+
+                    int start = 0;
+                    for (int d = 0; d < 256; d++)
+                    {
+                        (histogram[d], start) = (start, start + histogram[d]);
+                    }
+
+                    for (int i = 0; i < count; i++)
+                    {
+                        int position = from[i];
+                        into[histogram[(int)(keyed[position] >> shift) & 0xFF]++] = position;
+                    }
+
+                    (from, into) = (into, from);
+                }
+            }
+
+            if (!ReferenceEquals(from, positions))
+            {
+                from.AsSpan(0, count).CopyTo(positions);
+            }
+
+            return true;
+        }
+        finally
+        {
+            QueryArrays.Return(memory, keys);
+            QueryArrays.Return(memory, spare);
         }
     }
 

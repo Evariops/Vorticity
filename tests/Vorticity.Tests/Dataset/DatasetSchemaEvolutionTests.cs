@@ -146,6 +146,123 @@ public sealed class DatasetSchemaEvolutionTests
         }
     }
 
+    /// <summary>
+    /// Counts, presences and extremes answered by several lanes at once (one object a lane, each sharing the scan's
+    /// builder), over objects of both schemas with rows marked: under no filter, a filter the earlier objects' own scans
+    /// take through a renamed column, and filters evaluated on their reshaped batches, each question asked again and again so
+    /// that the lanes meet. Every answer is the rows' own, as at one lane.
+    /// </summary>
+    [Theory]
+    [InlineData(4)]
+    [InlineData(8)]
+    public async Task LanesSideBySideAnswerObjectsOfEitherSchemaAsTheRowsSay(int degree)
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        (VortexDataset dataset, List<MeterV2> expected) = await EvolvedAsync(store, clustered: false, ct, marking: true);
+        await using (dataset)
+        {
+            await dataset.DeleteAsync<MeterV2>(r => r.Reading > 2_500L | r.Key < 20L, ct);
+            expected.RemoveAll(row => row.Reading > 2_500 || row.Key < 20);
+
+            Vorticity.Expressions.ColumnFieldExpr reading = Vorticity.Expressions.Expr.Field("Reading");
+            Vorticity.Expressions.ColumnFieldExpr temperature = Vorticity.Expressions.Expr.Field("Temperature");
+            VortexExpr warm = Vorticity.Expressions.Expr.Gt(temperature, Literal(5.0));
+            (VortexExpr? Filter, Func<MeterV2, bool> Oracle)[] filters =
+            [
+                (null, static _ => true),
+                (Vorticity.Expressions.Expr.Eq(Vorticity.Expressions.Expr.Field("Place"), Literal("Lyon")), static row => row.Place == "Lyon"),
+                (Vorticity.Expressions.Expr.Not(warm), static row => Not(Gt(row.Temperature, 5.0)) == true),
+                (
+                    Vorticity.Expressions.Expr.Not(Vorticity.Expressions.Expr.Or(warm, Vorticity.Expressions.Expr.Gt(reading, Literal(100L)))),
+                    static row => Not(Or(Gt(row.Temperature, 5.0), row.Reading > 100)) == true
+                ),
+                (Vorticity.Expressions.Expr.Gt(reading, Literal(3_000_000_000L)), static row => row.Reading > 3_000_000_000L),
+            ];
+
+            for (int round = 0; round < 8; round++)
+            {
+                foreach ((VortexExpr? filter, Func<MeterV2, bool> oracle) in filters)
+                {
+                    List<MeterV2> kept = expected.Where(oracle).ToList();
+                    Assert.Equal(kept.Count, await Scan(filter).CountAsync(ct));
+                    Assert.Equal(kept.Count > 0, await Scan(filter).AnyAsync(ct));
+                    Vorticity.Expressions.FilterLiteral most = await Scan(filter).MaxAsync("Reading", ct);
+                    Vorticity.Expressions.FilterLiteral least = await Scan(filter).MinAsync("Key", ct);
+                    Assert.Equal(kept.Count > 0 ? kept.Max(row => row.Reading) : (long?)null, most.Kind == Vorticity.Expressions.FilterLiteralKind.Null ? (long?)null : most.SignedValue);
+                    Assert.Equal(kept.Count > 0 ? kept.Min(row => row.Key) : (long?)null, least.Kind == Vorticity.Expressions.FilterLiteralKind.Null ? (long?)null : least.SignedValue);
+                }
+            }
+
+            DatasetScanBuilder Scan(VortexExpr? filter)
+            {
+                DatasetScanBuilder scan = dataset.ScanBuilder().WithOptions(new ScanOptions { DegreeOfParallelism = degree }, keepEncodings: false);
+                return filter is null ? scan : scan.Where(filter);
+            }
+        }
+
+        static Vorticity.Expressions.LiteralExpr Literal<T>(T value) => Vorticity.Expressions.Expr.Literal(value switch
+        {
+            double d => Vorticity.Expressions.FilterLiteral.From(d),
+            long l => Vorticity.Expressions.FilterLiteral.From(l),
+            string s => Vorticity.Expressions.FilterLiteral.From(s),
+            _ => throw new ArgumentOutOfRangeException(nameof(value)),
+        });
+    }
+
+    /// <summary>
+    /// A tiered job moves a run of objects as large as the level above aims at, opened a wave at a time to read the schema
+    /// each holds: forty of them, past a wave, all move; one of them written under an earlier schema has the whole job
+    /// rewritten into the current one.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ATieredMoveOfMoreObjectsThanAWaveMovesThemUnlessOneHoldsAnEarlierSchema(bool evolved)
+    {
+        const int Objects = 40;
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Decoders.EnsureRegistered();
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, evolved ? MeterV1.Schema : MeterV2.Schema, Options(clustered: false), ct);
+        List<MeterV2> expected = [];
+        for (int part = 0; part < Objects; part++)
+        {
+            if (evolved && part == 0)
+            {
+                List<MeterV1> first = Meters(part, Objects);
+                await AppendAsync(dataset, first, ct);
+                expected.AddRange(first.Select(ToV2));
+                await dataset.EvolveSchemaAsync(MeterV2.Schema, new Dictionary<string, string> { ["Place"] = "Site" }, ct);
+                continue;
+            }
+
+            List<MeterV2> rows = [.. Meters(part, Objects).Select(ToV2).Select(row => row with { Temperature = row.Key % 7 }) ];
+            await AppendAsync(dataset, rows, ct);
+            expected.AddRange(rows);
+        }
+
+        long least = long.MaxValue;
+        await foreach (PositionedObject held in dataset.WalkAsync(null, 0, long.MaxValue, null, ct))
+        {
+            least = Math.Min(least, held.Entry.Bytes);
+        }
+
+        CompactionOptions options = new CompactionOptions
+        {
+            LevelZeroCeiling = 2,
+            TargetBytesAtLevelOne = least,
+            Fanout = 1_000,
+            MaxObjectBytes = 1L << 30,
+            TrivialMoves = true,
+        };
+        CompactionResult? done = await dataset.CompactAsync(options, ct);
+        Assert.NotNull(done);
+        Assert.Equal((Objects, evolved ? 0 : Objects), (done.ObjectsIn, done.ObjectsMoved));
+        Assert.Equal(0, await EarlierObjectsAsync(dataset, ct));
+        Assert.Equal(Sorted(expected), Sorted(await RowsAsync<MeterV2>(dataset, ct)));
+    }
+
     [Fact]
     public async Task CompactionWritesTheObjectsItTakesInTheCurrentSchema()
     {

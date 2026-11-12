@@ -324,12 +324,28 @@ internal sealed class PcoPlan
             Span<ulong> secondary = default;
             if (modeBase > 0)
             {
+                // The quotient by the base's reciprocal, worked out once, and the remainder from it: two divisions of 64
+                // bits a value were most of the split.
                 secondary = _secondary.AsSpan(0, n);
-                for (int i = 0; i < n; i++)
+                if (modeBase <= long.MaxValue)
                 {
-                    ulong latent = latents[i];
-                    latents[i] = latent / modeBase;
-                    secondary[i] = latent % modeBase;
+                    Compute.FloorDivisor divisor = new Compute.FloorDivisor((long)modeBase);
+                    for (int i = 0; i < n; i++)
+                    {
+                        ulong latent = latents[i];
+                        ulong quotient = divisor.Quotient(latent);
+                        latents[i] = quotient;
+                        secondary[i] = latent - (quotient * modeBase);
+                    }
+                }
+                else
+                {
+                    for (int i = 0; i < n; i++)
+                    {
+                        ulong latent = latents[i];
+                        latents[i] = latent / modeBase;
+                        secondary[i] = latent % modeBase;
+                    }
                 }
             }
 

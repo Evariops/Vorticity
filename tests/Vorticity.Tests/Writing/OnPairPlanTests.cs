@@ -1,4 +1,5 @@
-// OnPair's plan, checked as a reader would check it: every row spelt back exactly by its codes, and
+// OnPair's plan, checked as a reader would check it: every row spelt back exactly by its codes, each code the longest
+// token the rest of its row opens with, and
 // the dictionary the reference's reader validates before it reads a token -- the 256 single bytes,
 // offsets strictly increasing from zero, no token past sixteen bytes, sixteen readable bytes past the
 // last token's start -- on text that repeats, text that never does, and the edges between.
@@ -50,6 +51,52 @@ public sealed class OnPairPlanTests
             }
 
             Assert.Equal(plan.CodeCount, plan.CodeOffsets[values.Length]);
+        }
+        finally
+        {
+            plan.Release();
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(Corpora))]
+    public void EachCodeIsTheLongestTokenTheRestOfItsRowOpensWith(string corpus)
+    {
+        string?[] values = Build(corpus);
+        CanonicalArena arena = new CanonicalArena();
+        OnPairPlan? plan = OnPairPlan.TryBuild(arena, Strings(arena, new DTypeArena(), values), long.MaxValue);
+        Assert.NotNull(plan);
+        try
+        {
+            ReadOnlySpan<int> offsets = plan.DictionaryOffsets;
+            HashSet<string> tokens = [];
+            for (int code = 0; code < plan.Tokens; code++)
+            {
+                tokens.Add(Convert.ToHexString(plan.Dictionary[offsets[code]..offsets[code + 1]]));
+            }
+
+            for (int row = 0; row < values.Length; row++)
+            {
+                byte[] bytes = values[row] is { } text ? Encoding.UTF8.GetBytes(text) : [];
+                int at = 0;
+                for (int c = plan.CodeOffsets[row]; c < plan.CodeOffsets[row + 1]; c++)
+                {
+                    int code = plan.Codes[c];
+                    int length = offsets[code + 1] - offsets[code];
+                    int longest = 1;
+                    for (int n = Math.Min(16, bytes.Length - at); n > 1; n--)
+                    {
+                        if (tokens.Contains(Convert.ToHexString(bytes, at, n)))
+                        {
+                            longest = n;
+                            break;
+                        }
+                    }
+
+                    Assert.True(longest == length, $"row {row} at {at}: a token of {length} bytes where one of {longest} opens the rest");
+                    at += length;
+                }
+            }
         }
         finally
         {

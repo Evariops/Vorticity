@@ -3,6 +3,7 @@ using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.X86;
 
 namespace Vorticity.Arrays.Decoders.Compressed;
 
@@ -367,6 +368,20 @@ internal static partial class FastLanes
     internal static void InSet<T>(ReadOnlySpan<T> packed, int bitWidth, ReadOnlySpan<ulong> set, Span<ulong> words, int blocks)
         where T : unmanaged, IBinaryInteger<T>, IUnsignedNumber<T>
     {
+        if (typeof(T) == typeof(byte) && (Avx512Vbmi.IsSupported || Avx2.IsSupported))
+        {
+            InSetBytes(MemoryMarshal.Cast<T, byte>(packed), bitWidth, set, words, blocks);
+            return;
+        }
+
+        InSetScalar(packed, bitWidth, set, words, blocks);
+    }
+
+    /// <summary>The scalar twin of the byte kernels of <see cref="InSet{T}"/>, and what wider codes run.</summary>
+    [SkipLocalsInit]
+    internal static void InSetScalar<T>(ReadOnlySpan<T> packed, int bitWidth, ReadOnlySpan<ulong> set, Span<ulong> words, int blocks)
+        where T : unmanaged, IBinaryInteger<T>, IUnsignedNumber<T>
+    {
         int wordsPerBlock = BlockByteLength(bitWidth) / Unsafe.SizeOf<T>();
         Span<T> values = stackalloc T[BlockSize];
         for (int block = 0; block < blocks; block++)
@@ -386,5 +401,72 @@ internal static partial class FastLanes
                 answer[w] = verdicts;
             }
         }
+    }
+
+    /// <summary>
+    /// <see cref="InSet{T}"/> over codes of at most 8 bits, a dictionary's of at most 256 values: 64 codes at a time, each
+    /// code's byte of the set and its bit within it looked up in registers -- two byte permutes under AVX-512 VBMI where
+    /// the runtime takes 512-bit vectors, two in-lane shuffles and a blend under AVX2 -- where the scalar loop shifted a
+    /// word of the set a code (0.58-0.61 ns a code, 2026-11-11).
+    /// </summary>
+    [SkipLocalsInit]
+    private static void InSetBytes(ReadOnlySpan<byte> packed, int bitWidth, ReadOnlySpan<ulong> set, Span<ulong> words, int blocks)
+    {
+        int bytesPerBlock = BlockByteLength(bitWidth);
+        Span<byte> values = stackalloc byte[BlockSize];
+
+        // The set's 256 bits as bytes, and past what a narrower width holds, none.
+        Span<byte> table = stackalloc byte[64];
+        table.Clear();
+        ReadOnlySpan<byte> bits = MemoryMarshal.AsBytes(set);
+        bits[..Math.Min(bits.Length, 32)].CopyTo(table);
+        ref byte from = ref MemoryMarshal.GetReference(values);
+        if (Vector512.IsHardwareAccelerated && Avx512Vbmi.IsSupported)
+        {
+            Vector512<byte> bytesOfSet = Vector512.LoadUnsafe(ref MemoryMarshal.GetReference(table));
+            Vector512<byte> bitOf = Vector512.Create((ulong)0x8040_2010_0804_0201).AsByte();
+            for (int block = 0; block < blocks; block++)
+            {
+                UnpackBlock(packed.Slice(block * bytesPerBlock, bytesPerBlock), bitWidth, values);
+                Span<ulong> answer = words.Slice(block * BlockWords, BlockWords);
+                for (int w = 0; w < BlockWords; w++)
+                {
+                    Vector512<byte> code = Vector512.LoadUnsafe(ref from, (nuint)(w << 6));
+                    Vector512<byte> byteOf = Avx512Vbmi.PermuteVar64x8(bytesOfSet, Vector512.ShiftRightLogical(code, 3));
+                    Vector512<byte> bit = Avx512Vbmi.PermuteVar64x8(bitOf, code);
+                    answer[w] = ~Vector512.Equals(byteOf & bit, Vector512<byte>.Zero).ExtractMostSignificantBits();
+                }
+            }
+
+            return;
+        }
+
+        Vector256<byte> low = Vector256.Create(Vector128.LoadUnsafe(ref MemoryMarshal.GetReference(table)));
+        Vector256<byte> high = Vector256.Create(Vector128.LoadUnsafe(ref MemoryMarshal.GetReference(table), 16));
+        Vector256<byte> bitOfLane = Vector256.Create((ulong)0x8040_2010_0804_0201).AsByte();
+        Vector256<byte> seven = Vector256.Create((byte)7);
+        for (int block = 0; block < blocks; block++)
+        {
+            UnpackBlock(packed.Slice(block * bytesPerBlock, bytesPerBlock), bitWidth, values);
+            Span<ulong> answer = words.Slice(block * BlockWords, BlockWords);
+            for (int w = 0; w < BlockWords; w++)
+            {
+                answer[w] = InSet256(Vector256.LoadUnsafe(ref from, (nuint)(w << 6)), low, high, bitOfLane, seven)
+                    | ((ulong)InSet256(Vector256.LoadUnsafe(ref from, (nuint)((w << 6) + 32)), low, high, bitOfLane, seven) << 32);
+            }
+        }
+    }
+
+    /// <summary>
+    /// 32 codes' verdicts: a code's byte of the set picked in the two halves of the set by its low four bits and chosen by
+    /// its fifth, then tested with its bit.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static uint InSet256(Vector256<byte> code, Vector256<byte> low, Vector256<byte> high, Vector256<byte> bitOf, Vector256<byte> seven)
+    {
+        Vector256<byte> index = Vector256.ShiftRightLogical(code, 3);
+        Vector256<byte> byteOf = Avx2.BlendVariable(Avx2.Shuffle(low, index), Avx2.Shuffle(high, index), Vector256.ShiftLeft(index, 3));
+        Vector256<byte> bit = Avx2.Shuffle(bitOf, code & seven);
+        return ~Vector256.Equals(byteOf & bit, Vector256<byte>.Zero).ExtractMostSignificantBits();
     }
 }

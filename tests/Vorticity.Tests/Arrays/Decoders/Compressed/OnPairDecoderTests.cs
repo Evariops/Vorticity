@@ -290,6 +290,137 @@ public sealed class OnPairDecoderTests
         }
     }
 
+    /// <summary>
+    /// The ranges of a node a reader names, an ASCII dictionary or not, decode as the whole array sliced: the first
+    /// builds the token table and keeps it, the others read it, and recycling the context gives it back.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void RangesUnderAScopeReadTheTableTheFirstKept(bool ascii)
+    {
+        string[] tokens = ["ab", "cde", "f", "0123456789abcdef", ascii ? "g" : "é"];
+        Random random = new Random(17);
+        int rows = 60;
+        List<ushort> codes = [];
+        uint[] codeOffsets = new uint[rows + 1];
+        uint[] lengths = new uint[rows];
+        for (int i = 0; i < rows; i++)
+        {
+            int count = random.Next(7);
+            for (int c = 0; c < count; c++)
+            {
+                int token = random.Next(tokens.Length);
+                codes.Add((ushort)token);
+                lengths[i] += (uint)Encoding.UTF8.GetByteCount(tokens[token]);
+            }
+
+            codeOffsets[i + 1] = (uint)codes.Count;
+        }
+
+        using DecodeHarness harness = Load(tokens, codes, codeOffsets, lengths);
+        DType dtype = harness.Types.Utf8(Nullability.NonNullable);
+        ArrayNode root = harness.Scan.Nodes.Root;
+        CanonicalNode whole = harness.Node(harness.DecodeRoot(dtype, rows));
+        long key = ScanContext.NodeCheckKey(9, root.Index)!.Value;
+        long tag = Tag(tokens.Length, harness);
+        Assert.False(harness.Scan.TryNodeTable(key, tag, out _, out _, out _));
+
+        uint? outer = harness.Scan.Decode.BeginNodeCheckScope(9);
+        try
+        {
+            foreach ((int start, int count) in new[] { (0, 20), (20, 20), (40, 20), (5, 30) })
+            {
+                CanonicalNode range = harness.Node(
+                    harness.Scan.Decode.DecodeRootRange(in root, dtype, rows, start, count, keepEncoding: false));
+                Assert.Equal(count, range.Length);
+                for (int i = 0; i < count; i++)
+                {
+                    Assert.Equal(Text(whole, start + i), Text(range, i));
+                }
+
+                Assert.True(harness.Scan.TryNodeTable(key, tag, out _, out int entries, out long facts));
+                Assert.Equal(tokens.Length, entries);
+                Assert.Equal(ascii, (facts >> 32 & 1) == 1);
+            }
+        }
+        finally
+        {
+            harness.Scan.Decode.EndNodeCheckScope(outer);
+        }
+
+        harness.Scan.Recycle();
+        Assert.False(harness.Scan.TryNodeTable(key, tag, out _, out _, out _));
+    }
+
+    /// <summary>
+    /// A later range of a node whose dictionary is not ASCII still checks its rows' UTF-8: the verdict kept with the
+    /// table is the dictionary's, and a token that is not UTF-8 is refused where a range first reads it.
+    /// </summary>
+    [Fact]
+    public void ALaterRangeUnderAScopeStillRefusesWhatIsNotUtf8()
+    {
+        // Token 1 is a lone continuation byte; the first range reads token 0 alone, the second token 1.
+        byte[] dictionary = [(byte)'a', 0x80];
+        uint[] dictOffsets = [0, 1, 2];
+        List<ushort> codes = [0, 0, 1, 1];
+        uint[] codeOffsets = [0, 1, 2, 3, 4];
+        uint[] lengths = [1, 1, 1, 1];
+        using DecodeHarness harness = DecodeHarness.Load(
+            Root(2, 4, validityBuffer: -1),
+            dictionary,
+            TestBuffers.UInt32(dictOffsets),
+            TestBuffers.UInt16([.. codes]),
+            TestBuffers.UInt32(codeOffsets),
+            TestBuffers.UInt32(lengths));
+        DType dtype = harness.Types.Utf8(Nullability.NonNullable);
+        ArrayNode root = harness.Scan.Nodes.Root;
+        uint? outer = harness.Scan.Decode.BeginNodeCheckScope(9);
+        try
+        {
+            CanonicalNode first = harness.Node(
+                harness.Scan.Decode.DecodeRootRange(in root, dtype, 4, 0, 2, keepEncoding: false));
+            Assert.Equal("a", Text(first, 1));
+            VortexFormatException? refused = null;
+            try
+            {
+                harness.Scan.Decode.DecodeRootRange(in root, dtype, 4, 2, 2, keepEncoding: false);
+            }
+            catch (VortexFormatException e)
+            {
+                refused = e;
+            }
+
+            Assert.NotNull(refused);
+        }
+        finally
+        {
+            harness.Scan.Decode.EndNodeCheckScope(outer);
+        }
+    }
+
+    /// <summary>The tag a kept table of <paramref name="tokens"/> tokens is kept under: the count and the dictionary's bytes.</summary>
+    private static long Tag(int tokens, DecodeHarness harness) =>
+        ((long)tokens << 32) | (uint)harness.Scan.Nodes.Root.GetBuffer(0).Length;
+
+    private static DecodeHarness Load(string[] tokens, List<ushort> codes, uint[] codeOffsets, uint[] lengths)
+    {
+        byte[] dictionary = Encoding.UTF8.GetBytes(string.Concat(tokens));
+        uint[] dictOffsets = new uint[tokens.Length + 1];
+        for (int i = 0; i < tokens.Length; i++)
+        {
+            dictOffsets[i + 1] = dictOffsets[i] + (uint)Encoding.UTF8.GetByteCount(tokens[i]);
+        }
+
+        return DecodeHarness.Load(
+            Root((uint)tokens.Length, (ulong)codes.Count, validityBuffer: -1),
+            dictionary,
+            TestBuffers.UInt32(dictOffsets),
+            TestBuffers.UInt16([.. codes]),
+            TestBuffers.UInt32(codeOffsets),
+            TestBuffers.UInt32(lengths));
+    }
+
     /// <summary>A take of one row refuses a dictionary whose offsets are malformed, whatever tokens the row reads.</summary>
     [Fact]
     public void ATakeRefusesAMalformedDictionaryWhateverRowsItReads()

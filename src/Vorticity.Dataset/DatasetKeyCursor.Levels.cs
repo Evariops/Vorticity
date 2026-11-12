@@ -231,6 +231,7 @@ internal sealed partial class DatasetKeyCursor
         /// </summary>
         private void Moved()
         {
+            _owner._walksMoved++;
             _nextLength = 0;
             for (int height = _deepest; height >= 0; height--)
             {

@@ -894,6 +894,55 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
         }
     }
 
+    /// <summary>
+    /// Folds the rows' integers, those <paramref name="valid"/> keeps (every one when it is empty), into the one state that
+    /// starts at <paramref name="state"/>, signed or as their bits: as <see cref="FoldSigned"/> and <see cref="FoldUnsigned"/>
+    /// fold them into the state of every row's entry, the count, the sum and the extremes kept in registers, where a fold
+    /// into one entry stored and read them back at every row.
+    /// </summary>
+    internal static void Reduce(ref long state, ReadOnlySpan<long> integers, ReadOnlySpan<byte> valid, bool signed)
+    {
+        long values = 0;
+        ulong low = 0;
+        long high = 0;
+        long least = Unsafe.Add(ref state, MeasureLayout.IntegerLeast);
+        long greatest = Unsafe.Add(ref state, MeasureLayout.IntegerGreatest);
+
+        // A null row adds nothing, and stands for the bound each extreme starts at: no branch a row.
+        long lowest = signed ? long.MaxValue : -1;
+        long highest = signed ? long.MinValue : 0;
+        for (int i = 0; i < integers.Length; i++)
+        {
+            long keep = valid.IsEmpty ? -1 : -(long)valid[i];
+            long value = integers[i] & keep;
+            values -= keep;
+            ulong after = low + (ulong)value;
+            high += (signed ? value >> 63 : 0) + (after < low ? 1 : 0);
+            low = after;
+            long small = value | (lowest & ~keep);
+            long large = value | (highest & ~keep);
+            if (signed)
+            {
+                least = Math.Min(least, small);
+                greatest = Math.Max(greatest, large);
+            }
+            else
+            {
+                least = (long)Math.Min((ulong)least, (ulong)small);
+                greatest = (long)Math.Max((ulong)greatest, (ulong)large);
+            }
+        }
+
+        Unsafe.Add(ref state, MeasureLayout.Values) += values;
+        ref long held = ref Unsafe.Add(ref state, MeasureLayout.Sum);
+        ulong before = (ulong)held;
+        ulong sum = before + low;
+        held = (long)sum;
+        Unsafe.Add(ref state, MeasureLayout.Sum + 1) += high + (sum < before ? 1 : 0);
+        Unsafe.Add(ref state, MeasureLayout.IntegerLeast) = least;
+        Unsafe.Add(ref state, MeasureLayout.IntegerGreatest) = greatest;
+    }
+
     internal override void CloseBlock()
     {
     }

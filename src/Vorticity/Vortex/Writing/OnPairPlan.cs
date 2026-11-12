@@ -260,6 +260,13 @@ internal sealed class OnPairPlan
         private uint _presentLengths;
         private int _paddedBytes;
 
+        // The lengths of the tokens of two bytes or more that each pair of bytes opens, a bit a length; and the pairs set,
+        // a token's first two bytes each, which are all a clearing wipes: the table's 256 KB cleared whole at each column
+        // and each sort cost a short column more than its tokens.
+        private readonly uint[] _pairLengths = new uint[1 << 16];
+        private readonly ushort[] _pairsSet = new ushort[Capacity];
+        private int _setPairs;
+
         /// <summary>The tokens the dictionary holds.</summary>
         internal int Tokens => _tokens;
 
@@ -281,11 +288,30 @@ internal sealed class OnPairPlan
         /// </remarks>
         internal void Recycle() => SpareSlots<Trainer>.Give(this);
 
+        /// <summary>Clears the pairs' lengths: the pairs set alone, or the whole table when they were more than a list holds.</summary>
+        private void ClearPairLengths()
+        {
+            if (_setPairs > _pairsSet.Length)
+            {
+                Array.Clear(_pairLengths);
+            }
+            else
+            {
+                foreach (ushort pair in _pairsSet.AsSpan(0, _setPairs))
+                {
+                    _pairLengths[pair] = 0;
+                }
+            }
+
+            _setPairs = 0;
+        }
+
         private void Reset()
         {
             Array.Clear(_length);
             Array.Clear(_prefixUsed);
             Array.Clear(_pairCount);
+            ClearPairLengths();
             _pairs = 0;
             _tokens = 0;
             _longTokens = 0;
@@ -517,6 +543,7 @@ internal sealed class OnPairPlan
                 _offsets.AsSpan(0, tokens + 1).CopyTo(oldOffsets);
                 Array.Clear(_length);
                 Array.Clear(_prefixUsed);
+                ClearPairLengths();
                 _longTokens = 0;
                 _presentLengths = 0;
                 int at = 0;
@@ -577,7 +604,10 @@ internal sealed class OnPairPlan
             ulong low = Unsafe.ReadUnaligned<ulong>(ref start);
             ulong high = Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref start, 8));
             int window = Math.Min(remaining, MaxTokenSize);
-            uint lengths = _presentLengths & ((2u << window) - 1);
+
+            // Only the lengths of the tokens these two bytes open, past the single byte: a probe a length the dictionary
+            // holds anywhere, sixteen at most, came to most of a row's encoding.
+            uint lengths = _presentLengths & ((2u << window) - 1) & _pairLengths[(ushort)low];
 
             // The long tokens only when one starts with these eight bytes.
             if (window > 8 && _longTokens > 0 && !HasPrefix(low))
@@ -655,6 +685,22 @@ internal sealed class OnPairPlan
             _length[slot] = (byte)length;
             _code[slot] = code;
             _presentLengths |= 1u << length;
+            if (length >= 2)
+            {
+                ref uint lengths = ref _pairLengths[(ushort)low];
+                if (lengths == 0 && _setPairs < _pairsSet.Length)
+                {
+                    _pairsSet[_setPairs++] = (ushort)low;
+                }
+                else if (lengths == 0)
+                {
+                    // More pairs than a list holds: the next clearing wipes the whole table.
+                    _setPairs = int.MaxValue;
+                }
+
+                lengths |= 1u << length;
+            }
+
             if (length > 8)
             {
                 AddPrefix(low);

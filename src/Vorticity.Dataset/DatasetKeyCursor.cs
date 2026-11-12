@@ -84,6 +84,12 @@ internal sealed partial class DatasetKeyCursor : IKeyWalker
     // The walks of the levels a walk stands in: every level's own, or under a partition upward one of each partition of each.
     private readonly List<LevelWalk> _walks = [];
 
+    // Counted each time a walk's next object moves or the walks change (Waiting), and the answer kept at that count.
+    private long _walksMoved;
+    private long _waitingAt = -1;
+    private int _waitingDirection;
+    private LevelWalk? _waiting;
+
     private DatasetKeyCursor(DatasetSnapshot version, DatasetKey key, bool bounded, bool distinct, bool indexes)
     {
         _version = version;
@@ -132,7 +138,10 @@ internal sealed partial class DatasetKeyCursor : IKeyWalker
     /// How many objects' cursors the walk has opened. A seek on the sort key opens at most
     /// level 0's objects and one per level above it; a walk opens the rest as it reaches them.
     /// </summary>
-    public int Cursors { get; private set; }
+    public int Cursors => Volatile.Read(ref _cursors);
+
+    // Counted as each object's cursor opens, the walk opening several at once (OpenAllAsync).
+    private int _cursors;
 
     /// <summary>Whether the cursor is positioned on an entry.</summary>
     public bool IsValid => !_disposed && _current is not null;
@@ -981,6 +990,7 @@ internal sealed partial class DatasetKeyCursor : IKeyWalker
         _direction = direction;
         _anchor = anchor;
         _walks.Clear();
+        _walksMoved++;
 
         // Under a partition the tree's keys lead with it, which a key's encoding seeks none of: a bounded walk walks each
         // partition of each level, and another opens every object.
@@ -1008,6 +1018,7 @@ internal sealed partial class DatasetKeyCursor : IKeyWalker
             }
 
             _walks.Add(level);
+            _walksMoved++;
             if (direction > 0 && sought is not null && level.Disjoint)
             {
                 // In a key-disjoint level, everything before the last object whose minimum is at or
@@ -1088,6 +1099,7 @@ internal sealed partial class DatasetKeyCursor : IKeyWalker
             }
 
             _walks.Add(walk);
+            _walksMoved++;
             if (past is null)
             {
                 break;
@@ -1124,6 +1136,11 @@ internal sealed partial class DatasetKeyCursor : IKeyWalker
     /// </summary>
     private async ValueTask ResolveAsync(CancellationToken cancellationToken)
     {
+        if (!_bounded)
+        {
+            await OpenAllAsync(cancellationToken).ConfigureAwait(false);
+        }
+
         while (true)
         {
             LevelWalk? level = Waiting();
@@ -1150,6 +1167,58 @@ internal sealed partial class DatasetKeyCursor : IKeyWalker
         }
     }
 
+    /// <summary>The objects a walk the tree's key does not bound opens at once, the most.</summary>
+    private const int OpenFanOut = 16;
+
+    /// <summary>
+    /// A walk the tree's key does not bound opens every waiting object before its first key, whichever order it opens them in:
+    /// they are taken from the levels in turn, then leased, opened and positioned <see cref="OpenFanOut"/> at a time, where one
+    /// after another each waited its lease, its open and its seek in turn; pushed in the order they were taken.
+    /// </summary>
+    private async ValueTask OpenAllAsync(CancellationToken cancellationToken)
+    {
+        List<Slot>? taken = null;
+        while (Waiting() is { } level)
+        {
+            Slot slot = _direction > 0
+                ? await level.TakeNextAsync(cancellationToken).ConfigureAwait(false)
+                : await level.TakePreviousAsync(cancellationToken).ConfigureAwait(false);
+            slot.Walked = true;
+            (taken ??= []).Add(slot);
+        }
+
+        if (taken is null)
+        {
+            return;
+        }
+
+        if (taken.Count == 1)
+        {
+            await OpenAsync(taken[0], cancellationToken).ConfigureAwait(false);
+        }
+        else
+        {
+            await Parallel.ForEachAsync(
+                    taken,
+                    new ParallelOptions { MaxDegreeOfParallelism = OpenFanOut, CancellationToken = cancellationToken },
+                    (slot, token) => OpenAsync(slot, token))
+                .ConfigureAwait(false);
+        }
+
+        foreach (Slot slot in taken)
+        {
+            if (slot.Live)
+            {
+                Push(slot);
+            }
+        }
+    }
+
+    /// <summary>An object's cursor opened and positioned as the walk's anchor says, its slot live when it holds an entry there.</summary>
+    private async ValueTask OpenAsync(Slot slot, CancellationToken cancellationToken) =>
+        slot.Live = await CursorOfAsync(slot, cancellationToken).ConfigureAwait(false) is { } cursor
+            && await PositionAsync(slot, cursor, cancellationToken).ConfigureAwait(false);
+
     /// <summary>Positions an object's cursor as the walk's anchor says.</summary>
     private ValueTask<bool> PositionAsync(Slot slot, KeyCursor cursor, CancellationToken cancellationToken) => _anchor switch
     {
@@ -1166,6 +1235,23 @@ internal sealed partial class DatasetKeyCursor : IKeyWalker
     /// limit is the highest, level 0's, which nothing bounds, first.
     /// </summary>
     private LevelWalk? Waiting()
+    {
+        // The walks have not moved since the last answer, nor the direction turned: the same walk waits. Each key a walk over
+        // 256 partitions gave looked every walk over again, 88 % of the walk's time.
+        if (_waitingAt == _walksMoved && _waitingDirection == _direction)
+        {
+            return _waiting;
+        }
+
+        LevelWalk? next = Look();
+        _waiting = next;
+        _waitingAt = _walksMoved;
+        _waitingDirection = _direction;
+        return next;
+    }
+
+    /// <summary>The walk whose next object comes first in the walk's direction, every walk looked at.</summary>
+    private LevelWalk? Look()
     {
         LevelWalk? next = null;
         foreach (LevelWalk level in _walks)
@@ -1409,7 +1495,8 @@ internal sealed partial class DatasetKeyCursor : IKeyWalker
         {
             index?.Dispose();
         }
-        Cursors++;
+
+        Interlocked.Increment(ref _cursors);
         return slot.Cursor;
     }
 
