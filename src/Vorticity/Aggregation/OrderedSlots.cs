@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
 using Vorticity.Arrays;
 using Vorticity.Buffers;
 using Vorticity.Types;
@@ -331,12 +332,22 @@ internal struct PointRun<TWide>
 /// A group's growth so far: the sum of the values its falls came from, the run of points open, the runs closed before it,
 /// kept apart in the slot's arrays, and whether its points have to be read again once the pass is done.
 /// </summary>
+/// <remarks>
+/// What a point's step reads and writes comes first, its run's last point in the first 64 bytes; the sum, which only a fall
+/// adds to, comes last. Measured on twenty thousand groups whose points come interleaved, a group a row
+/// (<c>vortex-queries --micro growth</c>).
+/// </remarks>
 [StructLayout(LayoutKind.Sequential, Pack = 8)]
 internal struct GrowthState<TWide, TSum>
     where TWide : unmanaged
     where TSum : unmanaged
 {
-    internal TSum Sum;
+    /// <summary><see cref="GrowthSlots.Has"/>, <see cref="GrowthSlots.Spread"/>, <see cref="GrowthSlots.Preceded"/>.</summary>
+    internal int Flags;
+
+    /// <summary>The piece the open run was read in; <see cref="GrowthSlots.NoPiece"/> once it came from a merge.</summary>
+    internal int Piece;
+
     internal PointRun<TWide> Open;
 
     /// <summary>
@@ -348,17 +359,13 @@ internal struct GrowthState<TWide, TSum>
     /// <summary>The smallest value of the open run's last order, which the run went down or up to from <see cref="Before"/>.</summary>
     internal TWide Lowest;
 
-    /// <summary>The piece the open run was read in; <see cref="GrowthSlots.NoPiece"/> once it came from a merge.</summary>
-    internal int Piece;
-
     /// <summary>The first closed run, its index plus one; 0 for none.</summary>
     internal int Chain;
 
     /// <summary>The closed runs of the chain.</summary>
     internal int Closed;
 
-    /// <summary><see cref="GrowthSlots.Has"/>, <see cref="GrowthSlots.Spread"/>, <see cref="GrowthSlots.Preceded"/>.</summary>
-    internal int Flags;
+    internal TSum Sum;
 }
 
 /// <summary>What the slots of a growth share.</summary>
@@ -458,9 +465,114 @@ internal sealed class GrowthSlot<TWide, TSum, TGrowth, TResult>(PType values, PT
         _groups = Math.Max(_groups, groups);
     }
 
-    internal override void StepRange(in BatchInput input, int start, int end, int group) => Fold(input, start, end, default, group);
+    internal override void StepRange(in BatchInput input, int start, int end, int group)
+    {
+        ReadOnlySpan<TWide> points = _values.Of(input.Arena, input.Batch, input.Node, values, out ReadOnlySpan<ulong> valueValid);
+        ReadOnlySpan<long> order = _orders.Of(input.Arena, input.Batch, input.OrderNode, orders, out ReadOnlySpan<ulong> orderValid);
+        if (_mask.Of(input, valueValid, orderValid).IsEmpty)
+        {
+            FoldRange(ref _states[group], order, points, start, end, input.StartRow, input.Piece);
+            return;
+        }
+
+        Fold(input, start, end, default, group);
+    }
+
+    /// <summary>The ranges of a batch, its columns read once: those whose every row is a candidate a stretch at a time.</summary>
+    internal override void StepRanges(in BatchInput input, GroupRanges ranges)
+    {
+        ReadOnlySpan<TWide> points = _values.Of(input.Arena, input.Batch, input.Node, values, out ReadOnlySpan<ulong> valueValid);
+        ReadOnlySpan<long> order = _orders.Of(input.Arena, input.Batch, input.OrderNode, orders, out ReadOnlySpan<ulong> orderValid);
+        if (!_mask.Of(input, valueValid, orderValid).IsEmpty)
+        {
+            for (int r = 0; r < ranges.Count; r++)
+            {
+                Fold(input, ranges.StartAt(r), ranges.EndAt(r), default, ranges.GroupAt(r));
+            }
+
+            return;
+        }
+
+        Span<GrowthState<TWide, TSum>> states = _states;
+        for (int r = 0; r < ranges.Count; r++)
+        {
+            FoldRange(ref states[ranges.GroupAt(r)], order, points, ranges.StartAt(r), ranges.EndAt(r), input.StartRow, input.Piece);
+        }
+    }
 
     internal override void StepRows(in BatchInput input, ReadOnlySpan<int> groups) => Fold(input, input.Start, input.End, groups, 0);
+
+    /// <summary>
+    /// Folds rows [<paramref name="start"/>, <paramref name="end"/>) of one group, every one of which holds an order and a
+    /// value: a point a step, then the stretch after it whose points each come at or after the one before them, order and
+    /// value both, which only moves the run's last point (<see cref="GrowthKernels.Rising{TWide}"/>).
+    /// </summary>
+    private void FoldRange(ref GrowthState<TWide, TSum> state, ReadOnlySpan<long> order, ReadOnlySpan<TWide> points, int start, int end, long first, int piece)
+    {
+        int row = start;
+        while (row < end)
+        {
+            TWide value = points[row];
+            row++;
+            if (!TGrowth.Takes(value))
+            {
+                continue;
+            }
+
+            value = TGrowth.Kept(value);
+            long at = order[row - 1];
+            Step(ref state, at, value, first + row - 1, piece);
+            if ((state.Flags & GrowthSlots.Spread) != 0)
+            {
+                // The rows the group's points lie between, every point of the range in them.
+                state.Open.LastRow = Math.Max(state.Open.LastRow, first + end - 1);
+                return;
+            }
+
+            // The point just stepped is the run's last: the stretch after it rises from it.
+            if (row == end || state.Open.LastOrder != at || state.Open.LastValue != value)
+            {
+                continue;
+            }
+
+            int stretch = GrowthKernels.Rising(order, points, row, end, typeof(TWide) == typeof(double));
+            if (stretch > row)
+            {
+                Extend(ref state, order, points, row, stretch, first, piece);
+                row = stretch;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Moves the open run's last point to the end of a stretch [<paramref name="from"/>, <paramref name="to"/>) whose points
+    /// each come at or after the one before them, order and value both, from the run's last: no fall, so the sum stays; the
+    /// value the last order came from and its smallest are those of the stretch's last order.
+    /// </summary>
+    private static void Extend(ref GrowthState<TWide, TSum> state, ReadOnlySpan<long> order, ReadOnlySpan<TWide> points, int from, int to, long first, int piece)
+    {
+        int last = to - 1;
+        long at = order[last];
+
+        // The first row of the last order: where the stretch reached it, unless the run held it before the stretch.
+        int k = last;
+        while (k > from && order[k - 1] == at)
+        {
+            k--;
+        }
+
+        if (order[k - 1] != at)
+        {
+            state.Before = TGrowth.Kept(points[k - 1]);
+            state.Lowest = TGrowth.Kept(points[k]);
+            state.Flags |= GrowthSlots.Preceded;
+        }
+
+        state.Open.LastOrder = at;
+        state.Open.LastValue = TGrowth.Kept(points[last]);
+        state.Open.LastRow = first + last;
+        state.Piece = piece;
+    }
 
     private void Fold(in BatchInput input, int start, int end, ReadOnlySpan<int> groups, int group)
     {
@@ -1242,4 +1354,79 @@ internal struct EdgeState<TWide>
     internal long Order;
     internal TWide Value;
     internal long Has;
+}
+
+/// <summary>The kernels of a growth's step: the stretch of points that only rise, found four rows at a time.</summary>
+internal static class GrowthKernels
+{
+    /// <summary>
+    /// The first row of [<paramref name="from"/>, <paramref name="to"/>) whose point does not come at or after the one
+    /// before it, by its order and by its value both, or, for <paramref name="floats"/>, whose value is a NaN or an
+    /// infinity; <paramref name="to"/> when every one does. Row <paramref name="from"/> − 1 is the first compared against.
+    /// </summary>
+    /// <remarks>
+    /// Four rows a vector, each against the row before it, both read unaligned; the scalar loop finishes, and runs alone
+    /// where vectors of 256 bits are not accelerated.
+    /// </remarks>
+    internal static int Rising<TWide>(ReadOnlySpan<long> order, ReadOnlySpan<TWide> values, int from, int to, bool floats)
+        where TWide : unmanaged, INumber<TWide>
+    {
+        int row = from;
+        if (Vector256.IsHardwareAccelerated && Vector256<TWide>.IsSupported && Vector256<TWide>.Count == Vector256<long>.Count)
+        {
+            row = RisingVectors(order, values, from, to, floats);
+            if (row < to - Vector256<long>.Count + 1)
+            {
+                return row;
+            }
+        }
+
+        return RisingScalar(order, values, row, to, floats);
+    }
+
+    /// <summary>The scalar twin of <see cref="Rising{TWide}"/>, from <paramref name="from"/>.</summary>
+    internal static int RisingScalar<TWide>(ReadOnlySpan<long> order, ReadOnlySpan<TWide> values, int from, int to, bool floats)
+        where TWide : unmanaged, INumber<TWide>
+    {
+        for (int row = from; row < to; row++)
+        {
+            TWide value = values[row];
+            if (order[row] < order[row - 1] || !(value >= values[row - 1]) || (floats && !(value - value == TWide.Zero)))
+            {
+                return row;
+            }
+        }
+
+        return to;
+    }
+
+    /// <summary>The rows of [<paramref name="from"/>, <paramref name="to"/>) four at a time: the first that breaks, or the first past the whole vectors.</summary>
+    private static int RisingVectors<TWide>(ReadOnlySpan<long> order, ReadOnlySpan<TWide> values, int from, int to, bool floats)
+        where TWide : unmanaged, INumber<TWide>
+    {
+        int width = Vector256<long>.Count;
+        ref long orders = ref MemoryMarshal.GetReference(order);
+        ref TWide points = ref MemoryMarshal.GetReference(values);
+        int row = from;
+        for (; row + width <= to; row += width)
+        {
+            Vector256<long> at = Vector256.LoadUnsafe(ref orders, (nuint)row);
+            Vector256<long> before = Vector256.LoadUnsafe(ref orders, (nuint)(row - 1));
+            Vector256<TWide> value = Vector256.LoadUnsafe(ref points, (nuint)row);
+            Vector256<TWide> previous = Vector256.LoadUnsafe(ref points, (nuint)(row - 1));
+            Vector256<long> rises = Vector256.GreaterThanOrEqual(at, before) & Vector256.GreaterThanOrEqual(value, previous).As<TWide, long>();
+            if (floats)
+            {
+                rises &= Vector256.Equals(value - value, Vector256<TWide>.Zero).As<TWide, long>();
+            }
+
+            uint broken = ~rises.ExtractMostSignificantBits() & ((1u << width) - 1);
+            if (broken != 0)
+            {
+                return row + BitOperations.TrailingZeroCount(broken);
+            }
+        }
+
+        return row;
+    }
 }
