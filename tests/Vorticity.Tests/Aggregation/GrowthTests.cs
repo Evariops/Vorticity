@@ -341,6 +341,60 @@ public sealed partial class GrowthTests
     }
 
     [Fact]
+    public async Task AGroupOfNoPointIsNullAndAnIntegerGrowthPastItsTypeThrows()
+    {
+        // Two billion, one, two billion, one, two billion grows about four billion, past an int.
+        Ticked[] rows =
+        [
+            new Ticked("none", 0, null), new Ticked("none", 1, null),
+            new Ticked("wide", 0, 2_000_000_000), new Ticked("wide", 1, 1), new Ticked("wide", 2, 2_000_000_000), new Ticked("wide", 3, 1), new Ticked("wide", 4, 2_000_000_000),
+        ];
+        string path = await WriteRowsAsync(rows);
+        try
+        {
+            await using VortexFile file = await VortexFile.OpenAsync(path, Ct);
+            List<TickedGrowth> none = await ListAsync(file.Scan<Ticked>()
+                .Where(r => r.Series == "none")
+                .GroupBy(r => r.Series)
+                .Select(g => (g.Key, g.OrderedBy(r => r.Tick).Increase(r => r.Value), g.OrderedBy(r => r.Tick).First(r => r.Value)))
+                .As<TickedGrowth>());
+            Assert.Equal([new TickedGrowth("none", null, null)], none);
+
+            Vorticity.Aggregation<int?> wide = file.Scan<Ticked>()
+                .Where(r => r.Series == "wide")
+                .GroupBy(r => r.Series)
+                .Select(g => g.OrderedBy(r => r.Tick).Increase(r => r.Value));
+            await Assert.ThrowsAsync<OverflowException>(async () => await wide.ToListAsync(Ct));
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public async Task AGrowthReadsItsKeyItsOrderAndItsValuesAlone()
+    {
+        Point[] rows = Points(seed: 2);
+        string path = await WriteAsync(rows);
+        try
+        {
+            await using VortexFile file = await VortexFile.OpenAsync(path, Ct);
+            Vorticity.Aggregation growth = file.Scan<Point>()
+                .GroupBy(r => (r.Series, Hour: r.At.Truncate(CalendarUnit.Hour)))
+                .Select(g => (g.Key.Series, g.Key.Hour, g.OrderedBy(r => r.At).Increase(r => r.Value), g.OrderedBy(r => r.At).Last(r => r.Value)));
+            (ColumnShape[] columns, _) = AggregationEngine.Columns(growth.Plan, new AggregateSlot?[growth.Plan.Aggregates.Length]);
+            Assert.Equal(["Series", "At", "Value"], columns.Select(c => c.Column.Field.Path).Distinct());
+            Assert.Null((await growth.ExplainAsync(cancellationToken: Ct)).Grouping!.Streaming);
+            Assert.DoesNotContain(nameof(Point.Minute), (await growth.ExplainAsync(cancellationToken: Ct)).Logical, StringComparison.Ordinal);
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
+    [Fact]
     public async Task IntegerCountersGrowExactly()
     {
         Random random = new Random(5);
@@ -596,6 +650,12 @@ public sealed partial class GrowthTests
 
     [VortexRecord]
     public partial record struct Counted(string Series, long Tick, long? Requests, ulong Bytes);
+
+    [VortexRecord]
+    public partial record struct Ticked(string Series, int Tick, int? Value);
+
+    [VortexRecord]
+    public partial record struct TickedGrowth(string Series, int? Increase, int? First);
 
     [VortexRecord]
     public partial record struct CountedGrowth(string Series, long? Requests, ulong? Bytes);
