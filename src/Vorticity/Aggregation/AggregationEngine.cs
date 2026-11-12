@@ -82,7 +82,15 @@ internal sealed class AggregationPlan
         Chosen = [.. chosen];
         ChosenRows = Rows(Chosen);
         Filters = new FilterPlan(Aggregates);
+        Ordered = Array.Exists(Aggregates, static a => a.Kind == AggregateKind.Increase);
     }
+
+    /// <summary>
+    /// Whether an aggregate takes its points in the order of a column and keeps runs of them, a growth's
+    /// (<see cref="AggregateKind.Increase"/>): the pass then numbers its rows, a run keeping where it lies, and the groups
+    /// whose runs cross are settled after it by a read of their rows alone (<see cref="GrowthReads"/>).
+    /// </summary>
+    internal bool Ordered { get; }
 
     /// <summary>The means that read the slot of a sum, and that slot.</summary>
     internal (AggregateIdentity Mean, int Sum)[] Shares { get; }
@@ -115,6 +123,12 @@ internal sealed class AggregationPlan
     internal bool Blocking { get; set; }
 
     /// <summary>
+    /// Whether the groups wait for the end of the pass whatever their key: asked (<see cref="Blocking"/>), or held by an
+    /// aggregate over an order, whose groups are settled once every run of their points is known (<see cref="Ordered"/>).
+    /// </summary>
+    internal bool HoldsGroups => Blocking || Ordered;
+
+    /// <summary>
     /// Whether a key its zones may prove final streams on several lanes all the same, where its pass blocks
     /// by default there (<see cref="ZoneFinality.Candidate"/>): the switch the bench and the tests compare
     /// the two paths with.
@@ -126,6 +140,29 @@ internal sealed class AggregationPlan
 
     /// <summary>The groups the plan's last run found, before any operator on them.</summary>
     internal long LastGroups { get; set; }
+
+    /// <summary>The groups whose runs of points crossed in the plan's last run, their rows read again (<see cref="GrowthReads"/>).</summary>
+    internal long LastGroupsReadAgain => Interlocked.Read(ref _groupsReadAgain);
+
+    /// <summary>The rows those groups' runs lay between, read again.</summary>
+    internal long LastRowsReadAgain => Interlocked.Read(ref _rowsReadAgain);
+
+    private long _groupsReadAgain;
+    private long _rowsReadAgain;
+
+    /// <summary>Counts what a settling read again, which the next run starts from nothing.</summary>
+    internal void ReadAgain(long groups, long rows)
+    {
+        Interlocked.Add(ref _groupsReadAgain, groups);
+        Interlocked.Add(ref _rowsReadAgain, rows);
+    }
+
+    /// <summary>Forgets what the last run read again.</summary>
+    internal void ReadNothingAgain()
+    {
+        Interlocked.Exchange(ref _groupsReadAgain, 0);
+        Interlocked.Exchange(ref _rowsReadAgain, 0);
+    }
 
     /// <summary>The most bytes the plan's last run held of its memory budget at once.</summary>
     internal long LastPeakBytes { get; set; }
@@ -683,6 +720,9 @@ internal sealed class AggregationOutcome
 
     internal AggregationPlan Plan => _plan;
 
+    /// <summary>Whether the growths' runs of points were settled once the pass was done (<see cref="GrowthReads"/>).</summary>
+    internal bool RunsSettled { get; set; }
+
     /// <summary>What the result holds of its query's memory budget, until it is delivered; null for a result nobody counts.</summary>
     internal QueryMemory? Memory { get; set; }
 
@@ -830,6 +870,12 @@ internal sealed class AggregationPartition
     private readonly int _keyCount;
     private readonly int[] _nodes;
 
+    // The column each aggregate takes its points in the order of, or -1; null when none does.
+    private readonly int[]? _orders;
+
+    /// <summary>The piece of the source the partition reads now, the range its lane took (<see cref="BatchInput.Piece"/>).</summary>
+    internal int Piece { get; set; }
+
     // The column of distinct sketches of each distinct count's column a batch of states may hold, named at the first.
     private byte[]?[]? _distinctColumns;
 
@@ -923,6 +969,7 @@ internal sealed class AggregationPartition
         _source = source;
         _columns = columns;
         _inputs = inputs;
+        _orders = plan.Ordered ? AggregationEngine.OrderOf(plan, columns) : null;
         _keyCount = plan.Keys.Length;
         _nodes = new int[columns.Length];
         _filterOf = plan.Filters.FilterOf;
@@ -3392,7 +3439,10 @@ internal sealed class AggregationPartition
     {
         int column = _inputs[slot];
         int filter = _filterOf[slot];
-        return new BatchInput(number, arena, column >= 0 ? _nodes[column] : -1, rows, filter < 0 ? selection : _masks!.Selection(filter), _startRow, _settled);
+        int order = _orders is null ? -1 : _orders[slot];
+        return new BatchInput(
+            number, arena, column >= 0 ? _nodes[column] : -1, rows, filter < 0 ? selection : _masks!.Selection(filter), _startRow, _settled,
+            order >= 0 ? _nodes[order] : -1, Piece);
     }
 
     /// <summary>Whether the aggregate has rows of the batch to fold: none when its filter keeps none.</summary>
@@ -3486,6 +3536,19 @@ internal abstract class AggregationHost
         {
             ScanSpec spec = await AlignedSpecAsync(plan, rows, cancellationToken).ConfigureAwait(false);
             AggregationOutcome outcome = await AggregationEngine.RunAsync(Source, spec, Counters, plan, cancellationToken).ConfigureAwait(false);
+            if (plan.Ordered)
+            {
+                try
+                {
+                    await GrowthReads.SettleAsync(outcome, Source, spec, Counters, cancellationToken).ConfigureAwait(false);
+                }
+                catch
+                {
+                    outcome.Delivered();
+                    throw;
+                }
+            }
+
             if (plan.Chosen.Length > 0)
             {
                 // The columns of the chosen rows, read once every group's row is known.
@@ -3644,6 +3707,7 @@ internal static class AggregationEngine
     {
         IAggregateNode[] aggregates = plan.Aggregates;
         AggregateSlot?[] settled = new AggregateSlot?[aggregates.Length];
+        plan.ReadNothingAgain();
 
         // A run that gives its states rather than its answers (AggregationQuery.Exports) takes none from the file statistics,
         // an answer they give being no state; a count of rows from the structures is one.
@@ -4857,8 +4921,8 @@ internal static class AggregationEngine
             KeepEncodings = true,
             SinkDecodes = true,
 
-            // A chosen row is kept as its place in the source, which the batches then have to number.
-            PositionsUnread = plan.Chosen.Length == 0,
+            // A chosen row is kept as its place in the source, and so is a run of points, which the batches then have to number.
+            PositionsUnread = plan.Chosen.Length == 0 && !plan.Ordered,
             OrderPath = null,
             Descending = false,
             Options = spec.Options with { Compact = false },
@@ -4893,9 +4957,27 @@ internal static class AggregationEngine
             }
 
             inputs[i] = found;
+
+            // The column an aggregate takes its points in the order of is read beside its input (OrderOf).
+            if (plan.Aggregates[i].Order is { } order && !columns.Exists(known => known.Is(order)))
+            {
+                columns.Add(order);
+            }
         }
 
         return ([.. columns], inputs);
+    }
+
+    /// <summary>The column each aggregate takes its points in the order of, among <paramref name="columns"/>; -1 for one of no order.</summary>
+    internal static int[] OrderOf(AggregationPlan plan, ColumnShape[] columns)
+    {
+        int[] orders = new int[plan.Aggregates.Length];
+        for (int i = 0; i < orders.Length; i++)
+        {
+            orders[i] = plan.Aggregates[i].Order is { } order ? Array.FindIndex(columns, known => known.Is(order)) : -1;
+        }
+
+        return orders;
     }
 
     /// <summary>
@@ -5270,6 +5352,7 @@ internal static class AggregationEngine
                     {
                         if (taken is not null)
                         {
+                            partition.Piece = first;
                             await RunPartitionAsync(source, lane with { Rows = ranges[first] }, metrics, partition, token).ConfigureAwait(false);
                         }
 
@@ -5288,6 +5371,7 @@ internal static class AggregationEngine
                                 partition.Settle(settling, ranges[at]);
                             }
 
+                            partition.Piece = at;
                             await RunPartitionAsync(source, lane with { Rows = ranges[at] }, metrics, partition, token).ConfigureAwait(false);
                         }
 

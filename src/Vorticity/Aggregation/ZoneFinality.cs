@@ -46,7 +46,7 @@ internal sealed class ZoneFinality
     internal static bool Candidate(AggregationQuery query)
     {
         ColumnShape[] keys = query.Plan.Keys;
-        if (query.Plan.Blocking || keys.Length != 1 || query.Host.Source is not FileScanSource
+        if (query.Plan.HoldsGroups || keys.Length != 1 || query.Host.Source is not FileScanSource
             || keys[0].Field is FunctionFieldExpr or MappedFieldExpr or VariantFieldExpr || keys[0].Column.FieldPath.Length != 1 || keys[0].Kind != StorageKind.Primitive
             || keys[0].PType is not (PType.I8 or PType.I16 or PType.I32 or PType.I64 or PType.U8 or PType.U16 or PType.U32))
         {

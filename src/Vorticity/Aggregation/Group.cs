@@ -47,6 +47,16 @@ public readonly struct Group<TRecord, TKey>
     public Group<TRecord, TKey> Where(Func<Probe<TRecord>, Predicate> predicate) =>
         new Group<TRecord, TKey>(_binding, Key, RowFilter.And(_filter, Aggregators.Rows(_binding, predicate), holds: true));
 
+    /// <summary>
+    /// The group's points taken in the order of <paramref name="order"/>, then of their values, for the aggregates that
+    /// read an order: <c>g.OrderedBy(r => r.At).Increase(r => r.Requests)</c>.
+    /// </summary>
+    /// <typeparam name="TOrder">The order's type: an integer, or an instant, a date or a time stored as one.</typeparam>
+    /// <param name="order">The column the points are taken in the order of.</param>
+    /// <returns>The ordered group, over the rows this group's filter keeps.</returns>
+    public OrderedGroup<TRecord> OrderedBy<TOrder>(Func<Probe<TRecord>, Sym<TOrder>> order) =>
+        new OrderedGroup<TRecord>(_binding, _filter, Aggregators.Input(_binding, order));
+
     /// <summary>The number of rows of the group, nulls included.</summary>
     /// <returns>The symbol of the count.</returns>
     public Sym<long> Count() => Aggregators.Filtered(Aggregators.Count(), _filter);

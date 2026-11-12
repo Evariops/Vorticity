@@ -80,6 +80,66 @@ internal static class Aggregators
         _ => throw by.Unsupported(max ? "a MaxBy" : "a MinBy"),
     };
 
+    /// <summary>
+    /// The growth of a counter in <paramref name="value"/> over the points taken in the order of <paramref name="order"/>,
+    /// then of the value: each point after the first adds its rise from the one before it, or itself where it fell.
+    /// </summary>
+    internal static Sym<T?> Increase<T>(ColumnShape value, ColumnShape order)
+        where T : struct, INumber<T>
+    {
+        TakesOrder(order);
+        Func<ScanSource?, AggregateSlot<T?>> create = PointsOf(value, "a growth") switch
+        {
+            PointKind.Signed => _ => new GrowthSlot<long, Int128, SignedGrowth, T?>(value.PType, order.PType, static s => T.CreateChecked(s)),
+            PointKind.Unsigned => _ => new GrowthSlot<ulong, Int128, UnsignedGrowth, T?>(value.PType, order.PType, static s => T.CreateChecked(s)),
+            _ => _ => new GrowthSlot<double, WideIndexedSum, FloatGrowth, T?>(value.PType, order.PType, static s => T.CreateChecked(s.Value)),
+        };
+        return new Sym<T?>(new AggregateNode<T?>(AggregateKind.Increase, value, create, null, order: order));
+    }
+
+    /// <summary>The value of the first, or with <paramref name="last"/> the last, point in the order of <paramref name="order"/>, then of the value.</summary>
+    internal static Sym<T?> InOrder<T>(ColumnShape value, ColumnShape order, bool last)
+        where T : struct, INumber<T>
+    {
+        TakesOrder(order);
+        string what = last ? "a last point" : "a first point";
+        Func<ScanSource?, AggregateSlot<T?>> create = PointsOf(value, what) switch
+        {
+            PointKind.Signed => _ => new EdgeSlot<long, Int128, SignedGrowth, T?>(last, value.PType, order.PType, static v => T.CreateTruncating(v)),
+            PointKind.Unsigned => _ => new EdgeSlot<ulong, Int128, UnsignedGrowth, T?>(last, value.PType, order.PType, static v => T.CreateTruncating(v)),
+            _ => _ => new EdgeSlot<double, WideIndexedSum, FloatGrowth, T?>(last, value.PType, order.PType, static v => T.CreateTruncating(v)),
+        };
+        return new Sym<T?>(new AggregateNode<T?>(last ? AggregateKind.LastInOrder : AggregateKind.FirstInOrder, value, create, null, order: order));
+    }
+
+    private enum PointKind
+    {
+        Signed,
+        Unsigned,
+        Float,
+    }
+
+    /// <summary>How a column of points is read: as signed or unsigned integers, or as floats.</summary>
+    private static PointKind PointsOf(ColumnShape value, string what) =>
+        value.Kind != StorageKind.Primitive ? throw value.Unsupported(what)
+        : value.PType switch
+        {
+            PType.I8 or PType.I16 or PType.I32 or PType.I64 => PointKind.Signed,
+            PType.U8 or PType.U16 or PType.U32 or PType.U64 => PointKind.Unsigned,
+            PType.F16 or PType.F32 or PType.F64 => PointKind.Float,
+            _ => throw value.Unsupported(what),
+        };
+
+    /// <summary>Throws unless <paramref name="order"/> is a column of integers, or of instants, dates or times stored as integers.</summary>
+    private static void TakesOrder(ColumnShape order)
+    {
+        if (order.Kind != StorageKind.Primitive
+            || order.PType is not (PType.I8 or PType.I16 or PType.I32 or PType.I64 or PType.U8 or PType.U16 or PType.U32 or PType.U64))
+        {
+            throw order.Unsupported("an order of points");
+        }
+    }
+
     /// <summary>The predicate of a filtered group, built over the rows' probe.</summary>
     internal static Predicate Rows<TRecord>(RecordBinding? binding, Func<Probe<TRecord>, Predicate> predicate)
     {

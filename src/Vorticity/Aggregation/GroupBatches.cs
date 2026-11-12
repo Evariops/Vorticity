@@ -211,7 +211,7 @@ internal sealed class AggregationQuery : ResultQuery
     /// as the read goes when they nearly sort; once the pass has run, on any other.
     /// </summary>
     internal IAsyncEnumerator<RecordBatch> Groups(CancellationToken cancellationToken) =>
-        Plan.Blocking ? new GroupBatches(this, cancellationToken)
+        Plan.HoldsGroups ? new GroupBatches(this, cancellationToken)
         : States is { } states ? new StatesOrStreams(this, states, cancellationToken)
         : Streamed(cancellationToken);
 
@@ -874,6 +874,8 @@ internal static class GroupSelection
     internal static async ValueTask<(int[] Groups, int Count)> ApplyAsync(
         AggregationQuery query, AggregationOutcome outcome, ScanSpec spec, CancellationToken cancellationToken, bool windowed = true, int? until = null)
     {
+        // The growths' runs settled before any operator reads a group's answer.
+        await GrowthReads.SettleAsync(outcome, query.Host.Source, spec, query.Host.Counters, cancellationToken).ConfigureAwait(false);
         int operators = until ?? query.Operators.Length;
         bool chosen = query.Plan.Chosen.Length > 0;
         int reader = chosen ? Math.Min(query.ChosenReader, operators) : operators;

@@ -22,6 +22,15 @@ internal enum AggregateKind : byte
     Distribution,
     Quantile,
     ApproximateCountDistinct,
+
+    /// <summary>The growth of a counter over the group's points taken in the order of a column (<see cref="OrderedGroup{TRecord}"/>).</summary>
+    Increase,
+
+    /// <summary>The value of the group's first point in the order of a column.</summary>
+    FirstInOrder,
+
+    /// <summary>The value of the group's last point in the order of a column.</summary>
+    LastInOrder,
 }
 
 /// <summary>A result of an aggregation, whatever its type: what an element of a selection of several values is.</summary>
@@ -106,6 +115,9 @@ internal interface IAggregateNode
     /// <summary>The column it reads; null for a count of rows.</summary>
     ColumnShape? Input { get; }
 
+    /// <summary>The column its points are taken in the order of, for an aggregate over an order; null for any other.</summary>
+    ColumnShape? Order { get; }
+
     /// <summary>The rows of its group it reads, for an aggregate of a filtered group; null for every row.</summary>
     RowFilter? Filter { get; }
 
@@ -139,10 +151,11 @@ internal sealed class AggregateNode<T> : ResultNode<T>, IAggregateNode
     /// <summary>An aggregate whose states take what the run shares from its source's statistics, as a variance its center.</summary>
     internal AggregateNode(
         AggregateKind kind, ColumnShape? input, Func<ScanSource?, AggregateSlot<T>> create, Settler<T>? settle, Type? detail = null, IVortexRecord? record = null, RowFilter? filter = null,
-        Func<ScanSource?, AggregateSlot<T>>? alone = null, string? parameters = null)
+        Func<ScanSource?, AggregateSlot<T>>? alone = null, string? parameters = null, ColumnShape? order = null)
     {
         Kind = kind;
         Input = input;
+        Order = order;
         _create = create;
         _alone = alone;
 
@@ -150,8 +163,14 @@ internal sealed class AggregateNode<T> : ResultNode<T>, IAggregateNode
         _settle = filter is null ? settle : null;
         Record = record;
         Filter = filter;
-        Identity = new AggregateIdentity(kind, input?.Key, typeof(T), detail, filter?.Key, parameters);
+
+        // An order is part of what the aggregate is: the same values in two orders grow apart.
+        Identity = new AggregateIdentity(kind, input?.Key, typeof(T), detail, filter?.Key, order is null ? parameters : $"order={order.Key};{parameters}");
+        _parameters = parameters;
     }
+
+    // The parameters as given, before the order joined them: what a filtered copy is made with.
+    private readonly string? _parameters;
 
     /// <summary>How a state that is a record is read and written, for a custom aggregate whose state is one.</summary>
     internal IVortexRecord? Record { get; }
@@ -161,7 +180,7 @@ internal sealed class AggregateNode<T> : ResultNode<T>, IAggregateNode
 
     /// <summary>The same aggregate over the rows <paramref name="filter"/> keeps of its group; this one for none.</summary>
     internal AggregateNode<T> Filtered(RowFilter? filter) =>
-        filter is null ? this : new AggregateNode<T>(Kind, Input, _create, null, Identity.Detail, Record, filter, _alone, Identity.Parameters);
+        filter is null ? this : new AggregateNode<T>(Kind, Input, _create, null, Identity.Detail, Record, filter, _alone, _parameters, Order);
 
     internal override ColumnSym? Comparable => _comparable ??= Kind == AggregateKind.Custom
         ? throw new InvalidOperationException($"'{this}' is the state of a custom aggregator, which has no order: compare a value a built-in aggregate delivers.")
@@ -174,6 +193,8 @@ internal sealed class AggregateNode<T> : ResultNode<T>, IAggregateNode
     public AggregateIdentity Identity { get; }
 
     public ColumnShape? Input { get; }
+
+    public ColumnShape? Order { get; }
 
     public RowFilter? Filter { get; }
 
@@ -206,7 +227,7 @@ internal sealed class AggregateNode<T> : ResultNode<T>, IAggregateNode
 
     public override string ToString()
     {
-        string of = Input is null ? $"{Kind}()" : $"{Kind}({Input.Path})";
+        string of = Input is null ? $"{Kind}()" : Order is null ? $"{Kind}({Input.Path})" : $"{Kind}({Input.Path} by {Order.Path})";
         return Filter is null ? of : $"{of} where {Filter}";
     }
 }
