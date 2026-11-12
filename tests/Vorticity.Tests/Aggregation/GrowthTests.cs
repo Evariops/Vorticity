@@ -198,6 +198,109 @@ public sealed partial class GrowthTests
         Assert.Equal(0, ((AggregationQuery)daily.Query).Plan.LastGroupsReadAgain);
     }
 
+    [Fact]
+    public async Task ATakeSettlesTheGroupsItDeliversAndAnOrderOnTheGrowthSettlesEveryOne()
+    {
+        // Rows in no order: every group's runs cross.
+        Point[] rows = Arrange(Points(seed: 31), Layout.Shuffled);
+        string path = await WriteAsync(rows);
+        try
+        {
+            await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = 4);
+            await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
+            List<Hourly> expected = [.. Oracle(rows).OrderBy(h => h.Series, StringComparer.Ordinal).ThenBy(h => h.Hour)];
+
+            Vorticity.Aggregation first = file.Scan<Point>()
+                .GroupBy(r => (r.Series, Hour: r.At.Truncate(CalendarUnit.Hour)))
+                .OrderBy(g => g.Key.Series)
+                .ThenBy(g => g.Key.Hour)
+                .Take(5)
+                .Select(g => (g.Key.Series, g.Key.Hour, g.OrderedBy(r => r.At).Increase(r => r.Value), g.OrderedBy(r => r.At).First(r => r.Value), g.OrderedBy(r => r.At).Last(r => r.Value)));
+            List<Hourly> five = await ListAsync(first.As<Hourly>());
+            Assert.Equal(expected.Take(5).Select(Show), five.Select(Show));
+            Assert.Equal(5, ((AggregationQuery)first.Query).Plan.LastGroupsReadAgain);
+
+            Vorticity.Aggregation steepest = file.Scan<Point>()
+                .GroupBy(r => (r.Series, Hour: r.At.Truncate(CalendarUnit.Hour)))
+                .OrderByDescending(g => g.OrderedBy(r => r.At).Increase(r => r.Value))
+                .Take(5)
+                .Select(g => (g.Key.Series, g.Key.Hour, g.OrderedBy(r => r.At).Increase(r => r.Value), g.OrderedBy(r => r.At).First(r => r.Value), g.OrderedBy(r => r.At).Last(r => r.Value)));
+            List<Hourly> top = await ListAsync(steepest.As<Hourly>());
+            Assert.Equal(expected.OrderByDescending(h => h.Increase).Take(5).Select(Show), top.Select(Show));
+            Assert.Equal(expected.Count, ((AggregationQuery)steepest.Query).Plan.LastGroupsReadAgain);
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+
+        static string Show(Hourly h) => $"{h.Series} {h.Hour:O} {Bits(h.Increase)} {Bits(h.First)} {Bits(h.Last)}";
+    }
+
+    [Fact]
+    public async Task UnderATightBudgetTheTablesSpillAndTheGroupsAreReadAgainInHalves()
+    {
+        // Twenty thousand series of a dozen points in no order: every group read again, its points past the budget.
+        Random random = new Random(37);
+        Point[] rows = [.. Enumerable.Range(0, 20_000)
+            .SelectMany(s => Enumerable.Range(0, 12).Select(i => new Point($"s{s:D5}", Start.AddSeconds(15 * i), i, random.Next(4) == 0 ? random.Next(10) : 1_000 + (i * 3.5))))
+            .OrderBy(_ => random.Next())];
+        Dictionary<string, Hourly> expected = Oracle(rows, hourly: false).ToDictionary(h => h.Series);
+        string path = await WriteAsync(rows);
+        try
+        {
+            QueryMemoryBudget large = new QueryMemoryBudget(1L << 30);
+            await using (VortexSession measure = VortexSession.Create(options => { options.MaxDegreeOfParallelism = 1; options.MemoryBudget = large; }))
+            await using (VortexFile file = await measure.OpenAsync(path, cancellationToken: Ct))
+            {
+                Check(await ListAsync(Growths(file).As<Grown>()));
+            }
+
+            foreach (int percent in (int[])[50, 25])
+            {
+                string scratch = System.IO.Path.Combine(AppContext.BaseDirectory, "growth", $"scratch-{Guid.NewGuid():N}");
+                System.IO.Directory.CreateDirectory(scratch);
+                try
+                {
+                    QueryMemoryBudget budget = new QueryMemoryBudget(large.PeakBytes / 100 * percent);
+                    await using VortexSession session = VortexSession.Create(options =>
+                    {
+                        options.MaxDegreeOfParallelism = 4;
+                        options.MemoryBudget = budget;
+                        options.ScratchDirectory = scratch;
+                    });
+                    await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
+                    Vorticity.Aggregation growths = Growths(file);
+                    growths.Plan.LanesRetire = false;
+                    Check(await ListAsync(growths.As<Grown>()));
+                    Assert.Equal(0, budget.ReservedBytes);
+                    AggregationPlan plan = growths.Plan;
+                    Assert.True(plan.LastRun!.SpilledRuns > 0 || plan.LastRowsReadAgain > rows.Length, $"at {percent} %, nothing spilled nor read again in halves");
+                }
+                finally
+                {
+                    System.IO.Directory.Delete(scratch, recursive: true);
+                }
+            }
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+
+        static Vorticity.Aggregation Growths(VortexFile file) => file.Scan<Point>()
+            .GroupBy(r => r.Series)
+            .Select(g => (g.Key, g.OrderedBy(r => r.At).Increase(r => r.Value), g.OrderedBy(r => r.At).First(r => r.Value), g.OrderedBy(r => r.At).Last(r => r.Value)));
+
+        void Check(List<Grown> read)
+        {
+            Assert.Equal(expected.Count, read.Count);
+            Assert.All(read, g => Assert.True(
+                Bits(g.Increase) == Bits(expected[g.Series].Increase) && Bits(g.First) == Bits(expected[g.Series].First) && Bits(g.Last) == Bits(expected[g.Series].Last),
+                $"{g} where the oracle gives {expected[g.Series]}"));
+        }
+    }
+
     private static async Task AppendAsync(Vorticity.Dataset.VortexDataset dataset, Point[] rows)
     {
         await using Vorticity.Dataset.ObjectDraft draft = dataset.StartObject();

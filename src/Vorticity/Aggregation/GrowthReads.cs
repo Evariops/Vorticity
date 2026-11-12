@@ -20,16 +20,18 @@ namespace Vorticity.Aggregating;
 /// table of keys of its own, and a key's first point in a range is the first point of one of its group's runs there: the
 /// group's earliest row in the range lies in one of its runs, all of which the range holds whole. A key whose first point
 /// is no run's first is not read again; one whose first point is takes that group's points. The keys are told apart as
-/// the pass told them, with no comparison against the result's own: a result cut in parts or held by a core reads alike.
+/// the pass told them, with no comparison against the result's own: a result cut in parts reads alike.
 /// </para>
 /// <para>
 /// The ranges read again are the runs' rows: a group whose late point fell in another object reads that object's rows
-/// around the point and its own object's rows around its run, not the rows between them.
+/// around the point and its own object's rows around its run, not the rows between them. The points are held under the
+/// query's memory; where they do not fit, the groups are read again in halves, each half its own rows, down to a group
+/// alone, which fails when its own points do not fit.
 /// </para>
 /// </remarks>
 internal static class GrowthReads
 {
-    /// <summary>Settles every growth of <paramref name="outcome"/>, once; a later call does nothing.</summary>
+    /// <summary>Settles the growths of every group of <paramref name="outcome"/>, once; a later call does nothing.</summary>
     /// <param name="outcome">The aggregation, its pass done.</param>
     /// <param name="source">The source the pass read.</param>
     /// <param name="spec">The pass's scan, whose filter and rows the reads keep.</param>
@@ -37,13 +39,38 @@ internal static class GrowthReads
     /// <param name="cancellationToken">Cancels the reads.</param>
     internal static async ValueTask SettleAsync(AggregationOutcome outcome, ScanSource source, ScanSpec spec, ScanCounters metrics, CancellationToken cancellationToken)
     {
+        if (!outcome.Plan.Ordered || outcome.RunsSettled)
+        {
+            return;
+        }
+
+        int count = outcome.Keys?.Count ?? 1;
+        int[] all = new int[count];
+        for (int g = 0; g < count; g++)
+        {
+            all[g] = g;
+        }
+
+        await SettleAsync(outcome, source, spec, metrics, all, cancellationToken).ConfigureAwait(false);
+        outcome.RunsSettled = true;
+    }
+
+    /// <summary>Settles the growths of <paramref name="groups"/>, those not settled yet: the groups an operator or the result reads.</summary>
+    /// <param name="outcome">The aggregation, its pass done.</param>
+    /// <param name="source">The source the pass read.</param>
+    /// <param name="spec">The pass's scan, whose filter and rows the reads keep.</param>
+    /// <param name="metrics">Where the reads count.</param>
+    /// <param name="groups">The groups.</param>
+    /// <param name="cancellationToken">Cancels the reads.</param>
+    internal static async ValueTask SettleAsync(
+        AggregationOutcome outcome, ScanSource source, ScanSpec spec, ScanCounters metrics, ReadOnlyMemory<int> groups, CancellationToken cancellationToken)
+    {
         AggregationPlan plan = outcome.Plan;
         if (!plan.Ordered || outcome.RunsSettled)
         {
             return;
         }
 
-        int groups = outcome.Keys?.Count ?? 1;
         for (int a = 0; a < plan.Aggregates.Length; a++)
         {
             IAggregateNode aggregate = plan.Aggregates[a];
@@ -53,26 +80,66 @@ internal static class GrowthReads
             }
 
             AggregateSlot slot = outcome.SlotOf(aggregate);
-            List<(AggregateSlot Slot, int Group)> crossed = [];
-            for (int g = 0; g < groups; g++)
+            List<(AggregateSlot Slot, int Group, long First)> found = [];
+            List<(long First, long Last)> spans = [];
+            foreach (int g in groups.Span)
             {
                 AggregateSlot part = slot.PartOf(g, out int local);
                 if (!((IGrowthRuns)part).TrySettle(local))
                 {
-                    crossed.Add((part, local));
+                    spans.Clear();
+                    ((IGrowthRuns)part).Spans(local, spans);
+                    long first = long.MaxValue;
+                    foreach ((long start, _) in spans)
+                    {
+                        first = Math.Min(first, start);
+                    }
+
+                    found.Add((part, local, first));
                 }
             }
 
-            if (crossed.Count > 0)
+            if (found.Count == 0)
             {
-                await ReadAgainAsync(plan, a, crossed, outcome.Memory, source, spec, metrics, cancellationToken).ConfigureAwait(false);
+                continue;
+            }
+
+            // In the order of their first rows, so that a share of them reads a stretch of the source; in as many shares as
+            // their points need to fit the query's memory, each read on its own, as a read that ran out of it tells.
+            plan.ReadAgain(found.Count, 0);
+            found.Sort(static (a, b) => a.First.CompareTo(b.First));
+            List<(AggregateSlot Slot, int Group)> crossed = found.ConvertAll(static f => (f.Slot, f.Group));
+            Stack<(int Start, int End)> shares = new Stack<(int Start, int End)>([(0, crossed.Count)]);
+            while (shares.TryPop(out (int Start, int End) share))
+            {
+                (bool read, double done) = await TryReadAgainAsync(
+                    plan, a, crossed.GetRange(share.Start, share.End - share.Start), outcome.Memory, source, spec, metrics, cancellationToken).ConfigureAwait(false);
+                if (read)
+                {
+                    continue;
+                }
+
+                int count = share.End - share.Start;
+                if (count == 1)
+                {
+                    throw outcome.Memory!.Exceeded("points of a group a growth reads again", 1, 0);
+                }
+
+                // The read held a share of the rows' points when it ran out: the shares a fourth smaller, two at least.
+                int parts = (int)Math.Clamp(Math.Ceiling(1.25 / Math.Max(done, 1.0 / count)), 2, count);
+                for (int p = parts - 1; p >= 0; p--)
+                {
+                    shares.Push((share.Start + (int)((long)count * p / parts), share.Start + (int)((long)count * (p + 1) / parts)));
+                }
             }
         }
-
-        outcome.RunsSettled = true;
     }
 
-    private static async ValueTask ReadAgainAsync(
+    /// <summary>
+    /// Reads the points of <paramref name="crossed"/> again and settles each from them: false, nothing settled, when the
+    /// query's memory does not hold them, with the share of the rows read by then.
+    /// </summary>
+    private static async ValueTask<(bool Read, double Done)> TryReadAgainAsync(
         AggregationPlan plan, int aggregate, List<(AggregateSlot Slot, int Group)> crossed, QueryMemory? memory, ScanSource source, ScanSpec spec, ScanCounters metrics,
         CancellationToken cancellationToken)
     {
@@ -98,8 +165,6 @@ internal static class GrowthReads
         }
 
         List<RowRange> ranges = Merged(spans);
-        plan.ReadAgain(crossed.Count, 0);
-
         IAggregateNode node = plan.Aggregates[aggregate];
         (ColumnShape[] columns, _) = AggregationEngine.Columns(plan, new AggregateSlot?[plan.Aggregates.Length]);
         int value = Array.FindIndex(columns, known => known.Is(node.Input!));
@@ -123,6 +188,13 @@ internal static class GrowthReads
         int[] taken = [];
         int[] targets = [];
         long number = 0;
+        long total = 0;
+        foreach (RowRange range in ranges)
+        {
+            total += range.Length;
+        }
+
+        long done = 0;
         try
         {
             foreach (RowRange range in ranges)
@@ -144,6 +216,7 @@ internal static class GrowthReads
                     }
 
                     next = batch.StartRow + count;
+                    done += count;
                     if (count == 0 || batch.SelectedRows == 0)
                     {
                         continue;
@@ -224,14 +297,14 @@ internal static class GrowthReads
                         }
                     }
 
-                    if (held > 0)
+                    if (held > 0 && !points.Add(arena, number, nodes[value], nodes[order], taken.AsSpan(0, held), targets.AsSpan(0, held)))
                     {
-                        points.Add(arena, number, nodes[value], nodes[order], taken.AsSpan(0, held), targets.AsSpan(0, held));
+                        return (false, total == 0 ? 1 : (double)done / total);
                     }
                 }
             }
 
-            points.Settle(crossed.ToArray());
+            return (points.Settle(crossed.ToArray()), 1);
         }
         finally
         {

@@ -968,11 +968,14 @@ internal abstract class GrowthPoints
     /// </summary>
     internal abstract ReadOnlySpan<ulong> Rows(CanonicalArena arena, long batch, int valueNode, int orderNode, int rows, ReadOnlySpan<ulong> selection);
 
-    /// <summary>Adds the points of rows <paramref name="rows"/> of the batch <see cref="Rows"/> read, row <c>rows[i]</c> to target <c>targets[i]</c>.</summary>
-    internal abstract void Add(CanonicalArena arena, long batch, int valueNode, int orderNode, ReadOnlySpan<int> rows, ReadOnlySpan<int> targets);
+    /// <summary>
+    /// Adds the points of rows <paramref name="rows"/> of the batch <see cref="Rows"/> read, row <c>rows[i]</c> to target
+    /// <c>targets[i]</c>: false, the points let go, when the query's memory does not hold them.
+    /// </summary>
+    internal abstract bool Add(CanonicalArena arena, long batch, int valueNode, int orderNode, ReadOnlySpan<int> rows, ReadOnlySpan<int> targets);
 
     /// <summary>Sorts the points by target, then in order, and settles each target's group from its own.</summary>
-    internal abstract void Settle(ReadOnlySpan<(AggregateSlot Slot, int Group)> targets);
+    internal abstract bool Settle(ReadOnlySpan<(AggregateSlot Slot, int Group)> targets);
 
     /// <summary>Gives back what the points held.</summary>
     internal abstract void Release();
@@ -984,14 +987,11 @@ internal sealed class GrowthPoints<TWide, TSum, TGrowth, TResult>(PType values, 
     where TSum : unmanaged
     where TGrowth : IGrowth<TWide, TSum>
 {
-    private const string What = "points of the groups a growth reads again";
 
     private WideColumn<TWide> _values;
     private WideColumn<long> _orders;
 
-    private int[] _targets = [];
-    private long[] _pointOrders = [];
-    private TWide[] _pointValues = [];
+    private GrowthPoint<TWide>[] _points = [];
     private int _count;
     private ulong[] _rows = [];
 
@@ -1042,102 +1042,86 @@ internal sealed class GrowthPoints<TWide, TSum, TGrowth, TResult>(PType values, 
         }
     }
 
-    internal override void Add(CanonicalArena arena, long batch, int valueNode, int orderNode, ReadOnlySpan<int> rows, ReadOnlySpan<int> targets)
+    internal override bool Add(CanonicalArena arena, long batch, int valueNode, int orderNode, ReadOnlySpan<int> rows, ReadOnlySpan<int> targets)
     {
         ReadOnlySpan<TWide> value = _values.Of(arena, batch, valueNode, values, out _);
         ReadOnlySpan<long> order = _orders.Of(arena, batch, orderNode, orders, out _);
+        if (_count + rows.Length > _points.Length && !TryGrow(_count + rows.Length))
+        {
+            return false;
+        }
+
+        Span<GrowthPoint<TWide>> into = _points.AsSpan(_count, rows.Length);
         for (int i = 0; i < rows.Length; i++)
         {
-            if (_count == _targets.Length)
-            {
-                Grow();
-            }
-
             int row = rows[i];
-            _targets[_count] = targets[i];
-            _pointOrders[_count] = order[row];
-            _pointValues[_count] = TGrowth.Kept(value[row]);
-            _count++;
+            into[i] = new GrowthPoint<TWide>(targets[i], order[row], TGrowth.Kept(value[row]));
         }
+
+        _count += rows.Length;
+        return true;
     }
 
-    private void Grow()
+    /// <summary>Room for <paramref name="length"/> points under the query's memory; false, the points let go, when it refuses it.</summary>
+    private bool TryGrow(int length)
     {
-        int length = Scratch.Capacity(_count + 1, _targets.Length);
-        int[] targets = QueryArrays.Rent<int>(memory, length, What);
-        long[] pointOrders = QueryArrays.Rent<long>(memory, length, What);
-        TWide[] pointValues = QueryArrays.Rent<TWide>(memory, length, What);
-        _targets.AsSpan(0, _count).CopyTo(targets);
-        _pointOrders.AsSpan(0, _count).CopyTo(pointOrders);
-        _pointValues.AsSpan(0, _count).CopyTo(pointValues);
+        if (!QueryArrays.TryRent(memory, Scratch.Capacity(length, _points.Length), out GrowthPoint<TWide>[] grown))
+        {
+            Release();
+            return false;
+        }
+
+        _points.AsSpan(0, _count).CopyTo(grown);
         Give();
-        _targets = targets;
-        _pointOrders = pointOrders;
-        _pointValues = pointValues;
+        _points = grown;
+        return true;
     }
 
-    internal override void Settle(ReadOnlySpan<(AggregateSlot Slot, int Group)> targets)
+    internal override bool Settle(ReadOnlySpan<(AggregateSlot Slot, int Group)> targets)
     {
-        // The points sorted by target, then by order, then by value, through a permutation: three arrays move as one.
-        int[] order = QueryArrays.Rent<int>(memory, _count, What);
+        // Sorted in place by target, then in order: each target's points then lie side by side.
+        Span<GrowthPoint<TWide>> points = _points.AsSpan(0, _count);
+        points.Sort(default(GrowthPointOrder<TWide>));
+        long[] order = [];
+        TWide[] value = [];
         try
         {
-            for (int i = 0; i < _count; i++)
+            int start = 0;
+            while (start < points.Length)
             {
-                order[i] = i;
-            }
-
-            int[] t = _targets;
-            long[] o = _pointOrders;
-            TWide[] v = _pointValues;
-            order.AsSpan(0, _count).Sort((a, b) =>
-                t[a] != t[b] ? t[a].CompareTo(t[b])
-                : o[a] != o[b] ? o[a].CompareTo(o[b])
-                : v[a] < v[b] ? -1 : v[b] < v[a] ? 1 : 0);
-
-            long[] sortedOrders = QueryArrays.Rent<long>(memory, _count, What);
-            TWide[] sortedValues = QueryArrays.Rent<TWide>(memory, _count, What);
-            try
-            {
-                for (int i = 0; i < _count; i++)
+                int target = points[start].Target;
+                int end = start + 1;
+                while (end < points.Length && points[end].Target == target)
                 {
-                    sortedOrders[i] = o[order[i]];
-                    sortedValues[i] = v[order[i]];
+                    end++;
                 }
 
-                int start = 0;
-                while (start < _count)
+                Scratch.Grow(ref order, end - start);
+                Scratch.Grow(ref value, end - start);
+                for (int i = start; i < end; i++)
                 {
-                    int target = t[order[start]];
-                    int end = start + 1;
-                    while (end < _count && t[order[end]] == target)
-                    {
-                        end++;
-                    }
-
-                    (AggregateSlot slot, int group) = targets[target];
-                    ((GrowthSlot<TWide, TSum, TGrowth, TResult>)slot).Settle(group, sortedOrders.AsSpan(start, end - start), sortedValues.AsSpan(start, end - start));
-                    start = end;
+                    order[i - start] = points[i].Order;
+                    value[i - start] = points[i].Value;
                 }
+
+                (AggregateSlot slot, int group) = targets[target];
+                ((GrowthSlot<TWide, TSum, TGrowth, TResult>)slot).Settle(group, order.AsSpan(0, end - start), value.AsSpan(0, end - start));
+                start = end;
             }
-            finally
-            {
-                QueryArrays.Return(memory, sortedOrders);
-                QueryArrays.Return(memory, sortedValues);
-            }
+
+            return true;
         }
         finally
         {
-            QueryArrays.Return(memory, order);
+            Scratch.Return(ref order);
+            Scratch.Return(ref value);
         }
     }
 
     internal override void Release()
     {
         Give();
-        _targets = [];
-        _pointOrders = [];
-        _pointValues = [];
+        _points = [];
         _count = 0;
         _values.Release();
         _orders.Release();
@@ -1146,13 +1130,31 @@ internal sealed class GrowthPoints<TWide, TSum, TGrowth, TResult>(PType values, 
 
     private void Give()
     {
-        if (_targets.Length > 0)
+        if (_points.Length > 0)
         {
-            QueryArrays.Return(memory, _targets);
-            QueryArrays.Return(memory, _pointOrders);
-            QueryArrays.Return(memory, _pointValues);
+            QueryArrays.Return(memory, _points);
         }
     }
+}
+
+/// <summary>A point read again, and the group it goes to among those read.</summary>
+[StructLayout(LayoutKind.Sequential, Pack = 8)]
+internal readonly struct GrowthPoint<TWide>(int target, long order, TWide value)
+    where TWide : unmanaged
+{
+    internal readonly int Target = target;
+    internal readonly long Order = order;
+    internal readonly TWide Value = value;
+}
+
+/// <summary>Points by group, then in order: by the order, then by the value.</summary>
+internal readonly struct GrowthPointOrder<TWide> : IComparer<GrowthPoint<TWide>>
+    where TWide : unmanaged, INumber<TWide>
+{
+    public int Compare(GrowthPoint<TWide> x, GrowthPoint<TWide> y) =>
+        x.Target != y.Target ? x.Target.CompareTo(y.Target)
+        : x.Order != y.Order ? x.Order.CompareTo(y.Order)
+        : x.Value < y.Value ? -1 : y.Value < x.Value ? 1 : 0;
 }
 
 /// <summary>
