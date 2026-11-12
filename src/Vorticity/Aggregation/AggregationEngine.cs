@@ -154,9 +154,13 @@ internal sealed class AggregationPlan
     /// <summary>The time those reads took, in <see cref="Stopwatch"/> ticks.</summary>
     internal long LastReadAgainTicks => Interlocked.Read(ref _readAgainTicks);
 
+    /// <summary>The time the settling of the growths took, the folds of every group's runs and the reads again, in <see cref="Stopwatch"/> ticks.</summary>
+    internal long LastSettleTicks => Interlocked.Read(ref _settleTicks);
+
     private long _groupsReadAgain;
     private long _rowsReadAgain;
     private long _readAgainTicks;
+    private long _settleTicks;
 
     /// <summary>Counts what a settling read again, which the next run starts from nothing.</summary>
     internal void ReadAgain(long groups, long rows, long ticks = 0)
@@ -166,12 +170,16 @@ internal sealed class AggregationPlan
         Interlocked.Add(ref _readAgainTicks, ticks);
     }
 
+    /// <summary>Counts the time a settling took.</summary>
+    internal void Settled(long ticks) => Interlocked.Add(ref _settleTicks, ticks);
+
     /// <summary>Forgets what the last run read again.</summary>
     internal void ReadNothingAgain()
     {
         Interlocked.Exchange(ref _groupsReadAgain, 0);
         Interlocked.Exchange(ref _rowsReadAgain, 0);
         Interlocked.Exchange(ref _readAgainTicks, 0);
+        Interlocked.Exchange(ref _settleTicks, 0);
     }
 
     /// <summary>The most bytes the plan's last run held of its memory budget at once.</summary>

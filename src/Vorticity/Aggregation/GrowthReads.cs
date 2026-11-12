@@ -71,6 +71,21 @@ internal static class GrowthReads
             return;
         }
 
+        long settling = System.Diagnostics.Stopwatch.GetTimestamp();
+        try
+        {
+            await SettleEachAsync(outcome, source, spec, metrics, groups, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            plan.Settled(System.Diagnostics.Stopwatch.GetTimestamp() - settling);
+        }
+    }
+
+    private static async ValueTask SettleEachAsync(
+        AggregationOutcome outcome, ScanSource source, ScanSpec spec, ScanCounters metrics, ReadOnlyMemory<int> groups, CancellationToken cancellationToken)
+    {
+        AggregationPlan plan = outcome.Plan;
         for (int a = 0; a < plan.Aggregates.Length; a++)
         {
             IAggregateNode aggregate = plan.Aggregates[a];
@@ -170,153 +185,234 @@ internal static class GrowthReads
         List<RowRange> ranges = Merged(spans);
         IAggregateNode node = plan.Aggregates[aggregate];
         (ColumnShape[] columns, _) = AggregationEngine.Columns(plan, new AggregateSlot?[plan.Aggregates.Length]);
-        int value = Array.FindIndex(columns, known => known.Is(node.Input!));
-        int order = Array.FindIndex(columns, known => known.Is(node.Order!));
-        int filter = plan.Filters.FilterOf[aggregate];
+        Reading reading = new Reading(
+            plan, columns, Array.FindIndex(columns, known => known.Is(node.Input!)), Array.FindIndex(columns, known => known.Is(node.Order!)),
+            plan.Filters.FilterOf[aggregate], anchors, owners, source, spec, metrics,
 
-        // In order, on one lane: a key's first point is told by the row it lies at.
-        ScanSpec pass = AggregationEngine.PassSpec(spec, columns, plan, source.Schema) with
-        {
-            Answering = null,
-            Options = spec.Options with { DegreeOfParallelism = 1 },
-        };
+            // A lane reads its ranges in order: a key's first point is told by the row it lies at.
+            AggregationEngine.PassSpec(spec, columns, plan, source.Schema) with { Answering = null, Options = spec.Options with { DegreeOfParallelism = 1 } });
 
-        FilterMasks? masks = filter >= 0 ? new FilterMasks(plan.Filters) : null;
-        GroupKeys? keys = plan.Grouped ? plan.CreateKeys(sorted: false) : null;
-        GrowthPoints points = ((IGrowthRuns)crossed[0].Slot).Points(memory);
-        GroupRanges keyRanges = new GroupRanges();
-        int[] nodes = new int[columns.Length];
-        int[] rowGroups = [];
-        int[] status = [];
-        int[] taken = [];
-        int[] targets = [];
-        long number = 0;
+        // The ranges side by side, a stretch of them a lane, each lane with a table of keys of its own: a key's first point
+        // in a range names its group whatever the other ranges hold.
+        int degree = spec.Options.DegreeOfParallelism > 0 ? spec.Options.DegreeOfParallelism : source.Session.Options.MaxDegreeOfParallelism;
+        int lanes = Math.Clamp(degree, 1, ranges.Count);
         long total = 0;
         foreach (RowRange range in ranges)
         {
             total += range.Length;
         }
 
-        long done = 0;
+        Lane[] read = new Lane[lanes];
+        int first = 0;
+        long given = 0;
+        for (int l = 0; l < lanes; l++)
+        {
+            // About as many rows a lane: the ranges up to its share of them.
+            int last = first;
+            long share = total * (l + 1) / lanes;
+            while (last < ranges.Count && (last == first || given + ranges[last].Length <= share || l == lanes - 1))
+            {
+                given += ranges[last].Length;
+                last++;
+            }
+
+            read[l] = new Lane(reading, ((IGrowthRuns)crossed[0].Slot).Points(memory), ranges.GetRange(first, last - first));
+            first = last;
+        }
+
         try
+        {
+            Task<bool>[] tasks = new Task<bool>[lanes];
+            for (int l = 0; l < lanes; l++)
+            {
+                Lane lane = read[l];
+                tasks[l] = lanes == 1 ? lane.ReadAsync(cancellationToken).AsTask() : Task.Run(() => lane.ReadAsync(cancellationToken).AsTask(), cancellationToken);
+            }
+
+            await Task.WhenAll(tasks).ConfigureAwait(false);
+            long done = 0;
+            bool all = true;
+            foreach (Lane lane in read)
+            {
+                done += lane.Done;
+                all &= lane.Held;
+            }
+
+            if (!all)
+            {
+                return (false, total == 0 ? 1 : (double)done / total);
+            }
+
+            // Every lane's points in the first's, then sorted and folded.
+            for (int l = 1; l < lanes; l++)
+            {
+                if (!read[0].Points.Absorb(read[l].Points))
+                {
+                    return (false, 1);
+                }
+            }
+
+            return (read[0].Points.Settle(crossed.ToArray()), 1);
+        }
+        finally
+        {
+            foreach (Lane lane in read)
+            {
+                lane.Release();
+            }
+        }
+    }
+
+    /// <summary>What every lane of a read again shares: the columns, the runs' first rows and the groups they name, the scan.</summary>
+    private sealed record Reading(
+        AggregationPlan Plan, ColumnShape[] Columns, int Value, int Order, int Filter, long[] Anchors, int[] Owners, ScanSource Source, ScanSpec Spec,
+        ScanCounters Metrics, ScanSpec Pass);
+
+    /// <summary>A lane of a read again: a stretch of the ranges, read in order, its keys numbered in a table of its own.</summary>
+    private sealed class Lane(Reading reading, GrowthPoints points, List<RowRange> ranges)
+    {
+        private readonly FilterMasks? _masks = reading.Filter >= 0 ? new FilterMasks(reading.Plan.Filters) : null;
+        private readonly GroupKeys? _keys = reading.Plan.Grouped ? reading.Plan.CreateKeys(sorted: false) : null;
+        private readonly GroupRanges _keyRanges = new GroupRanges();
+        private readonly int[] _nodes = new int[reading.Columns.Length];
+        private int[] _rowGroups = [];
+        private int[] _status = [];
+        private int[] _taken = [];
+        private int[] _targets = [];
+        private long _number;
+
+        /// <summary>The points the lane gathered.</summary>
+        internal GrowthPoints Points => points;
+
+        /// <summary>The rows the lane read.</summary>
+        internal long Done { get; private set; }
+
+        /// <summary>Whether the query's memory held every point the lane met.</summary>
+        internal bool Held { get; private set; } = true;
+
+        internal async ValueTask<bool> ReadAsync(CancellationToken cancellationToken)
         {
             foreach (RowRange range in ranges)
             {
-                RowRange rows = spec.Rows is { } asked ? asked.Intersect(range) : range;
+                RowRange rows = reading.Spec.Rows is { } asked ? asked.Intersect(range) : range;
                 if (rows.IsEmpty)
                 {
                     continue;
                 }
 
-                plan.ReadAgain(0, rows.Length);
+                reading.Plan.ReadAgain(0, rows.Length);
                 long next = rows.Start;
-                await foreach (RecordBatch batch in source.Rows.BatchesAsync(pass with { Rows = rows }, metrics).WithCancellation(cancellationToken).ConfigureAwait(false))
+                await foreach (RecordBatch batch in reading.Source.Rows.BatchesAsync(reading.Pass with { Rows = rows }, reading.Metrics)
+                    .WithCancellation(cancellationToken).ConfigureAwait(false))
                 {
-                    int count = batch.RowCount;
                     if (batch.StartRow < next)
                     {
                         throw new InvalidOperationException($"A read of rows {rows.Start} to {rows.End} delivered row {batch.StartRow} after row {next}.");
                     }
 
-                    next = batch.StartRow + count;
-                    done += count;
-                    if (count == 0 || batch.SelectedRows == 0)
+                    next = batch.StartRow + batch.RowCount;
+                    Done += batch.RowCount;
+                    if (batch.RowCount > 0 && batch.SelectedRows > 0 && !Take(batch))
                     {
-                        continue;
-                    }
-
-                    CanonicalArena arena = batch.Arena;
-                    int root = batch.RootIndex;
-                    for (int c = 0; c < columns.Length; c++)
-                    {
-                        int resolved = FilterEvaluator.Resolve(arena, root, columns[c].Field, count);
-                        while (arena.RecordRef(resolved).Kind == CanonicalKind.Extension)
-                        {
-                            resolved = arena.GetNode(resolved).StorageIndex;
-                        }
-
-                        nodes[c] = resolved;
-                    }
-
-                    ReadOnlySpan<ulong> selection = batch.SelectionWords;
-                    if (masks is not null)
-                    {
-                        masks.Evaluate(arena, root, count, selection);
-                        if (masks.KeepsNone(filter))
-                        {
-                            continue;
-                        }
-
-                        selection = masks.Selection(filter);
-                    }
-
-                    // Each row's key, numbered in the read's own table.
-                    Scratch.Grow(ref rowGroups, count);
-                    if (keys is not null)
-                    {
-                        keyRanges.Clear();
-                        if (keys.Assign(arena, nodes.AsSpan(0, plan.Keys.Length), count, selection, rowGroups, keyRanges))
-                        {
-                            for (int r = 0; r < keyRanges.Count; r++)
-                            {
-                                rowGroups.AsSpan(keyRanges.StartAt(r), keyRanges.EndAt(r) - keyRanges.StartAt(r)).Fill(keyRanges.GroupAt(r));
-                            }
-                        }
-                    }
-                    else
-                    {
-                        rowGroups.AsSpan(0, count).Clear();
-                    }
-
-                    if (status.Length < (keys?.Count ?? 1))
-                    {
-                        int[] grown = new int[Scratch.Capacity(keys?.Count ?? 1, status.Length)];
-                        status.CopyTo(grown, 0);
-                        status = grown;
-                    }
-
-                    // A key's first point names its group, or none: the points of the groups named are kept.
-                    number++;
-                    ReadOnlySpan<ulong> kept = points.Rows(arena, number, nodes[value], nodes[order], count, selection);
-                    Scratch.Grow(ref taken, count);
-                    Scratch.Grow(ref targets, count);
-                    int held = 0;
-                    RowCursor cursor = new RowCursor(kept, 0, count);
-                    while (cursor.Next(out int row))
-                    {
-                        int key = rowGroups[row];
-                        int named = status[key];
-                        if (named == 0)
-                        {
-                            int at = Array.BinarySearch(anchors, batch.StartRow + row);
-                            named = status[key] = at >= 0 ? owners[at] + 1 : -1;
-                        }
-
-                        if (named > 0)
-                        {
-                            taken[held] = row;
-                            targets[held] = named - 1;
-                            held++;
-                        }
-                    }
-
-                    if (held > 0 && !points.Add(arena, number, nodes[value], nodes[order], taken.AsSpan(0, held), targets.AsSpan(0, held)))
-                    {
-                        return (false, total == 0 ? 1 : (double)done / total);
+                        Held = false;
+                        return false;
                     }
                 }
             }
 
-            return (points.Settle(crossed.ToArray()), 1);
+            return true;
         }
-        finally
+
+        /// <summary>The points of a batch whose keys a run's first point named; false when the query's memory refuses them.</summary>
+        private bool Take(RecordBatch batch)
+        {
+            int count = batch.RowCount;
+            CanonicalArena arena = batch.Arena;
+            int root = batch.RootIndex;
+            for (int c = 0; c < reading.Columns.Length; c++)
+            {
+                int resolved = FilterEvaluator.Resolve(arena, root, reading.Columns[c].Field, count);
+                while (arena.RecordRef(resolved).Kind == CanonicalKind.Extension)
+                {
+                    resolved = arena.GetNode(resolved).StorageIndex;
+                }
+
+                _nodes[c] = resolved;
+            }
+
+            ReadOnlySpan<ulong> selection = batch.SelectionWords;
+            if (_masks is not null)
+            {
+                _masks.Evaluate(arena, root, count, selection);
+                if (_masks.KeepsNone(reading.Filter))
+                {
+                    return true;
+                }
+
+                selection = _masks.Selection(reading.Filter);
+            }
+
+            // Each row's key, numbered in the lane's own table.
+            Scratch.Grow(ref _rowGroups, count);
+            if (_keys is not null)
+            {
+                _keyRanges.Clear();
+                if (_keys.Assign(arena, _nodes.AsSpan(0, reading.Plan.Keys.Length), count, selection, _rowGroups, _keyRanges))
+                {
+                    for (int r = 0; r < _keyRanges.Count; r++)
+                    {
+                        _rowGroups.AsSpan(_keyRanges.StartAt(r), _keyRanges.EndAt(r) - _keyRanges.StartAt(r)).Fill(_keyRanges.GroupAt(r));
+                    }
+                }
+            }
+            else
+            {
+                _rowGroups.AsSpan(0, count).Clear();
+            }
+
+            if (_status.Length < (_keys?.Count ?? 1))
+            {
+                int[] grown = new int[Scratch.Capacity(_keys?.Count ?? 1, _status.Length)];
+                _status.CopyTo(grown, 0);
+                _status = grown;
+            }
+
+            // A key's first point names its group, or none: the points of the groups named are kept.
+            _number++;
+            ReadOnlySpan<ulong> kept = points.Rows(arena, _number, _nodes[reading.Value], _nodes[reading.Order], count, selection);
+            Scratch.Grow(ref _taken, count);
+            Scratch.Grow(ref _targets, count);
+            int held = 0;
+            RowCursor cursor = new RowCursor(kept, 0, count);
+            while (cursor.Next(out int row))
+            {
+                int key = _rowGroups[row];
+                int named = _status[key];
+                if (named == 0)
+                {
+                    int at = Array.BinarySearch(reading.Anchors, batch.StartRow + row);
+                    named = _status[key] = at >= 0 ? reading.Owners[at] + 1 : -1;
+                }
+
+                if (named > 0)
+                {
+                    _taken[held] = row;
+                    _targets[held] = named - 1;
+                    held++;
+                }
+            }
+
+            return held == 0 || points.Add(arena, _number, _nodes[reading.Value], _nodes[reading.Order], _taken.AsSpan(0, held), _targets.AsSpan(0, held));
+        }
+
+        internal void Release()
         {
             points.Release();
-            keys?.Release();
-            keyRanges.Release();
-            Scratch.Return(ref rowGroups);
-            Scratch.Return(ref taken);
-            Scratch.Return(ref targets);
+            _keys?.Release();
+            _keyRanges.Release();
+            Scratch.Return(ref _rowGroups);
+            Scratch.Return(ref _taken);
+            Scratch.Return(ref _targets);
         }
     }
 

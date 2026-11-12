@@ -458,7 +458,9 @@ because the bounds of its entries, which a deletion loosens and a compaction tig
 and the bits with it, from one compaction to the next.
 
 Every answer in this section is therefore the same bits at every degree and in every split, except
-those that depend on row order by definition: `First`, `Last`, and a tie of `MinBy` or `MaxBy`.
+those that depend on row order by definition: `First`, `Last`, and a tie of `MinBy` or `MaxBy`. An
+order declared on a column is not row order: the growth and the first and last points of §5.10 depend
+on the values alone.
 
 ### 5.2 A filtered group
 
@@ -694,6 +696,49 @@ expansion estimator measured 94.76 % at 5 %. The exact tier gave the question's 
 Over a store that counts its requests, the first tier made 32 requests for 6 ranges, the objects' 8
 opens included, and the second 53 for 14 ranges of four columns: one request per range and column read
 at most, where drawing the same rows block by block would cost one per block and column.
+
+### 5.10 Points in order
+
+`g.OrderedBy(x => o)` takes the group's points in the order of `o`, an integer column or an instant, a
+date or a time stored as one, then in the order of their values. A point is a row whose order and value
+both hold one; a float's NaN or infinity makes none, and its −0 is read as +0, one zero for both. Three
+aggregates read it: `Increase(x => v)`, the growth of a counter, and `First(x => v)` and `Last(x => v)`,
+the values of its first and last points.
+
+```csharp
+select (g.Key.Series, g.Key.Hour, g.OrderedBy(x => x.At).Increase(x => x.Requests), g.OrderedBy(x => x.At).Last(x => x.Requests))
+```
+
+The growth adds, for each point after the first, its rise from the point before it, or its whole value
+where it fell, the counter having started again from zero: 100, 130, 160, 5, 20 grows 30 + 30 + 5 + 15
+= 80. That is the last point less the first, plus each value a fall came from, which the state keeps as
+an exact sum: the indexed sum of §5.1 for floats, 128 bits for integers, rounded once to the column's
+type, `OverflowException` past it. Points of one order rise through their values, so a fall happens
+only from one order to the next. The answer depends on the values alone, never on the rows' order or
+cut, so it is the same bits at every degree and in every split, as §5.1's sums are. The first and last
+points are each a point kept and compared by (order, value); the growth is null for a group of no point,
+0 for one of one.
+
+Each group keeps its runs of points. A run is the points of one piece of the source, the range a lane
+took, read in order; it closes where a point comes before the last one or where the lane takes a piece
+that does not follow the last, and keeps its first and last points and the rows it lies between.
+After the pass each group's runs, in the order of their first points, fold into one when each ends at
+or before the next starts: exactly, whatever was read between them, since a point between two runs
+lies in a third one that crosses their fold. The pieces only keep apart runs that a point read on
+another lane might fall between. A group whose runs cross is read again: the rows its runs lie between,
+merged into ranges and read in order on one lane, with a table of keys of the read's own. A key's first
+point in a range is the first point of one of its group's runs, so a sorted search of those rows names
+the group, and no key is compared with the result's, which may come in parts. The points read again are
+sorted and folded, held under the query's memory in shares when they do not fit it. Only the groups
+read are settled: those the first operator that reads a growth is given, or else the result's window.
+Past 256 runs a group keeps one span of rows and is read again, so rows in no order cost their points.
+
+The state is 120 bytes a group for floats and 96 for integers, and 52 bytes a run closed beyond the
+first, in the slot's own arrays, which a lane's spill writes and reads back. A plan that holds a growth
+waits for the end of its pass (no group streams), keeps its groups off the core, whose records hold no
+state of a variable size, numbers its rows, and takes no parts and no estimate. Where a group's rows
+come side by side, a range of them is folded a stretch at a time: the points that each come at or after
+the one before them, order and value, found four a vector, move the run's last point and nothing else.
 
 ## 6. After the group by
 

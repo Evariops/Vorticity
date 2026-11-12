@@ -377,7 +377,7 @@ internal static partial class LifecycleBench
         }
 
         double twinMs = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
-        ledger.Growths.Add((groups, plan.LastGroupsReadAgain, plan.LastRowsReadAgain, ms, plan.LastReadAgainTicks * 1e3 / Stopwatch.Frequency, twinMs));
+        ledger.Growths.Add((groups, plan.LastGroupsReadAgain, plan.LastRowsReadAgain, ms, plan.LastSettleTicks * 1e3 / Stopwatch.Frequency, plan.LastReadAgainTicks * 1e3 / Stopwatch.Frequency, twinMs));
     }
 
     private static void Print(
@@ -431,22 +431,23 @@ internal static partial class LifecycleBench
         {
             // The first sample, before a day of data is in, and the last, once every job ran, apart from the hourly ones.
             Console.WriteLine($"growth by service and hour over the last day, {ledger.Growths.Count} samples:");
-            Console.WriteLine($"  {"",-10} {"groups",7} {"read again",11} {"rows again",11} {"ms",8} {"again ms",9} {"twin ms",8}");
-            (string, (long Groups, long Crossed, long Rows, double Ms, double AgainMs, double TwinMs))[] lines =
+            Console.WriteLine($"  {"",-10} {"groups",7} {"read again",11} {"rows again",11} {"ms",8} {"settle ms",10} {"again ms",9} {"twin ms",8}");
+            (string, (long Groups, long Crossed, long Rows, double Ms, double SettleMs, double AgainMs, double TwinMs))[] lines =
                 [("mean", Mean(ledger.Growths)), ("max", Max(ledger.Growths)), ("last", ledger.Growths[^1])];
-            foreach ((string name, (long Groups, long Crossed, long Rows, double Ms, double AgainMs, double TwinMs) sample) in lines)
+            foreach ((string name, (long Groups, long Crossed, long Rows, double Ms, double SettleMs, double AgainMs, double TwinMs) sample) in lines)
             {
                 Console.WriteLine(
-                    $"  {name,-10} {sample.Groups,7} {sample.Crossed,11} {sample.Rows,11} {sample.Ms,8:F1} {sample.AgainMs,9:F1} {sample.TwinMs,8:F1}");
+                    $"  {name,-10} {sample.Groups,7} {sample.Crossed,11} {sample.Rows,11} {sample.Ms,8:F1} {sample.SettleMs,10:F1} {sample.AgainMs,9:F1} {sample.TwinMs,8:F1}");
             }
         }
 
-        static (long, long, long, double, double, double) Mean(List<(long Groups, long Crossed, long Rows, double Ms, double AgainMs, double TwinMs)> all) => (
+        static (long, long, long, double, double, double, double) Mean(List<(long Groups, long Crossed, long Rows, double Ms, double SettleMs, double AgainMs, double TwinMs)> all) => (
             (long)all.Average(s => s.Groups), (long)all.Average(s => s.Crossed), (long)all.Average(s => s.Rows),
-            all.Average(s => s.Ms), all.Average(s => s.AgainMs), all.Average(s => s.TwinMs));
+            all.Average(s => s.Ms), all.Average(s => s.SettleMs), all.Average(s => s.AgainMs), all.Average(s => s.TwinMs));
 
-        static (long, long, long, double, double, double) Max(List<(long Groups, long Crossed, long Rows, double Ms, double AgainMs, double TwinMs)> all) => (
-            all.Max(s => s.Groups), all.Max(s => s.Crossed), all.Max(s => s.Rows), all.Max(s => s.Ms), all.Max(s => s.AgainMs), all.Max(s => s.TwinMs));
+        static (long, long, long, double, double, double, double) Max(List<(long Groups, long Crossed, long Rows, double Ms, double SettleMs, double AgainMs, double TwinMs)> all) => (
+            all.Max(s => s.Groups), all.Max(s => s.Crossed), all.Max(s => s.Rows), all.Max(s => s.Ms), all.Max(s => s.SettleMs), all.Max(s => s.AgainMs),
+            all.Max(s => s.TwinMs));
     }
 
     /// <summary>A service's hour and a value of it, the growth's or the twin's.</summary>
@@ -479,7 +480,7 @@ internal static partial class LifecycleBench
         internal bool Growth { get; init; }
 
         /// <summary>Each growth sample: its groups, those read again, the rows read again, its time, that of the reads, the twin's.</summary>
-        internal List<(long Groups, long Crossed, long Rows, double Ms, double AgainMs, double TwinMs)> Growths { get; } = [];
+        internal List<(long Groups, long Crossed, long Rows, double Ms, double SettleMs, double AgainMs, double TwinMs)> Growths { get; } = [];
 
         internal int TraceLeft { get; set; }
 

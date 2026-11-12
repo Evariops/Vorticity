@@ -836,19 +836,21 @@ internal sealed class GrowthSlot<TWide, TSum, TGrowth, TResult>(PType values, PT
             return false;
         }
 
-        // The runs in the order of their first points, then of their last: each must end where the next starts or before.
+        // The runs in the order of their first points, then of their last: each must end where the next starts or before. A
+        // group's few runs on the stack, a run a piece it lay in; more from the process's shelf.
         int count = state.Closed + 1;
-        PointRun<TWide>[] runs = ArrayShelf.Rent<PointRun<TWide>>(count);
+        PointRun<TWide>[]? rented = count > 16 ? ArrayShelf.Rent<PointRun<TWide>>(count) : null;
+        Span<PointRun<TWide>> held = rented is null ? stackalloc PointRun<TWide>[16] : rented;
+        held = held[..count];
         try
         {
-            runs[0] = state.Open;
+            held[0] = state.Open;
             int at = 1;
             for (int link = state.Chain; link != 0; link = _next[link - 1])
             {
-                runs[at++] = _runs[link - 1];
+                held[at++] = _runs[link - 1];
             }
 
-            Span<PointRun<TWide>> held = runs.AsSpan(0, count);
             held.Sort(static (a, b) =>
                 GrowthSlots.Before(a.FirstOrder, a.FirstValue, b.FirstOrder, b.FirstValue) ? -1
                 : GrowthSlots.Before(b.FirstOrder, b.FirstValue, a.FirstOrder, a.FirstValue) ? 1
@@ -897,7 +899,10 @@ internal sealed class GrowthSlot<TWide, TSum, TGrowth, TResult>(PType values, PT
         }
         finally
         {
-            ArrayShelf.Return(runs);
+            if (rented is not null)
+            {
+                ArrayShelf.Return(rented);
+            }
         }
     }
 
@@ -1089,6 +1094,9 @@ internal abstract class GrowthPoints
     /// <summary>Sorts the points by target, then in order, and settles each target's group from its own.</summary>
     internal abstract bool Settle(ReadOnlySpan<(AggregateSlot Slot, int Group)> targets);
 
+    /// <summary>Takes <paramref name="other"/>'s points, another lane's of the same read, and lets it go; false when the query's memory refuses them.</summary>
+    internal abstract bool Absorb(GrowthPoints other);
+
     /// <summary>Gives back what the points held.</summary>
     internal abstract void Release();
 }
@@ -1186,6 +1194,25 @@ internal sealed class GrowthPoints<TWide, TSum, TGrowth, TResult>(PType values, 
         _points.AsSpan(0, _count).CopyTo(grown);
         Give();
         _points = grown;
+        return true;
+    }
+
+    internal override bool Absorb(GrowthPoints other)
+    {
+        GrowthPoints<TWide, TSum, TGrowth, TResult> theirs = (GrowthPoints<TWide, TSum, TGrowth, TResult>)other;
+        if (theirs._count > 0)
+        {
+            if (_count + theirs._count > _points.Length && !TryGrow(_count + theirs._count))
+            {
+                theirs.Release();
+                return false;
+            }
+
+            theirs._points.AsSpan(0, theirs._count).CopyTo(_points.AsSpan(_count));
+            _count += theirs._count;
+        }
+
+        theirs.Release();
         return true;
     }
 
