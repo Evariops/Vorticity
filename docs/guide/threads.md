@@ -128,9 +128,11 @@ A writer uses the session's degree too, and `VortexWriteOptions.DegreeOfParallel
 for one file. When a batch of a block or more comes in, the writer summarizes its columns side by
 side: each column's statistics, plus a text column's bounds and the distinct values a dictionary is
 priced from. It then chooses and compresses a chunk's columns side by side, a column with a chunk
-target of its own included, and a column's zstd frames in parallel, one frame per block, once the
-column holds a quarter of a megabyte of values. The file is byte for byte the same whatever the
-degree. A write that builds indexes summarizes its columns on one thread.
+target of its own included. A column that takes longer than its share of the threads, and whose
+previous chunk was tried as zstd on a quarter of a megabyte of values or more, has its zstd frames
+compressed in parallel too, one frame per block, beside the other columns' work. The file is byte
+for byte the same whatever the degree. A write that builds indexes summarizes its columns on one
+thread.
 
 Measured on the demonstration file, warmed up, each variant run in turn, the best of fifteen rounds in
 a process and the median of seven processes:
