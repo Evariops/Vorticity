@@ -61,6 +61,41 @@ public sealed partial class GrowthAllocationTests
         }
     }
 
+    [Fact]
+    public async Task TenTimesThePointsAGroupHoldNoMoreOfTheBudget()
+    {
+        string few = await WriteAsync(24);
+        string many = await WriteAsync(240);
+        try
+        {
+            long small = await PeakAsync(few);
+            long large = await PeakAsync(many);
+
+            // The query's peak is its groups' states and its lane's working memory, not its points: 1 835 008 B at both on
+            // 2026-11-12.
+            Assert.True(large <= (small * 5 / 4) + (256 << 10), $"peak {small:N0} B at 24 points a group, {large:N0} B at 240");
+        }
+        finally
+        {
+            System.IO.File.Delete(few);
+            System.IO.File.Delete(many);
+        }
+    }
+
+    /// <summary>The most a growth held of a budget that grants it all, on one lane.</summary>
+    private static async Task<long> PeakAsync(string path)
+    {
+        QueryMemoryBudget budget = new QueryMemoryBudget(1L << 30);
+        await using VortexSession session = VortexSession.Create(options =>
+        {
+            options.MaxDegreeOfParallelism = 1;
+            options.MemoryBudget = budget;
+        });
+        await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
+        Assert.Equal(Series, await QueryAsync(file));
+        return budget.PeakBytes;
+    }
+
     private static async Task<long> FloorAsync(string path, int lanes)
     {
         await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = lanes);
