@@ -9,12 +9,29 @@ namespace Vorticity.ObjectStorage.Http;
 internal static class StoreReads
 {
     /// <summary>
+    /// What a read asked if present answers for a key the service says is absent, a 404, inside the transport: no
+    /// token, which every object's read has. <see cref="Present"/> makes it null.
+    /// </summary>
+    internal static ObjectRead Absent => default;
+
+    /// <summary>A read asked if present: null for <see cref="Absent"/>, the read otherwise.</summary>
+    internal static ObjectRead? Present(ObjectRead read) => read.Token is null ? null : read;
+
+    /// <summary>
     /// A read into no memory: a head, which says the length and the token a read would, and refuses
     /// what a read would, an absent key, another token, or an offset past the end.
     /// </summary>
-    internal static async ValueTask<ObjectRead> EmptyAsync(IObjectStore store, string key, long offset, string? ifToken, CancellationToken cancellationToken)
+    internal static async ValueTask<ObjectRead> EmptyAsync(IObjectStore store, string key, long offset, string? ifToken, CancellationToken cancellationToken) =>
+        await EmptyIfPresentAsync(store, key, offset, ifToken, cancellationToken).ConfigureAwait(false) ?? throw ObjectNotFoundException.For(key);
+
+    /// <summary><see cref="EmptyAsync"/>, an absent key answered null, as the head says it.</summary>
+    internal static async ValueTask<ObjectRead?> EmptyIfPresentAsync(IObjectStore store, string key, long offset, string? ifToken, CancellationToken cancellationToken)
     {
-        ObjectHead head = await store.HeadAsync(key, cancellationToken).ConfigureAwait(false) ?? throw ObjectNotFoundException.For(key);
+        if (await store.HeadAsync(key, cancellationToken).ConfigureAwait(false) is not { } head)
+        {
+            return null;
+        }
+
         if (ifToken is not null && !string.Equals(ifToken, head.Token, StringComparison.Ordinal))
         {
             throw StoreFailures.Changed(key, ifToken, head.Token);

@@ -831,6 +831,7 @@ stores this repository ships for S3, Azure and Cloud Storage, are in
 | operation | used by |
 |---|---|
 | `ReadAsync(key, offset, destination, ifToken)` reads into the caller's memory and returns the bytes read, the object's length and its token from one answer | every read. A data object's segment source plans its reads with the core's coalescer, issues them together, and reads each into the aligned block the scan decodes from |
+| `ReadIfPresentAsync(key, offset, destination, ifToken)` reads as `ReadAsync` does, a missing key answered `null` | the commit after the one a refresh holds, absent whenever nothing is new: the absence is an answer, not an exception, so a reader that refreshes every second throws nothing |
 | `ReadTailAsync(key, destination)` reads the last bytes with the object's length | opening an object whose length nothing recorded. A data object's entry records it, so its open is one read of the tail |
 | `HeadAsync(key)` returns the size, the token, the store's creation time, and the retention date and legal hold on a locked store | the versions after a known one, and the lock of an object about to go when the listing does not say it |
 | `PutAsync(key, pipe, length, condition)` writes if the key is free, if the object still has a token, or always | every write, streamed. A dataset only creates, with the key free as its condition |

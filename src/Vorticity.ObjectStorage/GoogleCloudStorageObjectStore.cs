@@ -148,6 +148,27 @@ public sealed partial class GoogleCloudStorageObjectStore : IObjectStore, IUploa
     }
 
     /// <inheritdoc/>
+    /// <remarks>One GetObject, as <see cref="ReadAsync"/> sends: its 404 is the answer null, with no exception.</remarks>
+    public async ValueTask<ObjectRead?> ReadIfPresentAsync(string key, long offset, Memory<byte> destination, string? ifToken, CancellationToken cancellationToken)
+    {
+        CheckKey(key);
+        ArgumentOutOfRangeException.ThrowIfNegative(offset);
+        ThrowIfDisposed();
+        if (destination.IsEmpty)
+        {
+            return await StoreReads.EmptyIfPresentAsync(this, key, offset, ifToken, cancellationToken).ConfigureAwait(false);
+        }
+
+        return StoreReads.Present(await _transport.SendAsync(
+            "GetObject",
+            new ReadRequest(this, key, offset, destination, ifToken, IfPresent: true),
+            static (s, ct) => s.Store.BuildReadAsync(s, ct),
+            static (response, s, ct) => s.Store.ConsumeReadAsync(response, s, ct),
+            idempotent: true,
+            cancellationToken).ConfigureAwait(false));
+    }
+
+    /// <inheritdoc/>
     public async ValueTask<ObjectRead> ReadTailAsync(string key, Memory<byte> destination, CancellationToken cancellationToken)
     {
         CheckKey(key);
@@ -317,6 +338,11 @@ public sealed partial class GoogleCloudStorageObjectStore : IObjectStore, IUploa
             }
 
             throw StoreFailures.PastEnd(s.Key, s.Offset, size ?? -1);
+        }
+
+        if (status == HttpStatusCode.NotFound && s.IfPresent)
+        {
+            return StoreReads.Absent;
         }
 
         if (status is not (HttpStatusCode.PartialContent or HttpStatusCode.OK))
@@ -810,7 +836,8 @@ public sealed partial class GoogleCloudStorageObjectStore : IObjectStore, IUploa
     private readonly record struct KeyRequest(GoogleCloudStorageObjectStore Store, string Key);
 
     /// <summary>A read: from <see cref="Offset"/>, or the suffix the destination holds when it is negative.</summary>
-    private readonly record struct ReadRequest(GoogleCloudStorageObjectStore Store, string Key, long Offset, Memory<byte> Destination, string? IfToken);
+    /// <summary>A read's request; with <paramref name="IfPresent"/>, a 404 is answered <see cref="StoreReads.Absent"/> rather than thrown.</summary>
+    private readonly record struct ReadRequest(GoogleCloudStorageObjectStore Store, string Key, long Offset, Memory<byte> Destination, string? IfToken, bool IfPresent = false);
 
     private readonly record struct ListRequest(GoogleCloudStorageObjectStore Store, string Prefix, string? StartOffset, string? PageToken, List<ObjectListing> Page, string? Skip);
 

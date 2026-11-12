@@ -159,6 +159,31 @@ public sealed class CountingObjectStore : IObjectStore
     }
 
     /// <inheritdoc/>
+    /// <remarks>Counted as a read, and asked of the store under it as such, so that its absent key costs no exception there either.</remarks>
+    public async ValueTask<ObjectRead?> ReadIfPresentAsync(
+        string key, long offset, Memory<byte> destination, string? ifToken, CancellationToken cancellationToken)
+    {
+        Enter(ObjectOperation.Read);
+        try
+        {
+            ObjectRead? read = await _inner.ReadIfPresentAsync(key, offset, destination, ifToken, cancellationToken).ConfigureAwait(false);
+            if (read is { } held)
+            {
+                lock (_gate)
+                {
+                    _bytesRead += held.BytesRead;
+                }
+            }
+
+            return read;
+        }
+        finally
+        {
+            Leave();
+        }
+    }
+
+    /// <inheritdoc/>
     public async ValueTask<ObjectRead> ReadTailAsync(string key, Memory<byte> destination, CancellationToken cancellationToken)
     {
         Enter(ObjectOperation.Read);

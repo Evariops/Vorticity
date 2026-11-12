@@ -295,6 +295,9 @@ internal sealed class PrefixedObjectStore(IObjectStore inner, string prefix) : I
     public ValueTask<ObjectRead> ReadAsync(string key, long offset, Memory<byte> destination, string? ifToken, CancellationToken cancellationToken) =>
         inner.ReadAsync(prefix + key, offset, destination, ifToken, cancellationToken);
 
+    public ValueTask<ObjectRead?> ReadIfPresentAsync(string key, long offset, Memory<byte> destination, string? ifToken, CancellationToken cancellationToken) =>
+        inner.ReadIfPresentAsync(prefix + key, offset, destination, ifToken, cancellationToken);
+
     public ValueTask<ObjectRead> ReadTailAsync(string key, Memory<byte> destination, CancellationToken cancellationToken) =>
         inner.ReadTailAsync(prefix + key, destination, cancellationToken);
 

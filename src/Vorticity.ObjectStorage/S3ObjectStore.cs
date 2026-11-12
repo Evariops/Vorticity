@@ -202,6 +202,27 @@ public sealed partial class S3ObjectStore : IObjectStore, IUploadService
     }
 
     /// <inheritdoc/>
+    /// <remarks>One GetObject, as <see cref="ReadAsync"/> sends: its 404 is the answer null, with no exception.</remarks>
+    public async ValueTask<ObjectRead?> ReadIfPresentAsync(string key, long offset, Memory<byte> destination, string? ifToken, CancellationToken cancellationToken)
+    {
+        CheckKey(key);
+        ArgumentOutOfRangeException.ThrowIfNegative(offset);
+        ThrowIfDisposed();
+        if (destination.IsEmpty)
+        {
+            return await StoreReads.EmptyIfPresentAsync(this, key, offset, ifToken, cancellationToken).ConfigureAwait(false);
+        }
+
+        return StoreReads.Present(await _transport.SendAsync(
+            "GetObject",
+            new ReadRequest(this, key, offset, destination, ifToken, IfPresent: true),
+            static (s, ct) => s.Store.BuildAsync(HttpMethod.Get, s.Key, s, ct),
+            static (response, s, ct) => s.Store.ConsumeReadAsync(response, s, ct),
+            idempotent: true,
+            cancellationToken).ConfigureAwait(false));
+    }
+
+    /// <inheritdoc/>
     public ValueTask<ObjectRead> ReadTailAsync(string key, Memory<byte> destination, CancellationToken cancellationToken)
     {
         CheckKey(key);
@@ -322,6 +343,11 @@ public sealed partial class S3ObjectStore : IObjectStore, IUploadService
             }
 
             throw StoreFailures.PastEnd(s.Key, s.Offset, size ?? -1);
+        }
+
+        if (status == HttpStatusCode.NotFound && s.IfPresent)
+        {
+            return StoreReads.Absent;
         }
 
         if (status is not (HttpStatusCode.PartialContent or HttpStatusCode.OK))
@@ -733,7 +759,8 @@ public sealed partial class S3ObjectStore : IObjectStore, IUploadService
     private readonly record struct Request(S3ObjectStore Store, string Key);
 
     /// <summary>A read: from <see cref="Offset"/>, or the suffix the destination holds when it is negative.</summary>
-    private readonly record struct ReadRequest(S3ObjectStore Store, string Key, long Offset, Memory<byte> Destination, string? IfToken);
+    /// <summary>A read's request; with <paramref name="IfPresent"/>, a 404 is answered <see cref="StoreReads.Absent"/> rather than thrown.</summary>
+    private readonly record struct ReadRequest(S3ObjectStore Store, string Key, long Offset, Memory<byte> Destination, string? IfToken, bool IfPresent = false);
 
     private readonly record struct ListRequest(S3ObjectStore Store, string Prefix, string? StartAfter, string? Continuation, List<ObjectListing> Page);
 

@@ -119,6 +119,39 @@ public static class ObjectStoreExtensions
     }
 
     /// <summary>
+    /// <see cref="GetRangeAsync"/>, an absent key answered null rather than thrown (<see cref="IObjectStore.ReadIfPresentAsync"/>).
+    /// </summary>
+    /// <param name="store">The store.</param>
+    /// <param name="key">The object's key.</param>
+    /// <param name="offset">The first byte; at or past the end is refused, except 0 on an empty object.</param>
+    /// <param name="length">The most bytes to read.</param>
+    /// <param name="cancellationToken">Cancels the read.</param>
+    /// <returns>The bytes and the token, which the caller disposes once; null when no object has that key.</returns>
+    internal static async ValueTask<ObjectRange?> GetRangeIfPresentAsync(
+        this IObjectStore store, string key, long offset, int length, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(store);
+        ArgumentOutOfRangeException.ThrowIfNegative(offset);
+        ArgumentOutOfRangeException.ThrowIfNegative(length);
+        (byte[] array, PooledBuffer owner) = PooledBuffer.Rent(length);
+        try
+        {
+            if (await store.ReadIfPresentAsync(key, offset, array.AsMemory(0, length), null, cancellationToken).ConfigureAwait(false) is not { } read)
+            {
+                owner.Dispose();
+                return null;
+            }
+
+            return new ObjectRange(new SegmentLease(array.AsMemory(0, read.BytesRead), owner), read.Token, read.ObjectLength);
+        }
+        catch
+        {
+            owner.Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>
     /// Creates an object from <paramref name="content"/> if its key is free, atomically.
     /// <see cref="PutOutcome.Exists"/> says only that the key was taken, never whose bytes are there.
     /// </summary>

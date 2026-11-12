@@ -149,7 +149,29 @@ internal sealed class CommitObject
         ArgumentNullException.ThrowIfNull(store);
         using ObjectRange range = await store
             .GetRangeAsync(key, 0, CommitFormat.OpenBytes, cancellationToken).ConfigureAwait(false);
+        return Open(range);
+    }
 
+    /// <summary>
+    /// <see cref="OpenAsync"/>, an absent key answered null rather than thrown: the open of a commit that may not be there
+    /// yet, as a refresh asks for the version after the one it holds (<see cref="IObjectStore.ReadIfPresentAsync"/>).
+    /// </summary>
+    public static async ValueTask<CommitObject?> OpenIfPresentAsync(
+        IObjectStore store, string key, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(store);
+        if (await store.GetRangeIfPresentAsync(key, 0, CommitFormat.OpenBytes, cancellationToken).ConfigureAwait(false) is not { } read)
+        {
+            return null;
+        }
+
+        using ObjectRange range = read;
+        return Open(range);
+    }
+
+    /// <summary>The commit object the first bytes of its key's object hold, those past its header kept for the pages they hold.</summary>
+    private static CommitObject Open(ObjectRange range)
+    {
         // The read is the whole object exactly when it came back short of what was asked for.
         long length = range.Length < CommitFormat.OpenBytes ? range.Length : -1;
         ReadOnlySpan<byte> bytes = range.Contiguous().Span;

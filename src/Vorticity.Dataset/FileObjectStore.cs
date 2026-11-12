@@ -212,6 +212,32 @@ public sealed class FileObjectStore : IObjectStore
     }
 
     /// <inheritdoc/>
+    /// <remarks>
+    /// The file's presence is asked before it is opened, which tells an absent key without the exception an open throws; a
+    /// file deleted between the two is caught as <see cref="ReadAsync"/>'s absence. A read that names the token of a file
+    /// held open reads it as <see cref="ReadAsync"/> does, whatever its path holds now.
+    /// </remarks>
+    public async ValueTask<ObjectRead?> ReadIfPresentAsync(
+        string key, long offset, Memory<byte> destination, string? ifToken, CancellationToken cancellationToken)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(offset);
+        ObjectKey.Check(key);
+        if (ifToken is null && !System.IO.File.Exists(PathOf(key)))
+        {
+            return null;
+        }
+
+        try
+        {
+            return await ReadCoreAsync(key, offset, destination, ifToken, tail: false, cancellationToken).ConfigureAwait(false);
+        }
+        catch (ObjectNotFoundException)
+        {
+            return null;
+        }
+    }
+
+    /// <inheritdoc/>
     public ValueTask<ObjectRead> ReadTailAsync(string key, Memory<byte> destination, CancellationToken cancellationToken) =>
         ReadCoreAsync(key, 0, destination, null, tail: true, cancellationToken);
 

@@ -133,9 +133,23 @@ public sealed class MemoryObjectStore : IObjectStore
         ObjectKey.Check(key);
         ArgumentOutOfRangeException.ThrowIfNegative(offset);
         await StartAsync(ObjectOperation.Read, key, cancellationToken).ConfigureAwait(false);
+        return Read(Find(key, ifToken) ?? throw ObjectNotFoundException.For(key), key, offset, destination);
+    }
 
-        // An object's array is never written after it is stored, so it is copied out after the lock.
-        Entry entry = Find(key, ifToken);
+    /// <inheritdoc/>
+    /// <remarks>Counted and failed as a read, an absent key answered null without an exception.</remarks>
+    public async ValueTask<ObjectRead?> ReadIfPresentAsync(
+        string key, long offset, Memory<byte> destination, string? ifToken, CancellationToken cancellationToken)
+    {
+        ObjectKey.Check(key);
+        ArgumentOutOfRangeException.ThrowIfNegative(offset);
+        await StartAsync(ObjectOperation.Read, key, cancellationToken).ConfigureAwait(false);
+        return Find(key, ifToken) is { } entry ? Read(entry, key, offset, destination) : null;
+    }
+
+    /// <summary>Copies an object's bytes from <paramref name="offset"/>: its array is never written after it is stored, so it is copied out after the lock.</summary>
+    private static ObjectRead Read(Entry entry, string key, long offset, Memory<byte> destination)
+    {
         if (offset >= entry.Bytes.Length && !(offset == 0 && entry.Bytes.Length == 0))
         {
             throw ObjectStoreExtensions.PastEnd(key, offset, entry.Bytes.Length);
@@ -151,7 +165,7 @@ public sealed class MemoryObjectStore : IObjectStore
     {
         ObjectKey.Check(key);
         await StartAsync(ObjectOperation.Read, key, cancellationToken).ConfigureAwait(false);
-        Entry entry = Find(key, null);
+        Entry entry = Find(key, null) ?? throw ObjectNotFoundException.For(key);
         int available = Math.Min(destination.Length, entry.Bytes.Length);
         entry.Bytes.AsSpan(entry.Bytes.Length - available).CopyTo(destination.Span);
         return new ObjectRead(available, entry.Bytes.Length, entry.Token);
@@ -341,14 +355,14 @@ public sealed class MemoryObjectStore : IObjectStore
     private string Token() =>
         Interlocked.Increment(ref _tokens).ToString(System.Globalization.CultureInfo.InvariantCulture);
 
-    /// <summary>The object at <paramref name="key"/>, which must still have <paramref name="ifToken"/> when one is given.</summary>
-    private Entry Find(string key, string? ifToken)
+    /// <summary>The object at <paramref name="key"/>, which must still have <paramref name="ifToken"/> when one is given; null when there is none.</summary>
+    private Entry? Find(string key, string? ifToken)
     {
         lock (_gate)
         {
             if (!_objects.TryGetValue(key, out Entry entry))
             {
-                throw ObjectNotFoundException.For(key);
+                return null;
             }
 
             if (ifToken is not null && !string.Equals(ifToken, entry.Token, StringComparison.Ordinal))

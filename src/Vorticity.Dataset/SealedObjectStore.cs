@@ -182,6 +182,13 @@ internal sealed class SealedObjectStore : IObjectStore
             : _inner.ReadAsync(key, offset, destination, ifToken, cancellationToken);
 
     /// <inheritdoc/>
+    /// <remarks>A commit object's plaintext as <see cref="ReadAsync"/> reads it, its absence asked of the store under this one without an exception.</remarks>
+    public ValueTask<ObjectRead?> ReadIfPresentAsync(string key, long offset, Memory<byte> destination, string? ifToken, CancellationToken cancellationToken) =>
+        CommitKey.TryParse(key, out ulong version)
+            ? ReadCommitIntoAsync(key, version, offset, destination, ifPresent: true, cancellationToken)
+            : _inner.ReadIfPresentAsync(key, offset, destination, ifToken, cancellationToken);
+
+    /// <inheritdoc/>
     public async ValueTask<ObjectRead> ReadTailAsync(string key, Memory<byte> destination, CancellationToken cancellationToken)
     {
         if (!CommitKey.TryParse(key, out ulong version))
@@ -218,23 +225,37 @@ internal sealed class SealedObjectStore : IObjectStore
     }
 
     /// <summary>A commit object's bytes from <paramref name="offset"/>, its plaintext when it is sealed, copied into <paramref name="destination"/>.</summary>
-    private async ValueTask<ObjectRead> ReadCommitIntoAsync(string key, ulong version, long offset, Memory<byte> destination, CancellationToken cancellationToken)
+    private async ValueTask<ObjectRead> ReadCommitIntoAsync(string key, ulong version, long offset, Memory<byte> destination, CancellationToken cancellationToken) =>
+        await ReadCommitIntoAsync(key, version, offset, destination, ifPresent: false, cancellationToken).ConfigureAwait(false)
+        ?? throw ObjectNotFoundException.For(key);
+
+    /// <summary>
+    /// <see cref="ReadCommitIntoAsync(string, ulong, long, Memory{byte}, CancellationToken)"/>, with <paramref name="ifPresent"/>
+    /// an absent commit object answered null, asked of the store under this one without an exception.
+    /// </summary>
+    private async ValueTask<ObjectRead?> ReadCommitIntoAsync(
+        string key, ulong version, long offset, Memory<byte> destination, bool ifPresent, CancellationToken cancellationToken)
     {
-        ObjectRange read;
+        ObjectRange? read;
         if (!KnownPlain)
         {
-            read = await ReadCommitAsync(key, version, offset, destination.Length, cancellationToken).ConfigureAwait(false);
+            read = await ReadCommitAsync(key, version, offset, destination.Length, ifPresent, cancellationToken).ConfigureAwait(false);
         }
         else if (offset == 0)
         {
-            read = await PlainCommitAsync(key, destination.Length, cancellationToken).ConfigureAwait(false);
+            read = await PlainCommitAsync(key, destination.Length, ifPresent, cancellationToken).ConfigureAwait(false);
         }
         else
         {
-            read = await _inner.GetRangeAsync(key, offset, destination.Length, cancellationToken).ConfigureAwait(false);
+            read = await InnerRangeAsync(key, offset, destination.Length, ifPresent, cancellationToken).ConfigureAwait(false);
         }
 
-        using ObjectRange range = read;
+        if (read is not { } found)
+        {
+            return null;
+        }
+
+        using ObjectRange range = found;
         range.Bytes.CopyTo(destination.Span);
         long length = range.ObjectLength >= 0 ? range.ObjectLength : await CommitLengthAsync(key, cancellationToken).ConfigureAwait(false);
         return new ObjectRead(range.Length, length, range.Token);
@@ -490,15 +511,25 @@ internal sealed class SealedObjectStore : IObjectStore
             return known.PlainLength;
         }
 
-        Resolved resolved = await ResolveAsync(key, version, 1, cancellationToken).ConfigureAwait(false);
+        Resolved resolved = (await ResolveAsync(key, version, 1, ifPresent: false, cancellationToken).ConfigureAwait(false))!.Value;
         resolved.Head.Dispose();
         return resolved.Layout!.PlainLength;
     }
 
+    /// <summary>A range of the store under this one; with <paramref name="ifPresent"/>, null for an absent key rather than thrown.</summary>
+    private async ValueTask<ObjectRange?> InnerRangeAsync(string key, long offset, int length, bool ifPresent, CancellationToken cancellationToken) =>
+        ifPresent
+            ? await _inner.GetRangeIfPresentAsync(key, offset, length, cancellationToken).ConfigureAwait(false)
+            : await _inner.GetRangeAsync(key, offset, length, cancellationToken).ConfigureAwait(false);
+
     /// <summary>The head of a commit object of a plain dataset, whose magic is still checked: a sealed one among them is refused.</summary>
-    private async ValueTask<ObjectRange> PlainCommitAsync(string key, int length, CancellationToken cancellationToken)
+    private async ValueTask<ObjectRange?> PlainCommitAsync(string key, int length, bool ifPresent, CancellationToken cancellationToken)
     {
-        ObjectRange range = await _inner.GetRangeAsync(key, 0, length, cancellationToken).ConfigureAwait(false);
+        if (await InnerRangeAsync(key, 0, length, ifPresent, cancellationToken).ConfigureAwait(false) is not { } range)
+        {
+            return null;
+        }
+
         if (StartsWith(range, SealedFormat.HeaderMagic))
         {
             range.Dispose();
@@ -508,7 +539,7 @@ internal sealed class SealedObjectStore : IObjectStore
         return range;
     }
 
-    private async ValueTask<ObjectRange> ReadCommitAsync(string key, ulong version, long offset, int length, CancellationToken cancellationToken)
+    private async ValueTask<ObjectRange?> ReadCommitAsync(string key, ulong version, long offset, int length, bool ifPresent, CancellationToken cancellationToken)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(offset);
         ArgumentOutOfRangeException.ThrowIfNegative(length);
@@ -518,7 +549,12 @@ internal sealed class SealedObjectStore : IObjectStore
             Resolved resolved = default;
             if (layout is null)
             {
-                resolved = await ResolveAsync(key, version, offset + (long)length, cancellationToken).ConfigureAwait(false);
+                if (await ResolveAsync(key, version, offset + (long)length, ifPresent, cancellationToken).ConfigureAwait(false) is not { } found)
+                {
+                    return null;
+                }
+
+                resolved = found;
                 if (resolved.Layout is null)
                 {
                     // The dataset turned out plain: the bytes asked for, cut out of the read.
@@ -552,8 +588,15 @@ internal sealed class SealedObjectStore : IObjectStore
                     return layout.Open(resolved.Head.Contiguous().Span, 0, frameStart, frameEnd, offset, wanted, layout.Token);
                 }
 
-                using ObjectRange cipher = await _inner
-                    .GetRangeAsync(key, cipherStart, checked((int)(cipherEnd - cipherStart)), cancellationToken).ConfigureAwait(false);
+                if (await InnerRangeAsync(key, cipherStart, checked((int)(cipherEnd - cipherStart)), ifPresent, cancellationToken).ConfigureAwait(false)
+                    is not { } read)
+                {
+                    // Gone since its layout was read.
+                    Forget(key);
+                    return null;
+                }
+
+                using ObjectRange cipher = read;
                 if (!string.Equals(layout.Token, cipher.Token, StringComparison.Ordinal))
                 {
                     // Removed and created again under its key since its layout was read.
@@ -587,13 +630,17 @@ internal sealed class SealedObjectStore : IObjectStore
     /// layout is null when the object turns out plain on a dataset whose kind was not known yet, the
     /// read handed back as it is.
     /// </summary>
-    private async ValueTask<Resolved> ResolveAsync(string key, ulong version, long plainEnd, CancellationToken cancellationToken)
+    private async ValueTask<Resolved?> ResolveAsync(string key, ulong version, long plainEnd, bool ifPresent, CancellationToken cancellationToken)
     {
         int frameSize = 1 << FrameLog2;
         long reach = Math.Clamp(plainEnd, 1, SpeculativeBytes);
         long frames = ((reach - 1) / frameSize) + 1;
         int window = checked((int)(HeaderAllowance + (frames * (frameSize + SealedFormat.TagBytes))));
-        ObjectRange head = await _inner.GetRangeAsync(key, 0, window, cancellationToken).ConfigureAwait(false);
+        if (await InnerRangeAsync(key, 0, window, ifPresent, cancellationToken).ConfigureAwait(false) is not { } head)
+        {
+            return null;
+        }
+
         bool kept = false;
         try
         {
