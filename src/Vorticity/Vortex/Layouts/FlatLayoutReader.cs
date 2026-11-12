@@ -571,7 +571,10 @@ internal sealed class FlatLayoutReader : LayoutReader
     /// <param name="key">The window's retention key.</param>
     /// <param name="arena">The arena holding the window.</param>
     /// <param name="nodeIndex">The window's node in <paramref name="arena"/>.</param>
-    /// <returns>Always <see langword="true"/>: another context decoding the window is waited for.</returns>
+    /// <returns>
+    /// Always <see langword="true"/>: a window another context is decoding at that moment is decoded here too, rather
+    /// than waited for.
+    /// </returns>
     /// <remarks>
     /// The O(n) checks a node's side tables need are remembered from one window to the next under
     /// the node's check scope, and its shared children are retained once for every window of it:
