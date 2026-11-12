@@ -21,6 +21,30 @@ public sealed partial class VortexFileWriter
     /// <summary>Column chunks compressed side by side whose blob was renumbered onto ids the file met first in their chunk.</summary>
     internal int ColumnChunksRenumbered { get; private set; }
 
+    /// <summary>Column chunks whose zstd frames were compressed ahead of their trials, on the writer's threads, and kept.</summary>
+    internal int ColumnChunksFramedAhead => Volatile.Read(ref _columnChunksFramedAhead);
+
+    private int _columnChunksFramedAhead;
+
+    /// <summary>
+    /// The frames ahead of column <paramref name="field"/>, watching its chunk, node <paramref name="node"/> of
+    /// <paramref name="arena"/>, written on this thread: its trial notes whether it prices zstd on the column's values,
+    /// for the column's next chunk compressed side by side. Null for a writer that compresses none so.
+    /// </summary>
+    private ZstdPlan.Ahead? Watch(int field, CanonicalArena arena, int node)
+    {
+        if (_lanes <= 1 || !_isTabular || _fieldCount <= 1)
+        {
+            return null;
+        }
+
+        ChunkColumns columns = _chunkColumns ??= ChunkColumns.Take(this);
+        return columns.Watch(field, arena, node);
+    }
+
+    /// <summary>The zstd level column <paramref name="field"/>'s frames are compressed at, as its workspace has it; 0 for the default.</summary>
+    private int LevelOf(int field) => ZstdLevelOf(field) is var level and not 0 ? level : _zstdLevel;
+
     /// <summary>
     /// Whether a chunk's columns are compressed side by side on the writer's threads: a tabular file
     /// of several columns written on several lanes, each column chunked with the file, once the
@@ -91,8 +115,12 @@ public sealed partial class VortexFileWriter
         WorkFan fan = Fan!;
         try
         {
-            columns.Order(fan.Items(_fieldCount));
-            await fan.RunAsync(columns, _fieldCount, arena).ConfigureAwait(false);
+            // A column's frames compressed ahead are items before every column's, and its compression waits for them.
+            int ahead = columns.PlanAhead(arena, columns.Nodes, withColumns: true);
+            Span<int> items = fan.Items(ahead + _fieldCount);
+            columns.LayAhead(items[..ahead]);
+            columns.Order(items[ahead..]);
+            await fan.RunAsync(columns, ahead + _fieldCount, arena).ConfigureAwait(false);
             await WriteColumnBlobsAsync(columns, firstBlock, blocks, cancellationToken).ConfigureAwait(false);
         }
         finally
@@ -187,10 +215,14 @@ public sealed partial class VortexFileWriter
         WorkFan fan = Fan!;
         try
         {
-            Span<int> items = fan.Items(_fieldCount * 4);
-            int count = FeedItems(items, IngestItems(arena, items));
-            columns.Fuse(items[..count], rows, firstBlock, blocks);
-            await fan.RunAsync(columns, count, arena, rows).ConfigureAwait(false);
+            // A column's frames compressed ahead are items before every accumulator, and its compression waits for them too.
+            int ahead = columns.PlanAhead(arena, _fieldNodes, withColumns: false);
+            Span<int> items = fan.Items(ahead + (_fieldCount * 4));
+            columns.LayAhead(items[..ahead]);
+            Span<int> ingest = items[ahead..];
+            int count = FeedItems(ingest, IngestItems(arena, ingest));
+            columns.Fuse(ingest[..count], rows, firstBlock, blocks);
+            await fan.RunAsync(columns, ahead + count, arena, rows).ConfigureAwait(false);
             _blockFilled = (_blockFilled + rows) % _blockRows;
             BatchesIngestedAcross++;
             await WriteColumnBlobsAsync(columns, firstBlock, blocks, cancellationToken).ConfigureAwait(false);
@@ -268,8 +300,9 @@ public sealed partial class VortexFileWriter
         /// <summary>Per column, the ticks its compression took the last time it ran.</summary>
         private long[] _took = [];
 
-        // In an ingest across (see Fuse): per column, its accumulators still to run, and the chunk's
-        // rows and blocks its statistics are taken over.
+        // Per column, its items still to run before it is compressed: in an ingest across (see Fuse) its accumulators,
+        // and its frames compressed ahead (see PlanAhead), with its own item outside an ingest; 0 for a column compressed
+        // as its item comes. In an ingest across, the chunk's rows and blocks its statistics are taken over.
         private int[] _parts = [];
         private bool _fused;
         private int _rows;
@@ -286,6 +319,16 @@ public sealed partial class VortexFileWriter
         private int[] _gatheredFirst = [];
         private int[] _gatheredBlocks = [];
         private int[] _gatheredRows = [];
+
+        // Per column, its zstd frames compressed ahead of its trials, kept from one chunk to the next with whether its
+        // trial priced zstd (see ZstdPlan.Ahead).
+        private ZstdPlan.Ahead?[] _ahead = [];
+
+        /// <summary>
+        /// The bits of an item of frames compressed ahead that number it among its column's: the column is above them,
+        /// and the item's number is their complement, below zero, apart from every other item's.
+        /// </summary>
+        private const int AheadBits = 10;
 
         /// <summary>Per column, the chunk's node the column is read from.</summary>
         internal Span<int> Nodes => _nodes;
@@ -319,6 +362,11 @@ public sealed partial class VortexFileWriter
                 Array.Clear(fresh);
             }
 
+            foreach (ZstdPlan.Ahead? ahead in _ahead)
+            {
+                ahead?.Forget();
+            }
+
             _knownCount = 0;
             _writer = null;
             SpareSlots<ChunkColumns>.Give(this);
@@ -347,24 +395,7 @@ public sealed partial class VortexFileWriter
                 _bounds = new Indexes.ChunkBlockBounds?[fields];
             }
 
-            if (_nodes.Length < fields)
-            {
-                _nodes = new int[fields];
-                _stats = new ChunkStats[fields];
-                _blobs = new ArrayBlobWriter.BlobLease[fields];
-                _fresh = new string[fields][];
-                _freshCounts = new int[fields];
-                _took = new long[fields];
-                _gathered = new Gathering?[fields];
-                _gatheredFirst = new int[fields];
-                _gatheredBlocks = new int[fields];
-                _gatheredRows = new int[fields];
-                for (int field = 0; field < fields; field++)
-                {
-                    _fresh[field] = new string[4];
-                }
-            }
-
+            Size(fields);
             Array.Clear(_gathered, 0, fields);
 
             int count = file.Count;
@@ -380,6 +411,117 @@ public sealed partial class VortexFileWriter
 
             _knownCount = count;
         }
+
+        /// <summary>Makes room for <paramref name="fields"/> columns, keeping what the columns hold when there is.</summary>
+        private void Size(int fields)
+        {
+            if (_nodes.Length < fields)
+            {
+                _nodes = new int[fields];
+                _parts = new int[fields];
+                _ahead = new ZstdPlan.Ahead?[fields];
+                _stats = new ChunkStats[fields];
+                _blobs = new ArrayBlobWriter.BlobLease[fields];
+                _fresh = new string[fields][];
+                _freshCounts = new int[fields];
+                _took = new long[fields];
+                _gathered = new Gathering?[fields];
+                _gatheredFirst = new int[fields];
+                _gatheredBlocks = new int[fields];
+                _gatheredRows = new int[fields];
+                for (int field = 0; field < fields; field++)
+                {
+                    _fresh[field] = new string[4];
+                }
+            }
+        }
+
+        /// <summary>
+        /// Plans, for each column of the chunk compressed here rather than gathered, shredded or coded, the zstd frames
+        /// it compresses ahead of its trials, of its node in <paramref name="nodes"/>: those of a column whose trial
+        /// priced zstd on its values the chunk before (see <see cref="ZstdPlan.Ahead"/>), and which took more than its
+        /// share of the writer's threads. Each column's are counted among the items it waits for, with its own item when
+        /// <paramref name="withColumns"/>.
+        /// </summary>
+        /// <remarks>
+        /// A chunk takes at least as long as its longest column, and a column that took more than the chunk's columns
+        /// together over the threads is the one that keeps the others waiting: its frames, spread, shorten the chunk.
+        /// Those of a column within its share would only fill threads the other columns fill, and their rooms, sized
+        /// for each frame's worst case, would hold memory for nothing: a file of many like columns compresses none
+        /// ahead, and no more columns than threads ever do. The first chunk across reads what each column took on the
+        /// writer's thread (<see cref="Took"/>).
+        /// </remarks>
+        /// <returns>The items the frames take, for <see cref="LayAhead"/> to lay out.</returns>
+        internal int PlanAhead(CanonicalArena chunk, ReadOnlySpan<int> nodes, bool withColumns)
+        {
+            VortexFileWriter writer = _writer!;
+            int fields = writer._fieldCount;
+            int lanes = writer._lanes;
+            if (lanes <= 1 || fields >= 1 << (31 - AheadBits))
+            {
+                return 0;
+            }
+
+            long total = 0;
+            for (int field = 0; field < fields; field++)
+            {
+                total += _took[field];
+            }
+
+            int items = 0;
+            for (int field = 0; field < fields; field++)
+            {
+                if (_gathered[field] is not null || writer._shredding?[field] is not null || writer.Codes(field))
+                {
+                    continue;
+                }
+
+                // Within its share, the column is watched alone, its trial noting what it prices.
+                ZstdPlan.Ahead ahead = _ahead[field] ??= new ZstdPlan.Ahead();
+                bool longest = _took[field] * lanes > total;
+                int planned = ahead.Plan(chunk, nodes[field], writer._rowBlock, writer.LevelOf(field), longest ? lanes : 1);
+                if (planned > 0)
+                {
+                    _parts[field] += planned + (withColumns ? 1 : 0);
+                    items += planned;
+                }
+            }
+
+            return items;
+        }
+
+        /// <summary>The items of the frames <see cref="PlanAhead"/> planned, each its column above its number, complemented.</summary>
+        internal void LayAhead(Span<int> items)
+        {
+            int at = 0;
+            for (int field = 0; at < items.Length; field++)
+            {
+                if (_ahead[field] is { Ready: true } ahead)
+                {
+                    for (int item = 0; item < ahead.Items; item++)
+                    {
+                        items[at++] = ~((field << AheadBits) | item);
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// The frames ahead of column <paramref name="field"/> set to watch its chunk, node <paramref name="node"/> of
+        /// <paramref name="chunk"/>, written on the writer's thread: its trial notes what it prices, for the column's
+        /// next chunk compressed here.
+        /// </summary>
+        internal ZstdPlan.Ahead Watch(int field, CanonicalArena chunk, int node)
+        {
+            VortexFileWriter writer = _writer!;
+            Size(writer._fieldCount);
+            ZstdPlan.Ahead ahead = _ahead[field] ??= new ZstdPlan.Ahead();
+            ahead.Plan(chunk, node, writer._rowBlock, writer.LevelOf(field), lanes: 1);
+            return ahead;
+        }
+
+        /// <summary>Notes the ticks column <paramref name="field"/>'s chunk took to compress on the writer's thread, for the columns' order and their frames ahead.</summary>
+        internal void Took(int field, long ticks) => _took[field] = ticks;
 
         /// <summary>
         /// Lays the columns out in <paramref name="order"/>, longest first, by what each took the
@@ -408,11 +550,6 @@ public sealed partial class VortexFileWriter
         /// </summary>
         internal void Fuse(Span<int> items, int rows, int firstBlock, int blocks)
         {
-            if (_parts.Length < _nodes.Length)
-            {
-                _parts = new int[_nodes.Length];
-            }
-
             for (int i = 0; i < items.Length; i++)
             {
                 // A column's index builders are fed beside its accumulators, and its compression waits for none of them.
@@ -479,24 +616,35 @@ public sealed partial class VortexFileWriter
         public void Run(WorkFan fan, int item)
         {
             CanonicalArena? state = fan.State as CanonicalArena;
+            int entry = fan.Item(item);
+            if (entry < 0)
+            {
+                int frames = ~entry;
+                int column = frames >> AheadBits;
+                _ahead[column]!.Run(frames & ((1 << AheadBits) - 1));
+                Counted(column, state!);
+                return;
+            }
+
             if (!_fused)
             {
-                int column = fan.Item(item);
-                if (_gathered[column] is { } gathering)
+                if (_gathered[entry] is { } gathering)
                 {
-                    RunGathered(column, gathering, state);
+                    RunGathered(entry, gathering, state);
+                }
+                else if (_parts[entry] == 0)
+                {
+                    Compress(entry, state!);
                 }
                 else
                 {
-                    Compress(column, state!);
+                    Counted(entry, state!);
                 }
 
                 return;
             }
 
             CanonicalArena chunk = state!;
-
-            int entry = fan.Item(item);
             int field = entry >> 3;
             VortexFileWriter writer = _writer!;
             if ((entry & 7) == 0)
@@ -506,16 +654,34 @@ public sealed partial class VortexFileWriter
             }
 
             writer.IngestPart(field, (ColumnWriter.IngestParts)(entry & 7), chunk, _rows);
+            Counted(field, chunk);
+        }
 
-            // The decrement orders every accumulator of the column before the compression that
-            // reads what they summed, whichever threads ran them.
-            if (Interlocked.Decrement(ref _parts[field]) == 0)
+        /// <summary>
+        /// Counts one of the items column <paramref name="field"/> waits for done, and compresses the column after the
+        /// last: its accumulators in an ingest across, and its frames compressed ahead.
+        /// </summary>
+        /// <remarks>
+        /// The decrement orders every item of the column before the compression that reads what they summed and
+        /// compressed, whichever threads ran them. A column's own item outside an ingest counts 1 until it runs, so that
+        /// a column outside one reads 0 only when it has no item to wait for.
+        /// </remarks>
+        private void Counted(int field, CanonicalArena chunk)
+        {
+            if (Interlocked.Decrement(ref _parts[field]) != 0)
             {
+                return;
+            }
+
+            if (_fused)
+            {
+                VortexFileWriter writer = _writer!;
                 int node = writer._fieldNodes[field];
                 _nodes[field] = node;
                 _stats[field] = writer.ChunkStatsOf(field, chunk, node, _rows, _firstBlock, _blocks);
-                Compress(field, chunk);
             }
+
+            Compress(field, chunk);
         }
 
         /// <summary>
@@ -572,6 +738,10 @@ public sealed partial class VortexFileWriter
             long began = Stopwatch.GetTimestamp();
             VortexFileWriter writer = _writer!;
             CompressionLane lane = CompressionLane.Take(writer);
+
+            // What the column's frames compressed ahead took counts as its own, every item done.
+            ZstdPlan.Ahead? ahead = _ahead[field];
+            long framed = ahead is { Ready: true } ? ahead.Ticks : 0;
             try
             {
                 lane.Encodings.Reset(_known.AsSpan(0, _knownCount));
@@ -593,6 +763,7 @@ public sealed partial class VortexFileWriter
                 }
 
                 lane.Blobs.ColumnLevel = writer.ZstdLevelOf(field);
+                lane.Blobs.Ahead = ahead;
                 if (plan is not null)
                 {
                     Indexes.ChunkBlockBounds? bounds = writer.BoundsFor(field);
@@ -607,14 +778,20 @@ public sealed partial class VortexFileWriter
                     _blobs[field] = ArrayBlobWriter.Write(lane.Blobs, lane.Arena, local, lane.Encodings, writer._compress, stats);
                 }
                 KeepFresh(field, lane.Encodings);
+                if (ahead is { Taken: true })
+                {
+                    Interlocked.Increment(ref writer._columnChunksFramedAhead);
+                }
             }
             finally
             {
                 lane.Blobs.ColumnLevel = 0;
+                lane.Blobs.Ahead = null;
+                ahead?.Finish();
                 lane.Give();
             }
 
-            _took[field] = Stopwatch.GetTimestamp() - began;
+            _took[field] = Stopwatch.GetTimestamp() - began + framed;
         }
 
         /// <summary>Keeps, as the column's, the ids <paramref name="encodings"/> took past the file's.</summary>
@@ -682,6 +859,7 @@ public sealed partial class VortexFileWriter
             {
                 _blobs[field].Dispose();
                 _blobs[field] = default;
+                _ahead[field]?.Finish();
             }
 
             // A failed ingest across leaves counts behind; the next chunk starts from none. A flush ends

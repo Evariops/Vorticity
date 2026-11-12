@@ -27,7 +27,7 @@ namespace Vorticity.Writing;
 /// holds are rented, and whoever holds the plan last -- the trial that lost, or the blob that
 /// writes it -- gives them back, once.
 /// </remarks>
-internal readonly struct ZstdPlan
+internal readonly partial struct ZstdPlan
 {
     /// <summary>Numbers kept per frame: its end in <see cref="Data"/>, the bytes it decompresses to, its values.</summary>
     private const int FrameFields = 3;
@@ -122,7 +122,15 @@ internal readonly struct ZstdPlan
         bool anyGain)
     {
         int rows = node.Length;
+        int blocks = Blocks(rows, frameRows);
+        Ahead? ahead = workspace?.Ahead is null ? null : AheadOf(arena, in node, workspace, frameRows);
+        if (ahead is { Ready: true })
+        {
+            return Assemble(ahead, canonicalSize, anyGain ? 1 : MarginNumerator, anyGain ? 1 : MarginDenominator, views: true);
+        }
+
         long streamBytes = StreamBytes(arena, node, out int valueCount);
+        ahead?.Note(streamBytes, blocks);
         if (valueCount == 0 || streamBytes > int.MaxValue - StreamSlack)
         {
             return null;
@@ -131,7 +139,6 @@ internal readonly struct ZstdPlan
         // Rented, not allocated: pricing zstd needs two buffers the size of the column for a
         // candidate that may lose. A block's frame ends where its values end, so the stream is cut
         // as it is laid out: its end and its values, per block, go into the frame table.
-        int blocks = Blocks(rows, frameRows);
         byte[] stream = WorkArrays.Rent<byte>((int)streamBytes + StreamSlack);
         int[] frames = WorkArrays.Rent<int>(blocks * FrameFields);
         try
@@ -211,41 +218,13 @@ internal readonly struct ZstdPlan
         ReadOnlySpan<byte> heap = node.DataBufferCount == 1 ? node.GetDataBuffer(0).Span : default;
         bool masked = !valid.IsAllValid;
         ReadOnlySpan<byte> bits = masked ? valid.Bits[..((valid.BitOffset + rows + 7) >> 3)] : default;
-        ref byte view = ref MemoryMarshal.GetReference(views);
-        ref byte data = ref MemoryMarshal.GetReference(heap);
-        ref byte into = ref MemoryMarshal.GetReference(stream);
-        ref byte bit = ref MemoryMarshal.GetReference(bits);
         nint at = 0;
         int values = 0;
         for (int block = 0; block < blocks; block++)
         {
             nint row = (nint)Math.Min((long)block * frameRows, rows);
             nint end = (nint)Math.Min((long)(block + 1) * frameRows, rows);
-            while (true)
-            {
-                row = masked
-                    ? heap.Length >= Reach
-                        ? BlendMasked(ref view, ref data, heap.Length, ref into, ref at, ref bit, valid.BitOffset, row, end, ref values)
-                        : LayMasked(ref view, ref data, heap.Length, ref into, ref at, ref bit, valid.BitOffset, row, end, ref values)
-                    : heap.Length >= Reach
-                        ? Blend(ref view, ref data, heap.Length, ref into, ref at, row, end)
-                        : Lay(ref view, ref data, heap.Length, ref into, ref at, row, end);
-                if (row == end)
-                {
-                    break;
-                }
-
-                // A value the loop left: in another data buffer, or too near the end of its own for
-                // a 16-byte read. The accessor resolves the buffer and refuses a view out of it.
-                ReadOnlySpan<byte> value = strings.At((int)row);
-                Span<byte> slot = stream[(int)at..];
-                BinaryPrimitives.WriteUInt32LittleEndian(slot, (uint)value.Length);
-                value.CopyTo(slot[sizeof(uint)..]);
-                at += sizeof(uint) + value.Length;
-                values++;
-                row++;
-            }
-
+            LayRows(in strings, views, heap, bits, valid.BitOffset, masked, stream, row, end, ref at, ref values);
             if (!masked)
             {
                 values = (int)end;
@@ -253,6 +232,45 @@ internal readonly struct ZstdPlan
 
             frames[(block * FrameFields) + 1] = (int)at;
             frames[(block * FrameFields) + 2] = values;
+        }
+    }
+
+    /// <summary>
+    /// Lays rows <paramref name="row"/> up to <paramref name="end"/> of a <c>VarBinView</c> node's valid values into
+    /// <paramref name="stream"/> from <paramref name="at"/>, each behind its <c>u32</c> length, moving
+    /// <paramref name="at"/> past them and counting into <paramref name="values"/> the valid ones of a masked node.
+    /// </summary>
+    private static void LayRows(
+        in ViewValues strings, ReadOnlySpan<byte> views, ReadOnlySpan<byte> heap, ReadOnlySpan<byte> bits, int bitOffset,
+        bool masked, Span<byte> stream, nint row, nint end, ref nint at, ref int values)
+    {
+        ref byte view = ref MemoryMarshal.GetReference(views);
+        ref byte data = ref MemoryMarshal.GetReference(heap);
+        ref byte into = ref MemoryMarshal.GetReference(stream);
+        ref byte bit = ref MemoryMarshal.GetReference(bits);
+        while (true)
+        {
+            row = masked
+                ? heap.Length >= Reach
+                    ? BlendMasked(ref view, ref data, heap.Length, ref into, ref at, ref bit, bitOffset, row, end, ref values)
+                    : LayMasked(ref view, ref data, heap.Length, ref into, ref at, ref bit, bitOffset, row, end, ref values)
+                : heap.Length >= Reach
+                    ? Blend(ref view, ref data, heap.Length, ref into, ref at, row, end)
+                    : Lay(ref view, ref data, heap.Length, ref into, ref at, row, end);
+            if (row == end)
+            {
+                return;
+            }
+
+            // A value the loop left: in another data buffer, or too near the end of its own for
+            // a 16-byte read. The accessor resolves the buffer and refuses a view out of it.
+            ReadOnlySpan<byte> value = strings.At((int)row);
+            Span<byte> slot = stream[(int)at..];
+            BinaryPrimitives.WriteUInt32LittleEndian(slot, (uint)value.Length);
+            value.CopyTo(slot[sizeof(uint)..]);
+            at += sizeof(uint) + value.Length;
+            values++;
+            row++;
         }
     }
 
@@ -594,12 +612,18 @@ internal readonly struct ZstdPlan
 
         int rows = node.Length;
         ReadOnlySpan<byte> source = node.Values.Span;
+        int blocks = Blocks(rows, frameRows);
+        Ahead? ahead = workspace?.Ahead is null ? null : AheadOf(arena, in node, workspace, frameRows);
+        if (ahead is { Ready: true })
+        {
+            return Assemble(
+                ahead, canonicalSize, anyGain ? 1 : PrimitiveMarginNumerator, anyGain ? 1 : PrimitiveMarginDenominator, views: false);
+        }
 
         // With no null row the compacting loop would copy the source to itself, so the source is
         // compressed as it stands. It has to be sliced at `rows * width`: the arena's block can be
         // longer than the rows this node owns, and a longer input is a different frame.
         bool allValid = node.Validity.IsAllValid;
-        int blocks = Blocks(rows, frameRows);
         byte[]? stream = allValid ? null : WorkArrays.Rent<byte>((rows * width) + CompactSlack);
         int[] frames = WorkArrays.Rent<int>(Math.Max(blocks, 1) * FrameFields);
         try
@@ -630,6 +654,7 @@ internal readonly struct ZstdPlan
                 frames[(block * FrameFields) + 2] = valueCount;
             }
 
+            ahead?.Note((long)valueCount * width, blocks);
             if (valueCount == 0)
             {
                 WorkArrays.Return(frames);

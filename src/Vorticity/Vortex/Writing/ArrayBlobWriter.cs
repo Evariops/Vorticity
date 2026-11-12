@@ -3210,6 +3210,13 @@ internal static class ArrayBlobWriter
         internal int FrameRows { get; init; }
 
         /// <summary>
+        /// The zstd frames of the column being written, compressed ahead of its trials on the writer's threads, which a
+        /// trial pricing zstd on the column's own values takes, and which note what it priced for the column's next
+        /// chunk; null for none. Set by the writer around a column's write.
+        /// </summary>
+        internal ZstdPlan.Ahead? Ahead { get; set; }
+
+        /// <summary>
         /// Whether every array the workspace writes is priced by its bytes alone, a column's
         /// children -- an ALP's integers, a dictionary's codes, a run's ends -- as well as the
         /// column, as the size-first profile asks and the reference's compact compressor does.
