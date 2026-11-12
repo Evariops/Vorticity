@@ -129,7 +129,7 @@ double? mean = await file.Scan<Reading>().Where(r => r.Day >= 900).AverageAsync(
 
 ## Performance
 
-Where Vorticity is compared with another implementation, the figure is a speedup: the other side's time divided by Vorticity's, so anything above 1.00x means Vorticity took less time. The machines are an Apple M4 Pro (arm64, 14 cores, macOS) and an AMD Ryzen 9 7950X (x64, 16 cores and 32 threads, Windows 11). Every figure was measured on 2026-11-05, against Vortex Rust 0.90.0 where Rust is the other side, and [how it is measured](#how-it-is-measured) says what both sides do.
+Where Vorticity is compared with another implementation, the figure is a speedup: the other side's time divided by Vorticity's, so anything above 1.00x means Vorticity took less time. The machines are an Apple M4 Pro (arm64, 14 cores, macOS) and an AMD Ryzen 9 7950X (x64, 16 cores and 32 threads, Windows 11). The M4 Pro's figures and the codecs' were measured on 2026-11-05, the Ryzen's others on 2026-11-12, against Vortex Rust 0.90.0 where Rust is the other side, and [how it is measured](#how-it-is-measured) says what both sides do.
 
 ### Against Vortex's Rust implementation
 
@@ -137,12 +137,12 @@ Vortex's Rust implementation and Vorticity, each in its own process, read and wr
 
 | scenario | M4 Pro, 1 core | M4 Pro, 14 cores | 7950X, 1 core | 7950X, 32 threads |
 |---|---:|---:|---:|---:|
-| read every column | 2.09x | 2.23x | 3.01x | 1.60x |
-| read one column of four | 2.58x | 2.60x | 2.57x | 1.99x |
-| filter, 1 % of the rows | 1.17x | 2.55x | 1.06x | 2.35x |
-| filter, half the rows | 2.05x | 1.88x | 2.67x | 1.73x |
-| take 1,000 scattered rows | 1.65x | 1.00x | 1.44x | 1.04x |
-| write the table back out | 2.13x | 1.70x | 2.36x | 1.51x |
+| read every column | 2.09x | 2.23x | 3.01x | 1.63x |
+| read one column of four | 2.58x | 2.60x | 2.61x | 2.09x |
+| filter, 1 % of the rows | 1.17x | 2.55x | 1.20x | 2.30x |
+| filter, half the rows | 2.05x | 1.88x | 2.58x | 2.02x |
+| take 1,000 scattered rows | 1.65x | 1.00x | 1.37x | 1.17x |
+| write the table back out | 2.13x | 1.70x | 2.34x | 1.54x |
 
 Rust keeps the lead in a few places on the M4 Pro: a prefix filter over FSST strings (0.83x), a band over bit-packed integers (0.91x), 64 rows taken from a Pcodec file with nulls and from an ALP file (0.71x and 0.78x), and 10 of the 61 encodings decoded alone, from 0.92x to 1.00x, mostly masked, boolean and decimal columns. The Pcodec files decode in less time there, from 1.04x to 3.47x. On the Ryzen, Vorticity decodes all 61 encodings in less time, Pcodec files included.
 
@@ -159,15 +159,15 @@ The narrowest lead is db-benchmark's q10 on 14 threads, six keys and nearly a gr
 
 ### Parquet
 
-Parquet reads through the same engine as Vortex: a page decompresses straight into the buffer that becomes its column, plain values and dictionaries are read as views rather than copied, and a scan of the taxi trips below, 3 million rows, allocates 82 KiB. The table times a scan of every column of three real files on the Ryzen 9 7950X, against the same rows rewritten as Vortex:
+Parquet reads through the same engine as Vortex: a page decompresses straight into the buffer that becomes its column, plain values and dictionaries are read as views rather than copied, and a scan of the taxi trips below, 3 million rows, allocates 88 KiB. The table times a scan of every column of three real files on the Ryzen 9 7950X, against the same rows rewritten as Vortex:
 
 | scan of every column, in ms | Parquet, 1 thread | Parquet, 32 threads | Vortex, 32 threads |
 |---|---:|---:|---:|
-| New York's taxi trips, 3.1M rows of 19 columns, GZIP | 152 | 35.0 | 17.4 |
-| ClickBench's hits, 1M rows of 105 columns, Snappy | 165 | 59.9 | 48.1 |
-| a nested file, 2M rows of 22 columns, Snappy | 113 | 69.7 | 46.3 |
+| New York's taxi trips, 3.1M rows of 19 columns, GZIP | 154 | 31.0 | 17.3 |
+| ClickBench's hits, 1M rows of 105 columns, Snappy | 163 | 61.1 | 47.3 |
+| a nested file, 2M rows of 22 columns, Snappy | 112 | 69.2 | 46.0 |
 
-On one thread the codec weighs most: inflating the taxi trips' GZIP pages takes 122 ms of the 152, even though Vorticity decodes GZIP with its own DEFLATE decoder, 17 % faster than .NET's `GZipStream`.
+On one thread the codec weighs most: inflating the taxi trips' GZIP pages takes 122 ms of the 154, even though Vorticity decodes GZIP with its own DEFLATE decoder, 15 % faster than .NET's `GZipStream`.
 
 ### Zstandard and LZ4
 
