@@ -12,27 +12,28 @@ endorsed by The Apache Software Foundation, the Vortex project or LF Projects, L
 
 ## In short
 
-* **On 32 threads, Parquet reads in 1.2 to 2.0 times Vortex's time**: the taxi trips in 35.0 ms
-  against 17.4 for their Vortex copy, ClickBench's hits in 59.9 against 48.1, the nested file in 69.7
-  against 46.3. Every value a scan returns is read, on the caller's thread.
+* **On 32 threads, Parquet reads in 1.3 to 1.8 times Vortex's time**: the taxi trips in 31.0 ms
+  against 17.3 for their Vortex copy, ClickBench's hits in 61.1 against 47.3, the nested file in 69.2
+  against 46.0. Every value a scan returns is read, on the caller's thread.
 * **On one thread, a compressed Parquet file pays for its codec**: the taxi trips, compressed with
-  GZIP, read in 152 ms against 25.3, four fifths of it decompression. ClickBench's hits, compressed
-  with Snappy, read in 165 against 73.4.
-* **Parquet writes the report's table faster than Vortex**, in 0.69 of Vortex's time on one thread
-  and 0.73 on 32, and ClickBench's hits from 8 threads, in 0.78 on 32. Vortex writes the taxi trips
+  GZIP, read in 154 ms against 22.2, four fifths of it decompression. ClickBench's hits, compressed
+  with Snappy, read in 163 against 72.3.
+* **Parquet writes the report's table faster than Vortex**, in 0.70 of Vortex's time on one thread
+  and 0.62 on 32, and ClickBench's hits from 8 threads, in 0.74 on 32. Vortex writes the taxi trips
   and the nested file faster at every degree. The taxi trips, whose GZIP pages Parquet reads first,
-  take 586 ms on one thread against 216.
+  take 586 ms on one thread against 206.
 * **Threads pay up to 4** for every scan here but Parquet's taxi trips. Past them a scan takes what
   the caller's thread takes to read the values it is given.
 * **A file read again reads faster**: a session keeps the files it closed mapped, and ClickBench's
-  scan on 32 threads then takes 54.5 ms instead of 59.9.
+  scan on 32 threads then takes 52.3 ms instead of 61.1.
 * **A read allocates per call, not per row**: a scan of the taxi trips' three million rows allocates
-  83 KiB.
+  88 KiB.
 
 ## How it is measured
 
 * **The machine.** An AMD Ryzen 9 7950X (Zen 4, 16 cores and 32 threads, AVX-512) under Windows 11,
-  with .NET 11 (11.0.0-rc.1) and its JIT.
+  with .NET 11 (11.0.0-rc.3) and its JIT. The figures were measured on 2026-11-12, at commit
+  `acd910ae`.
 * **The same work on both formats**, in one process, through the same scan: only the open and the
   write are each format's own, and both must return the same rows. Every action reads every value
   it returns, on the caller's thread, as a loop over a scan reads them: a string's bytes, a list's
@@ -71,41 +72,42 @@ The nested file is drawn from a fixed seed, so that every machine writes the sam
 
 | action | threads | Vortex, ms | Parquet, ms | ratio | Vortex, allocated | Parquet, allocated |
 |---|---:|---:|---:|---:|---:|---:|
-| `open` | 1 | 0.14 | 0.13 | 0.90 | 3.0 KiB | 6.6 KiB |
-| `scan` | 1 | 3.71 | 2.98 | 0.80 | 22.7 KiB | 45.8 KiB |
-| `project` | 1 | 0.31 | 0.38 | 1.21 | 17.2 KiB | 43.9 KiB |
-| `filter-narrow` | 1 | 0.29 | 0.25 | 0.84 | 52.1 KiB | 123.5 KiB |
-| `filter-wide` | 1 | 1.67 | 1.69 | 1.01 | 33.8 KiB | 91.5 KiB |
-| `take` | 1 | 4.18 | 3.53 | 0.85 | 70.8 KiB | 85.2 KiB |
-| `write` | 1 | 24.9 | 17.3 | 0.69 | 60.7 KiB | 407.3 KiB |
-| `open` | 32 | 0.12 | 0.12 | 1.03 | 3.0 KiB | 6.6 KiB |
-| `scan` | 32 | 2.69 | 1.75 | 0.65 | 33.5 KiB | 84.8 KiB |
-| `project` | 32 | 0.27 | 0.38 | 1.43 | 31.7 KiB | 44.8 KiB |
-| `filter-narrow` | 32 | 0.30 | 0.24 | 0.81 | 52.8 KiB | 124.4 KiB |
-| `filter-wide` | 32 | 0.91 | 1.69 | 1.86 | 39.1 KiB | 92.3 KiB |
-| `take` | 32 | 1.79 | 2.38 | 1.33 | 119.4 KiB | 124.2 KiB |
-| `write` | 32 | 10.5 | 7.60 | 0.73 | 71.5 KiB | 595.5 KiB |
+| `open` | 1 | 0.13 | 0.13 | 0.94 | 3.1 KiB | 6.7 KiB |
+| `scan` | 1 | 3.56 | 3.00 | 0.84 | 21.9 KiB | 47.0 KiB |
+| `project` | 1 | 0.30 | 0.38 | 1.27 | 15.9 KiB | 45.0 KiB |
+| `filter-narrow` | 1 | 0.31 | 0.24 | 0.78 | 51.6 KiB | 124.7 KiB |
+| `filter-wide` | 1 | 1.69 | 1.69 | 1.00 | 32.9 KiB | 92.7 KiB |
+| `take` | 1 | 4.05 | 3.56 | 0.88 | 62.1 KiB | 86.5 KiB |
+| `write` | 1 | 24.4 | 17.2 | 0.70 | 41.4 KiB | 273.5 KiB |
+| `open` | 32 | 0.12 | 0.12 | 1.04 | 3.1 KiB | 6.7 KiB |
+| `scan` | 32 | 2.55 | 1.77 | 0.70 | 27.3 KiB | 77.5 KiB |
+| `project` | 32 | 0.27 | 0.39 | 1.44 | 21.6 KiB | 45.9 KiB |
+| `filter-narrow` | 32 | 0.29 | 0.24 | 0.84 | 52.3 KiB | 125.6 KiB |
+| `filter-wide` | 32 | 1.55 | 1.69 | 1.09 | 35.8 KiB | 93.6 KiB |
+| `take` | 32 | 1.79 | 2.38 | 1.33 | 87.2 KiB | 117.0 KiB |
+| `write` | 32 | 11.7 | 7.25 | 0.62 | 56.4 KiB | 435.5 KiB |
 
 Parquet's file is about half the size of Vortex's, 1.3 MB against 2.4. Parquet scans, writes and
 reads the narrow filter in less time on one thread and on 32, and takes rows faster on one. Vortex
-leads on the projection, and on 32 threads on the wide filter and the take.
+leads on the projection, and on 32 threads on the take and, by less, the wide filter: its 32-thread
+figure lands between 1.2 and 1.8 ms from one process to the next.
 
 ### The taxi trips
 
 | action | threads | Vortex, ms | Parquet, ms | ratio | Vortex, allocated | Parquet, allocated |
 |---|---:|---:|---:|---:|---:|---:|
-| `open` | 1 | 0.19 | 0.12 | 0.62 | 7.5 KiB | 11.7 KiB |
-| `scan` | 1 | 25.3 | 152 | 6.01 | 126.7 KiB | 82.6 KiB |
-| `project` | 1 | 1.31 | 2.63 | 2.00 | 53.3 KiB | 50.3 KiB |
-| `take` | 1 | 21.8 | 150 | 6.87 | 173.9 KiB | 122.0 KiB |
-| `write` | 1 | 216 | 586 | 2.72 | 1.1 MiB | 2.3 MiB |
-| `open` | 32 | 0.13 | 0.11 | 0.85 | 7.5 KiB | 11.7 KiB |
-| `scan` | 32 | 17.4 | 35.0 | 2.01 | 127.6 KiB | 129.4 KiB |
-| `project` | 32 | 0.95 | 2.62 | 2.75 | 83.5 KiB | 51.4 KiB |
-| `take` | 32 | 18.9 | 22.4 | 1.19 | 232.7 KiB | 168.0 KiB |
-| `write` | 32 | 83.6 | 137 | 1.64 | 600.0 KiB | 4.3 MiB |
+| `open` | 1 | 0.18 | 0.12 | 0.66 | 7.5 KiB | 11.9 KiB |
+| `scan` | 1 | 22.2 | 154 | 6.91 | 124.6 KiB | 88.1 KiB |
+| `project` | 1 | 1.33 | 2.57 | 1.93 | 52.0 KiB | 55.1 KiB |
+| `take` | 1 | 22.0 | 153 | 6.95 | 167.0 KiB | 127.5 KiB |
+| `write` | 1 | 206 | 586 | 2.84 | 217.3 KiB | 1.4 MiB |
+| `open` | 32 | 0.13 | 0.11 | 0.86 | 7.5 KiB | 11.9 KiB |
+| `scan` | 32 | 17.3 | 31.0 | 1.79 | 125.7 KiB | 162.5 KiB |
+| `project` | 32 | 1.12 | 2.58 | 2.31 | 63.3 KiB | 56.2 KiB |
+| `take` | 32 | 18.3 | 24.6 | 1.34 | 187.8 KiB | 228.2 KiB |
+| `write` | 32 | 87.8 | 152 | 1.73 | 243.0 KiB | 3.0 MiB |
 
-GZIP sets the scan on one thread: inflating the pages takes 122 ms of its 152
+GZIP sets the scan on one thread: inflating the pages takes 122 ms of its 154
 ([decompression](#decompression)). On 32 threads the pages inflate on every thread ahead of the read.
 The projection reads one small column, which more threads do not speed up: 2.6 ms on one thread as
 on 32.
@@ -114,40 +116,40 @@ on 32.
 
 | action | threads | Vortex, ms | Parquet, ms | ratio | Vortex, allocated | Parquet, allocated |
 |---|---:|---:|---:|---:|---:|---:|
-| `open` | 1 | 0.19 | 0.17 | 0.89 | 25.9 KiB | 54.4 KiB |
-| `scan` | 1 | 73.4 | 165 | 2.25 | 1.4 MiB | 314.0 KiB |
-| `project` | 1 | 1.50 | 0.98 | 0.66 | 435.4 KiB | 98.5 KiB |
-| `take` | 1 | 54.6 | 130 | 2.38 | 1.4 MiB | 336.2 KiB |
-| `write` | 1 | 824 | 1,171 | 1.42 | 12.6 MiB | 6.3 MiB |
-| `open` | 32 | 0.17 | 0.17 | 0.97 | 25.9 KiB | 54.4 KiB |
-| `scan` | 32 | 48.1 | 59.9 | 1.24 | 1.4 MiB | 446.6 KiB |
-| `project` | 32 | 2.28 | 1.02 | 0.45 | 436.1 KiB | 102.1 KiB |
-| `take` | 32 | 27.1 | 39.8 | 1.47 | 1.5 MiB | 468.5 KiB |
-| `write` | 32 | 339 | 266 | 0.78 | 4.2 MiB | 10.3 MiB |
+| `open` | 1 | 0.17 | 0.17 | 0.98 | 25.9 KiB | 55.3 KiB |
+| `scan` | 1 | 72.3 | 163 | 2.26 | 1.4 MiB | 368.3 KiB |
+| `project` | 1 | 1.43 | 1.01 | 0.71 | 434.7 KiB | 148.8 KiB |
+| `take` | 1 | 55.4 | 133 | 2.39 | 1.4 MiB | 390.5 KiB |
+| `write` | 1 | 817 | 1,127 | 1.38 | 1.9 MiB | 4.0 MiB |
+| `open` | 32 | 0.17 | 0.16 | 0.95 | 25.9 KiB | 55.3 KiB |
+| `scan` | 32 | 47.3 | 61.1 | 1.29 | 1.4 MiB | 488.9 KiB |
+| `project` | 32 | 1.39 | 1.08 | 0.78 | 435.4 KiB | 151.8 KiB |
+| `take` | 32 | 28.7 | 41.1 | 1.43 | 1.4 MiB | 524.1 KiB |
+| `write` | 32 | 338 | 250 | 0.74 | 1.9 MiB | 7.1 MiB |
 
 Snappy and four columns of long text, `Title`, `URL`, `Referer` and `OriginalURL`, which hold 86% of
-the decompressed bytes, set the scan on one thread. On 32 threads Parquet scans in 59.9 ms against
-Vortex's 48.1, most of it the caller reading those texts, and writes in 266 ms where Vortex takes
-339.
+the decompressed bytes, set the scan on one thread. On 32 threads Parquet scans in 61.1 ms against
+Vortex's 47.3, most of it the caller reading those texts, and writes in 250 ms where Vortex takes
+338.
 
 ### The nested file
 
 | action | threads | Vortex, ms | Parquet, ms | ratio | Vortex, allocated | Parquet, allocated |
 |---|---:|---:|---:|---:|---:|---:|
-| `open` | 1 | 0.15 | 0.13 | 0.85 | 7.7 KiB | 26.3 KiB |
-| `scan` | 1 | 54.4 | 113 | 2.07 | 332.4 KiB | 459.2 KiB |
-| `project` | 1 | 0.55 | 0.60 | 1.09 | 124.9 KiB | 65.3 KiB |
-| `take` | 1 | 35.8 | 76.6 | 2.14 | 380.0 KiB | 495.2 KiB |
-| `write` | 1 | 694 | 841 | 1.21 | 1.2 MiB | 2.5 MiB |
-| `open` | 32 | 0.13 | 0.12 | 0.96 | 7.7 KiB | 26.3 KiB |
-| `scan` | 32 | 46.3 | 69.7 | 1.50 | 335.5 KiB | 460.4 KiB |
-| `project` | 32 | 0.48 | 0.62 | 1.27 | 125.6 KiB | 66.1 KiB |
-| `take` | 32 | 26.5 | 32.7 | 1.24 | 392.8 KiB | 497.2 KiB |
-| `write` | 32 | 272 | 331 | 1.21 | 1.2 MiB | 4.0 MiB |
+| `open` | 1 | 0.15 | 0.13 | 0.83 | 7.7 KiB | 26.5 KiB |
+| `scan` | 1 | 53.4 | 112 | 2.09 | 331.1 KiB | 470.7 KiB |
+| `project` | 1 | 0.51 | 0.60 | 1.19 | 124.3 KiB | 75.9 KiB |
+| `take` | 1 | 35.4 | 74.4 | 2.10 | 371.3 KiB | 506.6 KiB |
+| `write` | 1 | 675 | 839 | 1.24 | 476.6 KiB | 1.7 MiB |
+| `open` | 32 | 0.13 | 0.12 | 0.93 | 7.7 KiB | 26.5 KiB |
+| `scan` | 32 | 46.0 | 69.2 | 1.50 | 333.0 KiB | 474.6 KiB |
+| `project` | 32 | 0.48 | 0.61 | 1.28 | 125.0 KiB | 76.8 KiB |
+| `take` | 32 | 25.5 | 32.6 | 1.28 | 377.9 KiB | 512.5 KiB |
+| `write` | 32 | 290 | 370 | 1.28 | 570.5 KiB | 2.9 MiB |
 
-Parquet scans the lists and the text that seldom repeats in 113 ms on one thread against Vortex's
-54.4, and in 69.7 on 32 against 46.3. It writes the file in 841 ms on one thread and in 331 on 32,
-where Vortex takes 694 and 272.
+Parquet scans the lists and the text that seldom repeats in 112 ms on one thread against Vortex's
+53.4, and in 69.2 on 32 against 46.0. It writes the file in 839 ms on one thread and in 370 on 32,
+where Vortex takes 675 and 290.
 
 ## From one thread to 32
 
@@ -158,23 +160,23 @@ tables above.
 
 | threads | taxi trips, Parquet | taxi trips, Vortex | ClickBench, Parquet | ClickBench, Vortex | nested, Parquet | nested, Vortex |
 |---:|---:|---:|---:|---:|---:|---:|
-| 1 | 152 | 25.3 | 165 | 73.4 | 113 | 54.4 |
-| 2 | 74.1 | 18.0 | 76.7 | 73.3 | 79.4 | 54.9 |
-| 4 | 41.0 | 16.9 | 57.9 | 45.5 | 69.5 | 44.7 |
-| 8 | 44.3 | 16.9 | 58.4 | 47.6 | 70.4 | 46.3 |
-| 16 | 39.1 | 17.3 | 59.7 | 47.8 | 69.8 | 46.1 |
-| 32 | 35.0 | 17.4 | 59.9 | 48.1 | 69.7 | 46.3 |
+| 1 | 154 | 22.2 | 163 | 72.3 | 112 | 53.4 |
+| 2 | 70.6 | 17.8 | 86.4 | 73.5 | 78.5 | 54.2 |
+| 4 | 41.8 | 16.7 | 59.7 | 44.8 | 68.5 | 44.4 |
+| 8 | 36.6 | 17.0 | 57.2 | 47.0 | 70.0 | 47.4 |
+| 16 | 33.0 | 16.9 | 60.6 | 46.7 | 69.0 | 46.1 |
+| 32 | 31.0 | 17.3 | 61.1 | 47.3 | 69.2 | 46.0 |
 
 **Write**
 
 | threads | taxi trips, Parquet | taxi trips, Vortex | ClickBench, Parquet | ClickBench, Vortex | nested, Parquet | nested, Vortex |
 |---:|---:|---:|---:|---:|---:|---:|
-| 1 | 586 | 216 | 1,171 | 824 | 841 | 694 |
-| 2 | 236 | 123 | 510 | 465 | 479 | 368 |
-| 4 | 175 | 78.7 | 314 | 281 | 388 | 225 |
-| 8 | 188 | 66.9 | 256 | 292 | 346 | 237 |
-| 16 | 153 | 83.3 | 250 | 320 | 322 | 273 |
-| 32 | 137 | 83.6 | 266 | 339 | 331 | 272 |
+| 1 | 586 | 206 | 1,127 | 817 | 839 | 675 |
+| 2 | 228 | 120 | 477 | 463 | 482 | 382 |
+| 4 | 191 | 77.8 | 307 | 285 | 414 | 236 |
+| 8 | 192 | 77.5 | 266 | 297 | 372 | 263 |
+| 16 | 161 | 86.1 | 251 | 319 | 369 | 281 |
+| 32 | 152 | 87.8 | 250 | 338 | 370 | 290 |
 
 * **Scans** gain up to 4 threads, and little or nothing past them. The values are read on the
   caller's thread, as a loop over a scan reads them, so once the pages decode ahead of that thread a
@@ -183,7 +185,7 @@ tables above.
   to 32 threads, their 19 columns of GZIP pages inflating on every one of them.
 * **Writes** gain most up to 4 threads: the writer prepares a block's columns on up to eight threads
   and compresses its pages on all of them. Past 4, Parquet's writes still gain a little and Vortex's
-  lose a little, the hits most: 281 ms on 4 threads, 339 on 32.
+  lose a little, the hits most: 285 ms on 4 threads, 338 on 32.
 
 ### A file read again
 
@@ -193,24 +195,24 @@ read where it lies, its pages already mapped. Parquet's scans, in milliseconds:
 
 | file | threads | opened again | kept mapped |
 |---|---:|---:|---:|
-| the taxi trips | 1 | 152 | 152 |
-| | 32 | 35.0 | 31.1 |
-| ClickBench's hits | 1 | 165 | 157 |
-| | 32 | 59.9 | 54.5 |
-| the nested file | 1 | 113 | 112 |
-| | 32 | 69.7 | 59.3 |
+| the taxi trips | 1 | 154 | 151 |
+| | 32 | 31.0 | 25.0 |
+| ClickBench's hits | 1 | 163 | 156 |
+| | 32 | 61.1 | 52.3 |
+| the nested file | 1 | 112 | 110 |
+| | 32 | 69.2 | 59.3 |
 
 ## Decompression
 
 | file | codec | decompressed | ratio | Vorticity | .NET's `GZipStream` |
 |---|---|---:|---:|---:|---:|
-| the taxi trips | GZIP | 83.2 MB | 1.75 | 0.68 GB/s | 0.58 GB/s |
-| ClickBench's hits | Snappy | 378.2 MB | 3.09 | 5.36 GB/s | |
-| the nested file | Snappy | 46.2 MB | 1.89 | 1.55 GB/s | |
+| the taxi trips | GZIP | 83.2 MB | 1.75 | 0.68 GB/s | 0.59 GB/s |
+| ClickBench's hits | Snappy | 378.2 MB | 3.09 | 5.26 GB/s | |
+| the nested file | Snappy | 46.2 MB | 1.89 | 1.56 GB/s | |
 
 Every compressed page of each file, decompressed in memory one after another on one thread: the
 median of 9 passes. Vorticity reads GZIP with its own DEFLATE decoder, which gives the same bytes as
-.NET's on every page, 17% faster. Snappy is the repository's own too, ZSTD and LZ4_RAW come from
+.NET's on every page, 15% faster. Snappy is the repository's own too, ZSTD and LZ4_RAW come from
 the managed codecs of ManagedCompressions, and BROTLI is .NET's.
 
 ## Reproducing

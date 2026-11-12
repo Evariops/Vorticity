@@ -2395,6 +2395,12 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         ArrayBlobWriter.Workspace blobs = Blobs;
         ArrayBlobWriter.BlobLease blob;
         blobs.ColumnLevel = ZstdLevelOf(field);
+
+        // A column of a file whose next chunks are compressed side by side has its trial watched, and its time noted,
+        // for those.
+        ZstdPlan.Ahead? watched = plan is null && !Codes(field) ? Watch(field, arena, node) : null;
+        blobs.Ahead = watched;
+        long began = System.Diagnostics.Stopwatch.GetTimestamp();
         try
         {
             blob = plan is not null
@@ -2404,6 +2410,13 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         finally
         {
             blobs.ColumnLevel = 0;
+            blobs.Ahead = null;
+            watched?.Finish();
+        }
+
+        if (watched is not null)
+        {
+            _chunkColumns!.Took(field, System.Diagnostics.Stopwatch.GetTimestamp() - began);
         }
 
         await WriteColumnBlobAsync(field, blob, firstBlock, blocks, cancellationToken, bounds).ConfigureAwait(false);

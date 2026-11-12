@@ -405,8 +405,8 @@ A comparison with a constant, a range, or a set is answered by the encoding itse
 | FSST | equality and prefixes on the compressed codes; containment by an automaton over the symbols | 14.7 to 17.6 for a containment | 10.4 to 11.5 when few rows hold the pattern *(measured)* |
 
 The decode costs are measured on one core ([benchmarks-x64.md](../guide/benchmarks-x64.md), decoding per encoding:
-0.14 ns a row for a constant, 0.20 for run-end, 0.28 for bit-packing, 0.62 for frame of reference, 0.60 to 0.97 for
-ALP, 0.91 to 1.34 for a dictionary, 12.1 for FSST); the FastLanes unpacking kernel alone runs at 0.07 to 0.13 ns a
+0.14 ns a row for a constant, 0.20 for run-end, 0.27 for bit-packing, 0.59 for frame of reference, 0.59 to 0.88 for
+ALP, 0.74 to 1.14 for a dictionary, 10.7 for FSST); the FastLanes unpacking kernel alone runs at 0.07 to 0.13 ns a
 value. Each kernel answers exactly what decoding and comparing would, three-valued and row for row, and is checked so on
 the corpus of its encoding. The measured figures are the best of short runs on one core with AVX-512: the bit-packing
 kernel at 5 and 45 bits, a sparse column of two million integers at 0.1 % to 50 % present
