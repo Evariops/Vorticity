@@ -83,7 +83,11 @@ internal sealed class AggregationPlan
         ChosenRows = Rows(Chosen);
         Filters = new FilterPlan(Aggregates);
         Ordered = Array.Exists(Aggregates, static a => a.Kind == AggregateKind.Increase);
+        TakesOrders = Array.Exists(Aggregates, static a => a.Order is not null);
     }
+
+    /// <summary>Whether an aggregate reads its points in the order of a column, a growth or a first or last point: its batches carry that column.</summary>
+    internal bool TakesOrders { get; }
 
     /// <summary>
     /// Whether an aggregate takes its points in the order of a column and keeps runs of them, a growth's
@@ -147,14 +151,19 @@ internal sealed class AggregationPlan
     /// <summary>The rows those groups' runs lay between, read again.</summary>
     internal long LastRowsReadAgain => Interlocked.Read(ref _rowsReadAgain);
 
+    /// <summary>The time those reads took, in <see cref="Stopwatch"/> ticks.</summary>
+    internal long LastReadAgainTicks => Interlocked.Read(ref _readAgainTicks);
+
     private long _groupsReadAgain;
     private long _rowsReadAgain;
+    private long _readAgainTicks;
 
     /// <summary>Counts what a settling read again, which the next run starts from nothing.</summary>
-    internal void ReadAgain(long groups, long rows)
+    internal void ReadAgain(long groups, long rows, long ticks = 0)
     {
         Interlocked.Add(ref _groupsReadAgain, groups);
         Interlocked.Add(ref _rowsReadAgain, rows);
+        Interlocked.Add(ref _readAgainTicks, ticks);
     }
 
     /// <summary>Forgets what the last run read again.</summary>
@@ -162,6 +171,7 @@ internal sealed class AggregationPlan
     {
         Interlocked.Exchange(ref _groupsReadAgain, 0);
         Interlocked.Exchange(ref _rowsReadAgain, 0);
+        Interlocked.Exchange(ref _readAgainTicks, 0);
     }
 
     /// <summary>The most bytes the plan's last run held of its memory budget at once.</summary>
@@ -969,7 +979,7 @@ internal sealed class AggregationPartition
         _source = source;
         _columns = columns;
         _inputs = inputs;
-        _orders = plan.Ordered ? AggregationEngine.OrderOf(plan, columns) : null;
+        _orders = plan.TakesOrders ? AggregationEngine.OrderOf(plan, columns) : null;
         _keyCount = plan.Keys.Length;
         _nodes = new int[columns.Length];
         _filterOf = plan.Filters.FilterOf;

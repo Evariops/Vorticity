@@ -107,6 +107,7 @@ internal static class GrowthReads
             // In the order of their first rows, so that a share of them reads a stretch of the source; in as many shares as
             // their points need to fit the query's memory, each read on its own, as a read that ran out of it tells.
             plan.ReadAgain(found.Count, 0);
+            long started = System.Diagnostics.Stopwatch.GetTimestamp();
             found.Sort(static (a, b) => a.First.CompareTo(b.First));
             List<(AggregateSlot Slot, int Group)> crossed = found.ConvertAll(static f => (f.Slot, f.Group));
             Stack<(int Start, int End)> shares = new Stack<(int Start, int End)>([(0, crossed.Count)]);
@@ -132,6 +133,8 @@ internal static class GrowthReads
                     shares.Push((share.Start + (int)((long)count * p / parts), share.Start + (int)((long)count * (p + 1) / parts)));
                 }
             }
+
+            plan.ReadAgain(0, 0, System.Diagnostics.Stopwatch.GetTimestamp() - started);
         }
     }
 

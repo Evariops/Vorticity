@@ -340,6 +340,36 @@ public sealed partial class GrowthTests
         }
     }
 
+    [Theory]
+    [InlineData(Layout.BySeries, 1)]
+    [InlineData(Layout.BySeries, 8)]
+    [InlineData(Layout.Shuffled, 8)]
+    public async Task AFirstAndALastPointAloneReadTheirOrder(Layout layout, int degree)
+    {
+        // No growth beside them: the groups of a sorted key stream, and the order still reaches each batch.
+        Point[] rows = Arrange(Points(seed: 53), layout);
+        string path = await WriteAsync(rows);
+        try
+        {
+            await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = degree);
+            await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
+            List<Grown> read = await ListAsync(file.Scan<Point>()
+                .GroupBy(r => r.Series)
+                .OrderBy(g => g.Key)
+                .Select(g => (g.Key, g.Max(r => r.Value), g.OrderedBy(r => r.At).First(r => r.Value), g.OrderedBy(r => r.At).Last(r => r.Value)))
+                .As<Grown>());
+            Dictionary<string, Hourly> expected = Oracle(rows, hourly: false).ToDictionary(h => h.Series);
+            Assert.Equal(expected.Count, read.Count);
+            Assert.All(read, g => Assert.True(
+                Bits(g.First) == Bits(expected[g.Series].First) && Bits(g.Last) == Bits(expected[g.Series].Last),
+                $"{g} where the oracle gives {expected[g.Series]}"));
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
     [Fact]
     public async Task AGroupOfNoPointIsNullAndAnIntegerGrowthPastItsTypeThrows()
     {

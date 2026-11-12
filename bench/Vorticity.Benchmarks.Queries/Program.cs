@@ -105,7 +105,7 @@ Dictionary<string, (string Help, Func<Task<int>> Run)> micros = new Dictionary<s
             (int)Option(args, "--hours", 48), Option(args, "--rate", 20), (int)Option(args, "--writers", 4), (int)Option(args, "--batch", 30),
             Text(args, "--partition") ?? "hour", Text(args, "--deletes") == "off" ? 0 : (int)Option(args, "--deletes", 2), (int)Option(args, "--fanout", 0),
             Text(args, "--late") != "off", Text(args, "--neighbours") != "off", (long)Option(args, "--max-object-mib", 0) << 20,
-            Text(args, "--pick"), (int)Option(args, "--trace-overlaps", 0))),
+            Text(args, "--pick"), (int)Option(args, "--trace-overlaps", 0), args.Contains("--growth"))),
     ["qp-dashboard"] = ("the client's questions of a --qp run's TSV against the review's targets, a Markdown table (QpDashboard.cs)", () =>
     {
         if (Text(args, "--tsv") is not { } qpTsv)

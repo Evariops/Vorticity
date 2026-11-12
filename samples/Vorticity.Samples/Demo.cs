@@ -60,6 +60,44 @@ internal static class Demo
         return s_readings = path;
     }
 
+    /// <summary>
+    /// Counters of the requests three services served, read every fifteen seconds for six hours, in the order of their
+    /// instants: checkout restarts at 02:10, its counter back to zero. Written on first use.
+    /// </summary>
+    internal static async ValueTask<string> CountersAsync()
+    {
+        if (s_counters is not null)
+        {
+            return s_counters;
+        }
+
+        string path = Path("counters.vortex");
+        string[] services = ["cart", "checkout", "search"];
+        DateTimeOffset start = new DateTimeOffset(2026, 9, 1, 0, 0, 0, TimeSpan.Zero);
+        DateTimeOffset restart = start.AddHours(2).AddMinutes(10);
+        Served[] rows = new Served[6 * 240 * services.Length];
+        long[] counters = [0, 0, 0];
+        for (int i = 0; i < 6 * 240; i++)
+        {
+            DateTimeOffset at = start.AddSeconds(15 * i);
+            for (int s = 0; s < services.Length; s++)
+            {
+                counters[s] = s == 1 && at == restart ? 0 : counters[s] + 10 + ((i * 7 + s * 3) % 11);
+                rows[(i * services.Length) + s] = new Served(services[s], at, counters[s]);
+            }
+        }
+
+        await using (VortexFileWriter writer = VortexSession.Default.CreateWriter<Served>(path))
+        {
+            await writer.WriteAsync<Served>(rows);
+            await writer.CompleteAsync();
+        }
+
+        return s_counters = path;
+    }
+
+    private static string? s_counters;
+
     /// <summary>The visits file, written on first use.</summary>
     internal static async ValueTask<string> VisitsAsync()
     {
