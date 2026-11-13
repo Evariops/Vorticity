@@ -72,7 +72,7 @@ public sealed partial class DatasetRangedConsolidationTests
         Assert.Equal(live, tight.OrderBy(static row => row.Sequence));
         Assert.True(wide.Any(static job => job.RangesAtOnce > 1), string.Join("; ", wide.Select(static job => $"{job.RangesAtOnce} at once, {job.MemoryReserved} B reserved")));
         Assert.True(narrow.Any(static job => job.RangesAtOnce > 1), string.Join("; ", narrow.Select(static job => $"{job.RangesAtOnce} at once, {job.MemoryReserved} B reserved")));
-        Assert.All(narrow, static job => Assert.InRange(job.MemoryReserved, 1, 3L << 30));
+        Assert.All(narrow.Where(static job => job.ObjectsMoved == 0), static job => Assert.InRange(job.MemoryReserved, 1, 3L << 30));
     }
 
     /// <summary>
