@@ -66,6 +66,12 @@ public sealed record VacuumResult
     /// next vacuum past the window.
     /// </summary>
     internal IReadOnlyList<ulong> Sparse { get; init; } = [];
+
+    /// <summary>
+    /// The most pages and regions of open reads the marking held at once: those of one version, however
+    /// many versions it marked.
+    /// </summary>
+    internal int MostInHand { get; init; }
 }
 
 /// <summary>
@@ -173,14 +179,17 @@ internal static class DatasetVacuum
             }
         }
 
-        // Each distinct page is walked once, however many retained versions share it.
+        // Each distinct page is walked once, however many retained versions share it. So the marking keeps no page it
+        // reads, and lets go of what a version's open read brought once that version is marked: no version marked after
+        // it reads those pages again, and held to the end they weighed what the retained versions' commit objects weigh.
         HashSet<ulong> markedCommits = [.. retained];
         HashSet<string> markedData = new HashSet<string>(StringComparer.Ordinal);
         HashSet<UInt128> markedUids = [];
         HashSet<PageReference> seen = [];
         HashSet<PageReference> fragmentsSeen = [];
         Dictionary<ulong, long> live = [];
-        CommitPageSource pages = new CommitPageSource(store);
+        CommitPageSource pages = new CommitPageSource(store) { ReadsOnce = true };
+        int mostInHand = 0;
 
         // The retained versions' commits opened a batch at a time side by side, then marked in turn: one after the other, a
         // round trip each, a dataset that keeps thousands of versions waited for each.
@@ -220,6 +229,9 @@ internal static class DatasetVacuum
                 {
                     await MarkAsync(trees.PartitionIndexes.Root, trees.PartitionIndexes.Depth, Leaves.PartitionIndexes).ConfigureAwait(false);
                 }
+
+                mostInHand = Math.Max(mostInHand, pages.InHand);
+                pages.Release();
             }
         }
         catch (Exception)
@@ -306,6 +318,7 @@ internal static class DatasetVacuum
             Retained = [.. retained],
             Window = window,
             PagesRead = seen.Count,
+            MostInHand = mostInHand,
             Deleted = [.. deleted],
             Young = [.. young],
             Locked = [.. locked],

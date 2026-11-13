@@ -66,10 +66,31 @@ internal sealed class CommitPageSource : IPageSource
     public bool KeepsReads { get; init; }
 
     /// <summary>
+    /// Whether no page is asked of this source twice, which then keeps none of those it reads from the
+    /// store: a vacuum's marking, which walks each distinct page of every version it retains once. A
+    /// source with no cache keeps every page it reads otherwise, as a commit that reads its pages
+    /// twice needs.
+    /// </summary>
+    public bool ReadsOnce { get; init; }
+
+    /// <summary>
     /// The version this source reads for, which a missing commit object is reported against; 0 when
     /// it reads for none.
     /// </summary>
     public ulong Reading { get; init; }
+
+    /// <summary>How many pages and regions of open reads this source holds now.</summary>
+    public int InHand => _known.Count + _held.Count;
+
+    /// <summary>
+    /// Lets go of the pages and the regions in hand, and keeps where each version's pages start: for a
+    /// walk that is done with them, since it reads no page twice.
+    /// </summary>
+    public void Release()
+    {
+        _known.Clear();
+        _held.Clear();
+    }
 
     /// <summary>The bytes of a page this source already holds, without any request.</summary>
     /// <exception cref="TornCommitException">A page the open read holds does not hash to its reference.</exception>
@@ -248,12 +269,12 @@ internal sealed class CommitPageSource : IPageSource
 
     /// <summary>
     /// Keeps a page in the handle's cache, and in this source too when it keeps its reads or the
-    /// cache could not take the page.
+    /// cache could not take the page, unless no page is asked of it twice.
     /// </summary>
     private void Hold(PageReference reference, ReadOnlyMemory<byte> page)
     {
         bool cached = _cache is not null && _cache.Add(reference, page);
-        if (KeepsReads || !cached)
+        if (KeepsReads || (!cached && !ReadsOnce))
         {
             _known[reference] = page;
         }

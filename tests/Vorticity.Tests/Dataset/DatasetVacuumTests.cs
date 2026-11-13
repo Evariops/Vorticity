@@ -284,6 +284,40 @@ public sealed class DatasetVacuumTests
     }
 
     [Fact]
+    public async Task AVacuumHoldsThePagesOfOneVersionAtATime()
+    {
+        const int Appends = 48;
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Decoders.EnsureRegistered();
+        DTypeArena types = new DTypeArena();
+        DType schema = Schema(types);
+        ManualClock clock = new ManualClock(new DateTimeOffset(2026, 9, 18, 12, 0, 0, TimeSpan.Zero));
+        await using MemoryObjectStore store = new MemoryObjectStore { TimeProvider = clock };
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Options(), ct);
+        for (int i = 0; i < Appends; i++)
+        {
+            await dataset.AppendAsync(Of(types, schema, i * PerObject, PerObject), ct);
+        }
+
+        // Inside the window every version is retained, and each append wrote a leaf of its own, so the marking reads a
+        // page a version at least. Kept to the end, they and the regions the open reads brought grew with the versions.
+        VacuumResult result = await dataset.VacuumAsync(new VacuumOptions { TimeProvider = clock }, ct);
+        Assert.Equal((int)dataset.Version, result.Retained.Length);
+        Assert.True(result.PagesRead >= Appends, $"the marking read {result.PagesRead} pages for {Appends} appends");
+        Assert.True(
+            result.MostInHand <= 8,
+            $"the marking held {result.MostInHand} pages and regions at once for {result.Retained.Length} versions");
+        Assert.Empty(result.Deleted);
+
+        // And what it let go of it did not need: past the window, the same marking keeps the latest version whole.
+        clock.Advance(TimeSpan.FromHours(2));
+        VacuumResult swept = await dataset.VacuumAsync(new VacuumOptions { TimeProvider = clock }, ct);
+        Assert.Equal([dataset.Version], swept.Retained);
+        await using VortexDataset fresh = await VortexDataset.OpenAsync(store, cancellationToken: ct);
+        Assert.Equal(Appends * PerObject, (await KeysAsync(fresh.ScanBuilder())).Count);
+    }
+
+    [Fact]
     public async Task ACommitHeldOnlyByAFragmentIsKept()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
