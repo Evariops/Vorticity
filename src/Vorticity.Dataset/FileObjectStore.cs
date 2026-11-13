@@ -547,11 +547,15 @@ public sealed class FileObjectStore : IObjectStore
             target = claims ? path : string.Create(CultureInfo.InvariantCulture, $"{path}{Beside}{Guid.NewGuid():N}");
             try
             {
+                // A claim deletes its key under its own handle when the content fails. Windows refuses to delete
+                // a file open without FileShare.Delete, and the torn file stayed under its key, so there the
+                // claim lets a delete through. Readers still find the file locked, since no read is shared.
+                // On Unix an open file can be unlinked, and .NET takes its lock from FileShare.None alone.
                 handle = System.IO.File.OpenHandle(
                     target,
                     FileMode.CreateNew,
                     FileAccess.Write,
-                    FileShare.None,
+                    claims && OperatingSystem.IsWindows() ? FileShare.Delete : FileShare.None,
                     Durable ? FileOptions.Asynchronous | FileOptions.WriteThrough : FileOptions.Asynchronous);
             }
             catch (IOException refused) when (claims && HeldByAPut(refused))
