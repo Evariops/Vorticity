@@ -65,13 +65,14 @@ public sealed partial class DatasetReadAheadTests
             read += batch.RowCount;
             if (read == ObjectRows + 100)
             {
-                // Inside the second object, the third opens ahead: two objects leased at once.
+                // Inside the second object, the third opens ahead: two objects leased at once, and the fourth when the walk
+                // opens objects ahead of the scan's own read-ahead, its window two objects by the second it hands over.
                 for (int wait = 0; dataset.LeasedObjects < 2 && wait < 10_000; wait++)
                 {
                     await Task.Delay(1, Ct);
                 }
 
-                Assert.Equal(2, dataset.LeasedObjects);
+                Assert.InRange(dataset.LeasedObjects, 2, 3);
                 after = 0;
             }
             else if (after >= 0 && ++after == 5)

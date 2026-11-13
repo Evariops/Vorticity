@@ -768,10 +768,9 @@ not choose the structure. It sets the page cap, the inlining, the one-object com
 cache of immutable headers, pages, tails and fences, and the parallel requests. Hedged requests belong
 to the store library.
 
-A scan in the tree's order opens the next object ahead once its consumer reads past the first batch
-(see [the first batch of each source](16-queries.md#26-the-first-batch-of-each-source)), so an
-object's tail and its first data request wait on each other rather than on the object before it, and
-a scan that stops at its first batch opens a single object.
+A scan in the tree's order opens the next object ahead once its consumer reads past the first batch (see [the first batch of each source](16-queries.md#26-the-first-batch-of-each-source)), so an object's tail and its first data request wait on each other rather than on the object before it, and a scan that stops at its first batch opens a single object.
+
+A question of one lane over many objects opens them ahead of its turn as well, side by side: a scan of rows every object it covers rows of, a count those its entries do not settle. It opens one ahead for its second object, then twice as many each time it comes back for another, as many at once as the session reads at once and while they hold within what a pass reads ahead, 16 MiB, reserved in the session's budget. Over a store whose profile prices a request at no latency it opens none ahead. On 1 712 small objects of level 0 at 20 ms a request, a count of one service took 37 seconds, one request after another, and takes 0.4 s. A read of every row of 3 306 objects took 72 seconds and takes 0.7 s. The requests and the bytes do not change: an object that a question cannot rule out costs it one request and all its bytes.
 
 ### 9.2 Held by a counting store
 

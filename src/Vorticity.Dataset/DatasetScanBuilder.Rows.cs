@@ -66,6 +66,10 @@ internal sealed partial class DatasetScanBuilder
 
         ObjectLease lease = held.Level == 0 && _variantKeys is { Count: > 0 } keys
             ? await _dataset.LevelZero.RentAsync(_dataset, _version, held.Entry, keys, cancellationToken).ConfigureAwait(false)
+            : TakeOpenedAheadAsync(held.Entry) is { } opened
+#pragma warning disable VSTHRD003 // The open was started by this scan's walk, a few objects before (OpenedAheadAsync).
+            ? await opened.ConfigureAwait(false)
+#pragma warning restore VSTHRD003
             : await _version.RentAsync(held.Entry, cancellationToken).ConfigureAwait(false);
         if (lease.IsCopy)
         {

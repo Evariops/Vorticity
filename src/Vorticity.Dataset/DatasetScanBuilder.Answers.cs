@@ -70,7 +70,8 @@ internal sealed partial class DatasetScanBuilder
             return rows;
         }
 
-        await foreach (PositionedObject held in WalkAsync(cancellationToken, granules: true).ConfigureAwait(false))
+        await foreach (PositionedObject held in OpenedAheadAsync(WalkAsync(cancellationToken, granules: true), counts: true, range, cancellationToken)
+            .ConfigureAwait(false))
         {
             long covered = Covered(held);
             if (covered == 0)
@@ -140,7 +141,8 @@ internal sealed partial class DatasetScanBuilder
                 cancellationToken).ConfigureAwait(false);
         }
 
-        await foreach (PositionedObject held in WalkAsync(cancellationToken, granules: true).ConfigureAwait(false))
+        await foreach (PositionedObject held in OpenedAheadAsync(WalkAsync(cancellationToken, granules: true), counts: true, range, cancellationToken)
+            .ConfigureAwait(false))
         {
             if (Covered(held) == 0)
             {

@@ -108,6 +108,7 @@ the row encoding, which a project acknowledges once before it builds.
 | [dataset-layout.md](dataset-layout.md) | a partition, a sort key and its indexed prefix: what each question reads, and what the layout costs the writes |
 | [variants.md](variants.md) | keys that are data in one column, each asked as fast as a declared column |
 | [dataset-maintenance.md](dataset-maintenance.md) | compaction, vacuum, verification and indexing after the fact, and what each costs in requests |
+| [frequent-appends.md](frequent-appends.md) | small appends every few seconds: what they cost, where the merges run, how many writers a dataset takes, what readers pay for a lag |
 | [concurrent-writers.md](concurrent-writers.md) | several writers of the same input, each entry counted once, without a lease |
 | [object-store.md](object-store.md) | implement the store interface for your service, and open a single file from a store |
 | [row-keys.md](row-keys.md) | encode a tuple into bytes whose `memcmp` order is the tuple's order |

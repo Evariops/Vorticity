@@ -623,7 +623,11 @@ internal sealed partial class DatasetScanBuilder
             yield break;
         }
 
-        IAsyncEnumerator<PositionedObject> walk = WalkAsync(cancellationToken, granules: true).GetAsyncEnumerator(cancellationToken);
+        // A scan of one lane opens the objects ahead of its turn; one of several lanes, or a part of a question, which lanes
+        // run side by side, reads as the walk gives them.
+        IAsyncEnumerable<PositionedObject> objects = WalkAsync(cancellationToken, granules: true);
+        IAsyncEnumerator<PositionedObject> walk = (ScanDegree > 1 || _rowsSet ? objects : OpenedAheadAsync(objects, counts: false, null, cancellationToken))
+            .GetAsyncEnumerator(cancellationToken);
         await using (walk.ConfigureAwait(false))
         {
             using CancellationTokenSource stopped = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -726,6 +730,157 @@ internal sealed partial class DatasetScanBuilder
 
         return null;
     }
+
+    /// <summary>
+    /// The objects of <paramref name="walk"/>, in its order, each the consumer opens (<see cref="OpensAhead"/>, a count's
+    /// over <paramref name="range"/> when <paramref name="counts"/>) opened ahead of its turn, the others passed on as they are: as many at once as the session reads at once, while
+    /// what they hold open stays within what a pass reads ahead (<see cref="AggregationEngine.ReadAheadTarget"/>), reserved
+    /// in the session's budget. The consumer takes over the lease of the object it opens (<see cref="TakeOpenedAheadAsync"/>);
+    /// one it leaves is given back once it asks for the next, and an open that failed is the consumer's failure only once
+    /// it reaches that object. A question over 1 712 small objects of level 0 waited for each, 37 seconds at 20 ms a
+    /// request; side by side, it waits for few. Over a store whose profile prices a request at no latency, or a scan that
+    /// reads keys of variant columns through the memo of level 0, the walk as it is.
+    /// </summary>
+    private async IAsyncEnumerable<PositionedObject> OpenedAheadAsync(
+        IAsyncEnumerable<PositionedObject> walk, bool counts, KeyRange? range, [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        IAsyncEnumerator<PositionedObject> objects = walk.GetAsyncEnumerator(cancellationToken);
+        await using (objects.ConfigureAwait(false))
+        {
+            // The first object is handed over as the walk gives it: a scan of one object, as most of a question's parts are,
+            // makes nothing more, and the rest is made when the consumer comes back for a second.
+            if (!await objects.MoveNextAsync().ConfigureAwait(false))
+            {
+                yield break;
+            }
+
+            yield return objects.Current;
+            using QueryMemory memory = new QueryMemory(_dataset.Session.Options.MemoryBudget ?? QueryMemoryBudget.Process);
+            bool ahead = _dataset.Profile.Store.Latency > TimeSpan.Zero && _variantKeys is not { Count: > 0 }
+                && memory.TryGrow(AggregationEngine.ReadAheadTarget);
+            int most = Math.Max(1, _dataset.Session.Options.MaxConcurrentReads);
+            Queue<(PositionedObject Held, long Bytes)> opened = new Queue<(PositionedObject, long)>();
+            long holding = 0;
+            bool more = true;
+
+            // The objects opened ahead past the one handed over: one for the second, then twice as many each time the
+            // consumer comes back for another, so that a question that stops at its first objects opens few more.
+            int window = 1;
+            try
+            {
+                while (true)
+                {
+                    while (more && (opened.Count == 0 || (ahead && opened.Count <= window && holding < AggregationEngine.ReadAheadTarget)))
+                    {
+                        if (!(more = await objects.MoveNextAsync().ConfigureAwait(false)))
+                        {
+                            break;
+                        }
+
+                        PositionedObject next = objects.Current;
+                        long bytes = ahead && OpensAhead(next, counts, range) && OpenAhead(next.Entry, cancellationToken) ? OpenedBytes(next.Entry) : 0;
+                        opened.Enqueue((next, bytes));
+                        holding += bytes;
+                    }
+
+                    if (opened.Count == 0)
+                    {
+                        yield break;
+                    }
+
+                    (PositionedObject held, long weight) = opened.Dequeue();
+                    yield return held;
+                    window = Math.Min(most, window == 0 ? 1 : window * 2);
+                    holding -= weight;
+                    if (weight > 0 && TakeOpenedAheadAsync(held.Entry) is { } left)
+                    {
+                        await GiveBackAsync(left).ConfigureAwait(false);
+                    }
+                }
+            }
+            finally
+            {
+                // A walk stopped early gives back what it opened ahead and the consumer did not take.
+                if (_openedAheadGate is { } gate)
+                {
+                    List<Task<ObjectLease>> left = [];
+                    lock (gate)
+                    {
+                        if (_openedAhead is { } held)
+                        {
+                            left.AddRange(held.Values);
+                            held.Clear();
+                        }
+                    }
+
+                    foreach (Task<ObjectLease> lease in left)
+                    {
+                        await GiveBackAsync(lease).ConfigureAwait(false);
+                    }
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Whether the consumer of a walk opens <paramref name="held"/>: a scan of rows every object it covers rows of, a count
+    /// those its entries do not settle over <paramref name="range"/> (<see cref="Settled"/>).
+    /// </summary>
+    private bool OpensAhead(in PositionedObject held, bool counts, KeyRange? range) =>
+        Covered(held) > 0 && (!counts || !Settled(held, range));
+
+    /// <summary>The objects this scan's walk opened ahead and its consumer has not taken yet, by key.</summary>
+    private Dictionary<string, Task<ObjectLease>>? _openedAhead;
+
+    // Made with the first object opened ahead: a scan that opens none, most of a question's parts, allocates nothing for it.
+    private Lock? _openedAheadGate;
+
+    /// <summary>Starts the open of <paramref name="entry"/> ahead of its turn; false when one is under way already.</summary>
+    private bool OpenAhead(ObjectEntry entry, CancellationToken cancellationToken)
+    {
+        lock (LazyInitializer.EnsureInitialized(ref _openedAheadGate, static () => new Lock()))
+        {
+            _openedAhead ??= new Dictionary<string, Task<ObjectLease>>(StringComparer.Ordinal);
+            return _openedAhead.TryAdd(entry.Key, _version.RentAsync(entry, cancellationToken).AsTask());
+        }
+    }
+
+    /// <summary>The open of <paramref name="entry"/> the walk started ahead, which the caller now owns; null for none.</summary>
+    private Task<ObjectLease>? TakeOpenedAheadAsync(ObjectEntry entry)
+    {
+        if (Volatile.Read(ref _openedAheadGate) is not { } gate)
+        {
+            return null;
+        }
+
+        lock (gate)
+        {
+            return _openedAhead is { } held && held.Remove(entry.Key, out Task<ObjectLease>? opening) ? opening : null;
+        }
+    }
+
+    /// <summary>Gives back the lease <paramref name="opening"/> rents, once rented; an open that failed, nobody reached, holds nothing.</summary>
+    private static async ValueTask GiveBackAsync(Task<ObjectLease> opening)
+    {
+        try
+        {
+            // Each open was started by the walk that opened ahead, a few objects before.
+#pragma warning disable VSTHRD003
+            await (await opening.ConfigureAwait(false)).DisposeAsync().ConfigureAwait(false);
+#pragma warning restore VSTHRD003
+        }
+        catch (Exception)
+        {
+            // An object never reached: its failure, if it is one, is met by whoever reaches it.
+        }
+    }
+
+    /// <summary>
+    /// What an object opened ahead holds, about: the tail its open reads, the object itself when small, and its footer
+    /// parsed (<see cref="ObjectCache.ParsedPerFooterByte"/>).
+    /// </summary>
+    private static long OpenedBytes(ObjectEntry entry) =>
+        Math.Min(entry.Bytes, 1L << 16) + (ObjectCache.ParsedPerFooterByte * Math.Min(entry.Bytes, entry.FooterBytes > 0 ? entry.FooterBytes : 16L << 10));
 
     /// <summary>One object's batches as the dataset's rows, its lease held until the last is read.</summary>
     private IAsyncEnumerable<RecordBatch> ObjectAsync(PositionedObject held, int open, CancellationToken cancellationToken) =>
