@@ -229,24 +229,35 @@ public sealed class ListElementStatisticsTests
     }
 
     [Theory]
-    [InlineData(8192, 512, true)]
-    [InlineData(Rows, 8192, true)]
-    [InlineData(97, 512, false)]
-    [InlineData(1000, 8192, false)]
-    public async Task RowsTradingTheirElementsAreSummarizedWhereTheirWindowsAbut(int batchRows, int rowBlock, bool whole)
+    [InlineData(8192, 512, Served.Every)]
+    [InlineData(Rows, 8192, Served.Every)]
+    [InlineData(97, 512, Served.None)]
+    [InlineData(1000, 8192, Served.Some)]
+    public async Task RowsTradingTheirElementsAreSummarizedWhereTheirWindowsAbut(int batchRows, int rowBlock, Served served)
     {
-        // Pairs of rows trade their elements. A cut between the two rows of a pair leaves windows
-        // that do not abut, which is measured; a cut between pairs leaves nothing to measure.
+        // Pairs of rows trade their elements. A cut between pairs leaves nothing to measure. A cut
+        // between the two rows of a pair leaves, at the batch's edge, an element none of its rows
+        // names: the batch's elements are gathered, they are no longer the window its blocks
+        // summarized, and every chunk is measured.
         ListShape shape = ListShapes.Build(ListShapes.Swapped, Rows);
         Written written = await Write(shape, batchRows, rowBlock, elementStatistics: true);
         try
         {
-            if (whole)
+            switch (served)
             {
-                Assert.Equal(0, written.Unserved);
+                case Served.Every:
+                    Assert.Equal(0, written.Unserved);
+                    Assert.True(written.Handed > 0);
+                    break;
+                case Served.Some:
+                    Assert.True(written.Handed > 0);
+                    break;
+                default:
+                    Assert.Equal(0, written.Handed);
+                    Assert.True(written.Unserved > 0);
+                    break;
             }
 
-            Assert.True(written.Handed > 0);
             Assert.True(written.Wrong.Count == 0, string.Join("\n", written.Wrong.Take(10)));
             Assert.Equal(Source(shape), await Read(written.Path));
         }
@@ -377,6 +388,19 @@ public sealed class ListElementStatisticsTests
     // ------------------------------------------------------------------------------ plumbing
 
     private sealed record Written(string Path, long Unserved, int Handed, int Chunks, List<string> Wrong);
+
+    /// <summary>Which list chunks of a write reach the chooser with their elements summarized from their blocks.</summary>
+    public enum Served
+    {
+        /// <summary>Every chunk.</summary>
+        Every,
+
+        /// <summary>Some chunks at least.</summary>
+        Some,
+
+        /// <summary>No chunk: each is measured.</summary>
+        None,
+    }
 
     private static async Task<Written> Write(
         ListShape shape, int batchRows, int? rowBlock, bool elementStatistics, int? rows = null)

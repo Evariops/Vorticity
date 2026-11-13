@@ -108,6 +108,7 @@ files differ by about 1 % in size.
 * `StartedAt.Append(DateTime)` converts a local time for a UTC column, and `Id.Append(Guid)` stores the
   uuid in network byte order. A `Guid` column needs an edition that carries `vortex.uuid`, which the
   default does ([editions.md](editions.md)).
+* A file holds the elements its rows name, whatever order the lists came in. Rows laid out in another order than their lists, as a dataset sorts an append's rows by its key, cost a copy of their elements as each chunk is written.
 * Reading nested records and lists back is covered in [nested-records.md](nested-records.md).
 
 ## Run it

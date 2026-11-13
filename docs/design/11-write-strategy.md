@@ -67,6 +67,8 @@ its index builders, and, while it runs, the chunk's distinct table. A nested col
 defined by its parent's rows. Block `i` of a list's elements covers the elements of the parent's rows
 in block `i`, so a filter over the elements answers "does any element of a row in this block match".
 
+A chunk of a list column writes the elements its rows name, and no other. A batch's rows are a view of its list's elements, and a chunk cut from it shares them whole, so the writer narrows each chunk before it writes it. Rows that lie one after the other in their elements keep them as a view, narrowed to the extent from the first to the last. Rows that lie apart are gathered: their elements are copied in the order of the rows. The writer tells the two apart in one pass, by comparing the elements the rows name with the extent they span. Rows lie apart when they were laid out in another order than their lists, as an append sorted by a key leaves them, or as a merge takes them a few at a time from several objects. Before this rule, such a chunk wrote the elements of its whole batch. In `DatasetCompositeCompactionTests`, 150 000 rows of short histograms appended in no order of their key made an object of 86.8 MB where the same rows in order made one of 5.7 MB, and twelve objects of 1.05 MB merged into one of 8.7 to 10 MB. The first now weighs what the rows in order do, within a hundredth, and the merge writes less than it reads.
+
 ### 3.2 The statistics pass
 
 Per column and block there is one loop, resolved on the physical type before it starts, that walks
