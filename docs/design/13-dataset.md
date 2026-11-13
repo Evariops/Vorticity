@@ -805,6 +805,7 @@ a scan that stops at its first batch opens a single object.
   [stores that cannot delete](15-compaction.md#5-stores-that-cannot-delete)). A reader that outlives
   the window gets an `ObjectNotFoundException` naming the version it was reading, never a partial
   answer. A dry run reports without deleting.
+- A vacuum opens the commit object of every version it retains and reads each distinct page of their trees once, so its requests and the bytes it reads grow with the versions the window holds. Its memory does not: it keeps no page it has marked, and lets go of what a version's open read brought as soon as that version is marked.
 - Repacking is internal for now. A commit object kept alive by a few live pages among dead ones is
   detected as sparse during vacuum, and a metadata-only commit can copy those pages and fragments
   into itself so the old object can go at the next vacuum, but neither the detection nor the repack
