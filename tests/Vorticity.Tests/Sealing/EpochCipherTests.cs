@@ -2,9 +2,12 @@
 //
 // WHAT IS HELD: a rent that a dispose overtakes either is refused or gets an instance over the
 // epoch's key, never one over a key already wiped and freed, which would fail every frame as if the
-// object were altered. Lanes rent and drop instances as fast as they can while the cipher is
-// disposed at a varying moment, round after round: without the guard, some 250 rents of these
-// 2,000 rounds opened under a wiped key.
+// object were altered. More lanes than the machine has cores rent and drop instances as fast as they
+// can, so that a lane is taken off its core in the middle of a rent, while one cipher after another
+// is disposed under them at a varying moment. With no guard at all, hundreds of rents a run opened
+// under a wiped key. With a flag and a count of the rents in two words, a few still did: a rent on its
+// way out found the count at zero, another came in and passed the flag, the dispose then set the flag
+// and left the key to that one, and the first, reading the flag at last, wiped the key under it.
 using System;
 using System.Security.Cryptography;
 using System.Threading;
@@ -18,9 +21,8 @@ public sealed class EpochCipherTests
     [Fact]
     public void ARentThatADisposeOvertakesNeverOpensWithAWipedKey()
     {
-        const int Rounds = 2_000;
-        const int Lanes = 4;
-        CancellationToken ct = TestContext.Current.CancellationToken;
+        const int Rounds = 20_000;
+        int laneCount = Math.Clamp(Environment.ProcessorCount * 2, 8, 32);
         byte[] key = SealedObjects.Key(7);
         byte[] plaintext = new byte[64];
         byte[] frame = new byte[64];
@@ -30,71 +32,71 @@ public sealed class EpochCipherTests
             EpochCipher.Seal(sealing, 0, final: true, plaintext, frame, tag);
         }
 
-        EpochCipher? current = null;
+        EpochCipher current = new EpochCipher(key);
+        bool done = false;
         int wrong = 0;
-        using Barrier start = new Barrier(Lanes + 1);
-        using Barrier end = new Barrier(Lanes + 1);
-        Thread[] lanes = new Thread[Lanes];
-        for (int t = 0; t < Lanes; t++)
+        long rents = 0;
+        Thread[] lanes = new Thread[laneCount];
+        for (int t = 0; t < lanes.Length; t++)
         {
             lanes[t] = new Thread(Lane);
             lanes[t].Start();
         }
 
+        // The cipher the lanes rent from is disposed under them, then the next one takes its place.
         for (int round = 0; round < Rounds; round++)
         {
-            EpochCipher cipher = new EpochCipher(key);
-            Volatile.Write(ref current, cipher);
-            start.SignalAndWait(ct);
-            Thread.SpinWait(200 + ((round % 50) * 20));
-            cipher.Dispose();
-            end.SignalAndWait(ct);
+            Thread.SpinWait(100 + ((round % 64) * 16));
+            Volatile.Read(ref current).Dispose();
+            Volatile.Write(ref current, new EpochCipher(key));
         }
 
+        Volatile.Write(ref done, true);
         foreach (Thread lane in lanes)
         {
             lane.Join();
         }
 
-        Assert.True(wrong == 0, $"{wrong} rents opened a frame under a wiped key");
+        current.Dispose();
+        Assert.True(wrong == 0, $"{wrong} rents of {rents:N0} opened a frame under a wiped key");
+        Assert.True(rents > Rounds, $"the lanes rented {rents:N0} instances over {Rounds:N0} ciphers, too few to meet a dispose");
 
         // Each lane drops what it rents rather than returning it, so every rent makes an instance from the key.
         void Lane()
         {
             byte[] opened = new byte[64];
-            for (int round = 0; round < Rounds; round++)
+            long rented = 0;
+            while (!Volatile.Read(ref done))
             {
-                start.SignalAndWait(ct);
-                EpochCipher cipher = Volatile.Read(ref current)!;
-                while (true)
+                AesGcm aes;
+                try
                 {
-                    AesGcm aes;
-                    try
-                    {
-                        aes = cipher.Rent();
-                    }
-                    catch (ObjectDisposedException)
-                    {
-                        break;
-                    }
-
-                    try
-                    {
-                        EpochCipher.Open(aes, 0, final: true, frame, tag, opened, 0);
-                    }
-                    catch (Exception)
-                    {
-                        // Counted rather than thrown: a lane that dies leaves the others waiting at the barrier.
-                        Interlocked.Increment(ref wrong);
-                    }
-                    finally
-                    {
-                        aes.Dispose();
-                    }
+                    aes = Volatile.Read(ref current).Rent();
+                }
+                catch (ObjectDisposedException)
+                {
+                    // Refused: the next cipher is on its way, which the round's thread needs a core to bring.
+                    Thread.Yield();
+                    continue;
                 }
 
-                end.SignalAndWait(ct);
+                rented++;
+                try
+                {
+                    EpochCipher.Open(aes, 0, final: true, frame, tag, opened, 0);
+                }
+                catch (Exception)
+                {
+                    // Counted rather than thrown: an exception a lane lets out ends the test's process.
+                    Interlocked.Increment(ref wrong);
+                }
+                finally
+                {
+                    aes.Dispose();
+                }
             }
+
+            Interlocked.Add(ref rents, rented);
         }
     }
 }
