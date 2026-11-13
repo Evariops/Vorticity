@@ -664,6 +664,8 @@ paused between a reading and the request it decides. The listing may lag, and a 
 passed version for the latest. A constant offset of the handle's clock from the store's costs
 nothing, since the handle compares two of its own readings.
 
+A writer commits on the version it holds without asking, while it trusts it: alone, a commit is one request. A writer that is not alone loses that first put whenever another committed since, after sending its whole commit object: two handles committing every two seconds each lost half their puts. A handle whose last commit met another writer's, a lost attempt or a version created past another's, asks for the latest version first at its next commit, and goes back to committing outright once a commit finds that nobody committed since. Two handles appending in turn twenty times each lose their first put once each, where they lost 39 of 40.
+
 A version whose number a reader already knows, because a writer handed it over, needs no listing at
 all. A commit object's key is a function of its version, so `OpenAsync(store, version)` is the one
 read of that key. The handle it returns does not take its version for the latest: its first refresh

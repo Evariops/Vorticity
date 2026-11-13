@@ -70,6 +70,7 @@ same objects ([dataset-maintenance.md](dataset-maintenance.md#in-the-background)
 
 ## Watch out
 
+* Writers that commit to one dataset share its chain of versions. A handle commits outright on the version it holds while it is alone, and asks for the latest version first once its last commit met another writer's, so that it does not send a commit object bound to be refused. The chain applies about 20 commits a second at 20 ms a request: see [frequent-appends.md](frequent-appends.md) when writers commit every few seconds.
 * Forget a source only once no writer can take it again. A writer that did would start it from 0,
   and count its entries a second time.
 * The rows of a commit that ended `AlreadyThere` or in a conflict are in the store and in no version.
