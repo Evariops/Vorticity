@@ -141,6 +141,9 @@ internal static partial class DatasetCompactor
         if (merge)
         {
             Check(schema);
+
+            // A handle that has not measured a row of the dataset decoded measures one before it sizes the job's batches.
+            await LearnRowBytesAsync(dataset, schema, job, cancellationToken).ConfigureAwait(false);
         }
 
         // The key the reads seek by, whose first column's summaries bound a level's ranges and the late rows.
@@ -218,7 +221,11 @@ internal static partial class DatasetCompactor
         long rows;
         long reserved = 0;
         int atOnce = 1;
-        long writer = WriterBytes(dataset, schema, shreddings);
+        int batchRows;
+        long writer = WriterBytes(dataset, schema, job, shreddings);
+
+        // What the inputs' batches weigh decoded, which the handle keeps for the next job's plan.
+        RowMeter meter = new RowMeter();
 
         // The writer's working arrays, its sheets, its counts, its compressors' trials, go back to the process's shelf between
         // its chunks and its objects: the shelf keeps as many as the writer holds at once while the job runs, where its own
@@ -230,13 +237,16 @@ internal static partial class DatasetCompactor
             if (ranges is not null)
             {
                 (streams, rows, reserved, atOnce) =
-                    await RangesAsync(dataset, schema, job, ranges, writer, doublings => OutputsOf(job, doublings), cancellationToken).ConfigureAwait(false);
+                    await RangesAsync(dataset, schema, job, ranges, writer, meter, doublings => OutputsOf(job, doublings), cancellationToken).ConfigureAwait(false);
             }
             else
             {
                 // A job in one piece runs whether the budget holds it or not; what it reserves tells the other jobs it holds it.
+                // Its inputs' batches take what the budget leaves of it once its writer and its open inputs are counted.
                 using QueryMemory memory = new QueryMemory(dataset.Session.Options.JobMemoryBudget ?? QueryMemoryBudget.Jobs);
-                memory.TryGrow(InputsBytes(dataset, schema, ran, merge ? ran.Inputs.Count : 1) + writer);
+                int open = merge ? ran.Inputs.Count : 1;
+                batchRows = InputBatchRows(dataset, schema, ran, open, JobBudget(dataset), writer);
+                memory.TryGrow(InputsBytes(dataset, schema, ran, open, batchRows) + writer);
                 for (int doublings = 0; ; doublings++)
                 {
                     lateOutputs = late is null ? null : new ObjectStream(
@@ -249,7 +259,7 @@ internal static partial class DatasetCompactor
                     try
                     {
                         rows = merge
-                            ? await MergeAsync(dataset, schema, ran, outputs, late, lateOutputs, cancellationToken).ConfigureAwait(false)
+                            ? await MergeAsync(dataset, schema, ran, outputs, late, lateOutputs, batchRows, meter, cancellationToken).ConfigureAwait(false)
                             : await ConcatenateAsync(dataset, schema, ran, outputs, cancellationToken).ConfigureAwait(false);
                         await outputs.FinishAsync(cancellationToken).ConfigureAwait(false);
                         if (lateOutputs is not null)
@@ -294,6 +304,8 @@ internal static partial class DatasetCompactor
                 $"The compaction read {ran.Rows} row(s) from {ran.Inputs.Count} object(s) and wrote " +
                 $"{rows}: a rewrite that loses rows is the one failure it must not have.");
         }
+
+        dataset.LearnDecodedRowBytes(meter.BytesPerRow);
 
         List<(int Level, ReadOnlyMemory<byte> Key)> consumed = [];
         foreach (CompactionInput input in ran.Inputs)
@@ -732,13 +744,40 @@ internal static partial class DatasetCompactor
     /// </summary>
     private const int MergeRows = 1 << 20;
 
-    /// <summary>
-    /// The rows of an input's batch in a merge of <paramref name="inputs"/>: <see cref="MergeRows"/> over the inputs, a power
-    /// of two between a block of 8 192 rows and a window (<see cref="FlatLayoutReader.WindowRows"/>). Decoded on its own, a
-    /// batch costs what its columns' fixed costs come to once more, a few per cent of a merge's decode at 8 192 rows.
-    /// </summary>
-    private static int InputBatchRows(int inputs) =>
-        Math.Clamp(1 << BitOperations.Log2((uint)Math.Max(MergeRows / Math.Max(1, inputs), 1)), 8_192, FlatLayoutReader.WindowRows);
+    /// <summary>The decoded bytes and the rows of the batches a merge's inputs held: what a row weighs decoded, measured.</summary>
+    private sealed class RowMeter
+    {
+        private long _bytes;
+        private long _rows;
+
+        /// <summary>Counts <paramref name="batch"/>, every buffer its nodes hold.</summary>
+        internal void Add(RecordBatch batch)
+        {
+            Interlocked.Add(ref _bytes, batch.Arena.ByteSize(batch.RootIndex));
+            Interlocked.Add(ref _rows, batch.RowCount);
+        }
+
+        /// <summary>The bytes of a row, over every batch counted; 0 before any row.</summary>
+        internal long BytesPerRow
+        {
+            get
+            {
+                long rows = Interlocked.Read(ref _rows);
+                return rows == 0 ? 0 : Interlocked.Read(ref _bytes) / rows;
+            }
+        }
+    }
+
+    /// <summary>The batches of <paramref name="batches"/> as they come, each counted by <paramref name="meter"/>.</summary>
+    private static async IAsyncEnumerable<RecordBatch> MeteredAsync(
+        IAsyncEnumerable<RecordBatch> batches, RowMeter meter, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        await foreach (RecordBatch batch in batches.WithCancellation(cancellationToken).ConfigureAwait(false))
+        {
+            meter.Add(batch);
+            yield return batch;
+        }
+    }
 
     /// <summary>
     /// An input's rows through <paramref name="scan"/>, in their order, without the rows it deleted: a compaction is also
@@ -796,11 +835,13 @@ internal static partial class DatasetCompactor
         ObjectStream outputs,
         LateRows? late,
         ObjectStream? lateOutputs,
+        int batchRows,
+        RowMeter meter,
         CancellationToken cancellationToken,
         KeyRanges? ranges = null,
         int range = 0)
     {
-        KeyOrderedMerge merge = InputsMerged(dataset, schema, job, cancellationToken, ranges: ranges, range: range);
+        KeyOrderedMerge merge = InputsMerged(dataset, schema, job, batchRows, cancellationToken, ranges: ranges, range: range, meter: meter);
         ValueCut? values = schema.Cut;
         long rows = 0;
         await using (merge.ConfigureAwait(false))
@@ -902,17 +943,20 @@ internal static partial class DatasetCompactor
     /// partition and the key read among them, and the rows merged hold them alone. With <paramref name="ranges"/>, the
     /// merge holds the rows of range <paramref name="range"/> alone: each input its keys meet reads the rows the range
     /// names of it, and leaves out those outside the range. With <paramref name="only"/>, it holds that input's rows alone,
-    /// their keys beside them.
+    /// their keys beside them. Each input reads batches of <paramref name="batchRows"/>, which <paramref name="meter"/>
+    /// counts when given.
     /// </remarks>
     private static KeyOrderedMerge InputsMerged(
         VortexDataset dataset,
         DatasetSchema schema,
         CompactionJob job,
+        int batchRows,
         CancellationToken cancellationToken,
         int[]? fields = null,
         KeyRanges? ranges = null,
         int range = 0,
-        int only = -1)
+        int only = -1,
+        RowMeter? meter = null)
     {
         List<(ReadOnlyMemory<byte> Key, MergeObject Object)> inputs = new(job.Inputs.Count);
         Dictionary<string, RowRange>? rows = ranges is null ? null : new Dictionary<string, RowRange>(StringComparer.Ordinal);
@@ -939,13 +983,14 @@ internal static partial class DatasetCompactor
         }
 
         inputs.Sort(static (left, right) => left.Key.Span.SequenceCompareTo(right.Key.Span));
-        int batchRows = InputBatchRows(inputs.Count);
         return new KeyOrderedMerge(
             dataset.Snapshot,
             inputs.Select(static held => held.Object).ToAsyncEnumerable(),
             schema.Tree!,
             rankedTies: false,
-            (lease, entry) => RowsOfAsync(lease, entry, schema, cancellationToken, fields, rows?[entry.Key], batchRows),
+            (lease, entry) => meter is null
+                ? RowsOfAsync(lease, entry, schema, cancellationToken, fields, rows?[entry.Key], batchRows)
+                : MeteredAsync(RowsOfAsync(lease, entry, schema, cancellationToken, fields, rows?[entry.Key], batchRows), meter, cancellationToken),
             opened: null,
             cancellationToken,
             ranges?.Low(range) ?? default,
@@ -977,10 +1022,16 @@ internal static partial class DatasetCompactor
         int next = 0;
         Lock gate = new Lock();
 
-        // Each lane reserves what it holds as it counts an input, the first whether the budget grants it or not: a window of
-        // the input's rows decoded, and a slice of a wide shredding.
+        // Each lane reserves what it holds as it counts an input, the first whether the budget grants it or not: a batch of
+        // the input's rows decoded, its own rows when it holds fewer, and a slice of a wide shredding.
         using QueryMemory memory = new QueryMemory(dataset.Session.Options.JobMemoryBudget ?? QueryMemoryBudget.Jobs);
-        long perLane = (FlatLayoutReader.WindowRows * Math.Max(job.Bytes / Math.Max(job.Rows, 1), 1) * DecodedPerEncoded)
+        long mostRows = 0;
+        foreach (CompactionInput input in job.Inputs)
+        {
+            mostRows = Math.Max(mostRows, input.Entry.PhysicalRows);
+        }
+
+        long perLane = (Math.Min(mostRows, CensusRows(dataset, job)) * HeldPerBatchByte * RowBytes(dataset, job))
             + File.VortexReadOptions.DefaultVariantSliceBytes;
         memory.TryGrow(perLane);
         int most = Math.Min(Math.Max(1, dataset.Session.Options.MaxDegreeOfParallelism), job.Inputs.Count);
@@ -1157,7 +1208,7 @@ internal static partial class DatasetCompactor
         int[] counted = Counted(schema);
         int[] read = [.. variants.Select(field => Array.BinarySearch(counted, field))];
         byte[]? last = null;
-        KeyOrderedMerge merge = InputsMerged(dataset, schema, job, cancellationToken, counted, only: input);
+        KeyOrderedMerge merge = InputsMerged(dataset, schema, job, CensusRows(dataset, job), cancellationToken, counted, only: input);
         await using (merge.ConfigureAwait(false))
         {
             while (await merge.MoveNextAsync().ConfigureAwait(false))

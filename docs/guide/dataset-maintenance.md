@@ -340,6 +340,7 @@ one. On a store where a request costs 30 ms, it is what a job takes. See
 * Compaction commits like any writer, so a concurrent writer can win the race. Check `Outcome`.
   Vacuum deletes only what no retained version references, and deletes nothing until every retained
   version has been walked.
+* A job holds what the session's jobs' budget gives it (`VortexSessionOptions.JobMemoryBudget`). It prices an input by the rows it holds and a row by what the handle's last merge measured it to weigh, and reads its inputs in batches sized to what the budget leaves. `CompactionResult.MemoryReserved` says what it reserved. `ConsolidateAsync` merges a partition whose level 0 the budget cannot hold at once by size class first, a pass at a time, so a long backlog of small objects costs several jobs rather than one that outgrows the process.
 * A vacuum's work grows with the versions the window keeps. It opens the commit object of each retained version and reads the pages that version wrote, so a dataset that commits every two seconds under a window of an hour gives each vacuum some 1,800 versions to read. Its memory does not grow with them, since it holds the pages of one version at a time. A shorter window, or fewer and larger commits, makes it cheaper.
 * A writer that dies mid-commit on `FileObjectStore` leaves no commit: the store shows a commit only
   once it is whole. On a file system that can neither rename exclusively nor link files, where the

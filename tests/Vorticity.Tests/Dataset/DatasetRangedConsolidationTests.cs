@@ -53,17 +53,16 @@ public sealed partial class DatasetRangedConsolidationTests
     }
 
     /// <summary>
-    /// A range reserves what its writer gathers besides its inputs' batches: columns that gather chunks of 64 MiB, sixteen
-    /// times that each at most, run the ranges one at a time under a budget of 3 GiB, which the inputs' batches alone, a
-    /// few hundred megabytes a range, would have filled with every range at once; under a budget of 64 GiB, side by side.
+    /// A range's writer holds at most the rows it writes, whatever the chunks its columns gather: columns that gather chunks
+    /// of 64 MiB, sixteen times that each at most, priced every range at several gigabytes and ran them one at a time under
+    /// a budget of 3 GiB, though a range of some 30 000 rows holds a few megabytes. Priced by its rows, each range reserves
+    /// what it holds, and the ranges run side by side under that budget as under one of 64 GiB.
     /// </summary>
     /// <remarks>
-    /// The roomy budget is one of its own, under a parent of a fixed ceiling standing for the process: under the process's
-    /// share, a range reserving some 5.5 GB ran alone on a runner of 16 GB, where it ran beside another on a machine of more
-    /// (2026-11-02).
+    /// The roomy budget is one of its own, under a parent of a fixed ceiling standing for the process (2026-11-02).
     /// </remarks>
     [Fact]
-    public async Task ARangeReservesWhatItsWriterGathers()
+    public async Task ARangesWriterIsPricedByTheRowsItWrites()
     {
         QueryMemoryBudget roomyBudget = new QueryMemoryBudget(64L << 30, new QueryMemoryBudget(64L << 30, process: null));
         (List<Row> appended, List<Row> roomy, IReadOnlyList<CompactionResult> wide) = await ConsolidateAsync(lanes: 4, roomyBudget, chunkBytes: 64 << 20);
@@ -72,7 +71,8 @@ public sealed partial class DatasetRangedConsolidationTests
         Assert.Equal(live, roomy.OrderBy(static row => row.Sequence));
         Assert.Equal(live, tight.OrderBy(static row => row.Sequence));
         Assert.True(wide.Any(static job => job.RangesAtOnce > 1), string.Join("; ", wide.Select(static job => $"{job.RangesAtOnce} at once, {job.MemoryReserved} B reserved")));
-        Assert.All(narrow, static job => Assert.Equal(1, job.RangesAtOnce));
+        Assert.True(narrow.Any(static job => job.RangesAtOnce > 1), string.Join("; ", narrow.Select(static job => $"{job.RangesAtOnce} at once, {job.MemoryReserved} B reserved")));
+        Assert.All(narrow, static job => Assert.InRange(job.MemoryReserved, 1, 3L << 30));
     }
 
     /// <summary>
