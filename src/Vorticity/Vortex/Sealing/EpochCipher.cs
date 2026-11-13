@@ -13,7 +13,9 @@ namespace Vorticity.Sealing;
 /// instance serves one thread at a time. The lanes that read an object at once each rent their own,
 /// created when first needed and kept for the next read, so a scan allocates none per frame or per
 /// batch. Disposing the cipher wipes the key and disposes every instance, which frees the
-/// platform's copies of it.
+/// platform's copies of it. A dispose that comes while a rent is creating an instance leaves the
+/// key to that rent, which wipes it once the instance has its copy: a rent never reads a key
+/// already freed.
 /// </remarks>
 internal sealed class EpochCipher : IDisposable
 {
@@ -23,6 +25,11 @@ internal sealed class EpochCipher : IDisposable
     private readonly SecretBytes _key;
     private readonly AesGcm?[] _kept = new AesGcm?[KeptInstances];
     private int _disposed;
+
+    // The rents creating an instance from the key now. A rent counts itself before it checks the cipher is not disposed,
+    // and a dispose marks the cipher before it reads the count, so at least one of the two sees the other: the one that
+    // sees no rent left wipes the key, never while a rent reads it.
+    private int _creating;
 
     /// <summary>A cipher over <paramref name="key"/>, which it copies.</summary>
     internal EpochCipher(ReadOnlySpan<byte> key) => _key = new SecretBytes(key);
@@ -39,7 +46,25 @@ internal sealed class EpochCipher : IDisposable
             }
         }
 
-        return new AesGcm(_key.Span, SealedFormat.TagBytes);
+        return Create();
+    }
+
+    /// <summary>A new instance over the key, which a dispose meanwhile leaves alone until it has its copy.</summary>
+    private AesGcm Create()
+    {
+        Interlocked.Increment(ref _creating);
+        try
+        {
+            ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+            return new AesGcm(_key.Span, SealedFormat.TagBytes);
+        }
+        finally
+        {
+            if (Interlocked.Decrement(ref _creating) == 0 && Volatile.Read(ref _disposed) != 0)
+            {
+                _key.Dispose();
+            }
+        }
     }
 
     /// <summary>Gives back an instance from <see cref="Rent"/>, kept for the next read or disposed.</summary>
@@ -91,7 +116,7 @@ internal sealed class EpochCipher : IDisposable
         }
     }
 
-    /// <summary>Wipes the key and disposes the kept instances. Idempotent.</summary>
+    /// <summary>Wipes the key, or leaves it to the rents creating an instance from it, and disposes the kept instances. Idempotent.</summary>
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0)
@@ -104,6 +129,10 @@ internal sealed class EpochCipher : IDisposable
             Interlocked.Exchange(ref _kept[i], null)?.Dispose();
         }
 
-        _key.Dispose();
+        // The last rent creating an instance wipes it otherwise; both may, and the wipe is idempotent.
+        if (Volatile.Read(ref _creating) == 0)
+        {
+            _key.Dispose();
+        }
     }
 }
