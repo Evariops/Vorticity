@@ -998,9 +998,11 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             writer._indexes?.AddSheets(schema);
             writer._sheetBytes = options.ColumnSheetBytes;
 
-            // And the counts of each column a sheet numbers the values of, over the whole object.
+            // And the counts of each column a sheet numbers the values of, over the whole object, bounded by its rows when
+            // the caller knows them.
             if (options.Counted && CountsPlan.For(schema) is { } plan)
             {
+                plan.RowBound = options.RowBound;
                 writer._indexes?.AddCounts(plan);
 
                 // And each column's statistics over the granules, and where each value lies, granule by granule.

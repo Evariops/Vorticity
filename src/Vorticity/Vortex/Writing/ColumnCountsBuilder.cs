@@ -87,6 +87,13 @@ internal sealed class CountsPlan
     internal List<WideColumn> Wide { get; } = [];
 
     /// <summary>
+    /// The rows the object holds at most, 0 when unknown: what tells a column's counts, before the object ends, that its
+    /// values can no longer hold the rows each that its sketches and its registers ask for (<see cref="ColumnCountsBuilder.SketchRows"/>,
+    /// <see cref="ColumnCountsBuilder.AttachRows"/>), so that it lets them go rather than build what its end would drop.
+    /// </summary>
+    internal long RowBound { get; set; }
+
+    /// <summary>
     /// Settles which text columns stay wide: one whose values hardly repeat is an identifier, whose distinct values in an
     /// entry are the entry's rows, which the counts give, and one of at most <see cref="ColumnCountsBuilder.WideValues"/> values
     /// is counted as a column instead: once its sheet gave its counts up, or once its first rows are in or the file ends.
@@ -346,7 +353,8 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
     /// <summary>
     /// The valid rows each of a column's values holds on average, at least, for its entries to keep a quantile sketch of
     /// each measure, the distribution of its values (spec H, 2): a sketch of about a kibibyte then costs some four bytes a
-    /// row of the column at most, whatever the object's size. Decided once the object is written.
+    /// row of the column at most, whatever the object's size. Decided once the object is written, and known before when
+    /// the column holds more values than the object's rows can give this many each (<see cref="CountsPlan.RowBound"/>).
     /// </summary>
     internal const int SketchRows = 256;
 
@@ -367,11 +375,16 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
 
     /// <summary>
     /// The valid rows each of a column's values holds on average, at least, for its entries to keep the distinct values of
-    /// every wide column (spec H, 2): registers of some two kibibytes a wide column then cost about a byte a row.
+    /// every wide column (spec H, 2): registers of some two kibibytes a wide column then cost about a byte a row. Decided
+    /// once the object is written, and known before when the column holds more values than the object's rows can give
+    /// this many each (<see cref="CountsPlan.RowBound"/>).
     /// </summary>
     internal const int AttachRows = 2_048;
 
-    /// <summary>The most values a column's entries keep registers of while the object is written: past them, none.</summary>
+    /// <summary>
+    /// The most values a column's entries keep registers of while the object is written: past them, none. An object of
+    /// known rows keeps them of fewer, its rows over <see cref="AttachRows"/> (<see cref="AttachLimit"/>).
+    /// </summary>
     internal const int AttachCeiling = 8_192;
 
     /// <summary>The bits of the sketches' grid: a relative error of 1 %, the engine's for a quantile asked with none.</summary>
@@ -421,7 +434,7 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
     // Each row's entry by its row in the batch being fed, which the distinct values read once the batch is in; and for each
     // wide column of the plan, the registers of its entries, ColumnSheet.Registers bytes an entry one after another in a
     // block of the shared pool, those of an entry no row reached left at zero (a rank is 1 at least): none for a column
-    // whose counts went, and the whole null once the column holds more than AttachCeiling values.
+    // whose counts went, and the whole null once the column holds more than AttachLimit values.
     private readonly int _field;
     private int[] _batchEntries = [];
     private NativeSegmentOwner?[]? _distinct;
@@ -614,7 +627,7 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
 
         if (_sketches is not null)
         {
-            if ((long)_sheet.Distinct * _sketches.Length * SketchSize > SketchBudget)
+            if ((long)_sheet.Distinct * _sketches.Length * SketchSize > SketchBudget || _sheet.Distinct > SketchLimit)
             {
                 ReleaseSketches();
             }
@@ -636,6 +649,37 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
     }
 
     /// <summary>
+    /// The most values the column holds while its entries keep registers: <see cref="AttachCeiling"/>, and for an object of
+    /// known rows the most values that can hold <see cref="AttachRows"/> rows each. Past it, the end of the object would
+    /// keep none (<see cref="Finish"/>), whatever rows come, since the values only grow and the rows are bounded.
+    /// </summary>
+    internal int AttachLimit => _plan.RowBound > 0 ? (int)Math.Min(AttachCeiling, _plan.RowBound / AttachRows) : AttachCeiling;
+
+    /// <summary>
+    /// The most values the column holds while its entries build sketches, for an object of known rows: the most values that
+    /// can hold <see cref="SketchRows"/> rows each. Past it, the end of the object would keep none.
+    /// </summary>
+    private long SketchLimit => _plan.RowBound > 0 ? _plan.RowBound / SketchRows : long.MaxValue;
+
+    /// <summary>The bytes of the blocks the column holds for its entries' registers, every wide column's.</summary>
+    internal long RegisterBytes
+    {
+        get
+        {
+            long bytes = 0;
+            foreach (NativeSegmentOwner? block in _distinct ?? [])
+            {
+                bytes += block?.Length ?? 0;
+            }
+
+            return bytes;
+        }
+    }
+
+    /// <summary>Whether the column still builds sketches of its measures.</summary>
+    internal bool Sketches => _sketches is not null;
+
+    /// <summary>
     /// Raises, for each of the batch's <paramref name="rows"/>, the register its wide columns' hashes call for in its entry's
     /// registers of each: once the whole batch is in, every column's sheet having hashed its rows.
     /// </summary>
@@ -646,7 +690,7 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
             return;
         }
 
-        if (_sheet.Distinct > AttachCeiling || !_sheet.Counting)
+        if (_sheet.Distinct > AttachLimit || !_sheet.Counting)
         {
             ReleaseRegisters();
             return;
