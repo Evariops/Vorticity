@@ -389,8 +389,10 @@ public sealed class CredentialChainTests
 
         internal List<Seen> Requests { get; } = [];
 
+        // The files are named with '/', as the tests write them. Under Windows the chains join a path under the home
+        // directory with '\', so a name is read with its separators turned back to '/'.
         internal CredentialHost Build() => new CredentialHost(
-            name => Env.GetValueOrDefault(name), path => Files.GetValueOrDefault(path), "/home/u", Clock, new Handler(this));
+            name => Env.GetValueOrDefault(name), path => Files.GetValueOrDefault(path.Replace('\\', '/')), "/home/u", Clock, new Handler(this));
 
         private sealed class Handler(FakeHost host) : HttpMessageHandler
         {
