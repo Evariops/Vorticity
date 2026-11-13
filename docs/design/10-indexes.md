@@ -462,20 +462,11 @@ order, a quantile sketch of each measure, then the registers of each wide column
 naming its first entry, then the chunks. On the design's requests, Service's counts take 136 KB and their
 sketches 2.4 MB, which a count by service no longer reads.
 
-A column of at most 1 000 values keeps, for each entry, a quantile sketch of each measure: the engine's
-log-linear grid at 1 % of relative error, which a quantile asked with no error takes, its buckets as the
-engine merges them. Sketches of two objects merge bucket by bucket into the sketch of their rows together.
-A sketch of a measure spanning 3.7 decades fills some 790 buckets: an entry's two sketched measures take 1
-to 3.4 KB on the design's requests, and the sketches cost the writer some 12 to 18 ns more a sketched
-column a row.
+A column whose values hold 256 rows each on average keeps, for each entry, a quantile sketch of each measure: the engine's log-linear grid at 1 % of relative error, which a quantile asked with no error takes, its buckets as the engine merges them. A sketch of about a kibibyte then costs some four bytes a row at most, whatever the object's size. Sketches of two objects merge bucket by bucket into the sketch of their rows together. A sketch of a measure spanning 3.7 decades fills some 790 buckets: an entry's two sketched measures take 1 to 3.4 KB on the design's requests, and the sketches cost the writer some 12 to 18 ns more a sketched column a row.
 
-A column of at most 100 values keeps, for each entry, the distinct values of every wide column as well:
-a text column of more than 1 000 values that repeat. They are a HyperLogLog of 2^11 registers of six bits
-over the hashes of the wide column's values in the entry's rows, the sheet's, written as the set registers
-while few are, packed past them, after the entry's quantile sketches. An identifier, whose values hardly
-repeat, is no wide column: its distinct values in an entry are the entry's rows. Registers of two objects
-merge register by register. The sheet of a wide column hashes each row of a batch for them, and the
-columns of few values raise their entries' registers once the whole batch is in.
+A column whose values hold 2 048 rows each on average, of 8 192 values at most, keeps, for each entry, the distinct values of every wide column as well: a text column of more than 1 000 values that repeat. They are a HyperLogLog of 2^11 registers of six bits over the hashes of the wide column's values in the entry's rows, the sheet's, written as the set registers while few are, packed past them, after the entry's quantile sketches. An identifier, whose values hardly repeat, is no wide column: its distinct values in an entry are the entry's rows. Registers of two objects merge register by register. The sheet of a wide column hashes each row of a batch for them, and the columns of few values raise their entries' registers once the whole batch is in.
+
+Both are decided once the object is written, from its rows and its values, but the writer of an object whose rows it knows settles them as soon as they are certain: a compaction knows the rows of its inputs, and an append that sorts its rows by a key or a partition knows them too. Values only grow and the rows are bounded, so a column past the bound's rows over 256 values builds no more sketches, and one past them over 2 048 builds no more registers, the end of the object keeping neither. Without that bound a column built registers for up to 8 192 values, 16 MiB a wide column, in blocks that double. A consolidation of 3 305 small objects into one of 13 234 rows held 1.3 GB of registers for its 39 pairs of a column and a wide column, all dropped at its end, and peaked at 1.9 GB. Its writer now builds none, and the job peaks at 590 MB.
 
 ### 4.11 `vorticity.granule.stats.v1`: a column over the granules
 
