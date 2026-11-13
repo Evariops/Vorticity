@@ -2,11 +2,13 @@ using System;
 using System.Buffers;
 using System.Collections.Generic;
 using System.Collections.Immutable;
+using System.Numerics;
 using System.Runtime.ExceptionServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Aggregating;
 using Vorticity.Indexes;
+using Vorticity.Layouts;
 using Vorticity.RowEncoding;
 using Vorticity.Writing;
 
@@ -18,25 +20,188 @@ internal static partial class DatasetCompactor
     private const int MostRanges = 8;
 
     /// <summary>
-    /// What a decoded row's bytes come to over an encoded one's, about: a log's record, its attributes rebuilt from their
-    /// shredded keys, read some 360 bytes for the 25 it is written in.
+    /// What an open input holds besides its batch, at least: its reader, its footer parsed, the segments of the chunks it
+    /// reads. Measured at 0.10 to 0.15 MB an input, linear from 8 to 3 283 open inputs of 24 KB (2026-11-13).
     /// </summary>
-    private const long DecodedPerEncoded = 16;
+    internal const long InputFloorBytes = 128 << 10;
 
     /// <summary>
-    /// What a range of a consolidation holds, about: <see cref="InputsBytes"/> of the range of the most inputs, and its
-    /// objects' <paramref name="writer"/> (<see cref="WriterBytes"/>).
+    /// What an input holds for each byte of the batch it hands the merge, about: the batch, the chunks it was cut from,
+    /// decoded whole, and what its columns' reshaping keeps. Measured at 3.3 on a metric's records: 1.78 KB of resident
+    /// memory a row for 530 bytes of batch, over merges of 8 inputs of 13 000 to 53 000 rows (2026-11-13).
     /// </summary>
-    private static long RangeBytes(VortexDataset dataset, DatasetSchema schema, CompactionJob job, KeyRanges ranges, long writer) =>
-        InputsBytes(dataset, schema, job, ranges.MostInputs) + writer;
+    private const long HeldPerBatchByte = 3;
+
+    /// <summary>
+    /// What a range of a consolidation holds, about: <see cref="InputsBytes"/> of the range of the most inputs, in batches
+    /// of <paramref name="batchRows"/>, and its objects' <paramref name="writer"/> (<see cref="WriterBytes"/>).
+    /// </summary>
+    private static long RangeBytes(VortexDataset dataset, DatasetSchema schema, CompactionJob job, KeyRanges ranges, long writer, int batchRows) =>
+        InputsBytes(dataset, schema, job, ranges.MostInputs, batchRows) + writer;
+
+    /// <summary>
+    /// What a decoded row of the job's inputs weighs, about: what the handle's last merge measured, or, before any, the
+    /// least its schema's columns take decoded (<see cref="FloorBytes"/>). The bytes a row is written in mislead on small
+    /// objects, whose chunks' fixed costs make a row of four 51 KB.
+    /// </summary>
+    internal static long RowBytes(VortexDataset dataset, CompactionJob job) =>
+        dataset.DecodedRowBytes > 0 ? dataset.DecodedRowBytes : FloorBytes(dataset.Snapshot.Schema.DType);
+
+    /// <summary>
+    /// The least a row of <paramref name="dtype"/> takes decoded: a number its width, a text or a binary its view, a list its
+    /// offset and size and one element, a variant a view. What its values hold past that, the bytes of long texts, the
+    /// elements of long lists, a merge measures.
+    /// </summary>
+    internal static long FloorBytes(Types.DType dtype)
+    {
+        switch (dtype.Kind)
+        {
+            case Types.DTypeKind.Primitive:
+                return Types.PTypeExtensions.ByteWidth(dtype.PType);
+            case Types.DTypeKind.Bool:
+            case Types.DTypeKind.Null:
+                return 1;
+            case Types.DTypeKind.Struct:
+                long sum = 0;
+                for (int field = 0; field < dtype.FieldCount; field++)
+                {
+                    sum += FloorBytes(dtype.GetField(field));
+                }
+
+                return Math.Max(sum, 1);
+            case Types.DTypeKind.List:
+                return 8 + FloorBytes(dtype.ElementType);
+            case Types.DTypeKind.FixedSizeList:
+                return Math.Max(1, (long)dtype.FixedSize * FloorBytes(dtype.ElementType));
+            case Types.DTypeKind.Extension:
+                return FloorBytes(dtype.StorageType);
+            default:
+                return 16;
+        }
+    }
+
+    /// <summary>
+    /// Learns what a row of the job's inputs weighs decoded, when the handle has not yet: the first batch of its input of
+    /// the most rows, 8 192 rows at most, read and measured once, before the job sizes its batches by it.
+    /// </summary>
+    private static async ValueTask LearnRowBytesAsync(VortexDataset dataset, DatasetSchema schema, CompactionJob job, CancellationToken cancellationToken)
+    {
+        if (dataset.DecodedRowBytes > 0)
+        {
+            return;
+        }
+
+        CompactionInput largest = job.Inputs[0];
+        foreach (CompactionInput input in job.Inputs)
+        {
+            if (input.Entry.PhysicalRows > largest.Entry.PhysicalRows)
+            {
+                largest = input;
+            }
+        }
+
+        RowMeter meter = new RowMeter();
+        ObjectLease lease = await dataset.RentAsync(largest.Entry, cancellationToken).ConfigureAwait(false);
+        await using (lease.ConfigureAwait(false))
+        {
+            await foreach (RecordBatch batch in RowsOfAsync(lease, largest.Entry, schema, cancellationToken, batchRows: 8_192).ConfigureAwait(false))
+            {
+                meter.Add(batch);
+                break;
+            }
+        }
+
+        dataset.LearnDecodedRowBytes(meter.BytesPerRow);
+    }
+
+    /// <summary>
+    /// What an open input of the job holds besides its batch, about: <see cref="HeldPerOpenByte"/> times the chunks it holds
+    /// open (<see cref="OpenChunkBytes"/>), and <see cref="InputFloorBytes"/> at least.
+    /// </summary>
+    internal static long OpenBytes(VortexDataset dataset, DatasetSchema schema, CompactionJob job) =>
+        Math.Max(InputFloorBytes, HeldPerOpenByte * OpenChunkBytes(dataset, schema, job));
+
+    /// <summary>
+    /// The rows of an input's batch in a merge of <paramref name="inputs"/> of the job's inputs, rows of
+    /// <paramref name="rowBytes"/> decoded, whose batches may hold <paramref name="share"/> bytes together: the rows
+    /// <see cref="MergeRows"/> gives each, fewer where the share holds fewer, a power of two between a block of 8 192 rows
+    /// and a window (<see cref="FlatLayoutReader.WindowRows"/>). Rows of a metric's maps and lists weigh four times a
+    /// log's: by rows alone, eight inputs of a window each held 1.7 GB of batches.
+    /// </summary>
+    internal static int InputBatchRows(int inputs, long rowBytes, long share)
+    {
+        long byCount = MergeRows / Math.Max(1, inputs);
+        long byBytes = share / ((long)Math.Max(1, inputs) * Math.Max(rowBytes, 1));
+        long rows = Math.Max(Math.Min(byCount, byBytes), 1);
+        return Math.Clamp(1 << BitOperations.Log2((ulong)Math.Min(rows, int.MaxValue)), 8_192, FlatLayoutReader.WindowRows);
+    }
+
+    /// <summary>
+    /// The rows of an input's batch in a merge of <paramref name="inputs"/> of the job's inputs under a budget of
+    /// <paramref name="budget"/> bytes, of which its writer holds <paramref name="writer"/>: what is left once the inputs'
+    /// open bytes are taken goes to their batches (<see cref="InputBatchRows(int, long, long)"/>).
+    /// </summary>
+    internal static int InputBatchRows(VortexDataset dataset, DatasetSchema schema, CompactionJob job, int inputs, long budget, long writer) =>
+        InputBatchRows(inputs, HeldPerBatchByte * RowBytes(dataset, job), budget - writer - ((long)inputs * OpenBytes(dataset, schema, job)));
+
+    /// <summary>
+    /// What the job holds at least, its inputs' batches at a block of 8 192 rows: its level 0 inputs, which overlap and are
+    /// all open at once, one input of the levels above, which are disjoint and open one after another, and its writer.
+    /// </summary>
+    internal static long LeastBytes(VortexDataset dataset, CompactionJob job)
+    {
+        DatasetSchema schema = dataset.Snapshot.Schema;
+        long held = 0;
+        long above = 0;
+        int open = 1;
+        foreach (CompactionInput input in job.Inputs)
+        {
+            long rows = Math.Min(input.Entry.PhysicalRows, 8_192);
+            if (input.Level == 0)
+            {
+                held += rows;
+                open++;
+            }
+            else
+            {
+                above = Math.Max(above, rows);
+            }
+        }
+
+        return ((held + above) * HeldPerBatchByte * RowBytes(dataset, job))
+            + ((long)open * OpenBytes(dataset, schema, job))
+            + WriterBytes(dataset, schema, job, null);
+    }
+
+    /// <summary>Whether the job holds within the jobs' budget at its least (<see cref="LeastBytes"/>).</summary>
+    internal static bool Fits(VortexDataset dataset, CompactionJob job) => LeastBytes(dataset, job) <= JobBudget(dataset);
+
+    /// <summary>
+    /// The rows of an input's batch in the first pass of a job, which counts its inputs one a lane: what a lane's share of the
+    /// budget holds of them.
+    /// </summary>
+    private static int CensusRows(VortexDataset dataset, CompactionJob job) =>
+        InputBatchRows(1, HeldPerBatchByte * RowBytes(dataset, job), JobBudget(dataset) / Math.Max(1, dataset.Session.Options.MaxDegreeOfParallelism));
+
+    /// <summary>
+    /// The bytes of the jobs' memory budget of the handle's session: what one job may plan to hold.
+    /// </summary>
+    internal static long JobBudget(VortexDataset dataset) =>
+        (dataset.Session.Options.JobMemoryBudget ?? QueryMemoryBudget.Jobs).CeilingBytes;
 
     /// <summary>
     /// What the writer of a job's objects holds, about: each column what it gathers before it writes a chunk, at most
     /// <see cref="VortexFileWriter.MostGatheredPerTarget"/> times the dataset's chunk bytes; a variant column shredded,
     /// <see cref="VariantShredder.HeldPerTarget"/> times its chunk's target. Of the partition values of a job in one
-    /// piece, whose objects are written one after the other, the one whose writer holds the most.
+    /// piece, whose objects are written one after the other, the one whose writer holds the most. No more, though, than
+    /// the job's rows decoded (<see cref="RowBytes"/>), which the writer holds once at most: a job of 200 000 rows of
+    /// metrics was priced 2.6 GB for chunks it never filled, and held 380 MB in all.
     /// </summary>
-    private static long WriterBytes(VortexDataset dataset, DatasetSchema schema, IReadOnlyList<ValueShredding>? shreddings)
+    private static long WriterBytes(VortexDataset dataset, DatasetSchema schema, CompactionJob job, IReadOnlyList<ValueShredding>? shreddings) =>
+        Math.Min(TargetsBytes(dataset, schema, shreddings), job.Rows * RowBytes(dataset, job));
+
+    /// <summary>What the writer of a job's objects holds once each column gathers its chunk's target (<see cref="WriterBytes"/>).</summary>
+    private static long TargetsBytes(VortexDataset dataset, DatasetSchema schema, IReadOnlyList<ValueShredding>? shreddings)
     {
         long most = 0;
         int values = shreddings?.Count ?? 0;
@@ -63,15 +228,39 @@ internal static partial class DatasetCompactor
     private const long HeldPerOpenByte = 4;
 
     /// <summary>
-    /// What a merge of <paramref name="inputs"/> of the job's inputs holds of them, about: the batches they hold together
-    /// (<see cref="InputBatchRows"/>), at <see cref="DecodedPerEncoded"/> times the bytes a row of the job's inputs is
-    /// written in, and <see cref="HeldPerOpenByte"/> times the chunks each holds open (<see cref="OpenChunkBytes"/>).
+    /// What a merge of <paramref name="inputs"/> of the job's inputs holds of them, about: each its open bytes
+    /// (<see cref="OpenBytes"/>), and its batch, of <paramref name="batchRows"/> rows or of its own rows when it holds fewer,
+    /// at <see cref="RowBytes"/> a row. The inputs of the most rows are counted, which a merge of the job's inputs that
+    /// overlap holds open at once: a small input costs what it holds, where a batch of 8 192 rows each priced 3 305 inputs of
+    /// four rows at 400 GB.
     /// </summary>
-    private static long InputsBytes(VortexDataset dataset, DatasetSchema schema, CompactionJob job, int inputs)
+    private static long InputsBytes(VortexDataset dataset, DatasetSchema schema, CompactionJob job, int inputs, int batchRows)
     {
-        long held = (long)inputs * InputBatchRows(inputs);
-        return (held * Math.Max(job.Bytes / Math.Max(job.Rows, 1), 1) * DecodedPerEncoded)
-            + ((long)inputs * HeldPerOpenByte * OpenChunkBytes(dataset, schema, job));
+        int count = Math.Min(inputs, job.Inputs.Count);
+        long held = 0;
+        if (count == job.Inputs.Count)
+        {
+            foreach (CompactionInput input in job.Inputs)
+            {
+                held += Math.Min(input.Entry.PhysicalRows, batchRows);
+            }
+        }
+        else
+        {
+            long[] rows = new long[job.Inputs.Count];
+            for (int i = 0; i < rows.Length; i++)
+            {
+                rows[i] = Math.Min(job.Inputs[i].Entry.PhysicalRows, batchRows);
+            }
+
+            Array.Sort(rows);
+            for (int i = rows.Length - count; i < rows.Length; i++)
+            {
+                held += rows[i];
+            }
+        }
+
+        return (held * HeldPerBatchByte * RowBytes(dataset, job)) + ((long)count * OpenBytes(dataset, schema, job));
     }
 
     /// <summary>
@@ -396,6 +585,7 @@ internal static partial class DatasetCompactor
         CompactionJob job,
         KeyRanges ranges,
         long writer,
+        RowMeter meter,
         Func<int, ObjectStream> outputsOf,
         CancellationToken cancellationToken)
     {
@@ -403,9 +593,11 @@ internal static partial class DatasetCompactor
         long[] rows = new long[ranges.Count];
 
         // Each range reserves what it holds before it starts, the first whether the budget grants it or not, as a job in one
-        // piece runs; the others wait for a lane, as many lanes as the budget holds ranges.
+        // piece runs; the others wait for a lane, as many lanes as the budget holds ranges. A range's batches take what the
+        // budget leaves once its writer and its open inputs are counted, so that one range alone fits it.
         using QueryMemory memory = new QueryMemory(dataset.Session.Options.JobMemoryBudget ?? QueryMemoryBudget.Jobs);
-        long perRange = RangeBytes(dataset, schema, job, ranges, writer);
+        int batchRows = InputBatchRows(dataset, schema, job, ranges.MostInputs, JobBudget(dataset), writer);
+        long perRange = RangeBytes(dataset, schema, job, ranges, writer, batchRows);
         memory.TryGrow(perRange);
         int lanes = 1;
         while (lanes < ranges.Count && memory.TryGrow(perRange))
@@ -464,7 +656,7 @@ internal static partial class DatasetCompactor
                 ObjectStream outputs = outputsOf(doublings);
                 try
                 {
-                    long merged = await MergeAsync(dataset, schema, job, outputs, null, null, token, ranges, range).ConfigureAwait(false);
+                    long merged = await MergeAsync(dataset, schema, job, outputs, null, null, batchRows, meter, token, ranges, range).ConfigureAwait(false);
                     await outputs.FinishAsync(token).ConfigureAwait(false);
                     return (outputs, merged);
                 }

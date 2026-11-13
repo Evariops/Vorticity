@@ -138,6 +138,23 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <summary>What the objects open between scans weigh, as <see cref="DatasetOptions.MaxOpenObjectBytes"/> bounds them.</summary>
     internal long OpenObjectBytes => _objects.HeldBytes;
 
+    /// <summary>
+    /// What a row of the dataset weighed decoded in the last merge this handle ran, over the batches its inputs held: what
+    /// the next job's plan prices an input's batch by; 0 before any merge measured one.
+    /// </summary>
+    internal long DecodedRowBytes => Volatile.Read(ref _decodedRowBytes);
+
+    private long _decodedRowBytes;
+
+    /// <summary>Keeps <paramref name="bytes"/> as what a decoded row weighs, as a merge measured it.</summary>
+    internal void LearnDecodedRowBytes(long bytes)
+    {
+        if (bytes > 0)
+        {
+            Volatile.Write(ref _decodedRowBytes, bytes);
+        }
+    }
+
     /// <summary>Its levels, where level 0 is the one an append lands in.</summary>
     internal DatasetLevels Levels => Snapshot.Levels;
 
@@ -1973,17 +1990,52 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <exception cref="DatasetIntegrityException">A guard found that a consolidation would lose rows; nothing was committed for it.</exception>
     public async ValueTask<IReadOnlyList<CompactionResult>> ConsolidateAsync(CancellationToken cancellationToken = default)
     {
-        CompactionPlan plan = await CompactionPolicy.PlanConsolidationsAsync(this, cancellationToken).ConfigureAwait(false);
         List<CompactionResult> results = [];
-        foreach (CompactionJob job in plan.Jobs)
+        while (true)
         {
-            if (job.Trigger == CompactionTrigger.Consolidation)
+            // A partition whose level 0 the jobs' budget does not hold at once is merged by size class first, a pass at a
+            // time, each pass committed, until its consolidation fits: a pass with no merge due consolidates it anyway.
+            CompactionPlan plan = await CompactionPolicy.PlanConsolidationsAsync(this, cancellationToken).ConfigureAwait(false);
+            HashSet<string> passes = [];
+            foreach (CompactionJob job in plan.Jobs)
             {
-                results.Add(await DatasetCompactor.RunAsync(this, job, cancellationToken).ConfigureAwait(false));
+                if (job.Trigger == CompactionTrigger.Consolidation && !DatasetCompactor.Fits(this, job))
+                {
+                    passes.Add(CompactionPolicy.PartitionOf(this, job));
+                }
+            }
+
+            List<CompactionJob> merges = [];
+            if (passes.Count > 0)
+            {
+                CompactionPlan tiers = await CompactionPolicy.PlanAsync(this, null, int.MaxValue, cancellationToken).ConfigureAwait(false);
+                foreach (CompactionJob merge in tiers.Jobs)
+                {
+                    if (merge.Trigger == CompactionTrigger.Tier && passes.Contains(CompactionPolicy.PartitionOf(this, merge)))
+                    {
+                        merges.Add(merge);
+                    }
+                }
+            }
+
+            if (merges.Count == 0)
+            {
+                foreach (CompactionJob job in plan.Jobs)
+                {
+                    if (job.Trigger == CompactionTrigger.Consolidation)
+                    {
+                        results.Add(await DatasetCompactor.RunAsync(this, job, cancellationToken).ConfigureAwait(false));
+                    }
+                }
+
+                return results;
+            }
+
+            foreach (CompactionJob merge in merges)
+            {
+                results.Add(await DatasetCompactor.RunAsync(this, merge, cancellationToken).ConfigureAwait(false));
             }
         }
-
-        return results;
     }
 
     /// <summary>

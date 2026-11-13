@@ -184,6 +184,10 @@ internal static partial class CompactionPolicy
         return -1;
     }
 
+    /// <summary>The partition a job's first input lies in, its row-encoded value as text: what tells two jobs of one partition.</summary>
+    internal static string PartitionOf(VortexDataset dataset, CompactionJob job) =>
+        Convert.ToHexString(new PlannedVersion(dataset).PartitionOf(job.Inputs[0].Key.Span));
+
     /// <summary>
     /// The merge of <paramref name="inputs"/>, objects of one class of one partition at level 0, into level 0: on the key,
     /// the outputs cut at the top without cutting a key; concatenated in their order without a key.

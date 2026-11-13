@@ -352,23 +352,15 @@ own directory, on another lane than its writer's (`DatasetOptions.PathDirectoryO
 A job holds what it reserves in the session's jobs' budget (`VortexSessionOptions.JobMemoryBudget`), half the process's
 limit by default and reserved in the process's budget too, so that the queries have the rest ([the
 governor](16-queries.md#the-governor)). The stores of an append reserve there what they hold, and write their largest
-partition sooner when it is refused. A consolidation's census counts its inputs on as many lanes as the budget holds,
-each reserving a window of an input's rows decoded and a slice of a wide shredding. Its ranges run side by side as many as
-the budget holds, each reserving before it starts what its inputs' batches hold, at sixteen times the bytes a row of its
-inputs is written in; four times the chunks each input holds open, a chunk of each column as its object's contents count
-them, for the segments it reads, a dictionary's values decompressed whole and the children its windows share; and what
-its writer gathers: sixteen times the dataset's chunk bytes for each column at most, the
-least rate a column is taken to encode to, and five times its chunk's target for a variant column it shreds, the values
-gathered, what the shredder takes of them and the column it lays out. The first runs whether it fits or not, as a job in
-one piece does, which reserves what its merge and its writer hold as well, and the others wait for a lane.
-A merge reads its inputs in batches that hold about a million rows together, an input of fifty-eight in batches of
-16 384 rows rather than of a window, each batch decoded on its own, so that what a range holds of its inputs does not
-grow with them. A variant shredded into many columns is read a window and a slice at a time ([shredded
-variants](21-variant-columns.md#5-the-worst-cases)), and written a typed column at a time ([the
-write](11-write-strategy.md#10-shredded-variants)). What memory cannot hold goes to disk: the runs of an object's
-hashed key index and of a partition's postings past their scratch's memory. `CompactionResult.RangesAtOnce`,
-`MemoryReserved` and `ScratchBytes` say how many ranges a job ran at once, what it reserved and what it spilled, and
-`vortex-queries --print-jobs` prints them beside the process's memory over each pass.
+partition sooner when it is refused.
+
+A job prices what it holds by the rows it holds, not by the bytes its inputs are written in. A row is priced at what the handle's last merge measured it to weigh decoded, the bytes of the batches its inputs handed over. A handle that has measured none reads the first batch of the job's largest input and measures it before the job sizes anything, and a plan prices a row at the least its schema's columns take until then. An open input holds its batch three times over, the batch, the chunks it was cut from and what its columns' reshaping keeps: 1.78 KB of resident memory a row for 530 bytes of batch, on metric records of maps and lists. It holds besides four times the chunks it keeps open, a chunk of each column as its object's contents count them, and 128 KiB at least, its reader and its footer: 0.10 to 0.15 MB an input, measured linear from 8 to 3 283 open inputs of 24 KB. The writer gathers sixteen times the dataset's chunk bytes for each column at most, the least rate a column is taken to encode to, and five times its chunk's target for a variant column it shreds, but never more than the rows the job writes, which it holds once at most: priced by its chunks alone, a job of 200 000 rows of metrics was priced 2.6 GB and held 380 MB.
+
+A merge reads its inputs in batches of what the budget leaves once its writer and its open inputs are counted, about a million rows together at most, a power of two between a block of 8 192 rows and a window, each batch decoded on its own, so that what a merge holds of its inputs does not grow with them. Priced so, a merge of 8 inputs of 26 000 rows reserved 416 MB and held 423, one of 32 such inputs reserved 850 MB and held 1 139, and the consolidation of 3 305 inputs of four rows reserved 495 MB and held 517. A consolidation's census counts its inputs on as many lanes as the budget holds, each reserving a batch of an input's rows and a slice of a wide shredding. Its ranges run side by side as many as the budget holds, each reserving before it starts what its inputs' batches, its open inputs and its writer hold. The first runs whether it fits or not, as a job in one piece does, and the others wait for a lane.
+
+`ConsolidateAsync` consolidates a partition at once when its level 0, all open at once, and one object of level 1 at a time fit the budget at a block of rows each. Otherwise it merges the partition's size classes first, a pass at a time, each pass committed, until they do: the passes of an external sort, each one durable and visible to readers. A partition with no merge due is consolidated anyway.
+
+A variant shredded into many columns is read a window and a slice at a time ([shredded variants](21-variant-columns.md#5-the-worst-cases)), and written a typed column at a time ([the write](11-write-strategy.md#10-shredded-variants)). What memory cannot hold goes to disk: the runs of an object's hashed key index and of a partition's postings past their scratch's memory. `CompactionResult.RangesAtOnce`, `MemoryReserved` and `ScratchBytes` say how many ranges a job ran at once, what it reserved and what it spilled, and `vortex-queries --print-jobs` prints them beside the process's memory over each pass.
 
 ### Late rows under levels
 
