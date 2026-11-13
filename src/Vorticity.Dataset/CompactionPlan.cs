@@ -461,6 +461,12 @@ public sealed record CompactionPlan
     /// </summary>
     public ImmutableArray<PartitionCompaction> Partitions { get; init; } = [];
 
+    /// <summary>
+    /// Whether the plan holds the jobs of one loop's partitions alone, those dealt to it among several loops: its first job
+    /// is that loop's, where the jobs of an unsharded plan are ranked for loops to take by their index.
+    /// </summary>
+    internal bool Sharded { get; init; }
+
     /// <summary>Whether a compaction is due.</summary>
     public bool HasWork => Job is not null;
 }

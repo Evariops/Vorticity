@@ -115,6 +115,15 @@ public sealed class DatasetCompactionLoopTests
         Assert.Null(CompactionLoop.Choose(new CompactionSchedule { Loops = 3, Loop = 2 }, plan));
     }
 
+    /// <summary>A plan of one loop's partitions hands that loop its first job, whatever the loop's index.</summary>
+    [Fact]
+    public void ALoopTakesTheFirstJobOfAPlanOfItsPartitions()
+    {
+        CompactionPlan plan = new CompactionPlan { Jobs = [Job(0, 1)], Sharded = true };
+        Assert.Same(plan.Jobs[0], CompactionLoop.Choose(new CompactionSchedule { Loops = 3, Loop = 2 }, plan));
+        Assert.Null(CompactionLoop.Choose(new CompactionSchedule { Loops = 3, Loop = 2 }, new CompactionPlan { Sharded = true }));
+    }
+
     [Fact]
     public async Task ALoopPacedBelowWhatAJobWroteWaitsBeforeItsNext()
     {

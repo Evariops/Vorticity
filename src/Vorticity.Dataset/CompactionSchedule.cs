@@ -28,9 +28,10 @@ public sealed record CompactionSchedule
     public TimeSpan Idle { get; init; } = TimeSpan.FromMinutes(1);
 
     /// <summary>
-    /// How many loops share the dataset, each told its <see cref="Loop"/>; 1 by default. Every loop
-    /// ranks the same due jobs, no two of which read or write one level, and takes the one whose rank
-    /// is its index: loops spread over jobs rather than all racing for the first.
+    /// How many loops share the dataset, each told its <see cref="Loop"/>; 1 by default. Under tiers,
+    /// each partition is dealt to one loop by the hash of its value, and a loop takes the jobs of its
+    /// own partitions alone: no two loops ever run one job. Under levels, every loop ranks the same due
+    /// jobs, no two of which read or write one level, and takes the one whose rank is its index.
     /// </summary>
     public int Loops { get; init; } = 1;
 
@@ -90,7 +91,8 @@ internal static class CompactionLoop
         {
             cancellationToken.ThrowIfCancellationRequested();
             await dataset.RefreshAsync(cancellationToken).ConfigureAwait(false);
-            CompactionPlan plan = await CompactionPolicy.PlanAsync(dataset, schedule.Compaction, schedule.Loop + 1, cancellationToken)
+            CompactionPlan plan = await CompactionPolicy.PlanAsync(
+                    dataset, schedule.Compaction, schedule.Loop + 1, cancellationToken, loops: schedule.Loops, loop: schedule.Loop)
                 .ConfigureAwait(false);
             if (Choose(schedule, plan) is not { } job)
             {
@@ -115,7 +117,11 @@ internal static class CompactionLoop
         }
     }
 
-    /// <summary>The job this loop runs from the plan: the one ranked at its index, or null when none is.</summary>
+    /// <summary>
+    /// The job this loop runs from the plan: the first of a plan of its own partitions, the one ranked at its index of one
+    /// that ranks every loop's, or null when none is.
+    /// </summary>
     internal static CompactionJob? Choose(CompactionSchedule schedule, CompactionPlan plan) =>
-        schedule.Loop < plan.Jobs.Length ? plan.Jobs[schedule.Loop] : null;
+        plan.Sharded ? (plan.Jobs.Length > 0 ? plan.Jobs[0] : null)
+        : schedule.Loop < plan.Jobs.Length ? plan.Jobs[schedule.Loop] : null;
 }

@@ -48,7 +48,9 @@ internal static partial class CompactionPolicy
         CompactionOptions? options,
         int jobs,
         CancellationToken cancellationToken,
-        long inputBytes = long.MaxValue)
+        long inputBytes = long.MaxValue,
+        int loops = 1,
+        int loop = 0)
     {
         ArgumentNullException.ThrowIfNull(dataset);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(jobs);
@@ -57,7 +59,7 @@ internal static partial class CompactionPolicy
         CompactionStyle style = StyleOf(version, settings);
         if (Tiers(version, style))
         {
-            return await PlanTiersAsync(version, settings, jobs, consolidateAll: false, cancellationToken, inputBytes).ConfigureAwait(false);
+            return await PlanTiersAsync(version, settings, jobs, consolidateAll: false, cancellationToken, inputBytes, loops, loop).ConfigureAwait(false);
         }
 
         bool descends = style switch

@@ -168,10 +168,7 @@ dependency.
 Two loops on one dataset are safe but wasteful: both plan the same job, and one commit loses. A
 dataset that several processes write is therefore compacted by a process of its own, which runs the
 dataset's only loop, while the writers leave inline compaction off, as it is by default. Two
-compactions then never run at once on the dataset, and nothing has to coordinate them. Loops that
-must share a dataset avoid the waste by a deterministic choice of job: the planner ranks the due
-jobs, and a loop that knows it is one of `n` takes the job whose rank is its index, which spreads `n`
-loops over `n` jobs and costs no request.
+compactions then never run at once on the dataset, and nothing has to coordinate them. Loops that must share a dataset avoid the waste by a deterministic choice of job, which costs no request. Under tiers, each partition is dealt to one of the `n` loops by the hash of its value, and a loop plans and runs the jobs of its own partitions alone, so no two loops ever take one job. Taking the job ranked at a loop's index did not hold under tiers: the ranks move with every commit, a loop that finished took the job another was running, and four loops on 40 partitions did 20 to 32 % of their jobs twice, one of each pair for nothing. Dealt by partition, they did none twice, for a drain 8 % longer on long jobs, the hash dealing 40 partitions unevenly. Under levels, the planner ranks the due jobs, and a loop that knows it is one of `n` takes the job whose rank is its index.
 
 `RunCompactionAsync` takes a `CompactionSchedule`: the options it plans against, `BytesPerSecond`,
 the `Idle` sleep, and `Loops` and `Loop` for loops that know one another. The planner ranks the due
