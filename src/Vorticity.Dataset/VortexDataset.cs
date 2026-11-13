@@ -2423,6 +2423,7 @@ public sealed class VortexDataset : IAsyncDisposable
                         Forgotten = forgotten,
                         Patience = patience < TrustSpan(held) ? patience : TrustSpan(held),
                         AbandonsWhenLost = abandonsWhenLost,
+                        AsksFirst = Volatile.Read(ref _raced),
                     },
                     cancellationToken)
                 .ConfigureAwait(false);
@@ -2435,11 +2436,21 @@ public sealed class VortexDataset : IAsyncDisposable
             throw;
         }
 
+        // A handle that met another writer asks for the latest version before its next commit, and builds on its own again
+        // once a commit finds nobody committed since.
+        if (result.Created)
+        {
+            Volatile.Write(ref _raced, result.Raced);
+        }
+
         // As the writer holds it: reading it back would cost a request per version probed, then the
         // read that opens it, for bytes this process wrote.
         MoveTo(result.Version, result.Commit, result.KnownAt);
         return result;
     }
+
+    /// <summary>Whether this handle's last commit met another writer's (<see cref="CommitResult.Raced"/>).</summary>
+    private bool _raced;
 
     /// <summary>
     /// Moves what this dataset still references in <paramref name="versions"/>' commit objects into

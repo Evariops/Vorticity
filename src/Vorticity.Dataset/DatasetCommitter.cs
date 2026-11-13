@@ -35,6 +35,13 @@ internal sealed record CommitOptions
     public bool AbandonsWhenLost { get; init; }
 
     /// <summary>
+    /// Whether the first attempt asks the store for the latest version, rather than building on the one the writer holds:
+    /// a handle whose last commit met another writer's. Its first put would lose, after sending the whole commit object:
+    /// two handles committing every two seconds each lost half their puts, 49 %.
+    /// </summary>
+    public bool AsksFirst { get; init; }
+
+    /// <summary>
     /// Whether the commit may only create the dataset's first version, as a creation does: one that
     /// finds a version there throws rather than rebasing onto it, since a creation that took up another
     /// writer's header would hand its caller a schema and settings it did not ask for.
@@ -141,6 +148,12 @@ internal sealed record CommitResult(
 
     /// <summary>Whether every attempt lost, its operations abandoned (<see cref="CommitOptions.AbandonsWhenLost"/>).</summary>
     public bool Lost { get; init; }
+
+    /// <summary>
+    /// Whether another writer committed since the version the writer held: an attempt lost, or the version created past
+    /// another's. The writer's next commit asks first (<see cref="CommitOptions.AsksFirst"/>).
+    /// </summary>
+    public bool Raced { get; init; }
 }
 
 /// <summary>
@@ -208,7 +221,7 @@ internal static class DatasetCommitter
         ulong known = options.Known;
         DateTimeOffset knownAt = options.KnownAt;
         CommitObject? held = options.Held is { } given && given.Header.Version == known ? given : null;
-        bool askFirst = false;
+        bool askFirst = options.AsksFirst;
         DateTimeOffset started = options.TimeProvider.GetUtcNow();
 
         // One source of pages over every attempt: a page is immutable and named by its version, its place and its hash, so
@@ -442,6 +455,7 @@ internal static class DatasetCommitter
                 return new CommitResult(version, key, next, outcomes, attempt, pages, CommitObject.Placed(header, bytes), put)
                 {
                     Created = true,
+                    Raced = attempt > 1 || version - 1 != options.Known,
                 };
             }
 

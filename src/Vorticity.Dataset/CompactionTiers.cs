@@ -33,8 +33,13 @@ internal static partial class CompactionPolicy
     /// <see cref="VortexDataset.ConsolidateAsync"/> asks.
     /// </summary>
     private static async ValueTask<CompactionPlan> PlanTiersAsync(
-        PlannedVersion dataset, CompactionOptions settings, int count, bool consolidateAll, CancellationToken cancellationToken, long inputBytes = long.MaxValue)
+        PlannedVersion dataset, CompactionOptions settings, int count, bool consolidateAll, CancellationToken cancellationToken, long inputBytes = long.MaxValue,
+        int loops = 1, int loop = 0)
     {
+        // Loops that share the dataset each take the jobs of their own partitions, a partition dealt to the loop of its
+        // value's hash: no two loops ever take one job, where loops that took the job ranked at their index took one
+        // another's as the ranks moved with every commit, 20 to 32 % of the jobs done twice, one of them for nothing.
+        bool sharded = loops > 1;
         DatasetLayout layout = dataset.Header.Layout ?? new DatasetLayout();
         long top = layout.ObjectBytes;
         int fanout = layout.MergeFanout;
@@ -77,7 +82,7 @@ internal static partial class CompactionPolicy
         foreach (TierPartition partition in partitions)
         {
             lag += partition.Lag(fanout);
-            if (!consolidateAll && partition.Due(fanout) is ({ } inputs, int size))
+            if (!consolidateAll && (!sharded || LoopOf(partition.Value, loops) == loop) && partition.Due(fanout) is ({ } inputs, int size))
             {
                 CompactionJob merge = Wide(dataset, inputs, fanout, Math.Min(top, inputBytes), top);
                 if (dataset.Keyed && calmAfter >= 0 && now - partition.Latest >= calmAfter)
@@ -121,7 +126,7 @@ internal static partial class CompactionPolicy
                 TooFine = isCalm && partition.Bytes < top / ((long)fanout * fanout),
             });
 
-            if (dataset.Keyed && (isCalm || consolidateAll))
+            if (dataset.Keyed && (isCalm || consolidateAll) && (!sharded || LoopOf(partition.Value, loops) == loop))
             {
                 calmOnes.Add(partition);
             }
@@ -157,7 +162,8 @@ internal static partial class CompactionPolicy
 
         // The purges of marks and the fragments, when no merge is due, by the levels' tallies.
         List<CompactionInput> fragmented = [];
-        if (jobs.Count == 0 && await TalliesAsync(dataset, cancellationToken).ConfigureAwait(false) is { } tallies)
+        // Those span every partition: the first loop of several takes them.
+        if (jobs.Count == 0 && (!sharded || loop == 0) && await TalliesAsync(dataset, cancellationToken).ConfigureAwait(false) is { } tallies)
         {
             fragmented = await FragmentedAsync(dataset, tallies, settings.MaxFragments, cancellationToken).ConfigureAwait(false);
             if (settings.PurgeMarks
@@ -184,6 +190,7 @@ internal static partial class CompactionPolicy
             Jobs = [.. jobs],
             FragmentedObjects = fragmented.Count,
             Partitions = states.MoveToImmutable(),
+            Sharded = sharded,
         };
     }
 
@@ -201,6 +208,10 @@ internal static partial class CompactionPolicy
 
         return -1;
     }
+
+    /// <summary>The loop of <paramref name="loops"/> a partition is dealt to, by the hash of its row-encoded value.</summary>
+    internal static int LoopOf(ReadOnlySpan<byte> partition, int loops) =>
+        (int)(System.IO.Hashing.XxHash32.HashToUInt32(partition) % (uint)loops);
 
     /// <summary>The partition a job's first input lies in, its row-encoded value as text: what tells two jobs of one partition.</summary>
     internal static string PartitionOf(VortexDataset dataset, CompactionJob job) =>
