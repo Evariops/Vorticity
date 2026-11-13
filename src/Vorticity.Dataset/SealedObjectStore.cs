@@ -67,8 +67,15 @@ internal sealed class SealedObjectStore : IObjectStore
     private readonly IObjectStore _inner;
     private readonly SessionKeys _keys;
     private readonly object _gate = new object();
+
+    // The layouts kept, by commit object key. The store holds each layout it keeps, and a read holds the one it uses until
+    // it has decrypted with it: a layout the store lets go of, past the cap, for a newer object under its key, for its
+    // deletion or at the store's disposal, wipes its data key once the last read holding it is done, never under it.
     private readonly Dictionary<string, CommitLayout> _layouts = new Dictionary<string, CommitLayout>(StringComparer.Ordinal);
-    private readonly Queue<string> _order = new Queue<string>();
+
+    // The layouts kept, in the order a clock passes them to let one go past the cap: one a read took since the clock last
+    // passed it goes round once more, so a layout every read takes, as the root's commit object's, stays.
+    private readonly LinkedList<CommitLayout> _clock = new LinkedList<CommitLayout>();
 
     // The trailers of the data objects read with no open of them, by key, which the next such read opens from with no read
     // of the envelope's end: a few hundred bytes each, what the object's envelope says, no plaintext; the most bytes kept.
@@ -276,7 +283,7 @@ internal sealed class SealedObjectStore : IObjectStore
     public IAsyncEnumerable<ObjectListing> ListAsync(string prefix, string? startAfter, CancellationToken cancellationToken) =>
         _inner.ListAsync(prefix, startAfter, cancellationToken);
 
-    /// <summary>Wipes the keys of the commit objects it opened; the store under it stays the caller's.</summary>
+    /// <summary>Wipes the keys of the commit objects it opened, each once no read decrypts with it; the store under it stays the caller's.</summary>
     public ValueTask DisposeAsync()
     {
         if (Interlocked.Exchange(ref _disposed, 1) == 0)
@@ -285,11 +292,11 @@ internal sealed class SealedObjectStore : IObjectStore
             {
                 foreach (CommitLayout layout in _layouts.Values)
                 {
-                    layout.Dispose();
+                    layout.Release();
                 }
 
                 _layouts.Clear();
-                _order.Clear();
+                _clock.Clear();
             }
         }
 
@@ -506,14 +513,17 @@ internal sealed class SealedObjectStore : IObjectStore
             return head.Length;
         }
 
-        if (Kept(key) is { } known)
+        CommitLayout? layout = Hold(key);
+        if (layout is null)
         {
-            return known.PlainLength;
+            Resolved resolved = (await ResolveAsync(key, version, 1, ifPresent: false, cancellationToken).ConfigureAwait(false))!.Value;
+            resolved.Head.Dispose();
+            layout = resolved.Layout!;
         }
 
-        Resolved resolved = (await ResolveAsync(key, version, 1, ifPresent: false, cancellationToken).ConfigureAwait(false))!.Value;
-        resolved.Head.Dispose();
-        return resolved.Layout!.PlainLength;
+        long plainLength = layout.PlainLength;
+        layout.Release();
+        return plainLength;
     }
 
     /// <summary>A range of the store under this one; with <paramref name="ifPresent"/>, null for an absent key rather than thrown.</summary>
@@ -545,7 +555,7 @@ internal sealed class SealedObjectStore : IObjectStore
         ArgumentOutOfRangeException.ThrowIfNegative(length);
         for (int attempt = 0; ; attempt++)
         {
-            CommitLayout? layout = Kept(key);
+            CommitLayout? layout = Hold(key);
             Resolved resolved = default;
             if (layout is null)
             {
@@ -600,7 +610,7 @@ internal sealed class SealedObjectStore : IObjectStore
                 if (!string.Equals(layout.Token, cipher.Token, StringComparison.Ordinal))
                 {
                     // Removed and created again under its key since its layout was read.
-                    Forget(key);
+                    Forget(key, layout);
                     if (attempt == 0)
                     {
                         continue;
@@ -619,6 +629,7 @@ internal sealed class SealedObjectStore : IObjectStore
             finally
             {
                 resolved.Head.Dispose();
+                layout.Release();
             }
         }
     }
@@ -627,8 +638,8 @@ internal sealed class SealedObjectStore : IObjectStore
     /// Reads a commit object's head, with as much of its frames as a range ending at
     /// <paramref name="plainEnd"/> needs, and makes its layout: the descriptor, the length the store
     /// gave, the binding to the dataset and the version, and the key, its commitment checked. The
-    /// layout is null when the object turns out plain on a dataset whose kind was not known yet, the
-    /// read handed back as it is.
+    /// caller holds the layout, and releases it. The layout is null when the object turns out plain
+    /// on a dataset whose kind was not known yet, the read handed back as it is.
     /// </summary>
     private async ValueTask<Resolved?> ResolveAsync(string key, ulong version, long plainEnd, bool ifPresent, CancellationToken cancellationToken)
     {
@@ -742,7 +753,7 @@ internal sealed class SealedObjectStore : IObjectStore
         DataKey dataKey = await _keys.UnwrapAsync(descriptor, cancellationToken).ConfigureAwait(false);
         try
         {
-            return new CommitLayout(descriptor, framesStart, plainLength, token, Cipher(dataKey, descriptor, key));
+            return new CommitLayout(key, descriptor, framesStart, plainLength, token, Cipher(dataKey, descriptor, key));
         }
         finally
         {
@@ -772,51 +783,91 @@ internal sealed class SealedObjectStore : IObjectStore
         }
     }
 
-    private CommitLayout? Kept(string key)
+    /// <summary>The layout kept for <paramref name="key"/>, held for the caller, who releases it; null when none is kept.</summary>
+    private CommitLayout? Hold(string key)
     {
         lock (_gate)
         {
-            return _layouts.GetValueOrDefault(key);
+            if (!_layouts.TryGetValue(key, out CommitLayout? layout))
+            {
+                return null;
+            }
+
+            layout.Used = true;
+            layout.Hold();
+            return layout;
         }
     }
 
-    /// <summary>Keeps a layout, and makes the data key of the newest commit read the one writers seal under.</summary>
+    /// <summary>
+    /// Keeps a layout its caller holds, unless one of the same object is kept already, which stays; and makes the data key
+    /// of the newest commit read the one writers seal under.
+    /// </summary>
     private void Remember(string key, ulong version, CommitLayout layout)
     {
         lock (_gate)
         {
-            if (_layouts.Remove(key, out CommitLayout? replaced))
-            {
-                replaced.Dispose();
-            }
-
-            _layouts[key] = layout;
-            _order.Enqueue(key);
-            while (_layouts.Count > MaxLayouts && _order.TryDequeue(out string? oldest))
-            {
-                if (_layouts.Remove(oldest, out CommitLayout? evicted))
-                {
-                    evicted.Dispose();
-                }
-            }
-
             if (version > _currentVersion)
             {
                 Adopt(new KeyName(layout.Descriptor.KeyId, layout.Descriptor.WrappedKey.ToArray()));
                 _currentVersion = version;
             }
+
+            if (_disposed != 0)
+            {
+                return;
+            }
+
+            if (_layouts.TryGetValue(key, out CommitLayout? kept))
+            {
+                // Two reads resolved the object at once: the layout kept first stays, and this one goes with its read.
+                if (string.Equals(kept.Token, layout.Token, StringComparison.Ordinal))
+                {
+                    return;
+                }
+
+                LetGo(kept);
+            }
+
+            layout.Hold();
+            _layouts[key] = layout;
+            _clock.AddLast(layout.Node);
+            while (_layouts.Count > MaxLayouts)
+            {
+                LinkedListNode<CommitLayout> oldest = _clock.First!;
+                _clock.Remove(oldest);
+                if (oldest.Value.Used)
+                {
+                    oldest.Value.Used = false;
+                    _clock.AddLast(oldest);
+                }
+                else
+                {
+                    _layouts.Remove(oldest.Value.Key);
+                    oldest.Value.Release();
+                }
+            }
         }
     }
 
-    private void Forget(string key)
+    /// <summary>Lets go of the layout kept for <paramref name="key"/>, or only of <paramref name="stale"/> when it is given and still kept.</summary>
+    private void Forget(string key, CommitLayout? stale = null)
     {
         lock (_gate)
         {
-            if (_layouts.Remove(key, out CommitLayout? layout))
+            if (_layouts.TryGetValue(key, out CommitLayout? layout) && (stale is null || ReferenceEquals(layout, stale)))
             {
-                layout.Dispose();
+                LetGo(layout);
             }
         }
+    }
+
+    /// <summary>Takes a kept layout out of the layouts and the clock and releases the store's hold on it; under the gate.</summary>
+    private void LetGo(CommitLayout layout)
+    {
+        _layouts.Remove(layout.Key);
+        _clock.Remove(layout.Node);
+        layout.Release();
     }
 
     // ---- data objects ----------------------------------------------------------------------
@@ -1067,20 +1118,35 @@ internal sealed class SealedObjectStore : IObjectStore
     /// <summary>A data key as a sealed object names it: the key that wrapped it and the wrapped bytes.</summary>
     private sealed record KeyName(string KeyId, byte[] Wrapped);
 
-    /// <summary>What a commit object's head says, and its key: everything a range of it needs to be read in one request.</summary>
-    private sealed class CommitLayout : IDisposable
+    /// <summary>
+    /// What a commit object's head says, and its key: everything a range of it needs to be read in one request. It is made
+    /// held once, for whoever made it, and wipes its key when the last hold is released.
+    /// </summary>
+    private sealed class CommitLayout
     {
         private readonly long _framesStart;
         private readonly EpochCipher _cipher;
+        private int _holds = 1;
 
-        internal CommitLayout(SealDescriptor descriptor, long framesStart, long plainLength, string token, EpochCipher cipher)
+        internal CommitLayout(string key, SealDescriptor descriptor, long framesStart, long plainLength, string token, EpochCipher cipher)
         {
+            Key = key;
+            Node = new LinkedListNode<CommitLayout>(this);
             Descriptor = descriptor;
             _framesStart = framesStart;
             PlainLength = plainLength;
             Token = token;
             _cipher = cipher;
         }
+
+        /// <summary>The commit object's key.</summary>
+        internal string Key { get; }
+
+        /// <summary>Its place on the store's clock while the store keeps it.</summary>
+        internal LinkedListNode<CommitLayout> Node { get; }
+
+        /// <summary>Whether a read took it from the store's layouts since the clock last passed it; under the store's gate.</summary>
+        internal bool Used { get; set; }
 
         internal SealDescriptor Descriptor { get; }
 
@@ -1145,7 +1211,17 @@ internal sealed class SealedObjectStore : IObjectStore
             }
         }
 
-        public void Dispose() => _cipher.Dispose();
+        /// <summary>One more hold; only on a layout that is held already, as one the store keeps is.</summary>
+        internal void Hold() => Interlocked.Increment(ref _holds);
+
+        /// <summary>Lets go of a hold: the last one wipes the key.</summary>
+        internal void Release()
+        {
+            if (Interlocked.Decrement(ref _holds) == 0)
+            {
+                _cipher.Dispose();
+            }
+        }
     }
 
     /// <summary>An array from the shared pool, wiped as it goes back: a commit object's plaintext does not outlive its lease there.</summary>
