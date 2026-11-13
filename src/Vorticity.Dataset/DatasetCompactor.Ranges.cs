@@ -116,7 +116,7 @@ internal static partial class DatasetCompactor
 
     /// <summary>
     /// What an open input of the job holds besides its batch, about: <see cref="HeldPerOpenByte"/> times the chunks it holds
-    /// open (<see cref="OpenChunkBytes"/>), and <see cref="InputFloorBytes"/> at least.
+    /// open (<see cref="OpenChunkBytes(VortexDataset, DatasetSchema, CompactionJob)"/>), and <see cref="InputFloorBytes"/> at least.
     /// </summary>
     internal static long OpenBytes(VortexDataset dataset, DatasetSchema schema, CompactionJob job) =>
         Math.Max(InputFloorBytes, HeldPerOpenByte * OpenChunkBytes(dataset, schema, job));
@@ -278,22 +278,65 @@ internal static partial class DatasetCompactor
         long sum = 0;
         foreach (CompactionInput input in job.Inputs)
         {
-            ObjectEntry entry = input.Entry;
-            if (entry.Contents is { ColumnBytes.Count: > 0 } contents)
-            {
-                for (int column = 0; column < contents.ColumnBytes.Count; column++)
-                {
-                    long chunks = column < contents.ColumnChunks.Count ? Math.Max(contents.ColumnChunks[column], 1) : 1;
-                    sum += contents.ColumnBytes[column] / chunks;
-                }
-            }
-            else
-            {
-                sum += Math.Min(entry.Bytes, (long)schema.DType.FieldCount * Math.Max(dataset.Options.ChunkBytes, 1));
-            }
+            sum += OpenChunkBytes(dataset, schema, input.Entry);
         }
 
         return sum / job.Inputs.Count;
+    }
+
+    /// <summary>The encoded bytes of the chunks the input of <paramref name="entry"/> holds open (<see cref="OpenChunkBytes(VortexDataset, DatasetSchema, CompactionJob)"/>).</summary>
+    private static long OpenChunkBytes(VortexDataset dataset, DatasetSchema schema, ObjectEntry entry)
+    {
+        long sum = 0;
+        if (entry.Contents is { ColumnBytes.Count: > 0 } contents)
+        {
+            for (int column = 0; column < contents.ColumnBytes.Count; column++)
+            {
+                long chunks = column < contents.ColumnChunks.Count ? Math.Max(contents.ColumnChunks[column], 1) : 1;
+                sum += contents.ColumnBytes[column] / chunks;
+            }
+
+            return sum;
+        }
+
+        return Math.Min(entry.Bytes, (long)schema.DType.FieldCount * Math.Max(dataset.Options.ChunkBytes, 1));
+    }
+
+    /// <summary>
+    /// How many of <paramref name="inputs"/>, objects of one size class of one partition in the order of the tree, a tier
+    /// merge takes: <paramref name="least"/> whatever the bounds, then as many more as keep their bytes within
+    /// <paramref name="bytes"/>, the layout's object size or a caller's bound, and what the merge holds within the jobs'
+    /// budget, each input open at once at a block of its rows, the writer at the rows they hold. The whole class when it
+    /// fits: one job where a merge of the fan-out at a time took 469 of them to empty a class of 3 283 small objects.
+    /// </summary>
+    internal static int TierWidth(VortexDataset dataset, IReadOnlyList<CompactionInput> inputs, int least, long bytes)
+    {
+        DatasetSchema schema = dataset.Snapshot.Schema;
+        long budget = JobBudget(dataset);
+        long rowBytes = dataset.DecodedRowBytes > 0 ? dataset.DecodedRowBytes : FloorBytes(schema.DType);
+        long targets = TargetsBytes(dataset, schema, null);
+        long held = 0;
+        long rows = 0;
+        long sum = 0;
+        int taken = 0;
+        foreach (CompactionInput input in inputs)
+        {
+            ObjectEntry entry = input.Entry;
+            long cost = (Math.Min(entry.PhysicalRows, 8_192) * HeldPerBatchByte * rowBytes)
+                + Math.Max(InputFloorBytes, HeldPerOpenByte * OpenChunkBytes(dataset, schema, entry));
+            long writer = Math.Min(targets, (rows + entry.Rows) * rowBytes);
+            if (taken >= least && (sum + entry.Bytes > bytes || held + cost + writer > budget))
+            {
+                break;
+            }
+
+            held += cost;
+            rows += entry.Rows;
+            sum += entry.Bytes;
+            taken++;
+        }
+
+        return taken;
     }
 
     /// <summary>

@@ -2336,7 +2336,8 @@ public sealed class VortexDataset : IAsyncDisposable
 
         try
         {
-            CompactionPlan plan = await CompactionPolicy.PlanAsync(this, null, tiered ? int.MaxValue : 1, cancellationToken).ConfigureAwait(false);
+            // A tier merge is cut to the budget, its fan-out at least, rather than left to another driver.
+            CompactionPlan plan = await CompactionPolicy.PlanAsync(this, null, tiered ? int.MaxValue : 1, cancellationToken, inputBytes: budget).ConfigureAwait(false);
             foreach (CompactionJob job in plan.Jobs)
             {
                 if (job.Trigger is CompactionTrigger.LevelZeroCeiling or CompactionTrigger.Tier && job.Bytes <= budget)
@@ -2378,6 +2379,14 @@ public sealed class VortexDataset : IAsyncDisposable
         CommitAsync(operations, kind, null, null, cancellationToken);
 
     /// <summary>
+    /// A job's commit: it rebases for as long as <paramref name="patience"/> past its attempts, half the retention window at
+    /// most, and reports its operations abandoned once every attempt lost, rather than throwing.
+    /// </summary>
+    internal ValueTask<CommitResult> CommitJobAsync(
+        IReadOnlyList<DatasetOperation> operations, TimeSpan patience, CancellationToken cancellationToken) =>
+        CommitAsync(operations, CommitKind.Compaction, null, null, cancellationToken, patience, abandonsWhenLost: true);
+
+    /// <summary>
     /// <see cref="CommitAsync(IReadOnlyList{DatasetOperation}, CommitKind, CancellationToken)"/>, for
     /// rows that take the source ranges <paramref name="consumed"/> into account, or for a commit that
     /// forgets the sources <paramref name="forgotten"/>.
@@ -2388,7 +2397,9 @@ public sealed class VortexDataset : IAsyncDisposable
         CommitKind kind,
         IReadOnlyList<SourceRange>? consumed,
         IReadOnlyCollection<string>? forgotten,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        TimeSpan patience = default,
+        bool abandonsWhenLost = false)
     {
         RequireConditionalCreation(_store);
         DatasetSnapshot held = Snapshot;
@@ -2410,6 +2421,8 @@ public sealed class VortexDataset : IAsyncDisposable
                         Location = _location,
                         Consumed = consumed,
                         Forgotten = forgotten,
+                        Patience = patience < TrustSpan(held) ? patience : TrustSpan(held),
+                        AbandonsWhenLost = abandonsWhenLost,
                     },
                     cancellationToken)
                 .ConfigureAwait(false);

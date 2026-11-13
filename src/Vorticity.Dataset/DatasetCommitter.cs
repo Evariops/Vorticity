@@ -22,6 +22,19 @@ internal sealed record CommitOptions
     public int MaxAttempts { get; init; } = 8;
 
     /// <summary>
+    /// How long the commit goes on rebasing past <see cref="MaxAttempts"/>, from its first attempt; zero for no longer. A
+    /// job's commit, whose loss throws away what the job wrote, is given as long as the job took: a consolidation of
+    /// 150 seconds lost its eight attempts in 13 seconds against appenders committing twice a second.
+    /// </summary>
+    public TimeSpan Patience { get; init; }
+
+    /// <summary>
+    /// Whether a commit that loses every attempt reports its operations abandoned rather than throwing: a job's, for which
+    /// a lost race is no failure of the store, and whose next plan takes its inputs up again.
+    /// </summary>
+    public bool AbandonsWhenLost { get; init; }
+
+    /// <summary>
     /// Whether the commit may only create the dataset's first version, as a creation does: one that
     /// finds a version there throws rather than rebasing onto it, since a creation that took up another
     /// writer's header would hand its caller a schema and settings it did not ask for.
@@ -125,6 +138,9 @@ internal sealed record CommitResult(
 
     /// <summary>Whether the commit's source ranges were counted already, by <see cref="Version"/>, so that it added nothing.</summary>
     public bool Counted { get; init; }
+
+    /// <summary>Whether every attempt lost, its operations abandoned (<see cref="CommitOptions.AbandonsWhenLost"/>).</summary>
+    public bool Lost { get; init; }
 }
 
 /// <summary>
@@ -175,7 +191,7 @@ internal static class DatasetCommitter
         }
 
         DatasetTelemetry.CommitEnded(
-            activity, options.Kind, result.Created ? CommitEnd.Applied : CommitEnd.NothingToDo, result.Attempts, result.Version);
+            activity, options.Kind, result.Lost ? CommitEnd.Lost : result.Created ? CommitEnd.Applied : CommitEnd.NothingToDo, result.Attempts, result.Version);
         return result;
     }
 
@@ -193,7 +209,13 @@ internal static class DatasetCommitter
         DateTimeOffset knownAt = options.KnownAt;
         CommitObject? held = options.Held is { } given && given.Header.Version == known ? given : null;
         bool askFirst = false;
-        for (int attempt = 1; attempt <= options.MaxAttempts; attempt++)
+        DateTimeOffset started = options.TimeProvider.GetUtcNow();
+
+        // One source of pages over every attempt: a page is immutable and named by its version, its place and its hash, so
+        // what a lost attempt read serves the next, which reads only what the commits between them rewrote.
+        CommitPageSource pages = new CommitPageSource(store, options.PageCache) { KeepsReads = true };
+        (ulong Parent, CommitObject Commit, DatasetLevels Levels, int Attempt)? last = null;
+        for (int attempt = 1; attempt <= options.MaxAttempts || options.TimeProvider.GetUtcNow() - started < options.Patience; attempt++)
         {
             cancellationToken.ThrowIfCancellationRequested();
 
@@ -226,7 +248,6 @@ internal static class DatasetCommitter
             }
 
             known = parent;
-            CommitPageSource pages = new CommitPageSource(store, options.PageCache) { KeepsReads = true };
             DatasetLevels levels = DatasetLevels.Empty;
             CommitHeader template = options.Template ?? new CommitHeader { Version = 1 };
             if (commit is not null)
@@ -234,6 +255,7 @@ internal static class DatasetCommitter
                 template = commit.Header;
                 pages.Open(parent, commit);
                 levels = DatasetLevels.Of(commit.Header);
+                last = (parent, commit, levels, attempt);
             }
 
             // The source ranges, judged against the offsets this attempt builds on: the commit applies
@@ -426,6 +448,18 @@ internal static class DatasetCommitter
             // Another writer created this number: the search for the latest starts past it.
             known = version;
             held = null;
+        }
+
+        // Every attempt lost: a job's operations are abandoned, against the last version it built on, as when an input is
+        // gone; anything else throws.
+        if (options.AbandonsWhenLost && last is { } lost)
+        {
+            OperationOutcome[] abandoned = new OperationOutcome[operations.Count];
+            Array.Fill(abandoned, OperationOutcome.Abandoned);
+            return new CommitResult(lost.Parent, CommitKey.For(lost.Parent), lost.Levels, abandoned, lost.Attempt, pages, lost.Commit, knownAt)
+            {
+                Lost = true,
+            };
         }
 
         return null;

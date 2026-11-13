@@ -78,7 +78,11 @@ public sealed record DatasetLayout
     /// </summary>
     public LayoutOrganization? Organization { get; init; }
 
-    /// <summary>How many objects of one size class a tiered merge takes, and makes one of the class above: 8 by default.</summary>
+    /// <summary>
+    /// How many objects of one size class make a tiered merge due, which takes them and makes one of the class above: 8 by
+    /// default. A merge of a class that holds more takes them all when they fit the object size and the jobs' memory
+    /// budget, and as many neighbours as they let otherwise, the fan-out at least.
+    /// </summary>
     /// <exception cref="ArgumentOutOfRangeException">The fan-out is under 2.</exception>
     public int MergeFanout
     {

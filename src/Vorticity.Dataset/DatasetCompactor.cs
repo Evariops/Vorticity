@@ -127,6 +127,7 @@ internal static partial class DatasetCompactor
     private static async ValueTask<CompactionResult> RewriteAsync(
         VortexDataset dataset, CompactionJob job, CancellationToken cancellationToken)
     {
+        DateTimeOffset started = dataset.Options.TimeProvider.GetUtcNow();
         if (job.Moves && await MoveAsync(dataset, job, cancellationToken).ConfigureAwait(false) is { } moved)
         {
             return moved;
@@ -145,6 +146,10 @@ internal static partial class DatasetCompactor
             // A handle that has not measured a row of the dataset decoded measures one before it sizes the job's batches.
             await LearnRowBytesAsync(dataset, schema, job, cancellationToken).ConfigureAwait(false);
         }
+
+        // Every input open before the passes, side by side, and held until the job ends.
+        InputLeases opened = await InputLeases.OpenAsync(dataset, job, cancellationToken).ConfigureAwait(false);
+        await using System.Runtime.CompilerServices.ConfiguredAsyncDisposable openedScope = opened.ConfigureAwait(false);
 
         // The key the reads seek by, whose first column's summaries bound a level's ranges and the late rows.
         DatasetKey? key = dataset.Key;
@@ -367,8 +372,10 @@ internal static partial class DatasetCompactor
             KeyGeneration = generation,
         };
 
+        // A commit lost throws away what the job wrote: it rebases for as long as the job took to write it, and leaves the
+        // job abandoned rather than failed when every attempt lost, for the next plan to take its inputs up again.
         CommitResult commit = await dataset
-            .CommitAsync([replacement], CommitKind.Compaction, cancellationToken).ConfigureAwait(false);
+            .CommitJobAsync([replacement], dataset.Options.TimeProvider.GetUtcNow() - started, cancellationToken).ConfigureAwait(false);
 
         int objectsOut = lateOutputs?.Written.Count ?? 0;
         long bytesOut = lateOutputs?.Bytes ?? 0;
@@ -743,6 +750,53 @@ internal static partial class DatasetCompactor
     /// their attributes rebuilt, held some 360 MB as eight inputs of a window each.
     /// </summary>
     private const int MergeRows = 1 << 20;
+
+    /// <summary>
+    /// The job's inputs opened before its passes, as many at once as the session reads at once, and held until the job ends:
+    /// each object is read once, whichever pass asks for it first, in one request when it fits the read that opens it. The
+    /// census and the merge read each of 3 305 small inputs one after the other, twice: 6 749 requests, 148 s at 20 ms a
+    /// request. Held open, an input costs what the job's price counts for it already.
+    /// </summary>
+    private sealed class InputLeases : IAsyncDisposable
+    {
+        private readonly ObjectLease?[] _leases;
+
+        private InputLeases(ObjectLease?[] leases) => _leases = leases;
+
+        /// <summary>Opens every input of <paramref name="job"/> of two inputs or more; none of a job of one.</summary>
+        internal static async ValueTask<InputLeases> OpenAsync(VortexDataset dataset, CompactionJob job, CancellationToken cancellationToken)
+        {
+            InputLeases opened = new InputLeases(new ObjectLease?[job.Inputs.Count < 2 ? 0 : job.Inputs.Count]);
+            try
+            {
+                ParallelOptions lanes = new ParallelOptions
+                {
+                    MaxDegreeOfParallelism = Math.Max(1, dataset.Session.Options.MaxConcurrentReads),
+                    CancellationToken = cancellationToken,
+                };
+                await Parallel.ForAsync(0, opened._leases.Length, lanes, async (i, token) =>
+                    opened._leases[i] = await dataset.RentAsync(job.Inputs[i].Entry, token).ConfigureAwait(false)).ConfigureAwait(false);
+                return opened;
+            }
+            catch
+            {
+                await opened.DisposeAsync().ConfigureAwait(false);
+                throw;
+            }
+        }
+
+        public async ValueTask DisposeAsync()
+        {
+            for (int i = 0; i < _leases.Length; i++)
+            {
+                if (_leases[i] is { } lease)
+                {
+                    _leases[i] = null;
+                    await lease.DisposeAsync().ConfigureAwait(false);
+                }
+            }
+        }
+    }
 
     /// <summary>The decoded bytes and the rows of the batches a merge's inputs held: what a row weighs decoded, measured.</summary>
     private sealed class RowMeter

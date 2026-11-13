@@ -87,8 +87,8 @@ public enum CompactionTrigger
     Neighbours = 6,
 
     /// <summary>
-    /// A partition of a tiered dataset holds at level 0 as many objects of one size class as the fan-out: the earliest
-    /// arrived of them are merged into one of the class below, in level 0.
+    /// A partition of a tiered dataset holds at level 0 as many objects of one size class as the fan-out, or more: they are
+    /// merged, all of them when their bounds hold them, neighbours in the tree's order otherwise, into level 0.
     /// </summary>
     Tier = 7,
 

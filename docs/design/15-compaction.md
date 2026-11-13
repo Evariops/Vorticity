@@ -286,12 +286,7 @@ A dataset with a partition, or without a sort key, keeps each partition's object
 partition leads their tree keys, so a partition's objects lie together and a plan reads level 0's
 leaves partition by partition. An object's size class is how many times the fan-out `k` (the layout's
 `MergeFanout`, 8 by default) multiplies its bytes before they pass the layout's object size over `k`:
-class 0 for an object of 128 MiB or more under objects of 1 GiB, one class more for each factor of `k`
-below. When a partition holds `k` objects of one class, a job merges them into one object of the class
-above it, the class of the smallest objects first, since that retires the most objects a byte, and no
-two jobs on one partition. A partition so holds at most `k − 1` objects a class while it receives rows,
-and a row is rewritten once a class it crosses: once, on appends a class below the object size over
-`k²`, in `DatasetTiersTests`' 96 000 rows of small appends merged four at a time.
+class 0 for an object of 128 MiB or more under objects of 1 GiB, one class more for each factor of `k` below. When a partition holds `k` objects of one class or more, a job merges them, the class of the smallest objects first, since that retires the most objects a byte, and no two jobs on one partition. A merge due as its class reaches `k` takes the `k`. One behind takes the whole class when its bytes stay within the object size and the merge within the jobs' budget ([the memory of a job](#the-memory-of-a-job)), and otherwise as many objects as those bounds let, `k` at least, neighbours in the order of the tree. Neighbours lie in the same leaves, so the commit that takes them away rewrites few: 512 objects taken as they arrived wrote a commit object of 3.1 MB, 512 neighbours one of 294 KB, and the whole class of 3 283 one of 72 KB. A merge of `k` at a time took 469 jobs and 510 MB of commit objects to empty that class, and its output fell back into its inputs' class. A partition so holds at most `k − 1` objects a class while it receives rows and its merges keep up, and a row is rewritten once a class it crosses: once, on appends a class below the object size over `k²`, in `DatasetTiersTests`' 96 000 rows of small appends merged four at a time.
 
 When a partition has received no row for `CalmAfter`, an hour by default, measured by the dataset's
 clock (`DatasetOptions.TimeProvider`) from the arrival of its newest row, its next job consolidates it:
@@ -305,13 +300,7 @@ commit refuses ([three drivers](#2-three-drivers-for-one-job)). On the lifecycle
 hour, keys in order, an hour's eight objects moved whole and a window of a day covered 147 objects;
 merged, it covers 26, for 0.98 rewrites a row more. A consolidation of several objects' worth runs in
 ranges of the key side by side on the session's lanes, each reading of its inputs the granules of its
-range alone, the ranges cut from the inputs' sparse indexes. The calm partitions are taken the earliest arrived first. A consolidation of a
-dataset that declares identifiers writes its partition's index beside its objects
-([the index of a consolidated partition](13-dataset.md#44-the-index-of-a-consolidated-partition)).
-`ConsolidateAsync` consolidates every partition whose level 0 holds an object, calm or not, as after a
-load of history, and `CalmAfter = null` leaves consolidation to it alone. A row is rewritten once more
-by its partition's consolidation: 96 000 rows of `DatasetTiersTests` once by their merges and once by
-the consolidation.
+range alone, the ranges cut from the inputs' sparse indexes. The calm partitions are taken the earliest arrived first. A calm partition whose consolidation fits the jobs' budget is consolidated even when one of its classes is full, rather than merged by class first: on 40 calm partitions of 30 small objects, the merges by class then the consolidations took 194 jobs and 50 MB of commit objects, the consolidations alone 40 jobs and 10 MB. One whose consolidation does not fit is merged by class until it does. A consolidation of a dataset that declares identifiers writes its partition's index beside its objects ([the index of a consolidated partition](13-dataset.md#44-the-index-of-a-consolidated-partition)), when it rewrites objects: a partition left one object by its merges moves to level 1 whole, its own postings with it. `ConsolidateAsync` consolidates every partition whose level 0 holds an object, calm or not, as after a load of history, and `CalmAfter = null` leaves consolidation to it alone. A row is rewritten once more by its partition's consolidation: 96 000 rows of `DatasetTiersTests` once by their merges and once by the consolidation.
 
 Rows that come late for a consolidated partition land in level 0 as small objects of that partition,
 and wait in its size classes. A calm partition whose level 0 weighs less than an eighth of the

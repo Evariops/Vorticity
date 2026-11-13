@@ -58,7 +58,11 @@ public sealed record DatasetOptions
             : throw new ArgumentOutOfRangeException(nameof(value), value, "An append holds a positive number of bytes.");
     }
 
-    /// <summary>How many times a commit re-applies its changes to a newer version before giving up; 8 by default.</summary>
+    /// <summary>
+    /// How many times a commit re-applies its changes to a newer version before giving up; 8 by default. A compaction's
+    /// commit, whose loss throws away what its job wrote, goes on past them for as long as its job took, half the
+    /// retention window at most, and then reports its job abandoned rather than throwing.
+    /// </summary>
     public int MaxAttempts { get; init; } = 8;
 
     /// <summary>
@@ -146,7 +150,8 @@ public sealed record DatasetOptions
     /// default, compacts nothing inline. Past the ceiling, level 0 is merged into the level above when
     /// the job reads no more than this, so a writer with no process to spare holds the read bound
     /// itself, at the price of the merge's latency in the commit that crosses it; a larger job is left
-    /// to another driver, and the commit returns at once.
+    /// to another driver, and the commit returns at once. Under tiers, a merge of a class that holds
+    /// more than this is cut to it, the class's fan-out of objects at least, rather than left whole.
     /// </summary>
     /// <remarks>
     /// The commit stands whatever befalls the compaction after it, and its outcome is what the caller

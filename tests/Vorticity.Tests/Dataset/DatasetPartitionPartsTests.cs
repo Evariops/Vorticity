@@ -55,10 +55,8 @@ public sealed partial class DatasetPartitionPartsTests
             await dataset.AppendAsync(draft, Ct);
         }
 
-        while (await dataset.CompactAsync(cancellationToken: Ct) is not null)
-        {
-        }
-
+        // Consolidated as they came: a merge of a day's size class first would leave it one object, which moves to level 1
+        // whole, its own postings with it, and writes no index.
         await dataset.ConsolidateAsync(Ct);
 
         // Asked day by day, newest first: each part one day, its count LINQ's.

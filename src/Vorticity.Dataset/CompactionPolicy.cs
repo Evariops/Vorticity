@@ -47,7 +47,8 @@ internal static partial class CompactionPolicy
         VortexDataset dataset,
         CompactionOptions? options,
         int jobs,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        long inputBytes = long.MaxValue)
     {
         ArgumentNullException.ThrowIfNull(dataset);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(jobs);
@@ -56,7 +57,7 @@ internal static partial class CompactionPolicy
         CompactionStyle style = StyleOf(version, settings);
         if (Tiers(version, style))
         {
-            return await PlanTiersAsync(version, settings, jobs, consolidateAll: false, cancellationToken).ConfigureAwait(false);
+            return await PlanTiersAsync(version, settings, jobs, consolidateAll: false, cancellationToken, inputBytes).ConfigureAwait(false);
         }
 
         bool descends = style switch
@@ -123,6 +124,9 @@ internal static partial class CompactionPolicy
     private readonly struct PlannedVersion(VortexDataset dataset)
     {
         private readonly DatasetSnapshot _snapshot = dataset.Snapshot;
+
+        /// <summary>The handle the plan reads through: what its jobs' budget and its measured rows price a job by.</summary>
+        internal VortexDataset Handle { get; } = dataset;
 
         /// <summary>The version.</summary>
         internal ulong Version => _snapshot.Version;

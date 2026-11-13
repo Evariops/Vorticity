@@ -25,7 +25,7 @@ public sealed partial class PartitionIndexTests
 
     /// <summary>
     /// Six appends of 15 000 rows over two days, partitioned by day, keyed by a service and a status, the sequence an
-    /// identifier, merged and consolidated: an index a day, which covers the day's level 1, places every covered row, and
+    /// identifier, consolidated: an index a day, which covers the day's level 1, places every covered row, and
     /// rules covered objects out of a lookup unread. Late rows of the first day consolidated keep it so; a purge of part
     /// of the second day leaves the objects it rewrites outside its index; a vacuum past the retention keeps the indexes
     /// the version names and takes the first day's first. Sealed, the same: an index is read by its plaintext's length, which
@@ -59,11 +59,9 @@ public sealed partial class PartitionIndexTests
             RetentionWindow = TimeSpan.FromMinutes(10),
         }, Ct);
         List<Row> all = [];
+        // Consolidated as they came: a merge of a day's size class first would leave it one object, which moves to level 1
+        // whole, its own postings with it, and writes no index.
         await AppendAsync(dataset, random, all, appends: 6, rows: 15_000, days: 2);
-        while (await dataset.CompactAsync(cancellationToken: Ct) is not null)
-        {
-        }
-
         await dataset.ConsolidateAsync(Ct);
         await IndexesAsync(dataset, all, expectDays: 2, purged: false);
         string firstDayZero = (await EntriesAsync(dataset))[0].ObjectKey;

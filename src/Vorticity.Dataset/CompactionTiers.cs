@@ -33,7 +33,7 @@ internal static partial class CompactionPolicy
     /// <see cref="VortexDataset.ConsolidateAsync"/> asks.
     /// </summary>
     private static async ValueTask<CompactionPlan> PlanTiersAsync(
-        PlannedVersion dataset, CompactionOptions settings, int count, bool consolidateAll, CancellationToken cancellationToken)
+        PlannedVersion dataset, CompactionOptions settings, int count, bool consolidateAll, CancellationToken cancellationToken, long inputBytes = long.MaxValue)
     {
         DatasetLayout layout = dataset.Header.Layout ?? new DatasetLayout();
         long top = layout.ObjectBytes;
@@ -68,15 +68,26 @@ internal static partial class CompactionPolicy
         }
 
         // The merges due, by partition: the class of the smallest objects first; none when every partition consolidates,
-        // which merges its level 0 whole.
+        // which merges its level 0 whole. A calm partition with a key is consolidated rather than merged by class, when its
+        // consolidation fits the jobs' budget: its rows go to level 1 in one job, where they climbed its classes first, 194
+        // jobs and 50 MB of commit objects for 40 partitions of 30 small objects against 40 jobs and 10 MB.
         List<(int Class, CompactionJob Job)> merges = [];
+        Dictionary<TierPartition, CompactionJob> deferred = [];
         long lag = 0;
         foreach (TierPartition partition in partitions)
         {
             lag += partition.Lag(fanout);
             if (!consolidateAll && partition.Due(fanout) is ({ } inputs, int size))
             {
-                merges.Add((size, Tier(dataset, inputs, top)));
+                CompactionJob merge = Wide(dataset, inputs, fanout, Math.Min(top, inputBytes), top);
+                if (dataset.Keyed && calmAfter >= 0 && now - partition.Latest >= calmAfter)
+                {
+                    deferred[partition] = merge;
+                }
+                else
+                {
+                    merges.Add((size, merge));
+                }
             }
         }
 
@@ -130,10 +141,17 @@ internal static partial class CompactionPolicy
                 continue;
             }
 
-            if (await ConsolidationAsync(dataset, partition, top, fanout, layout.LateShare, consolidateAll, cancellationToken).ConfigureAwait(false) is { } job)
+            if (await ConsolidationAsync(dataset, partition, top, fanout, layout.LateShare, consolidateAll, cancellationToken).ConfigureAwait(false) is { } job
+                && (consolidateAll || !deferred.ContainsKey(partition) || DatasetCompactor.Fits(dataset.Handle, job)))
             {
                 busy.Add(index);
                 jobs.Add(job);
+            }
+            else if (deferred.TryGetValue(partition, out CompactionJob? merge))
+            {
+                // Too much for one job, or not due: merged by class until it fits.
+                busy.Add(index);
+                jobs.Add(merge);
             }
         }
 
@@ -187,6 +205,18 @@ internal static partial class CompactionPolicy
     /// <summary>The partition a job's first input lies in, its row-encoded value as text: what tells two jobs of one partition.</summary>
     internal static string PartitionOf(VortexDataset dataset, CompactionJob job) =>
         Convert.ToHexString(new PlannedVersion(dataset).PartitionOf(job.Inputs[0].Key.Span));
+
+    /// <summary>
+    /// The merge of the first of <paramref name="inputs"/>, objects of one class of one partition at level 0 in the order of
+    /// the tree, that its bounds let it take: <paramref name="fanout"/> at least, then as many as their bytes stay within
+    /// <paramref name="bytes"/> and the merge within the jobs' budget (<see cref="DatasetCompactor.TierWidth"/>). A merge
+    /// due when its class reaches the fan-out takes the fan-out; one behind takes what it can.
+    /// </summary>
+    private static CompactionJob Wide(PlannedVersion dataset, List<CompactionInput> inputs, int fanout, long bytes, long top)
+    {
+        int width = DatasetCompactor.TierWidth(dataset.Handle, inputs, fanout, bytes);
+        return Tier(dataset, width == inputs.Count ? inputs : inputs.GetRange(0, width), top);
+    }
 
     /// <summary>
     /// The merge of <paramref name="inputs"/>, objects of one class of one partition at level 0, into level 0: on the key,
@@ -407,8 +437,11 @@ internal static partial class CompactionPolicy
         }
 
         /// <summary>
-        /// The merge due: the <paramref name="fanout"/> earliest arrived objects of the class of the smallest objects that
-        /// holds as many, and the class; null when none does.
+        /// The merge due: the objects of the class of the smallest objects that holds <paramref name="fanout"/> of them or
+        /// more, in the order of the tree, and the class; null when none does. A merge takes as many of them as its bounds
+        /// let (<see cref="DatasetCompactor.TierWidth"/>), neighbours in the tree: neighbours lie in the same leaves, and a
+        /// commit that takes them away rewrites a few, where the earliest arrived of 512 lay in so many leaves that the
+        /// commit object of their merge weighed 3.1 MB, against 294 KB for 512 neighbours.
         /// </summary>
         internal (List<CompactionInput> Inputs, int Class)? Due(int fanout)
         {
@@ -416,12 +449,7 @@ internal static partial class CompactionPolicy
             {
                 if (_classes[c].Count >= fanout)
                 {
-                    List<CompactionInput> earliest = [.. _classes[c]];
-                    earliest.Sort(static (left, right) =>
-                        left.Entry.Arrival != right.Entry.Arrival
-                            ? left.Entry.Arrival.CompareTo(right.Entry.Arrival)
-                            : left.Key.Span.SequenceCompareTo(right.Key.Span));
-                    return (earliest.GetRange(0, fanout), c);
+                    return (_classes[c], c);
                 }
             }
 
