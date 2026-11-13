@@ -254,10 +254,7 @@ its input ends, so it has no order to keep while it runs.
   performance contract](14-public-api.md#9-the-performance-contract-and-the-gates-that-hold-it)).
 * For a dataset, the first batch only waits for the first object. Once the consumer reads past it,
   with prefetch on, the next object is opened and its first batch read and decoded while the current
-  one is still being read. An object's open, its first request and its first decode wait on nothing
-  the consumer does, at most two objects are open, and a consumer that stops at the first batch opens
-  one. A group by reads the objects side by side at a degree above one (see [parallelism and the
-  merge](#94-parallelism-and-the-merge) and [13-dataset.md](13-dataset.md)).
+  one is still being read. An object's open, its first request and its first decode wait on nothing the consumer does, and a consumer that stops at the first batch opens one. Past the second object, a scan of one lane opens the objects it covers ahead of its turn, one more each time it comes back, then twice as many, within 16 MiB and the session's reads in flight ([the read-path budget](13-dataset.md#91-dependent-round-trips-not-bytes)). A group by reads the objects side by side at a degree above one (see [parallelism and the merge](#94-parallelism-and-the-merge) and [13-dataset.md](13-dataset.md)).
 * For a result, which is a stream itself ([`As<TRecord>`](#71-astrecord)), the first batch is its
   query's first.
 
