@@ -1,8 +1,10 @@
 using System;
+using System.Buffers;
 using System.Runtime.InteropServices;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Buffers;
+using Vorticity.Compute;
 using Vorticity.Layouts;
 using Vorticity.Types;
 
@@ -23,10 +25,21 @@ namespace Vorticity.Writing;
 /// same node.
 /// </para>
 /// <para>
-/// The window is <c>[min(offset), max(offset + size))</c> and not a gather: it keeps interior gaps,
-/// costs one pass over the rows, and leaves the child a view. A gather would be tighter and would
-/// copy every element; the rows of a chunk are contiguous in their child by construction here, so
-/// the window is already tight and the copy would buy nothing.
+/// The window is <c>[min(offset), max(offset + size))</c> while its rows name every element it
+/// holds: one pass over the rows, and the child stays a view. Rows cut from a batch as it was built
+/// lie one after the other in their child, and that window is tight.
+/// </para>
+/// <para>
+/// Rows that lie apart in their child are gathered instead: the elements each names, copied in the
+/// order of the rows. A batch whose rows were laid out in another order than they came, a sort by a
+/// key for one, keeps its elements where they came, and a few of its rows taken together span
+/// nearly all of them: written as a window, each such chunk carried the batch's elements whole. The
+/// same pass tells the two apart, by the elements the rows name against the extent they span, so a
+/// window is copied only when it would write an element no row asks for. Rows that share their
+/// elements name more than they span, and stay a view. The blocks of a gathered chunk summarized
+/// the window, gaps included, so they name more elements than the chunk writes:
+/// <see cref="ColumnWriter.ElementsOver"/> tells it by that number, and the chooser measures the
+/// chunk's elements itself.
 /// </para>
 /// <para>
 /// Nothing is rebuilt when nothing moves: every arm returns the index it was given when the window
@@ -148,6 +161,7 @@ internal static class ChunkCompactor
 
         long low = long.MaxValue;
         long high = 0;
+        long named = 0;
         for (int i = 0; i < rows; i++)
         {
             long size = ListViewDecoder.Widen(typedSizes[i]);
@@ -161,12 +175,20 @@ internal static class ChunkCompactor
             long offset = ListViewDecoder.Widen(typedOffsets[i]);
             if (offset < low) { low = offset; }
             if (offset + size > high) { high = offset + size; }
+            named += size;
         }
 
         if (low == long.MaxValue)
         {
             low = 0;
             high = 0;
+        }
+
+        // The rows name fewer elements than lie between the first and the last of them: they lie
+        // apart in the child, and the window would write what lies between.
+        if (high - low > named)
+        {
+            return Gathered(arena, dtype, rows, validity, elements, typedOffsets, typedSizes, sizes, sizePType, named);
         }
 
         if (low == 0 && high == childRows)
@@ -195,6 +217,61 @@ internal static class ChunkCompactor
         }
 
         return arena.AddListView(dtype, rows, validity, narrowed, rebased, PType.U32, sizes, sizePType);
+    }
+
+    /// <summary>
+    /// The list whose child holds the <paramref name="named"/> elements its rows name and no other,
+    /// in the order of the rows: each row's elements one after the other, the offsets counting on
+    /// from one row to the next.
+    /// </summary>
+    /// <remarks>
+    /// The places of the elements are listed once and the child gathered through them, whatever its
+    /// kind: a child that is a list itself comes out sharing its own child, which the same pass
+    /// narrows in turn. An empty row is given the place the next row starts at, so the offsets never
+    /// step back.
+    /// </remarks>
+    private static int Gathered<TOffset, TSize>(
+        CanonicalArena arena, DType dtype, int rows, Validity validity, int elements,
+        ReadOnlySpan<TOffset> offsets, ReadOnlySpan<TSize> sizes, VortexBuffer sizeBuffer, PType sizePType, long named)
+        where TOffset : unmanaged
+        where TSize : unmanaged
+    {
+        // Fewer than the extent the rows span, which the child's length bounds: an int holds it.
+        int count = checked((int)named);
+        VortexBuffer rebased = arena.AllocateUninitialized(
+            checked(rows * sizeof(uint)), sizeof(uint), out Span<byte> writable);
+        Span<uint> destination = MemoryMarshal.Cast<byte, uint>(writable);
+        int[] places = ArrayPool<int>.Shared.Rent(Math.Max(count, 1));
+        try
+        {
+            int at = 0;
+            for (int i = 0; i < rows; i++)
+            {
+                destination[i] = (uint)at;
+                long size = ListViewDecoder.Widen(sizes[i]);
+                if (size <= 0)
+                {
+                    continue;
+                }
+
+                int first = checked((int)ListViewDecoder.Widen(offsets[i]));
+                Span<int> row = places.AsSpan(at, (int)size);
+                for (int j = 0; j < row.Length; j++)
+                {
+                    row[j] = first + j;
+                }
+
+                at += row.Length;
+            }
+
+            int gathered = CanonicalFilter.Apply(arena, elements, places.AsSpan(0, count));
+            gathered = Compact(arena, gathered);
+            return arena.AddListView(dtype, rows, validity, gathered, rebased, PType.U32, sizeBuffer, sizePType);
+        }
+        finally
+        {
+            ArrayPool<int>.Shared.Return(places);
+        }
     }
 
     private static int CompactStruct(CanonicalArena arena, int nodeIndex)
