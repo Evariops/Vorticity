@@ -17,8 +17,9 @@
     <PackageVersion Include="System.IO.Hashing" Version="11.0.0" />
     <!-- Zstandard and the LZ4 block format in managed C#, Evariops's own, from their own
          repository (github.com/Evariops/ManagedCompressions), released together at one version.
-         0.2.0 makes public the prefix decode the reader uses to decode only the start of a frame. -->
-    <PackageVersion Include="ManagedCompressions.Zstd" Version="0.2.0" />
-    <PackageVersion Include="ManagedCompressions.Lz4" Version="0.2.0" />
+         The reader needs at least 0.2.0, which made public the prefix decode it uses to decode only
+         the start of a frame. -->
+    <PackageVersion Include="ManagedCompressions.Zstd" Version="0.3.0" />
+    <PackageVersion Include="ManagedCompressions.Lz4" Version="0.3.0" />
   </ItemGroup>
 </Project>
