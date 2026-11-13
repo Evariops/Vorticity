@@ -175,10 +175,10 @@ The codecs come from [ManagedCompressions](https://github.com/Evariops/ManagedCo
 
 | managed against native | Apple M4 Pro | Ryzen 9 7950X |
 |---|---:|---:|
-| Zstandard, decompression | 1.30x to 1.49x | 1.01x to 1.11x |
-| Zstandard, compression | 0.94x to 1.03x | 0.92x to 1.09x |
-| LZ4, decompression | 1.03x to 1.04x | 0.99x to 1.08x |
-| LZ4, compression | 0.85x to 0.96x | 0.88x to 0.95x |
+| Zstandard, decompression | 1.30x to 1.49x | 1.01x to 1.12x |
+| Zstandard, compression | 0.94x to 1.03x | 0.94x to 1.09x |
+| LZ4, decompression | 1.03x to 1.04x | 0.99x to 1.02x |
+| LZ4, compression | 0.85x to 0.96x | 0.89x to 0.96x |
 
 On x64, native libzstd decodes with hand-written assembly that arm64 does not have, which is why the managed decoder's lead is smaller there.
 
