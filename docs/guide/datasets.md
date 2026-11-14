@@ -338,9 +338,7 @@ Counts and sums over the parts add up, and so do minimums and maximums. A mean
 over the whole range is the sum of the parts' sums over the sum of their counts. A value whose next
 value no function tells, a text's or a float's, has no part to cut, and the call refuses it.
 
-Rows kept for different lengths of time go in a dataset each, and so may rows of different tenants or
-sources an application keeps apart: the library knows no tenant, and an application lays out its rows
-as it chooses. Each dataset then expires on its own schedule, reading no data:
+Rows kept for different lengths of time go in a dataset each, and so may rows of different tenants or sources an application keeps apart: the library knows no tenant, and an application lays out its rows as it chooses. A question still reads them together, through a set ([Several datasets as one](#several-datasets-as-one)). Each dataset then expires on its own schedule, reading no data:
 
 ```csharp
 DateTimeOffset week = DateTimeOffset.UtcNow.AddDays(-7);
@@ -366,6 +364,35 @@ late row costs at some nine writes. On 24 hours of requests at 20 a second from 
 by hour, a row in fifty a few seconds late and one in ten thousand up to an hour late, the size classes
 rewrote a row 1.93 times and the consolidations 0.92 times (`vortex-queries --micro lifecycle`), and a
 window of a day covers 40 objects.
+
+### Several datasets as one
+
+An application that keeps its rows in several datasets, one per length of time, per tenant or per source, still asks its questions of all of them. A `VortexDatasetSet` is a list of open datasets of one schema, read as one dataset that would hold the rows of them all:
+
+```csharp
+VortexDatasetSet logs = new VortexDatasetSet(debug, info);
+List<DayLines> days = await logs.Scan<Logged>()
+    .GroupBy(r => r.At.Truncate(CalendarUnit.Day))
+    .Select(g => (g.Key, g.Count(), g.CountDistinct(r => r.Retention)))
+    .As<DayLines>().ToRecordsAsync().ToListAsync();
+```
+
+```
+both as one: 10-01 480 lines of 1 retention, 10-02 480 lines of 1 retention, 10-03 1440 lines of 2 retentions
+```
+
+The debug lines of the first two days are expired, so those days hold the info lines alone, and the third holds both. The distinct count is exact over both datasets, which no sum of each dataset's own count would give. The same holds for a quantile, a filtered aggregate, a chosen row (`First`, `MaxBy`) and the best groups of an order (`OrderByDescending(…).Take(k)`): the set runs one question, under one session's lanes and memory, and folds the groups of every dataset in the same tables.
+
+Each dataset is read as it would be alone. Its objects are pruned by its own summaries and its own sort key, and each object is answered by the cheapest path its own plan proves: its counts, its granules' statistics, its rollups or its rows. A dataset whose summaries refute the filter is asked for no data. The requests a question makes are those each dataset would be asked for the same question, and the datasets are asked side by side where the question does not read them in turn. `ExplainAsync` lists the units of every dataset, and its cost is their sum.
+
+The set is a list of handles and nothing more. It writes nothing to a store, and it neither owns nor closes its datasets, which may lie in different stores and be laid out differently. Here is what follows from that:
+
+* The rows are numbered on from one dataset to the next, in the order the set was given. `Rows(…)`, a batch's `StartRow`, the row a `First` keeps and the parts `PartsAsync` cuts all count them that way.
+* No version holds across the datasets. A scan reads each one at the version its handle holds when the scan is made, and `logs.RefreshAsync()` moves every handle to its latest version, the datasets asked side by side.
+* The datasets have one schema and one session. A set of two schemas or two sessions is refused where it is declared.
+* A set orders what its datasets order. The rows in the order of a column each dataset has a key source for are merged, and an order one of them would refuse alone is refused. A window of that order, `OrderBy(…).Select(…).Take(k)`, needs no key source: each dataset finds its own best `k` rows as it would alone, its objects and granules from the best, then the column is read at those places alone to settle the `k` of the set, and only their rows are read.
+* A set walks no keys: a key cursor reads one dataset.
+* `ScanOptions.AlignWindow` grows no window over a set, and `AskByValuesAsync` asks one dataset.
 
 ### The local cache
 

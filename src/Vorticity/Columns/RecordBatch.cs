@@ -206,6 +206,10 @@ public sealed class RecordBatch : IDisposable
         _publicSchema = source._publicSchema;
         _selection = source._selection;
         _selected = source._selected;
+
+        // A batch of states stays one at another place: a union of sources rebases what each of them gives.
+        CarriesStates = source.CarriesStates;
+        KeysApplied = source.KeysApplied;
         _disposed = false;
     }
 
@@ -588,7 +592,13 @@ public sealed class RecordBatch : IDisposable
     internal RecordBatch Rebased(long startRow)
     {
         ThrowIfDisposed();
-        RecordBatch view = new RecordBatch(_arena, _root, startRow) { _publicSchema = _publicSchema, Session = Session };
+        RecordBatch view = new RecordBatch(_arena, _root, startRow)
+        {
+            _publicSchema = _publicSchema,
+            Session = Session,
+            CarriesStates = CarriesStates,
+            KeysApplied = KeysApplied,
+        };
         view.Select(_selection, _selected);
         return view;
     }
