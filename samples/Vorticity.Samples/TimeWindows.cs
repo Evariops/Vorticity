@@ -19,6 +19,10 @@ public partial record struct ServiceTotals(string Service, long Count, long Byte
 [VortexRecord]
 public partial record struct Logged(string Retention, DateTimeOffset At, string Message);
 
+/// <summary>A day's lines over the datasets of every retention, and how many retentions hold one.</summary>
+[VortexRecord]
+public partial record struct DayLines(DateTimeOffset Day, long Lines, long Retentions);
+
 /// <summary>
 /// The time-window part of the datasets page: a dataset whose objects each hold a day, questions that read the rows their
 /// window reaches, a request found through its identifier, a window asked day by day newest first, the objects'
@@ -147,6 +151,14 @@ internal static class TimeWindows
         long kept = await debug.Scan<Logged>().CountAsync();
         long untouched = await info.Scan<Logged>().CountAsync();
         Console.WriteLine($"debug lines expired before {cutoff:MM-dd}: {before} then {kept}, {expired.Rows} dropped; info lines untouched: {untouched}");
+
+        // Both datasets as one: a question over the set reads each dataset by its own summaries, in one run.
+        VortexDatasetSet logs = new VortexDatasetSet(debug, info);
+        List<DayLines> days = await logs.Scan<Logged>()
+            .GroupBy(r => r.At.Truncate(CalendarUnit.Day))
+            .Select(g => (g.Key, g.Count(), g.CountDistinct(r => r.Retention)))
+            .As<DayLines>().ToRecordsAsync().ToListAsync();
+        Console.WriteLine($"both as one: {string.Join(", ", days.OrderBy(d => d.Day).Select(d => $"{d.Day:MM-dd} {d.Lines} lines of {d.Retentions} retention{(d.Retentions == 1 ? string.Empty : "s")}"))}");
     }
 
     /// <summary>Appends <paramref name="rows"/> to <paramref name="dataset"/> as one object.</summary>

@@ -376,7 +376,7 @@ VX1011 accompanies the compiler's own error, to name the fix.
   `EvolveSchemaAsync` takes a `VortexSchema` and the renamed columns, `AddIdentifiersAsync` and
   `SetShreddedPathsAsync` the columns and keys of variant columns written as a filter reads them. The
   store interface, the maintenance calls, what each costs and how a change of rows or of schema
-  commits are described in [13-dataset.md](13-dataset.md).
+  commits are described in [13-dataset.md](13-dataset.md). `VortexDatasetSet` reads several open datasets of one schema as one: its `Scan<TRecord>()` is the same scan again, over the rows of them all in the order they were given, and its `RefreshAsync` moves every handle. It is a list of handles, which writes nothing and owns no dataset ([23-query-architecture.md](23-query-architecture.md#85-capabilities)).
 - `Vorticity.RowEncoding`: `RowEncoder`, `RowSortField`, `RowKeys` and `RowKeyEncoder`
   ([06-row-encoding.md](06-row-encoding.md)). `[Experimental]` is set on the assembly of both
   experimental packages, so every type reports its diagnostic to a caller, and the packages' own code

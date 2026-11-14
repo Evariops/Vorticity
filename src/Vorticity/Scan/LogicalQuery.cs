@@ -18,16 +18,23 @@ internal enum LogicalSourceKind
 
     /// <summary>A stream of batches: a query's result.</summary>
     Stream,
+
+    /// <summary>Several sources read as one, their rows one after the other.</summary>
+    Union,
 }
 
-/// <summary>The source a question reads: its kind, and a dataset's version.</summary>
+/// <summary>The source a question reads: its kind, and a dataset's version or the number of a union's sources.</summary>
 /// <param name="Kind">The kind.</param>
-/// <param name="Version">A dataset's version; 0 for another source.</param>
+/// <param name="Version">
+/// A dataset's version; how many sources a union reads, held here so that the source stays two words, which every
+/// question copies; 0 for another source.
+/// </param>
 internal readonly record struct LogicalSource(LogicalSourceKind Kind, ulong Version = 0)
 {
     public override string ToString() => Kind switch
     {
         LogicalSourceKind.Dataset => $"version {Version} of a dataset",
+        LogicalSourceKind.Union => $"{Version} sources read as one",
         LogicalSourceKind.File => "a file",
         _ => "a stream",
     };

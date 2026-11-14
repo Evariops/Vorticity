@@ -3572,6 +3572,15 @@ Vorticity.Dataset:     property long ObjectCount { get; }
 Vorticity.Dataset:     property long RowCount { get; }
 Vorticity.Dataset:     property ulong LastDataChange { get; }
 Vorticity.Dataset:     property ulong Version { get; }
+Vorticity.Dataset: sealed class Vorticity.Dataset.VortexDatasetSet
+Vorticity.Dataset:     ctor VortexDatasetSet(ReadOnlySpan<VortexDataset>)
+Vorticity.Dataset:     method Scan Scan(ReadOnlySpan<string>)
+Vorticity.Dataset:     method Scan<TRecord> Scan<TRecord>()
+Vorticity.Dataset:     method ValueTask RefreshAsync(CancellationToken = default)
+Vorticity.Dataset:     property IReadOnlyList<VortexDataset> Datasets { get; }
+Vorticity.Dataset:     property VortexSchema Schema { get; }
+Vorticity.Dataset:     property VortexSession Session { get; }
+Vorticity.Dataset:     property long RowCount { get; }
 Vorticity.RowEncoding: static class Vorticity.RowEncoding.RowEncoder
 Vorticity.RowEncoding:     const string VortexVersion = 0.86.1
 Vorticity.RowEncoding:     method RowKeys Encode(BatchView, ReadOnlySpan<RowSortField>)
