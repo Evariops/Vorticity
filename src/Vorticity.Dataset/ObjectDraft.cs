@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Threading.Tasks;
 
 namespace Vorticity.Dataset;
@@ -67,7 +68,10 @@ public sealed record DataObject
     /// <summary>The level whose tree holds it; level 0 is the one appends land in.</summary>
     public int Level { get; init; }
 
-    /// <summary>Its first row among the version's, in the order a scan delivers them.</summary>
+    /// <summary>
+    /// Its first row among the version's, in the order a scan delivers them; -1 for an object a commit's result names,
+    /// which no walk placed.
+    /// </summary>
     public long FirstRow { get; init; }
 
     /// <summary>Its rows, those a delete took out of it not counted.</summary>
@@ -100,6 +104,19 @@ public sealed record DataObject
         TreeKey = Convert.ToHexString(held.TreeKey.Span),
         Entry = held.Entry,
     };
+
+    /// <summary>An object a commit put at <paramref name="key"/> of <paramref name="level"/>, as its result names it.</summary>
+    internal static DataObject Of(int level, ReadOnlyMemory<byte> key, ObjectEntry entry) => new DataObject
+    {
+        Key = entry.Key,
+        Level = level,
+        FirstRow = -1,
+        Rows = entry.Rows,
+        DeletedRows = entry.DeletedRows,
+        Bytes = entry.Bytes,
+        TreeKey = Convert.ToHexString(key.Span),
+        Entry = entry,
+    };
 }
 
 /// <summary>What a replacement or a removal did.</summary>
@@ -115,4 +132,15 @@ public sealed record ReplaceResult
     /// <see cref="OperationOutcome.AlreadyThere"/> when there was nothing to remove nor to add.
     /// </summary>
     public OperationOutcome Outcome { get; init; }
+
+    /// <summary>
+    /// The objects the commit added, those of its drafts, one a partition: what a later replacement or removal names.
+    /// Empty when the commit did not apply.
+    /// </summary>
+    /// <remarks>
+    /// A compaction may take them as soon as the commit is made, the one a commit runs inline included. A replacement
+    /// that names one then comes back <see cref="OperationOutcome.Abandoned"/>, and their rows are in the objects the
+    /// compaction wrote.
+    /// </remarks>
+    public IReadOnlyList<DataObject> Added { get; init; } = [];
 }

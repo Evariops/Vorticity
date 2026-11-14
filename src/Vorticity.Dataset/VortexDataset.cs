@@ -1157,8 +1157,8 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <param name="consumed">The ranges the rows take into account, one per source, each starting where the dataset counts its source up to (<see cref="SourceOffset"/>).</param>
     /// <param name="cancellationToken">Cancels the put and the commit.</param>
     /// <returns>
-    /// <see cref="OperationOutcome.Applied"/> and the version created, the offsets moved to the
-    /// ranges' ends; or <see cref="OperationOutcome.AlreadyThere"/> and the version that counts them
+    /// <see cref="OperationOutcome.Applied"/>, the version created and the objects it added, the
+    /// offsets moved to the ranges' ends; or <see cref="OperationOutcome.AlreadyThere"/> and the version that counts them
     /// when another writer counted every range first, in which case nothing was added and the
     /// object is left for vacuum.
     /// </returns>
@@ -1197,7 +1197,20 @@ public sealed class VortexDataset : IAsyncDisposable
         {
             Version = commit.Version,
             Outcome = commit.Counted ? OperationOutcome.AlreadyThere : OperationOutcome.Applied,
+            Added = commit.Counted ? [] : Named(written),
         };
+    }
+
+    /// <summary>The objects an append put in level 0, as its result names them.</summary>
+    private static DataObject[] Named(List<WrittenObject> written)
+    {
+        DataObject[] named = new DataObject[written.Count];
+        for (int i = 0; i < named.Length; i++)
+        {
+            named[i] = DataObject.Of(0, written[i].Key, written[i].Entry);
+        }
+
+        return named;
     }
 
     /// <summary>
@@ -1207,7 +1220,7 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <param name="batches">The rows, with the dataset's schema; there may be none.</param>
     /// <param name="consumed">The ranges the rows take into account, one per source.</param>
     /// <param name="cancellationToken">Cancels the writes, the put and the commit.</param>
-    /// <returns>What the commit made of the ranges, and the version.</returns>
+    /// <returns>What the commit made of the ranges, the version, and the objects it added.</returns>
     /// <exception cref="ArgumentException"><paramref name="consumed"/> is empty, or names a source twice.</exception>
     /// <exception cref="SourceOffsetConflictException">A range would leave a gap, or overlap one another commit counted; nothing was committed.</exception>
     public async ValueTask<SourceCommit> AppendAsync(
@@ -1448,9 +1461,9 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <param name="added">Drafts whose rows are written; each is completed and put before the commit.</param>
     /// <param name="cancellationToken">Cancels the puts and the commit.</param>
     /// <returns>
-    /// The version created, or <see cref="OperationOutcome.Abandoned"/> and the latest version when
-    /// an object to remove was already gone from it, in which case no version is created and the
-    /// added objects are left for vacuum.
+    /// The version created and the objects it added, or <see cref="OperationOutcome.Abandoned"/> and
+    /// the latest version when an object to remove was already gone from it, in which case no
+    /// version is created and the objects written are left for vacuum.
     /// </returns>
     /// <remarks>
     /// The added objects land in level 0, from where compaction moves them. Without a sort key
@@ -1473,8 +1486,8 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <param name="consumed">The ranges the change takes into account, one per source.</param>
     /// <param name="cancellationToken">Cancels the puts and the commit.</param>
     /// <returns>
-    /// The version created; or <see cref="OperationOutcome.AlreadyThere"/> and the version that
-    /// counts the ranges when another commit counted them first; or
+    /// The version created and the objects it added; or <see cref="OperationOutcome.AlreadyThere"/>
+    /// and the version that counts the ranges when another commit counted them first; or
     /// <see cref="OperationOutcome.Abandoned"/> when an object to remove was gone, the ranges then
     /// not counted. The objects written for a commit that did not apply are left for vacuum.
     /// </returns>
@@ -1554,12 +1567,19 @@ public sealed class VortexDataset : IAsyncDisposable
         OperationOutcome outcome = commit.Counted ? OperationOutcome.AlreadyThere
             : commit.Outcomes.Count > 0 ? commit.Outcomes[0]
             : OperationOutcome.Applied;
+        DataObject[] named = [];
         if (outputs.Count > 0 && outcome == OperationOutcome.Applied)
         {
+            named = new DataObject[outputs.Count];
+            for (int i = 0; i < named.Length; i++)
+            {
+                named[i] = DataObject.Of(outputs[i].Level, outputs[i].Key, outputs[i].Entry);
+            }
+
             await CompactInlineAsync(cancellationToken).ConfigureAwait(false);
         }
 
-        return new ReplaceResult { Version = commit.Version, Outcome = outcome };
+        return new ReplaceResult { Version = commit.Version, Outcome = outcome, Added = named };
     }
 
     /// <summary>

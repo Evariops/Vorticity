@@ -511,6 +511,8 @@ versions that still name them, until vacuum deletes them. Removing an object the
 holds returns `Abandoned`: no version is created, the result names the latest one, and any objects
 a replace would have added are left for vacuum.
 
+The result of a replacement that applied names the objects its commit added, in `ReplaceResult.Added`, and a later replacement or removal takes them as it takes those of `ListObjectsAsync()`. A writer that flushes often uses them to merge its own recent objects in the commits of its flushes, as [Frequent appends](frequent-appends.md#replace-your-own-recent-objects) shows.
+
 ## Deleting and updating rows
 
 ```csharp
