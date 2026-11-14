@@ -184,7 +184,7 @@ internal static class IncrementalBuild
     /// </summary>
     internal static string JobLine(CompactionResult done, double seconds, Dictionary<string, Pass> passes, PeakMemory memory) => string.Create(
         CultureInfo.InvariantCulture,
-        $"    job {done.Trigger} {done.Style}: {done.ObjectsIn} objects in, {done.ObjectsOut} out, {done.ObjectsMoved} moved, {done.Rows:N0} rows, {done.BytesIn / 1e6:F1} MB in, {done.BytesOut / 1e6:F1} MB out, {seconds:F1} s{Passes(passes)}; {done.RangesAtOnce} ranges at once, {done.MemoryReserved / 1e9:F2} GB reserved, {done.ScratchBytes / 1e6:F1} MB spilled, a peak of {memory.Peak / 1e9:F1} GB private ({memory.PeakNative / 1e9:F1} native, {memory.PeakParked / 1e9:F1} parked)");
+        $"    job {done.Trigger} {done.Style}: {done.ObjectsIn} objects in, {done.ObjectsOut} out, {done.ObjectsMoved} moved, {done.Rows:N0} rows, {done.BytesIn / 1e6:F1} MB in, {done.BytesOut / 1e6:F1} MB out, {seconds:F1} s{Passes(passes)}; {done.RangesAtOnce} ranges at once, {done.MemoryReserved / 1e9:F2} GB reserved, {done.ScratchBytes / 1e6:F1} MB spilled, a peak of {memory.Peak / 1e9:F1} GB private ({memory.PeakBlocks / 1e9:F1} blocks, {memory.PeakParked / 1e9:F1} parked)");
 
     /// <summary>A pass's seconds, the process's private bytes when it began, and the most it held while it ran.</summary>
     internal readonly record struct Pass(double Seconds, long From, long Peak);

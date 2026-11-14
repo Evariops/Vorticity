@@ -25,8 +25,7 @@ namespace Vorticity;
 /// </remarks>
 public sealed class QueryMemoryBudget
 {
-    // The container's limit less its margin, which the engine's native memory counts against beside the
-    // heap; null outside a container.
+    // The container's limit less its margin; null outside a container.
     private static readonly long? s_container = ContainerLimit() is long container ? container / 4 * 3 : null;
 
     // The process's budget, which this one reserves in too; null for the process's own.
@@ -84,9 +83,9 @@ public sealed class QueryMemoryBudget
     /// <summary>
     /// The process's budget, which every session shares unless given another. Its limit is the memory
     /// the collector may commit — the heap's hard limit when one is set, its share of a container's
-    /// limit in a container, the machine's memory otherwise — and a container's own limit, which
-    /// counts the engine's native memory as well, each less a margin. Of it, the queries get what the
-    /// rest of the process leaves: a limit of 4 GB is not 4 GB for the queries.
+    /// limit in a container, the machine's memory otherwise — and a container's own limit, each less a
+    /// margin. Of it, the queries get what the rest of the process leaves: a limit of 4 GB is not 4 GB for
+    /// the queries.
     /// </summary>
     internal static QueryMemoryBudget Process { get; } = new QueryMemoryBudget(ProcessLimit(), process: null);
 
@@ -130,8 +129,8 @@ public sealed class QueryMemoryBudget
     /// <summary>
     /// Reserves <paramref name="bytes"/> under this budget and the process's; false, and nothing reserved,
     /// when either would pass its ceiling. Short of room, the process's shelf lets its large arrays go
-    /// first, for the collection that follows to take them, and the pool the native blocks it keeps for
-    /// the next rents, which a container's limit counts.
+    /// first, and the pool the blocks it keeps for the next rents, for the collection that follows to
+    /// take them.
     /// </summary>
     internal bool TryReserve(long bytes)
     {
@@ -295,21 +294,10 @@ public sealed class QueryMemoryBudget
     }
 
     /// <summary>
-    /// What the process's limits leave the queries past the rest of its memory: the collector's, past
-    /// the rest of its heap; in a container, the container's too, past the heap's rest and the engine's
-    /// native blocks, which it counts and the collector does not.
+    /// What the process's limit leaves the queries past the rest of its memory: the library's blocks are
+    /// managed, so the collector counts them with the rest of its heap.
     /// </summary>
-    private long Available()
-    {
-        long rest = RestBytes;
-        long available = _ceiling - rest;
-        if (s_container is long container)
-        {
-            available = Math.Min(available, container - rest - NativeSegmentOwner.NativeBytes);
-        }
-
-        return Math.Max(0, available);
-    }
+    private long Available() => Math.Max(0, _ceiling - RestBytes);
 
     /// <summary>
     /// The rest of the process, read again after each full collection, in two parts. What its heap
@@ -448,8 +436,7 @@ public sealed class QueryMemoryBudget
 
     /// <summary>
     /// The process's limit, less a margin for what the collector needs to work: an eighth of the
-    /// collector's limit; a container's, a quarter of it, applies past the native memory too
-    /// (<see cref="Available"/>).
+    /// collector's limit, and in a container a quarter of the container's when that is less.
     /// </summary>
     internal static long ProcessLimit()
     {

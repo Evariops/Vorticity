@@ -39,7 +39,7 @@ public sealed class VortexSessionOptions
 
     /// <summary>
     /// Where the batches, the builders' buffers and the segments read through a caller's
-    /// <see cref="ISegmentSource"/> come from. The engine decodes into 64-byte aligned native blocks,
+    /// <see cref="ISegmentSource"/> come from. The engine decodes into 64-byte aligned blocks,
     /// so an <see cref="AlignedMemoryPool"/> serves it directly; another pool serves the builders and
     /// the owned batches, and the engine falls back to <see cref="AlignedMemoryPool.Shared"/>.
     /// </summary>

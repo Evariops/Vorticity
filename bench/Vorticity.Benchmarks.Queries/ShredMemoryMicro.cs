@@ -20,7 +20,7 @@ namespace Vorticity.Benchmarks.Queries;
 /// writes them, the variant column shredded as the census of the object's every row chooses, as a job's census of a
 /// partition's rows does, in chunks of a million rows as a job writes them,
 /// then of a quarter and of a sixteenth of that. For each: the most private bytes the process held above its start, the
-/// native blocks among them, the collector's committed memory, the seconds, and the bytes written. With <c>--out DIR</c>,
+/// blocks among them, the collector's committed memory, the seconds, and the bytes written. With <c>--out DIR</c>,
 /// each file stays there, named after its chunks' rows, for the files of two builds compared byte for byte.
 /// </summary>
 internal static class ShredMemoryMicro
@@ -49,7 +49,7 @@ internal static class ShredMemoryMicro
             Console.WriteLine(string.Create(
                 CultureInfo.InvariantCulture,
                 $"{census.Rows:N0} rows of {name}, {plan.Keys.Count} keys shredded at its first level, chunks of {chunk / 1e6:F0} MB of values for {ShreddingChoice.ChunkRows:N0} rows"));
-            Console.WriteLine("chunk rows   seconds   private MB    native MB   managed MB   written MB");
+            Console.WriteLine("chunk rows   seconds   private MB    blocks MB   managed MB   written MB");
             foreach (int share in new[] { 1, 4, 16 })
             {
                 // Kept, the files of two builds compare byte for byte.
@@ -72,7 +72,7 @@ internal static class ShredMemoryMicro
         GC.WaitForPendingFinalizers();
         GC.Collect();
         AlignedBufferPool.Shared.Trim();
-        long nativeStart = NativeSegmentOwner.NativeBytes;
+        long blocksStart = NativeSegmentOwner.LiveBytes;
         VortexWriteOptions options = VortexWriteOptions.Default with
         {
             ShreddedVariants = new Dictionary<string, VariantShredding> { [name] = plan },
@@ -97,6 +97,6 @@ internal static class ShredMemoryMicro
 
         Console.WriteLine(string.Create(
             CultureInfo.InvariantCulture,
-            $"{chunkRows,10:N0} {Stopwatch.GetElapsedTime(begin).TotalSeconds,9:F1} {(memory.Peak - memory.First) / 1e6,12:F0} {(memory.PeakNative - nativeStart) / 1e6,12:F0} {memory.PeakCommitted / 1e6,12:F0} {new FileInfo(target).Length / 1e6,12:F0}"));
+            $"{chunkRows,10:N0} {Stopwatch.GetElapsedTime(begin).TotalSeconds,9:F1} {(memory.Peak - memory.First) / 1e6,12:F0} {(memory.PeakBlocks - blocksStart) / 1e6,12:F0} {memory.PeakCommitted / 1e6,12:F0} {new FileInfo(target).Length / 1e6,12:F0}"));
     }
 }

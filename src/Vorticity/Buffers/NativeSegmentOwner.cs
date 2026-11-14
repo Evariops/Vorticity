@@ -8,41 +8,37 @@ using System.Threading;
 namespace Vorticity.Buffers;
 
 /// <summary>
-/// A <see cref="SegmentOwner"/> over a block of aligned native memory. This is the destination
-/// the I/O layer reads into: a random-access file read or a range response from a remote source
-/// scatters straight into the aligned block.
+/// A <see cref="SegmentOwner"/> over an aligned block of a managed array pinned for its whole life. This is the destination
+/// the I/O layer reads into: a random-access file read or a range response from a remote source scatters straight into the
+/// aligned block, and the engine reads it through a pointer.
 /// </summary>
 /// <remarks>
 /// <para>
-/// The block is obtained with <see cref="NativeMemory.AlignedAlloc"/> and returned with
-/// <see cref="NativeMemory.AlignedFree"/>. A finalizer is present purely as a leak backstop: the
-/// correct lifecycle is <see cref="SegmentOwner.Dispose"/> or a balanced
-/// <see cref="SegmentOwner.Release"/>, and the finalizer only runs when a caller dropped the
-/// owner on the floor.
+/// The array is allocated on the pinned object heap, which never moves an object, so a pointer into it stays valid for as
+/// long as the owner is reachable. The collector counts its bytes, takes them back once nothing references the owner, and
+/// is the only allocator of the library's blocks: there is nothing to free by hand and no finalizer.
 /// </para>
 /// <para>
-/// An instance handed out by <see cref="AlignedBufferPool"/> returns itself to that pool when its
-/// reference count reaches zero, instead of freeing.
+/// An instance handed out by <see cref="AlignedBufferPool"/> returns itself to that pool when its reference count reaches
+/// zero, instead of letting its array go.
 /// </para>
 /// </remarks>
 internal sealed class NativeSegmentOwner : SegmentOwner
 {
-    // Held as nint rather than byte* so the free path can be a single Interlocked.Exchange: that
-    // is what makes a finalizer racing an explicit Dispose incapable of double-freeing.
-    private nint _pointer;
+    // Null once the block let its array go: one exchange takes it, so that two releases cannot both drop it.
+    private byte[]? _array;
+
+    // Where the aligned block starts in the array: the array is allocated a cap's worth longer, and the block starts at the
+    // first byte aligned to it.
+    private readonly int _offset;
 
     private readonly AlignedBufferPool? _pool;
     private readonly int _bucketIndex;
     private readonly int _capacity;
-
-    // A byte and not an int, which the exponent never needs: the room it leaves holds
-    // DeclaredPressure without growing the object.
     private readonly byte _alignmentExponent;
 
-    private static long s_finalizedBlocks;
-
-    // The bytes of every block allocated and not yet freed, pooled or not.
-    private static long s_nativeBytes;
+    // The bytes of every block alive, rented or kept by a pool: what the gauge of rented bytes is worked out from.
+    private static long s_liveBytes;
 
     /// <summary>
     /// The next block rented by the same arena, while an arena holds this one: the arena chains
@@ -51,80 +47,28 @@ internal sealed class NativeSegmentOwner : SegmentOwner
     internal NativeSegmentOwner? NextOwned;
 
     /// <summary>
-    /// The bytes a lease of <see cref="AlignedMemoryPool"/> declared to the GC for this block, and
-    /// takes back when it is disposed. A lease dropped undisposed leaves them to the finalizer,
-    /// which frees the block: the lease itself, a <see cref="System.Buffers.MemoryManager{T}"/>,
-    /// has none, since a span of it can outlive it.
-    /// </summary>
-    internal int DeclaredPressure;
-
-    /// <summary>
     /// Whether the arena whose chain holds this block kept it from the batch before, for an
     /// allocation of its size class, and has not handed it out again.
     /// </summary>
     internal bool Idle;
 
-    /// <summary>
-    /// Whether the block holds bytes of a batch its caller owns, which <see cref="OwnedBatchBytes"/>
-    /// counts until the batch's arena gives the block back, or the finalizer frees it.
-    /// </summary>
-    internal bool InOwnedBatch;
-
-    // The block as memory an asynchronous read writes into, made on the first such read and kept for
-    // the block's life, pooled or not.
-    private NativeBlockMemory? _memory;
-
-    private unsafe NativeSegmentOwner(
-        void* pointer,
-        int capacity,
-        int length,
-        int alignmentExponent,
-        AlignedBufferPool? pool,
-        int bucketIndex)
+    private NativeSegmentOwner(byte[] array, int offset, int capacity, int length, int alignmentExponent, AlignedBufferPool? pool, int bucketIndex)
     {
-        _pointer = (nint)pointer;
+        _array = array;
+        _offset = offset;
         _capacity = capacity;
         _alignmentExponent = (byte)alignmentExponent;
         _pool = pool;
         _bucketIndex = bucketIndex;
-        Buffer = VortexBuffer.FromPointer((byte*)pointer, length, alignmentExponent);
-        Interlocked.Add(ref s_nativeBytes, Math.Max(capacity, 1));
-    }
-
-
-    /// <summary>Frees the block if the owner was dropped without being released.</summary>
-    ~NativeSegmentOwner()
-    {
-        // Never re-park into the pool from a finalizer: the pool may itself be unreachable, and a
-        // resurrected owner would be handed to a caller with no live reference to it.
-        if (FreeNative())
-        {
-            Interlocked.Increment(ref s_finalizedBlocks);
-        }
-
-        if (DeclaredPressure != 0)
-        {
-            AlignedMemoryPool.Declare(_pool, -DeclaredPressure);
-        }
-
-        if (InOwnedBatch)
-        {
-            OwnedBatchBytes.Count(_pool, -_capacity);
-        }
+        Buffer = BufferOf(array, offset, length, alignmentExponent);
+        Interlocked.Add(ref s_liveBytes, Math.Max(capacity, 1));
     }
 
     /// <summary>
-    /// How many blocks this process has freed from a finalizer rather than from an explicit
-    /// release. A correctly used reader never increments it; the tests assert that it does move
-    /// when an owner is deliberately dropped, which is the only way to prove the backstop works.
+    /// The bytes of the blocks alive, rented or kept by a pool, from their allocation to the moment they let their array go.
+    /// A block its holder drops without giving it back is taken by the collector, and stays counted here.
     /// </summary>
-    internal static long FinalizedBlockCount => Interlocked.Read(ref s_finalizedBlocks);
-
-    /// <summary>
-    /// The bytes of the native blocks the process holds, rented, parked in a pool or owned alone: memory
-    /// a container's limit counts, and the collector's does not.
-    /// </summary>
-    internal static long NativeBytes => Interlocked.Read(ref s_nativeBytes);
+    internal static long LiveBytes => Interlocked.Read(ref s_liveBytes);
 
     /// <summary>
     /// Allocates <paramref name="length"/> bytes aligned to <paramref name="alignment"/>.
@@ -138,39 +82,31 @@ internal sealed class NativeSegmentOwner : SegmentOwner
     /// two within the supported cap.
     /// </exception>
     /// <exception cref="OutOfMemoryException">The allocation failed.</exception>
-    public static unsafe NativeSegmentOwner Allocate(int length, int alignment)
+    public static NativeSegmentOwner Allocate(int length, int alignment)
     {
         int exponent = CheckLengthAndAlignment(length, alignment);
-        void* pointer = AllocRaw(length, alignment);
-        return new NativeSegmentOwner(pointer, length, length, exponent, pool: null, bucketIndex: -1);
+        (byte[] array, int offset) = AllocRaw(length, alignment);
+        return new NativeSegmentOwner(array, offset, length, length, exponent, pool: null, bucketIndex: -1);
     }
 
     /// <summary>
-    /// The bytes <c>[offset, offset + length)</c> of the block as <see cref="Memory{T}"/>, for an
-    /// asynchronous read to write into before the reader sees them. The wrapper is made once per block,
-    /// so a pooled block's reads allocate nothing after its first. Valid until the memory is released.
+    /// The bytes <c>[offset, offset + length)</c> of the block as <see cref="Memory{T}"/>, for an asynchronous read to write
+    /// into before the reader sees them: a view of the array, which allocates nothing. Valid until the memory is released.
     /// </summary>
-    internal Memory<byte> WritableMemory(int offset, int length) =>
-        (_memory ??= new NativeBlockMemory(this)).Slice(offset, length);
+    internal Memory<byte> WritableMemory(int offset, int length)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(offset);
+        ArgumentOutOfRangeException.ThrowIfNegative(length);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(length, Length - offset);
+        return new Memory<byte>(Array, _offset + offset, length);
+    }
 
     /// <summary>
     /// A writable view over the owned memory, used by the I/O layer to fill the block before the
     /// reader sees it. Valid until the memory is released.
     /// </summary>
     /// <exception cref="ObjectDisposedException">The memory has already been released.</exception>
-    public unsafe Span<byte> WritableSpan
-    {
-        get
-        {
-            nint pointer = Volatile.Read(ref _pointer);
-            if (pointer == 0)
-            {
-                ThrowFreed();
-            }
-
-            return new Span<byte>((void*)pointer, Length);
-        }
-    }
+    public Span<byte> WritableSpan => new Span<byte>(Array, _offset, Length);
 
     /// <summary>Bytes actually allocated, which for a pooled block exceeds <see cref="SegmentOwner.Length"/>.</summary>
     internal int Capacity => _capacity;
@@ -185,6 +121,9 @@ internal sealed class NativeSegmentOwner : SegmentOwner
     /// <inheritdoc/>
     private protected override bool IsRecycled => _pool is not null;
 
+    /// <summary>The array, or a throw once the block let it go.</summary>
+    private byte[] Array => Volatile.Read(ref _array) ?? ThrowFreed();
+
     /// <inheritdoc/>
     protected override void FreeCore()
     {
@@ -194,71 +133,65 @@ internal sealed class NativeSegmentOwner : SegmentOwner
             AlignedBufferPool.Watch?.Released(this);
         }
 
-        // A parked owner keeps both its memory and its finalizer registration: if the pool is
-        // later dropped without Trim(), the finalizer is still the backstop that frees it.
+        // A parked owner keeps its array for the next rent; any other lets it go to the collector.
         if (pool is not null && pool.TryPark(this))
         {
             return;
         }
 
-        FreeNative();
+        Drop();
     }
 
-    /// <summary>Frees a block that the pool popped out of a bucket during <c>Trim</c>.</summary>
-    internal void FreeParked() => FreeNative();
+    /// <summary>Lets go of the array of a block that the pool popped out of a bucket during <c>Trim</c>.</summary>
+    internal void FreeParked() => Drop();
 
     /// <summary>Re-arms a parked owner for a new rental of <paramref name="length"/> bytes.</summary>
     /// <param name="length">The new segment length, at most <see cref="Capacity"/>.</param>
-    internal unsafe void ResetForRent(int length)
+    internal void ResetForRent(int length)
     {
-        nint pointer = Volatile.Read(ref _pointer);
-        if (pointer == 0)
-        {
-            ThrowFreed();
-        }
-
+        byte[] array = Array;
         if ((uint)length > (uint)_capacity)
         {
             ThrowCapacity(length, _capacity);
         }
 
-        Buffer = VortexBuffer.FromPointer((byte*)pointer, length, _alignmentExponent);
+        Buffer = BufferOf(array, _offset, length, _alignmentExponent);
         ResetRefCount();
     }
 
-    /// <summary>Frees the block once. Returns whether this call is the one that freed it.</summary>
-    private unsafe bool FreeNative()
+    /// <summary>Lets the array go, once: whichever of a release and a trim comes first, the other finds nothing to drop.</summary>
+    private void Drop()
     {
-        // Exchange-to-zero: whichever of Dispose, Release and the finalizer arrives first is the
-        // one that frees, and the losers see 0 and do nothing. This is what makes a finalizer
-        // racing an explicit release incapable of double-freeing.
-        nint pointer = Interlocked.Exchange(ref _pointer, 0);
-        if (pointer == 0)
+        if (Interlocked.Exchange(ref _array, null) is not null)
         {
-            return false;
+            Interlocked.Add(ref s_liveBytes, -Math.Max(_capacity, 1));
+        }
+    }
+
+    /// <summary>The view of <paramref name="length"/> bytes of <paramref name="array"/> from <paramref name="offset"/>, which the pinned heap never moves.</summary>
+    private static unsafe VortexBuffer BufferOf(byte[] array, int offset, int length, int alignmentExponent) =>
+        VortexBuffer.FromPointer((byte*)Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(array)) + offset, length, alignmentExponent);
+
+    /// <summary>
+    /// A pinned array of <paramref name="length"/> bytes and the place in it aligned to <paramref name="alignment"/>: the
+    /// pinned heap aligns an array to a pointer only, so the array is longer by the alignment and the block starts at its
+    /// first aligned byte.
+    /// </summary>
+    private static unsafe (byte[] Array, int Offset) AllocRaw(int length, int alignment)
+    {
+        // A zero-length block keeps a byte of its own, so that its address is real and its alignment meaningful.
+        long padded = (long)Math.Max(length, 1) + alignment - 1;
+        if (padded > System.Array.MaxLength)
+        {
+            ThrowTooLarge(length, alignment);
         }
 
-        NativeMemory.AlignedFree((void*)pointer);
-        Interlocked.Add(ref s_nativeBytes, -Math.Max(_capacity, 1));
-        GC.SuppressFinalize(this);
-        return true;
+        byte[] array = GC.AllocateUninitializedArray<byte>((int)padded, pinned: true);
+        nint address = (nint)Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(array));
+        return (array, (int)(Alignment.AlignUp(address, alignment) - address));
     }
 
-    private static unsafe void* AllocRaw(int length, int alignment)
-    {
-        // AlignedAlloc(0, a) is implementation-defined and may return null, which the runtime
-        // reports as OutOfMemory. One byte keeps a zero-length segment a real, freeable address
-        // so Buffer.IsAligned and pointer identity stay meaningful.
-        nuint byteCount = (nuint)Math.Max(length, 1);
-
-        // posix_memalign rejects an alignment below sizeof(void*). Rounding up never weakens the
-        // guarantee: a multiple of 8 is a multiple of 1, 2 and 4.
-        nuint allocAlignment = (nuint)Math.Max(alignment, sizeof(void*));
-
-        return NativeMemory.AlignedAlloc(byteCount, allocAlignment);
-    }
-
-    internal static unsafe NativeSegmentOwner AllocatePooled(
+    internal static NativeSegmentOwner AllocatePooled(
         AlignedBufferPool pool,
         int bucketIndex,
         int capacity,
@@ -267,14 +200,8 @@ internal sealed class NativeSegmentOwner : SegmentOwner
         // The pool always allocates at the 64-byte cap, whatever the caller asked for: a block
         // aligned to 64 satisfies every legal segment alignment, so buckets stay
         // alignment-agnostic and blocks are genuinely interchangeable.
-        void* pointer = AllocRaw(capacity, VortexLimits.MaxAlignment);
-        return new NativeSegmentOwner(
-            pointer,
-            capacity,
-            length,
-            VortexLimits.MaxAlignmentExponent,
-            pool,
-            bucketIndex);
+        (byte[] array, int offset) = AllocRaw(capacity, VortexLimits.MaxAlignment);
+        return new NativeSegmentOwner(array, offset, capacity, length, VortexLimits.MaxAlignmentExponent, pool, bucketIndex);
     }
 
     internal static int CheckLengthAndAlignment(int length, int alignment)
@@ -306,14 +233,20 @@ internal sealed class NativeSegmentOwner : SegmentOwner
 
     [MethodImpl(MethodImplOptions.NoInlining)]
     [DoesNotReturn]
+    private static void ThrowTooLarge(int length, int alignment) =>
+        throw new VortexFormatException(
+            $"A {length}-byte segment aligned to {alignment} does not fit in a single managed array.");
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    [DoesNotReturn]
     private static void ThrowCapacity(int length, int capacity) =>
         throw new InvalidOperationException(
             $"Cannot re-rent {length} bytes from a pooled block of {capacity} bytes.");
 
     [MethodImpl(MethodImplOptions.NoInlining)]
     [DoesNotReturn]
-    private void ThrowFreed() =>
+    private static byte[] ThrowFreed() =>
         throw new ObjectDisposedException(
             nameof(NativeSegmentOwner),
-            "The native block has been released; its memory is no longer addressable.");
+            "The block has been released; its memory is no longer addressable.");
 }

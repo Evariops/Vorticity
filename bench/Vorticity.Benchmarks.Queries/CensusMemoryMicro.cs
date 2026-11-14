@@ -17,7 +17,7 @@ namespace Vorticity.Benchmarks.Queries;
 /// What the census of a consolidation holds while it counts its inputs' paths (<c>--micro census --store DIR</c>): the
 /// variant column of the largest <c>--objects</c> data objects (12 by default) of the dataset directory <c>DIR</c>, counted at
 /// 1, 4 and 16 lanes side by side, each lane an object at a time, as a job's census counts its inputs. For each: the most
-/// private bytes the process held above its start, the native blocks among them and those parked in the pool, the
+/// private bytes the process held above its start, the blocks among them and those parked in the pool, the
 /// collector's committed memory, and the rows counted.
 /// </summary>
 internal static class CensusMemoryMicro
@@ -25,7 +25,7 @@ internal static class CensusMemoryMicro
     internal static async Task<int> Run(string directory, int objects)
     {
         List<string> files = await InputMemoryMicro.LargestAsync(directory, objects);
-        Console.WriteLine("lanes          rows   seconds   private MB    native MB    parked MB   managed MB");
+        Console.WriteLine("lanes          rows   seconds   private MB    blocks MB    parked MB   managed MB");
         foreach (int lanes in new[] { 1, 4, 16 })
         {
             await MeasureAsync([.. files], lanes);
@@ -42,7 +42,7 @@ internal static class CensusMemoryMicro
         AlignedBufferPool.Shared.Trim();
         long rows = 0;
         long begin = Stopwatch.GetTimestamp();
-        long nativeStart = NativeSegmentOwner.NativeBytes;
+        long blocksStart = NativeSegmentOwner.LiveBytes;
         long parkedStart = AlignedBufferPool.Shared.ParkedBytes;
         int textBound = new VortexWriteOptions().StringBoundBytes;
         PeakMemory memory = new PeakMemory();
@@ -68,6 +68,6 @@ internal static class CensusMemoryMicro
 
         Console.WriteLine(string.Create(
             CultureInfo.InvariantCulture,
-            $"{lanes,5} {rows,13:N0} {Stopwatch.GetElapsedTime(begin).TotalSeconds,9:F1} {(memory.Peak - memory.First) / 1e6,12:F0} {(memory.PeakNative - nativeStart) / 1e6,12:F0} {(memory.PeakParked - parkedStart) / 1e6,12:F0} {memory.PeakCommitted / 1e6,12:F0}"));
+            $"{lanes,5} {rows,13:N0} {Stopwatch.GetElapsedTime(begin).TotalSeconds,9:F1} {(memory.Peak - memory.First) / 1e6,12:F0} {(memory.PeakBlocks - blocksStart) / 1e6,12:F0} {(memory.PeakParked - parkedStart) / 1e6,12:F0} {memory.PeakCommitted / 1e6,12:F0}"));
     }
 }

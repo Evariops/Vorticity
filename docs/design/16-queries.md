@@ -1189,7 +1189,7 @@ host creates and gives to the sessions that share it, whose ceiling bounds their
 query reserves in its budget, and the budget in the process's, whatever the sum of the ceilings the
 host sets. The process's ceiling is its limit (the managed heap's,
 `GC.GetGCMemoryInfo().TotalAvailableMemoryBytes`, and in a container three quarters of the
-container's, which also counts the engine's native memory), minus an eighth for the garbage
+container's, the engine's blocks being managed and counted by the heap), minus an eighth for the garbage
 collector, minus the rest of the process: what its heap held beyond the queries' tables at the last
 full collection, what the collector kept committed beyond its heap, and what the queries released
 since. A limit of 4 GB is not 4 GB for the queries.
@@ -1214,8 +1214,8 @@ them, the lanes read one split fewer ahead at a time, down to none, before they 
 them back when the pass ends. A mapping reads in place, its reads being views of it, so nothing more
 is admitted. What the queries release stays in the heap until a collection, so when that memory,
 or what the collector keeps committed beyond its heap, stands between a reservation and the ceiling, a
-collection that gives it back comes first; before it, the pool gives back the native blocks it keeps
-for the next rents, which a container's limit counts. The background jobs reserve in a budget of their
+collection that gives it back comes first, and before it the pool lets go of the blocks it keeps
+for the next rents, for that collection to take. The background jobs reserve in a budget of their
 own, `JobMemoryBudget`, half the process's limit by default and reserved in the process's budget too:
 the queries have the rest ([memory of a job](15-compaction.md#the-memory-of-a-job)). A query that is refused fails with a
 `VortexMemoryException` naming the operator, its groups and its bytes, with everything it held given

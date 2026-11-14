@@ -70,7 +70,7 @@ internal sealed class NativeSites : AlignedBufferPool.INativeWatch, IDisposable
                 _kept = _live;
                 _peak = [.. _sites.Values.Where(static site => site.Bytes > 0).Select(static site => (site.Name, site.Bytes, site.Blocks))];
                 _peakSeconds = _clock.Elapsed.TotalSeconds;
-                _peakNative = NativeSegmentOwner.NativeBytes;
+                _peakNative = NativeSegmentOwner.LiveBytes;
                 _peakParked = AlignedBufferPool.Shared.ParkedBytes;
             }
         }

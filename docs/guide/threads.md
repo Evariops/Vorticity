@@ -85,9 +85,7 @@ the system again, every page faulted anew: the declared spans and logs at a tent
 rate answered about half as many questions a second as once the blocks were kept. Sealing an hour
 at the design's rate peaks at 9.8 GB instead of 8.8.
 
-The blocks parked are native memory: they count in the process's private bytes, not in the managed
-heap's counters, and a heap dump does not show them. To bound what a session's batches, builders and
-decodes keep, give it a pool of its own:
+The blocks parked are managed arrays the runtime keeps pinned: they count in the managed heap, a heap dump shows them on the pinned object heap, and `vortex.memory.retained` tags them `pool` ([observability.md](observability.md#the-memory)). To bound what a session's batches, builders and decodes keep, give it a pool of its own:
 
 ```csharp
 await using VortexSession session = VortexSession.Create(o =>

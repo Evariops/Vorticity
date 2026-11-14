@@ -7,7 +7,7 @@ using System.Threading;
 namespace Vorticity.Buffers;
 
 /// <summary>
-/// A thread-safe size-class pool of 64-byte aligned native blocks.
+/// A thread-safe size-class pool of 64-byte aligned blocks, each a managed array the runtime keeps pinned.
 /// </summary>
 /// <remarks>
 /// <para>

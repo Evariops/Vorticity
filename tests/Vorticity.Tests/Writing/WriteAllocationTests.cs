@@ -247,7 +247,7 @@ public sealed class WriteAllocationTests
 
     /// <summary>
     /// What one more column adds, in bytes: the ceiling that says the cost is a state and not a
-    /// scratch. The writer's block scratch is ~130 KiB and measured here is **1 972 B**, a
+    /// scratch. The writer's block scratch is ~130 KiB and measured here is **1 687 B**, a
     /// sixtieth of it, so the claim holds with room; the ceiling is set just above the measurement
     /// as a ratchet, not as a target. The blob a column's chunk becomes is assembled in the one
     /// workspace the writer keeps, and every column's zone map in the one scratch completions
@@ -260,10 +260,10 @@ public sealed class WriteAllocationTests
     /// Bloom builder it abandons at the first block. A thousand columns therefore cost about 2 MB
     /// to write once, against 130 KiB of scratch.
     /// </remarks>
-    private const double PerColumnCeiling = 2_100.0;
+    private const double PerColumnCeiling = 1_800.0;
 
-    /// <summary>The wide schema's own ratchet, in bytes. Measured at 1 979 800 B.</summary>
-    private const long WideCeiling = 2_100_000;
+    /// <summary>The wide schema's own ratchet, in bytes. Measured at 1 694 920 B, the batch built outside the measure.</summary>
+    private const long WideCeiling = 1_800_000;
 
     /// <summary>
     /// The schema axis: a schema of a thousand columns costs a thousand small states and one
@@ -420,30 +420,35 @@ public sealed class WriteAllocationTests
     {
         for (int i = 0; i < Warmup; i++)
         {
-            await WriteWide(columns);
+            await WriteWide(Wide(columns));
         }
 
         long floor = long.MaxValue;
         for (int i = 0; i < Runs; i++)
         {
+            (DType Schema, CanonicalArena Arena, int Root) batch = Wide(columns);
             long before = GC.GetTotalAllocatedBytes(precise: true);
-            await WriteWide(columns);
+            await WriteWide(batch);
             floor = Math.Min(floor, GC.GetTotalAllocatedBytes(precise: true) - before);
         }
 
         return floor;
     }
 
-    /// <summary>Writes one batch of a schema of <paramref name="columns"/> i64 columns.</summary>
-    /// <param name="columns">The columns.</param>
+    /// <summary>Writes one batch of a schema of i64 columns, built by <see cref="Wide"/>.</summary>
+    /// <param name="built">The schema, the arena holding the columns and the batch's root.</param>
     /// <remarks>
     /// The arena and its buffers are built OUTSIDE the measured region: this axis is about the
-    /// writer, and materializing a thousand canonical columns is the caller's cost. What is
-    /// measured is the write of an already-built batch.
+    /// writer, and materializing a thousand canonical columns is the caller's cost, whose blocks the
+    /// collector counts. What is measured is the write of an already-built batch.
     /// </remarks>
-    private static async Task WriteWide(int columns)
+    private static async Task WriteWide((DType Schema, CanonicalArena Arena, int Root) built)
     {
-        (DType schema, CanonicalArena arena, int root) = Wide(columns);
+        (DType schema, CanonicalArena arena, int root) = built;
+
+        // The batch's arena gives its blocks back once written: kept by nothing, they would be the collector's, and the next
+        // batch built would take from the pool the blocks the writer gave back, leaving the writer to allocate its own.
+        using CanonicalArenaReset reset = new CanonicalArenaReset(arena);
         await using VortexFileWriter writer = VortexFileWriter.Create(new NullSink(), schema);
         using (RecordBatch batch = new RecordBatch(arena, root, 0))
         {
@@ -540,6 +545,12 @@ public sealed class WriteAllocationTests
     }
 
     /// <summary>A sink that counts and keeps nothing, so the writer is what gets measured.</summary>
+    /// <summary>Resets an arena when disposed, so that its blocks go back to the pool.</summary>
+    private readonly struct CanonicalArenaReset(CanonicalArena arena) : IDisposable
+    {
+        public void Dispose() => arena.Reset();
+    }
+
     private sealed class NullSink : ISegmentSink
     {
         public long Position { get; private set; }

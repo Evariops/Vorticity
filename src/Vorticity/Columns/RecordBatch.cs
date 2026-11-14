@@ -265,7 +265,6 @@ public sealed class RecordBatch : IDisposable
                 batch.Select(words, selected);
             }
 
-            owned.HoldBlocks();
             return batch;
         }
         catch
@@ -721,8 +720,8 @@ public sealed class RecordBatch : IDisposable
             else
             {
                 // A copy's arena, the only batch that owns one with no context: kept for the next copy, which this batch,
-                // disposed but perhaps still held, no longer reaches; held, it kept the next copy's blocks from their
-                // finalizers when that copy was dropped undisposed.
+                // disposed but perhaps still held, no longer reaches; held, it kept the next copy's blocks from the
+                // collector when that copy was dropped undisposed.
                 CanonicalArena arena = _arena;
                 arena.Reset();
                 _arena = Released;

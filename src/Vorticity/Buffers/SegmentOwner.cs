@@ -26,8 +26,8 @@ namespace Vorticity.Buffers;
 /// </para>
 /// <para>
 /// <b>The owned bytes carry no zero-fill guarantee.</b> The origins disagree about what is there
-/// before anyone writes: native memory and a recycled pool block hold whatever they last held, a
-/// pinned array happens to arrive zeroed. They are interchangeable behind this type, so no caller
+/// before anyone writes: a recycled pool block holds whatever it last held, and a block allocated
+/// uninitialized whatever the heap held there. They are interchangeable behind this type, so no caller
 /// may read the difference — whatever produced an owner fills the bytes it means to be read.
 /// </para>
 /// <para>
@@ -154,8 +154,7 @@ internal abstract class SegmentOwner : IDisposable
 
     /// <summary>
     /// Releases the underlying memory. Called exactly once, on the transition to reference count
-    /// zero. Implementations must be safe to run from a finalizer: no managed object graph
-    /// traversal, no locks that a finalized peer could hold.
+    /// zero, on the thread of the last release.
     /// </summary>
     protected abstract void FreeCore();
 

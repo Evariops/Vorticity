@@ -7,23 +7,7 @@ using Xunit;
 
 namespace Vorticity.Tests.Buffers;
 
-/// <summary>
-/// Runs alone, because two of its tests read a PROCESS-GLOBAL counter.
-/// </summary>
-/// <remarks>
-/// <see cref="NativeSegmentOwner.FinalizedBlockCount"/> counts every block finalized anywhere in
-/// the process, so "the counter did not move" is only a statement about THIS test while no other
-/// test class is dropping blocks on the floor in parallel. Without this it fails roughly one run
-/// in eight, off by exactly however many blocks a neighbouring class happened to abandon - a
-/// flake that reads as a finalizer bug and is not one.
-/// </remarks>
-[CollectionDefinition(nameof(FinalizerCollection), DisableParallelization = true)]
-public sealed class FinalizerCollection
-{
-}
-
-[Collection(nameof(FinalizerCollection))]
-[Trait("Category", "RunsAlone")]
+/// <summary>The reference counting of an owner, and what becomes of a block its holder drops.</summary>
 public sealed class SegmentOwnerTests
 {
     /// <summary>A no-memory owner that observes exactly when <c>FreeCore</c> runs.</summary>
@@ -294,35 +278,14 @@ public sealed class SegmentOwnerTests
     }
 
     [Fact]
-    public void The_finalizer_frees_a_block_that_was_dropped_on_the_floor()
+    public void A_block_dropped_on_the_floor_is_taken_by_the_collector()
     {
-        const int Dropped = 16;
-
-        Collect();
-        long before = NativeSegmentOwner.FinalizedBlockCount;
-
-        WeakReference weak = DropBlocks(Dropped);
+        // A block is a managed array: dropped neither disposed nor released, it is garbage like any other object, and the
+        // collector takes it back with its owner. There is no finalizer to wait for.
+        WeakReference weak = DropBlocks(16);
         Collect();
 
         Assert.False(weak.IsAlive);
-        Assert.True(
-            NativeSegmentOwner.FinalizedBlockCount >= before + Dropped,
-            $"expected at least {Dropped} finalized blocks, saw " +
-            $"{NativeSegmentOwner.FinalizedBlockCount - before}");
-    }
-
-    [Fact]
-    public void A_disposed_block_is_never_finalized()
-    {
-        Collect();
-        long before = NativeSegmentOwner.FinalizedBlockCount;
-
-        DisposeBlocks(16);
-        Collect();
-
-        // Dispose suppresses finalization, so the backstop counter must not move. This is what
-        // makes the previous test's counter meaningful rather than incidental.
-        Assert.Equal(before, NativeSegmentOwner.FinalizedBlockCount);
     }
 
     // ---- PinnedArraySegmentOwner --------------------------------------------------------
@@ -423,31 +386,12 @@ public sealed class SegmentOwnerTests
         NativeSegmentOwner? last = null;
         for (int i = 0; i < count; i++)
         {
-            // Deliberately neither disposed nor released: this is the leak the finalizer exists
-            // to catch.
+            // Deliberately neither disposed nor released.
             last = NativeSegmentOwner.Allocate(4096, 64);
         }
 
         return new WeakReference(last);
     }
 
-    [MethodImpl(MethodImplOptions.NoInlining)]
-    private static void DisposeBlocks(int count)
-    {
-        for (int i = 0; i < count; i++)
-        {
-            NativeSegmentOwner.Allocate(4096, 64).Dispose();
-        }
-    }
-
-    private static void Collect()
-    {
-        for (int i = 0; i < 3; i++)
-        {
-            GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true);
-            GC.WaitForPendingFinalizers();
-        }
-
-        GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true);
-    }
+    private static void Collect() => GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true);
 }

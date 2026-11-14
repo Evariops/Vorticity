@@ -650,7 +650,6 @@ internal partial class CanonicalArena
     /// </summary>
     public void Reset()
     {
-        long held = 0;
         NativeSegmentOwner? owner = Unchain();
         while (owner is not null)
         {
@@ -658,15 +657,8 @@ internal partial class CanonicalArena
             NativeSegmentOwner? next = owner.NextOwned;
             owner.NextOwned = null;
             owner.Idle = false;
-            held += owner.InOwnedBatch ? owner.Capacity : 0;
-            owner.InOwnedBatch = false;
             _pool.Return(owner);
             owner = next;
-        }
-
-        if (held != 0)
-        {
-            OwnedBatchBytes.Count(_pool, -held);
         }
 
         Clear();
@@ -716,40 +708,6 @@ internal partial class CanonicalArena
         }
 
         return held;
-    }
-
-    /// <summary>
-    /// Counts the blocks of this arena, which a batch its caller owns holds, in
-    /// <see cref="OwnedBatchBytes"/> until <see cref="Reset"/> gives them back or their finalizers
-    /// free them.
-    /// </summary>
-    internal void HoldBlocks()
-    {
-        long held = 0;
-        NativeSegmentOwner? cursor = _owned;
-        if (_slabUsed >= 0)
-        {
-            cursor!.InOwnedBatch = true;
-            held += cursor.Capacity;
-            cursor = cursor.NextOwned;
-        }
-
-        if (cursor is not null)
-        {
-            NativeSegmentOwner owner = cursor;
-            do
-            {
-                owner = owner.NextOwned!;
-                owner.InOwnedBatch = true;
-                held += owner.Capacity;
-            }
-            while (owner != cursor);
-        }
-
-        if (held != 0)
-        {
-            OwnedBatchBytes.Count(_pool, held);
-        }
     }
 
     /// <summary>
@@ -1405,7 +1363,7 @@ internal partial class CanonicalArena
     /// <param name="alignment">A power of two in <c>[1, VortexLimits.MaxAlignment]</c>.</param>
     /// <returns>A non-owning view over the block, valid until the next <see cref="Reset"/> call.</returns>
     /// <remarks>
-    /// The block is zero-filled. The pool hands back recycled native memory, and letting a decoder that
+    /// The block is zero-filled. The pool hands back recycled blocks, and letting a decoder that
     /// writes only part of a buffer - a bitmap's trailing bits, a short last FastLanes block -
     /// publish the rest would leak whatever the previous batch, or the previous process activity,
     /// left there.

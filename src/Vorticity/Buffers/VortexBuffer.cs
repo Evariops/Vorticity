@@ -7,8 +7,8 @@ namespace Vorticity.Buffers;
 
 /// <summary>
 /// A non-owning, aligned view over a contiguous run of bytes. It is the single shape the reader
-/// works in, whatever the bytes came from: memory-mapped pages, aligned native memory, or a
-/// pinned managed array.
+/// works in, whatever the bytes came from: memory-mapped pages, a pooled block, a pinned managed
+/// array, or memory the caller holds.
 /// </summary>
 /// <remarks>
 /// <para>

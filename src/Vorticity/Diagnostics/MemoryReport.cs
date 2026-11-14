@@ -66,6 +66,9 @@ public sealed record MemoryReport
         };
     }
 
-    /// <summary>The bytes of the blocks in use: every block allocated, less those the pools keep for the next rents.</summary>
-    internal static long RentedNow() => System.Math.Max(0, NativeSegmentOwner.NativeBytes - HeldMemory.BytesOf<AlignedBufferPool>());
+    /// <summary>
+    /// The bytes of the blocks in use: every block alive, less those the pools keep for the next rents. A block its holder
+    /// drops without giving it back is taken by the collector, and stays counted.
+    /// </summary>
+    internal static long RentedNow() => System.Math.Max(0, NativeSegmentOwner.LiveBytes - HeldMemory.BytesOf<AlignedBufferPool>());
 }
