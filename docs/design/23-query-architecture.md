@@ -162,7 +162,7 @@ no sorted run has to be built beside an unsorted object.
 ### 4.5 Organizing a partition
 
 Within a partition, objects of similar size merge: when a partition holds `k` objects of one size class (`k` = 8 by
-default), they merge into one object of the class above, up to the object top size. When the partition is calm (no
+default), they merge into one object, of the class above once its rows outweigh a file's fixed cost, up to the object top size. When the partition is calm (no
 append for an hour by default, or on demand), a **consolidation** rewrites it into objects disjoint by key, in parallel
 over key ranges taken from the objects' sparse indexes. An entity's rows then lie in one object per partition.
 
