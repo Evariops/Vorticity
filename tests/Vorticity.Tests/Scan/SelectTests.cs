@@ -187,6 +187,45 @@ public sealed partial class SelectTests
         }
     }
 
+    /// <summary>
+    /// Bytes come as the rows hold them, one value per row and as the keys of their groups: a null as null, an empty value
+    /// as an empty memory, beside a column of bytes no row leaves null. A nullable memory was made from a bare one's bytes,
+    /// 8 bytes short, its flag from the array's address and its array from the value's index and length: the first value
+    /// read crashed the process, or threw, or came out wrong.
+    /// </summary>
+    [Fact]
+    public async Task BytesComeAsTheRowsHoldThemANullAsNull()
+    {
+        Blob[] rows = new Blob[3_000];
+        for (int row = 0; row < rows.Length; row++)
+        {
+            byte[] bytes = new byte[row % 5];
+            for (int b = 0; b < bytes.Length; b++)
+            {
+                bytes[b] = (byte)(row + b);
+            }
+
+            rows[row] = new Blob(row, row % 3 == 0 ? null : (ReadOnlyMemory<byte>?)bytes, new byte[] { (byte)row, (byte)(row >> 8) });
+        }
+
+        string path = await WriteAsync(rows);
+        try
+        {
+            await using VortexFile file = await VortexFile.OpenAsync(path, Ct);
+            Assert.Equal(rows.Select(r => Hex(r.Bytes)), (await file.Scan<Blob>().Select(r => r.Bytes).ToListAsync(Ct)).Select(Hex));
+            Assert.Equal(rows.Select(r => Hex(r.Pair)), (await file.Scan<Blob>().Select(r => r.Pair).ToListAsync(Ct)).Select(b => Hex(b)));
+            Assert.Equal(
+                rows.Select(r => Hex(r.Bytes)).Distinct().Order(StringComparer.Ordinal),
+                (await file.Scan<Blob>().GroupBy(r => r.Bytes).Select(g => g.Key).ToListAsync(Ct)).Select(Hex).Order(StringComparer.Ordinal));
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
+    private static string Hex(ReadOnlyMemory<byte>? bytes) => bytes is { } held ? Convert.ToHexString(held.Span) : "null";
+
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
 
     private static async Task<List<T>> ListAsync<T>(Scan<T> scan)
@@ -225,6 +264,23 @@ public sealed partial class SelectTests
 
         return (rows, path);
     }
+
+    private static async Task<string> WriteAsync(Blob[] rows)
+    {
+        string directory = Path.Combine(AppContext.BaseDirectory, "selects");
+        Directory.CreateDirectory(directory);
+        string path = Path.Combine(directory, $"blobs-{Environment.ProcessId}-{Guid.NewGuid():N}.vortex");
+        await using (VortexFileWriter writer = VortexSession.Default.CreateWriter<Blob>(path))
+        {
+            await writer.WriteAsync<Blob>(rows, Ct);
+            await writer.CompleteAsync(Ct);
+        }
+
+        return path;
+    }
+
+    [VortexRecord]
+    public partial record struct Blob(long Id, ReadOnlyMemory<byte>? Bytes, ReadOnlyMemory<byte> Pair);
 
     [VortexRecord]
     public partial record struct Trip(string City, int Day, [VortexColumn(Unit = TimeUnit.Nanoseconds)] DateTime At, double? Fare, long Id);
