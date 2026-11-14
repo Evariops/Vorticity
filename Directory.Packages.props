@@ -19,7 +19,7 @@
          repository (github.com/Evariops/ManagedCompressions), released together at one version.
          The reader needs at least 0.2.0, which made public the prefix decode it uses to decode only
          the start of a frame. -->
-    <PackageVersion Include="ManagedCompressions.Zstd" Version="0.3.0" />
-    <PackageVersion Include="ManagedCompressions.Lz4" Version="0.3.0" />
+    <PackageVersion Include="ManagedCompressions.Zstd" Version="0.3.1" />
+    <PackageVersion Include="ManagedCompressions.Lz4" Version="0.3.1" />
   </ItemGroup>
 </Project>
