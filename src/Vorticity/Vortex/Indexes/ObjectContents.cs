@@ -464,6 +464,11 @@ internal sealed class ObjectContents(
     // 3 held the slice table, retired with it: never reused.
     private const int TagChunkDirectory = 4;
     private const int TagSchema = 9;
+
+    // The XXH3-128 of the schema's bytes, sixteen bytes little-endian, in a table that leaves the schema out: the table of
+    // a small object, whose dataset holds that schema once. A reader that does not know the field finds no schema, and
+    // reads no table.
+    private const int TagSchemaHash = 40;
     private const int TagPathDirectory = 10;
     private const int TagDirectoryField = 1;
     private const int TagDirectoryRegion = 2;
@@ -717,8 +722,13 @@ internal sealed class ObjectContents(
         }
     }
 
-    /// <summary>The contents as an entry carries them: tagged fields, in the order of their tags.</summary>
-    internal byte[] ToBytes()
+    /// <summary>
+    /// The contents as an entry carries them: tagged fields, in the order of their tags. With
+    /// <paramref name="schemaByHash"/> the schema is named by the XXH3-128 of its bytes in place of them, 16 bytes for
+    /// some 1.3 KB: a reader finds the schema among those its process met (<see cref="SchemaInterns"/>), and one that
+    /// met none of that hash, or that predates the field, reads no table.
+    /// </summary>
+    internal byte[] ToBytes(bool schemaByHash = false)
     {
         ProtoWriter writer = new ProtoWriter();
         try
@@ -759,7 +769,17 @@ internal sealed class ObjectContents(
                 }
             }
 
-            writer.WriteBytes(TagSchema, Schema);
+            if (schemaByHash)
+            {
+                Span<byte> hash = stackalloc byte[16];
+                System.Buffers.Binary.BinaryPrimitives.WriteUInt128LittleEndian(hash, SchemaInterns.HashOf(Schema));
+                writer.WriteBytes(TagSchemaHash, hash);
+            }
+            else
+            {
+                writer.WriteBytes(TagSchema, Schema);
+            }
+
             foreach ((int field, IndexSegment region) in PathDirectories ?? [])
             {
                 using ProtoWriter.MessageScope message = writer.BeginMessage(TagPathDirectory);
@@ -1048,6 +1068,16 @@ internal sealed class ObjectContents(
                         break;
                     case (TagSchema, ProtoWireType.LengthDelimited):
                         schema = reader.ReadLengthDelimited().ToArray();
+                        break;
+                    case (TagSchemaHash, ProtoWireType.LengthDelimited):
+                        ReadOnlySpan<byte> hash = reader.ReadLengthDelimited();
+                        if (hash.Length != 16)
+                        {
+                            return null;
+                        }
+
+                        // The schema the hash names, when this process met it; none otherwise, and no table.
+                        schema ??= SchemaInterns.Find(System.Buffers.Binary.BinaryPrimitives.ReadUInt128LittleEndian(hash));
                         break;
                     case (TagIndexDirectory, ProtoWireType.LengthDelimited):
                         indexDirectory = IndexDirectory.ReadSegment(reader.ReadMessage());

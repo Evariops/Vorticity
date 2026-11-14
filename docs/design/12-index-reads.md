@@ -48,7 +48,7 @@ locate a key in `O(log n)`. The cheapest source the file offers is used, and the
 
 | source | exists when | entries | seek |
 |---|---|---|---|
-| sorted column | the file statistics say the column ascends, and it has a zone map | `(value, row)` per non-null row, in row order, which is key order | the zone bounds in memory, then one zone decoded and bisected |
+| sorted column | the file statistics say the column ascends, and it has a zone map, or holds 8,192 rows at most, which are then one zone of bounds nobody stated | `(value, row)` per non-null row, in row order, which is key order | the zone bounds in memory, then one zone decoded and bisected |
 | sorted runs | the column carries `vorticity.sorted.runs.v1` | `(key, row)` per non-null row, per run | the runs' bounds exclude runs, then a binary search in each survivor, through its fences |
 | postings | `vorticity.postings.blocks.v1` | the distinct keys of each run, without rows | the same, on keys only |
 | dictionary | `vorticity.dict.probe.v1` | the values of each dictionary chunk, sorted at open, without rows | in memory |
