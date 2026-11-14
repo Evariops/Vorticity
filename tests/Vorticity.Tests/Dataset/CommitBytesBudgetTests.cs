@@ -8,7 +8,9 @@
 //
 // THE ENTRIES ARE SYNTHETIC AND THE KEYS FIXED, so the tree is the same at every run: a dataset's own appends name their
 // objects by a random uid, which ends their tree keys and moves page boundaries by some ten percent from one run to the
-// next. An entry here weighs what an entry of a real small object weighs, its table of contents included: about 2.5 KB.
+// next. An entry here weighs 2.5 KB, what the entry of a real small object weighed when these ceilings were first set,
+// its table of contents included. It stays at that size, so that a ceiling compares one committer with the next and
+// never one entry with another: what an entry weighs is held where entries are written (ObjectContentsTests).
 // Only the commit objects reach the store, so the bytes it counts are theirs.
 using System;
 using System.Collections.Generic;

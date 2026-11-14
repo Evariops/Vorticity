@@ -270,7 +270,7 @@ slice](12-index-reads.md#51-the-rows-of-a-span-without-the-footer)). An append d
 describes the file as its writer cut it.
 
 Beside it, under the kind `vorticity.marks.v1`, on the root, a file with a table of contents keeps the
-geometry of every top-level column's chunks, a payload region per column: each chunk's encoding tree, and
+geometry of every top-level column's chunks, unless one granule holds its rows and its writer leaves the geometry out, as a dataset's appends do, since no read takes a part of such a file: a payload region per column, each chunk's encoding tree, and
 where each granule starts in each of its buffers of variable length, a variant's parts and a struct's
 fields among them. A read of a shredded key by its granules finds its text's starts there, in the
 buffers of its range of the chunk. A read of a few granules of a chunk

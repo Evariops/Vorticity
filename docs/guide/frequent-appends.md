@@ -8,8 +8,8 @@ A dataset was designed for appends of tens of megabytes every half minute. It ta
 
 | Fixed cost | Measured | Where it comes from |
 |---|---|---|
-| A data object | 22 to 28 KB at least | its footer and its indexes, which grow with the number of columns |
-| A commit object | 25 KB while level 0 is small, 120 KB with a few weeks of consolidated partitions, up to 260 KB once level 0 holds thousands of objects | the leaves of the tree the commit rewrites, and the pages above them |
+| A data object | 11 KB at least for 22 columns, 19 KB with 37 rows | its columns' segments, its schema, its statistics and its footer, which grow with the number of columns |
+| A commit object | 15 KB while the writer keeps level 0 merged, whatever the partitions consolidated above it, 125 KB once 300 objects were left in level 0, 205 KB once it holds thousands | the leaf of the tree the commit rewrites, and the pages above it |
 | A commit object at rest | one per commit, for as long as the retention window | a version replaced stays readable that long |
 
 An append every two seconds is 1,800 commits an hour and as many commit objects at rest under a window of an hour. No setting of the merges changes that number: only the cadence does.
@@ -93,21 +93,21 @@ async Task<ReplaceResult> ReplaceAsync(Metric[] rows, IReadOnlyList<DataObject> 
 
 Runs double in size from the latest to the oldest. A writer that made `n` flushes holds `log2(n)` runs at most, and has written each row `log2(n) / 2 + 1` times on average: 10 runs and 6 times over 1,024 flushes. Writing every recent row again at each flush would keep a single object, but the rows written would grow with the square of the flushes: each row 101 times over the same 1,024 flushes in the measure. A run that reaches `MostRows` is let go: its objects stay in the dataset as ordinary objects, which the merges take in their turn, and the writer holds twice `MostRows` rows at most.
 
-The table compares a writer that appends with one that folds its runs, on the same flushes of metric records, with a fan-out of 8, the merges run inline and runs let go at about 8,000 rows. It covers 1,024 flushes of 1 and of 10 records, 128 flushes of 100 records and 120 flushes of 1,000 records. An object of one record weighs about 23 KB, and a thousand records add about 85 KB to it. Each cell reads appended → folded.
+The table compares a writer that appends with one that folds its runs, on the same flushes of metric records, with a fan-out of 8, the merges run inline and runs let go at about 8,000 rows. It covers 1,024 flushes of 1 and of 10 records, 128 flushes of 100 records and 120 flushes of 1,000 records. An object of one record weighs about 11 KB, and a thousand records add about 55 KB to it. Each cell reads appended → folded.
 
 | Records a flush | Requests a flush | KB sent and read a flush | Merges in 100 flushes | Times the writer sends a record |
 |---:|---|---|---|---|
-| 1 | 3.4 → 2.0 | 82 → 41 | 14 → 0 | 1 → 6.0 |
-| 10 | 3.4 → 2.0 | 102 → 49 | 14 → 0 | 1 → 6.0 |
-| 100 | 3.7 → 2.0 | 138 → 64 | 14 → 0 | 1 → 4.5 |
-| 1,000 | 5.5 → 2.5 | 263 → 211 | 13 → 2 | 1 → 2.5 |
+| 1 | 3.4 → 2.1 | 43 → 24 | 14 → 0.4 | 1 → 5.0 |
+| 10 | 3.4 → 2.0 | 64 → 31 | 14 → 0 | 1 → 6.0 |
+| 100 | 3.4 → 2.0 | 90 → 47 | 14 → 0 | 1 → 4.5 |
+| 1,000 | 4.9 → 2.0 | 227 → 134 | 13 → 0 | 1 → 3.0 |
 
-Two requests a flush is the least a flush of one partition costs: one put of its object and one of its commit. The merges left at 1,000 records a flush are those of the runs let go.
+Two requests a flush is the least a flush of one partition costs: one put of its object and one of its commit.
 
-- The runs are objects of level 0 like any other, and they count toward their size class. A class that reaches `MergeFanout` objects is merged whole, the runs in it included, and the next replacement that names them comes back `Abandoned`. One writer with a fan-out of 8 never filled a class in these measures.
-- Several writers on one dataset fill a class together. With four writers at one record a flush, 396 of 1,024 replacements were abandoned and folding gained nothing over appending. A fan-out of 4 lets one writer's runs fill a class: 143 of 1,024 replacements were abandoned, for 30 % fewer bytes than appending all the same.
-- Keep fewer runs in those cases, by taking a run while it holds fewer than 8 or 64 times the rows gathered, instead of twice. Fewer objects then stay in level 0, and each row is written more often. Four writers at 64 times had no replacement abandoned. They made 8.0 requests a flush where appending made 9.8, and sent and read 91 KB where appending did 134 KB, each record written 48 times.
-- A larger factor also suits flushes of a few records, whose rows cost less than the entry each run keeps in every commit object. At one record a flush, a factor of 4 sent 12 % fewer bytes than a factor of 2. At 100 records a flush, it sent 5 % more.
+- The runs are objects of level 0 like any other, and they count toward their size class. A class that reaches `MergeFanout` objects is merged whole, the runs in it included, and the next replacement that names them comes back `Abandoned`. One writer with a fan-out of 8 filled a class 4 times in 1,024 flushes of one record, whose runs stay small for long, and never at 10 records a flush or more.
+- Several writers on one dataset fill a class together. With four writers at one record a flush, 400 of 1,024 replacements were abandoned and folding gained nothing over appending. A fan-out of 4 lets one writer's runs fill a class: 69 of 1,024 replacements were abandoned, for 37 % fewer bytes than appending all the same.
+- Keep fewer runs in those cases, by taking a run while it holds fewer than 8 or 64 times the rows gathered, instead of twice. Fewer objects then stay in level 0, and each row is written more often. Four writers at 64 times had 12 replacements of 1,024 abandoned. They made 8.1 requests a flush where appending made 9.8, and sent and read 50 KB where appending did 70 KB, each record written 33 times.
+- A larger factor also suits flushes of a few records, whose rows cost less than the entry each run keeps in every commit object. At one record a flush, a factor of 4 sent 18 % fewer bytes than a factor of 2, with no replacement abandoned. At 100 records a flush, it sent 10 % more.
 - A replacement comes back `Abandoned` too when a delete or an update changed a row of the objects it names, a row the run would otherwise bring back.
 - A writer that stops leaves its runs, which are ordinary objects that the merges take.
 - In a dataset without a sort key, rows follow the order of the commits, so the rows of a run move after those that other writers appended in the meantime.
