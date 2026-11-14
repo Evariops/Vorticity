@@ -835,8 +835,8 @@ internal static class DatasetCommitter
         return ordered;
     }
 
-    /// <summary>What the inlined pages may take, leaving room under the header's size cap for
-    /// everything else it carries.</summary>
+    /// <summary>What the pages a commit wrote may take inlined in its header, leaving room under the
+    /// header's size cap for everything else it carries.</summary>
     private const int InlineBudget = 192 << 10;
 
     /// <summary>

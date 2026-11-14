@@ -58,7 +58,8 @@ internal readonly record struct ObjectTally(
     /// The size class of an object of <paramref name="bytes"/> under objects of <paramref name="top"/> merged
     /// <paramref name="fanout"/> at a time: how many times its bytes are multiplied by the fan-out to pass
     /// <c>top / fanout</c>, 0 for an object past it already. A merge of <paramref name="fanout"/> objects of a class makes
-    /// one of the class below.
+    /// one of the class below when rows make most of their bytes, and one of their own class when they are objects of a
+    /// few rows, whose bytes are mostly a file's fixed cost.
     /// </summary>
     public static int ClassOf(long bytes, long top, int fanout)
     {

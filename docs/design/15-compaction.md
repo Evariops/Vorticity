@@ -62,8 +62,7 @@ A move keeps the object's size, so with keys in order objects stayed the size th
 whatever their level's target. `CompactionTrigger.Neighbours` makes them grow. An object's size class
 in its level is how many times the fan-out `F` fits between its bytes and the level's target, 0 within
 `F` of the target. When the objects at a level's end hold a run of at least `F` adjacent objects of one
-class above 0, those whose bytes stay within the target are merged into one, in their level, which is
-of the class above and joins the run before it, as a carry does. A byte is rewritten once a class,
+class above 0, those whose bytes stay within the target are merged into one, in their level. Its class is that of its bytes: the class above when rows make most of them, where it joins the run before it as a carry does, and its inputs' class when they were objects of a few rows, whose bytes are mostly a file's fixed cost. A byte is rewritten once a class,
 `log_F(target / size)` times, as the leveled merges of random keys rewrite it once a level, never once
 per append, and the objects end within `F` of their level's target. The plan reads the last `F²`
 entries of each level for it, a page or two down the tree's right edge, and ranks it after the purges
