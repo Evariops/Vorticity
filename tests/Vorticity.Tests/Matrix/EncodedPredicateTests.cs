@@ -6,7 +6,8 @@
 // three-valued logic, a null known to no comparison, a float compared as IEEE 754 says (a NaN equal to nothing and unequal
 // to everything, -0.0 equal to +0.0), text by its UTF-8 bytes. Whether the encoding answered or the scan decoded first,
 // they are the same: over the 99 753 predicates, a throwaway counter saw the encodings answer some 45 000 chunks, each of
-// FoR, zigzag, progression, the parts of instants and of decimals, ALP, sparse, dictionary and FSST among them.
+// FoR, zigzag, progression, the parts of instants and of decimals, ALP, sparse, dictionary and FSST among them (counted
+// on twenty thousand rows a file, before the matrix took the same blocks at a sixth of the rows).
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -223,9 +224,18 @@ public sealed class EncodedPredicateTests
         return sign < 0 ? Order.Less : sign > 0 ? Order.Greater : Order.Equal;
     }
 
-    /// <summary>The predicates asked of one file, each counted by a scan and by the rows.</summary>
+    /// <summary>
+    /// The predicates asked of one file, each counted by a scan and by the rows. The rows' side is read once: each column
+    /// into an array of its values, the projected column's hashes once, and each probe's order against every row once
+    /// for the six comparisons to it.
+    /// </summary>
     private sealed class Checks(VortexFile file, AllTypes[] rows, CancellationToken cancellationToken)
     {
+        private long[]? _hashes;
+
+        /// <summary>Each row's hash of the projected column.</summary>
+        private long[] Hashes => _hashes ??= [.. rows.Select(row => Hashed(row.I64))];
+
         internal List<string> Failures { get; } = [];
 
         internal int Asked { get; private set; }
@@ -233,21 +243,25 @@ public sealed class EncodedPredicateTests
         /// <summary>The comparisons, ranges and a set of the column named <paramref name="name"/>.</summary>
         internal async Task ColumnAsync<T>(string name, Func<AllTypes, T> value, Func<T, T, Order> order, T[] absent)
         {
-            List<T> held = Held(value, order);
+            T[] values = [.. rows.Select(value)];
+            List<T> held = Held(values, order);
             List<T> probes = [.. Picked(held), .. absent];
             foreach (T probe in probes)
             {
-                await CompareAsync(name, value, order, probe);
+                await CompareAsync(name, values, order, probe);
             }
 
             if (held.Count > 0)
             {
                 T low = held[held.Count / 4];
                 T high = held[held.Count * 3 / 4];
-                await ExpectAsync($"{name} between {low} and {high}", r => r.Column<T>(name).Between(low, high), row => Is(order(value(row), low), Order.Greater, Order.Equal) && Is(order(value(row), high), Order.Less, Order.Equal));
-                await ExpectAsync($"{name} from {low} below {high}", r => r.Column<T>(name) >= low & r.Column<T>(name) < high, row => Is(order(value(row), low), Order.Greater, Order.Equal) && order(value(row), high) == Order.Less);
+                Order[] toLow = Against(values, order, low);
+                Order[] toHigh = Against(values, order, high);
+                await ExpectAsync($"{name} between {low} and {high}", r => r.Column<T>(name).Between(low, high), row => Is(toLow[row], Order.Greater, Order.Equal) && Is(toHigh[row], Order.Less, Order.Equal));
+                await ExpectAsync($"{name} from {low} below {high}", r => r.Column<T>(name) >= low & r.Column<T>(name) < high, row => Is(toLow[row], Order.Greater, Order.Equal) && toHigh[row] == Order.Less);
                 T[] members = [held[0], held[held.Count / 2], absent[^1]];
-                await ExpectAsync($"{name} in {string.Join(", ", members)}", r => r.Column<T>(name).In(members), row => members.Any(member => order(value(row), member) == Order.Equal));
+                Order[][] toMembers = [.. members.Select(member => Against(values, order, member))];
+                await ExpectAsync($"{name} in {string.Join(", ", members)}", r => r.Column<T>(name).In(members), row => toMembers.Any(against => against[row] == Order.Equal));
             }
         }
 
@@ -255,41 +269,57 @@ public sealed class EncodedPredicateTests
         internal async Task TextAsync(string name, Func<AllTypes, string?> value)
         {
             await ColumnAsync(name, value, Utf8, ["", char.MaxValue.ToString(), "~absent"]);
-            foreach (string? picked in Picked(Held(value, Utf8)))
+            string?[] values = [.. rows.Select(value)];
+            foreach (string? picked in Picked(Held(values, Utf8)))
             {
                 string text = picked!;
                 foreach (string part in (string[])[text[..Math.Min(1, text.Length)], text[..Math.Min(3, text.Length)], text[(text.Length / 2)..]])
                 {
-                    await ExpectAsync($"{name} starts with '{part}'", r => r.Column<string>(name).StartsWith(part), row => value(row) is { } held && held.StartsWith(part, StringComparison.Ordinal));
-                    await ExpectAsync($"{name} contains '{part}'", r => r.Column<string>(name).Contains(part), row => value(row) is { } held && held.Contains(part, StringComparison.Ordinal));
+                    await ExpectAsync($"{name} starts with '{part}'", r => r.Column<string>(name).StartsWith(part), row => values[row] is { } held && held.StartsWith(part, StringComparison.Ordinal));
+                    await ExpectAsync($"{name} contains '{part}'", r => r.Column<string>(name).Contains(part), row => values[row] is { } held && held.Contains(part, StringComparison.Ordinal));
                 }
             }
         }
 
-        private async Task CompareAsync<T>(string name, Func<AllTypes, T> value, Func<T, T, Order> order, T probe)
+        private async Task CompareAsync<T>(string name, T[] values, Func<T, T, Order> order, T probe)
         {
-            await ExpectAsync($"{name} == {probe}", r => r.Column<T>(name) == probe, row => order(value(row), probe) == Order.Equal);
-            await ExpectAsync($"{name} != {probe}", r => r.Column<T>(name) != probe, row => Is(order(value(row), probe), Order.Less, Order.Greater, Order.Unordered));
-            await ExpectAsync($"{name} < {probe}", r => r.Column<T>(name) < probe, row => order(value(row), probe) == Order.Less);
-            await ExpectAsync($"{name} <= {probe}", r => r.Column<T>(name) <= probe, row => Is(order(value(row), probe), Order.Less, Order.Equal));
-            await ExpectAsync($"{name} > {probe}", r => r.Column<T>(name) > probe, row => order(value(row), probe) == Order.Greater);
-            await ExpectAsync($"{name} >= {probe}", r => r.Column<T>(name) >= probe, row => Is(order(value(row), probe), Order.Greater, Order.Equal));
+            Order[] against = Against(values, order, probe);
+            await ExpectAsync($"{name} == {probe}", r => r.Column<T>(name) == probe, row => against[row] == Order.Equal);
+            await ExpectAsync($"{name} != {probe}", r => r.Column<T>(name) != probe, row => Is(against[row], Order.Less, Order.Greater, Order.Unordered));
+            await ExpectAsync($"{name} < {probe}", r => r.Column<T>(name) < probe, row => against[row] == Order.Less);
+            await ExpectAsync($"{name} <= {probe}", r => r.Column<T>(name) <= probe, row => Is(against[row], Order.Less, Order.Equal));
+            await ExpectAsync($"{name} > {probe}", r => r.Column<T>(name) > probe, row => against[row] == Order.Greater);
+            await ExpectAsync($"{name} >= {probe}", r => r.Column<T>(name) >= probe, row => Is(against[row], Order.Greater, Order.Equal));
+        }
+
+        /// <summary>How each row's value orders against <paramref name="probe"/>.</summary>
+        private static Order[] Against<T>(T[] values, Func<T, T, Order> order, T probe)
+        {
+            Order[] against = new Order[values.Length];
+            for (int row = 0; row < values.Length; row++)
+            {
+                against[row] = order(values[row], probe);
+            }
+
+            return against;
         }
 
         /// <summary>
         /// Asks <paramref name="filter"/> of the file, a column of every row projected: the rows it keeps, counted and their
-        /// values of that column hashed, against the rows <paramref name="keeps"/> holds true of. A projection reads its
-        /// batches, where the scan offers the predicate to the column's encoding; a count would decode first.
+        /// values of that column hashed, against the rows <paramref name="keeps"/> holds true of, by their place. A
+        /// projection reads its batches, where the scan offers the predicate to the column's encoding; a count would decode
+        /// first.
         /// </summary>
-        private async Task ExpectAsync(string what, Func<Probe<AllTypes>, Predicate> filter, Func<AllTypes, bool> keeps)
+        private async Task ExpectAsync(string what, Func<Probe<AllTypes>, Predicate> filter, Func<int, bool> keeps)
         {
             Asked++;
             (long Rows, long Hash) want = default;
-            foreach (AllTypes row in rows)
+            long[] hashes = Hashes;
+            for (int row = 0; row < hashes.Length; row++)
             {
                 if (keeps(row))
                 {
-                    want = (want.Rows + 1, want.Hash + Hashed(row.I64));
+                    want = (want.Rows + 1, want.Hash + hashes[row]);
                 }
             }
 
@@ -309,9 +339,9 @@ public sealed class EncodedPredicateTests
         private static long Hashed(long value) => (long)System.IO.Hashing.XxHash3.HashToUInt64(System.Runtime.InteropServices.MemoryMarshal.AsBytes(new ReadOnlySpan<long>(in value)));
 
         /// <summary>The distinct values of the column that order, least first.</summary>
-        private List<T> Held<T>(Func<AllTypes, T> value, Func<T, T, Order> order)
+        private static List<T> Held<T>(T[] values, Func<T, T, Order> order)
         {
-            List<T> held = [.. rows.Select(value).Where(v => order(v, v) == Order.Equal).Distinct()];
+            List<T> held = [.. values.Where(v => order(v, v) == Order.Equal).Distinct()];
             held.Sort((left, right) => order(left, right) switch { Order.Less => -1, Order.Greater => 1, _ => 0 });
             return held;
         }

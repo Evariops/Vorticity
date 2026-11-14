@@ -23,7 +23,7 @@ public sealed class TypedInTests
         AllTypes[] rows = MatrixRows.Shared(Shape.Spread);
         (string path, _) = await TypeEncodingMatrixTests.WrittenAsync(Shape.Spread, EncodingHint.Auto);
         await using VortexFile file = await VortexFile.OpenAsync(path, ct);
-        AllTypes[] probes = [rows[3], rows[4_321], rows[^1]];
+        AllTypes[] probes = [rows[3], rows[2_321], rows[^1]];
 
         int[] ints = [.. probes.Select(r => r.I32), int.MaxValue];
         Assert.Equal(await TypedAsync(file, r => r.I32.In(ints), ct), await CountAsync(file, VortexExpr.In("I32", ints), ct));
@@ -84,15 +84,15 @@ public sealed class TypedInTests
         (string path, _) = await TypeEncodingMatrixTests.WrittenAsync(Shape.Spread, EncodingHint.Auto);
         await using VortexFile file = await VortexFile.OpenAsync(path, ct);
 
-        int[] buffer = [rows[3].I32, rows[4_321].I32];
+        int[] buffer = [rows[3].I32, rows[2_321].I32];
         VortexExpr filter = VortexExpr.In("I32", buffer);
-        long kept = rows.Count(r => r.I32 == rows[3].I32 || r.I32 == rows[4_321].I32);
+        long kept = rows.Count(r => r.I32 == rows[3].I32 || r.I32 == rows[2_321].I32);
         buffer[0] = int.MinValue;
         buffer[1] = int.MinValue;
         Assert.Equal(kept, await CountAsync(file, filter, ct));
 
         Assert.Equal(
-            rows.Count(r => (r.I32 == rows[3].I32 || r.I32 == rows[4_321].I32) && r.I64 > 0),
+            rows.Count(r => (r.I32 == rows[3].I32 || r.I32 == rows[2_321].I32) && r.I64 > 0),
             await CountAsync(file, filter & VortexExpr.Parse("I64 > 0"), ct));
         Assert.Equal(rows.Length - kept, await CountAsync(file, !filter, ct));
         Assert.Equal("I32 in (1, -2, 3)", VortexExpr.In("I32", 1, -2, 3).ToString());
