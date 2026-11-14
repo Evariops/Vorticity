@@ -60,6 +60,12 @@ public sealed record SourceCommit
     /// already, and this one added nothing.
     /// </summary>
     public OperationOutcome Outcome { get; init; }
+
+    /// <summary>
+    /// The objects the commit added, one a partition of the rows: what a later replacement or removal names, as
+    /// <see cref="ReplaceResult.Added"/> says. Empty when the commit added nothing.
+    /// </summary>
+    public IReadOnlyList<DataObject> Added { get; init; } = [];
 }
 
 /// <summary>

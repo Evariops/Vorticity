@@ -3414,6 +3414,7 @@ Vorticity.Dataset:     method bool op_Equality(ReplaceResult, ReplaceResult)
 Vorticity.Dataset:     method bool op_Inequality(ReplaceResult, ReplaceResult)
 Vorticity.Dataset:     method int GetHashCode()
 Vorticity.Dataset:     method string ToString()
+Vorticity.Dataset:     property IReadOnlyList<DataObject> Added { get; init; }
 Vorticity.Dataset:     property OperationOutcome Outcome { get; init; }
 Vorticity.Dataset:     property ulong Version { get; init; }
 Vorticity.Dataset: sealed class Vorticity.Dataset.RowChangeResult : IEquatable<RowChangeResult>
@@ -3443,6 +3444,7 @@ Vorticity.Dataset:     method bool op_Equality(SourceCommit, SourceCommit)
 Vorticity.Dataset:     method bool op_Inequality(SourceCommit, SourceCommit)
 Vorticity.Dataset:     method int GetHashCode()
 Vorticity.Dataset:     method string ToString()
+Vorticity.Dataset:     property IReadOnlyList<DataObject> Added { get; init; }
 Vorticity.Dataset:     property OperationOutcome Outcome { get; init; }
 Vorticity.Dataset:     property ulong Version { get; init; }
 Vorticity.Dataset: sealed class Vorticity.Dataset.SourceOffsetConflictException : VortexException
