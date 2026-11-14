@@ -23,7 +23,7 @@ namespace Vorticity.Aggregating;
 /// ordinary ones: pinned, each small one went through the lock the runtime takes for the pinned heap,
 /// which fourteen lanes splitting at once waited on more than they worked.
 /// </remarks>
-internal sealed class ArrayShelf : ISweptAfterCollections
+internal sealed class ArrayShelf : ISweptAfterCollections, IHeldMemory
 {
     /// <summary>
     /// The least array a lane's shelf counts in its query's memory, a page: a table's first arrays, which
@@ -158,8 +158,15 @@ internal sealed class ArrayShelf : ISweptAfterCollections
     {
         ArrayShelf shelf = Governed(Math.Min(256L << 20, GC.GetGCMemoryInfo().TotalAvailableMemoryBytes / 16));
         CollectionSweeper<ArrayShelf>.Register(shelf);
+        HeldMemory.Register(shelf);
         return shelf;
     }
+
+    /// <inheritdoc/>
+    public string Holder => "pool";
+
+    /// <inheritdoc/>
+    public long HeldBytes => Held;
 
     /// <summary>A shelf kept as the process's is, of <paramref name="budget"/> bytes and a quarter of it for small arrays: the process's, or a test's.</summary>
     internal static ArrayShelf Governed(long budget) => new ArrayShelf(parent: null, budget, budget / 4, governed: true);

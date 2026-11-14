@@ -34,6 +34,9 @@ internal sealed class PredicatePages
     // The filters whose pages in an object would spare little: their questions read the object whole, in one pass.
     private readonly ClockMemo<(UInt128 Object, UInt128 Filter), bool> _wide;
 
+    /// <summary>The bytes the pages and the wide notes hold now.</summary>
+    internal long Held => _held.Held + _wide.Held;
+
     /// <summary>Pages kept in <paramref name="budget"/> bytes at most, an eighth more for the wide notes; none for 0, the session's cache then alone.</summary>
     internal PredicatePages(long budget = DefaultBudget)
     {

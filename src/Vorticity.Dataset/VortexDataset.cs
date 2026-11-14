@@ -36,7 +36,7 @@ internal readonly record struct WrittenObject(ObjectEntry Entry, ReadOnlyMemory<
 /// not declare <see cref="ObjectStoreCapabilities.CreatesConditionally"/>, a handle reads, and every
 /// write throws <see cref="NotSupportedException"/> before it writes anything.
 /// </remarks>
-public sealed class VortexDataset : IAsyncDisposable
+public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
 {
     /// <summary>The bytes of the uid that ends every tree key.</summary>
     internal const int UidBytes = 16;
@@ -69,7 +69,19 @@ public sealed class VortexDataset : IAsyncDisposable
         _pageCache = new PageCache(options.PageCacheBytes);
         Predicates = new PredicatePages(options.PredicatePageBytes);
         _snapshot = new DatasetSnapshot(commit, PagesOf(version, commit), _objects, knownAt, Costs);
+        Buffers.HeldMemory.Register(this);
     }
+
+    /// <inheritdoc/>
+    string Buffers.IHeldMemory.Holder => "datasets";
+
+    /// <summary>
+    /// The bytes the handle's caches hold now, kept for its next questions: its open objects, its pages, its synopses, its
+    /// partitions' indexes and their entries, its predicates' pages, its memos and its sealed store's trailers.
+    /// </summary>
+    long Buffers.IHeldMemory.HeldBytes =>
+        _objects.HeldBytes + _pageCache.Size + _synopses.Held + PartitionIndexes.Bytes + Snapshot.HeldBytes + Predicates.Held
+        + _subtreeEnds.Held + _indexEntries.Held + (_store is SealedObjectStore sealedStore ? sealedStore.HeldBytes : 0);
 
     /// <summary>The version this handle reads; it moves only when this handle commits or refreshes.</summary>
     public ulong Version => Snapshot.Version;
@@ -2185,6 +2197,7 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <returns>A task that completes when every object is closed.</returns>
     public async ValueTask DisposeAsync()
     {
+        Buffers.HeldMemory.Unregister(this);
         await LevelZero.DisposeAsync().ConfigureAwait(false);
         await _objects.DisposeAsync().ConfigureAwait(false);
         if (_store is SealedObjectStore sealedStore)

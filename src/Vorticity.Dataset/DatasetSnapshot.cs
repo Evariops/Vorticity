@@ -328,6 +328,9 @@ internal sealed class DatasetSnapshot
     // The partition index entries the version's questions found, by partition (PartitionIndexAsync).
     private ClockMemo<byte[], PartitionIndexEntry?>? _partitionIndexes;
 
+    /// <summary>The bytes the version's memo of partition index entries holds now.</summary>
+    internal long HeldBytes => Volatile.Read(ref _partitionIndexes)?.Held ?? 0;
+
     /// <summary>
     /// The root of <paramref name="level"/>'s tree as the key walks of the version share it, read the
     /// first time one asks; null for an empty level.

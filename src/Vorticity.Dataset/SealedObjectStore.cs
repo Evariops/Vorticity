@@ -82,6 +82,9 @@ internal sealed class SealedObjectStore : IObjectStore
     private readonly ClockMemo<string, byte[]> _trailers = new ClockMemo<string, byte[]>(TrailerBytes, StringComparer.Ordinal);
     private const long TrailerBytes = 4L << 20;
 
+    /// <summary>The bytes of the trailers the store keeps now.</summary>
+    internal long HeldBytes => _trailers.Held;
+
     // What a trailer kept costs beyond its bytes: its array, its key and its slot.
     private const int TrailerOverhead = 128;
     private int _kind;

@@ -23,8 +23,11 @@ namespace Vorticity;
 /// lock every lane of the process takes, and cost a lookup of 4,096 segments 30 to 40 % more.
 /// </para>
 /// </remarks>
-public sealed class SegmentCache
+public sealed class SegmentCache : IHeldMemory
 {
+    /// <inheritdoc/>
+    string IHeldMemory.Holder => "segments";
+
     // Whether the reads of the flow under way keep nothing new: a dataset's job's (Pass).
     private static readonly AsyncLocal<bool> s_passing = new AsyncLocal<bool>();
 
@@ -46,6 +49,7 @@ public sealed class SegmentCache
     {
         ArgumentOutOfRangeException.ThrowIfNegative(capacityBytes);
         CapacityBytes = capacityBytes;
+        HeldMemory.Register(this);
     }
 
     /// <summary>

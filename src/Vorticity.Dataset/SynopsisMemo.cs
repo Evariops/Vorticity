@@ -18,6 +18,9 @@ internal sealed class SynopsisMemo
 
     private readonly ClockMemo<(UInt128 Object, ulong Offset), object> _synopses = new ClockMemo<(UInt128 Object, ulong Offset), object>(Bytes);
 
+    /// <summary>The bytes the memo holds now.</summary>
+    internal long Held => _synopses.Held;
+
     /// <summary>Whether the memo holds the region at <paramref name="offset"/> of object <paramref name="uid"/>, whatever it holds it as.</summary>
     internal bool Holds(UInt128 uid, ulong offset) => _synopses.TryGet((uid, offset), out _);
 

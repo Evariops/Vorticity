@@ -40,7 +40,7 @@ namespace Vorticity.Buffers;
 /// of a flag for it.
 /// </para>
 /// </remarks>
-internal sealed class AlignedBufferPool : ISweptAfterCollections
+internal sealed class AlignedBufferPool : ISweptAfterCollections, IHeldMemory
 {
     /// <summary>Smallest size class. Below this, pooling costs more than it saves.</summary>
     private const int MinBlockSize = 4096;
@@ -201,7 +201,14 @@ internal sealed class AlignedBufferPool : ISweptAfterCollections
         }
 
         _buckets = buckets;
+        HeldMemory.Register(this);
     }
+
+    /// <inheritdoc/>
+    public string Holder => "pool";
+
+    /// <summary>The bytes the pool keeps for the next rents: its classes' and the block its outsized slot keeps.</summary>
+    public long HeldBytes => ParkedBytes + (Volatile.Read(ref _outsized)?.Capacity ?? 0);
 
     /// <summary>The most blocks the class serving <paramref name="blockSize"/> keeps when its demand asks.</summary>
     /// <param name="floor">What it keeps whatever the demand.</param>
