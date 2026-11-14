@@ -53,15 +53,20 @@ public sealed partial class PatternBudgetTests : IClassFixture<PatternBudgetTest
     /// scans of an aggregation decoded the column to judge, is answered by the column's dictionary, which takes some
     /// 1.5 KB a question, for a tenth of its time.
     /// </para>
+    /// <para>
+    /// The cold bytes raised on 2026-11-14 by 4 to 17 bytes, the requests the same: an object of one zone keeps no zone map
+    /// any more, so the objects these questions read weigh 3.7 KB less, and the 64 KiB an open reads of an object's tail,
+    /// which start on a multiple of 64 bytes, start 21 bytes earlier in the lighter object.
+    /// </para>
     /// </summary>
     private static readonly Dictionary<string, Budget> Ceilings = new(StringComparer.Ordinal)
     {
-        ["QP-1 a service's routes under 5xx, per hour"] = new(8, 361216, 4, 98960, 86741),
-        ["QP-2 the pods of a route"] = new(4, 262256, 0, 0, 78260),
-        ["QP-3 the services under a shredded status of 500 or more"] = new(4, 262256, 0, 0, 101796),
-        ["QP-4 the spans of a trace"] = new(5, 286996, 1, 24740, 81960),
-        ["QP-6 the 99th percentile per service, the last quarter of an hour"] = new(2, 90304, 1, 24740, 140948),
-        ["QP-10 the services of a residual key"] = new(4, 262256, 0, 0, 108692),
+        ["QP-1 a service's routes under 5xx, per hour"] = new(8, 361233, 4, 98960, 86741),
+        ["QP-2 the pods of a route"] = new(4, 262273, 0, 0, 78260),
+        ["QP-3 the services under a shredded status of 500 or more"] = new(4, 262273, 0, 0, 101796),
+        ["QP-4 the spans of a trace"] = new(5, 287013, 1, 24740, 81960),
+        ["QP-6 the 99th percentile per service, the last quarter of an hour"] = new(2, 90308, 1, 24740, 140948),
+        ["QP-10 the services of a residual key"] = new(4, 262273, 0, 0, 108692),
     };
 
     private readonly Fixture _fixture;

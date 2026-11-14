@@ -402,6 +402,22 @@ public sealed record VortexWriteOptions
     internal bool Zones { get; init; } = true;
 
     /// <summary>
+    /// Whether a file whose rows all lie in one zone keeps its columns' zone maps: true by default. A map of one zone says
+    /// of each column what the file's statistics say of it, in a segment a column and a layout node around each, 9.2 KB of
+    /// a file of 22 columns whatever its rows. False leaves them out of a file that writes its statistics, as a dataset
+    /// does for its objects, which its entries' summaries rule out before any is opened.
+    /// </summary>
+    internal bool ZoneMapsOfOneZone { get; init; } = true;
+
+    /// <summary>
+    /// Whether a file with a table of contents whose rows all lie in one granule keeps the geometry of its chunks
+    /// (<c>vorticity.marks.v1</c>): true by default. The geometry lets a read take a few granules of a chunk, and a file of
+    /// one granule has no part to take: 2 KB of a file of 22 columns. False leaves it out, as a dataset does for the
+    /// objects its appends write.
+    /// </summary>
+    internal bool MarksOfOneGranule { get; init; } = true;
+
+    /// <summary>
     /// Whether the sparse index of the key may code its texts unpadded (Indexes.KeyCoding.UnpaddedTexts), which it does when
     /// that takes fewer bytes: true by default; false keeps the row encoding's keys, for a test that writes both codings.
     /// </summary>

@@ -612,6 +612,7 @@ never lend its values to an unrelated column.
   formats 1 to 4, is refused with a message that says so: read its rows with the release that wrote
   it and append them to a new dataset. A later release's format is refused too, so upgrade every
   process that writes or reads a dataset together.
+* Upgrade the readers of a dataset before its writers. From this release, a small object keeps no zone map and its entry names its schema by a hash. An earlier release reads the commits of such a dataset and then fails on those objects: a walk by key throws, and a read that goes through the entry's table of contents finds no table.
 * Marked rows keep their bytes until compaction. A delete that marks rows frees no space, since the
   object holds them (up to an eighth of its rows) until compaction rewrites it or a later delete
   passes that share. An object under a mebibyte is rewritten by every delete that touches it, so

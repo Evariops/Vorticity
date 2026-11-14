@@ -97,6 +97,64 @@ public sealed partial class ObjectContentsTests
     private const int GranuleRows = 256;
 
     /// <summary>
+    /// A small object keeps each fact about it once: no zone map over its one zone, whose bounds its entry's summaries
+    /// hold, no geometry of chunks that no read takes a part of, and in its entry's table its schema by its hash, which its
+    /// dataset holds. An object of several zones, larger than what an open reads of it, keeps all three.
+    /// </summary>
+    [Fact]
+    public async Task ASmallObjectKeepsEachFactOnceAndALargeOneKeepsItsMaps()
+    {
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexSession session = VortexSession.Create(static _ => { });
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Call.Schema, new DatasetOptions
+        {
+            Session = session,
+            Layout = new DatasetLayout { SortKey = [LayoutValue.Column(nameof(Call.At))] },
+        }, Ct);
+        Random random = new Random(11);
+        foreach (int count in (int[])[400, 40_000])
+        {
+            Call[] rows = [.. Enumerable.Range(0, count).Select(i => new Call(Noon.AddSeconds(i), $"region-{random.Next(50)}", random.Next(600), random.NextInt64()))];
+            await using ObjectDraft draft = dataset.StartObject();
+            await draft.Writer.WriteAsync<Call>(rows, Ct);
+            await dataset.AppendAsync(draft, Ct);
+        }
+
+        byte[] schema = dataset.Snapshot.Schema.FileSchema;
+        List<ObjectEntry> entries = [.. (await dataset.ListObjectsAsync(Ct).ToListAsync(Ct)).Select(held => held.Entry!).OrderBy(entry => entry.Rows)];
+        Assert.Equal([400L, 40_000L], entries.Select(entry => entry.Rows));
+
+        ObjectEntry small = entries[0];
+        Assert.True(small.Bytes <= VortexOpenOptions.DefaultInitialReadBytes, $"the small object weighs {small.Bytes} bytes");
+        ObjectContents contents = Assert.IsType<ObjectContents>(small.Contents);
+        Assert.Empty(contents.Marks);
+        Assert.Equal(schema, contents.Schema);
+        Assert.True(small.TableOfContents.Span.IndexOf(schema) < 0, "the small object's table holds its schema's bytes");
+        await using (ObjectLease lease = await dataset.RentAsync(small, Ct))
+        {
+            Assert.DoesNotContain(lease.File.LayoutEncodings, layout => layout.Id == "vortex.zoned");
+        }
+
+        ObjectEntry large = entries[1];
+        Assert.True(large.Bytes > VortexOpenOptions.DefaultInitialReadBytes, $"the large object weighs {large.Bytes} bytes");
+        ObjectContents whole = Assert.IsType<ObjectContents>(large.Contents);
+        Assert.NotEmpty(whole.Marks);
+        Assert.True(large.TableOfContents.Span.IndexOf(schema) >= 0, "the large object's table names its schema by its hash");
+        await using (ObjectLease lease = await dataset.RentAsync(large, Ct))
+        {
+            Assert.Contains(lease.File.LayoutEncodings, layout => layout.Id == "vortex.zoned");
+        }
+
+        // What an entry weighs, which every leaf a commit rewrites carries: the small object's table is less than half the
+        // large one's, the schema and the geometry gone from it.
+        Assert.True(
+            small.TableOfContents.Length * 2 < large.TableOfContents.Length,
+            $"a table of {small.TableOfContents.Length} bytes for the small object, {large.TableOfContents.Length} for the large one");
+
+        Assert.Equal(40_400, await dataset.Scan<Call>().CountAsync(Ct));
+    }
+
+    /// <summary>
     /// A table that names its schema by its hash reads as the table that holds it, sixteen bytes in place of the schema's
     /// own, once a handle read a version of that schema: the schema an object's table holds is its dataset's, byte for
     /// byte. A table whose hash names a schema the process never met reads as no table, as it does to a reader that

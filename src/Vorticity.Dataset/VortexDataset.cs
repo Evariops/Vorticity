@@ -946,6 +946,14 @@ public sealed class VortexDataset : IAsyncDisposable
             GatheredChunkBytes = _options.ChunkBytes,
             GatheredGroupRows = _options.GroupRows,
 
+            // An object of one zone keeps no zone map: its entry's summaries, taken from its statistics, rule it out
+            // before it is opened, and say of its rows what its one zone would.
+            ZoneMapsOfOneZone = false,
+
+            // Nor does an append's object of one granule keep the geometry of its chunks, which only a read of a part of
+            // an object uses. A job's object keeps it, with the statistics over its granules that are read through it.
+            MarksOfOneGranule = contents && synopses,
+
             // A job's object keeps a sheet of each column its table of contents names, when it is large enough for a scan
             // to read the sheets before it, and the counts of each column over its rows; an append's, which a job merges
             // soon, keeps none.
@@ -4297,10 +4305,29 @@ public sealed class VortexDataset : IAsyncDisposable
         }
         ObjectEntry entry = new ObjectEntry(draft.Key, Uid(draft.Identity), rows, bytes, hash, summaries)
             .WithFooterBytes(draft.Writer.TailBytes)
-            .WithTableOfContents(draft.Writer.TableOfContents)
+            .WithTableOfContents(TableOf(draft.Writer.TableOfContents, bytes))
             .WithLastKey(last)
             .WithArrival(draft.Arrival > 0 ? draft.Arrival : Math.Max(_options.TimeProvider.GetUtcNow().ToUnixTimeSeconds(), 1));
         return new WrittenObject(entry, KeyOf(prefix, entry), draft.Writer.DataBytes, draft.StartedAt, draft.KeyGeneration);
+    }
+
+    /// <summary>
+    /// The table of contents the entry of an object of <paramref name="storedBytes"/> carries: its writer's, the schema
+    /// named by its hash when the dataset holds that very schema and the object is small enough that the read opening it
+    /// brings it whole. A small object's entry then weighs 1.8 KB where it weighed 3.1, in every leaf a commit rewrites. A
+    /// large object keeps its schema: after a change of schema a reader would open it to learn its columns, which a small
+    /// object's reader does anyway.
+    /// </summary>
+    private byte[]? TableOf(byte[]? table, long storedBytes)
+    {
+        if (table is null || storedBytes > VortexOpenOptions.DefaultInitialReadBytes)
+        {
+            return table;
+        }
+
+        return Indexes.ObjectContents.From(table) is { } contents && contents.Schema.AsSpan().SequenceEqual(Snapshot.Schema.FileSchema)
+            ? contents.ToBytes(schemaByHash: true)
+            : table;
     }
 
     /// <summary>Whether <paramref name="failure"/> is a read before a streamed object's kept tail, however wrapped.</summary>

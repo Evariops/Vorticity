@@ -508,6 +508,12 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// <summary>Whether the file keeps its columns' zone maps (<see cref="VortexWriteOptions.Zones"/>).</summary>
     private bool _zones = true;
 
+    /// <summary>Whether it keeps them when one zone holds its rows (<see cref="VortexWriteOptions.ZoneMapsOfOneZone"/>).</summary>
+    private bool _zoneMapsOfOneZone = true;
+
+    /// <summary>Whether it keeps its chunks' geometry when one granule holds its rows (<see cref="VortexWriteOptions.MarksOfOneGranule"/>).</summary>
+    private bool _marksOfOneGranule = true;
+
     /// <summary>Whether the key's sparse index may code its texts unpadded (<see cref="VortexWriteOptions.UnpaddedKeyIndex"/>).</summary>
     private bool _unpaddedKeyIndex = true;
 
@@ -943,6 +949,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             _budget = session?.WriteLanes,
             _located = options.Located,
             _zones = options.Zones,
+            _zoneMapsOfOneZone = options.ZoneMapsOfOneZone,
+            _marksOfOneGranule = options.MarksOfOneGranule,
             _unpaddedKeyIndex = options.UnpaddedKeyIndex,
         };
         writer._leastChunkBlocks = LeastChunkBlocks(options.RowBound, schema, writer._rowBlock);
@@ -3021,9 +3029,11 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                     ? new ChunkPaging(_chunkPageEntries, chunks.Columns[laid.Columns[0]].Length, laid.PageRows, laid.Columns)
                     : null;
 
-                // Each column's geometry beside where its chunks lie, when every chunk's was collected.
+                // Each column's geometry beside where its chunks lie, when every chunk's was collected. A file of one granule
+                // may leave it out: a read of a part of it reads it whole.
                 if (_geometry is { } geometry && Array.TrueForAll(geometry, static column => column.Count > 0)
-                    && chunks.Columns.Count == geometry.Length)
+                    && chunks.Columns.Count == geometry.Length
+                    && (_marksOfOneGranule || _rowCount > Math.Min(_blockRows, Compute.ZoneColumn.LoneZoneRows)))
                 {
                     ColumnMarks[] columns = new ColumnMarks[geometry.Length];
                     for (int field = 0; field < columns.Length; field++)
@@ -3297,6 +3307,13 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         }
 
         if (!TryZoneLength(out uint zoneLength))
+        {
+            return;
+        }
+
+        // One zone holds every row: its bounds are the file's, which the statistics written next give. A reader that finds
+        // no map takes so few rows for one zone (ZoneColumn.LoneZoneRows).
+        if (!_zoneMapsOfOneZone && _fileStatistics && _rowCount <= Math.Min(zoneLength, Compute.ZoneColumn.LoneZoneRows))
         {
             return;
         }
