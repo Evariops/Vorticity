@@ -1,0 +1,22 @@
+# What the memory refactoring still has to take out (PLAN-MEMORY, section 7): a pattern, then its occurrences in
+# src, tests, bench (with samples and tools) and docs, separated by tabs. Lowered in the commit that takes some out,
+# removed at zero, never raised.
+ArrayPool<[^;()=]+?>\.Shared	831	23	2	0
+\bWorkArrays\b	237	10	0	0
+\bArrayShelf\b	331	22	1	0
+\bQueryArrays\b	36	0	0	0
+\bPooledBytes\b	54	0	0	0
+\bEnginePool\b	63	5	0	0
+\bAlignedMemoryPool\b	17	6	1	8
+\bMemoryPool\b	17	4	1	4
+\bBlockPool\.Shared\b	30	22	16	0
+\bProcessors\b	5	0	0	0
+\bDemandBudget\b	2	0	0	0
+\bDemandClassBudget\b	2	0	0	0
+\bDemandBlocks\b	2	0	0	0
+\bLargeRetentionBudget\b	4	0	0	0
+\bIdleMilliseconds\b	10	2	0	0
+\bPartitionIndexBytes\b	2	0	0	0
+\bPartitionIndexEntriesBytes\b	2	0	0	0
+\bDefaultBudget\b	3	0	0	0
+\bs_container\b	2	0	0	0
