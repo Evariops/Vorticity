@@ -766,6 +766,9 @@ internal sealed partial class DatasetScanBuilder
             // The objects opened ahead past the one handed over: one for the second, then twice as many each time the
             // consumer comes back for another, so that a question that stops at its first objects opens few more.
             int window = 1;
+
+            // A scan of rows opens whole an object that goes little past its tail. A count reads the tail alone.
+            long whole = counts ? 0 : ObjectCache.WholeBytesUnder(_dataset.Profile);
             try
             {
                 while (true)
@@ -778,7 +781,9 @@ internal sealed partial class DatasetScanBuilder
                         }
 
                         PositionedObject next = objects.Current;
-                        long bytes = ahead && OpensAhead(next, counts, range) && OpenAhead(next.Entry, cancellationToken) ? OpenedBytes(next.Entry) : 0;
+                        long bytes = ahead && OpensAhead(next, counts, range) && OpenAhead(next.Entry, !counts, cancellationToken)
+                            ? OpenedBytes(next.Entry, whole)
+                            : 0;
                         opened.Enqueue((next, bytes));
                         holding += bytes;
                     }
@@ -835,13 +840,16 @@ internal sealed partial class DatasetScanBuilder
     // Made with the first object opened ahead: a scan that opens none, most of a question's parts, allocates nothing for it.
     private Lock? _openedAheadGate;
 
-    /// <summary>Starts the open of <paramref name="entry"/> ahead of its turn; false when one is under way already.</summary>
-    private bool OpenAhead(ObjectEntry entry, CancellationToken cancellationToken)
+    /// <summary>
+    /// Starts the open of <paramref name="entry"/> ahead of its turn, for a read of its rows or not
+    /// (<paramref name="rows"/>); false when one is under way already.
+    /// </summary>
+    private bool OpenAhead(ObjectEntry entry, bool rows, CancellationToken cancellationToken)
     {
         lock (LazyInitializer.EnsureInitialized(ref _openedAheadGate, static () => new Lock()))
         {
             _openedAhead ??= new Dictionary<string, Task<ObjectLease>>(StringComparer.Ordinal);
-            return _openedAhead.TryAdd(entry.Key, _version.RentAsync(entry, cancellationToken).AsTask());
+            return _openedAhead.TryAdd(entry.Key, _version.RentAsync(entry, cancellationToken, rows).AsTask());
         }
     }
 
@@ -876,11 +884,12 @@ internal sealed partial class DatasetScanBuilder
     }
 
     /// <summary>
-    /// What an object opened ahead holds, about: the tail its open reads, the object itself when small, and its footer
-    /// parsed (<see cref="ObjectCache.ParsedPerFooterByte"/>).
+    /// What an object opened ahead holds, about: the tail its open reads, the object itself when small or when its open
+    /// reads it whole (<paramref name="wholeBytes"/>), and its footer parsed (<see cref="ObjectCache.ParsedPerFooterByte"/>).
     /// </summary>
-    private static long OpenedBytes(ObjectEntry entry) =>
-        Math.Min(entry.Bytes, 1L << 16) + (ObjectCache.ParsedPerFooterByte * Math.Min(entry.Bytes, entry.FooterBytes > 0 ? entry.FooterBytes : 16L << 10));
+    private static long OpenedBytes(ObjectEntry entry, long wholeBytes) =>
+        (entry.Bytes <= wholeBytes ? entry.Bytes : Math.Min(entry.Bytes, 1L << 16))
+        + (ObjectCache.ParsedPerFooterByte * Math.Min(entry.Bytes, entry.FooterBytes > 0 ? entry.FooterBytes : 16L << 10));
 
     /// <summary>One object's batches as the dataset's rows, its lease held until the last is read.</summary>
     private IAsyncEnumerable<RecordBatch> ObjectAsync(PositionedObject held, int open, CancellationToken cancellationToken) =>

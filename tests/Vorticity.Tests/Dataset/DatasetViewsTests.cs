@@ -24,13 +24,15 @@ public sealed partial class DatasetViewsTests
     /// <summary>
     /// Four appends of 25 000 rows, consolidated: a column of 300 values, 333 rows each, keeps a quantile sketch by value and
     /// answers a quantile by value from its counts, reading a few KiB; one of 1 000 values, 100 rows each, keeps none and
-    /// reads its rows (H1).
+    /// reads its rows (H1). The store is priced as a local disk, where an open reads an object's tail alone: what a question
+    /// asks for past its opens then tells an answer from counts from a read of rows, which an object read whole by its
+    /// open would hide.
     /// </summary>
     [Fact]
     public async Task AValueKeepsItsSketchWhileItHoldsEnoughRows()
     {
         Random random = new Random(41);
-        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using MemoryObjectStore store = new MemoryObjectStore { CostProfile = CostProfile.LocalDisk };
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Measure.Schema, new DatasetOptions
         {
             Layout = new DatasetLayout { SortKey = [LayoutValue.Column(nameof(Measure.Few))], ObjectBytes = 64 << 20, MergeFanout = 4, CalmAfter = null },

@@ -106,14 +106,27 @@ internal sealed class PathCosts(CostProfile profile, long chunkBytes, Func<UInt1
     /// chunks of the columns between when those take the joined gap at most, and reads those too: in an object of a few
     /// mebibytes, where every column is one chunk, what a read of two columns costs past their own bytes. A column's object
     /// dictionary lies right before its first chunk and is read with it: among the last chunks for a column of one chunk.
+    /// An object a read of rows opens whole (<see cref="OpensWhole"/>) costs that one request and its bytes, whatever the
+    /// columns.
     /// </remarks>
     internal Cost Rows(ObjectEntry entry, ReadOnlySpan<int> fields) => Read(entry, fields, dictionaries: true);
+
+    /// <summary>
+    /// Whether a read of rows opens the object <paramref name="entry"/> names whole: one that goes past the tail an open
+    /// reads by no more than the gap two ranges are read across as one (<see cref="ObjectCache.WholeBytesUnder"/>).
+    /// </summary>
+    internal bool OpensWhole(ObjectEntry entry) => entry.Bytes > OpenTailBytes && entry.Bytes <= ObjectCache.WholeBytesUnder(profile);
 
     /// <summary>What <see cref="Rows"/> says, but for the columns' object dictionaries unless <paramref name="dictionaries"/>.</summary>
     private Cost Read(ObjectEntry entry, ReadOnlySpan<int> fields, bool dictionaries)
     {
         IReadOnlyList<long>? columns = entry.Contents?.ColumnBytes;
         double decoded = Processing(entry, fields, default, 0);
+        if (OpensWhole(entry))
+        {
+            return new Cost(1, entry.Bytes, 0, decoded);
+        }
+
         if (columns is not { Count: > 0 })
         {
             return new Cost(1 + (int)Math.Min(int.MaxValue - 1, (entry.Bytes + _chunkBytes - 1) / _chunkBytes), entry.Bytes, 0, decoded);
@@ -216,6 +229,13 @@ internal sealed class PathCosts(CostProfile profile, long chunkBytes, Func<UInt1
         if (share >= 1 || columns is not { Count: > 0 })
         {
             return Rows(entry, fields);
+        }
+
+        // An object opened whole brings every row with its open: a part of them spares the decoding of the others alone.
+        if (OpensWhole(entry))
+        {
+            Cost opened = Rows(entry, fields);
+            return opened with { Nanoseconds = opened.Nanoseconds * share };
         }
 
         // Of each column, the share of its units the run lies in, and one it starts inside: the reads past the open, so

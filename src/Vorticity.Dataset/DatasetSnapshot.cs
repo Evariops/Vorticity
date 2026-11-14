@@ -403,17 +403,22 @@ internal sealed class DatasetSnapshot
         return Interlocked.CompareExchange(ref _rollups, sorted, null) ?? sorted;
     }
 
-    internal async ValueTask<ObjectLease> RentAsync(ObjectEntry entry, CancellationToken cancellationToken)
+    /// <summary>
+    /// A lease of the object <paramref name="entry"/> names, open. A caller that will read its rows says so
+    /// (<paramref name="rows"/>), and an object that goes little past its tail is then opened whole
+    /// (<see cref="ObjectCache.WholeBytesUnder"/>).
+    /// </summary>
+    internal async ValueTask<ObjectLease> RentAsync(ObjectEntry entry, CancellationToken cancellationToken, bool rows = false)
     {
         try
         {
             if (entry.IsResolved)
             {
-                return await _objects.RentAsync(entry, Pages, cancellationToken).ConfigureAwait(false);
+                return await _objects.RentAsync(entry, Pages, cancellationToken, rows).ConfigureAwait(false);
             }
 
             // A vector out of line is read beside the object's open, which does not wait on it.
-            Task<ObjectLease> renting = _objects.RentAsync(entry, Pages, cancellationToken).AsTask();
+            Task<ObjectLease> renting = _objects.RentAsync(entry, Pages, cancellationToken, rows).AsTask();
             try
             {
                 await entry.ResolveAsync(Pages, cancellationToken).ConfigureAwait(false);

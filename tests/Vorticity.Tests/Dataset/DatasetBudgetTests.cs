@@ -385,6 +385,110 @@ public sealed class DatasetBudgetTests
         return (store.Requests, metrics.ObjectsOpened);
     }
 
+    /// <summary>
+    /// An open for a read of rows reads whole an object that goes past its tail by the joined gap at most, 320 KiB at the
+    /// remote tier, and the read of its rows then asks the store for nothing more. Any other open of it, and every open of
+    /// a larger object, reads the tail alone.
+    /// </summary>
+    [Fact]
+    public async Task AReadOfRowsOpensWholeAnObjectALittlePastItsTail()
+    {
+        Decoders.EnsureRegistered();
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        DTypeArena types = new DTypeArena();
+        DType i64 = types.Primitive(PType.I64, Nullability.NonNullable);
+        DType schema = types.Struct(["key", "measure"], [i64, i64], Nullability.NonNullable);
+        DatasetOptions options = new DatasetOptions { Seed = Seed, Layout = new DatasetLayout { SortKey = [LayoutValue.Column("key")] } };
+        long whole = ObjectCache.WholeBytesUnder(CostProfile.Remote);
+        Assert.Equal(320L << 10, whole);
+
+        foreach (int rows in new[] { 12_000, 60_000 })
+        {
+            // Measures no encoding shrinks, eight bytes a row: some 100 KB, within the bound, then some 500 KB, past it.
+            Random random = new Random(rows);
+            long[] keys = [.. Enumerable.Range(0, rows).Select(row => (long)row)];
+            long[] measures = [.. keys.Select(_ => random.NextInt64())];
+            await using MemoryObjectStore inner = new MemoryObjectStore();
+            await using CountingObjectStore store = new CountingObjectStore(inner);
+            await using (VortexDataset writer = await VortexDataset.CreateAsync(store, schema, options, ct))
+            {
+                await writer.AppendAsync(OneBatch(types, schema, keys, measures), ct);
+            }
+
+            // An open that reads no row: the tail, from a boundary of 64 bytes.
+            ObjectEntry entry;
+            await using (VortexDataset dataset = await VortexDataset.OpenAsync(store, options, ct))
+            {
+                List<ObjectEntry> entries = [];
+                await foreach (PositionedObject held in dataset.WalkAsync(null, 0, long.MaxValue, null, ct))
+                {
+                    entries.Add(held.Entry);
+                }
+
+                entry = Assert.Single(entries);
+                store.Reset();
+                await using (ObjectLease lease = await dataset.RentAsync(entry, ct))
+                {
+                    Assert.Equal(rows, lease.File.RowCount);
+                }
+
+                Assert.Equal(1, store.Requests);
+                Assert.InRange(store.BytesRead, ObjectEntry.FirstReadBytes, ObjectEntry.FirstReadBytes + 63);
+            }
+
+            bool within = entry.Bytes <= whole;
+            Assert.True(entry.Bytes > ObjectEntry.FirstReadBytes, $"an object of {entry.Bytes} bytes comes whole with any open");
+            Assert.Equal(rows == 12_000, within);
+
+            // An open for a read of rows: the object, when it is within the bound.
+            await using (VortexDataset dataset = await VortexDataset.OpenAsync(store, options, ct))
+            {
+                store.Reset();
+                await using (ObjectLease lease = await dataset.RentAsync(entry, ct, rows: true))
+                {
+                    Assert.Equal(rows, lease.File.RowCount);
+                }
+
+                Assert.Equal(1, store.Requests);
+                if (within)
+                {
+                    Assert.Equal(entry.Bytes, store.BytesRead);
+                }
+                else
+                {
+                    Assert.InRange(store.BytesRead, ObjectEntry.FirstReadBytes, ObjectEntry.FirstReadBytes + 63);
+                }
+            }
+
+            // A scan of its rows, cold: one request for an object within the bound, the tail then the data for the other.
+            await using (VortexDataset dataset = await VortexDataset.OpenAsync(store, options, ct))
+            {
+                store.Reset();
+                long read = 0;
+                await foreach (RecordBatch batch in dataset.ScanBuilder().ExecuteAsync(ct))
+                {
+                    using (batch)
+                    {
+                        read += batch.RowCount;
+                    }
+                }
+
+                Console.Out.Write(FormattableString.Invariant(
+                    $"DATASET BUDGET, WHOLE OPEN: the rows of an object of {entry.Bytes} bytes read cold in {store.Requests} request(s) and {store.BytesRead} bytes.\n"));
+                Assert.Equal(rows, read);
+                if (within)
+                {
+                    Assert.Equal(1, store.Requests);
+                    Assert.Equal(entry.Bytes, store.BytesRead);
+                }
+                else
+                {
+                    Assert.True(store.Requests >= 2, $"an object of {entry.Bytes} bytes read in {store.Requests} request(s)");
+                }
+            }
+        }
+    }
+
     [Fact]
     public async Task AnObjectWhoseFooterPassesTheFirstReadOpensInOneRequest()
     {

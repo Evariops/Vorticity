@@ -169,7 +169,8 @@ public sealed partial class DatasetDataCacheTests
         {
             // What the question's data takes on the disk without a bound past it, then within one: a segment past the
             // bytes waiting is let go, and one past the quota pushes older ones out, whichever the writes' pace gives.
-            const long Quota = 96 << 10;
+            // A read of rows opens each of these objects whole, one segment an object: the quota holds one and not two.
+            const long Quota = 256 << 10;
             long unbounded = 0;
             string all = CacheDirectory();
             try

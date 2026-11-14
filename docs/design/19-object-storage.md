@@ -220,6 +220,7 @@ are coalesced, two ranges joined across a request's worth rounded down to a powe
 weighs before reading anything, with the tiers its caches hold regions in and the processor's price of
 a value by encoding class ([16-queries.md](16-queries.md)). A dataset's options may give another
 (`DatasetOptions.CostProfile`), for a store behind a cache, or on another link than its kind's.
+By the same gap, a dataset opens whole an object whose rows it reads when the object goes past the tail an open reads by no more ([13-dataset.md](13-dataset.md)).
 
 A capability marked to check is taken as absent until the contract tests prove it against the
 service, so a store whose suffix reads are not proven opens a file with a head and a read, as today.

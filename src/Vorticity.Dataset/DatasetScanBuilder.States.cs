@@ -329,7 +329,7 @@ internal sealed partial class DatasetScanBuilder
                     Planned next = units[openSeen];
                     if (next.Chosen.Path is AnswerPath.Rows or AnswerPath.Zones && next.Opened is null && !_version.HoldsOpen(next.Held.Entry))
                     {
-                        next.Opened = OpenAheadAsync(next.Held, stopped.Token);
+                        next.Opened = OpenAheadAsync(next.Held, rows: next.Chosen.Path is AnswerPath.Rows, stopped.Token);
                     }
                 }
 
@@ -627,13 +627,13 @@ internal sealed partial class DatasetScanBuilder
     /// <summary>
     /// Opens the object <paramref name="held"/> ahead of its read and gives the lease back, the object left open and idle in
     /// the handle's cache, its copy shredded in memory, if any, left to the read; what the open meets is the read's to
-    /// meet again.
+    /// meet again. An object whose rows the read takes (<paramref name="rows"/>) is opened as a read of rows opens it.
     /// </summary>
-    private async Task OpenAheadAsync(PositionedObject held, CancellationToken cancellationToken)
+    private async Task OpenAheadAsync(PositionedObject held, bool rows, CancellationToken cancellationToken)
     {
         try
         {
-            ObjectLease lease = await _version.RentAsync(held.Entry, cancellationToken).ConfigureAwait(false);
+            ObjectLease lease = await _version.RentAsync(held.Entry, cancellationToken, rows).ConfigureAwait(false);
             await lease.DisposeAsync().ConfigureAwait(false);
         }
         catch (Exception)

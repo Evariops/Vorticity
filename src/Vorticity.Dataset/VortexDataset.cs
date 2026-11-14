@@ -63,7 +63,9 @@ public sealed class VortexDataset : IAsyncDisposable
     {
         _store = store;
         _options = options;
-        _objects = new ObjectCache(store, options.MaxOpenObjects, options.Session, options.MaxOpenObjectBytes);
+        _objects = new ObjectCache(
+            store, options.MaxOpenObjects, options.Session, options.MaxOpenObjectBytes,
+            ObjectCache.WholeBytesUnder(options.CostProfile ?? store.CostProfile));
         _pageCache = new PageCache(options.PageCacheBytes);
         Predicates = new PredicatePages(options.PredicatePageBytes);
         _snapshot = new DatasetSnapshot(commit, PagesOf(version, commit), _objects, knownAt, Costs);
@@ -2544,8 +2546,8 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <exception cref="ObjectNotFoundException">
     /// The object is gone: this version fell out of the retention window and vacuum took it.
     /// </exception>
-    internal ValueTask<ObjectLease> RentAsync(ObjectEntry entry, CancellationToken cancellationToken) =>
-        Snapshot.RentAsync(entry, cancellationToken);
+    internal ValueTask<ObjectLease> RentAsync(ObjectEntry entry, CancellationToken cancellationToken, bool rows = false) =>
+        Snapshot.RentAsync(entry, cancellationToken, rows);
 
     /// <summary>The objects of level 0 this node read through keys of their variant columns, shredded in memory once.</summary>
     internal LevelZeroMemo LevelZero { get; } = new LevelZeroMemo();
