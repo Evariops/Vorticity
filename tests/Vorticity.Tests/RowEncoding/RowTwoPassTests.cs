@@ -169,6 +169,14 @@ public sealed class RowTwoPassTests
     /// scratch a variable-width child needs is rented too - a per-call allocation there would be
     /// paid on every batch of a sort.
     /// </summary>
+    /// <remarks>
+    /// The least of several windows is what the pass cannot avoid. A gen 2 collection under memory
+    /// pressure makes the shared pool let its arrays go, the caches of every thread at once, and the
+    /// pass that follows rents new ones: 88 bytes for an <c>int[16]</c>, counted on this thread. One
+    /// collection reaches one window, while an allocation the encoder makes itself shows in all of
+    /// them. Measured with the pressure forced high and four threads collecting beside: 54 windows
+    /// of 3,000 allocated, and the least of five never did.
+    /// </remarks>
     [Fact]
     public void AWarmWritePassAllocatesNothing()
     {
@@ -190,15 +198,20 @@ public sealed class RowTwoPassTests
             RowEncoder.Encode(fixture.Arena, columns, fields, offsets, cursors, destination);
         }
 
-        long before = GC.GetAllocatedBytesForCurrentThread();
-        for (int i = 0; i < 16; i++)
+        long least = long.MaxValue;
+        for (int window = 0; window < 5; window++)
         {
-            Array.Clear(cursors);
-            RowEncoder.Encode(fixture.Arena, columns, fields, offsets, cursors, destination);
+            long before = GC.GetAllocatedBytesForCurrentThread();
+            for (int i = 0; i < 16; i++)
+            {
+                Array.Clear(cursors);
+                RowEncoder.Encode(fixture.Arena, columns, fields, offsets, cursors, destination);
+            }
+
+            least = Math.Min(least, GC.GetAllocatedBytesForCurrentThread() - before);
         }
 
-        long after = GC.GetAllocatedBytesForCurrentThread();
-        Assert.Equal(0, after - before);
+        Assert.Equal(0, least);
     }
 
     /// <summary>The sizing pass does not walk fixed-width columns, so its cost is theirs to prove.</summary>
