@@ -65,12 +65,11 @@ internal sealed class IndexBatches<T> : IDisposable
         internal int Add(IndexSegment region)
         {
             int slot = Requests.Add(new SegmentSpec(region.Offset, region.Length, region.AlignmentExponent, 0, 0));
+            // The batch's own array: the regions go to an asynchronous read as memory of their type, which a block of
+            // bytes cannot give.
             if (slot >= _regions.Length)
             {
-                IndexSegment[] grown = System.Buffers.ArrayPool<IndexSegment>.Shared.Rent(Math.Max(slot + 1, 16));
-                _regions.AsSpan(0, _named).CopyTo(grown);
-                Return();
-                _regions = grown;
+                Array.Resize(ref _regions, Math.Max(slot + 1, Math.Max(16, 2 * _regions.Length)));
             }
 
             // A slot registered without its region, between two that were, names none.
@@ -83,17 +82,8 @@ internal sealed class IndexBatches<T> : IDisposable
         public void Dispose()
         {
             Requests.Dispose();
-            Return();
             _regions = [];
             _named = 0;
-        }
-
-        private void Return()
-        {
-            if (_regions.Length > 0)
-            {
-                System.Buffers.ArrayPool<IndexSegment>.Shared.Return(_regions);
-            }
         }
     }
 }

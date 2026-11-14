@@ -496,63 +496,46 @@ internal static class ZonePruningPlan
         int segments = 0;
         long bytes = 0;
 
-        // The statistics read, their blocks in rented arrays, given back once the blocks are judged.
-        List<Indexes.VariantBlockStats>? held = null;
-        try
+        foreach ((string column, List<(string Key, Types.Variants.PathClass Class)> wanted) in keys)
         {
-            foreach ((string column, List<(string Key, Types.Variants.PathClass Class)> wanted) in keys)
+            int field = file.DType.Kind == DTypeKind.Struct ? file.DType.IndexOfField(column) : -1;
+            if (field < 0)
             {
-                int field = file.DType.Kind == DTypeKind.Struct ? file.DType.IndexOfField(column) : -1;
-                if (field < 0)
-                {
-                    continue;
-                }
-
-                (Indexes.VariantBlockStats? read, int count, long readBytes) =
-                    await Indexes.VariantBlockStats.ReadAsync(file, field, wanted, cancellationToken).ConfigureAwait(false);
-                segments += count;
-                bytes += readBytes;
-                if (read is null)
-                {
-                    continue;
-                }
-
-                (held ??= []).Add(read);
-
-                foreach ((string key, Types.Variants.PathClass @class) in wanted)
-                {
-                    if (read.IndexOf(key, @class) is int at and >= 0)
-                    {
-                        (stats ??= new KeyStats()).Add(column, key, @class, read.Blocks[at]);
-                    }
-                }
+                continue;
             }
 
-            if (stats is null)
+            (Indexes.VariantBlockStats? read, int count, long readBytes) =
+                await Indexes.VariantBlockStats.ReadAsync(file, field, wanted, cancellationToken).ConfigureAwait(false);
+            segments += count;
+            bytes += readBytes;
+            if (read is null)
             {
-                return (segments, bytes);
+                continue;
             }
 
-            for (int block = 0; block < live.BlockCount; block++)
+            foreach ((string key, Types.Variants.PathClass @class) in wanted)
             {
-                if (live.IsLive(block) && !BlockMayMatch(filter, stats, block))
+                if (read.IndexOf(key, @class) is int at and >= 0)
                 {
-                    live.Kill(block);
+                    (stats ??= new KeyStats()).Add(column, key, @class, read.Blocks[at]);
                 }
             }
+        }
 
+        if (stats is null)
+        {
             return (segments, bytes);
         }
-        finally
+
+        for (int block = 0; block < live.BlockCount; block++)
         {
-            if (held is not null)
+            if (live.IsLive(block) && !BlockMayMatch(filter, stats, block))
             {
-                foreach (Indexes.VariantBlockStats read in held)
-                {
-                    read.Dispose();
-                }
+                live.Kill(block);
             }
         }
+
+        return (segments, bytes);
     }
 
     /// <summary>

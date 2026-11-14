@@ -413,7 +413,7 @@ internal sealed class GranulePlans(
         in ArrayNode root, int width, int rows, RowRange inFile, int start, int wanted, (long Start, long Length)[] layout,
         ChunkGeometry chunk, int granuleRows)
     {
-        int[] places = System.Buffers.ArrayPool<int>.Shared.Rent(wanted);
+        Buffers.Block<int> places = Buffers.Blocks.Rent<int>(wanted);
         try
         {
             Span<int> local = places.AsSpan(0, take!.LocalIndices(inFile, places));
@@ -426,7 +426,7 @@ internal sealed class GranulePlans(
         }
         finally
         {
-            System.Buffers.ArrayPool<int>.Shared.Return(places);
+            Buffers.Blocks.Return(places);
         }
     }
 

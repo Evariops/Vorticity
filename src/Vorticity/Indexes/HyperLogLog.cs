@@ -1,6 +1,6 @@
 using System;
-using System.Buffers;
 using System.Numerics;
+using Vorticity.Buffers;
 
 namespace Vorticity.Indexes;
 
@@ -75,8 +75,8 @@ internal static class HyperLogLog
         {
             // Written on the stack at its longest, then copied once at its length.
             int longest = 1 + Serialization.Varint.MaxLength32 + (set * (Serialization.Varint.MaxLength32 + 1));
-            byte[]? rented = longest > 4_096 ? ArrayPool<byte>.Shared.Rent(longest) : null;
-            Span<byte> sparse = rented is null ? stackalloc byte[longest] : rented.AsSpan(0, longest);
+            Block<byte> rented = longest > 4_096 ? Blocks.Rent<byte>(longest) : default;
+            Span<byte> sparse = rented.IsEmpty ? stackalloc byte[longest] : rented;
             sparse[0] = 0;
             int at = 1;
             at += Serialization.Varint.Write(sparse[at..], (ulong)set);
@@ -97,11 +97,7 @@ internal static class HyperLogLog
             }
 
             byte[] written = sparse[..at].ToArray();
-            if (rented is not null)
-            {
-                ArrayPool<byte>.Shared.Return(rented);
-            }
-
+            Blocks.Return(rented);
             return written;
         }
 
@@ -147,15 +143,11 @@ internal static class HyperLogLog
     {
         if (bytes.Length == 1 + (ranks.Length * 3 / 4) && bytes[0] == 1)
         {
-            byte[]? rented = ranks.Length > 4_096 ? ArrayPool<byte>.Shared.Rent(ranks.Length) : null;
-            Span<byte> other = rented is null ? stackalloc byte[ranks.Length] : rented.AsSpan(0, ranks.Length);
+            Block<byte> rented = ranks.Length > 4_096 ? Blocks.Rent<byte>(ranks.Length) : default;
+            Span<byte> other = rented.IsEmpty ? stackalloc byte[ranks.Length] : rented;
             Unpack(bytes[1..], other);
             Highest(other, ranks);
-            if (rented is not null)
-            {
-                ArrayPool<byte>.Shared.Return(rented);
-            }
-
+            Blocks.Return(rented);
             return;
         }
 

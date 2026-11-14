@@ -1,5 +1,4 @@
 using System;
-using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.IO.Hashing;
@@ -57,19 +56,20 @@ internal sealed class GranuleKeys : IDisposable
     private readonly int _lastKeyLength;
     private readonly bool _inline;
 
-    // Rented, given back by Dispose. Each page's first key, end to end. By page, where its first key ends there; then, by
-    // page, the longest key of a page taken, -1 before; then, by run, where its whole key lies in _whole, how long it is,
-    // and where the record past it starts in its page. By page, its place among the pages (its offset above its length),
-    // then its XXH3-64. The whole keys of the runs of the pages taken, end to end.
+    // Blocks of the pool, given back by Dispose. Each page's first key, end to end. By page, where its first key ends there;
+    // then, by page, the longest key of a page taken, -1 before; then, by run, where its whole key lies in _whole, how long
+    // it is, and where the record past it starts in its page. By page, its place among the pages (its offset above its
+    // length), then its XXH3-64. The whole keys of the runs of the pages taken, end to end. A block of bytes is its own
+    // array, all of it room.
     private byte[]? _pageKeys;
-    private int[]? _ints;
-    private ulong[]? _places;
+    private Block<int> _ints;
+    private Block<ulong> _places;
     private byte[]? _whole;
     private int _wholeUsed;
 
     private GranuleKeys(
-        Bytes table, KeyCoding coding, int granuleRows, long rows, int components, int pageEntries, int pages, byte[] pageKeys, int[] ints,
-        ulong[] places, int lastKeyAt, int lastKeyLength, bool inline)
+        Bytes table, KeyCoding coding, int granuleRows, long rows, int components, int pageEntries, int pages, byte[] pageKeys, Block<int> ints,
+        Block<ulong> places, int lastKeyAt, int lastKeyLength, bool inline)
     {
         _table = table;
         Coding = coding;
@@ -132,14 +132,14 @@ internal sealed class GranuleKeys : IDisposable
     /// <summary>The first key of page <paramref name="page"/>, its first granule's.</summary>
     internal ReadOnlySpan<byte> PageKey(int page)
     {
-        int start = page == 0 ? 0 : _ints![page - 1];
-        return _pageKeys.AsSpan(start, _ints![page] - start);
+        int start = page == 0 ? 0 : _ints[page - 1];
+        return _pageKeys.AsSpan(start, _ints[page] - start);
     }
 
     /// <summary>Where page <paramref name="page"/>'s bytes lie among the pages, and their XXH3-64.</summary>
     internal (int Offset, int Length, ulong Checksum) PageAt(int page)
     {
-        ulong place = _places![2 * page];
+        ulong place = _places[2 * page];
         return ((int)(place >> 32), (int)(uint)place, _places[(2 * page) + 1]);
     }
 
@@ -180,22 +180,18 @@ internal sealed class GranuleKeys : IDisposable
     /// <summary>Gives back the bytes read and the buffers rented.</summary>
     public void Dispose()
     {
-        if (_ints is null)
+        if (_ints.IsEmpty)
         {
             return;
         }
 
-        ArrayPool<byte>.Shared.Return(_pageKeys!);
-        ArrayPool<int>.Shared.Return(_ints);
-        ArrayPool<ulong>.Shared.Return(_places!);
-        if (_whole is not null)
-        {
-            ArrayPool<byte>.Shared.Return(_whole);
-        }
-
+        Blocks.ReturnBytes(_pageKeys);
+        Blocks.Return(_ints);
+        Blocks.Return(_places);
+        Blocks.ReturnBytes(_whole);
         _pageKeys = null;
-        _ints = null;
-        _places = null;
+        _ints = default;
+        _places = default;
         _whole = null;
         SegmentOwner? table = _table.Owner;
         SegmentOwner? pages = _pages.Owner;
@@ -221,7 +217,7 @@ internal sealed class GranuleKeys : IDisposable
     private int IntsLength => (2 * Pages) + (3 * Runs);
 
     /// <summary>Where the first keys of the pages before <paramref name="page"/> end.</summary>
-    private int PageKeysEnd(int page) => page == 0 ? 0 : _ints![page - 1];
+    private int PageKeysEnd(int page) => page == 0 ? 0 : _ints[page - 1];
 
     /// <summary>The records of page <paramref name="page"/>, its keys coded forward.</summary>
     private ReadOnlySpan<byte> Records(int page)
@@ -234,11 +230,11 @@ internal sealed class GranuleKeys : IDisposable
     private ReadOnlySpan<byte> RunKey(int run)
     {
         int at = (2 * Pages) + (3 * run);
-        return _whole.AsSpan(_ints![at], _ints[at + 1]);
+        return _whole.AsSpan(_ints[at], _ints[at + 1]);
     }
 
     /// <summary>Where the record past the first key of run <paramref name="run"/> starts in its page, its page taken.</summary>
-    private int RunNext(int run) => _ints![(2 * Pages) + (3 * run) + 2];
+    private int RunNext(int run) => _ints[(2 * Pages) + (3 * run) + 2];
 
     /// <summary>
     /// The bytes of the longest key of page <paramref name="page"/>, taken first when no search reached it yet: its bytes
@@ -247,7 +243,7 @@ internal sealed class GranuleKeys : IDisposable
     /// <exception cref="VortexFormatException">The page's bytes are not those the table names, or do not decode.</exception>
     private int Page(int page)
     {
-        int longest = _ints![Pages + page];
+        int longest = _ints[Pages + page];
         return longest >= 0 ? longest : TakePage(page);
     }
 
@@ -255,7 +251,7 @@ internal sealed class GranuleKeys : IDisposable
     private int TakePage(int page)
     {
         ReadOnlySpan<byte> bytes = Records(page);
-        if (XxHash3.HashToUInt64(bytes) != _places![(2 * page) + 1])
+        if (XxHash3.HashToUInt64(bytes) != _places[(2 * page) + 1])
         {
             throw Corrupt(page);
         }
@@ -264,9 +260,9 @@ internal sealed class GranuleKeys : IDisposable
         // kept whole.
         int count = Math.Min(PageEntries, Granules - (page * PageEntries));
         ReadOnlySpan<byte> pageKey = PageKey(page);
-        int[] ints = _ints!;
+        Span<int> ints = _ints;
         int runs = (2 * Pages) + (3 * page * RunsAPage);
-        byte[]? rented = pageKey.Length > 512 ? ArrayPool<byte>.Shared.Rent(pageKey.Length) : null;
+        byte[]? rented = pageKey.Length > 512 ? Blocks.Rent<byte>(pageKey.Length).Array() : null;
         Span<byte> key = rented ?? stackalloc byte[512];
         try
         {
@@ -284,13 +280,9 @@ internal sealed class GranuleKeys : IDisposable
                 int next = shared + rest;
                 if (next > key.Length)
                 {
-                    byte[] grown = ArrayPool<byte>.Shared.Rent(Math.Max(next, key.Length * 2));
+                    byte[] grown = Blocks.Rent<byte>(Math.Max(next, key.Length * 2)).Array();
                     key[..shared].CopyTo(grown);
-                    if (rented is not null)
-                    {
-                        ArrayPool<byte>.Shared.Return(rented);
-                    }
-
+                    Blocks.ReturnBytes(rented);
                     rented = grown;
                     key = grown;
                 }
@@ -332,23 +324,16 @@ internal sealed class GranuleKeys : IDisposable
         }
         finally
         {
-            if (rented is not null)
-            {
-                ArrayPool<byte>.Shared.Return(rented);
-            }
+            Blocks.ReturnBytes(rented);
         }
     }
 
     /// <summary>Makes room for <paramref name="bytes"/> more bytes of whole keys, those kept copied over.</summary>
     private void GrowWhole(int bytes)
     {
-        byte[] grown = ArrayPool<byte>.Shared.Rent(Math.Max(_wholeUsed + bytes, Math.Max((_whole?.Length ?? 0) * 2, 1_024)));
-        if (_whole is not null)
-        {
-            _whole.AsSpan(0, _wholeUsed).CopyTo(grown);
-            ArrayPool<byte>.Shared.Return(_whole);
-        }
-
+        byte[] grown = Blocks.Rent<byte>(Math.Max(_wholeUsed + bytes, Math.Max((_whole?.Length ?? 0) * 2, 1_024))).Array();
+        _whole.AsSpan(0, _wholeUsed).CopyTo(grown);
+        Blocks.ReturnBytes(_whole);
         _whole = grown;
     }
 
@@ -500,7 +485,7 @@ internal sealed class GranuleKeys : IDisposable
             return end;
         }
 
-        byte[]? rented = longest > 512 ? ArrayPool<byte>.Shared.Rent(longest) : null;
+        byte[]? rented = longest > 512 ? Blocks.Rent<byte>(longest).Array() : null;
         try
         {
             Span<byte> key = rented ?? stackalloc byte[512];
@@ -530,10 +515,7 @@ internal sealed class GranuleKeys : IDisposable
         }
         finally
         {
-            if (rented is not null)
-            {
-                ArrayPool<byte>.Shared.Return(rented);
-            }
+            Blocks.ReturnBytes(rented);
         }
 
         return end;
@@ -647,8 +629,8 @@ internal sealed class GranuleKeys : IDisposable
     private static GranuleKeys? Parse(Bytes table)
     {
         byte[]? pageKeys = null;
-        int[]? ints = null;
-        ulong[]? places = null;
+        Block<int> ints = default;
+        Block<ulong> places = default;
         try
         {
             ReadOnlySpan<byte> bytes = table.Span;
@@ -677,9 +659,9 @@ internal sealed class GranuleKeys : IDisposable
                 return null;
             }
 
-            ints = ArrayPool<int>.Shared.Rent((2 * pages) + (3 * (int)runs));
-            places = ArrayPool<ulong>.Shared.Rent(2 * pages);
-            pageKeys = ArrayPool<byte>.Shared.Rent(Math.Max(bytes.Length * 2, 256));
+            ints = Blocks.Rent<int>((2 * pages) + (3 * (int)runs));
+            places = Blocks.Rent<ulong>(2 * pages);
+            pageKeys = Blocks.Rent<byte>(Math.Max(bytes.Length * 2, 256)).Array();
             int end = 0;
             int before = 0;
             for (int page = 0; page < pages; page++)
@@ -691,9 +673,9 @@ internal sealed class GranuleKeys : IDisposable
 
                 if (pageKeys.Length - end < shared + rest)
                 {
-                    byte[] grown = ArrayPool<byte>.Shared.Rent(Math.Max(end + shared + rest, pageKeys.Length * 2));
+                    byte[] grown = Blocks.Rent<byte>(Math.Max(end + shared + rest, pageKeys.Length * 2)).Array();
                     pageKeys.AsSpan(0, end).CopyTo(grown);
-                    ArrayPool<byte>.Shared.Return(pageKeys);
+                    Blocks.ReturnBytes(pageKeys);
                     pageKeys = grown;
                 }
 
@@ -746,8 +728,8 @@ internal sealed class GranuleKeys : IDisposable
             GranuleKeys keys = new GranuleKeys(
                 table, coding, granuleRows, (long)rows, components, pageEntries, pages, pageKeys, ints, places, lastKeyAt, lastKeyLength, inline == 1);
             pageKeys = null;
-            ints = null;
-            places = null;
+            ints = default;
+            places = default;
             if (inline == 1 && !keys.Take(page0))
             {
                 keys.ForgetTable();
@@ -759,20 +741,9 @@ internal sealed class GranuleKeys : IDisposable
         }
         finally
         {
-            if (pageKeys is not null)
-            {
-                ArrayPool<byte>.Shared.Return(pageKeys);
-            }
-
-            if (ints is not null)
-            {
-                ArrayPool<int>.Shared.Return(ints);
-            }
-
-            if (places is not null)
-            {
-                ArrayPool<ulong>.Shared.Return(places);
-            }
+            Blocks.ReturnBytes(pageKeys);
+            Blocks.Return(ints);
+            Blocks.Return(places);
         }
     }
 
@@ -924,12 +895,8 @@ internal sealed class GranuleKeys : IDisposable
             int run = entry / RestartEvery;
             if (_buffer is null || _buffer.Length < longest)
             {
-                if (_buffer is not null)
-                {
-                    ArrayPool<byte>.Shared.Return(_buffer);
-                }
-
-                _buffer = ArrayPool<byte>.Shared.Rent(Math.Max(longest, 64));
+                Blocks.ReturnBytes(_buffer);
+                _buffer = Blocks.Rent<byte>(Math.Max(longest, 64)).Array();
                 _keys = null;
             }
 
@@ -962,7 +929,7 @@ internal sealed class GranuleKeys : IDisposable
         {
             if (_buffer is not null)
             {
-                ArrayPool<byte>.Shared.Return(_buffer);
+                Blocks.ReturnBytes(_buffer);
                 _buffer = null;
                 _keys = null;
             }

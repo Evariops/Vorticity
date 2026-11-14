@@ -475,10 +475,10 @@ internal sealed class VariantDirectory
             length += Digits(step.Key!.Length) + 1 + step.Key.Length;
         }
 
-        char[]? rented = length > 256 ? System.Buffers.ArrayPool<char>.Shared.Rent(length) : null;
+        Buffers.Block<char> rented = length > 256 ? Buffers.Blocks.Rent<char>(length) : default;
         try
         {
-            Span<char> joined = rented ?? stackalloc char[256];
+            Span<char> joined = rented.IsEmpty ? stackalloc char[256] : rented;
             int at = 0;
             foreach (VariantStep step in path.Steps)
             {
@@ -493,10 +493,7 @@ internal sealed class VariantDirectory
         }
         finally
         {
-            if (rented is not null)
-            {
-                System.Buffers.ArrayPool<char>.Shared.Return(rented);
-            }
+            Buffers.Blocks.Return(rented);
         }
         if (entries.IsEmpty)
         {

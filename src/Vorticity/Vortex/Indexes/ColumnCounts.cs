@@ -1,8 +1,8 @@
 using System;
-using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.Generic;
 using Vorticity.Aggregating;
+using Vorticity.Buffers;
 using Vorticity.Serialization;
 
 namespace Vorticity.Indexes;
@@ -731,9 +731,9 @@ internal sealed class ColumnCounts
     /// <summary>A growing buffer the counts and their sketches are written into.</summary>
     internal struct Output(int capacity)
     {
-        // Rented, grown into a larger one rented, and given back by Return once the bytes are copied out: the bytes
+        // A block of the pool, grown into a larger one, and given back by Return once the bytes are copied out: the bytes
         // written were grown by doubling into arrays left to the collector, the largest on the large object heap.
-        private byte[] _bytes = ArrayPool<byte>.Shared.Rent(capacity);
+        private byte[] _bytes = Blocks.Rent<byte>(capacity).Array();
 
         internal int Length { get; private set; }
 
@@ -755,9 +755,9 @@ internal sealed class ColumnCounts
         {
             if (Length + bytes > _bytes.Length)
             {
-                byte[] larger = ArrayPool<byte>.Shared.Rent(Math.Max(_bytes.Length * 2, Length + bytes));
+                byte[] larger = Blocks.Rent<byte>(Math.Max(_bytes.Length * 2, Length + bytes)).Array();
                 _bytes.AsSpan(0, Length).CopyTo(larger);
-                ArrayPool<byte>.Shared.Return(_bytes);
+                Blocks.ReturnBytes(_bytes);
                 _bytes = larger;
             }
 
@@ -766,10 +766,10 @@ internal sealed class ColumnCounts
             return span;
         }
 
-        /// <summary>Gives the bytes' array back; the output holds nothing after.</summary>
+        /// <summary>Gives the bytes' block back; the output holds nothing after.</summary>
         internal void Return()
         {
-            ArrayPool<byte>.Shared.Return(_bytes);
+            Blocks.ReturnBytes(_bytes);
             _bytes = [];
             Length = 0;
         }

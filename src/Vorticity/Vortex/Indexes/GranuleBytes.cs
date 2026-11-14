@@ -318,7 +318,7 @@ internal sealed class GranuleBytes
             return false;
         }
 
-        ZstdFrameMetadata[] table = System.Buffers.ArrayPool<ZstdFrameMetadata>.Shared.Rent(Math.Max(node.BufferCount, 1));
+        Buffers.Block<ZstdFrameMetadata> table = Buffers.Blocks.Rent<ZstdFrameMetadata>(Math.Max(node.BufferCount, 1));
         try
         {
             ZstdMetadata metadata = ZstdMetadata.Read(node.Metadata, table.AsSpan(0, node.BufferCount));
@@ -357,7 +357,7 @@ internal sealed class GranuleBytes
         }
         finally
         {
-            System.Buffers.ArrayPool<ZstdFrameMetadata>.Shared.Return(table, clearArray: true);
+            Buffers.Blocks.Return(table);
         }
     }
 

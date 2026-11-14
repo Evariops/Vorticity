@@ -1,6 +1,7 @@
 using System;
 using System.Threading;
 using Vorticity.Aggregating;
+using Vorticity.Buffers;
 using Vorticity.Expressions;
 using Vorticity.Keys;
 using Vorticity.Serialization;
@@ -395,8 +396,8 @@ internal sealed class GranuleStats
         (ids, valueRows) = ([], []);
         int granules = rows.Length;
         int most = (int)Math.Min((long)granules * ListedValues, Math.Max(bytes, 1));
-        int[] listed = ArrayShelf.Rent<int>(most);
-        long[] listedRows = ArrayShelf.Rent<long>(most);
+        Block<int> listed = Blocks.Rent<int>(most);
+        Block<long> listedRows = Blocks.Rent<long>(most);
         try
         {
             int count = 0;
@@ -456,8 +457,8 @@ internal sealed class GranuleStats
         }
         finally
         {
-            ArrayShelf.Return(listed);
-            ArrayShelf.Return(listedRows);
+            Blocks.Return(listed);
+            Blocks.Return(listedRows);
         }
     }
 

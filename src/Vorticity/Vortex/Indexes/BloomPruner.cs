@@ -249,10 +249,10 @@ internal sealed class BloomPruner : IDisposable
     private void Kill(BlockMask live, int level)
     {
         int words = live.Words.Length;
-        ulong[] rented = ArrayPool<ulong>.Shared.Rent(words);
+        Block<ulong> rented = Blocks.Rent<ulong>(words);
         try
         {
-            Span<ulong> kept = rented.AsSpan(0, words);
+            Span<ulong> kept = rented;
             Absent(_filter, kept, level);
             for (int i = 0; i < kept.Length; i++)
             {
@@ -263,7 +263,7 @@ internal sealed class BloomPruner : IDisposable
         }
         finally
         {
-            ArrayPool<ulong>.Shared.Return(rented);
+            Blocks.Return(rented);
         }
     }
 
@@ -483,16 +483,10 @@ internal sealed class BloomPruner : IDisposable
     /// <summary>Keeps a reference to <paramref name="owner"/>, taken by the caller, until the pruner is disposed.</summary>
     private void Hold(SegmentOwner owner)
     {
+        // The pruner's own list: an owner is a reference, which no block of bytes can hold.
         if (_heldCount == _held.Length)
         {
-            SegmentOwner[] grown = ArrayPool<SegmentOwner>.Shared.Rent(Math.Max(16, 2 * _held.Length));
-            _held.AsSpan(0, _heldCount).CopyTo(grown);
-            if (_held.Length != 0)
-            {
-                ArrayPool<SegmentOwner>.Shared.Return(_held, clearArray: true);
-            }
-
-            _held = grown;
+            Array.Resize(ref _held, Math.Max(16, 2 * _held.Length));
         }
 
         _held[_heldCount++] = owner;
@@ -517,34 +511,25 @@ internal sealed class BloomPruner : IDisposable
             _held[i].Release();
         }
 
-        if (_held.Length != 0)
-        {
-            ArrayPool<SegmentOwner>.Shared.Return(_held, clearArray: true);
-        }
-
         (_held, _heldCount) = ([], 0);
     }
 
-    /// <summary>Items added in order to an array rented from the pool, given back by <see cref="Return"/>.</summary>
+    /// <summary>Items added in order to a block of the pool, given back by <see cref="Return"/>.</summary>
     private struct Kept<T>
+        where T : unmanaged
     {
-        private T[]? _items;
+        private Block<T> _items;
         private int _count;
 
         /// <summary>The items, in the order added.</summary>
-        internal readonly Span<T> Items => new Span<T>(_items, 0, _count);
+        internal readonly Span<T> Items => _items.AsSpan(0, _count);
 
         internal void Add(T item)
         {
-            if (_items is null || _count == _items.Length)
+            if (_count == _items.Length)
             {
-                T[] grown = ArrayPool<T>.Shared.Rent(Math.Max(16, 2 * _count));
-                if (_items is not null)
-                {
-                    _items.AsSpan(0, _count).CopyTo(grown);
-                    ArrayPool<T>.Shared.Return(_items, RuntimeHelpers.IsReferenceOrContainsReferences<T>());
-                }
-
+                Block<T> grown = _items.WithLength(_count);
+                Blocks.Grow(ref grown, Math.Max(16, 2 * _count));
                 _items = grown;
             }
 
@@ -553,12 +538,8 @@ internal sealed class BloomPruner : IDisposable
 
         internal void Return()
         {
-            if (_items is not null)
-            {
-                ArrayPool<T>.Shared.Return(_items, RuntimeHelpers.IsReferenceOrContainsReferences<T>());
-            }
-
-            (_items, _count) = (null, 0);
+            Blocks.Return(_items);
+            (_items, _count) = (default, 0);
         }
     }
 
@@ -649,10 +630,10 @@ internal sealed class BloomPruner : IDisposable
         if (expr is LogicalExpr logical)
         {
             Absent(logical.Left, absent, level);
-            ulong[] rented = ArrayPool<ulong>.Shared.Rent(absent.Length);
+            Block<ulong> rented = Blocks.Rent<ulong>(absent.Length);
             try
             {
-                Span<ulong> right = rented.AsSpan(0, absent.Length);
+                Span<ulong> right = rented;
                 Absent(logical.Right, right, level);
                 for (int i = 0; i < absent.Length; i++)
                 {
@@ -661,7 +642,7 @@ internal sealed class BloomPruner : IDisposable
             }
             finally
             {
-                ArrayPool<ulong>.Shared.Return(rented);
+                Blocks.Return(rented);
             }
 
             return;
