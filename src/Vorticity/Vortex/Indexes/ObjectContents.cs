@@ -277,6 +277,25 @@ internal sealed class ObjectContents(
     /// </summary>
     internal long PureGranuleRows { get; init; } = -1;
 
+    /// <summary>The postscript metadata key under which a small object's file holds its own table of contents.</summary>
+    internal const string MetadataKey = "vorticity.contents";
+
+    /// <summary><see cref="MetadataKey"/> as UTF-8.</summary>
+    internal static ReadOnlySpan<byte> MetadataKeyUtf8 => "vorticity.contents"u8;
+
+    /// <summary>
+    /// Whether these are the lean contents an entry keeps of an object whose own file holds its whole table
+    /// (<see cref="MetadataKey"/>): the schema and the rows, which say whether to open the object. The read that opens
+    /// such an object brings it whole, its table with it.
+    /// </summary>
+    internal bool InFile { get; init; }
+
+    /// <summary>
+    /// Whether the table the object's file holds names the counts of its columns, as lean contents say it
+    /// (<see cref="InFile"/>): what tells a rollup, before any open, that the object can be summed.
+    /// </summary>
+    internal bool CountsInFile { get; init; }
+
     /// <summary>
     /// The rows of the object's granules whose statistics list each top-level column's values (<see cref="GranuleStats"/>),
     /// at most <see cref="GranuleStats.ListedValues"/> of them a granule, by the column's place: those whose groups by the
@@ -469,6 +488,12 @@ internal sealed class ObjectContents(
     // a small object, whose dataset holds that schema once. A reader that does not know the field finds no schema, and
     // reads no table.
     private const int TagSchemaHash = 40;
+
+    // Set in the table an entry keeps of an object whose own file holds its whole table (MetadataKey): the entry's names the
+    // schema and the rows alone. Bit 0 says so, and bit 1 that the file's table names the counts of its columns, which a
+    // rollup asks before it opens anything. A reader that does not know the field reads a table that names no region, and
+    // answers from the object's rows.
+    private const int TagInFile = 41;
     private const int TagPathDirectory = 10;
     private const int TagDirectoryField = 1;
     private const int TagDirectoryRegion = 2;
@@ -719,6 +744,31 @@ internal sealed class ObjectContents(
 
             System.Runtime.CompilerServices.StrongBox<DType> read = new System.Runtime.CompilerServices.StrongBox<DType>(SchemaIn(new DTypeArena()));
             return (System.Threading.Interlocked.CompareExchange(ref _schema, read, null) ?? read).Value;
+        }
+    }
+
+    /// <summary>
+    /// The contents as the entry of an object whose own file holds them whole carries them: their version, the object's
+    /// rows and the XXH3-128 of its schema, which say whether the object follows the dataset's schema with no open of it.
+    /// Every region and every count of its columns is left to the file, which the read that opens a small object brings
+    /// whole.
+    /// </summary>
+    internal byte[] ToLeanBytes()
+    {
+        ProtoWriter writer = new ProtoWriter();
+        try
+        {
+            writer.WriteUInt64Always(TagVersion, Version);
+            writer.WriteUInt64Always(TagRows, (ulong)Rows);
+            Span<byte> hash = stackalloc byte[16];
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt128LittleEndian(hash, SchemaInterns.HashOf(Schema));
+            writer.WriteBytes(TagSchemaHash, hash);
+            writer.WriteUInt64Always(TagInFile, Counts.Count > 0 ? 3UL : 1UL);
+            return writer.WrittenSpan.ToArray();
+        }
+        finally
+        {
+            writer.Dispose();
         }
     }
 
@@ -1025,6 +1075,8 @@ internal sealed class ObjectContents(
             List<LocatingEntry>? locating = null;
             ChunkPaging? paging = null;
             byte[]? schema = null;
+            bool inFile = false;
+            bool countsInFile = false;
 
             // The largest column a region found by its column names, which the chunk directories must name too.
             int widest = -1;
@@ -1078,6 +1130,11 @@ internal sealed class ObjectContents(
 
                         // The schema the hash names, when this process met it; none otherwise, and no table.
                         schema ??= SchemaInterns.Find(System.Buffers.Binary.BinaryPrimitives.ReadUInt128LittleEndian(hash));
+                        break;
+                    case (TagInFile, ProtoWireType.Varint):
+                        ulong held41 = reader.ReadVarint();
+                        inFile = (held41 & 1) != 0;
+                        countsInFile = (held41 & 2) != 0;
                         break;
                     case (TagIndexDirectory, ProtoWireType.LengthDelimited):
                         indexDirectory = IndexDirectory.ReadSegment(reader.ReadMessage());
@@ -1302,6 +1359,8 @@ internal sealed class ObjectContents(
                     Carried = carried,
                     Marks = marks.Count == directories.Count ? marks : [],
                     Dictionaries = Placed(dictionaries, directories.Count),
+                    InFile = inFile,
+                    CountsInFile = inFile && countsInFile,
                 }
                 : null;
         }

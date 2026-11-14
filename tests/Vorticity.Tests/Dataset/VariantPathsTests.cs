@@ -136,7 +136,7 @@ public sealed partial class VariantPathsTests
     public async Task ObjectsKeptWholeAnswerFromTheirDirectoriesUnopened()
     {
         await using MemoryObjectStore store = new MemoryObjectStore();
-        await using VortexDataset dataset = await CreateAsync(store);
+        await using VortexDataset dataset = await CreateAsync(store, entryTables: true);
         List<Event> rows = await FillAsync(dataset, new Random(7), deletes: false);
         while (await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 0 }, Ct) is not null)
         {
@@ -169,7 +169,7 @@ public sealed partial class VariantPathsTests
     public async Task AnAppendWritesTheDirectoryOfItsRows(bool directories)
     {
         await using MemoryObjectStore store = new MemoryObjectStore();
-        await using VortexDataset dataset = await CreateAsync(store, directories);
+        await using VortexDataset dataset = await CreateAsync(store, directories, entryTables: true);
         List<Event> rows = [];
         Random random = new Random(19);
         for (int part = 0; part < 6; part++)
@@ -304,9 +304,14 @@ public sealed partial class VariantPathsTests
     private static Scan<Event> Scan(VortexDataset dataset, Func<Probe<Event>, Predicate>? filter) =>
         filter is null ? dataset.Scan<Event>() : dataset.Scan<Event>().Where(filter);
 
-    private static ValueTask<VortexDataset> CreateAsync(IObjectStore store, bool directories = true) =>
+    /// <summary>
+    /// A dataset of events. With <paramref name="entryTables"/> the tables of its small objects stay in their entries, as a
+    /// large object's does, for the tests that read a directory with no open of its object.
+    /// </summary>
+    private static ValueTask<VortexDataset> CreateAsync(IObjectStore store, bool directories = true, bool entryTables = false) =>
         VortexDataset.CreateAsync(store, Event.Schema, new DatasetOptions
         {
+            TableInFileBytes = entryTables ? 0 : ObjectEntry.FirstReadBytes,
             Layout = new DatasetLayout
             {
                 Partition = LayoutValue.Column(nameof(Event.At)).Truncate(CalendarUnit.Hour),

@@ -387,7 +387,7 @@ find its rows, of its chunks, its pages, its indexes and its variants' paths, ne
 the filters' pages questions evaluated. A read with no open of an object, such as a
 lookup of an identifier in a large one, needs nothing else before its data; a read that opens the
 object reads its last 64 KiB from the store first. An object never changes, so an entry never goes
-stale.
+stale. An object of 64 KiB at most holds its table of contents itself and is read through its open, which brings it whole: the cache keeps it when it keeps data, and nothing of it otherwise.
 
 Given a quota of its own, the cache keeps the data a question reads of a plain dataset's objects too,
 their footers included, so that the same question asked again, by this process or the next, reads no
@@ -612,7 +612,7 @@ never lend its values to an unrelated column.
   formats 1 to 4, is refused with a message that says so: read its rows with the release that wrote
   it and append them to a new dataset. A later release's format is refused too, so upgrade every
   process that writes or reads a dataset together.
-* Upgrade the readers of a dataset before its writers. From this release, a small object keeps no zone map and its entry names its schema by a hash. An earlier release reads the commits of such a dataset and then fails on those objects: a walk by key throws, and a read that goes through the entry's table of contents finds no table.
+* Upgrade the readers of a dataset before its writers. From this release, a small object keeps no zone map and holds its table of contents itself, its entry naming its schema by a hash. An earlier release reads the commits of such a dataset and then fails on those objects: a walk by key throws, and a read that goes through the entry's table of contents finds no table.
 * Marked rows keep their bytes until compaction. A delete that marks rows frees no space, since the
   object holds them (up to an eighth of its rows) until compaction rewrites it or a later delete
   passes that share. An object under a mebibyte is rewritten by every delete that touches it, so

@@ -84,6 +84,36 @@ public sealed partial class DatasetRollupsTests
         Assert.True((await dataset.VerifyAsync(cancellationToken: Ct)).Holds);
     }
 
+    /// <summary>
+    /// Objects small enough to hold their tables of contents in their own files are summed as the others are. Their entries
+    /// keep a lean table that says their files' name counts: the rollup opens them, which brings each whole, and reads the
+    /// counts there.
+    /// </summary>
+    [Fact]
+    public async Task ARollupSumsSmallObjectsThroughTheTablesTheirFilesHold()
+    {
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await WriteAsync(store, rowsPerHour: 600);
+        List<DataObject> objects = await dataset.ListObjectsAsync(Ct).ToListAsync(Ct);
+        int deepest = objects.Max(held => held.Level);
+        List<DataObject> summed = [.. objects.Where(held => held.Level == deepest)];
+        Assert.NotEmpty(summed);
+        Assert.All(summed, held =>
+        {
+            ObjectContents lean = Assert.IsType<ObjectContents>(held.Entry!.Contents);
+            Assert.True(lean.InFile && lean.CountsInFile, $"'{held.Key}' of {held.Entry.Bytes} bytes keeps its table in its entry");
+            Assert.Empty(lean.Counts);
+        });
+
+        int put = await dataset.RollUpAsync(Ct);
+        List<RollupEntry> rollups = await RollupsAsync(dataset);
+        Console.WriteLine($"ROLLUPS over small objects: {summed.Count} objects of {summed.Max(held => held.Entry!.Bytes)} bytes at most in level {deepest}, {put} put");
+        Assert.True(put > 0, "no rollup over small objects");
+        Assert.Equal(put, rollups.Count);
+        Assert.All(rollups, rollup => Assert.Equal(deepest, rollup.Level));
+        await HoldsAsync(dataset, rollups);
+    }
+
     [Fact]
     public async Task ADeleteTakesAwayTheRollupsOverItsObjectsAndAVacuumTheirs()
     {
@@ -333,8 +363,9 @@ public sealed partial class DatasetRollupsTests
     /// hour, some of them together in the deepest level, each keeping its counts, and the sketches of its service's values,
     /// which hold 256 rows each and more.
     /// </summary>
-    private static async Task<VortexDataset> WriteAsync(MemoryObjectStore store)
+    private static async Task<VortexDataset> WriteAsync(MemoryObjectStore store, int rowsPerHour = RowsPerHour)
     {
+        int RowsPerHour = rowsPerHour;
         VortexDataset dataset = await VortexDataset.CreateAsync(store, Hit.Schema, Options() with
         {
             Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(Hit.At)).Truncate(CalendarUnit.Hour), SortKey = [LayoutValue.Column(nameof(Hit.At))], Organization = LayoutOrganization.Leveled, ObjectBytes = 12L << 10 },

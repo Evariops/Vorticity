@@ -262,6 +262,23 @@ internal static class DatasetRollups
     private static async ValueTask<RollupEntry?> FromObjectsAsync(
         VortexDataset dataset, DatasetSnapshot version, DatasetKey key, int level, List<PositionedObject> objects, Run run, CancellationToken cancellationToken)
     {
+        // An object whose entry keeps a lean table holds the regions of its counts in its own file, and says so: its open,
+        // which the read of its counts needs anyway, brings its table. Those of a run open side by side.
+        List<Task>? opening = null;
+        for (int i = run.First; i < run.First + run.Count; i++)
+        {
+            ObjectEntry entry = objects[i].Entry;
+            if (entry.Contents is { InFile: true, CountsInFile: true } && !entry.HasDeletions)
+            {
+                (opening ??= []).Add(version.ContentsAsync(entry, cancellationToken).AsTask());
+            }
+        }
+
+        if (opening is not null)
+        {
+            await Task.WhenAll(opening).ConfigureAwait(false);
+        }
+
         for (int i = run.First; i < run.First + run.Count; i++)
         {
             PositionedObject held = objects[i];

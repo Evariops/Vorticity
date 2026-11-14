@@ -44,6 +44,9 @@ public sealed partial class IdentifierPostingsTests
                 Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(Request.At)).Truncate(CalendarUnit.Hour), SortKey = [LayoutValue.Column(nameof(Request.At))], Organization = LayoutOrganization.Leveled },
                 Identifiers = [nameof(Request.RequestId)],
                 ContentsObjectBytes = 0,
+
+                // The tables of these small objects stay in their entries, which name their postings with no open.
+                TableInFileBytes = 0,
                 Write = paged ? new VortexWriteOptions { BlockRows = 16, ChunkTargetBytes = 1, ChunkPageEntries = 4 } : VortexWriteOptions.Default,
                 ChunkBytes = paged ? 1 : 1 << 20,
             }, Ct);

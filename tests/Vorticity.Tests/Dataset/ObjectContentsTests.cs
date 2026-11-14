@@ -35,6 +35,9 @@ public sealed partial class ObjectContentsTests
         {
             Session = session,
             Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(Call.At)).Truncate(CalendarUnit.Hour), SortKey = [LayoutValue.Column(nameof(Call.At))], Organization = LayoutOrganization.Leveled }, ContentsObjectBytes = 0,
+
+            // The tables of these small objects stay in their entries, which the test reads with no open.
+            TableInFileBytes = 0,
             Write = new VortexWriteOptions { Indexes = IndexPolicy.None.WithBudgetPerMille(1_000), BlockRows = GranuleRows },
         }, Ct);
         Random random = new Random(5);
@@ -98,8 +101,10 @@ public sealed partial class ObjectContentsTests
 
     /// <summary>
     /// A small object keeps each fact about it once: no zone map over its one zone, whose bounds its entry's summaries
-    /// hold, no geometry of chunks that no read takes a part of, and in its entry's table its schema by its hash, which its
-    /// dataset holds. An object of several zones, larger than what an open reads of it, keeps all three.
+    /// hold, no geometry of chunks that no read takes a part of, and its table of contents in its own file, which the read
+    /// that opens it brings whole. Its entry keeps a lean table, its schema by its hash and its rows, and takes the whole
+    /// one from the file when it is asked for. An object of several zones, larger than what an open reads of it, keeps its
+    /// zone maps, its geometry and its table in its entry.
     /// </summary>
     [Fact]
     public async Task ASmallObjectKeepsEachFactOnceAndALargeOneKeepsItsMaps()
@@ -126,32 +131,92 @@ public sealed partial class ObjectContentsTests
 
         ObjectEntry small = entries[0];
         Assert.True(small.Bytes <= VortexOpenOptions.DefaultInitialReadBytes, $"the small object weighs {small.Bytes} bytes");
-        ObjectContents contents = Assert.IsType<ObjectContents>(small.Contents);
-        Assert.Empty(contents.Marks);
-        Assert.Equal(schema, contents.Schema);
-        Assert.True(small.TableOfContents.Span.IndexOf(schema) < 0, "the small object's table holds its schema's bytes");
+
+        // Its entry keeps a lean table: its schema by its hash and its rows, a few dozen bytes, and no region.
+        ObjectContents lean = Assert.IsType<ObjectContents>(small.Contents);
+        Assert.True(lean.InFile);
+        Assert.True(small.TableInFile);
+        Assert.Equal(schema, lean.Schema);
+        Assert.Equal(400, lean.Rows);
+        Assert.Empty(lean.ChunkDirectories);
+        Assert.Null(lean.KeyIndex);
+        Assert.True(small.TableOfContents.Length < 40, $"the small object's entry keeps a table of {small.TableOfContents.Length} bytes");
         await using (ObjectLease lease = await dataset.RentAsync(small, Ct))
         {
             Assert.DoesNotContain(lease.File.LayoutEncodings, layout => layout.Id == "vortex.zoned");
+            Assert.True(lease.File.TryGetMetadataIndex(ObjectContents.MetadataKeyUtf8, out _), "the small object's file holds no table of contents");
         }
+
+        // Its file holds the whole table, which the entry takes when it is asked for: each column's chunk directory, the
+        // sparse index of the key, and no geometry of chunks.
+        ObjectContents held = Assert.IsType<ObjectContents>(await dataset.ContentsAsync(small, Ct));
+        Assert.Same(held, small.Contents);
+        Assert.False(held.InFile);
+        Assert.True(small.TableInFile);
+        Assert.Equal(schema, held.Schema);
+        Assert.Equal(400, held.Rows);
+        Assert.Equal(dataset.Snapshot.Schema.DType.FieldCount, held.ChunkDirectories.Count);
+        Assert.NotNull(held.KeyIndex);
+        Assert.Empty(held.Marks);
 
         ObjectEntry large = entries[1];
         Assert.True(large.Bytes > VortexOpenOptions.DefaultInitialReadBytes, $"the large object weighs {large.Bytes} bytes");
         ObjectContents whole = Assert.IsType<ObjectContents>(large.Contents);
+        Assert.False(whole.InFile);
+        Assert.False(large.TableInFile);
         Assert.NotEmpty(whole.Marks);
         Assert.True(large.TableOfContents.Span.IndexOf(schema) >= 0, "the large object's table names its schema by its hash");
         await using (ObjectLease lease = await dataset.RentAsync(large, Ct))
         {
             Assert.Contains(lease.File.LayoutEncodings, layout => layout.Id == "vortex.zoned");
+            Assert.False(lease.File.TryGetMetadataIndex(ObjectContents.MetadataKeyUtf8, out _), "the large object's file holds its table of contents");
         }
 
-        // What an entry weighs, which every leaf a commit rewrites carries: the small object's table is less than half the
-        // large one's, the schema and the geometry gone from it.
+        // What an entry weighs, which every leaf a commit rewrites carries: a few dozen bytes of table for the small object,
+        // where the large one's takes kilobytes.
         Assert.True(
-            small.TableOfContents.Length * 2 < large.TableOfContents.Length,
+            small.TableOfContents.Length * 20 < large.TableOfContents.Length,
             $"a table of {small.TableOfContents.Length} bytes for the small object, {large.TableOfContents.Length} for the large one");
 
         Assert.Equal(40_400, await dataset.Scan<Call>().CountAsync(Ct));
+    }
+
+    /// <summary>
+    /// A read of a small object's regions goes through its open, which brings it whole. Asked for its table, a cold handle
+    /// opens the object in one request, its bytes, and its entry takes the table its file holds. The sparse index that
+    /// table names is then read with no request, the object still open.
+    /// </summary>
+    [Fact]
+    public async Task ARegionOfASmallObjectIsReadThroughItsOpen()
+    {
+        await using MemoryObjectStore inner = new MemoryObjectStore();
+        await using CountingObjectStore store = new CountingObjectStore(inner);
+        DatasetOptions options = new DatasetOptions { Layout = new DatasetLayout { SortKey = [LayoutValue.Column(nameof(Call.At))] } };
+        await using (VortexDataset writer = await VortexDataset.CreateAsync(store, Call.Schema, options, Ct))
+        {
+            Random random = new Random(17);
+            Call[] rows = [.. Enumerable.Range(0, 400).Select(i => new Call(Noon.AddSeconds(i), $"region-{random.Next(50)}", random.Next(600), random.NextInt64()))];
+            await using ObjectDraft draft = writer.StartObject();
+            await draft.Writer.WriteAsync<Call>(rows, Ct);
+            await writer.AppendAsync(draft, Ct);
+        }
+
+        await using VortexDataset dataset = await VortexDataset.OpenAsync(store, new DatasetOptions(), Ct);
+        ObjectEntry entry = Assert.Single(await dataset.ListObjectsAsync(Ct).ToListAsync(Ct)).Entry!;
+        Assert.True(entry.TableInFile);
+        Assert.Null(entry.Contents!.KeyIndex);
+
+        store.Reset();
+        ObjectContents contents = Assert.IsType<ObjectContents>(await dataset.ContentsAsync(entry, Ct));
+        Assert.Equal(1, store.Requests);
+        Assert.Equal(entry.Bytes, store.BytesRead);
+        Assert.NotNull(contents.KeyIndex);
+
+        store.Reset();
+        using GranuleKeys? keys = await dataset.KeyIndexAsync(entry, contents, Ct);
+        Assert.NotNull(keys);
+        Assert.Equal(400, keys.Rows);
+        Assert.Equal(0, store.Requests);
     }
 
     /// <summary>
@@ -236,6 +301,9 @@ public sealed partial class ObjectContentsTests
         {
             Session = session,
             Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(Tagged.At)).Truncate(CalendarUnit.Hour), SortKey = [LayoutValue.Column(nameof(Tagged.At))], Organization = LayoutOrganization.Leveled }, ContentsObjectBytes = 0,
+
+            // The tables of these small objects stay in their entries, which the test reads with no open.
+            TableInFileBytes = 0,
         }, Ct);
         Random random = new Random(3);
         for (int part = 0; part < 16; part++)

@@ -107,6 +107,9 @@ public sealed partial class IdentifierPostingsTests
             Identifiers = [nameof(Request.RequestId)],
             ContentsObjectBytes = 0,
 
+            // The tables of these small objects stay in their entries, which name their postings with no open.
+            TableInFileBytes = 0,
+
             // A request priced at nothing: a lookup, a request a column, weighs less than any footer an open reads.
             CostProfile = Vorticity.IO.CostProfile.Memory,
         }, Ct);

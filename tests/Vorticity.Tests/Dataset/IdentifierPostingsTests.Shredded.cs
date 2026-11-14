@@ -31,6 +31,9 @@ public sealed partial class IdentifierPostingsTests
                 Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(Visit.At)).Truncate(CalendarUnit.Hour), SortKey = [LayoutValue.Column(nameof(Visit.At))], Organization = LayoutOrganization.Leveled },
                 ShreddedPaths = declared ? ["Attributes['rare'].AsInt64()"] : null,
                 ContentsObjectBytes = 0,
+
+                // The tables of these small objects stay in their entries, where the test reads their columns' bytes.
+                TableInFileBytes = 0,
             }, Ct))
             {
                 for (int part = 0; part < 16; part++)
@@ -133,6 +136,9 @@ public sealed partial class IdentifierPostingsTests
         DatasetOptions options = new DatasetOptions
         {
             Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(Visit.At)).Truncate(CalendarUnit.Hour), SortKey = [LayoutValue.Column(nameof(Visit.At))], Organization = LayoutOrganization.Leveled }, ContentsObjectBytes = 0,
+
+            // The tables of these small objects stay in their entries, where the test reads their columns' bytes.
+            TableInFileBytes = 0,
         };
         await using VortexDataset writer = await VortexDataset.CreateAsync(store, Visit.Schema, options, Ct);
         await using VortexDataset compactor = await VortexDataset.OpenAsync(store, options, Ct);

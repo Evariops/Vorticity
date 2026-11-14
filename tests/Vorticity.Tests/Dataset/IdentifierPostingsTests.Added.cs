@@ -28,6 +28,9 @@ public sealed partial class IdentifierPostingsTests
 
             // A request priced at nothing: every object that carries postings is looked up, however small its footer.
             CostProfile = Vorticity.IO.CostProfile.Memory,
+
+            // The tables of these small objects stay in their entries, which name their postings with no open.
+            TableInFileBytes = 0,
         }, Ct);
         Random random = new Random(37);
         List<Request> appended = [];

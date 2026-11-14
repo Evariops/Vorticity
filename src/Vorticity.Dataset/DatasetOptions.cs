@@ -260,6 +260,13 @@ public sealed record DatasetOptions
     internal long ContentsObjectBytes { get; init; } = 1L << 20;
 
     /// <summary>
+    /// The bytes up to which an object holds its table of contents in its own file, its entry keeping a lean one: 64 KiB by
+    /// default, what an open reads first, so that the read that opens such an object brings its table. A test sets 0 to
+    /// keep the tables of its small objects in their entries, and read them with no open as a large object's is read.
+    /// </summary>
+    internal long TableInFileBytes { get; init; } = ObjectEntry.FirstReadBytes;
+
+    /// <summary>
     /// The share of an object's rows its marks may reach, as a divisor: past a
     /// <c>1/MarkedShare</c>-th of its rows deleted, a delete rewrites the object instead; 8 by default.
     /// </summary>

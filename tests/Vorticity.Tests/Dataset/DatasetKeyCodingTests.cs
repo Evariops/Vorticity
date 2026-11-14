@@ -94,6 +94,9 @@ public sealed partial class DatasetKeyCodingTests
         Session = session ?? VortexSession.Default,
         Layout = layout,
         ContentsObjectBytes = 0,
+
+        // The tables of these small objects stay in their entries, where the tests read how their sparse indexes are coded.
+        TableInFileBytes = 0,
         Write = new VortexWriteOptions { BlockRows = 512, UnpaddedKeyIndex = unpadded },
     };
 

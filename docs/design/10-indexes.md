@@ -43,6 +43,7 @@ nor the footer's segment table. A reader that does not ask for the key never tou
 checks that the directory's own segment lies inside the file, which it does, and does not know the
 runs exist. A second entry, `vorticity.identity`, is the file's identity (see [identity and
 integrity](13-dataset.md#7-identity-and-integrity)), which leaves fourteen entries for the caller.
+A dataset's object that ends within the 64 KiB an open reads first holds a third, `vorticity.contents`: its table of contents, which its entry then need not repeat ([what a node carries](13-dataset.md#42-what-a-node-carries)), and thirteen entries are left.
 
 The carriers not used:
 

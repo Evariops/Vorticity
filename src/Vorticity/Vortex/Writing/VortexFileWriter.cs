@@ -168,6 +168,19 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// </summary>
     internal byte[]? TableOfContents { get; private set; }
 
+    /// <summary>
+    /// Once the file is completed, whether it holds its table of contents itself, under the metadata key
+    /// <see cref="Indexes.ObjectContents.MetadataKey"/> (<see cref="VortexWriteOptions.ContentsInFile"/>): a file that ends
+    /// within what an open reads first.
+    /// </summary>
+    internal bool TableInFile { get; private set; }
+
+    /// <summary>
+    /// What follows the footer of a file at most, but for its metadata entries: its identity, its postscript and its end.
+    /// A postscript of a file with a few metadata entries takes some 300 bytes.
+    /// </summary>
+    private const int EndSlackBytes = 2_048;
+
     // The table of contents of a file that carries one, built once its regions are written, before the directory's.
     private ObjectContents? _contents;
 
@@ -513,6 +526,9 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
     /// <summary>Whether it keeps its chunks' geometry when one granule holds its rows (<see cref="VortexWriteOptions.MarksOfOneGranule"/>).</summary>
     private bool _marksOfOneGranule = true;
+
+    /// <summary>Whether a file that ends within the first read holds its table of contents (<see cref="VortexWriteOptions.ContentsInFile"/>).</summary>
+    private bool _contentsInFile;
 
     /// <summary>Whether the key's sparse index may code its texts unpadded (<see cref="VortexWriteOptions.UnpaddedKeyIndex"/>).</summary>
     private bool _unpaddedKeyIndex = true;
@@ -951,6 +967,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             _zones = options.Zones,
             _zoneMapsOfOneZone = options.ZoneMapsOfOneZone,
             _marksOfOneGranule = options.MarksOfOneGranule,
+            _contentsInFile = options.ContentsInFile,
             _unpaddedKeyIndex = options.UnpaddedKeyIndex,
         };
         writer._leastChunkBlocks = LeastChunkBlocks(options.RowBound, schema, writer._rowBlock);
@@ -3148,11 +3165,13 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
         // A file's table of contents names the directory too, now that it is written, and the entry of each index
         // that locates a column's values in it, which a lookup reads alone.
+        ObjectContents? named = null;
         if (_contents is { } contents)
         {
-            TableOfContents = (directory is null
+            named = directory is null
                 ? contents
-                : contents.Naming(IndexSegment.Of(directoryOffset, directory, 0), Locating(located!, directory, directoryOffset))).ToBytes();
+                : contents.Naming(IndexSegment.Of(directoryOffset, directory, 0), Locating(located!, directory, directoryOffset));
+            TableOfContents = named.ToBytes();
         }
 
         long dtypeOffset = _sink.Position;
@@ -3174,6 +3193,20 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         int footerLength = footer.Length;
         await _sink.WriteAsync(footer, cancellationToken).ConfigureAwait(false);
 
+        // A file that ends within what an open reads first holds its table of contents itself, when its writer is asked
+        // to: the read that opens it brings the table, and the entry a dataset keeps of it need not repeat it. The schema
+        // is named by its hash there, since the file holds its dtype.
+        KeyValuePair<string, ReadOnlyMemory<byte>>[] metadata = _metadata;
+        if (_contentsInFile && named is not null && _metadata.Length + 3 <= VortexLimits.MaxMetadataSegments)
+        {
+            byte[] held = named.ToBytes(schemaByHash: true);
+            if (_sink.Position + held.Length + EndSlackBytes <= VortexOpenOptions.DefaultInitialReadBytes)
+            {
+                metadata = [.. _metadata, new KeyValuePair<string, ReadOnlyMemory<byte>>(ObjectContents.MetadataKey, held)];
+                TableInFile = true;
+            }
+        }
+
         builder.Clear();
         await WriteEndAsync(
             _sink,
@@ -3181,7 +3214,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                 dtypeOffset, dtypeLength, layoutOffset, layoutLength, footerOffset, footerLength,
                 statisticsOffset, statisticsLength, directoryOffset, directory?.Length ?? 0),
             _identity,
-            _metadata,
+            metadata,
             cancellationToken,
             builder,
             _filePipe is { Durable: true } durable ? durable : null).ConfigureAwait(false);

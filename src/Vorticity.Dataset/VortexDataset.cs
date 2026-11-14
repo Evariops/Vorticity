@@ -956,6 +956,10 @@ public sealed class VortexDataset : IAsyncDisposable
             // an object uses. A job's object keeps it, with the statistics over its granules that are read through it.
             MarksOfOneGranule = contents && synopses,
 
+            // An object that ends within what an open reads first holds its table of contents itself: the read that opens
+            // it brings the table, and its entry names its schema and its rows alone (TableOf).
+            ContentsInFile = contents && _options.TableInFileBytes > 0,
+
             // A job's object keeps a sheet of each column its table of contents names, when it is large enough for a scan
             // to read the sheets before it, and the counts of each column over its rows; an append's, which a job merges
             // soon, keeps none.
@@ -2549,6 +2553,14 @@ public sealed class VortexDataset : IAsyncDisposable
     internal ValueTask<ObjectLease> RentAsync(ObjectEntry entry, CancellationToken cancellationToken, bool rows = false) =>
         Snapshot.RentAsync(entry, cancellationToken, rows);
 
+    /// <summary>
+    /// The table of contents of the object <paramref name="entry"/> names: its entry's, or the one its own file holds when
+    /// the entry keeps a lean one (<see cref="Indexes.ObjectContents.InFile"/>). The object is then opened, which brings
+    /// it whole, and left open in the handle's cache for the read that follows.
+    /// </summary>
+    internal ValueTask<Indexes.ObjectContents?> ContentsAsync(ObjectEntry entry, CancellationToken cancellationToken) =>
+        Snapshot.ContentsAsync(entry, cancellationToken);
+
     /// <summary>The objects of level 0 this node read through keys of their variant columns, shredded in memory once.</summary>
     internal LevelZeroMemo LevelZero { get; } = new LevelZeroMemo();
 
@@ -2561,23 +2573,33 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <summary>
     /// The store's reader of an object read with no open of it, which the caller disposes: a sealed object's
     /// keeps its trailer and the frames of the regions its table of contents declares in the session's synopsis
-    /// cache, the bytes the store holds.
+    /// cache, the bytes the store holds. An object whose own file holds its table of contents is small, and is read
+    /// through its open instead, which brings it whole: its regions then cost no request while it stays open.
     /// </summary>
     private ValueTask<ISegmentReader> OpenFooterlessAsync(ObjectEntry entry, Indexes.ObjectContents contents, CancellationToken cancellationToken) =>
-        SealedObjectStore.OpenDataAsync(
-            _store, entry.Key, entry.Uid, entry.Bytes, cancellationToken,
-            _store is SealedObjectStore { Seals: true } ? SealedSynopsisCache.Over(Session.Options.SynopsisCache, entry.Uid, contents) : null,
-            footerless: true);
+        entry.TableInFile
+            ? OpenLeasedAsync(entry, cancellationToken)
+            : SealedObjectStore.OpenDataAsync(
+                _store, entry.Key, entry.Uid, entry.Bytes, cancellationToken,
+                _store is SealedObjectStore { Seals: true } ? SealedSynopsisCache.Over(Session.Options.SynopsisCache, entry.Uid, contents) : null,
+                footerless: true);
+
+    /// <summary>The object <paramref name="entry"/> names, open, as the reader a read with no open reads through.</summary>
+    private async ValueTask<ISegmentReader> OpenLeasedAsync(ObjectEntry entry, CancellationToken cancellationToken) =>
+        new LeasedReader(await RentAsync(entry, cancellationToken).ConfigureAwait(false));
 
     /// <summary>
     /// The reader of an object read with no open of it, from the store's reader <paramref name="source"/>: the
     /// session's, through the session's synopsis cache for the regions the object's table of contents declares
-    /// when the object is plain. A sealed object's reader decrypts what its cache keeps, which holds no plaintext.
+    /// when the object is plain. A sealed object's reader decrypts what its cache keeps, which holds no plaintext. An
+    /// open object's reader (<see cref="LeasedReader"/>) reads through the session already.
     /// </summary>
     private ISegmentReader Footerless(ISegmentReader source, ObjectEntry entry, Indexes.ObjectContents contents) =>
-        SessionReader.Wrap(
-            source is ObjectStoreSource ? SynopsisCacheReader.Over(source, Session.Options.SynopsisCache, entry.Uid, contents) : source,
-            Session);
+        source is LeasedReader
+            ? source
+            : SessionReader.Wrap(
+                source is ObjectStoreSource ? SynopsisCacheReader.Over(source, Session.Options.SynopsisCache, entry.Uid, contents) : source,
+                Session);
 
     /// <summary>
     /// Whether an index on the column of a field of <paramref name="schema"/>'s root is one <paramref name="filter"/> may
@@ -3294,6 +3316,13 @@ public sealed class VortexDataset : IAsyncDisposable
             }
 
             known.Rows += held.Entry.Rows;
+
+            // A small object's sheets are named by the table its own file holds: its open, which reads them, brings it.
+            if (fields.Count > 0 && held.Entry.Contents is { InFile: true })
+            {
+                await version.ContentsAsync(held.Entry, cancellationToken).ConfigureAwait(false);
+            }
+
             Indexes.ColumnSheet?[] sheets = fields.Count == 0 ? [] : await ReadSheetsAsync(held.Entry, fields, cancellationToken).ConfigureAwait(false);
             for (int c = 0; c < sheets.Length; c++)
             {
@@ -4307,7 +4336,7 @@ public sealed class VortexDataset : IAsyncDisposable
         }
         ObjectEntry entry = new ObjectEntry(draft.Key, Uid(draft.Identity), rows, bytes, hash, summaries)
             .WithFooterBytes(draft.Writer.TailBytes)
-            .WithTableOfContents(TableOf(draft.Writer.TableOfContents, bytes))
+            .WithTableOfContents(TableOf(draft.Writer.TableOfContents, bytes, draft.Writer.TableInFile))
             .WithLastKey(last)
             .WithArrival(draft.Arrival > 0 ? draft.Arrival : Math.Max(_options.TimeProvider.GetUtcNow().ToUnixTimeSeconds(), 1));
         return new WrittenObject(entry, KeyOf(prefix, entry), draft.Writer.DataBytes, draft.StartedAt, draft.KeyGeneration);
@@ -4318,18 +4347,23 @@ public sealed class VortexDataset : IAsyncDisposable
     /// named by its hash when the dataset holds that very schema and the object is small enough that the read opening it
     /// brings it whole. A small object's entry then weighs 1.8 KB where it weighed 3.1, in every leaf a commit rewrites. A
     /// large object keeps its schema: after a change of schema a reader would open it to learn its columns, which a small
-    /// object's reader does anyway.
+    /// object's reader does anyway. A small object whose file holds the table itself (<paramref name="inFile"/>) keeps
+    /// a lean one in its entry, its schema's hash and its rows: 0.7 KB less again, and the read that opens the object
+    /// brings the table.
     /// </summary>
-    private byte[]? TableOf(byte[]? table, long storedBytes)
+    private byte[]? TableOf(byte[]? table, long storedBytes, bool inFile)
     {
         if (table is null || storedBytes > VortexOpenOptions.DefaultInitialReadBytes)
         {
             return table;
         }
 
-        return Indexes.ObjectContents.From(table) is { } contents && contents.Schema.AsSpan().SequenceEqual(Snapshot.Schema.FileSchema)
-            ? contents.ToBytes(schemaByHash: true)
-            : table;
+        if (Indexes.ObjectContents.From(table) is not { } contents || !contents.Schema.AsSpan().SequenceEqual(Snapshot.Schema.FileSchema))
+        {
+            return table;
+        }
+
+        return inFile && storedBytes <= _options.TableInFileBytes ? contents.ToLeanBytes() : contents.ToBytes(schemaByHash: true);
     }
 
     /// <summary>Whether <paramref name="failure"/> is a read before a streamed object's kept tail, however wrapped.</summary>

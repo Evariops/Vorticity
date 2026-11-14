@@ -64,6 +64,9 @@ public sealed class RollupBuilderTests
             Write = new VortexWriteOptions { RowBlockSize = 512, DataBlockTargetBytes = 4 << 10 },
             SheetObjectBytes = 0,
             ContentsObjectBytes = 0,
+
+            // The tables of these small objects stay in their entries, where the test finds those that keep counts.
+            TableInFileBytes = 0,
         });
         DatasetKey key = dataset.Snapshot.Schema.RollupKey!;
         ValueCut values = dataset.Snapshot.Schema.Cut!;

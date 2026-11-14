@@ -525,6 +525,27 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
         }
     }
 
+    /// <summary>
+    /// Takes <paramref name="contents"/>, the whole table the object's own file holds, in place of the lean one the entry
+    /// carries (<see cref="Indexes.ObjectContents.InFile"/>): from the object's open on, the entry answers as one that
+    /// carried the table. Its bytes do not change, so a page that holds it is written again as it was read.
+    /// </summary>
+    internal void Adopt(Indexes.ObjectContents contents)
+    {
+        Volatile.Write(ref _adopted, true);
+        Volatile.Write(ref _contents, contents);
+    }
+
+    // Whether the entry took its object's own table in place of its lean one (Adopt).
+    private bool _adopted;
+
+    /// <summary>
+    /// Whether the table the entry carries is a lean one, its object's own file holding the whole
+    /// (<see cref="Indexes.ObjectContents.InFile"/>), adopted yet or not. Such an object is small: a read of its regions
+    /// goes through its open, which brings it whole (<see cref="LeasedReader"/>).
+    /// </summary>
+    internal bool TableInFile => Volatile.Read(ref _adopted) || Contents is { InFile: true };
+
     /// <summary>The entry with <paramref name="contents"/> as its table of contents; itself when there are none.</summary>
     /// <param name="contents">The writer's table of contents, or null.</param>
     public ObjectEntry WithTableOfContents(byte[]? contents)
