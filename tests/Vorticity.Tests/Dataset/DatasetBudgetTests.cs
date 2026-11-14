@@ -244,15 +244,17 @@ public sealed class DatasetBudgetTests
     }
 
     [Fact]
-    public async Task ACommitCostsThreeRequestsAndOneMoreWhenItOutgrowsTheInlining()
+    public async Task ACommitCostsThreeRequestsAndOneMoreWhenItsLeafIsNotInTheHeader()
     {
         // A commit costs three dependent requests: the List, the read of N's header, the
         // creation. An iteration costs depth + 2: the header of N+1, the touched leaves, the
-        // creation. BOTH ARE TRUE, and what decides which is the header's inlining: while the
-        // header carries the pages the commit will touch, the touched leaves cost nothing and the
-        // total is three. Once the tree outgrows the 192 KiB the header inlines, the touched leaf
-        // is a read of its own and the total is four. That is the whole story of this number, and
-        // it is why the assertion below is a range with an explanation rather than a constant.
+        // creation. BOTH ARE TRUE, and what decides which is the header's inlining: a header
+        // carries the pages its own commit wrote, up to 192 KiB. Here one commit wrote the whole
+        // tree, so while the tree fits the header carries the leaf the next commit touches and
+        // the total is three. Once the tree outgrows what the header inlines, the touched leaf
+        // is a read of its own and the total is four, as it is for a leaf an earlier commit
+        // wrote. That is the whole story of this number, and it is why the assertion below is a
+        // range with an explanation rather than a constant.
         CancellationToken ct = TestContext.Current.CancellationToken;
         int[] sizes = [1, 1_000, 100_000];
         long[] steps = new long[sizes.Length];

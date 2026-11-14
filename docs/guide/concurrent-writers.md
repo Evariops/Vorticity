@@ -62,7 +62,7 @@ can be spread over the writers as you like, and spread again at any time.
 `AppendAsync`, `ReplaceObjectsAsync`, `DeleteAsync` and `UpdateAsync` all take the ranges. A
 commit that consumed entries and produced no row still commits, so the offset moves: an append of an
 empty draft, or a delete that matched nothing. Compactions, indexings and vacuums declare nothing and
-carry the offsets on. `ForgetSourcesAsync` drops the offsets of sources no writer will take again.
+carry the offsets on. `ForgetSourcesAsync` drops the offsets of sources no writer will take again. Every commit's header carries the offset of each source, so name a source by what lasts, a shard or a partition of a log, never by a slice of time.
 
 The writers leave compaction to a process of their own, which runs the dataset's only compaction
 loop, and keep inline compaction off, as it is by default. Two compactions then never race for the

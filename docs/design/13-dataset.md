@@ -145,7 +145,7 @@ pure function of the key set and the parameters: the same objects committed in a
 byte-identical pages and one root hash. The rule sits behind an interface whose other
 implementation, a B+tree's fill factor, is measured on the same bench.
 
-With entries of about 180 bytes the fan-out is about 680. The header inlines the pages its commit wrote, the path from the leaves it changed to the level's top, so a cold lookup reads one dependent page per level that its path shares with no page of that commit: 0 or 1 up to about 650 objects, 1 or 2 up to about 400 000, and 2 or 3 up to about 280 million, the lower count when the commit changed the level. A handle keeps the pages it read across versions, so it reads each of them once (see [objects and keys](#3-objects-and-keys)).
+An entry weighs what the columns of its object make it. For objects of 22 columns, measured on metric records, a leaf entry takes about 0.9 KB for a small object, whose file holds its table of contents, and 3.3 KB for a larger one, and an internal entry about 0.8 KB, so a leaf holds 40 to 145 objects and an internal page about 160 children. A table of fewer columns has lighter entries and a wider tree. The header inlines the pages its commit wrote, the path from the leaves it changed to the level's top, so a cold lookup reads one dependent page per level that its path shares with no page of that commit: 0 or 1 while the objects of a level fit one leaf, 1 or 2 up to about 6 500 of them, and 2 or 3 up to about a million, the lower count when the commit changed the level. A handle keeps the pages it read across versions, so it reads each of them once (see [objects and keys](#3-objects-and-keys)).
 
 ### 4.2 What a node carries
 
@@ -287,7 +287,7 @@ organized is the layout's organization, fixed when the dataset is created:
 
 - **Tiers**, the default with a partition or without a sort key. Level 0 holds a partition's objects
   until it is consolidated, by size classes: when it holds `k` objects of one class (`MergeFanout`, 8),
-  a job merges them into one object of the class above, up to the layout's object size
+  a job merges them into one object, of the class above once its rows outweigh a file's fixed cost, up to the layout's object size
   (`ObjectBytes`, 1 GiB), so a partition holds at most `k − 1` objects a class. A partition that
   received no row for `CalmAfter` (an hour) is consolidated: its objects are rewritten, in key ranges
   side by side, into objects disjoint by key, each up to the object size, at level 1. Objects already
@@ -754,7 +754,7 @@ counted in dependent round trips. Cold, a point lookup on the sort key costs:
 | step | dependent requests | cached by |
 |---|---|---|
 | list the latest commit, read its header | 2, or 1 for a version known by its number | version |
-| descend the tree to the partition and the key | 0 or 1 up to ~650 objects, 1 or 2 up to ~400 000, 2 or 3 up to ~280 million, the lower count on the path the version's commit wrote | page, across versions, since pages are immutable |
+| descend the tree to the partition and the key | 0 or 1 while a level's objects fit one leaf, 40 to 145 objects of 22 columns, 1 or 2 up to ~6 500, 2 or 3 up to ~1 million, the lower count on the path the version's commit wrote | page, across versions, since pages are immutable |
 | open the object's tail, which holds its sparse index | 1, in parallel across the objects touched, one a consolidated partition | object |
 | the granules the index keeps | 1, coalesced | none |
 
