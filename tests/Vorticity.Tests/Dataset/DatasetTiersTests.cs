@@ -27,7 +27,7 @@ public sealed partial class DatasetTiersTests
     /// both at once; every row reads back, and a lookup returns LINQ's rows.
     /// </summary>
     [Fact]
-    public async Task SmallAppendsMergeAFanOutAtATimeAndCalmPartitionsConsolidate()
+    public async Task SmallAppendsMergeAsTheirClassesFillAndCalmPartitionsConsolidate()
     {
         const int Fanout = 4;
         ManualClock clock = new ManualClock(new DateTimeOffset(2026, 10, 27, 8, 0, 0, TimeSpan.Zero));

@@ -232,8 +232,7 @@ commit then abandons. When several processes write one dataset, give its compact
 its own that runs the dataset's only loop, and leave inline compaction off in the writers
 (`InlineCompactionBytes` is 0 by default). Two compactions then never run at once on the dataset.
 Loops that know about one another can share a dataset all the same, and say so with `Loops` and
-`Loop`: each takes the due job ranked at its index, and no two ranked jobs read or write the same
-level.
+`Loop`. Under tiers each partition is dealt to one loop by the hash of its value, and under levels each loop takes the due job ranked at its index, so no two loops take one job.
 
 To follow compaction from a dashboard, listen to the meter `Vorticity` (see
 [observability.md](observability.md)). `vortex.dataset.compaction.bytes_written` over the bytes the

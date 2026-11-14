@@ -133,7 +133,7 @@ What the key does not do:
 
 ## How the objects are organized
 
-Appends land as small sorted objects. Within each partition, objects of one size class merge: when a partition holds `MergeFanout` objects of a class, 8 by default, a job merges them into one object of the class above. A row is rewritten once a class, and a partition of a day stays within a few dozen objects while it receives rows. A partition that fell behind is caught up in few jobs: a merge takes its whole class when the class fits the layout's object size and the jobs' memory budget, and as many neighbouring objects as they let otherwise.
+Appends land as small sorted objects. Within each partition, objects of one size class merge: when a partition holds `MergeFanout` objects of a class, 8 by default, a job merges them into one object, which is of the class above once its rows outweigh the fixed cost of a file. A row is rewritten once a class, and a partition of a day stays within a few dozen objects while it receives rows. A partition that fell behind is caught up in few jobs: a merge takes its whole class when the class fits the layout's object size and the jobs' memory budget, and as many neighbouring objects as they let otherwise.
 
 When a partition has received no row for `CalmAfter`, an hour by default, its next job **consolidates** it: it
 rewrites the partition into objects disjoint by key, each up to `ObjectBytes`, 1 GiB by default, cutting no key. An
