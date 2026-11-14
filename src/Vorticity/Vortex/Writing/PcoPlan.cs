@@ -1,9 +1,8 @@
 using System;
-using System.Buffers;
 using System.Runtime.InteropServices;
 
-using Vorticity.Aggregating;
 using Vorticity.Arrays;
+using Vorticity.Buffers;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Arrays.Decoders.Compressed.Pco;
 
@@ -54,12 +53,12 @@ internal sealed class PcoPlan
     /// <summary>pco's wrapped header: format version 4.1.</summary>
     internal static ReadOnlySpan<byte> Header => [4, 1];
 
-    private byte[]? _data;
-    private int[]? _buffers;
-    private int[]? _pageValues;
-    private int[]? _chunkPages;
+    private Block<byte> _data;
+    private Block<int> _buffers;
+    private Block<int> _pageValues;
+    private Block<int> _chunkPages;
 
-    private PcoPlan(byte[] data, int[] buffers, int[] pageValues, int[] chunkPages, int chunkCount, int pageCount, long bytes)
+    private PcoPlan(Block<byte> data, Block<int> buffers, Block<int> pageValues, Block<int> chunkPages, int chunkCount, int pageCount, long bytes)
     {
         _data = data;
         _buffers = buffers;
@@ -97,42 +96,27 @@ internal sealed class PcoPlan
     internal ReadOnlySpan<int> ChunkPages => _chunkPages.AsSpan(0, ChunkCount);
 
     /// <summary>Buffer <paramref name="index"/>'s place in <see cref="TakeData"/>'s bytes: the chunk metadata first, then the pages.</summary>
-    internal (int Start, int Length) BufferAt(int index) => (_buffers![2 * index], _buffers[(2 * index) + 1]);
+    internal (int Start, int Length) BufferAt(int index) => (_buffers[2 * index], _buffers[(2 * index) + 1]);
 
     /// <summary>The bytes every buffer is cut from; the caller returns them to the pool, and the plan holds nothing after.</summary>
-    internal byte[] TakeData()
+    internal Block<byte> TakeData()
     {
-        byte[] data = _data!;
-        _data = null;
+        Block<byte> data = _data;
+        _data = default;
         return data;
     }
 
     /// <summary>Gives back what the plan still holds.</summary>
     internal void Release()
     {
-        if (_data is { } data)
-        {
-            _data = null;
-            WorkArrays.Return(data);
-        }
-
-        if (_buffers is { } buffers)
-        {
-            _buffers = null;
-            WorkArrays.Return(buffers);
-        }
-
-        if (_pageValues is { } pages)
-        {
-            _pageValues = null;
-            WorkArrays.Return(pages);
-        }
-
-        if (_chunkPages is { } chunks)
-        {
-            _chunkPages = null;
-            WorkArrays.Return(chunks);
-        }
+        Blocks.Return(_data);
+        Blocks.Return(_buffers);
+        Blocks.Return(_pageValues);
+        Blocks.Return(_chunkPages);
+        _data = default;
+        _buffers = default;
+        _pageValues = default;
+        _chunkPages = default;
     }
 
     /// <summary>Whether pco stores <paramref name="node"/>'s values: a primitive of 16 bits or more.</summary>
@@ -175,9 +159,9 @@ internal sealed class PcoPlan
         private readonly int _bits;
         private readonly ulong _mask;
         private readonly ulong _mid;
-        private readonly ulong[] _latents;
-        private readonly ulong[] _secondary;
-        private readonly ulong[] _sorted;
+        private readonly Block<ulong> _latents;
+        private readonly Block<ulong> _secondary;
+        private readonly Block<ulong> _sorted;
         private readonly PcoBinTrainer _primaryBins = new PcoBinTrainer();
         private readonly PcoBinTrainer _secondaryBins = new PcoBinTrainer();
         private readonly PcoAnsEncoder _primaryEncoder = new PcoAnsEncoder();
@@ -186,10 +170,10 @@ internal sealed class PcoPlan
         private readonly PageScratch _secondaryPage = new PageScratch();
         private readonly PcoBitWriter _writer;
         private readonly long _ceiling;
-        private int[]? _buffers;
-        private int[]? _pageValues;
-        private int[]? _chunkPages;
-        private ulong[]? _moments;
+        private Block<int> _buffers;
+        private Block<int> _pageValues;
+        private Block<int> _chunkPages;
+        private Block<ulong> _moments;
         private long _abandonAbove = long.MaxValue;
 
         internal Builder(PcoNumber number, int count, long ceiling)
@@ -199,9 +183,9 @@ internal sealed class PcoPlan
             _bits = number.LatentBits;
             _mask = number.Mask;
             _mid = number.Mid;
-            _latents = WorkArrays.Rent<ulong>(Math.Max(count, 1));
-            _secondary = WorkArrays.Rent<ulong>(Math.Max(Math.Min(count, ValuesPerChunk), 1));
-            _sorted = WorkArrays.Rent<ulong>(Math.Max(Math.Min(count, ValuesPerChunk), 1));
+            _latents = Blocks.Rent<ulong>(count);
+            _secondary = Blocks.Rent<ulong>(Math.Min(count, ValuesPerChunk));
+            _sorted = Blocks.Rent<ulong>(Math.Min(count, ValuesPerChunk));
 
             // The bytes pco must come in under, when there is a ceiling, and never more than the
             // values themselves: the buffer grows past that only for a pin on values pco inflates.
@@ -281,10 +265,10 @@ internal sealed class PcoPlan
                 pages += (Math.Min(ValuesPerChunk, _count - start) + ValuesPerPage - 1) / ValuesPerPage;
             }
 
-            _buffers = WorkArrays.Rent<int>(Math.Max(2 * (chunks + pages), 1));
-            _pageValues = WorkArrays.Rent<int>(Math.Max(pages, 1));
-            _chunkPages = WorkArrays.Rent<int>(Math.Max(chunks, 1));
-            _moments = WorkArrays.Rent<ulong>(MaxDeltaOrder * Math.Max(pages, 1));
+            _buffers = Blocks.Rent<int>(2 * (chunks + pages));
+            _pageValues = Blocks.Rent<int>(pages);
+            _chunkPages = Blocks.Rent<int>(chunks);
+            _moments = Blocks.Rent<ulong>(MaxDeltaOrder * pages);
 
             int page = 0;
             int chunk = 0;
@@ -306,9 +290,9 @@ internal sealed class PcoPlan
 
             int bytes = _writer.Length;
             PcoPlan plan = new PcoPlan(_writer.TakeBuffer(), _buffers, _pageValues, _chunkPages, chunks, pages, bytes);
-            _buffers = null;
-            _pageValues = null;
-            _chunkPages = null;
+            _buffers = default;
+            _pageValues = default;
+            _chunkPages = default;
             return plan;
         }
 
@@ -370,7 +354,7 @@ internal sealed class PcoPlan
             for (int p = 0, start = 0; p < pageCount; p++)
             {
                 int pageN = low + (p < longer ? 1 : 0);
-                _pageValues![firstPage + p] = pageN;
+                _pageValues[firstPage + p] = pageN;
                 Span<ulong> pageLatents = latents.Slice(start, pageN);
                 DeltaEncode(pageLatents, order, moments.Slice(p * MaxDeltaOrder, MaxDeltaOrder));
                 Span<ulong> kept = pageLatents[Math.Min(order, pageN)..];
@@ -394,13 +378,13 @@ internal sealed class PcoPlan
             int metaStart = _writer.Length;
             WriteChunkMeta(modeBase, order);
             int metaEnd = _writer.Align();
-            _buffers![2 * chunk] = metaStart;
+            _buffers[2 * chunk] = metaStart;
             _buffers[(2 * chunk) + 1] = metaEnd - metaStart;
-            _chunkPages![chunk] = pageCount;
+            _chunkPages[chunk] = pageCount;
 
             for (int p = 0, start = 0; p < pageCount; p++)
             {
-                int pageN = _pageValues![firstPage + p];
+                int pageN = _pageValues[firstPage + p];
                 int pageStart = _writer.Length;
                 WritePage(
                     latents.Slice(start, pageN), modeBase > 0 ? secondary.Slice(start, pageN) : default, order,
@@ -457,8 +441,8 @@ internal sealed class PcoPlan
             int padding = Math.Max(0, n - nominal) / extraGroups;
 
             // The sample and the copy each candidate delta-encodes, rented for the choice alone.
-            ulong[] sampleArray = WorkArrays.Rent<ulong>(Math.Min(nominal, n) + 1);
-            ulong[] work = WorkArrays.Rent<ulong>(Math.Min(nominal, n) + 1);
+            Block<ulong> sampleArray = Blocks.Rent<ulong>(Math.Min(nominal, n) + 1);
+            Block<ulong> work = Blocks.Rent<ulong>(Math.Min(nominal, n) + 1);
             try
             {
                 int sampled = 0;
@@ -500,8 +484,8 @@ internal sealed class PcoPlan
             }
             finally
             {
-                WorkArrays.Return(work);
-                WorkArrays.Return(sampleArray);
+                Blocks.Return(work);
+                Blocks.Return(sampleArray);
             }
         }
 
@@ -510,9 +494,9 @@ internal sealed class PcoPlan
         /// <c>calculate_compressed_sample_size</c>: the chunk metadata at its largest, and the page's
         /// metadata and its body at the bins' average bits a latent.
         /// </summary>
-        private long SampleCost(ReadOnlySpan<ulong> sample, ulong[] work, int order, int binsLog)
+        private long SampleCost(ReadOnlySpan<ulong> sample, Span<ulong> work, int order, int binsLog)
         {
-            Span<ulong> latents = work.AsSpan(0, sample.Length);
+            Span<ulong> latents = work[..sample.Length];
             sample.CopyTo(latents);
             Span<ulong> moments = stackalloc ulong[MaxDeltaOrder];
             DeltaEncode(latents, order, moments);
@@ -540,17 +524,17 @@ internal sealed class PcoPlan
             }
 
             int target = PcoIntMult.MinSample + ((n - PcoIntMult.MinSample) / PcoIntMult.SampleRatio);
-            ulong[] sample = WorkArrays.Rent<ulong>(target);
-            byte[] visited = WorkArrays.Rent<byte>((n + 7) / 8);
+            Block<ulong> sample = Blocks.Rent<ulong>(target);
+            Block<byte> visited = Blocks.Rent<byte>((n + 7) / 8);
             try
             {
-                int sampled = PcoIntMult.Sample(latents, sample.AsSpan(0, target), visited.AsSpan(0, (n + 7) / 8));
+                int sampled = PcoIntMult.Sample(latents, sample, visited);
                 return sampled < PcoIntMult.MinSample ? 0 : PcoIntMult.ChooseBase(sample.AsSpan(0, sampled));
             }
             finally
             {
-                WorkArrays.Return(visited);
-                WorkArrays.Return(sample);
+                Blocks.Return(visited);
+                Blocks.Return(sample);
             }
         }
 
@@ -647,33 +631,22 @@ internal sealed class PcoPlan
         /// <inheritdoc/>
         public void Dispose()
         {
-            WorkArrays.Return(_latents);
-            WorkArrays.Return(_secondary);
-            WorkArrays.Return(_sorted);
+            Blocks.Return(_latents);
+            Blocks.Return(_secondary);
+            Blocks.Return(_sorted);
             _primaryBins.Dispose();
             _secondaryBins.Dispose();
             _primaryPage.Dispose();
             _secondaryPage.Dispose();
             _writer.Dispose();
-            if (_buffers is { } buffers)
-            {
-                WorkArrays.Return(buffers);
-            }
-
-            if (_pageValues is { } pages)
-            {
-                WorkArrays.Return(pages);
-            }
-
-            if (_chunkPages is { } chunks)
-            {
-                WorkArrays.Return(chunks);
-            }
-
-            if (_moments is { } moments)
-            {
-                WorkArrays.Return(moments);
-            }
+            Blocks.Return(_buffers);
+            Blocks.Return(_pageValues);
+            Blocks.Return(_chunkPages);
+            Blocks.Return(_moments);
+            _buffers = default;
+            _pageValues = default;
+            _chunkPages = default;
+            _moments = default;
         }
     }
 
@@ -684,10 +657,10 @@ internal sealed class PcoPlan
     private sealed class PageScratch : IDisposable
     {
         private readonly uint[] _states = new uint[4];
-        private uint[] _ansValues = WorkArrays.Rent<uint>(ValuesPerPage);
-        private byte[] _ansBits = WorkArrays.Rent<byte>(ValuesPerPage);
-        private ulong[] _offsets = WorkArrays.Rent<ulong>(ValuesPerPage);
-        private byte[] _offsetBits = WorkArrays.Rent<byte>(ValuesPerPage);
+        private Block<uint> _ansValues = Blocks.Rent<uint>(ValuesPerPage);
+        private Block<byte> _ansBits = Blocks.Rent<byte>(ValuesPerPage);
+        private Block<ulong> _offsets = Blocks.Rent<ulong>(ValuesPerPage);
+        private Block<byte> _offsetBits = Blocks.Rent<byte>(ValuesPerPage);
         private int _count;
 
         internal void Dissect(ReadOnlySpan<ulong> latents, PcoBinTrainer bins, PcoAnsEncoder encoder)
@@ -702,20 +675,24 @@ internal sealed class PcoPlan
 
             ReadOnlySpan<ulong> lowers = bins.Lowers;
             ReadOnlySpan<int> widths = bins.OffsetBits;
+            Span<ulong> offsets = _offsets;
+            Span<byte> offsetBits = _offsetBits;
+            Span<uint> ansValues = _ansValues;
+            Span<byte> ansBits = _ansBits;
             bool single = bins.Count == 1;
             for (int i = latents.Length - 1; i >= 0; i--)
             {
                 ulong latent = latents[i];
                 int bin = single ? 0 : bins.BinOf(latent);
-                _offsets[i] = latent - lowers[bin];
-                _offsetBits[i] = (byte)widths[bin];
+                offsets[i] = latent - lowers[bin];
+                offsetBits[i] = (byte)widths[bin];
                 if (!single)
                 {
                     int lane = i & 3;
                     uint state = _states[lane];
                     uint next = encoder.Encode(state, bin, out int shed);
-                    _ansValues[i] = state & ((1u << shed) - 1);
-                    _ansBits[i] = (byte)shed;
+                    ansValues[i] = state & ((1u << shed) - 1);
+                    ansBits[i] = (byte)shed;
                     _states[lane] = next;
                 }
             }
@@ -740,28 +717,32 @@ internal sealed class PcoPlan
             int end = Math.Min(start + PcoPageDecoder.BatchSize, _count);
             if (bins.Count > 1)
             {
+                ReadOnlySpan<uint> ansValues = _ansValues;
+                ReadOnlySpan<byte> ansBits = _ansBits;
                 for (int i = start; i < end; i++)
                 {
-                    writer.Write(_ansValues[i], _ansBits[i]);
+                    writer.Write(ansValues[i], ansBits[i]);
                 }
             }
 
+            ReadOnlySpan<ulong> offsets = _offsets;
+            ReadOnlySpan<byte> offsetBits = _offsetBits;
             for (int i = start; i < end; i++)
             {
-                writer.Write(_offsets[i], _offsetBits[i]);
+                writer.Write(offsets[i], offsetBits[i]);
             }
         }
 
         public void Dispose()
         {
-            WorkArrays.Return(_ansValues);
-            WorkArrays.Return(_ansBits);
-            WorkArrays.Return(_offsets);
-            WorkArrays.Return(_offsetBits);
-            _ansValues = [];
-            _ansBits = [];
-            _offsets = [];
-            _offsetBits = [];
+            Blocks.Return(_ansValues);
+            Blocks.Return(_ansBits);
+            Blocks.Return(_offsets);
+            Blocks.Return(_offsetBits);
+            _ansValues = default;
+            _ansBits = default;
+            _offsets = default;
+            _offsetBits = default;
         }
     }
 }

@@ -1,8 +1,7 @@
 using System;
-using System.Buffers;
-using Vorticity.Aggregating;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Compressed;
+using Vorticity.Buffers;
 using Vorticity.Types;
 
 namespace Vorticity.Writing;
@@ -14,14 +13,13 @@ namespace Vorticity.Writing;
 /// </summary>
 internal sealed class FsstPlan
 {
-    private byte[] _codes;
-    private int[] _offsets;
-    private int[] _lengths;
+    private Block<byte> _codes;
+    private Block<int> _offsets;
+    private Block<int> _lengths;
     private FsstSymbols? _table;
-    private readonly int _rows;
 
     private FsstPlan(
-        FsstSymbols table, byte[] codes, int codeLength, int[] offsets, int[] lengths, int rows,
+        FsstSymbols table, Block<byte> codes, int codeLength, Block<int> offsets, Block<int> lengths,
         long encodedSize)
     {
         _table = table;
@@ -29,7 +27,6 @@ internal sealed class FsstPlan
         CodeLength = codeLength;
         _offsets = offsets;
         _lengths = lengths;
-        _rows = rows;
         EncodedSize = encodedSize;
     }
 
@@ -41,56 +38,42 @@ internal sealed class FsstPlan
     internal int CodeLength { get; }
 
     /// <summary>Where each row's codes begin, plus a final total: <c>rows + 1</c> entries.</summary>
-    internal ReadOnlySpan<int> Offsets => _offsets.Length == 0 ? [] : _offsets.AsSpan(0, _rows + 1);
+    internal ReadOnlySpan<int> Offsets => _offsets;
 
     /// <summary>Each row's decoded length; the row boundaries live on the decoded side.</summary>
-    internal ReadOnlySpan<int> Lengths => _lengths.Length == 0 ? [] : _lengths.AsSpan(0, _rows);
+    internal ReadOnlySpan<int> Lengths => _lengths;
 
     /// <summary>Total bytes this encoding will occupy, table and children included.</summary>
     internal long EncodedSize { get; }
 
     /// <summary>
-    /// The code stream's rental, whose first <see cref="CodeLength"/> bytes are the stream. It
+    /// The code stream's block, whose first <see cref="CodeLength"/> bytes are the stream. It
     /// passes to the caller: the plan forgets it, and <see cref="Release"/> no longer hands it back.
     /// </summary>
-    internal byte[] TakeCodes()
+    internal Block<byte> TakeCodes()
     {
-        byte[] codes = _codes;
-        _codes = [];
+        Block<byte> codes = _codes;
+        _codes = default;
         return codes;
     }
 
-    /// <summary>Hands back every rental the plan still holds: the code stream, the row tables, the symbol table.</summary>
+    /// <summary>Hands back every block the plan still holds: the code stream, the row tables, the symbol table.</summary>
     /// <remarks>
     /// Called by the writer once the row tables and the symbols are in its buffers, and by the
-    /// chooser for a plan nothing will write. Safe twice: the plan forgets each rental before it
+    /// chooser for a plan nothing will write. Safe twice: the plan forgets each block before it
     /// gives it back, so a second call has nothing left to give.
     /// </remarks>
     internal void Release()
     {
-        byte[] codes = _codes;
-        int[] offsets = _offsets;
-        int[] lengths = _lengths;
         FsstSymbols? table = _table;
-        _codes = [];
-        _offsets = [];
-        _lengths = [];
         _table = null;
         table?.Recycle();
-        if (codes.Length > 0)
-        {
-            WorkArrays.Return(codes);
-        }
-
-        if (offsets.Length > 0)
-        {
-            WorkArrays.Return(offsets);
-        }
-
-        if (lengths.Length > 0)
-        {
-            WorkArrays.Return(lengths);
-        }
+        Blocks.Return(_codes);
+        Blocks.Return(_offsets);
+        Blocks.Return(_lengths);
+        _codes = default;
+        _offsets = default;
+        _lengths = default;
     }
 
     /// <summary>
@@ -120,12 +103,12 @@ internal sealed class FsstPlan
         // The sizes are read from the views, a null row's as zero: its bytes are unspecified, so it
         // contributes nothing to the corpus and nothing to the stream, but still occupies a row slot.
         ValidityReader valid = ValidityReader.Of(arena, node.Validity);
-        int[] lengths = WorkArrays.Rent<int>(Math.Max(rows, 1));
-        long plain = ViewHeap.Lengths(node, valid, lengths.AsSpan(0, rows));
+        Block<int> lengths = Blocks.Rent<int>(rows);
+        long plain = ViewHeap.Lengths(node, valid, lengths);
 
-        if (plain > int.MaxValue - ViewHeap.Slack || CodedFloor(lengths.AsSpan(0, rows), plain) > sizeCeiling)
+        if (plain > int.MaxValue - ViewHeap.Slack || CodedFloor(lengths, plain) > sizeCeiling)
         {
-            WorkArrays.Return(lengths);
+            Blocks.Return(lengths);
             return null;
         }
 
@@ -137,50 +120,47 @@ internal sealed class FsstPlan
         // every position as one eight-byte word however near the end of its value, so eight bytes
         // past the values are cleared.
         int heapBytes = Math.Max((int)plain, 1);
-        byte[] heap = WorkArrays.Rent<byte>(heapBytes + ViewHeap.Slack);
-        int[] starts = WorkArrays.Rent<int>(Math.Max(rows, 1));
-        byte[]? codes = null;
-        int[]? offsets = null;
+        Block<byte> heap = Blocks.Rent<byte>(heapBytes + ViewHeap.Slack);
+        Block<int> starts = Blocks.Rent<int>(rows);
+        Block<byte> codes = default;
+        Block<int> offsets = default;
         FsstSymbols? table = null;
         bool kept = false;
         try
         {
             int at = (int)plain;
-            ViewHeap.Gather(node, lengths.AsSpan(0, rows), heap, starts.AsSpan(0, rows));
+            ViewHeap.Gather(node, lengths, heap, starts);
 
             // The training is handed the ceiling too: a column its sample says is past it by far is
             // given up before the training ends, as the compression gives up past it below.
-            table = FsstSymbols.Train(
-                heap.AsSpan(0, heapBytes), starts.AsSpan(0, rows), lengths.AsSpan(0, rows), plain, sizeCeiling);
+            table = FsstSymbols.Train(heap.AsSpan(0, heapBytes), starts, lengths, plain, sizeCeiling);
             if (table is null)
             {
                 return null;
             }
 
             // An escape costs two bytes, so the worst case is twice the input.
-            int codeRoom = (int)Math.Max(plain * 2, 1);
-            codes = WorkArrays.Rent<byte>(codeRoom);
-            offsets = WorkArrays.Rent<int>(rows + 1);
+            codes = Blocks.Rent<byte>((int)Math.Max(plain * 2, 1));
+            offsets = Blocks.Rent<int>(rows + 1);
             heap.AsSpan(at, FsstSymbols.MaxSymbolLength).Clear();
             int written = table.CompressAll(
-                heap.AsSpan(0, at + FsstSymbols.MaxSymbolLength), starts.AsSpan(0, rows), lengths.AsSpan(0, rows),
-                codes.AsSpan(0, codeRoom), offsets.AsSpan(0, rows + 1), sizeCeiling);
+                heap.AsSpan(0, at + FsstSymbols.MaxSymbolLength), starts, lengths, codes, offsets, sizeCeiling);
             if (written < 0)
             {
                 return null;
             }
 
             long encoded = ((long)table.Count * (FsstSymbols.MaxSymbolLength + 1)) + written
-                + RowTableBytes(rows, MaxOf(lengths.AsSpan(0, rows)))
+                + RowTableBytes(rows, MaxOf(lengths))
                 + RowTableBytes(rows + 1, written);
             if (encoded > sizeCeiling)
             {
                 return null;
             }
 
-            // The code stream stays in its worst-case rental rather than being copied out: the
-            // writer hands the rental to the blob as it is, and the blob gives it back once laid out.
-            FsstPlan plan = new FsstPlan(table, codes, written, offsets, lengths, rows, encoded);
+            // The code stream stays in its worst-case block rather than being copied out: the
+            // writer hands the block to the blob as it is, and the blob gives it back once laid out.
+            FsstPlan plan = new FsstPlan(table, codes, written, offsets, lengths, encoded);
             kept = true;
             return plan;
         }
@@ -189,21 +169,13 @@ internal sealed class FsstPlan
             if (!kept)
             {
                 table?.Recycle();
-                if (codes is not null)
-                {
-                    WorkArrays.Return(codes);
-                }
-
-                if (offsets is not null)
-                {
-                    WorkArrays.Return(offsets);
-                }
-
-                WorkArrays.Return(lengths);
+                Blocks.Return(codes);
+                Blocks.Return(offsets);
+                Blocks.Return(lengths);
             }
 
-            WorkArrays.Return(starts);
-            WorkArrays.Return(heap);
+            Blocks.Return(starts);
+            Blocks.Return(heap);
         }
     }
 

@@ -1,8 +1,8 @@
 using System;
-using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Numerics;
+using Vorticity.Buffers;
 using Vorticity.Indexes;
 
 namespace Vorticity.Writing;
@@ -20,7 +20,7 @@ namespace Vorticity.Writing;
 /// </remarks>
 internal sealed class ChunkKeys : IDisposable
 {
-    private byte[] _heap = ArrayPool<byte>.Shared.Rent(1 << 12);
+    private Block<byte> _heap = Blocks.Rent<byte>(1 << 12);
     private int _heapUsed;
     private List<(int Key, long Position)> _log = [];
     private List<(int Offset, int Length)> _keys = [];
@@ -77,10 +77,7 @@ internal sealed class ChunkKeys : IDisposable
     {
         if (_heapUsed + bytes.Length > _heap.Length)
         {
-            byte[] grown = ArrayPool<byte>.Shared.Rent(Math.Max(_heap.Length * 2, _heapUsed + bytes.Length));
-            _heap.AsSpan(0, _heapUsed).CopyTo(grown);
-            ArrayPool<byte>.Shared.Return(_heap);
-            _heap = grown;
+            Blocks.Grow(ref _heap, Math.Max(_heap.Length * 2, _heapUsed + bytes.Length));
         }
 
         bytes.CopyTo(_heap.AsSpan(_heapUsed));
@@ -174,9 +171,9 @@ internal sealed class ChunkKeys : IDisposable
             return;
         }
 
-        int keys = _keys.Count;
-        int[] ids = ArrayPool<int>.Shared.Rent(keys);
-        ids.AsSpan(0, keys).Fill(-1);
+        Block<int> block = Blocks.Rent<int>(_keys.Count);
+        Span<int> ids = block;
+        ids.Fill(-1);
         for (int i = from; i < _log.Count; i++)
         {
             (int key, long position) = _log[i];
@@ -188,7 +185,7 @@ internal sealed class ChunkKeys : IDisposable
             target.Note(ids[key], position);
         }
 
-        ArrayPool<int>.Shared.Return(ids);
+        Blocks.Return(block);
     }
 
     private void Reset()
@@ -210,15 +207,13 @@ internal sealed class ChunkKeys : IDisposable
 
     /// <summary>The ids the log uses, in the layout's total order.</summary>
     /// <param name="layout">How the bytes compare.</param>
-    /// <param name="ranked">
-    /// The ids, in an array rented from <see cref="ArrayPool{T}.Shared"/> that the caller returns.
-    /// </param>
+    /// <param name="ranked">The ids, in a block of the pool that the caller gives back.</param>
     /// <returns>How many ids <paramref name="ranked"/> holds.</returns>
-    internal int Ranked(KeyLayout layout, out int[] ranked)
+    internal int Ranked(KeyLayout layout, out Block<int> ranked)
     {
         int keys = _keys.Count;
-        bool[] used = ArrayPool<bool>.Shared.Rent(keys);
-        used.AsSpan(0, keys).Clear();
+        Block<bool> usedBlock = Blocks.RentCleared<bool>(keys);
+        Span<bool> used = usedBlock;
         int count = 0;
         foreach ((int key, _) in _log)
         {
@@ -229,17 +224,18 @@ internal sealed class ChunkKeys : IDisposable
             }
         }
 
-        ranked = ArrayPool<int>.Shared.Rent(count);
+        ranked = Blocks.Rent<int>(count);
+        Span<int> ids = ranked;
         int next = 0;
         for (int id = 0; id < keys; id++)
         {
             if (used[id])
             {
-                ranked[next++] = id;
+                ids[next++] = id;
             }
         }
 
-        ArrayPool<bool>.Shared.Return(used);
+        Blocks.Return(usedBlock);
 
         // The sort keys are the table's own buffer, grown once to the largest chunk, as the log is.
         if (_order.Length < count)
@@ -378,10 +374,7 @@ internal sealed class ChunkKeys : IDisposable
 
     public void Dispose()
     {
-        if (_heap.Length > 0)
-        {
-            ArrayPool<byte>.Shared.Return(_heap);
-            _heap = [];
-        }
+        Blocks.Return(_heap);
+        _heap = default;
     }
 }

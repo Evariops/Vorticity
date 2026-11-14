@@ -77,12 +77,12 @@ public sealed class PcoPlanTests
         PcoPlan plan = PcoPlan.TryBuild(arena, node, long.MaxValue)!;
         try
         {
-            byte[] data = plan.TakeData();
+            Block<byte> data = plan.TakeData();
             (int start, int length) = plan.BufferAt(0);
             PcoChunkMeta meta = PcoChunkMeta.Read(PcoPlan.Header, data.AsSpan(start, length), PcoNumber.Of(PType.I64)!.Value);
             Assert.Equal(PcoModeKind.IntMult, meta.Mode);
             Assert.Equal(100UL, meta.ModeBase);
-            System.Buffers.ArrayPool<byte>.Shared.Return(data);
+            Blocks.Return(data);
         }
         finally
         {
@@ -124,7 +124,7 @@ public sealed class PcoPlanTests
         int width = number.LatentBits / 8;
         ulong[] expected = [.. values.Where((_, i) => valid is null || valid[i])];
 
-        byte[] data = plan.TakeData();
+        Block<byte> data = plan.TakeData();
         try
         {
             List<ulong> decoded = [];
@@ -177,7 +177,7 @@ public sealed class PcoPlanTests
         }
         finally
         {
-            System.Buffers.ArrayPool<byte>.Shared.Return(data);
+            Blocks.Return(data);
             plan.Release();
         }
 

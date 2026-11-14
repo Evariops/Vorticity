@@ -6,6 +6,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Aggregating;
 using Vorticity.Arrays;
+using Vorticity.Buffers;
 using Vorticity.Compute;
 using Vorticity.Indexes;
 using Vorticity.Layouts;
@@ -563,15 +564,16 @@ public sealed class DatasetWriter
             return;
         }
 
-        int[] order = WorkArrays.Rent<int>(rows);
+        Block<int> rented = Blocks.Rent<int>(rows);
         try
         {
+            Span<int> order = rented;
             for (int i = 0; i < rows; i++)
             {
                 order[i] = i;
             }
 
-            partitions.SortStable(order.AsSpan(0, rows));
+            partitions.SortStable(order);
             for (int at = 0, end; at < rows; at = end)
             {
                 end = at + 1;
@@ -581,13 +583,13 @@ public sealed class DatasetWriter
                 }
 
                 Part part = PartOf(partitions.Row(order[at]));
-                StoreRows.Append(part.Store, arena, CanonicalFilter.Apply(arena, root, order.AsSpan(at, end - at)));
+                StoreRows.Append(part.Store, arena, CanonicalFilter.Apply(arena, root, order.Slice(at, end - at)));
                 part.Store.Commit();
             }
         }
         finally
         {
-            WorkArrays.Return(order);
+            Blocks.Return(rented);
         }
     }
 
@@ -686,7 +688,7 @@ public sealed class DatasetWriter
 
         CanonicalArena arena = Arena();
         RowKeys? keys = null;
-        int[]? order = null;
+        Block<int> order = default;
         ObjectOutput? output = null;
         try
         {
@@ -703,13 +705,14 @@ public sealed class DatasetWriter
                     all.Dispose();
                 }
 
-                order = WorkArrays.Rent<int>(rows);
+                order = Blocks.Rent<int>(rows);
+                Span<int> places = order;
                 for (int i = 0; i < rows; i++)
                 {
-                    order[i] = i;
+                    places[i] = i;
                 }
 
-                keys.SortStable(order.AsSpan(0, rows));
+                keys.SortStable(places);
             }
 
             output = _dataset.StartObjectUnder(
@@ -730,13 +733,13 @@ public sealed class DatasetWriter
                     int count = Math.Min(batchRows, rows - start);
                     arena.ResetKeepingBlocks();
                     root = store.Build(arena, rows);
-                    int node = order is null
+                    int node = order.Bytes is null
                         ? (count == rows ? root : CanonicalSlice.SliceAcross(arena, arena, root, start, count))
                         : CanonicalFilter.Apply(arena, root, order.AsSpan(start, count));
                     batch = RecordBatch.Over(arena, node, 0, batch);
                     if (sorted is not null)
                     {
-                        sorted.Take(new OrderedRows(keys!, order!, start), 0, count, writer.BlockRows);
+                        sorted.Take(new OrderedRows(keys!, order, start), 0, count, writer.BlockRows);
                     }
 
                     await writer.WriteBatchAsync(batch, cancellationToken).ConfigureAwait(false);
@@ -756,7 +759,7 @@ public sealed class DatasetWriter
             // when the dataset has no key (FinishAsync).
             ObjectOutput completed = output;
             output = null;
-            completed.Keys = keys is null ? null : (keys.Row(order![0]).ToArray(), keys.Row(order[rows - 1]).ToArray());
+            completed.Keys = keys is null ? null : (keys.Row(order[0]).ToArray(), keys.Row(order[rows - 1]).ToArray());
             completed.Partition = keys is null && _partition is not null ? part.Partition : null;
             if (await _dataset.CompleteAsync(completed, 0, cancellationToken).ConfigureAwait(false) is { } written)
             {
@@ -772,10 +775,7 @@ public sealed class DatasetWriter
             }
 
             keys?.Dispose();
-            if (order is not null)
-            {
-                WorkArrays.Return(order);
-            }
+            Blocks.Return(order);
 
             arena.ResetKeepingBlocks();
         }

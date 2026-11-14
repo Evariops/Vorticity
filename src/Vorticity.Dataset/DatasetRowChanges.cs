@@ -762,20 +762,21 @@ internal static class DatasetRowChanges
         using RowKeys keys = key.Encode(batch);
         if (words.IsEmpty)
         {
-            sorted.Take(new OrderedRows(keys, null, 0), 0, keeping, writer.BlockRows);
+            sorted.Take(new OrderedRows(keys, default, 0), 0, keeping, writer.BlockRows);
         }
         else
         {
-            int[] kept = ArrayPool<int>.Shared.Rent(keeping);
+            Block<int> kept = Blocks.Rent<int>(keeping);
             try
             {
+                Span<int> rows = kept;
                 int at = 0;
                 ReadOnlySpan<ulong> bits = MemoryMarshal.Cast<byte, ulong>(words);
                 for (int word = 0; word < bits.Length && at < keeping; word++)
                 {
                     for (ulong w = bits[word]; w != 0 && at < keeping; w &= w - 1)
                     {
-                        kept[at++] = (word << 6) + BitOperations.TrailingZeroCount(w);
+                        rows[at++] = (word << 6) + BitOperations.TrailingZeroCount(w);
                     }
                 }
 
@@ -783,7 +784,7 @@ internal static class DatasetRowChanges
             }
             finally
             {
-                ArrayPool<int>.Shared.Return(kept);
+                Blocks.Return(kept);
             }
         }
 

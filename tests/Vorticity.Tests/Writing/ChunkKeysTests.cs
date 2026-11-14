@@ -8,6 +8,7 @@
 using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
+using Vorticity.Buffers;
 using Vorticity.Indexes;
 using Vorticity.Types;
 using Vorticity.Writing;
@@ -117,7 +118,7 @@ public sealed class ChunkKeysTests
 
         List<byte[]> expected = [.. keys];
         expected.Sort((a, b) => layout.Compare(a, b));
-        int count = table.Ranked(layout, out int[] ranked);
+        int count = table.Ranked(layout, out Block<int> ranked);
         Assert.Equal(expected.Count, count);
         for (int i = 0; i < count; i++)
         {
@@ -126,6 +127,6 @@ public sealed class ChunkKeysTests
                 $"rank {i}: {Convert.ToHexString(table.KeyBytes(ranked[i]))}, expected {Convert.ToHexString(expected[i])}");
         }
 
-        System.Buffers.ArrayPool<int>.Shared.Return(ranked);
+        Blocks.Return(ranked);
     }
 }

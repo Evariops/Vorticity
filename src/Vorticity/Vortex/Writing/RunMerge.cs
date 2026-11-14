@@ -39,25 +39,25 @@ internal sealed class RawRun
     /// <summary>Its windows, in key order, when it is laid in the scratch.</summary>
     internal List<RawWindow> Windows { get; } = [];
 
-    /// <summary>Its keys, rented; null when it is laid in the scratch.</summary>
-    internal byte[]? HeldKeys { get; set; }
+    /// <summary>Its keys, rented; empty when it is laid in the scratch.</summary>
+    internal Block<byte> HeldKeys { get; set; }
 
     /// <summary>Byte keys: where each key starts, and one past the last; rented.</summary>
-    internal int[]? HeldKeyOffsets { get; set; }
+    internal Block<int> HeldKeyOffsets { get; set; }
 
     /// <summary>A sorted run: each entry's file row; rented.</summary>
-    internal long[]? HeldRows { get; set; }
+    internal Block<long> HeldRows { get; set; }
 
     /// <summary>Postings: where each key's list starts, and one past the last; rented.</summary>
-    internal int[]? HeldBlockOffsets { get; set; }
+    internal Block<int> HeldBlockOffsets { get; set; }
 
     /// <summary>Postings: the lists end to end; rented.</summary>
-    internal uint[]? HeldBlocks { get; set; }
+    internal Block<uint> HeldBlocks { get; set; }
 
     /// <summary>What the scratch admitted for it.</summary>
     internal long Admitted { get; set; }
 
-    internal bool Held => HeldKeys is not null;
+    internal bool Held => HeldKeys.Bytes is not null;
 
     /// <summary>The bytes its arrays hold, for the scratch's budget.</summary>
     internal static long HeldBytes(long entries, long keyBytes, bool hasRows, long blocks) =>
@@ -77,26 +77,18 @@ internal sealed class RawRun
     /// <summary>Gives its arrays back and its bytes to the scratch.</summary>
     internal void Release(RunScratch scratch)
     {
-        Return(HeldKeys);
-        Return(HeldKeyOffsets);
-        Return(HeldRows);
-        Return(HeldBlockOffsets);
-        Return(HeldBlocks);
-        HeldKeys = null;
-        HeldKeyOffsets = null;
-        HeldRows = null;
-        HeldBlockOffsets = null;
-        HeldBlocks = null;
+        Blocks.Return(HeldKeys);
+        Blocks.Return(HeldKeyOffsets);
+        Blocks.Return(HeldRows);
+        Blocks.Return(HeldBlockOffsets);
+        Blocks.Return(HeldBlocks);
+        HeldKeys = default;
+        HeldKeyOffsets = default;
+        HeldRows = default;
+        HeldBlockOffsets = default;
+        HeldBlocks = default;
         scratch.Release(Admitted);
         Admitted = 0;
-    }
-
-    private static void Return<T>(T[]? array)
-    {
-        if (array is { Length: > 0 })
-        {
-            ArrayPool<T>.Shared.Return(array);
-        }
     }
 }
 
@@ -113,7 +105,7 @@ internal sealed class HeldWindowSource(RawRun run) : IWindowSource
         }
 
         _done = true;
-        cursor.Adopt(run.HeldKeys!, run.HeldKeyOffsets, run.HeldRows, run.HeldBlockOffsets, run.HeldBlocks, checked((int)run.Entries));
+        cursor.Adopt(run.HeldKeys, run.HeldKeyOffsets, run.HeldRows, run.HeldBlockOffsets, run.HeldBlocks, checked((int)run.Entries));
         return new ValueTask<bool>(true);
     }
 
@@ -170,20 +162,26 @@ internal sealed class RunCursor : IDisposable
 
     internal bool HasRows { get; }
 
+    private Block<byte> _keys;
+    private Block<int> _keyOffsets;
+    private Block<long> _rows;
+    private Block<int> _blockOffsets;
+    private Block<uint> _blocks;
+
     /// <summary>The window's keys: fixed-width keys end to end, or byte keys' heap.</summary>
-    internal byte[] Keys { get; private set; } = [];
+    internal Block<byte> Keys => _keys;
 
     /// <summary>For byte keys, where each starts in <see cref="Keys"/>, and one past the last.</summary>
-    internal int[] KeyOffsets { get; private set; } = [];
+    internal Block<int> KeyOffsets => _keyOffsets;
 
     /// <summary>For a sorted run, each entry's file row.</summary>
-    internal long[] Rows { get; private set; } = [];
+    internal Block<long> Rows => _rows;
 
-    /// <summary>For postings, where each key's list starts in <see cref="Blocks"/>, and one past the last.</summary>
-    internal int[] BlockOffsets { get; private set; } = [];
+    /// <summary>For postings, where each key's list starts in <see cref="Lists"/>, and one past the last.</summary>
+    internal Block<int> BlockOffsets => _blockOffsets;
 
     /// <summary>For postings, the window's block lists end to end.</summary>
-    internal uint[] Blocks { get; private set; } = [];
+    internal Block<uint> Lists => _blocks;
 
     /// <summary>The window's entries.</summary>
     internal int Count { get; set; }
@@ -200,7 +198,7 @@ internal sealed class RunCursor : IDisposable
     internal long Row => Rows[_index];
 
     internal ReadOnlySpan<uint> BlockList =>
-        Blocks.AsSpan(BlockOffsets[_index], BlockOffsets[_index + 1] - BlockOffsets[_index]);
+        _blocks.AsSpan(_blockOffsets[_index], _blockOffsets[_index + 1] - _blockOffsets[_index]);
 
     /// <summary>Steps to the window's next entry; false once the window is spent.</summary>
     internal bool MoveNext()
@@ -230,81 +228,40 @@ internal sealed class RunCursor : IDisposable
     internal int Index => _index;
 
     /// <summary>
-    /// Takes a held run's arrays as the window, with no copy; they stay the run's, and the cursor
+    /// Takes a held run's blocks as the window, with no copy; they stay the run's, and the cursor
     /// never returns them.
     /// </summary>
-    internal void Adopt(byte[] keys, int[]? keyOffsets, long[]? rows, int[]? blockOffsets, uint[]? blocks, int count)
+    internal void Adopt(Block<byte> keys, Block<int> keyOffsets, Block<long> rows, Block<int> blockOffsets, Block<uint> blocks, int count)
     {
         DropOwned();
         _borrowed = true;
-        Keys = keys;
-        KeyOffsets = keyOffsets ?? [];
-        Rows = rows ?? [];
-        BlockOffsets = blockOffsets ?? [];
-        Blocks = blocks ?? [];
+        _keys = keys;
+        _keyOffsets = keyOffsets;
+        _rows = rows;
+        _blockOffsets = blockOffsets;
+        _blocks = blocks;
         Count = count;
     }
 
     private bool _borrowed;
 
-    internal Span<byte> KeysFor(int bytes)
+    internal Span<byte> KeysFor(int bytes) => Window(ref _keys, bytes);
+
+    internal Span<int> KeyOffsetsFor(int count) => Window(ref _keyOffsets, count);
+
+    internal Span<long> RowsFor(int count) => Window(ref _rows, count);
+
+    internal Span<int> BlockOffsetsFor(int count) => Window(ref _blockOffsets, count);
+
+    internal Span<uint> BlocksFor(int count) => Window(ref _blocks, count);
+
+    /// <summary>The cursor's own block of <paramref name="count"/> elements for the next window, grown where it is too short.</summary>
+    private Span<T> Window<T>(ref Block<T> block, int count)
+        where T : unmanaged
     {
         OwnBuffers();
-        if (Keys.Length < bytes)
-        {
-            Return(Keys);
-            Keys = ArrayPool<byte>.Shared.Rent(Math.Max(bytes, 1));
-        }
-
-        return Keys.AsSpan(0, bytes);
-    }
-
-    internal Span<int> KeyOffsetsFor(int count)
-    {
-        OwnBuffers();
-        if (KeyOffsets.Length < count)
-        {
-            Return(KeyOffsets);
-            KeyOffsets = ArrayPool<int>.Shared.Rent(count);
-        }
-
-        return KeyOffsets.AsSpan(0, count);
-    }
-
-    internal Span<long> RowsFor(int count)
-    {
-        OwnBuffers();
-        if (Rows.Length < count)
-        {
-            Return(Rows);
-            Rows = ArrayPool<long>.Shared.Rent(Math.Max(count, 1));
-        }
-
-        return Rows.AsSpan(0, count);
-    }
-
-    internal Span<int> BlockOffsetsFor(int count)
-    {
-        OwnBuffers();
-        if (BlockOffsets.Length < count)
-        {
-            Return(BlockOffsets);
-            BlockOffsets = ArrayPool<int>.Shared.Rent(count);
-        }
-
-        return BlockOffsets.AsSpan(0, count);
-    }
-
-    internal Span<uint> BlocksFor(int count)
-    {
-        OwnBuffers();
-        if (Blocks.Length < count)
-        {
-            Return(Blocks);
-            Blocks = ArrayPool<uint>.Shared.Rent(Math.Max(count, 1));
-        }
-
-        return Blocks.AsSpan(0, count);
+        Vorticity.Buffers.Blocks.Ensure(ref block, count);
+        return block.AsSpan(0, count);
     }
 
     /// <summary>After an adopted window, the cursor's buffers are its own again, and empty.</summary>
@@ -313,11 +270,11 @@ internal sealed class RunCursor : IDisposable
         if (_borrowed)
         {
             _borrowed = false;
-            Keys = [];
-            KeyOffsets = [];
-            Rows = [];
-            BlockOffsets = [];
-            Blocks = [];
+            _keys = default;
+            _keyOffsets = default;
+            _rows = default;
+            _blockOffsets = default;
+            _blocks = default;
         }
     }
 
@@ -325,26 +282,18 @@ internal sealed class RunCursor : IDisposable
     {
         if (!_borrowed)
         {
-            Return(Keys);
-            Return(KeyOffsets);
-            Return(Rows);
-            Return(BlockOffsets);
-            Return(Blocks);
+            Vorticity.Buffers.Blocks.Return(_keys);
+            Vorticity.Buffers.Blocks.Return(_keyOffsets);
+            Vorticity.Buffers.Blocks.Return(_rows);
+            Vorticity.Buffers.Blocks.Return(_blockOffsets);
+            Vorticity.Buffers.Blocks.Return(_blocks);
         }
 
-        Keys = [];
-        KeyOffsets = [];
-        Rows = [];
-        BlockOffsets = [];
-        Blocks = [];
-    }
-
-    private static void Return<T>(T[] array)
-    {
-        if (array.Length > 0)
-        {
-            ArrayPool<T>.Shared.Return(array);
-        }
+        _keys = default;
+        _keyOffsets = default;
+        _rows = default;
+        _blockOffsets = default;
+        _blocks = default;
     }
 
     public void Dispose()
@@ -376,23 +325,22 @@ internal sealed class RawWindowSource(RunScratch scratch, RawRun run) : IWindowS
             return ReadAsync(window, cursor, cancellationToken);
         }
 
-        Unpack(window, null, cursor);
+        Unpack(window, default, cursor);
         return new ValueTask<bool>(true);
     }
 
     [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder<>))]
     private async ValueTask<bool> ReadAsync(RawWindow window, RunCursor cursor, CancellationToken cancellationToken)
     {
-        int bytes = run.WindowBytes(window);
-        byte[] staged = ArrayPool<byte>.Shared.Rent(bytes);
+        Block<byte> staged = Blocks.Rent<byte>(run.WindowBytes(window));
         try
         {
-            await scratch.ReadAsync(window.Offset, staged.AsMemory(0, bytes), cancellationToken).ConfigureAwait(false);
+            await scratch.ReadAsync(window.Offset, staged.AsMemory(), cancellationToken).ConfigureAwait(false);
             Unpack(window, staged, cursor);
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(staged);
+            Blocks.Return(staged);
         }
 
         return true;
@@ -402,7 +350,7 @@ internal sealed class RawWindowSource(RunScratch scratch, RawRun run) : IWindowS
     /// Copies the window's parts into the cursor, in their order in the scratch: from
     /// <paramref name="staged"/> when it holds the window, from the scratch's pages otherwise.
     /// </summary>
-    private void Unpack(RawWindow window, byte[]? staged, RunCursor cursor)
+    private void Unpack(RawWindow window, Block<byte> staged, RunCursor cursor)
     {
         int n = window.Entries;
         int at = 0;
@@ -429,9 +377,9 @@ internal sealed class RawWindowSource(RunScratch scratch, RawRun run) : IWindowS
         cursor.Count = n;
     }
 
-    private void Take(RawWindow window, byte[]? staged, ref int at, Span<byte> part)
+    private void Take(RawWindow window, Block<byte> staged, ref int at, Span<byte> part)
     {
-        if (staged is null)
+        if (staged.Bytes is null)
         {
             scratch.Read(window.Offset + at, part);
         }
@@ -460,11 +408,11 @@ internal sealed class RawRunWriter : IRunSink, IDisposable
 
     private readonly RunScratch _scratch;
     private readonly RawRun _run;
-    private byte[] _keys = ArrayPool<byte>.Shared.Rent(1 << 16);
-    private int[] _keyOffsets = ArrayPool<int>.Shared.Rent(WindowEntries + 1);
-    private long[] _rows = ArrayPool<long>.Shared.Rent(WindowEntries);
-    private int[] _blockOffsets = ArrayPool<int>.Shared.Rent(WindowEntries + 1);
-    private uint[] _blocks = ArrayPool<uint>.Shared.Rent(1 << 12);
+    private Block<byte> _keys = Blocks.Rent<byte>(1 << 16);
+    private Block<int> _keyOffsets = Blocks.Rent<int>(WindowEntries + 1);
+    private Block<long> _rows = Blocks.Rent<long>(WindowEntries);
+    private Block<int> _blockOffsets = Blocks.Rent<int>(WindowEntries + 1);
+    private Block<uint> _blocks = Blocks.Rent<uint>(1 << 12);
     private int _count;
     private int _keyBytes;
     private int _blockCount;
@@ -491,7 +439,7 @@ internal sealed class RawRunWriter : IRunSink, IDisposable
     {
         if (_blockCount + blocks.Length > _blocks.Length)
         {
-            _blocks = Grow(_blocks, _blockCount, _blockCount + blocks.Length);
+            Blocks.Grow(ref _blocks, Math.Max(_blockCount + blocks.Length, _blocks.Length * 2));
         }
 
         blocks.CopyTo(_blocks.AsSpan(_blockCount));
@@ -511,7 +459,7 @@ internal sealed class RawRunWriter : IRunSink, IDisposable
     {
         if (_keyBytes + key.Length > _keys.Length)
         {
-            _keys = Grow(_keys, _keyBytes, _keyBytes + key.Length);
+            Blocks.Grow(ref _keys, Math.Max(_keyBytes + key.Length, _keys.Length * 2));
         }
 
         key.CopyTo(_keys.AsSpan(_keyBytes));
@@ -541,7 +489,7 @@ internal sealed class RawRunWriter : IRunSink, IDisposable
         }
 
         long offset = _scratch.Length;
-        Pack(null);
+        Pack(default);
         Laid(offset);
         return ValueTask.CompletedTask;
     }
@@ -549,16 +497,16 @@ internal sealed class RawRunWriter : IRunSink, IDisposable
     [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder))]
     private async ValueTask FlushToFileAsync(int bytes, CancellationToken cancellationToken)
     {
-        byte[] staged = ArrayPool<byte>.Shared.Rent(bytes);
+        Block<byte> staged = Blocks.Rent<byte>(bytes);
         try
         {
             Pack(staged);
-            long offset = await _scratch.AppendAsync(staged.AsMemory(0, bytes), cancellationToken).ConfigureAwait(false);
+            long offset = await _scratch.AppendAsync(staged.AsMemory(), cancellationToken).ConfigureAwait(false);
             Laid(offset);
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(staged);
+            Blocks.Return(staged);
         }
     }
 
@@ -566,7 +514,7 @@ internal sealed class RawRunWriter : IRunSink, IDisposable
     /// Copies the window's parts in their order in the scratch: into <paramref name="staged"/> when
     /// there is one, onto the scratch's pages otherwise.
     /// </summary>
-    private void Pack(byte[]? staged)
+    private void Pack(Block<byte> staged)
     {
         int at = 0;
         if (_run.KeyWidth == 0)
@@ -586,9 +534,9 @@ internal sealed class RawRunWriter : IRunSink, IDisposable
         }
     }
 
-    private void Put(byte[]? staged, ref int at, ReadOnlySpan<byte> part)
+    private void Put(Block<byte> staged, ref int at, ReadOnlySpan<byte> part)
     {
-        if (staged is null)
+        if (staged.Bytes is null)
         {
             _scratch.Append(part);
         }
@@ -617,26 +565,18 @@ internal sealed class RawRunWriter : IRunSink, IDisposable
         return _run;
     }
 
-    private static T[] Grow<T>(T[] array, int used, int needed)
-    {
-        T[] grown = ArrayPool<T>.Shared.Rent(Math.Max(needed, array.Length * 2));
-        array.AsSpan(0, used).CopyTo(grown);
-        ArrayPool<T>.Shared.Return(array);
-        return grown;
-    }
-
     public void Dispose()
     {
-        ArrayPool<byte>.Shared.Return(_keys);
-        ArrayPool<int>.Shared.Return(_keyOffsets);
-        ArrayPool<long>.Shared.Return(_rows);
-        ArrayPool<int>.Shared.Return(_blockOffsets);
-        ArrayPool<uint>.Shared.Return(_blocks);
-        _keys = [];
-        _keyOffsets = [];
-        _rows = [];
-        _blockOffsets = [];
-        _blocks = [];
+        Blocks.Return(_keys);
+        Blocks.Return(_keyOffsets);
+        Blocks.Return(_rows);
+        Blocks.Return(_blockOffsets);
+        Blocks.Return(_blocks);
+        _keys = default;
+        _keyOffsets = default;
+        _rows = default;
+        _blockOffsets = default;
+        _blocks = default;
     }
 }
 
@@ -660,8 +600,8 @@ internal static class RunMerger
             Cursors = cursors,
             Sink = sink,
             Width = layout.Shape == KeyShape.Bytes ? 0 : layout.Width,
-            Heap = ArrayPool<Head>.Shared.Rent(Math.Max(cursors.Count, 1)),
-            Key = hasRows ? [] : ArrayPool<byte>.Shared.Rent(64),
+            Heap = Blocks.Rent<Head>(Math.Max(cursors.Count, 1)),
+            Key = hasRows ? default : Blocks.Rent<byte>(64),
         };
         try
         {
@@ -699,12 +639,8 @@ internal static class RunMerger
         }
         finally
         {
-            ArrayPool<Head>.Shared.Return(state.Heap);
-            if (state.Key.Length > 0)
-            {
-                ArrayPool<byte>.Shared.Return(state.Key);
-            }
-
+            Blocks.Return(state.Heap);
+            Blocks.Return(state.Key);
             foreach (RunCursor cursor in cursors)
             {
                 cursor.Dispose();
@@ -733,9 +669,9 @@ internal static class RunMerger
         public List<RunCursor> Cursors;
         public IRunSink Sink;
         public int Width;
-        public Head[] Heap;
+        public Block<Head> Heap;
         public int Size;
-        public byte[] Key;
+        public Block<byte> Key;
         public int KeyLength;
         public ulong Ordered;
         public bool Open;
@@ -758,7 +694,7 @@ internal static class RunMerger
     /// <summary>After the top's refill: its new first entry is its head, or the run has ended and leaves the heap.</summary>
     private static void Settle(ref MergeState state, bool filled, bool hasRows)
     {
-        Head[] heap = state.Heap;
+        Span<Head> heap = state.Heap;
         if (filled)
         {
             RunCursor top = state.Cursors[heap[0].Cursor];
@@ -801,7 +737,7 @@ internal static class RunMerger
     /// </summary>
     private static Pause Sorted(ref MergeState state)
     {
-        Head[] heap = state.Heap;
+        Span<Head> heap = state.Heap;
         int size = state.Size;
         List<RunCursor> cursors = state.Cursors;
         IRunSink sink = state.Sink;
@@ -850,12 +786,12 @@ internal static class RunMerger
     /// </summary>
     private static Pause Postings(ref MergeState state)
     {
-        Head[] heap = state.Heap;
+        Span<Head> heap = state.Heap;
         int size = state.Size;
         List<RunCursor> cursors = state.Cursors;
         IRunSink sink = state.Sink;
         int width = state.Width;
-        byte[] current = state.Key;
+        Block<byte> current = state.Key;
         int length = state.KeyLength;
         ulong ordered = state.Ordered;
         bool open = state.Open;
@@ -883,8 +819,7 @@ internal static class RunMerger
                 ReadOnlySpan<byte> key = KeySpan(cursors[heap[0].Cursor], width);
                 if (current.Length < key.Length)
                 {
-                    ArrayPool<byte>.Shared.Return(current);
-                    current = ArrayPool<byte>.Shared.Rent(key.Length);
+                    Blocks.Ensure(ref current, key.Length);
                     state.Key = current;
                 }
 
@@ -929,7 +864,7 @@ internal static class RunMerger
         return a.Tie < b.Tie;
     }
 
-    private static void SiftDown(Head[] heap, int size, int at, List<RunCursor> cursors, int width)
+    private static void SiftDown(Span<Head> heap, int size, int at, List<RunCursor> cursors, int width)
     {
         while (true)
         {
@@ -967,11 +902,11 @@ internal sealed class PayloadRunSink : IRunSink
     private readonly bool _wide;
     private readonly List<KeySegment> _segments = [];
     private readonly List<PendingPayload> _payloads = [];
-    private byte[] _keys = [];
-    private int[] _keyOffsets = [];
-    private ulong[] _rows = [];
-    private uint[] _listOffsets = [];
-    private uint[] _blocks = [];
+    private Block<byte> _keys;
+    private Block<int> _keyOffsets;
+    private Block<ulong> _rows;
+    private Block<uint> _listOffsets;
+    private Block<uint> _blocks;
     private int _count;
     private int _keyBytes;
     private int _listed;
@@ -1016,15 +951,13 @@ internal sealed class PayloadRunSink : IRunSink
     {
         if (_listed + blocks.Length > _blocks.Length)
         {
-            uint[] grown = ArrayPool<uint>.Shared.Rent(Math.Max(_listed + blocks.Length, _blocks.Length * 2));
-            _blocks.AsSpan(0, _listed).CopyTo(grown);
-            ArrayPool<uint>.Shared.Return(_blocks);
-            _blocks = grown;
+            Blocks.Grow(ref _blocks, Math.Max(_listed + blocks.Length, _blocks.Length * 2));
         }
 
+        Span<uint> lists = _blocks.AsSpan(_listed, blocks.Length);
         for (int i = 0; i < blocks.Length; i++)
         {
-            _blocks[_listed + i] = checked(blocks[i] - (uint)_firstBlock);
+            lists[i] = checked(blocks[i] - (uint)_firstBlock);
         }
 
         _listed += blocks.Length;
@@ -1044,10 +977,7 @@ internal sealed class PayloadRunSink : IRunSink
     {
         if (_keyBytes + key.Length > _keys.Length)
         {
-            byte[] grown = ArrayPool<byte>.Shared.Rent(Math.Max(_keyBytes + key.Length, _keys.Length * 2));
-            _keys.AsSpan(0, _keyBytes).CopyTo(grown);
-            ArrayPool<byte>.Shared.Return(_keys);
-            _keys = grown;
+            Blocks.Grow(ref _keys, Math.Max(_keyBytes + key.Length, _keys.Length * 2));
         }
 
         key.CopyTo(_keys.AsSpan(_keyBytes));
@@ -1072,18 +1002,18 @@ internal sealed class PayloadRunSink : IRunSink
     private void Open()
     {
         int capacity = Math.Min(_segmentEntries, 1 << 16);
-        _keys = ArrayPool<byte>.Shared.Rent(Math.Max(capacity * Math.Max(_layout.Width, 8), 64));
-        _keyOffsets = ArrayPool<int>.Shared.Rent(_segmentEntries + 1);
+        _keys = Blocks.Rent<byte>(Math.Max(capacity * Math.Max(_layout.Width, 8), 64));
+        _keyOffsets = Blocks.Rent<int>(_segmentEntries + 1);
         _keyOffsets[0] = 0;
         if (_hasRows)
         {
-            _rows = ArrayPool<ulong>.Shared.Rent(_segmentEntries);
+            _rows = Blocks.Rent<ulong>(_segmentEntries);
         }
         else
         {
-            _listOffsets = ArrayPool<uint>.Shared.Rent(_segmentEntries + 1);
+            _listOffsets = Blocks.Rent<uint>(_segmentEntries + 1);
             _listOffsets[0] = 0;
-            _blocks = ArrayPool<uint>.Shared.Rent(Math.Max(capacity, 64));
+            _blocks = Blocks.Rent<uint>(Math.Max(capacity, 64));
         }
 
         _count = 0;
@@ -1095,8 +1025,8 @@ internal sealed class PayloadRunSink : IRunSink
     private void Cut()
     {
         int count = _count;
-        int[] offsets = _keyOffsets;
-        byte[] heap = _keys;
+        Block<int> offsets = _keyOffsets;
+        Block<byte> heap = _keys;
         int length = _keyBytes;
         _segments.Add(new KeySegment(
             (ulong)count,
@@ -1115,14 +1045,14 @@ internal sealed class PayloadRunSink : IRunSink
             _payloads.Add(PendingPayload.RentedU32(_blocks, _listed, compress: true));
         }
 
-        _keys = [];
-        _keyOffsets = [];
-        _rows = [];
-        _listOffsets = [];
-        _blocks = [];
+        _keys = default;
+        _keyOffsets = default;
+        _rows = default;
+        _listOffsets = default;
+        _blocks = default;
     }
 
-    private ReadOnlySpan<byte> Key(byte[] heap, int[] offsets, int index) => _layout.Shape == KeyShape.Bytes
+    private ReadOnlySpan<byte> Key(Block<byte> heap, Block<int> offsets, int index) => _layout.Shape == KeyShape.Bytes
         ? heap.AsSpan(offsets[index], offsets[index + 1] - offsets[index])
         : heap.AsSpan(index * _layout.Width, _layout.Width);
 
@@ -1143,23 +1073,16 @@ internal sealed class PayloadRunSink : IRunSink
 
     private void ReturnOpen()
     {
-        ArrayPool<byte>.Shared.Return(_keys);
-        ArrayPool<int>.Shared.Return(_keyOffsets);
-        if (_hasRows)
-        {
-            ArrayPool<ulong>.Shared.Return(_rows);
-        }
-        else
-        {
-            ArrayPool<uint>.Shared.Return(_listOffsets);
-            ArrayPool<uint>.Shared.Return(_blocks);
-        }
-
-        _keys = [];
-        _keyOffsets = [];
-        _rows = [];
-        _listOffsets = [];
-        _blocks = [];
+        Blocks.Return(_keys);
+        Blocks.Return(_keyOffsets);
+        Blocks.Return(_rows);
+        Blocks.Return(_listOffsets);
+        Blocks.Return(_blocks);
+        _keys = default;
+        _keyOffsets = default;
+        _rows = default;
+        _listOffsets = default;
+        _blocks = default;
     }
 }
 
@@ -1167,7 +1090,7 @@ internal sealed class PayloadRunSink : IRunSink
 internal static class KeyPayloads
 {
     /// <summary>A payload over a rented heap and its rented offsets, both given back once laid.</summary>
-    internal static PendingPayload Keys(KeyLayout layout, bool utf8, byte[] heap, int length, int[] offsets, int count) =>
+    internal static PendingPayload Keys(KeyLayout layout, bool utf8, Block<byte> heap, int length, Block<int> offsets, int count) =>
         new PendingPayload(
             (arena, types) => layout.Shape == KeyShape.Bytes
                 ? Views(arena, types, utf8, heap.AsSpan(0, length), offsets.AsSpan(0, count + 1))
@@ -1176,8 +1099,8 @@ internal static class KeyPayloads
             estimate: length + (layout.Shape == KeyShape.Bytes ? 16L * count : 0),
             () =>
             {
-                ArrayPool<byte>.Shared.Return(heap);
-                ArrayPool<int>.Shared.Return(offsets);
+                Blocks.Return(heap);
+                Blocks.Return(offsets);
             });
 
     private static int Fixed(CanonicalArena arena, DTypeArena types, KeyLayout layout, ReadOnlySpan<byte> heap, int count)

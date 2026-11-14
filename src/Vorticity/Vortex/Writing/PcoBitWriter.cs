@@ -1,12 +1,12 @@
 using System;
-using System.Buffers;
 using System.Buffers.Binary;
+using Vorticity.Buffers;
 
 namespace Vorticity.Writing;
 
 /// <summary>
 /// pco's bit stream written: each value's bits from the lowest, packed straight after the last
-/// value's, into a rented buffer that grows as it fills. <see cref="Align"/> pads with zeros to the
+/// value's, into a rented block that grows as it fills. <see cref="Align"/> pads with zeros to the
 /// next byte, as pco's <c>finish_byte</c> does at the end of each section.
 /// </summary>
 /// <remarks>
@@ -15,15 +15,15 @@ namespace Vorticity.Writing;
 /// </remarks>
 internal sealed class PcoBitWriter : IDisposable
 {
-    private byte[] _buffer;
+    private Block<byte> _buffer;
     private int _bytes;
     private ulong _pending;
     private int _pendingBits;
 
-    /// <summary>Creates a writer whose buffer starts at <paramref name="capacity"/> bytes.</summary>
+    /// <summary>Creates a writer whose block starts at <paramref name="capacity"/> bytes.</summary>
     internal PcoBitWriter(int capacity)
     {
-        _buffer = Aggregating.WorkArrays.Rent<byte>(Math.Max(capacity, 64));
+        _buffer = Blocks.Rent<byte>(Math.Max(capacity, 64));
     }
 
     /// <summary>Bytes written; the position of the next section once <see cref="Align"/> has run.</summary>
@@ -67,11 +67,11 @@ internal sealed class PcoBitWriter : IDisposable
         return _bytes;
     }
 
-    /// <summary>Hands the buffer over: the caller returns it to the pool; this writer holds nothing after.</summary>
-    internal byte[] TakeBuffer()
+    /// <summary>Hands the block over: the caller returns it to the pool; this writer holds nothing after.</summary>
+    internal Block<byte> TakeBuffer()
     {
-        byte[] buffer = _buffer;
-        _buffer = [];
+        Block<byte> buffer = _buffer;
+        _buffer = default;
         _bytes = 0;
         return buffer;
     }
@@ -79,11 +79,8 @@ internal sealed class PcoBitWriter : IDisposable
     /// <inheritdoc/>
     public void Dispose()
     {
-        if (_buffer.Length > 0)
-        {
-            Aggregating.WorkArrays.Return(_buffer);
-            _buffer = [];
-        }
+        Blocks.Return(_buffer);
+        _buffer = default;
     }
 
     private void Emit(ulong word)
@@ -95,18 +92,9 @@ internal sealed class PcoBitWriter : IDisposable
 
     private void Reserve(int bytes)
     {
-        if (_bytes + bytes <= _buffer.Length)
+        if (_bytes + bytes > _buffer.Length)
         {
-            return;
+            Blocks.Grow(ref _buffer, Math.Max(_buffer.Length * 2, _bytes + bytes));
         }
-
-        byte[] grown = Aggregating.WorkArrays.Rent<byte>(Math.Max(_buffer.Length * 2, _bytes + bytes));
-        _buffer.AsSpan(0, _bytes).CopyTo(grown);
-        if (_buffer.Length > 0)
-        {
-            Aggregating.WorkArrays.Return(_buffer);
-        }
-
-        _buffer = grown;
     }
 }

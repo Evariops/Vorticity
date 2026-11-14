@@ -75,6 +75,38 @@ internal readonly struct Block<T>
         }
     }
 
+    /// <summary>Element <paramref name="index"/>, an unsigned index as an array takes one.</summary>
+    /// <exception cref="IndexOutOfRangeException"><paramref name="index"/> is not below <see cref="Length"/>.</exception>
+    public ref T this[uint index]
+    {
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        get
+        {
+            if (index >= (uint)_length)
+            {
+                ThrowIndex();
+            }
+
+            return ref Unsafe.Add(ref Unsafe.As<byte, T>(ref MemoryMarshal.GetArrayDataReference(_bytes!)), (nint)index);
+        }
+    }
+
+    /// <summary>Element <paramref name="index"/>, an unsigned index as an array takes one.</summary>
+    /// <exception cref="IndexOutOfRangeException"><paramref name="index"/> is not below <see cref="Length"/>.</exception>
+    public ref T this[ulong index]
+    {
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        get
+        {
+            if (index >= (uint)_length)
+            {
+                ThrowIndex();
+            }
+
+            return ref Unsafe.Add(ref Unsafe.As<byte, T>(ref MemoryMarshal.GetArrayDataReference(_bytes!)), (nint)index);
+        }
+    }
+
     /// <summary>Every element, as a span.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public Span<T> AsSpan() =>

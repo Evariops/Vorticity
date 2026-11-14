@@ -99,9 +99,15 @@ internal static class Blocks
     /// pool lent, or the default, is let go.
     /// </summary>
     internal static void Return<T>(Block<T> block)
-        where T : unmanaged
+        where T : unmanaged => ReturnBytes(block.Bytes);
+
+    /// <summary>
+    /// Gives back the bytes behind a block, for a holder that kept them alone, its own offset and length beside: the
+    /// buffers a blob queues, which are many and small. Null, or bytes no pool lent, are let go.
+    /// </summary>
+    internal static void ReturnBytes(byte[]? bytes)
     {
-        if (block.Bytes is not { } bytes)
+        if (bytes is null)
         {
             return;
         }
@@ -134,6 +140,28 @@ internal static class Blocks
         {
             block.AsSpan(kept).Clear();
         }
+    }
+
+    /// <summary>
+    /// <paramref name="block"/> made <paramref name="length"/> elements long at least, what it held let go: within its
+    /// bytes when they have room, as long as they go, otherwise a block rented for it, the old one given back.
+    /// </summary>
+    internal static void Ensure<T>(ref Block<T> block, int length)
+        where T : unmanaged
+    {
+        if (length <= block.Length)
+        {
+            return;
+        }
+
+        if (length <= block.Capacity)
+        {
+            block = block.WithLength(block.Capacity);
+            return;
+        }
+
+        Return(block);
+        block = Rent<T>(length);
     }
 
     /// <summary>

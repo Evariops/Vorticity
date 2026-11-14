@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using Vorticity.Buffers;
 using Vorticity.Compute;
 using Vorticity.Expressions;
 using Vorticity.Indexes;
@@ -376,7 +377,7 @@ internal sealed class SortedRows(SortKey keys, int prefix, int skip = 0)
 /// The keys of rows in the key's order, by their places among <paramref name="keys"/>: through <paramref name="order"/>
 /// from <paramref name="start"/> on, or the rows of <paramref name="keys"/> themselves from there when there is none.
 /// </summary>
-internal readonly struct OrderedRows(RowKeys keys, int[]? order, int start) : IOrderedKeys
+internal readonly struct OrderedRows(RowKeys keys, Block<int> order, int start) : IOrderedKeys
 {
-    public ReadOnlySpan<byte> KeyAt(int row) => keys.Row(order is null ? start + row : order[start + row]);
+    public ReadOnlySpan<byte> KeyAt(int row) => keys.Row(order.IsEmpty ? start + row : order[start + row]);
 }

@@ -7,6 +7,7 @@ using System.Runtime.InteropServices;
 using Vorticity.Aggregating;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
+using Vorticity.Buffers;
 using Vorticity.Editions;
 using Vorticity.Types;
 using Vorticity.Types.Numerics;
@@ -101,7 +102,7 @@ internal enum ColumnScheme : byte
 /// <summary>The chosen scheme and the indices it needs.</summary>
 internal readonly struct ColumnPlan
 {
-    private ColumnPlan(ColumnScheme scheme, int[] gather, int[] codes)
+    private ColumnPlan(ColumnScheme scheme, Block<int> gather = default, Block<int> codes = default)
     {
         Scheme = scheme;
         Gather = gather;
@@ -109,7 +110,7 @@ internal readonly struct ColumnPlan
     }
 
     /// <summary>Leave the column alone.</summary>
-    internal static ColumnPlan Canonical => new ColumnPlan(ColumnScheme.None, [], []);
+    internal static ColumnPlan Canonical => new ColumnPlan(ColumnScheme.None);
 
     /// <summary>
     /// The compressed column, for <see cref="ColumnScheme.Fsst"/>. Carried on the plan rather than
@@ -204,22 +205,29 @@ internal readonly struct ColumnPlan
     /// The rows to gather as the values child: one per run for <see cref="ColumnScheme.RunEnd"/>,
     /// one per distinct value for <see cref="ColumnScheme.Dict"/>.
     /// </summary>
-    internal int[] Gather { get; }
+    internal Block<int> Gather { get; }
 
     /// <summary>
     /// For <see cref="ColumnScheme.RunEnd"/>, each run's exclusive end row. For
     /// <see cref="ColumnScheme.Dict"/>, each row's dictionary entry.
     /// </summary>
-    internal int[] Codes { get; }
+    internal Block<int> Codes { get; }
 
-    internal static ColumnPlan Runs(int[] starts, int[] ends) =>
-        new ColumnPlan(ColumnScheme.RunEnd, starts, ends) { RunCount = ends.Length };
+    /// <summary>The runs <paramref name="starts"/> and <paramref name="ends"/> say, copied into blocks the plan gives back (<see cref="ReleaseCodes"/>).</summary>
+    internal static ColumnPlan Runs(ReadOnlySpan<int> starts, ReadOnlySpan<int> ends)
+    {
+        Block<int> startBlock = Blocks.Rent<int>(starts.Length);
+        Block<int> endBlock = Blocks.Rent<int>(ends.Length);
+        starts.CopyTo(startBlock);
+        ends.CopyTo(endBlock);
+        return RentedRuns(startBlock, endBlock, ends.Length);
+    }
 
     /// <summary>
-    /// The same, over <paramref name="runs"/> runs of arrays rented longer than them, which go back to the pool once the
+    /// The same, over <paramref name="runs"/> runs of blocks rented longer than them, which go back to the pool once the
     /// plan is written, or let go (<see cref="ReleaseCodes"/>).
     /// </summary>
-    internal static ColumnPlan RentedRuns(int[] starts, int[] ends, int runs) =>
+    internal static ColumnPlan RentedRuns(Block<int> starts, Block<int> ends, int runs) =>
         new ColumnPlan(ColumnScheme.RunEnd, starts, ends) { RunCount = runs, RunsRented = true };
 
     /// <summary>For <see cref="ColumnScheme.RunEnd"/>, the runs <see cref="Gather"/> and <see cref="Codes"/> hold.</summary>
@@ -234,15 +242,22 @@ internal readonly struct ColumnPlan
     /// <summary>Each run's exclusive end row, for a run-end plan.</summary>
     internal ReadOnlySpan<int> RunEnds => Codes.AsSpan(0, RunCount);
 
-    internal static ColumnPlan Dictionary(int[] firstOccurrences, int[] codes) =>
-        new ColumnPlan(ColumnScheme.Dict, firstOccurrences, codes) { Rows = codes.Length, Entries = firstOccurrences.Length };
+    /// <summary>The dictionary <paramref name="firstOccurrences"/> and <paramref name="codes"/> say, copied into blocks the encoder gives back.</summary>
+    internal static ColumnPlan Dictionary(ReadOnlySpan<int> firstOccurrences, ReadOnlySpan<int> codes)
+    {
+        Block<int> first = Blocks.Rent<int>(firstOccurrences.Length);
+        Block<int> codeBlock = Blocks.Rent<int>(codes.Length);
+        firstOccurrences.CopyTo(first);
+        codes.CopyTo(codeBlock);
+        return RentedDictionary(first, firstOccurrences.Length, codeBlock, codes.Length);
+    }
 
     /// <summary>
-    /// The same, over arrays rented longer than they are used: <paramref name="firstOccurrences"/> for
+    /// The same, over blocks rented longer than they are used: <paramref name="firstOccurrences"/> for
     /// <paramref name="entries"/> entries, which the encoder hands back once it has gathered the values, and
     /// <paramref name="codes"/> for <paramref name="rows"/> rows, once it has narrowed them into the arena.
     /// </summary>
-    internal static ColumnPlan RentedDictionary(int[] firstOccurrences, int entries, int[] codes, int rows) =>
+    internal static ColumnPlan RentedDictionary(Block<int> firstOccurrences, int entries, Block<int> codes, int rows) =>
         new ColumnPlan(ColumnScheme.Dict, firstOccurrences, codes)
         {
             Rows = rows,
@@ -252,58 +267,52 @@ internal readonly struct ColumnPlan
         };
 
     internal static ColumnPlan ForFsst(FsstPlan plan) =>
-        new ColumnPlan(ColumnScheme.Fsst, [], []) { Fsst = plan };
+        new ColumnPlan(ColumnScheme.Fsst) { Fsst = plan };
 
     internal static ColumnPlan ForZstd(ZstdPlan plan) =>
-        new ColumnPlan(ColumnScheme.Zstd, [], []) { Zstd = plan };
+        new ColumnPlan(ColumnScheme.Zstd) { Zstd = plan };
 
     internal static ColumnPlan ForAlp(AlpPlan plan) =>
-        new ColumnPlan(ColumnScheme.Alp, [], []) { Alp = plan };
+        new ColumnPlan(ColumnScheme.Alp) { Alp = plan };
 
     internal static ColumnPlan ForAlpRd(AlpRdPlan plan) =>
-        new ColumnPlan(ColumnScheme.AlpRd, [], []) { AlpRd = plan };
+        new ColumnPlan(ColumnScheme.AlpRd) { AlpRd = plan };
 
     internal static ColumnPlan ForBitPacking(BitPackPlan plan) =>
-        new ColumnPlan(ColumnScheme.BitPacked, [], []) { BitPack = plan };
+        new ColumnPlan(ColumnScheme.BitPacked) { BitPack = plan };
 
     internal static ColumnPlan ForSequence(SequencePlan plan) =>
-        new ColumnPlan(ColumnScheme.Sequence, [], []) { Sequence = plan };
+        new ColumnPlan(ColumnScheme.Sequence) { Sequence = plan };
 
     internal static ColumnPlan ForDecimalParts(PType parts) =>
-        new ColumnPlan(ColumnScheme.DecimalByteParts, [], []) { PartsPType = parts };
+        new ColumnPlan(ColumnScheme.DecimalByteParts) { PartsPType = parts };
 
     internal static ColumnPlan ForConstant(int row) =>
-        new ColumnPlan(ColumnScheme.Constant, [], []) { ConstantRow = row };
+        new ColumnPlan(ColumnScheme.Constant) { ConstantRow = row };
 
     internal static ColumnPlan ForOnPair(OnPairPlan plan) =>
-        new ColumnPlan(ColumnScheme.OnPair, [], []) { OnPair = plan, PredictedBytes = plan.EncodedSize };
+        new ColumnPlan(ColumnScheme.OnPair) { OnPair = plan, PredictedBytes = plan.EncodedSize };
 
     internal static ColumnPlan ForPco(PcoPlan plan) =>
-        new ColumnPlan(ColumnScheme.Pco, [], []) { Pco = plan, PredictedBytes = plan.Price };
+        new ColumnPlan(ColumnScheme.Pco) { Pco = plan, PredictedBytes = plan.Price };
 
     internal static ColumnPlan ForSparse(long predicted) =>
-        new ColumnPlan(ColumnScheme.Sparse, [], []) { PredictedBytes = predicted };
+        new ColumnPlan(ColumnScheme.Sparse) { PredictedBytes = predicted };
 
     internal static ColumnPlan ForDateTimeParts(DateTimePartsPlan plan) =>
-        new ColumnPlan(ColumnScheme.DateTimeParts, [], []) { DateTimeParts = plan, PredictedBytes = plan.EncodedSize };
+        new ColumnPlan(ColumnScheme.DateTimeParts) { DateTimeParts = plan, PredictedBytes = plan.EncodedSize };
 
-    /// <summary>Hands a rented codes array back, and a run-end plan's rented runs, for a plan written or that will not be.</summary>
+    /// <summary>Hands a rented codes block back, and a run-end plan's rented runs, for a plan written or that will not be.</summary>
     internal void ReleaseCodes()
     {
-        if (CodesRented)
+        if (CodesRented || RunsRented)
         {
-            WorkArrays.Return(Codes);
+            Blocks.Return(Codes);
         }
 
-        if (GatherRented)
+        if (GatherRented || RunsRented)
         {
-            WorkArrays.Return(Gather);
-        }
-
-        if (RunsRented)
-        {
-            WorkArrays.Return(Gather);
-            WorkArrays.Return(Codes);
+            Blocks.Return(Gather);
         }
     }
 
@@ -431,8 +440,8 @@ internal static class ColumnCompressor
 
         // Each count stops before it writes a run past the ceiling, so the runs are rented to it, and given to the plan
         // that wins: a column of a million rows took two arrays of its rows to count, and two more of its runs to keep.
-        int[] runStarts = WorkArrays.Rent<int>(ceiling + 1);
-        int[] runEnds = WorkArrays.Rent<int>(ceiling + 1);
+        Block<int> runStarts = Blocks.Rent<int>(ceiling + 1);
+        Block<int> runEnds = Blocks.Rent<int>(ceiling + 1);
         int runCount = node.Kind == CanonicalKind.Bool && node.Validity.IsAllValid
             ? BitmapRuns(node.Bits.Span, node.BitOffset, length, ceiling, runStarts, runEnds)
             : FixedRuns(in node, length, ceiling, runStarts, runEnds, out int fixedRuns)
@@ -445,8 +454,8 @@ internal static class ColumnCompressor
 
         if (runCount > ceiling)
         {
-            WorkArrays.Return(runStarts);
-            WorkArrays.Return(runEnds);
+            Blocks.Return(runStarts);
+            Blocks.Return(runEnds);
             return ColumnPlan.Canonical;
         }
 
@@ -1588,14 +1597,18 @@ internal static class ColumnCompressor
         // sized by the rows were filled, then probed, over a hundred kilobytes and more.
         int entries = (int)Math.Min(length, Math.Max(1, (budget - DictionaryOverhead + minimumEntry - 1) / minimumEntry));
         int capacity = BucketCount(entries);
-        int[] buckets = WorkArrays.Rent<int>(capacity);
-        int[] chain = WorkArrays.Rent<int>(Math.Max(entries, 1));
-        int[] firstRows = WorkArrays.Rent<int>(Math.Max(entries, 1));
-        int[] codes = WorkArrays.Rent<int>(Math.Max(length, 1));
+        Block<int> bucketBlock = Blocks.Rent<int>(capacity);
+        Block<int> chainBlock = Blocks.Rent<int>(Math.Max(entries, 1));
+        Block<int> firstRowBlock = Blocks.Rent<int>(Math.Max(entries, 1));
+        Block<int> codeBlock = Blocks.Rent<int>(Math.Max(length, 1));
         bool kept = false;
         try
         {
-            buckets.AsSpan(0, capacity).Fill(-1);
+            Span<int> buckets = bucketBlock;
+            Span<int> chain = chainBlock;
+            Span<int> firstRows = firstRowBlock;
+            Span<int> codes = codeBlock;
+            buckets.Fill(-1);
             int mask = capacity - 1;
 
             // A column of four- or eight-byte values, most of those the walk reads, is walked a word a row; one with no null
@@ -1678,7 +1691,7 @@ internal static class ColumnCompressor
             // Priced, not assumed: codes at the narrowest width that indexes the entries, plus the
             // entries themselves in whatever form they will actually be written.
             long encoded = CodeBytes(length, distinct, packs)
-                + EntriesSize(arena, node, firstRows.AsSpan(0, distinct));
+                + EntriesSize(arena, node, firstRows[..distinct]);
             if (encoded + DictionaryOverhead >= budget)
             {
                 return ColumnPlan.Canonical;
@@ -1688,19 +1701,19 @@ internal static class ColumnCompressor
             // the values from them, the codes once it has narrowed them into an arena buffer. A copy of the first rows
             // at their length made a tenth of what a consolidation of log records allocated.
             kept = true;
-            return ColumnPlan.RentedDictionary(firstRows, distinct, codes, length)
+            return ColumnPlan.RentedDictionary(firstRowBlock, distinct, codeBlock, length)
                 with { PredictedBytes = encoded };
         }
         finally
         {
             if (!kept)
             {
-                WorkArrays.Return(codes);
-                WorkArrays.Return(firstRows);
+                Blocks.Return(codeBlock);
+                Blocks.Return(firstRowBlock);
             }
 
-            WorkArrays.Return(chain);
-            WorkArrays.Return(buckets);
+            Blocks.Return(chainBlock);
+            Blocks.Return(bucketBlock);
         }
     }
 
@@ -1743,20 +1756,20 @@ internal static class ColumnCompressor
     /// </remarks>
     /// <returns>The distinct values, or <see cref="Abandoned"/>.</returns>
     private static int WalkWords<T, TNulls>(
-        ReadOnlySpan<T> values, in ValidityMask validity, int entries, int[] buckets, int mask, int[] chain, int[] firstRows,
-        int[] codes, int minimumEntry, long budget, bool packs)
+        ReadOnlySpan<T> values, in ValidityMask validity, int entries, Span<int> buckets, int mask, Span<int> chain, Span<int> firstRows,
+        Span<int> codes, int minimumEntry, long budget, bool packs)
         where T : unmanaged, IBinaryInteger<T>
         where TNulls : struct, IFlag
     {
         int length = values.Length;
-        T[] keys = WorkArrays.Rent<T>(Math.Max(entries, 1));
+        Block<T> keys = Blocks.Rent<T>(Math.Max(entries, 1));
         try
         {
             ulong seed = KeyHash.MixSeed;
             ref T value = ref MemoryMarshal.GetReference(values);
-            ref int bucketAt = ref MemoryMarshal.GetArrayDataReference(buckets);
-            ref int chainAt = ref MemoryMarshal.GetArrayDataReference(chain);
-            ref T keyAt = ref MemoryMarshal.GetArrayDataReference(keys);
+            ref int bucketAt = ref MemoryMarshal.GetReference(buckets);
+            ref int chainAt = ref MemoryMarshal.GetReference(chain);
+            ref T keyAt = ref keys.GetReference();
             int distinct = 0;
             long codeBytes = 0;
             int widthHolds = 0;
@@ -1827,7 +1840,7 @@ internal static class ColumnCompressor
         }
         finally
         {
-            WorkArrays.Return(keys);
+            Blocks.Return(keys);
         }
     }
 

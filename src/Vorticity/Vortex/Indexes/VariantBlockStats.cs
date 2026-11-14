@@ -465,15 +465,15 @@ internal sealed class VariantBlockStats : IDisposable
     private static byte[] Encode(int count, ReadOnlySpan<byte> blocks)
     {
         int length = Varint.Size((ulong)count) + blocks.Length;
-        byte[] plain = Aggregating.WorkArrays.Rent<byte>(length);
+        Buffers.Block<byte> plain = Buffers.Blocks.Rent<byte>(length);
         try
         {
             blocks.CopyTo(plain.AsSpan(Varint.Write(plain, (ulong)count)));
-            return ZstdRegion.Encode(Version, plain.AsSpan(0, length));
+            return ZstdRegion.Encode(Version, plain);
         }
         finally
         {
-            Aggregating.WorkArrays.Return(plain);
+            Buffers.Blocks.Return(plain);
         }
     }
 
@@ -484,16 +484,16 @@ internal sealed class VariantBlockStats : IDisposable
     /// </remarks>
     internal static ReadOnlyMemory<BlockBound>? KeyFrom(ReadOnlySpan<byte> bytes)
     {
-        if (ZstdRegion.Rent(bytes, Version, out int length) is not { } plain)
+        if (ZstdRegion.Rent(bytes, Version) is not { } plain)
         {
             return null;
         }
 
         try
         {
-            ProtoReader reader = new ProtoReader(plain.AsSpan(0, length));
+            ProtoReader reader = new ProtoReader(plain);
             ulong count = reader.ReadVarint();
-            if (count > (ulong)length)
+            if (count > (ulong)plain.Length)
             {
                 return null;
             }
@@ -531,7 +531,7 @@ internal sealed class VariantBlockStats : IDisposable
         }
         finally
         {
-            System.Buffers.ArrayPool<byte>.Shared.Return(plain);
+            Buffers.Blocks.Return(plain);
         }
     }
 

@@ -1,7 +1,6 @@
 using System;
-using System.Buffers;
-using Vorticity.Aggregating;
 using Vorticity.Arrays;
+using Vorticity.Buffers;
 
 namespace Vorticity.RowEncoding;
 
@@ -79,7 +78,7 @@ public static partial class RowEncoder
         CanonicalArena arena = batch.Arena;
         CanonicalNode root = arena.GetNode(batch.RootIndex);
         int count = root.FieldCount;
-        int[] columns = ArrayPool<int>.Shared.Rent(Math.Max(count, 1));
+        Block<int> columns = Blocks.Rent<int>(count);
         try
         {
             for (int i = 0; i < count; i++)
@@ -87,11 +86,11 @@ public static partial class RowEncoder
                 columns[i] = root.GetFieldIndex(i);
             }
 
-            return Encode(arena, columns.AsSpan(0, count), fields);
+            return Encode(arena, columns, fields);
         }
         finally
         {
-            ArrayPool<int>.Shared.Return(columns);
+            Blocks.Return(columns);
         }
     }
 
@@ -128,42 +127,33 @@ public static partial class RowEncoder
     {
         int rowCount = Validate(arena, columns, fields);
 
-        int[]? sizes = WorkArrays.Rent<int>(Math.Max(rowCount, 1));
-        int[]? offsets = WorkArrays.Rent<int>(Math.Max(rowCount, 1));
-        byte[]? elements = null;
+        Block<int> sizes = Blocks.Rent<int>(rowCount);
+        Block<int> offsets = Blocks.Rent<int>(rowCount);
+        Block<byte> elements = default;
+        bool kept = false;
         try
         {
-            int total = ComputeSizes(arena, columns, fields, sizes.AsSpan(0, rowCount));
-            _ = ComputeOffsets(sizes.AsSpan(0, rowCount), offsets.AsSpan(0, rowCount));
-            elements = WorkArrays.Rent<byte>(Math.Max(total, 1));
+            int total = ComputeSizes(arena, columns, fields, sizes);
+            _ = ComputeOffsets(sizes, offsets);
+            elements = Blocks.Rent<byte>(total);
 
             // Cursors start at zero and end as the per-row sizes, so one buffer serves as both the
             // output of pass 1 and the write cursor of pass 2.
-            Span<int> cursors = sizes.AsSpan(0, rowCount);
+            Span<int> cursors = sizes;
             cursors.Clear();
-            Encode(arena, columns, fields, offsets.AsSpan(0, rowCount), cursors, elements.AsSpan(0, total));
+            Encode(arena, columns, fields, offsets, cursors, elements);
 
             RowKeys keys = new RowKeys(elements, offsets, sizes, rowCount, total);
-            elements = null;
-            offsets = null;
-            sizes = null;
+            kept = true;
             return keys;
         }
         finally
         {
-            if (elements is not null)
+            if (!kept)
             {
-                WorkArrays.Return(elements);
-            }
-
-            if (offsets is not null)
-            {
-                WorkArrays.Return(offsets);
-            }
-
-            if (sizes is not null)
-            {
-                WorkArrays.Return(sizes);
+                Blocks.Return(elements);
+                Blocks.Return(offsets);
+                Blocks.Return(sizes);
             }
         }
     }
@@ -177,10 +167,10 @@ public static partial class RowEncoder
         CanonicalArena arena, ReadOnlySpan<int> columns, ReadOnlySpan<RowSortField> fields, RowKeys into)
     {
         int rowCount = Validate(arena, columns, fields);
-        (int[] sizes, int[] offsets) = into.Rows(rowCount);
+        (Block<int> sizes, Block<int> offsets) = into.Rows(rowCount);
         int total = ComputeSizes(arena, columns, fields, sizes.AsSpan(0, rowCount));
         _ = ComputeOffsets(sizes.AsSpan(0, rowCount), offsets.AsSpan(0, rowCount));
-        byte[] elements = into.Bytes(total);
+        Block<byte> elements = into.Bytes(total);
         Span<int> cursors = sizes.AsSpan(0, rowCount);
         cursors.Clear();
         Encode(arena, columns, fields, offsets.AsSpan(0, rowCount), cursors, elements.AsSpan(0, total));

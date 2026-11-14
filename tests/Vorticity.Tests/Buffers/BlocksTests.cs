@@ -1,6 +1,7 @@
 // The pool's typed face: a block is read as the array it replaces, holds the length it was rented at whatever its
 // element's size, and its bytes go back to the pool, which lends them again to a rent of any type.
 using System;
+using System.Threading;
 using Vorticity.Aggregating;
 using Vorticity.Buffers;
 using Xunit;
@@ -202,6 +203,30 @@ public sealed class BlocksKeptTests
         Blocks.Return(block);
 
         Assert.All(bytes, b => Assert.Equal(0xDB, b));
+    }
+
+    /// <summary>
+    /// A block of 3 MB asked is one of 4 MB, given back on another thread and taken again after a full collection: the
+    /// same bytes, none made new, the class asked for since the last sweep keeping what it holds.
+    /// </summary>
+    [Fact]
+    public void A_large_block_given_back_on_another_thread_is_taken_again_past_a_full_collection()
+    {
+        const int Asked = 3 << 20;
+        Block<byte> first = Blocks.Rent<byte>(Asked);
+        Assert.Equal(4 << 20, first.Bytes!.Length);
+        Thread other = new Thread(() => Blocks.Return(first));
+        other.Start();
+        other.Join();
+        GC.Collect(2, GCCollectionMode.Forced, blocking: true);
+        GC.WaitForPendingFinalizers();
+
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        Block<byte> again = Blocks.Rent<byte>(Asked);
+        long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+        Assert.Same(first.Bytes, again.Bytes);
+        Assert.Equal(0, allocated);
+        Blocks.Return(again);
     }
 
     [Fact]
