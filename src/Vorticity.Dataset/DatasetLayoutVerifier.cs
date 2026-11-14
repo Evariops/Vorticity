@@ -203,10 +203,11 @@ internal static class DatasetLayoutVerifier
             problems.Add(Invariant($"'{entry.Key}': its tree key does not lead with its partition (I4)"));
         }
 
-        // I7: the geometry of its chunks, and its object dictionaries' values in their type's order.
+        // I7: the geometry of its chunks, and its object dictionaries' values in their type's order. An object of so few
+        // rows that one granule holds them all may keep no geometry: a read of a part of it reads it whole.
         if (contents is not null)
         {
-            if (contents.Marks.Count == 0)
+            if (contents.Marks.Count == 0 && entry.PhysicalRows > Compute.ZoneColumn.LoneZoneRows)
             {
                 problems.Add(Invariant($"'{entry.Key}': its table of contents names no geometry of its chunks (I7)"));
             }

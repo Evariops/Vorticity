@@ -33,15 +33,19 @@ public sealed class DatasetKeyCursorReadTests
     // a walk that opened one of them would fail, so the test also proves the seek left them closed.
     private const int Middle = 12_345;
 
+    // With zone maps and without: an object of so few rows that one zone holds them is walked by its key all the same
+    // when it keeps no map, the zone decoded as the one a map names.
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task ASeekOnAColdVersionReadsOnePathOfEachLevel(bool down)
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    public async Task ASeekOnAColdVersionReadsOnePathOfEachLevel(bool down, bool zones)
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
         await using MemoryObjectStore inner = new MemoryObjectStore();
         await using CountingObjectStore store = new CountingObjectStore(inner);
-        DatasetOptions options = await CreateAsync(store, ct);
+        DatasetOptions options = await CreateAsync(store, ct, zones);
 
         // A handle opened afresh holds what the read opening the version brought back, and nothing
         // a walk read before.
@@ -389,7 +393,7 @@ public sealed class DatasetKeyCursorReadTests
     /// A clustered dataset whose level 1 holds <see cref="Objects"/> objects, object i's keys running
     /// from 10 i, and its rows five: the three around <see cref="Middle"/> files of those rows.
     /// </summary>
-    private static async Task<DatasetOptions> CreateAsync(IObjectStore store, CancellationToken ct)
+    private static async Task<DatasetOptions> CreateAsync(IObjectStore store, CancellationToken ct, bool zones = true)
     {
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
@@ -397,7 +401,12 @@ public sealed class DatasetKeyCursorReadTests
             ["key", "measure"],
             [types.Primitive(PType.I64, Nullability.NonNullable), types.Primitive(PType.F64, Nullability.NonNullable)],
             Nullability.NonNullable);
-        DatasetOptions options = new DatasetOptions { Seed = Seed, Layout = new DatasetLayout { SortKey = [LayoutValue.Column("key")] } };
+        DatasetOptions options = new DatasetOptions
+        {
+            Seed = Seed,
+            Layout = new DatasetLayout { SortKey = [LayoutValue.Column("key")] },
+            Write = new VortexWriteOptions { Zones = zones },
+        };
         List<DatasetOperation> adds = new List<DatasetOperation>(Objects);
         await using (VortexDataset writer = await VortexDataset.CreateAsync(store, schema, options, ct))
         {

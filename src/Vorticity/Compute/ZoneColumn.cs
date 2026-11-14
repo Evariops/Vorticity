@@ -12,6 +12,13 @@ namespace Vorticity.Compute;
 /// </summary>
 internal sealed class ZoneColumn
 {
+    /// <summary>
+    /// The most rows a file may hold and be read as one zone when it keeps no zone map: the rows of a block by default. A
+    /// writer leaves the map of one zone out only at or under it, and a reader that finds no map takes the file for one
+    /// zone only at or under it, so neither depends on what blocks the other was configured with.
+    /// </summary>
+    internal const int LoneZoneRows = 8_192;
+
     /// <summary>The zones one by one, or null when <see cref="_table"/> holds them.</summary>
     private readonly ZoneBounds[]? _zones;
 

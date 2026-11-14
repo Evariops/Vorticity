@@ -175,7 +175,15 @@ internal sealed class SortedColumnSource : ISortedEntries
 
         if (zones is null || zones.ZoneLength <= 0)
         {
-            return (null, "the column carries no zone map, so a seek would have to decode the whole column");
+            // A file of so few rows that a zone holds them all is its own zone, of bounds nobody stated: a seek decodes
+            // it, as it decodes the zone a map names. A dataset's small objects keep no zone map, whose one zone would say
+            // what their entries' summaries say.
+            if (file.RowCount > ZoneColumn.LoneZoneRows)
+            {
+                return (null, "the column carries no zone map, so a seek would have to decode the whole column");
+            }
+
+            zones = new ZoneColumn(field, Math.Max(file.RowCount, 1), file.RowCount, [ZoneBounds.Unknown]);
         }
 
         FieldMaskBuilder builder = new FieldMaskBuilder();

@@ -97,6 +97,48 @@ public sealed partial class ObjectContentsTests
     private const int GranuleRows = 256;
 
     /// <summary>
+    /// A table that names its schema by its hash reads as the table that holds it, sixteen bytes in place of the schema's
+    /// own, once a handle read a version of that schema: the schema an object's table holds is its dataset's, byte for
+    /// byte. A table whose hash names a schema the process never met reads as no table, as it does to a reader that
+    /// predates the hash.
+    /// </summary>
+    [Fact]
+    public async Task ATableThatNamesItsSchemaByItsHashReadsAsTheOneThatHoldsIt()
+    {
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexSession session = VortexSession.Create(static _ => { });
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Call.Schema, new DatasetOptions
+        {
+            Session = session,
+            Layout = new DatasetLayout { SortKey = [LayoutValue.Column(nameof(Call.At))] },
+        }, Ct);
+        Call[] rows = [.. Enumerable.Range(0, 400).Select(i => new Call(Noon.AddSeconds(i), $"region-{i % 3}", 200 + (i % 5 * 100), i * 7L))];
+        await using (ObjectDraft draft = dataset.StartObject())
+        {
+            await draft.Writer.WriteAsync<Call>(rows, Ct);
+            await dataset.AppendAsync(draft, Ct);
+        }
+
+        ObjectContents contents = Assert.IsType<ObjectContents>(Assert.Single(await dataset.ListObjectsAsync(Ct).ToListAsync(Ct)).Entry!.Contents);
+        Assert.Equal(dataset.Snapshot.Schema.FileSchema, contents.Schema);
+
+        byte[] whole = contents.ToBytes();
+        byte[] named = contents.ToBytes(schemaByHash: true);
+        Assert.True(named.Length <= whole.Length - contents.Schema.Length + 20, $"{named.Length} bytes named, {whole.Length} whole, a schema of {contents.Schema.Length}");
+        ObjectContents read = Assert.IsType<ObjectContents>(ObjectContents.From(named));
+        Assert.Equal(contents.Schema, read.Schema);
+        Assert.Equal(whole, read.ToBytes());
+
+        // The same table under a hash that names nothing.
+        byte[] hash = new byte[16];
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt128LittleEndian(hash, SchemaInterns.HashOf(contents.Schema));
+        int at = named.AsSpan().IndexOf(hash);
+        Assert.True(at >= 0, "the table does not hold its schema's hash");
+        named[at] ^= 0xFF;
+        Assert.Null(ObjectContents.From(named));
+    }
+
+    /// <summary>
     /// An hour of calls whose attributes hold a route, and on about one row in a hundred a rare key: a question on that key
     /// reads, cold, the path directory beside the column's chunk directory, then the slices that may hold the key, two round
     /// trips, and warm none at all, whether the session keeps the declared regions in a synopsis cache as well or not; it

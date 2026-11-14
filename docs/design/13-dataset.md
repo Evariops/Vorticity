@@ -181,7 +181,7 @@ A leaf entry describes one data object:
   for objects of hundreds of megabytes and wide tables. This field and those like it come after the
   summaries, as a zero where a count of deleted rows would stand, which no earlier entry holds there,
   then their length and their tagged bytes, so an entry without them keeps its bytes
-- for an object with a table of contents, the table: the object's schema, the encodings its blobs
+- for an object with a table of contents, the table: the object's schema, or the XXH3-128 of its bytes in their place when the object is small and its schema the dataset's, which a reader finds among the schemas of the versions its process read and reads as no table when it met none of that hash, the encodings its blobs
   name, its rows, the regions of its sparse index ([the sparse
   index](10-indexes.md#44-vorticitykeyindexv1-the-first-key-of-each-granule)) and the region of each
   column's chunk directory, or of its page table with the first row of each page,

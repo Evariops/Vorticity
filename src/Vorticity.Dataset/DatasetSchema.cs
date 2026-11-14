@@ -50,6 +50,15 @@ internal sealed class DatasetSchema
         IndexPolicy = Indexes.IndexDirectory.PolicyOf(policy.Span);
         IndexedColumns = new HashSet<string>(IndexPolicy.Columns.Keys, StringComparer.Ordinal);
         DType = bytes.IsEmpty ? default : DTypeProtobuf.Read(bytes.Span, new DTypeArena());
+
+        // The schema as an object's table of contents holds it, kept by its hash for the tables that name it by that hash:
+        // those of the small objects written under this schema.
+        if (!DType.IsDefault)
+        {
+            FileSchema = Vorticity.Types.Serialization.DTypeFlatBuffers.Serialize(DType);
+            FileSchemaHash = Indexes.SchemaInterns.Intern(FileSchema);
+        }
+
         Columns = DType.IsDefault ? VortexSchema.Create([]) : VortexTypes.SchemaOf(DType);
         Layout = DType.IsDefault ? null : LayoutPlan.Of(layout, DType);
         Tree = Layout is { } plan && (plan.Partition is not null || plan.Components.Count > 0)
@@ -78,6 +87,15 @@ internal sealed class DatasetSchema
 
     /// <summary>The schema as the engine holds it; default for a dataset that has none yet.</summary>
     internal DType DType { get; }
+
+    /// <summary>
+    /// The schema as the file of an object written under it holds it, and as its table of contents does; empty for a
+    /// dataset that has none yet.
+    /// </summary>
+    internal byte[] FileSchema { get; } = [];
+
+    /// <summary>The hash a table of contents names <see cref="FileSchema"/> by (<see cref="Indexes.SchemaInterns"/>).</summary>
+    internal UInt128 FileSchemaHash { get; }
 
     /// <summary>The schema as a caller sees it, and binds a record to.</summary>
     internal VortexSchema Columns { get; }

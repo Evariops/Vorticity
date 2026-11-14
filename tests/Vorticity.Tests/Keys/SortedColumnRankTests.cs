@@ -23,17 +23,62 @@ public sealed partial class SortedColumnRankTests
     [Fact]
     public async Task EachRankIsTheCountOfTheValuesBelowTheKey()
     {
-        Typed[] rows = new Typed[Rows];
-        for (int i = 0; i < Rows; i++)
+        Typed[] rows = RowsOf(Rows);
+        string path = await WriteAsync(rows, options: null);
+        try
         {
-            // Ascending, a value every few rows, the signed ones through zero.
+            await using VortexFile file = await VortexFile.OpenAsync(path, cancellationToken: TestContext.Current.CancellationToken);
+            await CheckEveryColumn(file, rows);
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
+    /// <summary>
+    /// A file of so few rows that one zone holds them all, written with no zone map, is its own zone: each rank is what
+    /// the file with its map gives, the zone decoded as the one a map names is. A dataset's small objects keep no map. A
+    /// file of one row more without a map is refused, since a seek would decode a column of any length.
+    /// </summary>
+    [Fact]
+    public async Task AFileOfOneZoneWithoutAZoneMapRanksAsOneWithIt()
+    {
+        VortexWriteOptions unmapped = new VortexWriteOptions { Zones = false };
+        Typed[] rows = RowsOf(Vorticity.Compute.ZoneColumn.LoneZoneRows);
+        Typed[] more = RowsOf(Vorticity.Compute.ZoneColumn.LoneZoneRows + 1);
+        string path = await WriteAsync(rows, unmapped);
+        string longer = await WriteAsync(more, unmapped);
+        try
+        {
+            await using VortexFile file = await VortexFile.OpenAsync(path, cancellationToken: TestContext.Current.CancellationToken);
+            await CheckEveryColumn(file, rows);
+
+            await using VortexFile refused = await VortexFile.OpenAsync(longer, cancellationToken: TestContext.Current.CancellationToken);
+            (SortedColumnSource? source, string? reason) = await SortedColumnSource.OpenAsync(refused, nameof(Typed.I64), TestContext.Current.CancellationToken);
+            Assert.Null(source);
+            Assert.Contains("no zone map", reason, StringComparison.Ordinal);
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+            System.IO.File.Delete(longer);
+        }
+    }
+
+    /// <summary>Rows ascending in every column, a value every few rows, the signed ones through zero.</summary>
+    private static Typed[] RowsOf(int count)
+    {
+        Typed[] rows = new Typed[count];
+        for (int i = 0; i < count; i++)
+        {
             int step = i / 7;
             rows[i] = new Typed(
-                (sbyte)(-120 + (step * 240 / (Rows / 7))),
+                (sbyte)(-120 + (step * 240 / (count / 7))),
                 (short)(-20_000 + (step * 9)),
                 -2_000_000 + (step * 1_000),
                 -5_000_000_000L + (step * 3_000_000L),
-                (byte)(step * 250 / (Rows / 7)),
+                (byte)(step * 250 / (count / 7)),
                 (ushort)(step * 15),
                 3_000_000_000u + (uint)(step * 11),
                 ulong.MaxValue - 9_000_000_000UL + ((ulong)step * 2_000_000UL),
@@ -41,31 +86,30 @@ public sealed partial class SortedColumnRankTests
                 -2_000.25 + (step * 1.5));
         }
 
-        string path = Path.Combine(Path.GetTempPath(), $"vorticity-ranks-{Guid.NewGuid():N}.vortex");
-        try
-        {
-            await using (VortexFileWriter writer = VortexSession.Default.CreateWriter<Typed>(path))
-            {
-                await writer.WriteAsync<Typed>(rows, TestContext.Current.CancellationToken);
-                await writer.CompleteAsync(TestContext.Current.CancellationToken);
-            }
+        return rows;
+    }
 
-            await using VortexFile file = await VortexFile.OpenAsync(path, cancellationToken: TestContext.Current.CancellationToken);
-            await Signed(file, nameof(Typed.I8), rows.Select(r => (long)r.I8).ToArray(), sbyte.MinValue, sbyte.MaxValue);
-            await Signed(file, nameof(Typed.I16), rows.Select(r => (long)r.I16).ToArray(), short.MinValue, short.MaxValue);
-            await Signed(file, nameof(Typed.I32), rows.Select(r => (long)r.I32).ToArray(), int.MinValue, int.MaxValue);
-            await Signed(file, nameof(Typed.I64), rows.Select(r => r.I64).ToArray(), long.MinValue, long.MaxValue);
-            await Unsigned(file, nameof(Typed.U8), rows.Select(r => (ulong)r.U8).ToArray(), byte.MaxValue);
-            await Unsigned(file, nameof(Typed.U16), rows.Select(r => (ulong)r.U16).ToArray(), ushort.MaxValue);
-            await Unsigned(file, nameof(Typed.U32), rows.Select(r => (ulong)r.U32).ToArray(), uint.MaxValue);
-            await Unsigned(file, nameof(Typed.U64), rows.Select(r => r.U64).ToArray(), ulong.MaxValue);
-            await Floats(file, nameof(Typed.F32), rows.Select(r => (double)r.F32).ToArray());
-            await Floats(file, nameof(Typed.F64), rows.Select(r => r.F64).ToArray());
-        }
-        finally
-        {
-            System.IO.File.Delete(path);
-        }
+    private static async Task<string> WriteAsync(Typed[] rows, VortexWriteOptions? options)
+    {
+        string path = Path.Combine(Path.GetTempPath(), $"vorticity-ranks-{Guid.NewGuid():N}.vortex");
+        await using VortexFileWriter writer = VortexSession.Default.CreateWriter<Typed>(path, options);
+        await writer.WriteAsync<Typed>(rows, TestContext.Current.CancellationToken);
+        await writer.CompleteAsync(TestContext.Current.CancellationToken);
+        return path;
+    }
+
+    private static async Task CheckEveryColumn(VortexFile file, Typed[] rows)
+    {
+        await Signed(file, nameof(Typed.I8), rows.Select(r => (long)r.I8).ToArray(), sbyte.MinValue, sbyte.MaxValue);
+        await Signed(file, nameof(Typed.I16), rows.Select(r => (long)r.I16).ToArray(), short.MinValue, short.MaxValue);
+        await Signed(file, nameof(Typed.I32), rows.Select(r => (long)r.I32).ToArray(), int.MinValue, int.MaxValue);
+        await Signed(file, nameof(Typed.I64), rows.Select(r => r.I64).ToArray(), long.MinValue, long.MaxValue);
+        await Unsigned(file, nameof(Typed.U8), rows.Select(r => (ulong)r.U8).ToArray(), byte.MaxValue);
+        await Unsigned(file, nameof(Typed.U16), rows.Select(r => (ulong)r.U16).ToArray(), ushort.MaxValue);
+        await Unsigned(file, nameof(Typed.U32), rows.Select(r => (ulong)r.U32).ToArray(), uint.MaxValue);
+        await Unsigned(file, nameof(Typed.U64), rows.Select(r => r.U64).ToArray(), ulong.MaxValue);
+        await Floats(file, nameof(Typed.F32), rows.Select(r => (double)r.F32).ToArray());
+        await Floats(file, nameof(Typed.F64), rows.Select(r => r.F64).ToArray());
     }
 
     private static async Task Signed(VortexFile file, string column, long[] values, long least, long most)
