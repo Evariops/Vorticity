@@ -100,6 +100,14 @@ Dictionary<string, (string Help, Func<Task<int>> Run)> micros = new Dictionary<s
             args.Contains("--sealed"))),
     ["facets"] = ("the worst case of many facets, spans with a dozen repeating columns and a route under them (FacetsBench.cs)", () =>
         FacetsBench.Run((int)Option(args, "--hours", 12), Option(args, "--rate", 20), (int)Option(args, "--latency", 30), rounds, (int)Option(args, "--budget", 100))),
+    ["maintainer"] = ("the memory of a maintainer, by sort: sealed datasets appended every flush and compacted in turn (MemoryScenarios.cs)", () =>
+        MemoryScenarios.MaintainerAsync(
+            Text(args, "--store") ?? BenchStores.Of("memory-maintainer"), (int)Option(args, "--datasets", 7), (int)Option(args, "--minutes", 20),
+            Option(args, "--rate", 100), (int)Option(args, "--flush", 2), (int)Option(args, "--latency", 20), (int)Option(args, "--idle", 10))),
+    ["reader"] = ("the memory of a reader, by sort: a handle on each dataset of tables kept under several retentions, asked as sets (MemoryScenarios.cs)", () =>
+        MemoryScenarios.ReaderAsync(
+            Text(args, "--store") ?? BenchStores.Of("memory-reader"), (int)Option(args, "--tables", 8), (int)Option(args, "--retentions", 5),
+            (int)Option(args, "--rows", 40_000), (int)Option(args, "--latency", 20))),
     ["lifecycle"] = ("what a row costs from its append to its last rewrite, and the objects a window finds (LifecycleBench.cs)", () =>
         LifecycleBench.Run(
             (int)Option(args, "--hours", 48), Option(args, "--rate", 20), (int)Option(args, "--writers", 4), (int)Option(args, "--batch", 30),
