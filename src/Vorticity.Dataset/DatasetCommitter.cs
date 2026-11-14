@@ -760,17 +760,19 @@ internal static class DatasetCommitter
     /// <summary>
     /// The pages a header carries, top first, spending what is left of its inline room, and into
     /// <paramref name="named"/> those it names without carrying them: its top, or a child of a page
-    /// it carries. Only pages already in hand are inlined: reading one just to inline it would spend
-    /// a request to save bytes, and the rewrite already holds the levels above the leaves.
+    /// it carries. Only the pages this commit wrote are inlined, which a cold reader would otherwise
+    /// read where they lie, in this very object.
     /// </summary>
     /// <remarks>
-    /// Nor is a leaf that holds an object with rows marked in it, unless this commit wrote it. Its
-    /// bytes grow with every mark, and carried in every header they would cost each commit that does
-    /// not touch its level what only the commits that mark or purge an object of it have to pay; a
-    /// reader reads it once, where the header says its version's pages start, and a handle keeps it.
+    /// A page an earlier version wrote is named where it lies, never copied: copied, it costs every
+    /// commit its bytes, up to the whole inline room, for a reader that opens the version cold and
+    /// whose question passes through that page. On a dataset of 40 partitions that took 93 KB of a
+    /// 212 KB append, the first leaves in the tree's order, those of the oldest partition, which
+    /// almost no question asks for. A handle keeps the pages it read across versions, and reads a
+    /// named page in one request where the header says its version's pages start.
     /// </remarks>
     private static IReadOnlyList<InlinedPage> Inline(
-        CommitObjectBuilder builder, CommitPageSource pages, DatasetTree tree, ref long budget, List<PageReference> named)
+        CommitObjectBuilder builder, DatasetTree tree, ref long budget, List<PageReference> named)
     {
         List<InlinedPage> inlined = [];
         Queue<(PageReference Reference, int Level)> queue = new Queue<(PageReference, int)>();
@@ -778,8 +780,7 @@ internal static class DatasetCommitter
         while (queue.Count > 0)
         {
             (PageReference reference, int level) = queue.Dequeue();
-            if ((!builder.TryGetPage(reference, out ReadOnlyMemory<byte> page) && !pages.TryGetKnown(reference, out page))
-                || (level == 1 && reference.Version != builder.Version && Marks(page)))
+            if (reference.Version != builder.Version || !builder.TryGetPage(reference, out ReadOnlyMemory<byte> page))
             {
                 named.Add(reference);
                 continue;
@@ -808,20 +809,6 @@ internal static class DatasetCommitter
         }
 
         return inlined;
-    }
-
-    /// <summary>Whether a leaf holds an object with rows marked in it, read off its entries in place.</summary>
-    private static bool Marks(ReadOnlyMemory<byte> leaf)
-    {
-        foreach (TreeEntry entry in TreePage.ReadLeaf(leaf))
-        {
-            if (ObjectEntry.TallyOf(entry.Value.Span).DeletedRows > 0)
-            {
-                return true;
-            }
-        }
-
-        return false;
     }
 
     /// <summary>
@@ -961,10 +948,10 @@ internal static class DatasetCommitter
     public static DatasetTree TreeOf(CommitHeader header) => DatasetLevels.Of(header)[0];
 
     /// <summary>
-    /// What a header records for each occupied level, with the pages it can inline, and where the
-    /// pages it names without carrying start. The levels share one inline budget and spend it from
-    /// level 0 up, since every lookup descends level 0; a level whose top does not fit costs one
-    /// request to read instead.
+    /// What a header records for each occupied level, with the pages of it this commit wrote that it
+    /// can inline, and where the pages it names without carrying start. The levels share one inline
+    /// budget and spend it from level 0 up, since every lookup descends level 0; a level whose top
+    /// this commit did not write, or that does not fit, costs a cold reader one request to read.
     /// </summary>
     private static (IReadOnlyList<CommitLevel> Levels, CommitLevel? Rollups, CommitLevel? PartitionIndexes, IReadOnlyList<PagesStart> Starts) LevelsOf(
         DatasetLevels levels, CommitObjectBuilder builder, CommitPageSource pages)
@@ -974,7 +961,7 @@ internal static class DatasetCommitter
         long budget = InlineBudget;
         foreach ((int level, DatasetTree tree) in levels.Occupied())
         {
-            IReadOnlyList<InlinedPage> inlined = Inline(builder, pages, tree, ref budget, named);
+            IReadOnlyList<InlinedPage> inlined = Inline(builder, tree, ref budget, named);
             recorded.Add(new CommitLevel(level, tree.Entries, tree.Root, inlined)
             {
                 Depth = tree.Depth,

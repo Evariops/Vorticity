@@ -80,8 +80,7 @@ and policy), the declared identifiers and shredded paths, the indexes every writ
 objects it writes (see [fragments](#64-fragments-in-commit-objects-transient)), the tree's chunking
 parameters and seed, the compaction and retention settings, the last version that changed rows, the
 offset up to which each source's entries are counted, and, per level, where its last round-robin
-compaction stopped and its top page inlined, with the pages below it as long as the header stays
-within 192 KiB.
+compaction stopped, its top page, and the pages of it this commit wrote, inlined top first as long as the header stays within 192 KiB.
 
 The last version that changed rows is set by a commit of rows or of the schema one of whose
 operations applied, to its own version, and copied from the parent by every other commit, a
@@ -91,12 +90,7 @@ header reads as its own version: the field needs no new format, since its absenc
 reader recompute what it might have kept. One ranged read of the first 256 KiB opens a commit. The pages region
 follows the header, so a page the commit wrote itself that ends inside those 256 KiB is not inlined,
 since the read that opens the commit brings it back once, where inlined it would be written twice.
-Nor is a leaf holding an object with marked rows (see [deleting rows](#12-deleting-and-updating-rows))
-inlined, unless this commit wrote it: its bytes grow with every mark, and carried by every header they
-would cost each commit what only the commits that change its level should pay. For every page it
-names without carrying it (a level's top, or a child of a page it carries), the header records where
-that page's version keeps its pages, as far as the writer knows, so a reader fetches such a page in
-one request rather than two.
+A page an earlier version wrote is never inlined: carried by every header, it would cost each commit its bytes for the reader that opens the version cold and whose question passes through it. On a dataset of 40 consolidated partitions, the pages so carried were the first leaves in the tree's order, those of the oldest partition, which almost no question asks for, and they took 93 KB of a 212 KB append. For every page it names without carrying it (a level's top an earlier version wrote, or a child of a page it carries), the header records where that page's version keeps its pages, as far as the writer knows, so a reader fetches such a page in one request rather than two, and a handle keeps it across versions.
 
 A page reference is a fixed 36 bytes: the version that wrote the page, its offset relative to that
 object's pages region, its length, and its XXH3-128. A commit references every page it did not change
@@ -151,10 +145,7 @@ pure function of the key set and the parameters: the same objects committed in a
 byte-identical pages and one root hash. The rule sits behind an interface whose other
 implementation, a B+tree's fill factor, is measured on the same bench.
 
-With entries of about 180 bytes the fan-out is about 680. The header inlines a level's top page and,
-while they fit, the pages below it, so a lookup reads 0 dependent pages up to about 650 objects, 1 up
-to about 400 000, and 2 up to about 280 million. A leaf with marked rows that another commit wrote
-costs one more read, once (see [objects and keys](#3-objects-and-keys)).
+With entries of about 180 bytes the fan-out is about 680. The header inlines the pages its commit wrote, the path from the leaves it changed to the level's top, so a cold lookup reads one dependent page per level that its path shares with no page of that commit: 0 or 1 up to about 650 objects, 1 or 2 up to about 400 000, and 2 or 3 up to about 280 million, the lower count when the commit changed the level. A handle keeps the pages it read across versions, so it reads each of them once (see [objects and keys](#3-objects-and-keys)).
 
 ### 4.2 What a node carries
 
@@ -633,10 +624,7 @@ outputs), and never merges two trees. Each operation carries its own answer to a
 
 An object's key ends with its uid, which makes it unique and a function of the object. Without it,
 two appenders that read the same version would compute the same key, and the second would replace the
-first's entry, a case the interleaving fuzzer found. Because a commit header carries the pages it
-wrote and the pages above them it read, one rebase iteration is also three dependent requests while
-the tree fits in the header. A writer that loses too many times (`DatasetOptions.MaxAttempts`) is told
-to use a coordinator, in the exception's own words.
+first's entry, a case the interleaving fuzzer found. Because a commit header carries the pages it wrote, from the leaves it changed to the top, one rebase iteration is also three dependent requests when the winner changed the leaves the loser touches, and one more read of a leaf otherwise, which the loser's handle keeps from then on. A writer that loses too many times (`DatasetOptions.MaxAttempts`) is told to use a coordinator, in the exception's own words.
 
 ### 8.3 The latest version in one request
 
@@ -763,11 +751,11 @@ counted in dependent round trips. Cold, a point lookup on the sort key costs:
 | step | dependent requests | cached by |
 |---|---|---|
 | list the latest commit, read its header | 2, or 1 for a version known by its number | version |
-| descend the tree to the partition and the key | 0 up to ~650 objects, 1 up to ~400 000, 2 up to ~280 million | page, across versions, since pages are immutable |
+| descend the tree to the partition and the key | 0 or 1 up to ~650 objects, 1 or 2 up to ~400 000, 2 or 3 up to ~280 million, the lower count on the path the version's commit wrote | page, across versions, since pages are immutable |
 | open the object's tail, which holds its sparse index | 1, in parallel across the objects touched, one a consolidated partition | object |
 | the granules the index keeps | 1, coalesced | none |
 
-That is about 4 to 6 requests cold and 1 to 2 warm, for any number of rows and objects. A lookup of an
+That is about 4 to 7 requests cold and 1 to 2 warm, for any number of rows and objects. A lookup of an
 identifier reads a page of the partition's index in place of the descent and the open
 ([the index of a consolidated partition](#44-the-index-of-a-consolidated-partition)). Latency does
 not choose the structure. It sets the page cap, the inlining, the one-object commit, the in-process

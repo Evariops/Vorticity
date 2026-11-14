@@ -240,39 +240,66 @@ public sealed class DatasetPageCacheTests
     }
 
     [Fact]
-    public async Task AHeaderSaysWhereThePagesItNamesPastItsRoomStart()
+    public async Task AHeaderSaysWhereThePagesItNamesStart()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
         await using MemoryObjectStore inner = new MemoryObjectStore();
         await using CountingObjectStore store = new CountingObjectStore(inner);
 
-        // Small pages, so that the tree's top levels alone fill what a header carries; then one
-        // object at the end, whose commit rewrites the right edge of every height.
+        // Small pages, so that the tree has several heights; then one object at the end, whose
+        // commit rewrites the right edge of every height.
         CommitOptions options = new CommitOptions { Seed = Seed, Rule = new ProllyBoundaryRule(Seed, minBytes: 256, targetBytes: 512, maxBytes: 1_024) };
         await DatasetCommitter.CommitAsync(store, [.. Enumerable.Range(0, Objects).Select(i => Add(2L * i))], options, ct);
         ulong edge = (await DatasetCommitter.CommitAsync(store, [Add(2L * Objects)], options, ct)).Version;
 
-        // Level 0 spends a third of the room first, so level 1 stops at a page the load wrote, well
-        // left of the edge: the edge's pages past the stop are named by the pages the header carries,
-        // and by nothing else.
+        // A commit that only changes level 0 carries none of level 1's pages, which the edge's
+        // commit wrote: it names the level's top, and says where the edge's pages start.
         CommitResult last = await DatasetCommitter.CommitAsync(
             store, [.. Enumerable.Range(0, 300).Select(i => (DatasetOperation)((DatasetOperation.AddObject)Add((2L * i) + 1) with { Level = 0 }))], options, ct);
         CommitObject opened = await CommitObject.OpenAsync(store, CommitKey.For(last.Version), ct);
+        CommitLevel level = opened.Header.Levels.Single(recorded => recorded.Level == 1);
+        Assert.Empty(level.Inlined);
+        Assert.Equal(edge, level.Top.Version);
         Assert.Contains(opened.Header.Starts, start => start.Version == edge);
 
-        // Such a page reads in one request, where the edge's preamble would be a second.
-        CommitLevel level = opened.Header.Levels.Single(recorded => recorded.Level == 1);
-        HashSet<PageReference> carried = [.. level.Inlined.Select(page => page.Reference)];
-        PageReference named = level.Inlined
-            .Where(page => TreePage.KindOf(page.Bytes.Span) == TreePageKind.Internal)
-            .SelectMany(page => TreePage.ReadInternal(page.Bytes))
-            .Select(child => child.Child)
-            .Last(child => child.Version == edge && !carried.Contains(child));
+        // So the top reads in one request, where the edge's preamble would be a second.
         CommitPageSource pages = new CommitPageSource(store);
         pages.Open(last.Version, opened);
         store.Reset();
-        _ = await pages.ReadPageAsync(named, ct);
+        _ = await pages.ReadPageAsync(level.Top, ct);
         Assert.Equal(1, store.Requests);
+    }
+
+    /// <summary>
+    /// Along a chain of commits, among the keys and past them, no header carries a page another version wrote; and the
+    /// last version, opened cold, finds every object of the chain and of the load, the pages it did not write read where
+    /// they lie.
+    /// </summary>
+    [Fact]
+    public async Task NoHeaderOfAChainCarriesAPageAnotherVersionWrote()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        CommitOptions options = new CommitOptions { Seed = Seed };
+        await DatasetCommitter.CommitAsync(store, [.. Enumerable.Range(0, Objects).Select(i => Add(2L * i))], options, ct);
+        List<long> added = [0, 2L * (Objects - 1)];
+        for (int commit = 0; commit < 100; commit++)
+        {
+            long low = commit % 2 == 0 ? (2L * (commit * 197 % Objects)) + 1 : (2L * Objects) + commit;
+            CommitResult result = await DatasetCommitter.CommitAsync(store, [Add(low)], options, ct);
+            added.Add(low);
+            CommitObject written = await CommitObject.OpenAsync(store, CommitKey.For(result.Version), ct);
+            Assert.All(written.Header.Levels, level => Assert.All(level.Inlined, page => Assert.Equal(result.Version, page.Reference.Version)));
+        }
+
+        (ulong latest, CommitObject? head) = await DatasetCommitter.LatestAsync(store, ct);
+        CommitPageSource pages = new CommitPageSource(store);
+        pages.Open(latest, head!);
+        DatasetTree tree = DatasetLevels.Of(head!.Header)[1];
+        foreach (long low in added)
+        {
+            Assert.NotNull(await tree.FindAsync(((DatasetOperation.AddObject)Add(low)).Key, pages, ct));
+        }
     }
 
     [Fact]

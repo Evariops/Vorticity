@@ -105,8 +105,8 @@ public sealed class CommitBytesBudgetTests
 
         long mean = (long)written.Average();
         Report("200 appends from an empty dataset", mean, written.Max());
-        Assert.True(mean <= 188_000, $"mean {mean}");
-        Assert.True(written.Max() <= 359_000, $"largest {written.Max()}");
+        Assert.True(mean <= 78_000, $"mean {mean}");
+        Assert.True(written.Max() <= 189_000, $"largest {written.Max()}");
     }
 
     /// <summary>Appends among the keys of a tree of 5,000 objects: the dataset whose level 0 fell behind.</summary>
@@ -122,8 +122,8 @@ public sealed class CommitBytesBudgetTests
 
         long mean = (long)written.Average();
         Report("32 appends among 5,000 objects", mean, written.Max());
-        Assert.True(mean <= 305_000, $"mean {mean}");
-        Assert.True(written.Max() <= 410_000, $"largest {written.Max()}");
+        Assert.True(mean <= 176_000, $"mean {mean}");
+        Assert.True(written.Max() <= 242_000, $"largest {written.Max()}");
     }
 
     /// <summary>
@@ -142,8 +142,8 @@ public sealed class CommitBytesBudgetTests
 
         long mean = (long)written.Average();
         Report("32 appends past 5,000 objects", mean, written.Max());
-        Assert.True(mean <= 239_000, $"mean {mean}");
-        Assert.True(written.Max() <= 292_000, $"largest {written.Max()}");
+        Assert.True(mean <= 128_000, $"mean {mean}");
+        Assert.True(written.Max() <= 166_000, $"largest {written.Max()}");
     }
 
     /// <summary>A job that replaces 200 neighbouring objects of a tree of 5,000 by one: a tier merge of a level 0 behind.</summary>
@@ -155,7 +155,7 @@ public sealed class CommitBytesBudgetTests
         long written = await CommitAsync(store, [new DatasetOperation.ReplaceObjects(inputs, [(0, Key(2_000), Entry(2_000))])]);
 
         Report("a job of 200 objects in 5,000", written, written);
-        Assert.True(written <= 226_000, $"written {written}");
+        Assert.True(written <= 117_000, $"written {written}");
     }
 
     /// <summary>A delete that marks rows in one object of a tree of 5,000: its entry gains a deletion vector.</summary>
@@ -170,6 +170,6 @@ public sealed class CommitBytesBudgetTests
             [new DatasetOperation.ReplaceObjects([(0, Key(2_000 * 2))], [(0, Key(2_000 * 2), marked)]) { Expected = [entry] }]);
 
         Report("a delete marking one object of 5,000", written, written);
-        Assert.True(written <= 344_000, $"written {written}");
+        Assert.True(written <= 217_000, $"written {written}");
     }
 }

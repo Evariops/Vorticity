@@ -158,6 +158,7 @@ internal sealed class DatasetSnapshot
             yield break;
         }
 
+        await ReadTopsAsync(trees, cancellationToken).ConfigureAwait(false);
         TreeWalk[] walks = new TreeWalk[trees.Count];
         bool[] live = new bool[trees.Count];
         try
@@ -219,6 +220,29 @@ internal sealed class DatasetSnapshot
                     await walk.DisposeAsync().ConfigureAwait(false);
                 }
             }
+        }
+    }
+
+    /// <summary>
+    /// The tops of the levels the handle does not hold yet, read side by side before the walks start. A header carries
+    /// none of the pages an earlier version wrote, so each level the version's commit did not change would otherwise cost
+    /// a cold walk a round trip of its own, one after the other; every walk reads its top first, so none is read for
+    /// nothing. A handle that holds them reads nothing and allocates nothing here.
+    /// </summary>
+    private async ValueTask ReadTopsAsync(List<DatasetTree> trees, CancellationToken cancellationToken)
+    {
+        List<Task<ReadOnlyMemory<byte>>>? reads = null;
+        foreach (DatasetTree tree in trees)
+        {
+            if (!Pages.TryGetInHand(tree.Root, out _))
+            {
+                (reads ??= new List<Task<ReadOnlyMemory<byte>>>(trees.Count)).Add(Pages.ReadPageAsync(tree.Root, cancellationToken).AsTask());
+            }
+        }
+
+        if (reads is not null)
+        {
+            await Task.WhenAll(reads).ConfigureAwait(false);
         }
     }
 

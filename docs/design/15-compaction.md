@@ -453,16 +453,9 @@ The region follows the header, so a page that ends inside the read that opens th
 copy in the header: the reader keeps the part of the region that read brings back. Inlining those
 pages in the header as well would make a commit object 39 % larger on the churn bench (26.6 KiB on
 average over the first 15 000 commits, against 16.2) for nothing a reader needs. What a header carries
-is pages other commits wrote, every level's that fits, except leaves with marks.
+is the pages its own commit wrote that end past that read.
 
-A header leaves out a leaf whose entries carry marks when its own commit did not write it, and says
-instead where the version that wrote it keeps its pages, so a mark only costs the commits that change
-its own level. A reader that opens the version reads that page in one ranged read when it walks the
-level. A handle keeps, from one version to the next, the pages it read and the regions its last
-versions' open reads held (see [objects and keys](13-dataset.md#3-objects-and-keys)), so neither its
-commits nor its refreshes read the page again until a commit changes it. On the churn bench this makes
-a commit object 30 % smaller (11.3 KiB on average over the first 15 000 commits, against 16.2), with
-the same reads.
+A header carries no page another commit wrote, marked or not, and says instead where the version that wrote it keeps its pages, so a page only costs the commits that change it. A reader that opens the version reads that page in one ranged read when it walks the level. A handle keeps, from one version to the next, the pages it read and the regions its last versions' open reads held (see [objects and keys](13-dataset.md#3-objects-and-keys)), so neither its commits nor its refreshes read the page again until a commit changes it. Leaving out the leaves with marks alone made a commit object 30 % smaller on the churn bench (11.3 KiB on average over the first 15 000 commits, against 16.2), with the same reads. Leaving out every page another commit wrote took 43 % off an append on a dataset of 40 consolidated partitions (122 KB against 212), for one request more to a cold question whose path the last commit did not write.
 
 A vector past 256 bytes is stored out of line. The commit that writes the entry puts the vector's
 bytes into its own commit object, as an index fragment is (see

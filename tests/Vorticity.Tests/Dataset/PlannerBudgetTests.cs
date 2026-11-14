@@ -64,19 +64,24 @@ public sealed class PlannerBudgetTests : IClassFixture<DatasetPlannerTests.Fixtu
     /// quantile asks by default, the planner weighs the granules of each object for it too, where it declined them at once;
     /// the same reads cold.
     /// </para>
+    /// <para>
+    /// Every cold question raised on 2026-11-14 by one request and 5,602 bytes: a header carries no page an earlier version
+    /// wrote any more, and the version the questions open did not write its tree's top, which a cold question now reads
+    /// where it lies, one page in one request. Each commit of the dataset writes that page less.
+    /// </para>
     /// </summary>
     private static readonly Dictionary<string, Budget> Ceilings = new(StringComparer.Ordinal)
     {
-        ["count by service"] = new(6, 35130, 0, 0, 54664),
-        ["count by service and hour"] = new(6, 35386, 0, 0, 61837),
-        ["measures by service"] = new(6, 36149, 0, 0, 74436),
-        ["count by day"] = new(6, 36149, 0, 0, 67263),
-        ["count by hour, one service"] = new(6, 36149, 0, 0, 79895),
-        ["count by service, an aligned window"] = new(2, 401, 0, 0, 46047),
-        ["measures by service, an unaligned window"] = new(5, 402466, 2, 270920, 93375),
-        ["quantiles by service"] = new(6, 68839, 0, 0, 69401),
-        ["distinct services by hour"] = new(6, 35386, 0, 0, 63526),
-        ["count by route and day"] = new(6, 48486, 0, 0, 62669),
+        ["count by service"] = new(7, 40732, 0, 0, 54664),
+        ["count by service and hour"] = new(7, 40988, 0, 0, 61837),
+        ["measures by service"] = new(7, 41751, 0, 0, 74436),
+        ["count by day"] = new(7, 41751, 0, 0, 67263),
+        ["count by hour, one service"] = new(7, 41751, 0, 0, 79895),
+        ["count by service, an aligned window"] = new(3, 6003, 0, 0, 46047),
+        ["measures by service, an unaligned window"] = new(6, 402466, 2, 270920, 93375),
+        ["quantiles by service"] = new(7, 74441, 0, 0, 69401),
+        ["distinct services by hour"] = new(7, 40988, 0, 0, 63526),
+        ["count by route and day"] = new(7, 54088, 0, 0, 62669),
     };
 
     private readonly DatasetPlannerTests.Fixture _fixture;
