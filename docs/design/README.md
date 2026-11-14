@@ -31,7 +31,7 @@ build on those two.
 | [21-variant-columns.md](21-variant-columns.md) | the record of the variant design: attributes whose keys are data stored as the format's shredded variant, chosen per object, where each piece is described, the models compared, the worst cases, the decisions and the alternatives |
 | [22-on-the-fly-and-synopses.md](22-on-the-fly-and-synopses.md) | any question over any columns computed on the fly by the group-by engine, over objects sorted by the application's key, and the per-column synopses kept beside the rows for what the rows cannot answer in time |
 | [23-query-architecture.md](23-query-architecture.md) | how datasets answer questions: partitions and sort keys, sorted objects addressable to the granule, execution and predicates on encoded data, an explicit plan with a cost profile, distributed execution, and automatic views on top |
-| [24-commit-tail.md](24-commit-tail.md) | a proposal, not built: a commit that writes its operations as a run ahead of level 0, folded into the tree when the runs have cost what a fold costs, and a table of contents that names its schema by its hash |
+| [24-commit-tail.md](24-commit-tail.md) | a proposal, neither built nor scheduled: what a commit writes today, smaller pages measured and turned down, then a commit that writes its operations as a run ahead of level 0, folded into the tree when the runs have cost what a fold costs, and a table of contents that names its schema by its hash |
 | [90-registry.md](90-registry.md) | every encoding, layout and dtype: its edition, whether it is read and written, how a take is served |
 | [99-sources.md](99-sources.md) | the primary sources, and how to verify them again |
 
