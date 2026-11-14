@@ -32,7 +32,7 @@ public sealed class CommitBytesBudgetTests
 
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
 
-    private static CommitOptions Options() => new CommitOptions
+    internal static CommitOptions Options() => new CommitOptions
     {
         Seed = Seed,
         Template = new CommitHeader
@@ -64,7 +64,8 @@ public sealed class CommitBytesBudgetTests
             .WithTableOfContents(contents);
     }
 
-    private static DatasetOperation Add(int i) => new DatasetOperation.AddObject(Key(i), Entry(i));
+    /// <summary>An object of key <paramref name="i"/>, its entry the 2.5 KB of a real small object's.</summary>
+    internal static DatasetOperation Add(int i) => new DatasetOperation.AddObject(Key(i), Entry(i));
 
     /// <summary>A store whose dataset holds <paramref name="objects"/> entries at keys 0 to objects - 1, the tree committed once.</summary>
     private static async Task<CountingObjectStore> TreeOfAsync(int objects)

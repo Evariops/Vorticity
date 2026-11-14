@@ -179,9 +179,14 @@ internal static class DatasetVacuum
             }
         }
 
-        // Each distinct page is walked once, however many retained versions share it. So the marking keeps no page it
-        // reads, and lets go of what a version's open read brought once that version is marked: no version marked after
-        // it reads those pages again, and held to the end they weighed what the retained versions' commit objects weigh.
+        // Each distinct page is walked once, however many retained versions share it. The versions are marked from the
+        // oldest retained to the latest, each read whole in one request, from the length its listing gave: every page a
+        // version wrote lies in its own commit object, held while that version is marked, and a later version names only
+        // pages an earlier one walked already and pages it wrote itself. So the pages read on their own are those of the
+        // versions past the window that the oldest retained still names. Marked from the latest, a walk of its tree asked
+        // for each page of every older version it named, one after the other, before their objects were opened: 1,032
+        // requests over 802 versions, 22 seconds at 20 ms a request. The marking keeps no page it reads, and lets go of
+        // what a version's read brought once that version is marked: it holds what the reads in flight hold.
         HashSet<ulong> markedCommits = [.. retained];
         HashSet<string> markedData = new HashSet<string>(StringComparer.Ordinal);
         HashSet<UInt128> markedUids = [];
@@ -191,27 +196,32 @@ internal static class DatasetVacuum
         CommitPageSource pages = new CommitPageSource(store) { ReadsOnce = true };
         int mostInHand = 0;
 
-        // The retained versions' commits opened a batch at a time side by side, then marked in turn: one after the other, a
-        // round trip each, a dataset that keeps thousands of versions waited for each.
-        const int OpenedAhead = 32;
-        Task<CommitObject>?[] opening = new Task<CommitObject>?[retained.Count];
+        // The versions opened ahead side by side, as many as fit in what 32 opens of their first 256 KiB held before they
+        // were read whole, and one at least: the commit object of a large job weighs megabytes.
+        const long OpenedAheadBytes = 32L * CommitFormat.OpenBytes;
+        List<ulong> order = [.. retained];
+        order.Reverse();
+        Task<CommitObject>?[] opening = new Task<CommitObject>?[order.Count];
+        long inFlight = 0;
+        int next = 0;
         try
         {
-            for (int at = 0; at < retained.Count; at++)
+            for (int at = 0; at < order.Count; at++)
             {
-                if (at % OpenedAhead == 0)
+                while (next < order.Count && (next == at || inFlight + WeightOf(order[next]) <= OpenedAheadBytes))
                 {
-                    for (int ahead = at; ahead < Math.Min(at + OpenedAhead, retained.Count); ahead++)
-                    {
-                        opening[ahead] = retained[ahead] == latest
-                            ? null
-                            : CommitObject.OpenAsync(store, CommitKey.For(retained[ahead]), cancellationToken).AsTask();
-                    }
+                    ulong ahead = order[next];
+                    opening[next] = ahead == latest && WeightOf(ahead) <= CommitFormat.OpenBytes
+                        ? null
+                        : CommitObject.OpenWholeAsync(store, CommitKey.For(ahead), WeightOf(ahead), cancellationToken).AsTask();
+                    inFlight += WeightOf(ahead);
+                    next++;
                 }
 
-                ulong version = retained[at];
+                ulong version = order[at];
                 CommitObject commit = opening[at] is { } open ? await open.ConfigureAwait(false) : head;
                 opening[at] = null;
+                inFlight -= WeightOf(version);
                 pages.Open(version, commit);
                 DatasetLevels trees = DatasetLevels.Of(commit.Header);
                 foreach ((int _, DatasetTree tree) in trees.Occupied())
@@ -296,18 +306,61 @@ internal static class DatasetVacuum
         // The ratio is over the body, past the header: a header inlines copies of the pages it has
         // in hand, so taken over the whole object every superseded commit would look half dead
         // and each repack would make the next one due.
-        List<ulong> sparse = [];
+        // Where each body starts, as the walk learned it for the versions it read pages of, and read side by side, 32 at a
+        // time, for the others: read in turn, one a version, they took a round trip each after the walk.
+        List<(ulong Version, long Bytes, long Length)> judged = [];
         foreach ((ulong version, long bytes) in live)
         {
-            if (retained.Contains(version) || !lengths.TryGetValue(version, out long length))
+            if (!retained.Contains(version) && lengths.TryGetValue(version, out long length))
             {
-                continue;
+                judged.Add((version, bytes, length));
+            }
+        }
+
+        const int StartsAtOnce = 32;
+        List<ulong> sparse = [];
+        Task<long>?[] reading = new Task<long>?[Math.Min(judged.Count, StartsAtOnce)];
+        for (int from = 0; from < judged.Count; from += reading.Length)
+        {
+            int count = Math.Min(reading.Length, judged.Count - from);
+            for (int i = 0; i < count; i++)
+            {
+                ulong version = judged[from + i].Version;
+                reading[i] = pages.TryGetStart(version, out _)
+                    ? null
+                    : CommitObject.PagesStartAsync(store, CommitKey.For(version), cancellationToken).AsTask();
             }
 
-            long body = length - await CommitObject.PagesStartAsync(store, CommitKey.For(version), cancellationToken).ConfigureAwait(false);
-            if (body > 0 && (double)bytes / body < options.RepackBelow)
+            try
             {
-                sparse.Add(version);
+                for (int i = 0; i < count; i++)
+                {
+                    (ulong version, long bytes, long length) = judged[from + i];
+                    pages.TryGetStart(version, out long start);
+#pragma warning disable VSTHRD003 // The read was started just above, for this version.
+                    start = reading[i] is { } read ? await read.ConfigureAwait(false) : start;
+#pragma warning restore VSTHRD003
+                    reading[i] = null;
+                    long body = length - start;
+                    if (body > 0 && (double)bytes / body < options.RepackBelow)
+                    {
+                        sparse.Add(version);
+                    }
+                }
+            }
+            catch (Exception)
+            {
+                List<Task> pending = [];
+                foreach (Task<long>? read in reading)
+                {
+                    if (read is not null)
+                    {
+                        pending.Add(read);
+                    }
+                }
+
+                await Task.WhenAll(pending).ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
+                throw;
             }
         }
 
@@ -326,7 +379,8 @@ internal static class DatasetVacuum
             Sparse = sparse,
         };
 
-        async ValueTask MarkAsync(PageReference reference, int depth, Leaves leaves = Leaves.Objects)
+        // A page's read, started by the walk of its parent, side by side with its siblings', or started here.
+        async ValueTask MarkAsync(PageReference reference, int depth, Leaves leaves = Leaves.Objects, Task<ReadOnlyMemory<byte>>? read = null)
         {
             if (!reference.Exists || !seen.Add(reference))
             {
@@ -335,7 +389,11 @@ internal static class DatasetVacuum
 
             markedCommits.Add(reference.Version);
             live[reference.Version] = live.GetValueOrDefault(reference.Version) + reference.Length;
-            ReadOnlyMemory<byte> page = await pages.ReadPageAsync(reference, cancellationToken).ConfigureAwait(false);
+#pragma warning disable VSTHRD003 // The read was started by this walk, at the page's parent.
+            ReadOnlyMemory<byte> page = read is not null
+                ? await read.ConfigureAwait(false)
+                : await pages.ReadPageAsync(reference, cancellationToken).ConfigureAwait(false);
+#pragma warning restore VSTHRD003
             if (depth == 1 && leaves == Leaves.Rollups)
             {
                 foreach (TreeEntry leaf in TreePage.ReadLeaf(page))
@@ -396,11 +454,85 @@ internal static class DatasetVacuum
                 return;
             }
 
-            // The children walked in turn, their pages not asked for side by side: reads side by side each fetched the region of
-            // their commit that a read after another finds held.
-            foreach (InternalEntry child in TreePage.ReadInternal(page))
+            // The children walked in turn, their pages read side by side a window at a time: with the versions marked from the
+            // oldest, the pages read here are those of versions past the window, and the region of a version this vacuum read
+            // whole is in hand. Where a version's pages start, which a page's read needs, is learned first for the window's
+            // versions this source does not know, side by side and once a version: read with each page, every sibling of that
+            // version would ask for it again, and read in turn, each would wait for the one before.
+            IReadOnlyList<InternalEntry> children = TreePage.ReadInternal(page);
+            Task<ReadOnlyMemory<byte>>?[] window = new Task<ReadOnlyMemory<byte>>?[Math.Min(children.Count, DatasetTree.PrefetchWindow)];
+            for (int from = 0; from < children.Count; from += window.Length)
             {
-                await MarkAsync(child.Child, depth - 1, leaves).ConfigureAwait(false);
+                int count = Math.Min(window.Length, children.Count - from);
+                await LearnStartsAsync(children, from, count).ConfigureAwait(false);
+                for (int i = 0; i < count; i++)
+                {
+                    PageReference child = children[from + i].Child;
+                    window[i] = Unread(child) ? pages.ReadPageAsync(child, cancellationToken).AsTask() : null;
+                }
+
+                try
+                {
+                    for (int i = 0; i < count; i++)
+                    {
+                        Task<ReadOnlyMemory<byte>>? childRead = window[i];
+                        window[i] = null;
+                        await MarkAsync(children[from + i].Child, depth - 1, leaves, childRead).ConfigureAwait(false);
+                    }
+                }
+                catch (Exception)
+                {
+                    // The window's reads still in flight are waited for, their failures observed.
+                    List<Task> pending = [];
+                    foreach (Task<ReadOnlyMemory<byte>>? inFlightRead in window)
+                    {
+                        if (inFlightRead is not null)
+                        {
+                            pending.Add(inFlightRead);
+                        }
+                    }
+
+                    await Task.WhenAll(pending).ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
+                    throw;
+                }
+            }
+        }
+
+        // What a version's read holds while it is in flight or marked: its whole object, as the listing measured it.
+        long WeightOf(ulong version) => lengths.TryGetValue(version, out long length) ? length : CommitFormat.OpenBytes;
+
+        // Whether the walk has a page still to read from the store: one it has not walked, that no read in hand holds.
+        bool Unread(PageReference child) => child.Exists && !seen.Contains(child) && !pages.TryGetInHand(child, out _);
+
+        // Where the pages of the versions of children[from..from + count] lie, for those the walk must read and whose start
+        // the source has not learned: read side by side, once a version.
+        async ValueTask LearnStartsAsync(IReadOnlyList<InternalEntry> children, int from, int count)
+        {
+            List<ulong>? unknown = null;
+            for (int i = from; i < from + count; i++)
+            {
+                PageReference child = children[i].Child;
+                if (Unread(child) && !pages.TryGetStart(child.Version, out _) && (unknown is null || !unknown.Contains(child.Version)))
+                {
+                    (unknown ??= []).Add(child.Version);
+                }
+            }
+
+            if (unknown is null)
+            {
+                return;
+            }
+
+            Task<long>[] starts = new Task<long>[unknown.Count];
+            for (int i = 0; i < unknown.Count; i++)
+            {
+                starts[i] = CommitObject.PagesStartAsync(store, CommitKey.For(unknown[i]), cancellationToken).AsTask();
+            }
+
+            long[] learned = await Task.WhenAll(starts).ConfigureAwait(false);
+            for (int i = 0; i < unknown.Count; i++)
+            {
+                pages.Know(unknown[i], learned[i]);
             }
         }
 

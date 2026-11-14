@@ -314,7 +314,7 @@ Measured above with `CountingObjectStore`, on a dataset of one object after comp
 | `CompactAsync`, a move | 1 to 2 | the object's tail, to know its schema, unless the handle holds it open, and one commit |
 | `VerifyAsync` | 17 | every object hashed, every page read |
 | `VerifyAsync(since)` | 15 | what the earlier version does not share |
-| `VacuumAsync` | 7 to 18 | the listings, the commit object of each retained version and the trees they name, the deletes in batches |
+| `VacuumAsync` | 7 to 18 | the listings, the commit object of each retained version read whole, side by side, the pages of older versions the oldest still names, the deletes in batches |
 | `IndexAsync` | 90, for thirteen objects | per walk a refresh, then per object its tail and its index directory, its columns read for a fragment, and one commit per batch |
 
 `DependentSteps` is the number that sets latency: the round trips that had to wait for the previous
