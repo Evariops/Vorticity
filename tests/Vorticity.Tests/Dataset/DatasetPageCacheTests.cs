@@ -270,6 +270,38 @@ public sealed class DatasetPageCacheTests
         Assert.Equal(1, store.Requests);
     }
 
+    /// <summary>
+    /// Along a chain of commits, among the keys and past them, no header carries a page another version wrote; and the
+    /// last version, opened cold, finds every object of the chain and of the load, the pages it did not write read where
+    /// they lie.
+    /// </summary>
+    [Fact]
+    public async Task NoHeaderOfAChainCarriesAPageAnotherVersionWrote()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        CommitOptions options = new CommitOptions { Seed = Seed };
+        await DatasetCommitter.CommitAsync(store, [.. Enumerable.Range(0, Objects).Select(i => Add(2L * i))], options, ct);
+        List<long> added = [0, 2L * (Objects - 1)];
+        for (int commit = 0; commit < 100; commit++)
+        {
+            long low = commit % 2 == 0 ? (2L * (commit * 197 % Objects)) + 1 : (2L * Objects) + commit;
+            CommitResult result = await DatasetCommitter.CommitAsync(store, [Add(low)], options, ct);
+            added.Add(low);
+            CommitObject written = await CommitObject.OpenAsync(store, CommitKey.For(result.Version), ct);
+            Assert.All(written.Header.Levels, level => Assert.All(level.Inlined, page => Assert.Equal(result.Version, page.Reference.Version)));
+        }
+
+        (ulong latest, CommitObject? head) = await DatasetCommitter.LatestAsync(store, ct);
+        CommitPageSource pages = new CommitPageSource(store);
+        pages.Open(latest, head!);
+        DatasetTree tree = DatasetLevels.Of(head!.Header)[1];
+        foreach (long low in added)
+        {
+            Assert.NotNull(await tree.FindAsync(((DatasetOperation.AddObject)Add(low)).Key, pages, ct));
+        }
+    }
+
     [Fact]
     public async Task AHeaderLeavesOutThePagesThatWouldTakeItPastTheReadThatOpensIt()
     {
