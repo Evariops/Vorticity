@@ -2,7 +2,7 @@
 # them again on every pull request, since a local hook can be skipped.
 repos:
   - repo: https://github.com/betterleaks/betterleaks
-    rev: v1.10.0
+    rev: v1.10.1
     hooks:
       # Since 1.10, betterleaks reads .betterleaks.toml only when --config names it.
       - id: betterleaks
