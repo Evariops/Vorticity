@@ -283,6 +283,46 @@ public sealed class DatasetVacuumTests
         Assert.Equal(Objects * PerObject, (await KeysAsync(previous.ScanBuilder())).Count);
     }
 
+    /// <summary>
+    /// A vacuum reads each version it retains whole, in one request, and no page of theirs on its own: marked from the
+    /// oldest, every page a version wrote lies in its own object, read already, and a later version names only pages an
+    /// earlier one walked. The reads go side by side, so its round trips do not follow its versions. Marked from the latest,
+    /// a walk of its tree asked for each page of the older versions one after the other, and the pages of a commit past
+    /// the read that opens it each took a request of their own.
+    /// </summary>
+    [Fact]
+    public async Task AVacuumReadsEachVersionItRetainsInOneRequest()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using MemoryObjectStore inner = new MemoryObjectStore();
+        await using CountingObjectStore store = new CountingObjectStore(inner);
+        CommitOptions options = CommitBytesBudgetTests.Options();
+        await DatasetCommitter.CommitAsync(store, [.. Enumerable.Range(0, 5_000).Select(i => CommitBytesBudgetTests.Add(i * 2))], options, ct);
+        for (int i = 0; i < 64; i++)
+        {
+            await DatasetCommitter.CommitAsync(store, [CommitBytesBudgetTests.Add((i * 313 % 5_000 * 2) + 1)], options, ct);
+        }
+
+        // Some commits outgrow the read that opens a commit, whose pages past it are what the marking read on their own.
+        int large = 0;
+        for (ulong version = 2; version <= 65; version++)
+        {
+            large += (await inner.HeadAsync(CommitKey.For(version), ct))!.Value.Length > CommitFormat.OpenBytes ? 1 : 0;
+        }
+
+        Assert.True(large > 0, "no commit outgrew the read that opens it");
+
+        inner.Latency = TimeSpan.FromMilliseconds(2);
+        store.Reset();
+        VacuumResult result = await DatasetVacuum.RunAsync(store, new VacuumOptions { DryRun = true }, cancellationToken: ct);
+        Assert.Equal(65, result.Retained.Length);
+
+        // The latest found by a listing and an open, four listings to sweep, and one read a version, the latest's again
+        // when it outgrew its open.
+        Assert.True(store.Requests <= result.Retained.Length + 7, $"{store.Requests} requests for {result.Retained.Length} versions");
+        Assert.True(store.DependentSteps <= 16, $"{store.DependentSteps} round trips for {result.Retained.Length} versions");
+    }
+
     [Fact]
     public async Task AVacuumHoldsThePagesOfOneVersionAtATime()
     {

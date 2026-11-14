@@ -153,6 +153,31 @@ internal sealed class CommitObject
     }
 
     /// <summary>
+    /// Opens the commit object at a key with one read of its whole <paramref name="length"/>, which a listing gave: every
+    /// page it wrote is held then, where <see cref="OpenAsync"/> holds those of its first
+    /// <see cref="CommitFormat.OpenBytes"/>. An object no longer than that read is opened by it.
+    /// </summary>
+    public static async ValueTask<CommitObject> OpenWholeAsync(
+        IObjectStore store, string key, long length, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(store);
+        if (length <= CommitFormat.OpenBytes || length > int.MaxValue)
+        {
+            return await OpenAsync(store, key, cancellationToken).ConfigureAwait(false);
+        }
+
+        using ObjectRange range = await store.GetRangeAsync(key, 0, (int)length, cancellationToken).ConfigureAwait(false);
+        ReadOnlySpan<byte> bytes = range.Contiguous().Span;
+        CommitObject opened = Open(bytes, range.Length);
+        return opened.HeaderEnd < bytes.Length
+            ? new CommitObject(opened.Header, opened.Table, opened.Trailer, opened.Length, opened.HeaderEnd)
+            {
+                Held = bytes[(int)opened.HeaderEnd..].ToArray(),
+            }
+            : opened;
+    }
+
+    /// <summary>
     /// <see cref="OpenAsync"/>, an absent key answered null rather than thrown: the open of a commit that may not be there
     /// yet, as a refresh asks for the version after the one it holds (<see cref="IObjectStore.ReadIfPresentAsync"/>).
     /// </summary>
