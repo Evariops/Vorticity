@@ -420,13 +420,13 @@ public sealed class DatasetDeletionVectorTests
     }
 
     /// <summary>
-    /// A leaf whose objects carry marks grows with every mark: carried by every header, it would cost
-    /// each commit what only those that change its level have to pay. It rides in the commit that
-    /// wrote it, where the read opening that commit holds it; a later header names it, says where its
-    /// version's pages start, and a reader reads it in one request.
+    /// A leaf rides in the commit that wrote it, where the read opening that commit holds it; a later
+    /// header names it, says where its version's pages start, and a reader reads it in one request.
+    /// Carried by every header, it would cost each commit what only those that change its level have
+    /// to pay, and a leaf whose objects carry marks grows with every mark.
     /// </summary>
     [Fact]
-    public async Task AMarkedLeafRidesOnlyInTheCommitsThatWriteIt()
+    public async Task ALeafRidesOnlyInTheCommitsThatWriteIt()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
         await using MemoryObjectStore inner = new MemoryObjectStore();
@@ -435,9 +435,12 @@ public sealed class DatasetDeletionVectorTests
         await DrainAsync(dataset, ct);
         int level = Assert.Single(await dataset.ListObjectsAsync(ct).ToListAsync(ct)).Level;
 
-        // Unmarked, the leaf rides in the header of a commit that does not change its level.
+        // Unmarked, the leaf rides no more in the header of a commit that does not change its level.
+        ulong drained = dataset.Version;
         await AppendAsync(dataset, 9_000, ct);
-        Assert.NotEmpty(LevelOf(await LatestAsync(store, dataset, ct), level).Inlined);
+        CommitLevel named = LevelOf(await LatestAsync(store, dataset, ct), level);
+        Assert.Empty(named.Inlined);
+        Assert.True(named.Top.Version <= drained);
 
         Assert.Equal(1, (await dataset.DeleteAsync<ChangeRow>(r => r.Key >= 1_040 & r.Key < 1_090, ct)).ObjectsMarked);
         ulong marking = dataset.Version;

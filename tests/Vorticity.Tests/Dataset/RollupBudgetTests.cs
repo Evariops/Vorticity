@@ -40,13 +40,14 @@ public sealed partial class RollupBudgetTests : IClassFixture<RollupBudgetTests.
     /// days' objects, which the open run leaves out, besides the two listings a fresh handle makes of the question's learned
     /// partials and of their families. One route by the day: the counts by bucket of the 2 rollups, each by its header and a
     /// chunk, those 3 objects' counts and the two listings. Over days 3 to 26: 2 rollups so, and nothing listed, no object
-    /// being weighed.
+    /// being weighed. Raised on 2026-11-14 by one request and 27,811 bytes, within the requests' ceilings for the first two:
+    /// a header carries no page an earlier version wrote any more, and a cold question reads its tree's top where it lies.
     /// </summary>
     private static readonly Dictionary<string, (long Requests, long Bytes)> Ceilings = new(StringComparer.Ordinal)
     {
-        ["count by route"] = (7, 324_254),
-        ["count by day, one route"] = (9, 228_086),
-        ["count by day, one route, days 3 to 26"] = (4, 35_054),
+        ["count by route"] = (7, 352_065),
+        ["count by day, one route"] = (9, 255_897),
+        ["count by day, one route, days 3 to 26"] = (5, 62_865),
     };
 
     private readonly Fixture _fixture;

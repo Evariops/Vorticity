@@ -9,7 +9,7 @@ A dataset was designed for appends of tens of megabytes every half minute. It ta
 | Fixed cost | Measured | Where it comes from |
 |---|---|---|
 | A data object | 22 to 28 KB at least | its footer and its indexes, which grow with the number of columns |
-| A commit object | 20 KB while level 0 is small, up to 300 KB once it holds thousands of objects | the leaves of the tree the commit rewrites, and the pages its header carries |
+| A commit object | 25 KB while level 0 is small, 120 KB with a few weeks of consolidated partitions, up to 260 KB once level 0 holds thousands of objects | the leaves of the tree the commit rewrites, and the pages above them |
 | A commit object at rest | one per commit, for as long as the retention window | a version replaced stays readable that long |
 
 An append every two seconds is 1,800 commits an hour and as many commit objects at rest under a window of an hour. No setting of the merges changes that number: only the cadence does.
@@ -135,6 +135,7 @@ A merge never takes away what a reader holds: a reader holds a version, and ever
 - A question opens the small objects of level 0 it reads side by side, as many at once as the session reads at once (`VortexSessionOptions.MaxConcurrentReads`, 128 by default). On 1,712 small objects at 20 ms a request, a count of one service takes about 0.4 s.
 - An object a question cannot rule out costs it one request and all its bytes: 41.6 MB for that count, at every question, until the merges catch up.
 - A handle keeps the objects it opened (`DatasetOptions.MaxOpenObjectBytes`, 64 MiB by default), about 81 KB for a small object, so 830 of them by default. A question that reads more of them than that finds none open the next time.
+- Keep readers' handles open and refresh them rather than open a new one per question. A commit carries only the pages it wrote, so a handle opened cold reads, one request per level, the pages of the tree its question passes through that the last commit did not write. An open handle keeps them from one version to the next and reads them once.
 - Watch the lag: `CompactionPlan.Partitions` gives it by partition, without opening an object. Past a few hundred small objects in a partition, its readers pay for it.
 
 ## Watch out
