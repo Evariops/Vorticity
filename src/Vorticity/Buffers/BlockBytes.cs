@@ -1,42 +1,34 @@
 using System;
 using System.Buffers;
-using Vorticity.Buffers;
-using Vorticity.IO;
 
-namespace Vorticity.Parquet.Writing;
+namespace Vorticity.Buffers;
 
 /// <summary>
-/// A growable run of contiguous bytes over a block of the engine's pool: a page being staged or
-/// compressed, a footer being serialized.
+/// A growable run of contiguous bytes in one block of the pool (<see cref="Blocks"/>): a page being staged or
+/// compressed, a footer being serialized, a partial result being spilled.
 /// </summary>
 /// <remarks>
-/// It grows by doubling into a new block and gives the old one back, and keeps its block across
-/// <see cref="Clear"/>, so a writer's buffers reach their working size once and are reused for every
-/// page after. The blocks are the engine's pool's, so that a write of a million rows takes its buffers from the blocks the
-/// last one gave back rather than allocating them again. Not thread-safe: each belongs to one column writer.
+/// It grows by doubling into a new block and gives the old one back, and keeps its block across <see cref="Clear"/>, so
+/// a writer's buffers reach their working size once and are reused for every page after. A write of a million rows takes
+/// its buffers from the blocks the last one gave back rather than allocating them again. Not thread-safe: each belongs
+/// to one writer.
 /// </remarks>
-internal sealed class PooledBytes : IBufferWriter<byte>, IDisposable
+internal sealed class BlockBytes : IBufferWriter<byte>, IDisposable
 {
     private const int MinimumCapacity = 4096;
 
-    private readonly BlockPool _pool;
-    private BlockOwner? _owner;
-
-    // The block's bytes, a view of its array.
-    private Memory<byte> _block;
-    private int _capacity;
+    // The block's bytes, every one of them room: a block of bytes is its own array.
+    private byte[] _block = [];
     private int _length;
-
-    internal PooledBytes(BlockPool pool) => _pool = pool;
 
     /// <summary>The bytes written so far.</summary>
     internal int Length => _length;
 
     /// <summary>The bytes written so far, valid until the next write.</summary>
-    internal ReadOnlyMemory<byte> Written => _block[.._length];
+    internal ReadOnlyMemory<byte> Written => _block.AsMemory(0, _length);
 
     /// <summary>The bytes written so far, writable in place.</summary>
-    internal Span<byte> WrittenSpan => _block.Span[.._length];
+    internal Span<byte> WrittenSpan => _block.AsSpan(0, _length);
 
     /// <summary>Forgets what was written and keeps the block.</summary>
     internal void Clear() => _length = 0;
@@ -61,7 +53,7 @@ internal sealed class PooledBytes : IBufferWriter<byte>, IDisposable
 
     public void Advance(int count)
     {
-        if (count < 0 || _length + count > _capacity)
+        if (count < 0 || _length + count > _block.Length)
         {
             throw new ArgumentOutOfRangeException(nameof(count));
         }
@@ -72,19 +64,19 @@ internal sealed class PooledBytes : IBufferWriter<byte>, IDisposable
     public Memory<byte> GetMemory(int sizeHint = 0)
     {
         Ensure(Math.Max(sizeHint, 1));
-        return _block[_length..];
+        return _block.AsMemory(_length);
     }
 
     public Span<byte> GetSpan(int sizeHint = 0)
     {
         Ensure(Math.Max(sizeHint, 1));
-        return _block.Span[_length..];
+        return _block.AsSpan(_length);
     }
 
     private void Ensure(int more)
     {
         long needed = (long)_length + more;
-        if (needed <= _capacity)
+        if (needed <= _block.Length)
         {
             return;
         }
@@ -94,32 +86,23 @@ internal sealed class PooledBytes : IBufferWriter<byte>, IDisposable
             throw new InvalidOperationException($"A buffer of {needed} bytes passes what one block can hold.");
         }
 
-        long capacity = Math.Max(MinimumCapacity, (long)_capacity * 2);
+        long capacity = Math.Max(MinimumCapacity, (long)_block.Length * 2);
         while (capacity < needed)
         {
             capacity *= 2;
         }
 
-        BlockOwner owner = _pool.Rent((int)Math.Min(capacity, Array.MaxLength), VortexLimits.MaxAlignment);
-        Memory<byte> block = owner.WritableMemory(0, owner.Length);
-        if (_owner is { } previous)
-        {
-            _block.Span[.._length].CopyTo(block.Span);
-            _pool.Return(previous);
-        }
-
-        _owner = owner;
-        _block = block;
-        _capacity = block.Length;
+        byte[] grown = Blocks.Rent<byte>((int)Math.Min(capacity, Array.MaxLength)).Array();
+        _block.AsSpan(0, _length).CopyTo(grown);
+        Blocks.ReturnBytes(_block);
+        _block = grown;
     }
 
+    /// <summary>Gives the block back to the pool.</summary>
     public void Dispose()
     {
-        // Disposing a pooled block gives it back to its pool.
-        _owner?.Dispose();
-        _owner = null;
-        _block = default;
-        _capacity = 0;
+        Blocks.ReturnBytes(_block);
+        _block = [];
         _length = 0;
     }
 }

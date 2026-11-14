@@ -1,7 +1,7 @@
 using System;
 using System.Numerics;
-using Vorticity.Aggregating;
 using Vorticity.Arrays;
+using Vorticity.Buffers;
 using Vorticity.Indexes;
 
 namespace Vorticity.Writing;
@@ -36,13 +36,13 @@ internal sealed class LocateBuilder : IndexBuilder
     private long _rows;
 
     // Each number's granule it was last met in, plus one; its first and last pair.
-    private int[] _seenIn = [];
-    private int[] _first = [];
-    private int[] _last = [];
+    private Block<int> _seenIn;
+    private Block<int> _first;
+    private Block<int> _last;
 
     // The pairs, a value's as a list through _next: each pair's granule.
-    private int[] _granules = [];
-    private int[] _next = [];
+    private Block<int> _granules;
+    private Block<int> _next;
     private int _pairs;
 
     /// <param name="sheet">The column's sheet, fed first, which numbers its rows' values.</param>
@@ -68,7 +68,7 @@ internal sealed class LocateBuilder : IndexBuilder
         }
 
         int mark = _granule + 1;
-        int[] seenIn = _seenIn;
+        Span<int> seenIn = _seenIn;
         foreach (int id in ids[..count])
         {
             if (id < 0)
@@ -110,9 +110,9 @@ internal sealed class LocateBuilder : IndexBuilder
     {
         int size = (int)BitOperations.RoundUpToPowerOf2((uint)Math.Max(id + 1, Math.Max(64, _seenIn.Length * 2)));
         int old = _seenIn.Length;
-        _seenIn = Regrown(_seenIn, size);
-        _first = Regrown(_first, size);
-        _last = Regrown(_last, size);
+        Blocks.Grow(ref _seenIn, size);
+        Blocks.Grow(ref _first, size);
+        Blocks.Grow(ref _last, size);
         _seenIn.AsSpan(old).Clear();
         _first.AsSpan(old).Fill(None);
         _last.AsSpan(old).Fill(None);
@@ -124,8 +124,8 @@ internal sealed class LocateBuilder : IndexBuilder
         if (_pairs == _granules.Length)
         {
             int size = Math.Max(FirstPairs, _pairs * 2);
-            _granules = Regrown(_granules, size);
-            _next = Regrown(_next, size);
+            Blocks.Grow(ref _granules, size);
+            Blocks.Grow(ref _next, size);
         }
 
         int pair = _pairs++;
@@ -159,12 +159,12 @@ internal sealed class LocateBuilder : IndexBuilder
         int values = _sheet.Numbered;
         int granules = (int)((rows + granuleRows - 1) / granuleRows);
         int most = granules - (granules / 4);
-        int[] order = Taken(values);
-        int[] starts = Taken(values + 1);
-        int[] placed = Taken(_pairs);
+        Block<int> order = Blocks.Rent<int>(values);
+        Block<int> starts = Blocks.Rent<int>(values + 1);
+        Block<int> placed = Blocks.Rent<int>(_pairs);
         try
         {
-            Span<int> sorted = order.AsSpan(0, values);
+            Span<int> sorted = order;
             for (int id = 0; id < values; id++)
             {
                 sorted[id] = id;
@@ -192,30 +192,13 @@ internal sealed class LocateBuilder : IndexBuilder
         }
         finally
         {
-            ArrayShelf.Retained.Give(order);
-            ArrayShelf.Retained.Give(starts);
-            ArrayShelf.Retained.Give(placed);
+            Blocks.Return(order);
+            Blocks.Return(starts);
+            Blocks.Return(placed);
         }
     }
 
-    /// <summary>An array of the shelf's of <paramref name="length"/> elements at least, at a power of two.</summary>
-    private static int[] Taken(int length) =>
-        ArrayShelf.Retained.Take<int>((int)BitOperations.RoundUpToPowerOf2((uint)Math.Max(length, 1)), zeroed: false);
-
-    /// <summary><paramref name="held"/>'s elements in an array of the shelf's of <paramref name="length"/>, <paramref name="held"/> given back.</summary>
-    private static int[] Regrown(int[] held, int length)
-    {
-        int[] grown = ArrayShelf.Retained.Take<int>(length, zeroed: false);
-        held.CopyTo(grown, 0);
-        if (held.Length > 0)
-        {
-            ArrayShelf.Retained.Give(held);
-        }
-
-        return grown;
-    }
-
-    /// <summary>Gives every array back to the shelf, once.</summary>
+    /// <summary>Gives every block back to the pool, once.</summary>
     private void GiveBack()
     {
         Give(ref _seenIn);
@@ -225,12 +208,9 @@ internal sealed class LocateBuilder : IndexBuilder
         Give(ref _next);
     }
 
-    private static void Give(ref int[] array)
+    private static void Give(ref Block<int> block)
     {
-        if (array.Length > 0)
-        {
-            ArrayShelf.Retained.Give(array);
-            array = [];
-        }
+        Blocks.Return(block);
+        block = default;
     }
 }

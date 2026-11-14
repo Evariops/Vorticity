@@ -1,9 +1,9 @@
 using System;
-using System.Buffers;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
+using Vorticity.Buffers;
 using Vorticity.Compute;
 using Vorticity.Serialization;
 
@@ -182,11 +182,11 @@ internal static class DeltaBinaryPacked
             return Blocks32(data, destination, header, stackalloc uint[256]);
         }
 
-        // A miniblock longer than writers cut: its deltas in a rented array, which a decode that
+        // A miniblock longer than writers cut: its deltas in a rented block, which a decode that
         // throws leaves to the collector.
-        uint[] rented = ArrayPool<uint>.Shared.Rent(perMiniblock);
+        Block<uint> rented = Blocks.Rent<uint>(perMiniblock);
         int length = Blocks32(data, destination, header, rented);
-        ArrayPool<uint>.Shared.Return(rented);
+        Blocks.Return(rented);
         return length;
     }
 
@@ -274,9 +274,9 @@ internal static class DeltaBinaryPacked
             return Blocks64(data, destination, header, stackalloc ulong[256]);
         }
 
-        ulong[] rented = ArrayPool<ulong>.Shared.Rent(perMiniblock);
+        Block<ulong> rented = Blocks.Rent<ulong>(perMiniblock);
         int length = Blocks64(data, destination, header, rented);
-        ArrayPool<ulong>.Shared.Return(rented);
+        Blocks.Return(rented);
         return length;
     }
 

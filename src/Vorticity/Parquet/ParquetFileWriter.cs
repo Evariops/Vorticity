@@ -8,6 +8,7 @@ using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
+using Vorticity.Buffers;
 using Vorticity.Parquet.Codecs;
 using Vorticity.Parquet.Metadata;
 using Vorticity.Parquet.Schema;
@@ -895,7 +896,7 @@ public sealed class ParquetFileWriter : IAsyncDisposable
 
     private async ValueTask WriteTailAsync(CancellationToken cancellationToken)
     {
-        using PooledBytes tail = new(_session.Options.EnginePool);
+        using BlockBytes tail = new();
         WriteTail(tail, _sink.Position);
         await _sink.WriteAsync(tail.Written, cancellationToken).ConfigureAwait(false);
         await _sink.FlushAsync(cancellationToken).ConfigureAwait(false);
@@ -905,12 +906,12 @@ public sealed class ParquetFileWriter : IAsyncDisposable
     /// The file's end, starting at <paramref name="position"/>: every column chunk's column index,
     /// then every offset index, then the footer, its length and the magic.
     /// </summary>
-    private void WriteTail(PooledBytes tail, long position)
+    private void WriteTail(BlockBytes tail, long position)
     {
         // Every column index, then every offset index, by row group then column, so that a reader's
         // reads of each coalesce.
         ThriftCompactWriter writer = new(tail);
-        using PooledBytes plain = new(_session.Options.EnginePool);
+        using BlockBytes plain = new();
         foreach (WrittenRowGroup rowGroup in _rowGroups)
         {
             foreach (WrittenChunk chunk in rowGroup.Chunks)
@@ -972,14 +973,14 @@ public sealed class ParquetFileWriter : IAsyncDisposable
             // The footer encrypted: its crypto metadata, then its module, both counted by the length.
             plain.Clear();
             ThriftCompactWriter inner = new(plain);
-            using PooledBytes scratch = new(_session.Options.EnginePool);
+            using BlockBytes scratch = new();
             FooterWriter.WriteFileMetaData(ref inner, _map.Elements, _rowCount, _rowGroups, _keyValues, CreatedBy, _map.Columns, sealedFooter, scratch, _sorted?.Declared);
             inner.Flush();
             sealedFooter.WriteEncryptedFooter(tail, plain.Written.Span);
         }
         else
         {
-            using PooledBytes scratch = new(_session.Options.EnginePool);
+            using BlockBytes scratch = new();
             FooterWriter.WriteFileMetaData(ref writer, _map.Elements, _rowCount, _rowGroups, _keyValues, CreatedBy, _map.Columns, _encryptor, scratch, _sorted?.Declared);
             writer.Flush();
             if (_encryptor is { } signer)

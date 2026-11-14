@@ -1,8 +1,8 @@
 using System;
-using System.Buffers;
 using System.Buffers.Binary;
 using System.Diagnostics.CodeAnalysis;
 using System.IO.Hashing;
+using Vorticity.Buffers;
 
 namespace Vorticity.Parquet.Codecs;
 
@@ -15,7 +15,7 @@ namespace Vorticity.Parquet.Codecs;
 /// last. A member's header is checked as zlib checks it: the magic, the method, no reserved flag,
 /// its optional fields inside the page, its own CRC where it carries one. Its trailer is checked
 /// against what it decoded: the CRC-32, and the length modulo 2^32. The tables of the dynamic codes
-/// are rented from the shared array pool, once a page.
+/// are a block of the pool, rented once a page.
 /// </remarks>
 internal static class Gzip
 {
@@ -41,7 +41,7 @@ internal static class Gzip
             return;
         }
 
-        uint[] tables = ArrayPool<uint>.Shared.Rent(Inflate.TableEntries);
+        Block<uint> tables = Blocks.Rent<uint>(Inflate.TableEntries);
         try
         {
             int read = 0;
@@ -59,12 +59,12 @@ internal static class Gzip
         }
         finally
         {
-            ArrayPool<uint>.Shared.Return(tables);
+            Blocks.Return(tables);
         }
     }
 
     /// <summary>The member at the start of <paramref name="source"/>, decoded into the start of <paramref name="destination"/>; the bytes it takes.</summary>
-    private static int Member(ReadOnlySpan<byte> source, Span<byte> destination, uint[] tables, out int produced)
+    private static int Member(ReadOnlySpan<byte> source, Span<byte> destination, Span<uint> tables, out int produced)
     {
         if (source.Length < HeaderBytes + TrailerBytes || source[0] != 0x1F || source[1] != 0x8B || source[2] != 8)
         {

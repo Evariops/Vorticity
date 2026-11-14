@@ -63,9 +63,9 @@ internal sealed class ColumnChunkWriter : IDisposable
     private readonly int _level;
     private readonly Compressors? _compressors;
     private readonly int _blockRows;
-    private readonly PooledBytes _values;
-    private readonly PooledBytes _levels;
-    private readonly PooledBytes _compressed;
+    private readonly BlockBytes _values;
+    private readonly BlockBytes _levels;
+    private readonly BlockBytes _compressed;
     private readonly ChunkBytes _chunk;
     private readonly byte[] _validity;
     private BlockOwner? _levelBytes;
@@ -81,7 +81,7 @@ internal sealed class ColumnChunkWriter : IDisposable
     private readonly ParquetEncodingHint _hint;
 
     /// <summary>The dictionary's values in their PLAIN form, in code order, the null left out.</summary>
-    private readonly PooledBytes _entries;
+    private readonly BlockBytes _entries;
 
     /// <summary>
     /// The 16 bytes that open this writer's extension of a page header, the identifier the standard
@@ -101,7 +101,7 @@ internal sealed class ColumnChunkWriter : IDisposable
     /// is known: its length then puts every aligned page of the chunk on its boundary.
     /// </summary>
     private PageHeader _first;
-    private readonly PooledBytes _firstHeader;
+    private readonly BlockBytes _firstHeader;
 
     /// <summary>
     /// Where, counted from a 64-byte boundary, the chunk's data pages were laid out as starting: the
@@ -113,16 +113,16 @@ internal sealed class ColumnChunkWriter : IDisposable
     private bool _aligned;
 
     /// <summary>A header measured before its extension is sized.</summary>
-    private readonly PooledBytes _measured;
+    private readonly BlockBytes _measured;
 
     /// <summary>A v1 page's levels and values, assembled to be compressed together.</summary>
-    private readonly PooledBytes _page;
+    private readonly BlockBytes _page;
 
     /// <summary>A page's codes, RLE/bit-packed behind their width.</summary>
-    private readonly PooledBytes _codes;
+    private readonly BlockBytes _codes;
 
     /// <summary>The dictionary page, written ahead of the data pages when the chunk closes.</summary>
-    private readonly PooledBytes _dictionaryPage;
+    private readonly BlockBytes _dictionaryPage;
 
     private BlockOwner? _pageCodes;
     private BlockOwner? _firstOccurrences;
@@ -151,8 +151,8 @@ internal sealed class ColumnChunkWriter : IDisposable
     private ParquetEncoding? _smallest;
 
     /// <summary>A page encoded otherwise than PLAIN, and a byte array page's values without their lengths.</summary>
-    private readonly PooledBytes _encoded;
-    private readonly PooledBytes _data;
+    private readonly BlockBytes _encoded;
+    private readonly BlockBytes _data;
     private BlockOwner? _lengths;
     private BlockOwner? _prefixes;
     private BlockOwner? _suffixes;
@@ -191,8 +191,8 @@ internal sealed class ColumnChunkWriter : IDisposable
     private readonly Shredder? _shredder;
 
     /// <summary>A nested column's page's levels, a byte per entry.</summary>
-    private readonly PooledBytes? _repetitionLevels;
-    private readonly PooledBytes? _definitionLevels;
+    private readonly BlockBytes? _repetitionLevels;
+    private readonly BlockBytes? _definitionLevels;
 
     /// <summary>A nested column's page's rows and entries; its values are what <see cref="_pageRows"/> counts.</summary>
     private int _pageNestedRows;
@@ -229,7 +229,7 @@ internal sealed class ColumnChunkWriter : IDisposable
     internal int RowGroup { get; set; }
 
     /// <summary>A module's plaintext, made whole before it is encrypted: a header, or a page's levels and values.</summary>
-    private PooledBytes? _plain;
+    private BlockBytes? _plain;
 
     /// <summary>The pool the writer's buffers are of.</summary>
     private readonly BlockPool _pool;
@@ -281,7 +281,7 @@ internal sealed class ColumnChunkWriter : IDisposable
     private ulong _codedEntries;
 
     /// <summary>The PLAIN values of a page's entries, its bounds' input.</summary>
-    private PooledBytes? _entriesBounded;
+    private BlockBytes? _entriesBounded;
 
     internal ColumnChunkWriter(WriteColumn column, CompressionCodec codec, int level, Compressors? compressors, int blockRows, CompressionProfile profile, BlockPool pool, double bloomRate = 0, int rowGroupRows = 0)
     {
@@ -289,8 +289,8 @@ internal sealed class ColumnChunkWriter : IDisposable
         if (column.Nested)
         {
             _shredder = new Shredder(pool);
-            _repetitionLevels = new PooledBytes(pool);
-            _definitionLevels = new PooledBytes(pool);
+            _repetitionLevels = new BlockBytes();
+            _definitionLevels = new BlockBytes();
         }
 
         _column = column;
@@ -298,17 +298,17 @@ internal sealed class ColumnChunkWriter : IDisposable
         _level = level;
         _compressors = compressors;
         _blockRows = blockRows;
-        _values = new PooledBytes(pool);
-        _levels = new PooledBytes(pool);
-        _compressed = new PooledBytes(pool);
+        _values = new BlockBytes();
+        _levels = new BlockBytes();
+        _compressed = new BlockBytes();
         _chunk = new ChunkBytes(pool);
-        _entries = new PooledBytes(pool);
-        _codes = new PooledBytes(pool);
-        _page = new PooledBytes(pool);
-        _dictionaryPage = new PooledBytes(pool);
-        _firstHeader = new PooledBytes(pool);
+        _entries = new BlockBytes();
+        _codes = new BlockBytes();
+        _page = new BlockBytes();
+        _dictionaryPage = new BlockBytes();
+        _firstHeader = new BlockBytes();
         _pool = pool;
-        _measured = new PooledBytes(pool);
+        _measured = new BlockBytes();
         _validity = new byte[(blockRows + 7) / 8 + 8];
         _mask = new ulong[(blockRows + 63) >> 6];
         _statistics = new ChunkStatistics(column);
@@ -316,13 +316,13 @@ internal sealed class ColumnChunkWriter : IDisposable
         if (bloomRate > 0 && column.Conversion is not (ValueConversion.Bool or ValueConversion.Null))
         {
             // A flat column's chunk holds a value a row at most, a nested one's any number.
-            _bloom = new BloomCollector(column, bloomRate, column.Nested || rowGroupRows <= 0 ? long.MaxValue : rowGroupRows, pool);
+            _bloom = new BloomCollector(column, bloomRate, column.Nested || rowGroupRows <= 0 ? long.MaxValue : rowGroupRows);
         }
         _eligible = profile != CompressionProfile.None && column.Conversion is not (ValueConversion.Bool or ValueConversion.Null) && !column.FixedElements;
         _encodings = profile is CompressionProfile.Auto or CompressionProfile.Smallest;
         _trials = profile == CompressionProfile.Smallest;
-        _encoded = new PooledBytes(pool);
-        _data = new PooledBytes(pool);
+        _encoded = new BlockBytes();
+        _data = new BlockBytes();
         _dictionary = _eligible;
     }
 
@@ -787,7 +787,7 @@ internal sealed class ColumnChunkWriter : IDisposable
     /// </summary>
     private int EncryptHeader(Encryption.ColumnEncryptor encryptor, in PageHeader header, Encryption.ModuleType type, int page, System.Buffers.IBufferWriter<byte> into)
     {
-        PooledBytes plain = _plain ??= new PooledBytes(_pool);
+        BlockBytes plain = _plain ??= new BlockBytes();
         plain.Clear();
         ThriftCompactWriter writer = new(plain);
         header.Write(ref writer, default);
@@ -804,7 +804,7 @@ internal sealed class ColumnChunkWriter : IDisposable
             return;
         }
 
-        PooledBytes plain = _plain ??= new PooledBytes(_pool);
+        BlockBytes plain = _plain ??= new BlockBytes();
         plain.Clear();
         plain.Write(levels);
         plain.Write(stored);
@@ -857,18 +857,18 @@ internal sealed class ColumnChunkWriter : IDisposable
     /// Where each staged row's entries, values and bytes begin, which a block cut into pages is cut
     /// by: rows to entries by the repetition levels, entries to values by the definition levels or the
     /// validity, values to bytes by their width or their lengths. Made only for a block that is cut,
-    /// over arrays of the shared pool.
+    /// over blocks of the pool.
     /// </summary>
     private sealed class PageCuts : IDisposable
     {
         /// <summary>Per row, and one past the last, its first entry.</summary>
-        private readonly int[] _entries;
+        private readonly Block<int> _entries;
 
         /// <summary>Per entry, and one past the last, the values before it.</summary>
-        private readonly int[] _values;
+        private readonly Block<int> _values;
 
-        /// <summary>Per value of a byte array, and one past the last, its first byte; null for a fixed width.</summary>
-        private readonly int[]? _bytes;
+        /// <summary>Per value of a byte array, and one past the last, its first byte; empty for a fixed width.</summary>
+        private readonly Block<int> _bytes;
 
         private readonly int _width;
 
@@ -876,8 +876,8 @@ internal sealed class ColumnChunkWriter : IDisposable
         {
             WriteColumn column = writer._column;
             bool nested = writer._shredder is not null;
-            _entries = ArrayPool<int>.Shared.Rent(rows + 1);
-            _values = ArrayPool<int>.Shared.Rent(entries + 1);
+            _entries = Blocks.Rent<int>(rows + 1);
+            _values = Blocks.Rent<int>(entries + 1);
             if (nested && column.MaxRepetitionLevel > 0)
             {
                 // A row begins at each entry of repetition level 0.
@@ -928,7 +928,7 @@ internal sealed class ColumnChunkWriter : IDisposable
             if (column.Conversion == ValueConversion.ByteArray)
             {
                 int values = writer._pageValues;
-                _bytes = ArrayPool<int>.Shared.Rent(values + 1);
+                _bytes = Blocks.Rent<int>(values + 1);
                 ReadOnlySpan<byte> plain = writer._values.WrittenSpan;
                 int at = 0;
                 for (int value = 0; value < values; value++)
@@ -960,15 +960,12 @@ internal sealed class ColumnChunkWriter : IDisposable
 
         public void Dispose()
         {
-            ArrayPool<int>.Shared.Return(_entries);
-            ArrayPool<int>.Shared.Return(_values);
-            if (_bytes is not null)
-            {
-                ArrayPool<int>.Shared.Return(_bytes);
-            }
+            Blocks.Return(_entries);
+            Blocks.Return(_values);
+            Blocks.Return(_bytes);
         }
 
-        private int ByteOf(int value) => _bytes is null ? value * _width : _bytes[value];
+        private int ByteOf(int value) => _bytes.IsEmpty ? value * _width : _bytes[value];
     }
 
     /// <summary>A nested page's levels of one kind, RLE at the width of their maximum, after those already in the page's; their bytes.</summary>
@@ -1449,7 +1446,7 @@ internal sealed class ColumnChunkWriter : IDisposable
     /// </summary>
     private ReadOnlySpan<byte> EntryValues(ulong entries)
     {
-        PooledBytes values = _entriesBounded ??= new PooledBytes(_pool);
+        BlockBytes values = _entriesBounded ??= new BlockBytes();
         values.Clear();
         ReadOnlySpan<byte> all = _entries.WrittenSpan;
         for (ulong rest = entries; rest != 0; rest &= rest - 1)
@@ -2085,7 +2082,7 @@ internal sealed class ColumnChunkWriter : IDisposable
     }
 
     /// <summary>The values of the rows that hold one, in their PLAIN form, appended to <paramref name="target"/>.</summary>
-    private void StageValues(CanonicalArena arena, CanonicalNode node, int start, int count, int values, PooledBytes target)
+    private void StageValues(CanonicalArena arena, CanonicalNode node, int start, int count, int values, BlockBytes target)
     {
         bool dense = values == count;
         int first = _pageRows;
@@ -2217,7 +2214,7 @@ internal sealed class ColumnChunkWriter : IDisposable
     /// the next value goes, or past the reservation's end, in room taken for them. A value held out
     /// of line is copied from its buffer, which <see cref="ViewValues"/> resolves and checks.
     /// </remarks>
-    private void StageBytes(CanonicalNode node, int start, int count, bool dense, int first, PooledBytes target)
+    private void StageBytes(CanonicalNode node, int start, int count, bool dense, int first, BlockBytes target)
     {
         const int ViewSize = CanonicalSupport.ViewSize;
         ReadOnlySpan<byte> raw = node.Views.Span.Slice(start * ViewSize, count * ViewSize);
@@ -2311,7 +2308,7 @@ internal sealed class ColumnChunkWriter : IDisposable
         return source.Length;
     }
 
-    private void StageConverted(CanonicalNode node, int start, int count, bool dense, int first, int values, PooledBytes target)
+    private void StageConverted(CanonicalNode node, int start, int count, bool dense, int first, int values, BlockBytes target)
     {
         int width = _column.ValueWidth;
         Span<byte> destination = target.Reserve(values * width);

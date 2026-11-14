@@ -7,6 +7,7 @@ using System.Threading;
 using Vorticity.Aggregating;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
+using Vorticity.Buffers;
 using Vorticity.Indexes;
 using Vorticity.Serialization.Protobuf;
 using Vorticity.Types;
@@ -39,8 +40,8 @@ internal sealed class GranuleStatsBuilder : IndexBuilder
 
     // An integer under an extension, which the plan does not carry, read here: how it is summed and its width; null for none.
     private readonly (MeasureKind Kind, int Width)? _own;
-    private long[] _ownValues = [];
-    private byte[] _ownValid = [];
+    private Block<long> _ownValues;
+    private Block<byte> _ownValid;
 
     // The rows taken; the open granule's first row and nulls; the granules closed, those that list their values, and the
     // rows of those that hold one value, or nulls alone.
@@ -57,9 +58,9 @@ internal sealed class GranuleStatsBuilder : IndexBuilder
     private bool _measured;
 
     // The values met in the open granule: each number's rows and the granule it was last met in, plus one; the numbers met.
-    private int[] _rowsOf = [];
-    private int[] _seenIn = [];
-    private int[] _met = [];
+    private Block<int> _rowsOf;
+    private Block<int> _seenIn;
+    private Block<int> _met;
     private int _metCount;
 
     // The open granule's measure, a record in StateWords' layout; the rows' entries, all of it.
@@ -204,8 +205,8 @@ internal sealed class GranuleStatsBuilder : IndexBuilder
     private void Count(ReadOnlySpan<int> ids)
     {
         int mark = _granules + 1;
-        int[] rowsOf = _rowsOf;
-        int[] seenIn = _seenIn;
+        Span<int> rowsOf = _rowsOf;
+        Span<int> seenIn = _seenIn;
         foreach (int id in ids)
         {
             if (id < 0)
@@ -216,7 +217,8 @@ internal sealed class GranuleStatsBuilder : IndexBuilder
             if ((uint)id >= (uint)rowsOf.Length)
             {
                 Grow(id);
-                (rowsOf, seenIn) = (_rowsOf, _seenIn);
+                rowsOf = _rowsOf;
+                seenIn = _seenIn;
             }
 
             if (seenIn[id] != mark)
@@ -224,7 +226,7 @@ internal sealed class GranuleStatsBuilder : IndexBuilder
                 seenIn[id] = mark;
                 if (_metCount == _met.Length)
                 {
-                    _met = Regrown(_met, Math.Max(64, _met.Length * 2));
+                    Blocks.Grow(ref _met, Math.Max(64, _met.Length * 2));
                 }
 
                 _met[_metCount++] = id;
@@ -239,27 +241,13 @@ internal sealed class GranuleStatsBuilder : IndexBuilder
     {
         int size = (int)BitOperations.RoundUpToPowerOf2((uint)Math.Max(id + 1, Math.Max(64, _rowsOf.Length * 2)));
         int old = _rowsOf.Length;
-        _rowsOf = Regrown(_rowsOf, size);
-        _seenIn = Regrown(_seenIn, size);
+
+        // In blocks of the pool, at a power of two, the old ones given back: the builders of every column and shredded key
+        // of every object written made them anew, 22 MB of a consolidation of four hours of log records.
+        Blocks.Resize(ref _rowsOf, size);
+        Blocks.Resize(ref _seenIn, size);
         _rowsOf.AsSpan(old).Clear();
         _seenIn.AsSpan(old).Clear();
-    }
-
-    /// <summary>
-    /// <paramref name="held"/>'s elements in an array of the process's shelf's of <paramref name="length"/>, a power of two,
-    /// <paramref name="held"/> given back: the arrays of the builders of every column and shredded key of every object
-    /// written, which made them anew, 22 MB of a consolidation of four hours of log records.
-    /// </summary>
-    private static T[] Regrown<T>(T[] held, int length)
-    {
-        T[] grown = ArrayShelf.Retained.Take<T>(length, zeroed: false);
-        held.CopyTo(grown, 0);
-        if (held.Length > 0)
-        {
-            ArrayShelf.Retained.Give(held);
-        }
-
-        return grown;
     }
 
     // Zeros, the entries of a granule's rows, which every builder reads and none writes.
@@ -278,14 +266,12 @@ internal sealed class GranuleStatsBuilder : IndexBuilder
         return zeros.AsSpan(0, count);
     }
 
-    /// <summary>Gives <paramref name="array"/> back to the process's shelf, once.</summary>
-    private static void Give<T>(ref T[] array)
+    /// <summary>Gives <paramref name="block"/> back to the pool, once.</summary>
+    private static void Give<T>(ref Block<T> block)
+        where T : unmanaged
     {
-        if (array.Length > 0)
-        {
-            ArrayShelf.Retained.Give(array);
-            array = [];
-        }
+        Blocks.Return(block);
+        block = default;
     }
 
     /// <summary>Folds the measure's values of the batch's rows <c>[start, start + count)</c> into the open granule's record.</summary>
@@ -380,10 +366,8 @@ internal sealed class GranuleStatsBuilder : IndexBuilder
         if (_ownValues.Length < count)
         {
             int size = (int)BitOperations.RoundUpToPowerOf2((uint)Math.Max(count, _ownValues.Length * 2));
-            Give(ref _ownValues);
-            Give(ref _ownValid);
-            _ownValues = ArrayShelf.Retained.Take<long>(size, zeroed: false);
-            _ownValid = ArrayShelf.Retained.Take<byte>(size, zeroed: false);
+            Blocks.Ensure(ref _ownValues, size);
+            Blocks.Ensure(ref _ownValid, size);
         }
 
         bool constant = node.Kind == CanonicalKind.Constant;
@@ -517,7 +501,7 @@ internal sealed class GranuleStatsBuilder : IndexBuilder
         // statistics of every column and key of every object came twice, 21 MB of a consolidation of log records.
         Span<byte> header = stackalloc byte[32];
         header = header[..GranuleStats.WriteHeader(header, _granules, listed, _measured ? Kind : null)];
-        ColumnSheetBuilder.Values values = new ColumnSheetBuilder.Values(_sheet, null, _sheet.Numbered);
+        ColumnSheetBuilder.Values values = new ColumnSheetBuilder.Values(_sheet, default, _sheet.Numbered);
         ReadOnlySpan<byte> rowsPart = _rowsSection.WrittenSpan;
         ReadOnlySpan<byte> valuesPart = listed ? _valuesSection.WrittenSpan : default;
         ReadOnlySpan<byte> measurePart = _measured ? _measureSection.WrittenSpan : default;

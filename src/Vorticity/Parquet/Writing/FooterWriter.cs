@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using Vorticity.Buffers;
 using Vorticity.Parquet.Metadata;
 using Vorticity.Parquet.Thrift;
 
@@ -60,7 +61,7 @@ internal static class FooterWriter
         string createdBy,
         WriteColumn[] columns,
         Encryption.FileEncryptor? encryptor = null,
-        PooledBytes? scratch = null,
+        BlockBytes? scratch = null,
         SortingColumn[]? sorting = null)
     {
         short saved = writer.BeginStruct();
@@ -114,7 +115,7 @@ internal static class FooterWriter
         writer.EndStruct(saved);
     }
 
-    private static void WriteRowGroup(ref ThriftCompactWriter writer, WrittenRowGroup rowGroup, PooledBytes? scratch, SortingColumn[]? sorting)
+    private static void WriteRowGroup(ref ThriftCompactWriter writer, WrittenRowGroup rowGroup, BlockBytes? scratch, SortingColumn[]? sorting)
     {
         long uncompressed = 0;
         long compressed = 0;
@@ -161,7 +162,7 @@ internal static class FooterWriter
         writer.EndStruct(saved);
     }
 
-    private static void WriteColumnChunk(ref ThriftCompactWriter writer, WrittenChunk written, int rowGroup, PooledBytes? scratch)
+    private static void WriteColumnChunk(ref ThriftCompactWriter writer, WrittenChunk written, int rowGroup, BlockBytes? scratch)
     {
         Encryption.ColumnEncryptor? encryptor = written.Encryptor;
         short saved = writer.BeginStruct();
@@ -196,7 +197,7 @@ internal static class FooterWriter
             encryptor.WriteCryptoMetadata(ref writer);
             if (module)
             {
-                PooledBytes plain = scratch!;
+                BlockBytes plain = scratch!;
                 plain.Clear();
                 ThriftCompactWriter inner = new(plain);
                 short own = inner.BeginStruct();

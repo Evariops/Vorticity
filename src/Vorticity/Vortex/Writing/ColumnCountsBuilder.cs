@@ -411,21 +411,21 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
     private bool _settled;
     private bool _dropped;
 
-    // The entries: each one's value's number, NullValue or OtherValues, and its record of words. Like every working array
-    // of the counts, from the process's shelf, given back as they grow and when the counts drop or are disposed.
+    // The entries: each one's value's number, NullValue or OtherValues, and its record of words. Like every working block
+    // of the counts, from the pool, given back as they grow and when the counts drop or are disposed.
     private int _entries;
-    private int[] _entryValue = [];
-    private long[] _words = [];
+    private Block<int> _entryValue;
+    private Block<long> _words;
 
     // The entry of each value's number, -1 for none; and the entries of the nulls and of the values left out, -1 for none.
-    private int[] _entryOf = [];
+    private Block<int> _entryOf;
     private int _nullEntry = -1;
     private int _otherEntry = -1;
     private bool[]? _leftOut;
 
     // Each row's entry, as where its record starts and as its number.
-    private int[] _rowEntries = [];
-    private int[] _rowIndexes = [];
+    private Block<int> _rowEntries;
+    private Block<int> _rowIndexes;
 
     // For each measure the records hold, the quantile sketches of the entries, each made at its entry's first value, encoded
     // at the end; null once they would pass SketchBudget.
@@ -436,7 +436,7 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
     // block of the shared pool, those of an entry no row reached left at zero (a rank is 1 at least): none for a column
     // whose counts went, and the whole null once the column holds more than AttachLimit values.
     private readonly int _field;
-    private int[] _batchEntries = [];
+    private Block<int> _batchEntries;
     private BlockOwner?[]? _distinct;
 
     /// <param name="sheet">The column's sheet, fed first, which numbers its rows' values.</param>
@@ -508,7 +508,7 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
         int[] oldAt = _at;
         int[] oldMeasures = _measures;
         int oldStride = _stride;
-        long[] old = _words;
+        Block<long> old = _words;
         if (_sketches is { } sketches)
         {
             int[] from = Array.ConvertAll(live, m => Array.IndexOf(oldMeasures, m));
@@ -525,7 +525,7 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
 
         (_measures, _kinds, _at, _stride) = Layout(live);
         _entryLimit = Math.Min(_limit, Math.Max(1_024, WordLimit / _stride));
-        _words = _entryValue.Length == 0 ? [] : ArrayShelf.Retained.Take<long>(_entryValue.Length * _stride, zeroed: false);
+        _words = Blocks.Rent<long>(_entryValue.Length * _stride);
         for (int e = 0; e < _entries; e++)
         {
             _words[e * _stride] = old[e * oldStride];
@@ -541,7 +541,7 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
             }
         }
 
-        ArrayShelf.Retained.Give(old);
+        Blocks.Return(old);
     }
 
     internal override void Accumulate(CanonicalArena arena, int nodeIndex, int start, int count)
@@ -568,21 +568,19 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
         // words are reached from its entry with no slice of them.
         if (_rowEntries.Length < count)
         {
-            int length = ArrayShelf.Grown(count, _rowEntries.Length);
-            ArrayShelf.Retained.Give(_rowEntries);
-            ArrayShelf.Retained.Give(_rowIndexes);
-            _rowEntries = ArrayShelf.Retained.Take<int>(length, zeroed: false);
-            _rowIndexes = ArrayShelf.Retained.Take<int>(length, zeroed: false);
+            int length = Blocks.Grown(count, _rowEntries.Length);
+            Blocks.Ensure(ref _rowEntries, length);
+            Blocks.Ensure(ref _rowIndexes, length);
         }
 
         Span<int> entries = _rowEntries.AsSpan(0, count);
         Span<int> indexes = _rowIndexes.AsSpan(0, count);
         if (_distinct is not null && _batchEntries.Length < start + count)
         {
-            ArrayShelf.Resize(ArrayShelf.Retained, ref _batchEntries, ArrayShelf.Grown(start + count, _batchEntries.Length));
+            Blocks.Resize(ref _batchEntries, Blocks.Grown(start + count, _batchEntries.Length));
         }
 
-        int[] map = _entryOf;
+        Span<int> map = _entryOf;
         for (int i = 0; i < count; i++)
         {
             int id = ids[i];
@@ -601,7 +599,7 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
             }
         }
 
-        ref long words = ref MemoryMarshal.GetArrayDataReference(_words);
+        ref long words = ref _words.GetReference();
         foreach (int at in entries)
         {
             Unsafe.Add(ref words, at)++;
@@ -788,22 +786,22 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
         base.Dispose();
     }
 
-    /// <summary>Gives the entries' arrays and the rows' back to the process's shelf, and keeps none: the counts hold no entry.</summary>
+    /// <summary>Gives the entries' blocks and the rows' back to the pool, and keeps none: the counts hold no entry.</summary>
     private void ReleaseEntries()
     {
-        foreach (int[] held in (ReadOnlySpan<int[]>)[_entryValue, _entryOf, _rowEntries, _rowIndexes, _batchEntries])
-        {
-            ArrayShelf.Retained.Give(held);
-        }
-
-        ArrayShelf.Retained.Give(_words);
+        Blocks.Return(_entryValue);
+        Blocks.Return(_entryOf);
+        Blocks.Return(_rowEntries);
+        Blocks.Return(_rowIndexes);
+        Blocks.Return(_batchEntries);
+        Blocks.Return(_words);
         _entries = 0;
-        _entryValue = [];
-        _words = [];
-        _entryOf = [];
-        _rowEntries = [];
-        _rowIndexes = [];
-        _batchEntries = [];
+        _entryValue = default;
+        _words = default;
+        _entryOf = default;
+        _rowEntries = default;
+        _rowIndexes = default;
+        _batchEntries = default;
         _nullEntry = -1;
         _otherEntry = -1;
     }
@@ -1217,15 +1215,15 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
             return _nullEntry >= 0 ? _nullEntry : _nullEntry = NewEntry(NullValue);
         }
 
-        int[] map = _entryOf;
-        if (id >= map.Length)
+        if (id >= _entryOf.Length)
         {
             // Room for every value the sheet has numbered, fed the batch first.
-            int held = map.Length;
-            ArrayShelf.Resize(ArrayShelf.Retained, ref _entryOf, ArrayShelf.Grown(Math.Max(id + 1, _sheet.Numbered), held));
-            map = _entryOf;
-            map.AsSpan(held).Fill(-1);
+            int held = _entryOf.Length;
+            Blocks.Grow(ref _entryOf, Blocks.Grown(Math.Max(id + 1, _sheet.Numbered), held));
+            _entryOf.AsSpan(held).Fill(-1);
         }
+
+        Span<int> map = _entryOf;
 
         if (map[id] >= 0)
         {
@@ -1249,9 +1247,9 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
         {
             // Room at once for an entry of every value the sheet has numbered, fed the batch first, and for the nulls' and
             // the values left out's, as far as the entries kept go: the records grew by doubling, copied each time.
-            int size = ArrayShelf.Grown(Math.Min(_sheet.Numbered + 2, _entryLimit + 2), entry);
-            ArrayShelf.Resize(ArrayShelf.Retained, ref _entryValue, size);
-            ArrayShelf.Resize(ArrayShelf.Retained, ref _words, size * _stride);
+            int size = Blocks.Grown(Math.Min(_sheet.Numbered + 2, _entryLimit + 2), entry);
+            Blocks.Resize(ref _entryValue, size);
+            Blocks.Resize(ref _words, size * _stride);
         }
 
         _entryValue[entry] = value;
@@ -1365,13 +1363,13 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
         ReleaseRegisters();
 
         int total = _entries;
-        int[] values = _entryValue;
-        long[] words = _words;
+        Block<int> values = _entryValue;
+        Block<long> words = _words;
 
         // The entry each entry moves onto, for its sketches to follow once the entries have moved.
-        int[] to = ArrayShelf.Retained.Take<int>(Math.Max(total, 1), zeroed: false);
-        _entryValue = ArrayShelf.Retained.Take<int>(values.Length, zeroed: false);
-        _words = ArrayShelf.Retained.Take<long>(words.Length, zeroed: false);
+        Block<int> to = Blocks.Rent<int>(Math.Max(total, 1));
+        _entryValue = Blocks.Rent<int>(values.Length);
+        _words = Blocks.Rent<long>(words.Length);
         _entries = 0;
         _entryOf.AsSpan().Fill(-1);
         _nullEntry = -1;
@@ -1406,9 +1404,9 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
             sketches.Remap(to.AsSpan(0, total));
         }
 
-        ArrayShelf.Retained.Give(to);
-        ArrayShelf.Retained.Give(values);
-        ArrayShelf.Retained.Give(words);
+        Blocks.Return(to);
+        Blocks.Return(values);
+        Blocks.Return(words);
     }
 
     private void Drop()
