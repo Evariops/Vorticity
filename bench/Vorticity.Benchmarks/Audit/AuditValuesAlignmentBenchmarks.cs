@@ -4,6 +4,7 @@
 // 65,536 longs summed by 512-bit vectors (a consumer's pass): in an aligned block, in place 16 bytes off, and copied
 // into an aligned block first, as ColumnData.Values does once a batch.
 using System;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
 
@@ -18,15 +19,19 @@ public unsafe class AuditValuesAlignmentBenchmarks : IDisposable
 {
     private const int Values = 65_536;
 
+    private Vorticity.Buffers.NativeSegmentOwner? _blockOwner;
+    private Vorticity.Buffers.NativeSegmentOwner? _copyOwner;
     private byte* _block;
     private byte* _copy;
 
-    /// <summary>Allocates the blocks, 64-byte aligned, and fills the values.</summary>
+    /// <summary>Allocates the blocks, 64-byte aligned on the pinned heap as the library's are, and fills the values.</summary>
     [GlobalSetup]
     public void Setup()
     {
-        _block = (byte*)NativeMemory.AlignedAlloc((nuint)((Values * 8) + 64), 64);
-        _copy = (byte*)NativeMemory.AlignedAlloc((nuint)(Values * 8), 64);
+        _blockOwner = Vorticity.Buffers.NativeSegmentOwner.Allocate((Values * 8) + 64, 64);
+        _copyOwner = Vorticity.Buffers.NativeSegmentOwner.Allocate(Values * 8, 64);
+        _block = (byte*)Unsafe.AsPointer(ref MemoryMarshal.GetReference(_blockOwner.WritableSpan));
+        _copy = (byte*)Unsafe.AsPointer(ref MemoryMarshal.GetReference(_copyOwner.WritableSpan));
         Random random = new Random(3);
         for (int i = 0; i < (Values * 8) + 64; i += 8)
         {
@@ -34,12 +39,14 @@ public unsafe class AuditValuesAlignmentBenchmarks : IDisposable
         }
     }
 
-    /// <summary>Frees the blocks.</summary>
+    /// <summary>Lets the blocks go.</summary>
     [GlobalCleanup]
     public void Dispose()
     {
-        NativeMemory.AlignedFree(_block);
-        NativeMemory.AlignedFree(_copy);
+        _blockOwner?.Dispose();
+        _copyOwner?.Dispose();
+        _block = null;
+        _copy = null;
         GC.SuppressFinalize(this);
     }
 

@@ -269,7 +269,7 @@ internal static class CoalescedReads
                 ThrowRunWindow(spec.Offset, spec.Length, run.Start, run.Length);
             }
 
-            // FromPinned over native memory: nothing is pinned, and the segment keeps its own
+            // FromPinned over a block already pinned: nothing more is pinned, and the segment keeps its own
             // declared exponent instead of inheriting the block's 64.
             VortexBuffer view = VortexBuffer.FromPinned(
                 bytes.Slice((int)relative, (int)spec.Length), spec.AlignmentExponent);

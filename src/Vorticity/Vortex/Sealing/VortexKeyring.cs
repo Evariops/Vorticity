@@ -13,7 +13,7 @@ namespace Vorticity;
 /// the wrapped bytes a sealed object records so that a keyring can unwrap them again.
 /// </summary>
 /// <remarks>
-/// The key lives in native memory, which the garbage collector never moves or copies, and
+/// The key lives in a managed array the runtime pins, which the garbage collector never moves or copies, and
 /// <see cref="Dispose"/> wipes it. The library never hands it out: a sealed object derives keys of
 /// its own from it, a fresh one per object and per append. A key a keyring returns belongs to the
 /// library from then on, which disposes it.
@@ -28,7 +28,7 @@ public sealed class DataKey : IDisposable
 
     /// <summary>A data key a keyring generated or unwrapped.</summary>
     /// <param name="keyId">The id of the key that wrapped it, which a sealed object records and hands back to unwrap it.</param>
-    /// <param name="key">The 32 bytes of the key, copied into native memory; the caller wipes its own copy.</param>
+    /// <param name="key">The 32 bytes of the key, copied into a pinned array; the caller wipes its own copy.</param>
     /// <param name="wrappedKey">The key as the keyring wrapped it, 1 to 1 024 bytes.</param>
     /// <exception cref="ArgumentException"><paramref name="keyId"/> is empty or longer than 255 bytes of UTF-8, <paramref name="key"/> is not 32 bytes, or <paramref name="wrappedKey"/> is empty or too long.</exception>
     public DataKey(string keyId, ReadOnlySpan<byte> key, ReadOnlySpan<byte> wrappedKey)
@@ -91,7 +91,7 @@ public readonly struct VortexKey
 {
     /// <summary>A key named <paramref name="id"/>.</summary>
     /// <param name="id">Its name, which every object sealed under it records: 1 to 255 bytes of UTF-8, and never a secret.</param>
-    /// <param name="key">Its 32 bytes, which <see cref="VortexKeyring.FromKeys"/> copies into native memory.</param>
+    /// <param name="key">Its 32 bytes, which <see cref="VortexKeyring.FromKeys"/> copies into a pinned array.</param>
     /// <exception cref="ArgumentException"><paramref name="id"/> is empty or too long, or <paramref name="key"/> is not 32 bytes.</exception>
     public VortexKey(string id, ReadOnlyMemory<byte> key)
     {

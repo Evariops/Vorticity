@@ -47,7 +47,7 @@ internal sealed class BloomPruner : IDisposable
 
     // The words of the roots, nodes and leaves read are read where they lie, in the segments read, whose owners the pruner
     // holds until it is disposed: copying them out was a sixth of a prune's time (2026-11-11). Words a decoding had to
-    // copy -- a payload not stored flat -- go to a block of native memory rented for them and held the same way.
+    // copy -- a payload not stored flat -- go to a block rented for them and held the same way.
     private SegmentOwner[] _held = [];
     private int _heldCount;
     private readonly Dictionary<string, Column> _columns;

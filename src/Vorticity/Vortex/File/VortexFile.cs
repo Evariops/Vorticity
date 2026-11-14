@@ -1670,7 +1670,7 @@ public sealed partial class VortexFile : IAsyncDisposable
     /// <remarks>
     /// Copied out of the tail window when first asked for, which the layout tree does once per open
     /// file: one bounded allocation buys a ReadOnlyMemory the layouts component can hold without
-    /// wrapping native memory in a MemoryManager. Two scans asking at once may both copy; either
+    /// holding the tail's block. Two scans asking at once may both copy; either
     /// copy is the same bytes.
     /// </remarks>
     /// <exception cref="ObjectDisposedException">The file has been disposed.</exception>

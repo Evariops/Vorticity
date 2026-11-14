@@ -1,8 +1,6 @@
 using System;
 using System.Buffers;
 using System.IO;
-using System.Runtime.CompilerServices;
-using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Win32.SafeHandles;
@@ -143,20 +141,14 @@ public sealed class FileSegmentSource : ISegmentSource, ISegmentReader
         // A single segment starts at the buffer base, so no rounding is needed: a 64-aligned base
         // satisfies every legal exponent outright.
         NativeSegmentOwner owner = CoalescedReads.RentBlock(length, _options);
-        NativeMemoryManager manager = new NativeMemoryManager();
-
         try
         {
-            await ReadExactAsync(manager, owner, 0, length, offset, cancellationToken).ConfigureAwait(false);
+            await ReadExactAsync(owner, length, offset, cancellationToken).ConfigureAwait(false);
         }
         catch
         {
             owner.Dispose();
             throw;
-        }
-        finally
-        {
-            manager.Clear();
         }
 
         return owner;
@@ -198,8 +190,6 @@ public sealed class FileSegmentSource : ISegmentSource, ISegmentReader
         ulong[] keys = ArrayPool<ulong>.Shared.Rent(registered);
         SegmentSpec[] sorted = ArrayPool<SegmentSpec>.Shared.Rent(registered);
         CoalescedRun[] runs = ArrayPool<CoalescedRun>.Shared.Rent(registered);
-        NativeMemoryManager manager = new NativeMemoryManager();
-
         try
         {
             int pending = CoalescedReads.CollectPending(requests, order, keys);
@@ -220,8 +210,7 @@ public sealed class FileSegmentSource : ISegmentSource, ISegmentReader
 
                 try
                 {
-                    await ReadExactAsync(manager, block, 0, run.Length, run.Start, cancellationToken)
-                        .ConfigureAwait(false);
+                    await ReadExactAsync(block, run.Length, run.Start, cancellationToken).ConfigureAwait(false);
 
                     if (CoalescedReads.Publish(requests, block, in run, sorted, order, _options))
                     {
@@ -249,7 +238,6 @@ public sealed class FileSegmentSource : ISegmentSource, ISegmentReader
         }
         finally
         {
-            manager.Clear();
             ArrayPool<CoalescedRun>.Shared.Return(runs);
             ArrayPool<SegmentSpec>.Shared.Return(sorted);
             ArrayPool<ulong>.Shared.Return(keys);
@@ -270,20 +258,14 @@ public sealed class FileSegmentSource : ISegmentSource, ISegmentReader
         }
 
         NativeSegmentOwner owner = CoalescedReads.RentBlock(actual, _options);
-        NativeMemoryManager manager = new NativeMemoryManager();
-
         try
         {
-            await ReadExactAsync(manager, owner, 0, actual, offset, cancellationToken).ConfigureAwait(false);
+            await ReadExactAsync(owner, actual, offset, cancellationToken).ConfigureAwait(false);
         }
         catch
         {
             owner.Dispose();
             throw;
-        }
-        finally
-        {
-            manager.Clear();
         }
 
         return owner;
@@ -308,27 +290,16 @@ public sealed class FileSegmentSource : ISegmentSource, ISegmentReader
 
     // ---- I/O ----------------------------------------------------------------------------------
 
-    /// <summary>
-    /// Reads exactly <paramref name="length"/> bytes into <paramref name="owner"/> at
-    /// <paramref name="destinationOffset"/>.
-    /// </summary>
+    /// <summary>Reads exactly <paramref name="length"/> bytes into the start of <paramref name="owner"/>.</summary>
     /// <remarks>
     /// <see cref="RandomAccess.ReadAsync(SafeFileHandle, Memory{byte}, long, CancellationToken)"/>
     /// may legitimately return a short count for a reason other than end of file, so the loop
     /// continues until the buffer is full; a zero-byte return is the end of file and means the
     /// file is shorter than its own footer claims — a format error, not something to retry.
     /// </remarks>
-    private async ValueTask ReadExactAsync(
-        NativeMemoryManager manager,
-        NativeSegmentOwner owner,
-        int destinationOffset,
-        int length,
-        long fileOffset,
-        CancellationToken cancellationToken)
+    private async ValueTask ReadExactAsync(NativeSegmentOwner owner, int length, long fileOffset, CancellationToken cancellationToken)
     {
-        PointBufferAt(manager, owner, destinationOffset, length);
-
-        Memory<byte> destination = manager.Memory;
+        Memory<byte> destination = owner.WritableMemory(0, length);
         int done = 0;
 
         while (done < length)
@@ -344,21 +315,6 @@ public sealed class FileSegmentSource : ISegmentSource, ISegmentReader
 
             done += read;
         }
-    }
-
-    /// <summary>Re-points <paramref name="manager"/> at a window of the owner's native block.</summary>
-    private static unsafe void PointBufferAt(
-        NativeMemoryManager manager, NativeSegmentOwner owner, int offset, int length)
-    {
-        Span<byte> block = owner.WritableSpan;
-        if ((uint)offset > (uint)block.Length || (uint)length > (uint)(block.Length - offset))
-        {
-            throw new ArgumentOutOfRangeException(nameof(length), length, null);
-        }
-
-        manager.Reset(
-            (byte*)Unsafe.AsPointer(ref MemoryMarshal.GetReference(block)) + offset,
-            length);
     }
 
     private void ThrowIfDisposed()

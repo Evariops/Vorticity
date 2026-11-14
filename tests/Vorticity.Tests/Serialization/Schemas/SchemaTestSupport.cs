@@ -11,29 +11,20 @@ using System.Runtime.InteropServices;
 
 namespace Vorticity.Tests.Serialization.Schemas;
 
-/// <summary>A 64-byte aligned native copy of a buffer, so alignment tests are deterministic.</summary>
-internal unsafe struct AlignedBytes : IDisposable
+/// <summary>A 64-byte aligned copy of a buffer in a pinned array, so alignment tests are deterministic.</summary>
+internal struct AlignedBytes : IDisposable
 {
-    private byte* _pointer;
-    private int _length;
+    private Vorticity.Buffers.PinnedArraySegmentOwner? _owner;
 
-    internal static AlignedBytes Copy(ReadOnlySpan<byte> bytes)
-    {
-        byte* pointer = (byte*)NativeMemory.AlignedAlloc((nuint)Math.Max(bytes.Length, 1), 64);
-        bytes.CopyTo(new Span<byte>(pointer, bytes.Length));
-        return new AlignedBytes { _pointer = pointer, _length = bytes.Length };
-    }
+    internal static AlignedBytes Copy(ReadOnlySpan<byte> bytes) =>
+        new AlignedBytes { _owner = Vorticity.Buffers.PinnedArraySegmentOwner.CopyOf(bytes, VortexLimits.MaxAlignment) };
 
-    internal readonly ReadOnlySpan<byte> Span => new(_pointer, _length);
+    internal readonly ReadOnlySpan<byte> Span => _owner is { } owner ? owner.Buffer.Span : default;
 
     public void Dispose()
     {
-        if (_pointer != null)
-        {
-            NativeMemory.AlignedFree(_pointer);
-            _pointer = null;
-            _length = 0;
-        }
+        _owner?.Dispose();
+        _owner = null;
     }
 }
 

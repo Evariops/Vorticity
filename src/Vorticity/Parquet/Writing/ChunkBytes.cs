@@ -1,8 +1,6 @@
 using System;
 using System.Buffers;
 using System.Collections.Generic;
-using System.Runtime.CompilerServices;
-using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Buffers;
@@ -22,7 +20,7 @@ namespace Vorticity.Parquet.Writing;
 /// the first take no block of their own. A write that does not fit the rest of a block starts the
 /// next one, which leaves the rest unused rather than cut a span in two.
 /// </remarks>
-internal sealed unsafe class ChunkBytes : IBufferWriter<byte>, IDisposable
+internal sealed class ChunkBytes : IBufferWriter<byte>, IDisposable
 {
     private const int FirstBlock = 64 * 1024;
     private const int LargestBlock = 1024 * 1024;
@@ -69,7 +67,7 @@ internal sealed unsafe class ChunkBytes : IBufferWriter<byte>, IDisposable
     {
         Room(Math.Max(sizeHint, 1));
         Block block = _blocks[_current];
-        return block.View.Memory[block.Used..];
+        return block.Memory[block.Used..];
     }
 
     public Span<byte> GetSpan(int sizeHint = 0) => Room(Math.Max(sizeHint, 1));
@@ -85,7 +83,7 @@ internal sealed unsafe class ChunkBytes : IBufferWriter<byte>, IDisposable
             Block block = _blocks[i];
             if (block.Used > 0)
             {
-                await sink.LendAsync(block.View.Memory[..block.Used], cancellationToken).ConfigureAwait(false);
+                await sink.LendAsync(block.Memory[..block.Used], cancellationToken).ConfigureAwait(false);
             }
         }
     }
@@ -107,7 +105,6 @@ internal sealed unsafe class ChunkBytes : IBufferWriter<byte>, IDisposable
         foreach (Block block in _blocks)
         {
             _pool.Return(block.Owner);
-            block.View.Reset(null, 0);
         }
 
         _blocks.Clear();
@@ -145,22 +142,20 @@ internal sealed unsafe class ChunkBytes : IBufferWriter<byte>, IDisposable
     private Block Rent(int length)
     {
         NativeSegmentOwner owner = _pool.Rent(length, VortexLimits.MaxAlignment);
-        Span<byte> span = owner.WritableSpan;
-        NativeMemoryManager view = new();
-        view.Reset((byte*)Unsafe.AsPointer(ref MemoryMarshal.GetReference(span)), span.Length);
-        return new Block(owner, view, span.Length);
+        return new Block(owner, owner.WritableMemory(0, owner.Length));
     }
 
-    private sealed class Block(NativeSegmentOwner owner, NativeMemoryManager view, int capacity)
+    /// <summary>A block and its bytes, as a view of the block's array that the sink writes from where they lie.</summary>
+    private sealed class Block(NativeSegmentOwner owner, Memory<byte> memory)
     {
         internal NativeSegmentOwner Owner { get; } = owner;
 
-        internal NativeMemoryManager View { get; } = view;
+        internal Memory<byte> Memory { get; } = memory;
 
-        internal int Capacity { get; } = capacity;
+        internal int Capacity => Memory.Length;
 
         internal int Used { get; set; }
 
-        internal Span<byte> Span => View.GetSpan();
+        internal Span<byte> Span => Memory.Span;
     }
 }

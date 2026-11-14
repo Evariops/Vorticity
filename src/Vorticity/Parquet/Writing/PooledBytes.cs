@@ -1,7 +1,5 @@
 using System;
 using System.Buffers;
-using System.Runtime.CompilerServices;
-using System.Runtime.InteropServices;
 using Vorticity.Buffers;
 using Vorticity.IO;
 
@@ -14,17 +12,18 @@ namespace Vorticity.Parquet.Writing;
 /// <remarks>
 /// It grows by doubling into a new block and gives the old one back, and keeps its block across
 /// <see cref="Clear"/>, so a writer's buffers reach their working size once and are reused for every
-/// page after. The blocks are the engine's, which declares nothing to the GC: a writer's buffers are
-/// bounded by its row group, and declaring each one as it grew made a write of a million rows collect
-/// its oldest generation four times. Not thread-safe: each belongs to one column writer.
+/// page after. The blocks are the engine's pool's, so that a write of a million rows takes its buffers from the blocks the
+/// last one gave back rather than allocating them again. Not thread-safe: each belongs to one column writer.
 /// </remarks>
-internal sealed unsafe class PooledBytes : IBufferWriter<byte>, IDisposable
+internal sealed class PooledBytes : IBufferWriter<byte>, IDisposable
 {
     private const int MinimumCapacity = 4096;
 
     private readonly AlignedBufferPool _pool;
-    private readonly NativeMemoryManager _view = new();
     private NativeSegmentOwner? _owner;
+
+    // The block's bytes, a view of its array.
+    private Memory<byte> _block;
     private int _capacity;
     private int _length;
 
@@ -34,10 +33,10 @@ internal sealed unsafe class PooledBytes : IBufferWriter<byte>, IDisposable
     internal int Length => _length;
 
     /// <summary>The bytes written so far, valid until the next write.</summary>
-    internal ReadOnlyMemory<byte> Written => _view.Memory[.._length];
+    internal ReadOnlyMemory<byte> Written => _block[.._length];
 
     /// <summary>The bytes written so far, writable in place.</summary>
-    internal Span<byte> WrittenSpan => _view.GetSpan()[.._length];
+    internal Span<byte> WrittenSpan => _block.Span[.._length];
 
     /// <summary>Forgets what was written and keeps the block.</summary>
     internal void Clear() => _length = 0;
@@ -73,13 +72,13 @@ internal sealed unsafe class PooledBytes : IBufferWriter<byte>, IDisposable
     public Memory<byte> GetMemory(int sizeHint = 0)
     {
         Ensure(Math.Max(sizeHint, 1));
-        return _view.Memory[_length..];
+        return _block[_length..];
     }
 
     public Span<byte> GetSpan(int sizeHint = 0)
     {
         Ensure(Math.Max(sizeHint, 1));
-        return _view.GetSpan()[_length..];
+        return _block.Span[_length..];
     }
 
     private void Ensure(int more)
@@ -102,24 +101,24 @@ internal sealed unsafe class PooledBytes : IBufferWriter<byte>, IDisposable
         }
 
         NativeSegmentOwner owner = _pool.Rent((int)Math.Min(capacity, Array.MaxLength), VortexLimits.MaxAlignment);
-        Span<byte> block = owner.WritableSpan;
+        Memory<byte> block = owner.WritableMemory(0, owner.Length);
         if (_owner is { } previous)
         {
-            _view.GetSpan()[.._length].CopyTo(block);
+            _block.Span[.._length].CopyTo(block.Span);
             _pool.Return(previous);
         }
 
         _owner = owner;
+        _block = block;
         _capacity = block.Length;
-        _view.Reset((byte*)Unsafe.AsPointer(ref MemoryMarshal.GetReference(block)), block.Length);
     }
 
     public void Dispose()
     {
-        // Disposing a pooled block gives it back to its pool; the view only forgets its pointer.
+        // Disposing a pooled block gives it back to its pool.
         _owner?.Dispose();
         _owner = null;
-        ((IDisposable)_view).Dispose();
+        _block = default;
         _capacity = 0;
         _length = 0;
     }

@@ -1781,7 +1781,7 @@ internal static class BlockStatsPass
     /// <remarks>
     /// Which buffer a row lives in belongs to the node, not to the row, and nearly every string
     /// column has exactly one. Asking the node per row costs a kind check, a bound and a span built
-    /// over native memory, twice for every pair the run pass compares.
+    /// over the block, twice for every pair the run pass compares.
     /// </remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static ReadOnlySpan<byte> Value(
