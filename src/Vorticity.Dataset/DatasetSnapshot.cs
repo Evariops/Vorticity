@@ -446,6 +446,30 @@ internal sealed class DatasetSnapshot
         }
     }
 
+    /// <summary>
+    /// The table of contents of the object <paramref name="entry"/> names: its entry's, or the one its own file holds when
+    /// the entry keeps a lean one (<see cref="Indexes.ObjectContents.InFile"/>). The object is then opened, which brings
+    /// it whole, the entry takes its table, and the object is left open in the handle's cache for the read that follows.
+    /// A question does not ask for it, and reads a small object through its open. What sums an object's counts or
+    /// verifies its indexes does.
+    /// </summary>
+    internal async ValueTask<Indexes.ObjectContents?> ContentsAsync(ObjectEntry entry, CancellationToken cancellationToken)
+    {
+        if (entry.Contents is { InFile: true })
+        {
+            ObjectLease lease = await RentAsync(entry, cancellationToken).ConfigureAwait(false);
+            await using (lease.ConfigureAwait(false))
+            {
+                if (await ObjectCache.ContentsInAsync(lease.File, cancellationToken).ConfigureAwait(false) is { } whole)
+                {
+                    entry.Adopt(whole);
+                }
+            }
+        }
+
+        return entry.Contents;
+    }
+
     /// <summary>The roots of the levels, none read yet: made once a key walk first asks for one.</summary>
     private ParsedPage?[] Roots()
     {
@@ -562,7 +586,8 @@ internal sealed class DatasetSnapshot
         bool any = false;
         await foreach (PositionedObject held in WalkAsync(null, 0, long.MaxValue, null, cancellationToken).ConfigureAwait(false))
         {
-            if (held.Entry.Contents is { Counts.Count: > 0 })
+            // An entry that keeps a lean table says whether its object's own table names counts.
+            if (held.Entry.Contents is { Counts.Count: > 0 } or { CountsInFile: true })
             {
                 any = true;
                 break;

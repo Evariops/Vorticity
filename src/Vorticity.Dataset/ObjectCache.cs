@@ -230,6 +230,37 @@ internal sealed class ObjectCache : IAsyncDisposable
         return new ObjectLease(this, held, cached: false);
     }
 
+    /// <summary>
+    /// The table of contents <paramref name="file"/> holds itself (<see cref="Indexes.ObjectContents.MetadataKey"/>), read
+    /// from the bytes its open brought; null when it holds none, or none this library reads. A question does not ask for
+    /// it: it reads a small object through its open. What sums an object's counts or verifies its indexes does.
+    /// </summary>
+    internal static async ValueTask<Indexes.ObjectContents?> ContentsInAsync(VortexFile file, CancellationToken cancellationToken)
+    {
+        if (!file.TryGetMetadataIndex(Indexes.ObjectContents.MetadataKeyUtf8, out int index))
+        {
+            return null;
+        }
+
+        Vorticity.Buffers.SegmentOwner owner = await file.ReadMetadataAsync(index, cancellationToken).ConfigureAwait(false);
+        try
+        {
+            Indexes.ObjectContents? contents = Indexes.ObjectContents.From(owner.Buffer.Span);
+            if (contents is null)
+            {
+                // The table names its schema by a hash this process has not met: the file's own, which its dtype gives.
+                Indexes.SchemaInterns.Intern(Vorticity.Types.Serialization.DTypeFlatBuffers.Serialize(file.DType));
+                contents = Indexes.ObjectContents.From(owner.Buffer.Span);
+            }
+
+            return contents;
+        }
+        finally
+        {
+            owner.Release();
+        }
+    }
+
     /// <summary>Opens an object with the index fragments its entry names, leased once to the caller.</summary>
     private async ValueTask<Held> OpenHeldAsync(ObjectEntry entry, CommitPageSource pages, string handle, bool rows, CancellationToken cancellationToken)
     {

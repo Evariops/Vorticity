@@ -204,6 +204,9 @@ public sealed partial class DatasetTupleInTests
                 ? new DatasetLayout { SortKey = [LayoutValue.Column(nameof(Call.Service)), LayoutValue.Column(nameof(Call.Code)), LayoutValue.Column(nameof(Call.Sequence))] }
                 : null,
             Write = new VortexWriteOptions { BlockRows = keyed ? 64 : 1_024 },
+
+            // The tables of these small objects stay in their entries, where the tests read their sparse indexes.
+            TableInFileBytes = 0,
         }, Ct);
         List<Call> all = [];
         for (int append = 0; append < 6; append++)

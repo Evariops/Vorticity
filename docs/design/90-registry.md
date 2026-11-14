@@ -195,7 +195,7 @@ field once retired is never reused.
 |---|---|---|---|
 | commit object, from `VXCOMMIT` to `VXCT` | each version of a dataset ([commits](13-dataset.md#43-commits-are-paths-written-as-one-object)) | 5, and no other: a commit of another format is refused with a message that says whether an earlier or a later release wrote it | formats 1 to 4; header fields 17 (the features of format 4), 19, 21 and 22 (the lateness horizon, length and changes of a dataset written by periods) and 23 (partition columns) |
 | object entry | a leaf of a level's tree | tagged fields 1 to 5: the footer's bytes, when the oldest mark was made, the table of contents, the last key, the counts of the deleted rows | none |
-| table of contents | the entry's tagged field 3 | 2 | version 1, which held the synopsis tables (tags 5 to 8); tag 17, the region of the blocks' keys |
+| table of contents | the entry's tagged field 3, or, for an object of 64 KiB at most, the postscript metadata key `vorticity.contents` of its file, the entry then keeping its tags 1, 25, 40 and 41 alone | 2 | version 1, which held the synopsis tables (tags 5 to 8); tag 17, the region of the blocks' keys |
 | counts of the deleted rows | out of line in the commit object that made them, which the entry's field 5 names | 1 | none |
 | fragment bundle, `VXFB` | an object's index fragments, side by side | 1 | none |
 | partition index entry | a leaf of the tree of partition indexes, which the header's field 28 names ([the index of a consolidated partition](13-dataset.md#44-the-index-of-a-consolidated-partition)) | 1 | none |

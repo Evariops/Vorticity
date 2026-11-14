@@ -418,6 +418,14 @@ public sealed record VortexWriteOptions
     internal bool MarksOfOneGranule { get; init; } = true;
 
     /// <summary>
+    /// Whether a file with a table of contents that ends within what an open reads first, 64 KiB, holds that table itself,
+    /// as the postscript metadata entry <c>vorticity.contents</c>: false by default. The read that opens such a file brings
+    /// it whole, its table with it, so the entry a dataset keeps of it names its schema and its rows alone, where the
+    /// table took 0.7 KB of every leaf a commit rewrites. The schema is named by its hash there, the file holding its dtype.
+    /// </summary>
+    internal bool ContentsInFile { get; init; }
+
+    /// <summary>
     /// Whether the sparse index of the key may code its texts unpadded (Indexes.KeyCoding.UnpaddedTexts), which it does when
     /// that takes fewer bytes: true by default; false keeps the row encoding's keys, for a test that writes both codings.
     /// </summary>

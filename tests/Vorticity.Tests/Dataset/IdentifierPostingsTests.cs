@@ -101,6 +101,9 @@ public sealed partial class IdentifierPostingsTests
             Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(Request.At)).Truncate(CalendarUnit.Hour), SortKey = [LayoutValue.Column(nameof(Request.At))], Organization = LayoutOrganization.Leveled },
             Identifiers = [nameof(Request.RequestId)],
             ContentsObjectBytes = 0,
+
+            // The tables of these small objects stay in their entries, which name their postings with no open.
+            TableInFileBytes = 0,
         }, Ct);
         Random random = new Random(23);
         List<Request> appended = [];
@@ -184,6 +187,9 @@ public sealed partial class IdentifierPostingsTests
                 Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(Request.At)).Truncate(CalendarUnit.Hour), SortKey = [LayoutValue.Column(nameof(Request.At))], Organization = LayoutOrganization.Leveled },
                 Identifiers = [nameof(Request.RequestId)],
                 ContentsObjectBytes = 0,
+
+                // The tables of these small objects stay in their entries, which name their postings with no open.
+                TableInFileBytes = 0,
                 Write = paged ? new VortexWriteOptions { Fences = new global::Vorticity.Writing.FenceShape(InlineFences: 1, PageBytes: 512) } : VortexWriteOptions.Default,
             }, Ct);
             // The same two hours and a quarter; in pages, enough rows that a run of an hour's postings takes more
@@ -295,6 +301,9 @@ public sealed partial class IdentifierPostingsTests
             Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(Visit.At)).Truncate(CalendarUnit.Hour), SortKey = [LayoutValue.Column(nameof(Visit.At))], Organization = LayoutOrganization.Leveled },
             Identifiers = ["Attributes['user'].AsString()"],
             ContentsObjectBytes = 0,
+
+            // The tables of these small objects stay in their entries, which name their postings with no open.
+            TableInFileBytes = 0,
         }, Ct);
         Random random = new Random(31);
         List<string> users = [];
@@ -493,6 +502,9 @@ public sealed partial class IdentifierPostingsTests
             },
             Identifiers = ["Attributes['user'].AsString()"],
             ContentsObjectBytes = 0,
+
+            // The tables of these small objects stay in their entries, which name their postings with no open.
+            TableInFileBytes = 0,
         }, Ct);
         const string User = "u-needle";
         Random random = new Random(43);

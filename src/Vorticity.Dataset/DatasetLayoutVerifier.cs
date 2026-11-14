@@ -81,7 +81,9 @@ internal static class DatasetLayoutVerifier
         CancellationToken cancellationToken)
     {
         ObjectEntry entry = held.Entry;
-        ObjectContents? contents = entry.Contents;
+
+        // The table of a small object is its file's: its open, which the rows below need anyway, brings it.
+        ObjectContents? contents = await dataset.ContentsAsync(entry, cancellationToken).ConfigureAwait(false);
 
         // I3: the sparse index of the key's prefix, read first, so that each granule's first key is met as its row passes.
         GranuleKeys? index = null;

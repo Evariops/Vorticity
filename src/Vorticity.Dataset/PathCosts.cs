@@ -122,7 +122,9 @@ internal sealed class PathCosts(CostProfile profile, long chunkBytes, Func<UInt1
     {
         IReadOnlyList<long>? columns = entry.Contents?.ColumnBytes;
         double decoded = Processing(entry, fields, default, 0);
-        if (OpensWhole(entry))
+        // An object a read of rows opens whole, or one whose own file holds its table of contents, which any open brings
+        // whole: that one request and its bytes.
+        if (OpensWhole(entry) || entry.TableInFile)
         {
             return new Cost(1, entry.Bytes, 0, decoded);
         }
@@ -232,7 +234,7 @@ internal sealed class PathCosts(CostProfile profile, long chunkBytes, Func<UInt1
         }
 
         // An object opened whole brings every row with its open: a part of them spares the decoding of the others alone.
-        if (OpensWhole(entry))
+        if (OpensWhole(entry) || entry.TableInFile)
         {
             Cost opened = Rows(entry, fields);
             return opened with { Nanoseconds = opened.Nanoseconds * share };
