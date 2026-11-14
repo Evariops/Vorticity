@@ -1,6 +1,6 @@
 // The write path must give back every block it rents.
 //
-// WHY THIS FILE EXISTS. `AlignedBufferPool` blocks are recycled by `CanonicalArena.Reset`. Two write-path owners once
+// WHY THIS FILE EXISTS. `BlockPool` blocks are recycled by `CanonicalArena.Reset`. Two write-path owners once
 // dropped every block they rented:
 //
 //   * `ZoneMapWriter.TryBuild` built one `CanonicalArena` PER COLUMN and never reset it;

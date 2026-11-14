@@ -9,10 +9,10 @@
 // scan keeps. This is that axis, as a test rather than a benchmark, because "does it grow" is a
 // yes-or-no question and a benchmark would answer it with a mean.
 //
-// TWO THINGS ARE WATCHED, because the interesting one is not the managed heap. A scan's buffers come
-// from AlignedBufferPool, which allocates NATIVE memory the GC never sees, so a pool that retains
-// more blocks on every pass would leak invisibly to every other measurement here. The parked count
-// is checked alongside the live heap for that reason.
+// TWO THINGS ARE WATCHED. A scan's buffers come from BlockPool, whose parked blocks are pinned
+// arrays the live heap's reading includes, but a reading in bytes has a margin a retained block or
+// two would pass under. The parked count is checked alongside the live heap for that reason: it
+// counts blocks, not bytes.
 using System;
 using System.Globalization;
 using System.Threading;
@@ -25,7 +25,7 @@ namespace Vorticity.Tests.Scan;
 
 /// <summary>Repeated scans settle instead of growing.</summary>
 /// <remarks>
-/// Shares <see cref="AllocationCollection"/>: <see cref="AlignedBufferPool.Shared"/> is
+/// Shares <see cref="AllocationCollection"/>: <see cref="BlockPool.Shared"/> is
 /// process-global, so a neighbouring class renting from it would move the parked counts under this
 /// one's feet.
 /// </remarks>
@@ -118,7 +118,7 @@ public sealed class LiveMemoryTests
         int total = 0;
         for (int size = 4096; size <= 1 << 22; size <<= 1)
         {
-            total += AlignedBufferPool.Shared.ParkedCount(size);
+            total += BlockPool.Shared.ParkedCount(size);
         }
 
         return total;

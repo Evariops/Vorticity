@@ -457,9 +457,9 @@ public sealed partial class VortexFileWriter
             Abandon();
         }
 
-        // The transit contexts own pooled native blocks: dropped rather than reset, each block is
-        // freed on the finalizer thread instead of returning to the pool. Reset, they go back for
-        // the next writer, their record tables with them.
+        // The transit contexts own pooled blocks: dropped rather than reset, each block is left to
+        // the collector instead of returning to the pool. Reset, they go back for the next writer,
+        // their record tables with them.
         if (_transit is not null)
         {
             for (int i = 0; i < _transit.Length; i++)

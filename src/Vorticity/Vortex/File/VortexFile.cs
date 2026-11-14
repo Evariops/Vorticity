@@ -527,7 +527,7 @@ public sealed partial class VortexFile : IAsyncDisposable
 
     private static SegmentOwner Concatenate(SegmentOwner prefix, SegmentOwner suffix, int alignment)
     {
-        NativeSegmentOwner combined = NativeSegmentOwner.Allocate(prefix.Length + suffix.Length, alignment);
+        BlockOwner combined = BlockOwner.Allocate(prefix.Length + suffix.Length, alignment);
         try
         {
             Span<byte> destination = combined.WritableSpan;

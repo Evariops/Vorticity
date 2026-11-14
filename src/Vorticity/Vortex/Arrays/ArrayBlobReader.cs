@@ -262,7 +262,7 @@ internal static class ArrayBlobReader
 
             // FromPinned rather than region.Slice: Slice keeps the segment's declared alignment
             // exponent, and every consumer that reinterprets these bytes needs the buffer's own.
-            // The bytes are owner-backed (mapped pages or an aligned native block), so they are
+            // The bytes are owner-backed (mapped pages or an aligned pinned block), so they are
             // pinned in the sense FromPinned requires.
             arena.AddGlobalBuffer(
                 VortexBuffer.FromPinned(regionBytes.Slice((int)start, (int)spec.Length), alignmentExponent));

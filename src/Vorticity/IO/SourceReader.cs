@@ -24,9 +24,9 @@ internal sealed class SourceReader : ISegmentReader
 {
     private readonly ISegmentSource _source;
     private readonly bool _ownsSource;
-    private readonly AlignedBufferPool _pool;
+    private readonly BlockPool _pool;
 
-    internal SourceReader(ISegmentSource source, bool ownsSource, AlignedBufferPool pool)
+    internal SourceReader(ISegmentSource source, bool ownsSource, BlockPool pool)
     {
         _source = source;
         _ownsSource = ownsSource;
@@ -164,7 +164,7 @@ internal sealed class SourceReader : ISegmentReader
             pin.Dispose();
         }
 
-        NativeSegmentOwner block = _pool.Rent(length, VortexLimits.MaxAlignment);
+        BlockOwner block = _pool.Rent(length, VortexLimits.MaxAlignment);
         try
         {
             taken.Bytes.CopyTo(block.WritableSpan);

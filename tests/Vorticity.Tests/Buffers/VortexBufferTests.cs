@@ -107,7 +107,7 @@ public sealed class VortexBufferTests
     [Fact]
     public void FromPinned_views_the_bytes_without_copying()
     {
-        using PinnedArraySegmentOwner owner = PinnedArraySegmentOwner.CopyOf([1, 2, 3, 4], 64);
+        using BlockOwner owner = BlockOwner.CopyOf([1, 2, 3, 4], 64);
         VortexBuffer buffer = VortexBuffer.FromPinned(owner.Buffer.Span, 6);
 
         Assert.Equal(4, buffer.Length);
@@ -133,7 +133,7 @@ public sealed class VortexBufferTests
     [Fact]
     public void Slice_accepts_both_endpoints()
     {
-        using NativeSegmentOwner owner = NativeSegmentOwner.Allocate(64, 64);
+        using BlockOwner owner = BlockOwner.Allocate(64, 64);
         VortexBuffer buffer = owner.Buffer;
 
         Assert.Equal(64, buffer.Slice(0).Length);
@@ -152,7 +152,7 @@ public sealed class VortexBufferTests
     [InlineData(int.MaxValue)]
     public void Slice_rejects_an_offset_outside_the_buffer(int offset)
     {
-        using NativeSegmentOwner owner = NativeSegmentOwner.Allocate(64, 64);
+        using BlockOwner owner = BlockOwner.Allocate(64, 64);
         Assert.Throws<VortexFormatException>(() => owner.Buffer.Slice(offset));
     }
 
@@ -168,14 +168,14 @@ public sealed class VortexBufferTests
     [InlineData(int.MinValue, int.MinValue)]
     public void Slice_rejects_a_range_outside_the_buffer(int offset, int length)
     {
-        using NativeSegmentOwner owner = NativeSegmentOwner.Allocate(64, 64);
+        using BlockOwner owner = BlockOwner.Allocate(64, 64);
         Assert.Throws<VortexFormatException>(() => owner.Buffer.Slice(offset, length));
     }
 
     [Fact]
     public void Slice_keeps_the_declared_alignment_and_tells_the_truth_about_the_address()
     {
-        using NativeSegmentOwner owner = NativeSegmentOwner.Allocate(128, 64);
+        using BlockOwner owner = BlockOwner.Allocate(128, 64);
         VortexBuffer buffer = owner.Buffer;
 
         Assert.True(buffer.IsAligned);
@@ -192,7 +192,7 @@ public sealed class VortexBufferTests
     [Fact]
     public void Slice_of_a_slice_composes()
     {
-        using PinnedArraySegmentOwner owner = PinnedArraySegmentOwner.Allocate(16, 16);
+        using BlockOwner owner = BlockOwner.Allocate(16, 16);
         for (int i = 0; i < 16; i++)
         {
             owner.WritableSpan[i] = (byte)i;
@@ -209,7 +209,7 @@ public sealed class VortexBufferTests
     [Fact]
     public void Cast_reinterprets_the_bytes_in_place()
     {
-        using NativeSegmentOwner owner = NativeSegmentOwner.Allocate(32, 64);
+        using BlockOwner owner = BlockOwner.Allocate(32, 64);
         Span<byte> writable = owner.WritableSpan;
         MemoryMarshal.Write(writable[..8], (ulong)0x0102030405060708UL);
         MemoryMarshal.Write(writable.Slice(8, 4), 0x11223344u);
@@ -230,7 +230,7 @@ public sealed class VortexBufferTests
     [Fact]
     public void Cast_is_actually_zero_copy()
     {
-        using NativeSegmentOwner owner = NativeSegmentOwner.Allocate(32, 64);
+        using BlockOwner owner = BlockOwner.Allocate(32, 64);
         ReadOnlySpan<SegmentSpecLike> specs = owner.Buffer.Cast<SegmentSpecLike>();
 
         // Zero-copy is a performance invariant, checked by pointer identity.
@@ -242,7 +242,7 @@ public sealed class VortexBufferTests
     [Fact]
     public void Cast_rejects_a_ragged_length()
     {
-        using NativeSegmentOwner owner = NativeSegmentOwner.Allocate(40, 64);
+        using BlockOwner owner = BlockOwner.Allocate(40, 64);
 
         // 40 bytes is two whole specs plus 8 stray bytes. Truncating would silently drop a
         // segment from the map; that is the bug this rejection exists to prevent.
@@ -255,7 +255,7 @@ public sealed class VortexBufferTests
     [Fact]
     public void Cast_rejects_a_misaligned_base()
     {
-        using NativeSegmentOwner owner = NativeSegmentOwner.Allocate(64, 64);
+        using BlockOwner owner = BlockOwner.Allocate(64, 64);
 
         Assert.Throws<VortexFormatException>(() => { _ = owner.Buffer.Slice(1, 32).Cast<uint>(); });
         Assert.Throws<VortexFormatException>(() => { _ = owner.Buffer.Slice(2, 32).Cast<uint>(); });
@@ -269,7 +269,7 @@ public sealed class VortexBufferTests
     [Fact]
     public void TryCast_reports_failure_instead_of_throwing()
     {
-        using NativeSegmentOwner owner = NativeSegmentOwner.Allocate(64, 64);
+        using BlockOwner owner = BlockOwner.Allocate(64, 64);
 
         Assert.False(owner.Buffer.Slice(1, 32).TryCast(out ReadOnlySpan<uint> misaligned));
         Assert.True(misaligned.IsEmpty);
@@ -284,7 +284,7 @@ public sealed class VortexBufferTests
     [Fact]
     public void Cast_to_byte_always_succeeds()
     {
-        using NativeSegmentOwner owner = NativeSegmentOwner.Allocate(37, 64);
+        using BlockOwner owner = BlockOwner.Allocate(37, 64);
 
         Assert.Equal(36, owner.Buffer.Slice(1).Cast<byte>().Length);
         Assert.Equal(37, owner.Buffer.Cast<byte>().Length);
@@ -293,7 +293,7 @@ public sealed class VortexBufferTests
     [Fact]
     public void Cast_of_an_empty_buffer_is_an_empty_span()
     {
-        using NativeSegmentOwner owner = NativeSegmentOwner.Allocate(64, 64);
+        using BlockOwner owner = BlockOwner.Allocate(64, 64);
         VortexBuffer empty = owner.Buffer.Slice(64);
 
         Assert.True(empty.Cast<SegmentSpecLike>().IsEmpty);
@@ -304,7 +304,7 @@ public sealed class VortexBufferTests
     [Fact]
     public void Written_bytes_are_visible_through_the_read_only_view()
     {
-        using NativeSegmentOwner owner = NativeSegmentOwner.Allocate(16, 64);
+        using BlockOwner owner = BlockOwner.Allocate(16, 64);
         MemoryMarshal.Write(owner.WritableSpan, 0xDEADBEEFu);
 
         Assert.Equal(0xDEADBEEFu, owner.Buffer.Cast<uint>()[0]);

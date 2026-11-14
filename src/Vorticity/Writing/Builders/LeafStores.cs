@@ -15,7 +15,7 @@ namespace Vorticity.Writing;
 /// <summary>A column every row of which is null.</summary>
 internal sealed class NullStore : ColumnStore
 {
-    internal NullStore(DType dtype, AlignedBufferPool pool)
+    internal NullStore(DType dtype, BlockPool pool)
         : base(dtype, pool)
     {
     }
@@ -43,12 +43,12 @@ internal sealed class NullStore : ColumnStore
 /// </summary>
 internal sealed unsafe class FixedStore : ColumnStore
 {
-    private NativeSegmentOwner? _owner;
+    private BlockOwner? _owner;
     private byte* _data;
     private int _capacityBytes;
     private int _capacity;
 
-    internal FixedStore(DType dtype, AlignedBufferPool pool)
+    internal FixedStore(DType dtype, BlockPool pool)
         : base(dtype, pool)
     {
         if (dtype.Kind == DTypeKind.Decimal)
@@ -276,11 +276,11 @@ internal sealed unsafe class FixedStore : ColumnStore
 /// <summary>Booleans, one bit per row, least significant first.</summary>
 internal sealed unsafe class BoolStore : ColumnStore
 {
-    private NativeSegmentOwner? _owner;
+    private BlockOwner? _owner;
     private byte* _bits;
     private int _capacityBytes;
 
-    internal BoolStore(DType dtype, AlignedBufferPool pool)
+    internal BoolStore(DType dtype, BlockPool pool)
         : base(dtype, pool)
     {
     }
@@ -441,18 +441,18 @@ internal sealed unsafe class VarBinStore : ColumnStore
     private const int ViewSize = CanonicalSupport.ViewSize;
     private const int MaxInline = CanonicalSupport.MaxInlineViewLength;
 
-    private NativeSegmentOwner? _viewsOwner;
+    private BlockOwner? _viewsOwner;
     private byte* _views;
     private int _viewBytes;
     private int _capacity;
 
-    private NativeSegmentOwner? _dataOwner;
+    private BlockOwner? _dataOwner;
     private byte* _data;
     private int _dataCapacity;
     private int _dataLength;
     private int _dataCommitted;
 
-    internal VarBinStore(DType dtype, AlignedBufferPool pool)
+    internal VarBinStore(DType dtype, BlockPool pool)
         : base(dtype, pool)
     {
         IsUtf8 = dtype.Kind == DTypeKind.Utf8;

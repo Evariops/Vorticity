@@ -332,9 +332,9 @@ public sealed class CanonicalArenaTests
     [Fact]
     public void AllocateReturnsZeroedMemoryEvenAfterTheBlockHasBeenRecycled()
     {
-        // The pool hands back recycled NATIVE memory. A decoder that writes only part of a buffer
-        // would otherwise publish whatever the previous batch left there.
-        AlignedBufferPool pool = new AlignedBufferPool();
+        // The pool hands back recycled blocks, never cleared. A decoder that writes only part of a
+        // buffer would otherwise publish whatever the previous batch left there.
+        BlockPool pool = new BlockPool();
         CanonicalArena arena = new CanonicalArena(8, pool);
 
         VortexBuffer first = arena.Allocate(256, 64, out Span<byte> firstSpan);
@@ -373,7 +373,7 @@ public sealed class CanonicalArenaTests
     [Fact]
     public void ResetClearsTheNodesAndReleasesTheRentedBlocks()
     {
-        AlignedBufferPool pool = new AlignedBufferPool();
+        BlockPool pool = new BlockPool();
         CanonicalArena arena = new CanonicalArena(8, pool);
         arena.Allocate(128, 8);
         arena.AddNull(_types.Null(Nullability.Nullable), 1);
@@ -390,12 +390,12 @@ public sealed class CanonicalArenaTests
     [Fact]
     public void ReusingOneArenaAcrossBatchesAllocatesNothingAfterWarmUp()
     {
-        // A dedicated pool with room for every block this test rents. AlignedBufferPool's default
+        // A dedicated pool with room for every block this test rents. BlockPool's default
         // MaxPerBucket is 8, so a batch that materializes more than eight buffers of one size class
-        // makes the pool free the surplus and allocate a fresh NativeSegmentOwner next time round -
+        // makes the pool free the surplus and allocate a fresh BlockOwner next time round -
         // a real, if small, per-batch allocation that belongs to the pool's policy and not to the
         // arena. This asserts the arena's own contribution, which is zero.
-        AlignedBufferPool pool = new AlignedBufferPool(maxPooledLength: 1 << 20, maxPerBucket: 32);
+        BlockPool pool = new BlockPool(maxPooledLength: 1 << 20, maxPerBucket: 32);
         CanonicalArena arena = new CanonicalArena(64, pool);
         DType i32 = _types.Primitive(PType.I32, Nullability.NonNullable);
 

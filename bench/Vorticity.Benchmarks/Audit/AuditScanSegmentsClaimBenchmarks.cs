@@ -27,7 +27,7 @@ public class AuditScanSegmentsClaimBenchmarks
 
     private ScanSegments _segments = null!;
     private SegmentRequestSet[] _sets = null!;
-    private NativeSegmentOwner _owner = null!;
+    private BlockOwner _owner = null!;
     private long _batch;
 
     /// <summary>Makes the set and the batches' request sets.</summary>
@@ -35,7 +35,7 @@ public class AuditScanSegmentsClaimBenchmarks
     public void Setup()
     {
         _segments = new ScanSegments(Lanes);
-        _owner = AlignedBufferPool.Shared.Rent(Length, 64);
+        _owner = BlockPool.Shared.Rent(Length, 64);
         _sets = new SegmentRequestSet[Lanes];
         for (int l = 0; l < Lanes; l++)
         {

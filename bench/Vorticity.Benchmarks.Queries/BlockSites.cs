@@ -12,13 +12,13 @@ using Vorticity.Buffers;
 namespace Vorticity.Benchmarks.Queries;
 
 /// <summary>
-/// The native blocks a run holds, by the site that rented them (<c>--native-sites FILE</c>, with any <c>--micro</c>): each
+/// The blocks a run holds, by the site that rented them (<c>--block-sites FILE</c>, with any <c>--micro</c>): each
 /// block of 64 KiB or more the pools rent out is counted at the frames above the pool and the arena that asked for it,
 /// until its last holder gives it back. At each peak of what the counted blocks hold, past the last one kept by 64 MiB,
-/// the sites are kept; the file says those of the highest, most bytes first, beside what the process held natively and
+/// the sites are kept; the file says those of the highest, most bytes first, beside what the process held in blocks and
 /// what the shared pool kept parked then. A stack is taken at each rent counted: the run is slower, its bytes the same.
 /// </summary>
-internal sealed class NativeSites : AlignedBufferPool.INativeWatch, IDisposable
+internal sealed class BlockSites : BlockPool.IBlockWatch, IDisposable
 {
     private const int LeastBytes = 64 * 1024;
     private const long Step = 64L << 20;
@@ -26,27 +26,27 @@ internal sealed class NativeSites : AlignedBufferPool.INativeWatch, IDisposable
 
     private readonly string _path;
     private readonly Lock _gate = new Lock();
-    private readonly Dictionary<NativeSegmentOwner, Site> _held = new Dictionary<NativeSegmentOwner, Site>(ReferenceEqualityComparer.Instance);
+    private readonly Dictionary<BlockOwner, Site> _held = new Dictionary<BlockOwner, Site>(ReferenceEqualityComparer.Instance);
     private readonly Dictionary<string, Site> _sites = new Dictionary<string, Site>(StringComparer.Ordinal);
     private readonly Stopwatch _clock = Stopwatch.StartNew();
     private long _live;
     private long _kept;
     private (string Site, long Bytes, int Blocks)[] _peak = [];
     private double _peakSeconds;
-    private long _peakNative;
+    private long _peakBlocks;
     private long _peakParked;
 
-    private NativeSites(string path) => _path = path;
+    private BlockSites(string path) => _path = path;
 
     /// <summary>Counts the blocks rented from now on, by site, until the result is disposed, which writes them to <paramref name="path"/>.</summary>
-    internal static NativeSites Watch(string path)
+    internal static BlockSites Watch(string path)
     {
-        NativeSites sites = new NativeSites(path);
-        AlignedBufferPool.Watch = sites;
+        BlockSites sites = new BlockSites(path);
+        BlockPool.Watch = sites;
         return sites;
     }
 
-    public void Rented(NativeSegmentOwner owner)
+    public void Rented(BlockOwner owner)
     {
         if (owner.Capacity < LeastBytes)
         {
@@ -70,13 +70,13 @@ internal sealed class NativeSites : AlignedBufferPool.INativeWatch, IDisposable
                 _kept = _live;
                 _peak = [.. _sites.Values.Where(static site => site.Bytes > 0).Select(static site => (site.Name, site.Bytes, site.Blocks))];
                 _peakSeconds = _clock.Elapsed.TotalSeconds;
-                _peakNative = NativeSegmentOwner.LiveBytes;
-                _peakParked = AlignedBufferPool.Shared.ParkedBytes;
+                _peakBlocks = BlockOwner.LiveBytes;
+                _peakParked = BlockPool.Shared.ParkedBytes;
             }
         }
     }
 
-    public void Released(NativeSegmentOwner owner)
+    public void Released(BlockOwner owner)
     {
         if (owner.Capacity < LeastBytes)
         {
@@ -97,10 +97,10 @@ internal sealed class NativeSites : AlignedBufferPool.INativeWatch, IDisposable
     /// <summary>Stops counting and writes the sites of the highest peak kept.</summary>
     public void Dispose()
     {
-        AlignedBufferPool.Watch = null;
+        BlockPool.Watch = null;
         StringBuilder text = new StringBuilder();
         long held = _peak.Sum(static site => site.Bytes);
-        text.AppendLine(CultureInfo.InvariantCulture, $"the native blocks of {LeastBytes >> 10} KiB or more held at their peak, {_peakSeconds:F0} s in: {held / 1e6:F0} MB, of {_peakNative / 1e6:F0} MB native in all, {_peakParked / 1e6:F0} MB of them parked by the shared pool");
+        text.AppendLine(CultureInfo.InvariantCulture, $"the blocks of {LeastBytes >> 10} KiB or more held at their peak, {_peakSeconds:F0} s in: {held / 1e6:F0} MB, of {_peakBlocks / 1e6:F0} MB of blocks in all, {_peakParked / 1e6:F0} MB of them parked by the shared pool");
         text.AppendLine("      MB  share  blocks  site (the frames above the pool and the arena, the innermost first)");
         foreach ((string site, long bytes, int blocks) in _peak.OrderByDescending(static site => site.Bytes))
         {
@@ -108,7 +108,7 @@ internal sealed class NativeSites : AlignedBufferPool.INativeWatch, IDisposable
         }
 
         System.IO.File.WriteAllText(_path, text.ToString());
-        Console.WriteLine($"native sites written to {_path}");
+        Console.WriteLine($"block sites written to {_path}");
     }
 
     /// <summary>The frames of <paramref name="stack"/> above the pool, the arenas and the owners, the innermost first.</summary>
@@ -146,7 +146,7 @@ internal sealed class NativeSites : AlignedBufferPool.INativeWatch, IDisposable
     {
         for (Type? outer = type; outer is not null; outer = outer.DeclaringType)
         {
-            if (outer == typeof(AlignedBufferPool) || outer == typeof(NativeSegmentOwner) || outer.Name is "CanonicalArena" or "SegmentOwner")
+            if (outer == typeof(BlockPool) || outer == typeof(BlockOwner) || outer.Name is "CanonicalArena" or "SegmentOwner")
             {
                 return true;
             }

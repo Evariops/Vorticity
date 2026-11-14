@@ -51,7 +51,7 @@ public sealed partial class PoisonedBlockTests
         Assert.Equal(rows, cleanRows);
 
         Poison poison = new Poison();
-        AlignedBufferPool.Watch = poison;
+        BlockPool.Watch = poison;
         try
         {
             byte[] poisoned = await WriteAsync(rows, options);
@@ -62,7 +62,7 @@ public sealed partial class PoisonedBlockTests
         }
         finally
         {
-            AlignedBufferPool.Watch = null;
+            BlockPool.Watch = null;
         }
     }
 
@@ -138,17 +138,17 @@ public sealed partial class PoisonedBlockTests
     }
 
     /// <summary>Fills each block with garbage as it is rented, and with other garbage as it is given back.</summary>
-    private sealed class Poison : AlignedBufferPool.INativeWatch
+    private sealed class Poison : BlockPool.IBlockWatch
     {
         internal long Blocks;
 
-        void AlignedBufferPool.INativeWatch.Rented(NativeSegmentOwner owner)
+        void BlockPool.IBlockWatch.Rented(BlockOwner owner)
         {
             owner.WritableSpan.Fill(0xA5);
             Interlocked.Increment(ref Blocks);
         }
 
-        void AlignedBufferPool.INativeWatch.Released(NativeSegmentOwner owner) => owner.WritableSpan.Fill(0x5A);
+        void BlockPool.IBlockWatch.Released(BlockOwner owner) => owner.WritableSpan.Fill(0x5A);
     }
 
     [VortexRecord]

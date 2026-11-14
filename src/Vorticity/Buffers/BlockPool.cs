@@ -40,7 +40,7 @@ namespace Vorticity.Buffers;
 /// of a flag for it.
 /// </para>
 /// </remarks>
-internal sealed class AlignedBufferPool : ISweptAfterCollections, IHeldMemory
+internal sealed class BlockPool : ISweptAfterCollections, IHeldMemory
 {
     /// <summary>Smallest size class. Below this, pooling costs more than it saves.</summary>
     private const int MinBlockSize = 4096;
@@ -106,7 +106,7 @@ internal sealed class AlignedBufferPool : ISweptAfterCollections, IHeldMemory
     private const long IdleMilliseconds = 60_000;
 
     /// <summary>The sweeps of each watched pool, counted; null until a pool is watched, so that a pool nobody watches does not look.</summary>
-    private static ConditionalWeakTable<AlignedBufferPool, StrongBox<int>>? SweepCounts;
+    private static ConditionalWeakTable<BlockPool, StrongBox<int>>? SweepCounts;
 
     /// <summary>The longest block past <see cref="MaxPooledLength"/> a graded pool keeps parked, in its one slot for them.</summary>
     /// <remarks>
@@ -126,7 +126,7 @@ internal sealed class AlignedBufferPool : ISweptAfterCollections, IHeldMemory
     private readonly bool _keepsOutsized;
 
     /// <summary>The block past <see cref="MaxPooledLength"/> kept parked, or null.</summary>
-    private NativeSegmentOwner? _outsized;
+    private BlockOwner? _outsized;
 
     /// <summary>When a block past <see cref="MaxPooledLength"/> was last asked for, in the milliseconds of <see cref="Environment.TickCount64"/>.</summary>
     private long _outsizedAsked;
@@ -163,7 +163,7 @@ internal sealed class AlignedBufferPool : ISweptAfterCollections, IHeldMemory
     /// </param>
     /// <param name="maxPerBucket">Blocks retained per size class. Zero disables retention.</param>
     /// <exception cref="ArgumentOutOfRangeException">A parameter is outside its range.</exception>
-    public AlignedBufferPool(int maxPooledLength = 8 * 1024 * 1024, int maxPerBucket = 8)
+    public BlockPool(int maxPooledLength = 8 * 1024 * 1024, int maxPerBucket = 8)
         : this(maxPooledLength, maxPerBucket, graded: false)
     {
     }
@@ -179,7 +179,7 @@ internal sealed class AlignedBufferPool : ISweptAfterCollections, IHeldMemory
     /// <param name="maxPerBucket">Blocks retained per size class, before grading.</param>
     /// <param name="demandBudget">Bytes parked across every class, base retention included, under which a class may keep more than its base retention.</param>
     /// <summary>Creates a pool, optionally grading retention by size class.</summary>
-    private AlignedBufferPool(int maxPooledLength, int maxPerBucket, bool graded, long demandBudget = -1)
+    private BlockPool(int maxPooledLength, int maxPerBucket, bool graded, long demandBudget = -1)
     {
         _demandBudget = demandBudget < 0 ? DemandBudget : demandBudget;
         ArgumentOutOfRangeException.ThrowIfLessThan(maxPooledLength, MinBlockSize);
@@ -228,7 +228,7 @@ internal sealed class AlignedBufferPool : ISweptAfterCollections, IHeldMemory
     /// the classes in demand rather than in equal shares that most classes would leave unused.
     /// </summary>
     /// <param name="maxRetainedBytes">The most bytes the pool keeps parked across every class.</param>
-    internal AlignedBufferPool(long maxRetainedBytes)
+    internal BlockPool(long maxRetainedBytes)
         : this(8 * 1024 * 1024, 0, graded: false, demandBudget: maxRetainedBytes)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(maxRetainedBytes);
@@ -239,15 +239,15 @@ internal sealed class AlignedBufferPool : ISweptAfterCollections, IHeldMemory
     }
 
     /// <summary>The process-wide pool used by the default segment sources.</summary>
-    public static AlignedBufferPool Shared { get; }
-        = new AlignedBufferPool(32 * 1024 * 1024, 8, graded: true).Swept();
+    public static BlockPool Shared { get; }
+        = new BlockPool(32 * 1024 * 1024, 8, graded: true).Swept();
 
     /// <summary>A pool graded as <see cref="Shared"/> is, with a budget of its own for widening its classes.</summary>
     /// <param name="maxPooledLength">Requests above this length bypass the pool.</param>
     /// <param name="maxPerBucket">Blocks retained per size class, before grading.</param>
     /// <param name="demandBudget">Bytes parked across every class, base retention included, under which a class may keep more than its base retention.</param>
-    internal static AlignedBufferPool Graded(int maxPooledLength, int maxPerBucket, long demandBudget) =>
-        new AlignedBufferPool(maxPooledLength, maxPerBucket, graded: true, demandBudget);
+    internal static BlockPool Graded(int maxPooledLength, int maxPerBucket, long demandBudget) =>
+        new BlockPool(maxPooledLength, maxPerBucket, graded: true, demandBudget);
 
     /// <summary>Requests longer than this bypass the pool. A power of two.</summary>
     public int MaxPooledLength { get; }
@@ -272,32 +272,32 @@ internal sealed class AlignedBufferPool : ISweptAfterCollections, IHeldMemory
     /// <exception cref="VortexFormatException">
     /// <paramref name="length"/> is negative or <paramref name="alignment"/> is out of range.
     /// </exception>
-    public NativeSegmentOwner Rent(int length, int alignment)
+    public BlockOwner Rent(int length, int alignment)
     {
-        NativeSegmentOwner owner = RentCore(length, alignment);
+        BlockOwner owner = RentCore(length, alignment);
         Watch?.Rented(owner);
         return owner;
     }
 
     /// <summary>
     /// What is told of each block the pools rent out and of each one its last holder gives back, for a tool that counts
-    /// the native memory held by the site that rented it (<c>vortex-queries --native-sites</c>); null, and nothing is.
+    /// the blocks held by the site that rented them (<c>vortex-queries --block-sites</c>); null, and nothing is.
     /// </summary>
-    internal static INativeWatch? Watch;
+    internal static IBlockWatch? Watch;
 
     /// <summary>A tool told of the blocks the pools rent out and of those given back (<see cref="Watch"/>).</summary>
-    internal interface INativeWatch
+    internal interface IBlockWatch
     {
         /// <summary>Block <paramref name="owner"/> rented out, on the thread that rented it.</summary>
-        void Rented(NativeSegmentOwner owner);
+        void Rented(BlockOwner owner);
 
         /// <summary>Block <paramref name="owner"/> given back by its last holder, before the pool parks or frees it.</summary>
-        void Released(NativeSegmentOwner owner);
+        void Released(BlockOwner owner);
     }
 
-    private NativeSegmentOwner RentCore(int length, int alignment)
+    private BlockOwner RentCore(int length, int alignment)
     {
-        NativeSegmentOwner.CheckLengthAndAlignment(length, alignment);
+        BlockOwner.CheckLengthAndAlignment(length, alignment);
 
         if (length > MaxPooledLength)
         {
@@ -317,19 +317,19 @@ internal sealed class AlignedBufferPool : ISweptAfterCollections, IHeldMemory
                     kept.FreeParked();
                 }
 
-                return NativeSegmentOwner.AllocatePooled(this, OutsizedBucket, capacity: length, length: length);
+                return BlockOwner.AllocatePooled(this, OutsizedBucket, capacity: length, length: length);
             }
 
             // Tagged with this pool but bucket -1, so Return() still accepts it and the block is
             // freed rather than retained.
-            return NativeSegmentOwner.AllocatePooled(this, bucketIndex: -1, capacity: length, length: length);
+            return BlockOwner.AllocatePooled(this, bucketIndex: -1, capacity: length, length: length);
         }
 
         int capacity = RoundedSize(length);
         int index = BucketIndexOf(capacity);
         Bucket bucket = _buckets[index];
 
-        NativeSegmentOwner? parked = bucket.TryPop();
+        BlockOwner? parked = bucket.TryPop();
         if (parked is not null)
         {
             Interlocked.Add(ref _parkedBytes, -capacity);
@@ -337,7 +337,7 @@ internal sealed class AlignedBufferPool : ISweptAfterCollections, IHeldMemory
             return parked;
         }
 
-        return NativeSegmentOwner.AllocatePooled(this, index, capacity, length);
+        return BlockOwner.AllocatePooled(this, index, capacity, length);
     }
 
     /// <summary>
@@ -353,7 +353,7 @@ internal sealed class AlignedBufferPool : ISweptAfterCollections, IHeldMemory
     /// <exception cref="ObjectDisposedException">
     /// <paramref name="owner"/> has already been fully released.
     /// </exception>
-    public void Return(NativeSegmentOwner owner)
+    public void Return(BlockOwner owner)
     {
         ArgumentNullException.ThrowIfNull(owner);
 
@@ -382,16 +382,16 @@ internal sealed class AlignedBufferPool : ISweptAfterCollections, IHeldMemory
     /// Asked once, where the pool is made: a pool is swept only once asked, so that its trimming can
     /// also be driven by hand (<see cref="TrimIdle"/>).
     /// </remarks>
-    internal AlignedBufferPool Swept()
+    internal BlockPool Swept()
     {
-        CollectionSweeper<AlignedBufferPool>.Register(this);
+        CollectionSweeper<BlockPool>.Register(this);
         return this;
     }
 
     /// <summary>Counts, from now on, the sweeps of <paramref name="pool"/>.</summary>
     /// <param name="pool">The pool to watch.</param>
     /// <returns>The count, raised by each sweep.</returns>
-    internal static StrongBox<int> WatchSweeps(AlignedBufferPool pool) =>
+    internal static StrongBox<int> WatchSweeps(BlockPool pool) =>
         LazyInitializer.EnsureInitialized(ref SweepCounts).GetValue(pool, static _ => new StrongBox<int>());
 
     /// <summary>
@@ -425,7 +425,7 @@ internal sealed class AlignedBufferPool : ISweptAfterCollections, IHeldMemory
     /// demand budget; the budget is read before the push and counted after it, so
     /// racing returns may overrun it by a block each, and no more.
     /// </remarks>
-    internal bool TryPark(NativeSegmentOwner owner)
+    internal bool TryPark(BlockOwner owner)
     {
         int index = owner.BucketIndex;
         if (index == OutsizedBucket)
@@ -537,7 +537,7 @@ internal sealed class AlignedBufferPool : ISweptAfterCollections, IHeldMemory
 
         /// <summary>The most blocks the class keeps parked when its demand asks.</summary>
         internal int Ceiling => _ceiling;
-        private NativeSegmentOwner?[] _items;
+        private BlockOwner?[] _items;
         private int _count;
 
         /// <summary>Whether a rent has asked for the class since the last sweep.</summary>
@@ -557,7 +557,7 @@ internal sealed class AlignedBufferPool : ISweptAfterCollections, IHeldMemory
         {
             _floor = floor;
             _ceiling = Math.Max(floor, ceiling);
-            _items = new NativeSegmentOwner?[floor];
+            _items = new BlockOwner?[floor];
         }
 
         /// <summary>
@@ -572,7 +572,7 @@ internal sealed class AlignedBufferPool : ISweptAfterCollections, IHeldMemory
         internal int Count => Volatile.Read(ref _count);
 
         /// <summary>A parked block for a rent, or null when none is parked; either way the class is in use.</summary>
-        internal NativeSegmentOwner? TryPop()
+        internal BlockOwner? TryPop()
         {
             lock (_gate)
             {
@@ -588,7 +588,7 @@ internal sealed class AlignedBufferPool : ISweptAfterCollections, IHeldMemory
         }
 
         /// <summary>A parked block to free, or null when none is left.</summary>
-        internal NativeSegmentOwner? TryTake()
+        internal BlockOwner? TryTake()
         {
             lock (_gate)
             {
@@ -620,7 +620,7 @@ internal sealed class AlignedBufferPool : ISweptAfterCollections, IHeldMemory
         /// <param name="owner">The block.</param>
         /// <param name="widen">Whether the pool's budget lets the class keep more than its floor.</param>
         /// <returns>Whether the block was parked.</returns>
-        internal bool TryPush(NativeSegmentOwner owner, bool widen)
+        internal bool TryPush(BlockOwner owner, bool widen)
         {
             lock (_gate)
             {
@@ -639,7 +639,7 @@ internal sealed class AlignedBufferPool : ISweptAfterCollections, IHeldMemory
             }
         }
 
-        private NativeSegmentOwner? Take()
+        private BlockOwner? Take()
         {
             if (_count == 0)
             {
@@ -647,7 +647,7 @@ internal sealed class AlignedBufferPool : ISweptAfterCollections, IHeldMemory
             }
 
             int index = --_count;
-            NativeSegmentOwner? owner = _items[index];
+            BlockOwner? owner = _items[index];
             _items[index] = null;
             return owner;
         }

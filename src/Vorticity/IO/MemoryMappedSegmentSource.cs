@@ -240,7 +240,7 @@ public sealed class MemoryMappedSegmentSource : ISegmentSource, ISegmentReader
             // The tail read starts at `length - 65536`, which is aligned to nothing in particular.
             // One copy, once per file open, is the honest answer; the alternative is handing back
             // a buffer that lies about its base.
-            NativeSegmentOwner copy = AlignedBufferPool.Shared.Rent(actual, alignment);
+            BlockOwner copy = BlockPool.Shared.Rent(actual, alignment);
             try
             {
                 mapping.CopyTo(offset, copy.WritableSpan);

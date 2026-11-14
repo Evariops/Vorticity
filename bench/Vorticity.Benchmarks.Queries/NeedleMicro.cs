@@ -332,9 +332,9 @@ internal static class NeedleMicro
     /// <summary>A blob in a block aligned as a segment is, so that its buffers decode in place.</summary>
     private sealed class AlignedBlob : IDisposable
     {
-        private readonly NativeSegmentOwner _block;
+        private readonly BlockOwner _block;
 
-        private AlignedBlob(int length) => _block = NativeSegmentOwner.Allocate(length, VortexLimits.MaxAlignment);
+        private AlignedBlob(int length) => _block = BlockOwner.Allocate(length, VortexLimits.MaxAlignment);
 
         internal int Length => _block.Length;
 

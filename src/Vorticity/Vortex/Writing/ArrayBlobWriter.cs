@@ -127,8 +127,7 @@ internal static class ArrayBlobWriter
         //
         // The blob is assembled here rather than handed to the sink buffer by buffer and padding
         // run by padding run: the copy below is not what a write costs, while streaming it would
-        // mean many small writes to a FileStream and a native view that is only memory through a
-        // manager.
+        // mean many small writes to a FileStream.
         int exact = checked((int)total);
         byte[] bytes = WorkArrays.Rent<byte>(exact);
         long cursor = 0;

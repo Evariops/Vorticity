@@ -10,12 +10,12 @@ using Vorticity.Serialization.Schemas;
 namespace Vorticity.IO;
 
 /// <summary>
-/// A source that reads a local file through <see cref="RandomAccess"/> into aligned native buffers,
+/// A source that reads a local file through <see cref="RandomAccess"/> into aligned pooled blocks,
 /// coalescing the ranges of a batch into as few positional reads as their gaps allow.
 /// </summary>
 /// <remarks>
 /// <para>
-/// A run is read into one 64-byte-aligned native buffer and its segments are published as views
+/// A run is read into one 64-byte-aligned pooled block and its segments are published as views
 /// into it, as <see cref="CoalescedReads"/> describes.
 /// </para>
 /// <para>
@@ -140,7 +140,7 @@ public sealed class FileSegmentSource : ISegmentSource, ISegmentReader
 
         // A single segment starts at the buffer base, so no rounding is needed: a 64-aligned base
         // satisfies every legal exponent outright.
-        NativeSegmentOwner owner = CoalescedReads.RentBlock(length, _options);
+        BlockOwner owner = CoalescedReads.RentBlock(length, _options);
         try
         {
             await ReadExactAsync(owner, length, offset, cancellationToken).ConfigureAwait(false);
@@ -206,7 +206,7 @@ public sealed class FileSegmentSource : ISegmentSource, ISegmentReader
                 cancellationToken.ThrowIfCancellationRequested();
 
                 CoalescedRun run = runs[r];
-                NativeSegmentOwner block = CoalescedReads.RentBlock(run.Length, _options);
+                BlockOwner block = CoalescedReads.RentBlock(run.Length, _options);
 
                 try
                 {
@@ -257,7 +257,7 @@ public sealed class FileSegmentSource : ISegmentSource, ISegmentReader
             return new EmptySegmentOwner();
         }
 
-        NativeSegmentOwner owner = CoalescedReads.RentBlock(actual, _options);
+        BlockOwner owner = CoalescedReads.RentBlock(actual, _options);
         try
         {
             await ReadExactAsync(owner, actual, offset, cancellationToken).ConfigureAwait(false);
@@ -297,7 +297,7 @@ public sealed class FileSegmentSource : ISegmentSource, ISegmentReader
     /// continues until the buffer is full; a zero-byte return is the end of file and means the
     /// file is shorter than its own footer claims — a format error, not something to retry.
     /// </remarks>
-    private async ValueTask ReadExactAsync(NativeSegmentOwner owner, int length, long fileOffset, CancellationToken cancellationToken)
+    private async ValueTask ReadExactAsync(BlockOwner owner, int length, long fileOffset, CancellationToken cancellationToken)
     {
         Memory<byte> destination = owner.WritableMemory(0, length);
         int done = 0;

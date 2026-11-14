@@ -317,7 +317,7 @@ public sealed class VortexSessionOptions
     };
 
     /// <summary>The engine's pool: the aligned pool's own, or the shared one.</summary>
-    internal AlignedBufferPool EnginePool => _memoryPool is AlignedMemoryPool aligned ? aligned.Inner : AlignedBufferPool.Shared;
+    internal BlockPool EnginePool => _memoryPool is AlignedMemoryPool aligned ? aligned.Inner : BlockPool.Shared;
 
     internal void Freeze()
     {

@@ -37,7 +37,7 @@ internal sealed partial class ColumnChunkReader
     private readonly List<Segment> _plan = [];
 
     /// <summary>The levels of the batch read last: its repetition levels, then its definition levels.</summary>
-    private NativeSegmentOwner? _levels;
+    private BlockOwner? _levels;
 
     /// <summary>Whether a data page of the chunk was decoded, after which a v1 page may go on with a row.</summary>
     private bool _pastFirstPage;

@@ -28,9 +28,9 @@ internal sealed class CorpusColumns : IAsyncDisposable
 {
     private readonly VortexFile _file;
     private readonly ScanContext _context;
-    private readonly PinnedArraySegmentOwner _layoutBytes;
+    private readonly BlockOwner _layoutBytes;
 
-    private CorpusColumns(VortexFile file, ScanContext context, PinnedArraySegmentOwner layoutBytes, RecordBatch batch)
+    private CorpusColumns(VortexFile file, ScanContext context, BlockOwner layoutBytes, RecordBatch batch)
     {
         _file = file;
         _context = context;
@@ -55,13 +55,13 @@ internal sealed class CorpusColumns : IAsyncDisposable
     {
         DecoderBootstrap.Ensure();
         VortexFile file = await VortexFile.OpenAsync(PathOf(entry, ".vortex")).ConfigureAwait(false);
-        PinnedArraySegmentOwner? layoutBytes = null;
+        BlockOwner? layoutBytes = null;
         ScanContext? context = null;
         try
         {
             // The FlatBuffers reader reinterprets Layout.segments in place and tests the element
             // address, so the layout blob has to be handed to it aligned.
-            layoutBytes = PinnedArraySegmentOwner.CopyOf(file.RootLayoutBytes.Span, 64);
+            layoutBytes = BlockOwner.CopyOf(file.RootLayoutBytes.Span, 64);
             context = new ScanContext(file);
 
             string[] layoutIds = new string[file.LayoutEncodingCount];
@@ -99,14 +99,14 @@ internal sealed class CorpusColumns : IAsyncDisposable
     }
 
     private static void RegisterAll(
-        VortexFile file, ScanContext context, string[] layoutIds, PinnedArraySegmentOwner layoutBytes)
+        VortexFile file, ScanContext context, string[] layoutIds, BlockOwner layoutBytes)
     {
         int budget = VortexLimits.MaxFlatBufferTables;
         Register(file, context, layoutIds, LayoutView.Root(layoutBytes.Buffer.Span, ref budget), 0);
     }
 
     private static int DecodeAll(
-        VortexFile file, ScanContext context, string[] layoutIds, PinnedArraySegmentOwner layoutBytes)
+        VortexFile file, ScanContext context, string[] layoutIds, BlockOwner layoutBytes)
     {
         int budget = VortexLimits.MaxFlatBufferTables;
         return Decode(

@@ -12,7 +12,7 @@ namespace Vorticity.IO;
 /// defensive one. It exists so that every populated slot of a <see cref="SegmentRequestSet"/>
 /// has a real owner and the refcount bookkeeping stays uniform. A shared singleton would work
 /// only until an adversarial file registered two billion zero-length segments and overflowed its
-/// count, so each slot gets its own — an object header, no native allocation, no syscall.
+/// count, so each slot gets its own — an object header, no block, no syscall.
 /// </remarks>
 internal sealed class EmptySegmentOwner : SegmentOwner
 {

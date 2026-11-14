@@ -73,7 +73,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
 
     private readonly PType _ptype;
     private readonly DecimalStorageType _decimal;
-    private readonly AlignedBufferPool _pool;
+    private readonly BlockPool _pool;
     private readonly long _cap;
     private readonly List<Page> _retired = [];
     private readonly Stack<Page> _free = [];
@@ -137,13 +137,13 @@ internal sealed partial class ColumnChunkReader : IDisposable
     private VortexBuffer[] _gathered = new VortexBuffer[4];
 
     /// <summary>The codes of a batch's valid rows, decoded from a page read a batch at a time.</summary>
-    private NativeSegmentOwner? _batchCodes;
+    private BlockOwner? _batchCodes;
 
     /// <summary>A batch's values gathered from the dictionary, before they are spread over its rows.</summary>
-    private NativeSegmentOwner? _batchValues;
+    private BlockOwner? _batchValues;
 
     /// <summary>A piece of a page read a batch at a time, gathered and spread, before its views are rebased into a batch that spans pages.</summary>
-    private NativeSegmentOwner? _batchRows;
+    private BlockOwner? _batchRows;
 
     /// <summary>The data pages after the one read, decompressed or being decompressed on the scan's lanes, in the chunk's order.</summary>
     private readonly Queue<AheadPage> _ahead = new();
@@ -158,14 +158,14 @@ internal sealed partial class ColumnChunkReader : IDisposable
     private const int BehindLength = -1;
 
     /// <summary>The block a lane decompressed the page being decoded into, until its decode takes it.</summary>
-    private NativeSegmentOwner? _decompressed;
+    private BlockOwner? _decompressed;
 
     /// <summary>
     /// The views a lane cut the PLAIN byte arrays of the page being decoded into, while the page's bytes
     /// lay in its cache, until the decode takes them: with the views cut and the bytes they were cut
     /// from, which the decode holds to its own.
     /// </summary>
-    private NativeSegmentOwner? _cutAhead;
+    private BlockOwner? _cutAhead;
     private int _cutAheadViews;
     private int _cutAheadBytes;
 
@@ -188,7 +188,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
     /// <param name="pool">The pool pages decode into.</param>
     /// <param name="cap">The most bytes a page may decode to.</param>
     /// <param name="nested">Whether the column is read by its levels, for the field above it to assemble.</param>
-    internal ColumnChunkReader(ParquetColumn leaf, DType type, DType validityType, AlignedBufferPool pool, long cap, bool nested = false)
+    internal ColumnChunkReader(ParquetColumn leaf, DType type, DType validityType, BlockPool pool, long cap, bool nested = false)
     {
         if (!nested && (leaf.MaxRepetitionLevel > 0 || leaf.MaxDefinitionLevel > 1))
         {
@@ -377,7 +377,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
     /// The stored bytes of the page <see cref="NextHeader"/> read: a view of the chunk, or its module
     /// decrypted into a block <paramref name="owner"/> holds, which the caller takes.
     /// </summary>
-    private VortexBuffer Body(in PageHeader header, int body, int bytes, out NativeSegmentOwner? owner)
+    private VortexBuffer Body(in PageHeader header, int body, int bytes, out BlockOwner? owner)
     {
         if (_decryption is not { } decryption)
         {
@@ -524,7 +524,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
             return handed;
         }
 
-        return DecodeDictionary(context, header, Body(header, at, stored, out NativeSegmentOwner? owner), owner);
+        return DecodeDictionary(context, header, Body(header, at, stored, out BlockOwner? owner), owner);
     }
 
     /// <summary>The next <paramref name="rows"/> rows, as a node of <paramref name="context"/>'s arena.</summary>
@@ -1109,7 +1109,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
     /// <paramref name="bytes"/> bytes of <paramref name="block"/>, a block of the pool the reader keeps
     /// from one batch to the next, rented again larger when it is short and given back with the reader.
     /// </summary>
-    private Span<byte> Room(ref NativeSegmentOwner? block, int bytes)
+    private Span<byte> Room(ref BlockOwner? block, int bytes)
     {
         if (block is null || block.WritableSpan.Length < bytes)
         {
@@ -1247,7 +1247,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
 
             Mapped(_position, header.Type);
             _position = at + stored;
-            NativeSegmentOwner? owner;
+            BlockOwner? owner;
             Page decoded;
             switch (header.Type)
             {
@@ -1316,7 +1316,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
     /// decompressed them into while the pages before were read, or a block they are decompressed into
     /// now.
     /// </summary>
-    private NativeSegmentOwner Decompressed(ScanContext context, ReadOnlySpan<byte> source, int size)
+    private BlockOwner Decompressed(ScanContext context, ReadOnlySpan<byte> source, int size)
     {
         if (_decompressed is { } ahead)
         {
@@ -1326,7 +1326,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
         }
 
         Cap(size);
-        NativeSegmentOwner values = _pool.Rent(size, 64);
+        BlockOwner values = _pool.Rent(size, 64);
         try
         {
             Counters?.AddDecompression();
@@ -1419,8 +1419,8 @@ internal sealed partial class ColumnChunkReader : IDisposable
                 }
 
                 int values = ViewsAt(header);
-                NativeSegmentOwner block = _pool.Rent(size, 64);
-                NativeSegmentOwner? views = values == NoViews ? null : _pool.Rent(header.ValueCount * CanonicalSupport.ViewSize, 64);
+                BlockOwner block = _pool.Rent(size, 64);
+                BlockOwner? views = values == NoViews ? null : _pool.Rent(header.ValueCount * CanonicalSupport.ViewSize, 64);
                 AheadPage page = new(this, position, header, at, stored, _chunk.Slice(at + offset, stored - offset), _codec, block, lanes, size, views, values);
                 page.Queue();
                 Counters?.AddAhead();
@@ -1475,9 +1475,9 @@ internal sealed partial class ColumnChunkReader : IDisposable
     /// <paramref name="bytes"/> bytes the decode would cut, with a view for each of its
     /// <paramref name="rows"/>: else null, the lane's given back.
     /// </summary>
-    private NativeSegmentOwner? TakeCutAhead(int bytes, int valid, int rows)
+    private BlockOwner? TakeCutAhead(int bytes, int valid, int rows)
     {
-        NativeSegmentOwner? views = _cutAhead;
+        BlockOwner? views = _cutAhead;
         _cutAhead = null;
         if (views is not null && (_cutAheadViews != valid || _cutAheadBytes != bytes || views.Length < (long)rows * CanonicalSupport.ViewSize))
         {
@@ -1554,9 +1554,9 @@ internal sealed partial class ColumnChunkReader : IDisposable
     }
 
     /// <summary>A page its lane still decompresses, decompressed again into a block of the read's.</summary>
-    private NativeSegmentOwner DecompressedAgain(AheadPage page)
+    private BlockOwner DecompressedAgain(AheadPage page)
     {
-        NativeSegmentOwner block = _pool.Rent(page.Size, 64);
+        BlockOwner block = _pool.Rent(page.Size, 64);
         try
         {
             DecompressPage(page.Source.Span, block.WritableSpan);
@@ -1641,8 +1641,8 @@ internal sealed partial class ColumnChunkReader : IDisposable
     /// decompresses it itself rather than waiting for a lane the pool has not yet run.
     /// </summary>
     private sealed class AheadPage(
-        ColumnChunkReader reader, int position, PageHeader header, int at, int stored, VortexBuffer source, CompressionCodec codec, NativeSegmentOwner block,
-        PageLanes lanes, int size, NativeSegmentOwner? views, int values)
+        ColumnChunkReader reader, int position, PageHeader header, int at, int stored, VortexBuffer source, CompressionCodec codec, BlockOwner block,
+        PageLanes lanes, int size, BlockOwner? views, int values)
         : LaneWork(lanes)
     {
         /// <summary>The bytes the page decompresses to, which its block holds at least.</summary>
@@ -1656,13 +1656,13 @@ internal sealed partial class ColumnChunkReader : IDisposable
 
         internal int Stored { get; } = stored;
 
-        internal NativeSegmentOwner Block { get; } = block;
+        internal BlockOwner Block { get; } = block;
 
         /// <summary>The page's stored bytes, in the chunk, which the read decompresses again when it meets the page on its lane.</summary>
         internal VortexBuffer Source { get; } = source;
 
         /// <summary>The views the page's PLAIN byte arrays are cut into once it is decompressed, where the read takes them: see <see cref="ViewsAt"/>.</summary>
-        internal NativeSegmentOwner? Views { get; } = views;
+        internal BlockOwner? Views { get; } = views;
 
         /// <summary>The views cut, every value the page's bytes hold, or -1 before the lane cuts them.</summary>
         internal int ViewCount { get; private set; } = -1;
@@ -1732,7 +1732,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
     /// A v2 data page of stored bytes <paramref name="body"/>, which <paramref name="owner"/> holds
     /// where they are not the chunk's: the page takes the block, or gives it back.
     /// </summary>
-    private Page DecodeV2(ScanContext context, in PageHeader header, VortexBuffer body, NativeSegmentOwner? owner)
+    private Page DecodeV2(ScanContext context, in PageHeader header, VortexBuffer body, BlockOwner? owner)
     {
         try
         {
@@ -1798,7 +1798,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
             }
             else if (header.IsCompressed && _codec != CompressionCodec.Uncompressed)
             {
-                NativeSegmentOwner values = Decompressed(context, stored.Span, size);
+                BlockOwner values = Decompressed(context, stored.Span, size);
                 owner?.Dispose();
                 owner = null;
                 Decode(page, header.Encoding, values.Buffer, values, valid);
@@ -1811,7 +1811,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
                 }
 
                 // The page's values are its stored bytes: the block that holds them is the page's.
-                NativeSegmentOwner? taken = owner;
+                BlockOwner? taken = owner;
                 owner = null;
                 Decode(page, header.Encoding, stored, taken, valid);
             }
@@ -1831,9 +1831,9 @@ internal sealed partial class ColumnChunkReader : IDisposable
     /// A v1 data page of stored bytes <paramref name="body"/>, which <paramref name="stored"/> holds
     /// where they are not the chunk's: the page takes the block, or gives it back.
     /// </summary>
-    private Page DecodeV1(ScanContext context, in PageHeader header, VortexBuffer body, NativeSegmentOwner? stored)
+    private Page DecodeV1(ScanContext context, in PageHeader header, VortexBuffer body, BlockOwner? stored)
     {
-        NativeSegmentOwner? owner = stored;
+        BlockOwner? owner = stored;
         Page page = Rent(0);
         try
         {
@@ -1846,7 +1846,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
             int size = header.UncompressedPageSize;
             if (_codec != CompressionCodec.Uncompressed)
             {
-                NativeSegmentOwner decompressed = Decompressed(context, body.Span, size);
+                BlockOwner decompressed = Decompressed(context, body.Span, size);
                 owner?.Dispose();
                 owner = decompressed;
                 body = decompressed.Buffer;
@@ -1873,7 +1873,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
             }
 
             // The page's values take the decompression's block: it keeps it or gives it back.
-            NativeSegmentOwner? values = owner;
+            BlockOwner? values = owner;
             owner = null;
             Decode(page, header.Encoding, body.Slice(position, body.Length - position), values, valid);
             return page;
@@ -1942,7 +1942,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
     /// <summary>A v1 page's levels in the deprecated BIT_PACKED encoding, into its validity; the rows that hold a value.</summary>
     private int LegacyLevels(Page page, ReadOnlySpan<byte> levels, int rows)
     {
-        NativeSegmentOwner bits = _pool.Rent(CanonicalSupport.BitmapByteCount(rows), 64);
+        BlockOwner bits = _pool.Rent(CanonicalSupport.BitmapByteCount(rows), 64);
         int valid = LegacyBitPacked.ReadBits(levels, rows, bits.WritableSpan);
         if (valid == rows)
         {
@@ -1968,7 +1968,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
             return rows;
         }
 
-        NativeSegmentOwner bits = _pool.Rent(CanonicalSupport.BitmapByteCount(rows), 64);
+        BlockOwner bits = _pool.Rent(CanonicalSupport.BitmapByteCount(rows), 64);
         int valid = new RleHybridDecoder(1).ReadBits(levels, bits.WritableSpan, 0, rows);
         if (valid == rows)
         {
@@ -1989,7 +1989,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
     /// <param name="values">The values, decompressed.</param>
     /// <param name="owner">The pool's block holding <paramref name="values"/>, or null when they are the chunk's.</param>
     /// <param name="valid">The rows that hold a value.</param>
-    private void Values(Page page, VortexBuffer values, NativeSegmentOwner? owner, int valid)
+    private void Values(Page page, VortexBuffer values, BlockOwner? owner, int valid)
     {
         int rows = page.Rows;
         ReadOnlySpan<byte> source = values.Span;
@@ -2007,7 +2007,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
                     return;
                 }
 
-                NativeSegmentOwner bits = Slots(page, CanonicalSupport.BitmapByteCount(rows));
+                BlockOwner bits = Slots(page, CanonicalSupport.BitmapByteCount(rows));
                 SpreadBits(source, page.Validity.Buffer.Span, bits.WritableSpan, rows);
                 owner?.Dispose();
                 return;
@@ -2040,7 +2040,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
                     return;
                 }
 
-                NativeSegmentOwner slots = Slots(page, rows * _slot);
+                BlockOwner slots = Slots(page, rows * _slot);
                 Span<byte> into = slots.WritableSpan;
                 ValidRows.SpreadOver(source, into, ValidityMask.Bitmap(page.Validity.Buffer.Span, 0), rows, _width, Encoding);
                 owner?.Dispose();
@@ -2049,17 +2049,17 @@ internal sealed partial class ColumnChunkReader : IDisposable
     }
 
     /// <summary>A page's values as they lie: the decompression's destination, or the chunk's bytes.</summary>
-    private static void Keep(Page page, VortexBuffer values, NativeSegmentOwner? owner)
+    private static void Keep(Page page, VortexBuffer values, BlockOwner? owner)
     {
         page.Slots = owner;
         page.Values = values;
     }
 
     /// <summary>A PLAIN BYTE_ARRAY page cut into views over its own bytes, a null row's view empty.</summary>
-    private void Views(Page page, VortexBuffer values, NativeSegmentOwner? owner, int valid)
+    private void Views(Page page, VortexBuffer values, BlockOwner? owner, int valid)
     {
         int rows = page.Rows;
-        NativeSegmentOwner? cut = TakeCutAhead(values.Length, valid, rows);
+        BlockOwner? cut = TakeCutAhead(values.Length, valid, rows);
         if (page.Validity is null && cut is not null)
         {
             // Cut where the page decompressed, while its bytes lay in that lane's cache.
@@ -2074,7 +2074,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
         else
         {
             Span<byte> into = Slots(page, rows * CanonicalSupport.ViewSize).WritableSpan;
-            NativeSegmentOwner dense = cut ?? _pool.Rent(Math.Max(valid, 1) * CanonicalSupport.ViewSize, 64);
+            BlockOwner dense = cut ?? _pool.Rent(Math.Max(valid, 1) * CanonicalSupport.ViewSize, 64);
             try
             {
                 if (cut is null)
@@ -2135,7 +2135,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
             }
         }
 
-        Span<byte> dense = Dense(page, valid, out NativeSegmentOwner? spread);
+        Span<byte> dense = Dense(page, valid, out BlockOwner? spread);
         try
         {
             IntegerNarrowing.Truncate(ints, _slot == sizeof(byte) ? PType.I8 : PType.I16, dense);
@@ -2152,7 +2152,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
     /// it holds no null, so that nothing is copied after; else a block of <paramref name="spread"/>,
     /// which <see cref="Spread"/> spreads over the page's rows and the caller gives back.
     /// </summary>
-    private Span<byte> Dense(Page page, int valid, out NativeSegmentOwner? spread)
+    private Span<byte> Dense(Page page, int valid, out BlockOwner? spread)
     {
         if (page.Validity is null)
         {
@@ -2165,7 +2165,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
     }
 
     /// <summary>The values <see cref="Dense"/> gave a block for spread over the page's rows; nothing where they are its slots.</summary>
-    private void Spread(Page page, ReadOnlySpan<byte> dense, NativeSegmentOwner? spread)
+    private void Spread(Page page, ReadOnlySpan<byte> dense, BlockOwner? spread)
     {
         if (spread is not null)
         {
@@ -2191,7 +2191,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
             Wide(_width);
         }
 
-        Span<byte> wide = Dense(page, valid, out NativeSegmentOwner? spread);
+        Span<byte> wide = Dense(page, valid, out BlockOwner? spread);
         try
         {
             if (_width > 0)
@@ -2241,7 +2241,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
     /// </summary>
     private void Widen(Page page, ReadOnlySpan<byte> heap, ReadOnlySpan<int> lengths, int valid)
     {
-        Span<byte> wide = Dense(page, valid, out NativeSegmentOwner? spread);
+        Span<byte> wide = Dense(page, valid, out BlockOwner? spread);
         try
         {
             int position = 0;
@@ -2280,7 +2280,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
     private void Place(Page page, ReadOnlySpan<byte> dense)
     {
         int rows = page.Rows;
-        NativeSegmentOwner slots = Slots(page, rows * _slot);
+        BlockOwner slots = Slots(page, rows * _slot);
         Span<byte> into = slots.WritableSpan;
         if (page.Validity is null)
         {
@@ -2333,10 +2333,10 @@ internal sealed partial class ColumnChunkReader : IDisposable
         }
     }
 
-    private NativeSegmentOwner Slots(Page page, int bytes)
+    private BlockOwner Slots(Page page, int bytes)
     {
         Cap(bytes);
-        NativeSegmentOwner owner = _pool.Rent(Math.Max(bytes, 1), 64);
+        BlockOwner owner = _pool.Rent(Math.Max(bytes, 1), 64);
         page.Slots = owner;
         page.Values = owner.Buffer.Slice(0, bytes);
         return owner;
@@ -2383,7 +2383,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
     }
 
     /// <summary>A page's values by their encoding, the page taking <paramref name="owner"/> when its values stay where they lie.</summary>
-    private void Decode(Page page, ParquetEncoding encoding, VortexBuffer values, NativeSegmentOwner? owner, int valid)
+    private void Decode(Page page, ParquetEncoding encoding, VortexBuffer values, BlockOwner? owner, int valid)
     {
         switch (encoding)
         {
@@ -2452,7 +2452,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
             return;
         }
 
-        NativeSegmentOwner dense = _pool.Rent(Math.Max(valid, 1) * width, 64);
+        BlockOwner dense = _pool.Rent(Math.Max(valid, 1) * width, 64);
         try
         {
             Span<byte> values = dense.WritableSpan[..(valid * width)];
@@ -2484,9 +2484,9 @@ internal sealed partial class ColumnChunkReader : IDisposable
     /// A DELTA_LENGTH_BYTE_ARRAY page cut into views over its own bytes, which the page keeps, or a
     /// BYTE_ARRAY decimal's widened out of them.
     /// </summary>
-    private void Lengths(Page page, VortexBuffer values, NativeSegmentOwner? owner, int valid)
+    private void Lengths(Page page, VortexBuffer values, BlockOwner? owner, int valid)
     {
-        NativeSegmentOwner lengths = _pool.Rent(Math.Max(valid, 1) * sizeof(int), 64);
+        BlockOwner lengths = _pool.Rent(Math.Max(valid, 1) * sizeof(int), 64);
         try
         {
             Span<int> span = MemoryMarshal.Cast<byte, int>(lengths.WritableSpan)[..valid];
@@ -2513,8 +2513,8 @@ internal sealed partial class ColumnChunkReader : IDisposable
     /// <summary>A DELTA_BYTE_ARRAY page rebuilt, each value from the one before it, into a heap the page keeps.</summary>
     private void Prefixed(Page page, ReadOnlySpan<byte> source, int valid)
     {
-        NativeSegmentOwner lengths = _pool.Rent(Math.Max(valid, 1) * sizeof(int) * 3, 64);
-        NativeSegmentOwner? heap = null;
+        BlockOwner lengths = _pool.Rent(Math.Max(valid, 1) * sizeof(int) * 3, 64);
+        BlockOwner? heap = null;
         try
         {
             Span<int> all = MemoryMarshal.Cast<byte, int>(lengths.WritableSpan);
@@ -2575,7 +2575,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
             return;
         }
 
-        NativeSegmentOwner dense = _pool.Rent(Math.Max(valid, 1) * _width, 64);
+        BlockOwner dense = _pool.Rent(Math.Max(valid, 1) * _width, 64);
         try
         {
             Span<byte> values = dense.WritableSpan[..(valid * _width)];
@@ -2608,8 +2608,8 @@ internal sealed partial class ColumnChunkReader : IDisposable
         int rows = page.Rows;
         bool wide = _leaf.Physical == PhysicalType.Double;
         int width = wide ? sizeof(double) : sizeof(float);
-        NativeSegmentOwner scratch = _pool.Rent(Encodings.Alp.VectorSize(source) * width, 64);
-        NativeSegmentOwner? dense = null;
+        BlockOwner scratch = _pool.Rent(Encodings.Alp.VectorSize(source) * width, 64);
+        BlockOwner? dense = null;
         try
         {
             Span<byte> into = page.Validity is null
@@ -2659,11 +2659,11 @@ internal sealed partial class ColumnChunkReader : IDisposable
             return;
         }
 
-        NativeSegmentOwner dense = _pool.Rent(CanonicalSupport.BitmapByteCount(Math.Max(valid, 1)), 64);
+        BlockOwner dense = _pool.Rent(CanonicalSupport.BitmapByteCount(Math.Max(valid, 1)), 64);
         try
         {
             new RleHybridDecoder(1).ReadBits(runs, dense.WritableSpan, 0, valid);
-            NativeSegmentOwner bits = Slots(page, CanonicalSupport.BitmapByteCount(rows));
+            BlockOwner bits = Slots(page, CanonicalSupport.BitmapByteCount(rows));
             SpreadBits(dense.WritableSpan, page.Validity.Buffer.Span, bits.WritableSpan, rows);
         }
         finally
@@ -2676,9 +2676,9 @@ internal sealed partial class ColumnChunkReader : IDisposable
     private void CutViews(Page page, ReadOnlySpan<int> lengths, VortexBuffer heap, int valid)
     {
         int rows = page.Rows;
-        NativeSegmentOwner views = Slots(page, rows * CanonicalSupport.ViewSize);
+        BlockOwner views = Slots(page, rows * CanonicalSupport.ViewSize);
         Span<byte> into = views.WritableSpan;
-        NativeSegmentOwner? dense = page.Validity is null ? null : _pool.Rent(Math.Max(valid, 1) * CanonicalSupport.ViewSize, 64);
+        BlockOwner? dense = page.Validity is null ? null : _pool.Rent(Math.Max(valid, 1) * CanonicalSupport.ViewSize, 64);
         try
         {
             Span<byte> cut = dense is null ? into : dense.WritableSpan[..(valid * CanonicalSupport.ViewSize)];
@@ -2712,10 +2712,10 @@ internal sealed partial class ColumnChunkReader : IDisposable
     }
 
     /// <summary>The chunk's dictionary page, decoded as a page of one slot per entry and no null.</summary>
-    private Page DecodeDictionary(ScanContext context, in PageHeader header, VortexBuffer body, NativeSegmentOwner? stored)
+    private Page DecodeDictionary(ScanContext context, in PageHeader header, VortexBuffer body, BlockOwner? stored)
     {
         Counters?.AddDictionary();
-        NativeSegmentOwner? owner = stored;
+        BlockOwner? owner = stored;
         try
         {
             Check(header, body);
@@ -2744,7 +2744,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
             {
                 // A dictionary page has no flag that keeps it out of the codec: it is always compressed.
                 Cap(size);
-                NativeSegmentOwner values = _pool.Rent(size, 64);
+                BlockOwner values = _pool.Rent(size, 64);
                 try
                 {
                     Counters?.AddDecompression();
@@ -2767,7 +2767,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
                     ParquetThrow.Format($"The dictionary page of '{Name}' holds {body.Length} bytes where its header declares {size}.");
                 }
 
-                NativeSegmentOwner? taken = owner;
+                BlockOwner? taken = owner;
                 owner = null;
                 Values(page, body, taken, header.ValueCount);
             }
@@ -2790,7 +2790,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
     /// of millions of rows, whose values, gathered whole, would be a buffer of the page's size written
     /// out to memory and read back; a batch's are its own, in cache.
     /// </summary>
-    private void Lazy(Page page, VortexBuffer values, NativeSegmentOwner? owner, int valid)
+    private void Lazy(Page page, VortexBuffer values, BlockOwner? owner, int valid)
     {
         if (_dictionary is not { } dictionary)
         {
@@ -2844,8 +2844,8 @@ internal sealed partial class ColumnChunkReader : IDisposable
         }
 
         int width = source[0];
-        NativeSegmentOwner codes = _pool.Rent(valid * sizeof(uint), 64);
-        NativeSegmentOwner? dense = null;
+        BlockOwner codes = _pool.Rent(valid * sizeof(uint), 64);
+        BlockOwner? dense = null;
         try
         {
             Span<uint> span = MemoryMarshal.Cast<byte, uint>(codes.WritableSpan)[..valid];
@@ -2869,7 +2869,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
             if (_slot == 0)
             {
                 // Booleans: a bit per entry, gathered a bit at a time.
-                NativeSegmentOwner bits = Slots(page, CanonicalSupport.BitmapByteCount(rows));
+                BlockOwner bits = Slots(page, CanonicalSupport.BitmapByteCount(rows));
                 Span<byte> into = bits.WritableSpan;
                 into.Clear();
                 ReadOnlySpan<byte> entries = dictionary.Values.Span;
@@ -2898,7 +2898,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
             }
 
             ReadOnlySpan<byte> codeBytes = MemoryMarshal.AsBytes((ReadOnlySpan<uint>)span);
-            NativeSegmentOwner slots = Slots(page, rows * _slot);
+            BlockOwner slots = Slots(page, rows * _slot);
             Span<byte> target = page.Validity is null ? slots.WritableSpan : (dense = _pool.Rent(valid * _slot, 64)).WritableSpan;
             int bad = RowKernels.Gather(codeBytes, PType.U32, dictionary.Values.Span, _slot, dictionary.Rows, target[..(valid * _slot)], valid);
             if (bad >= 0)
@@ -2936,7 +2936,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
 
         int rows = page.Rows;
         Cap((long)rows * sizeof(uint));
-        NativeSegmentOwner codes = _pool.Rent(Math.Max(rows * sizeof(uint), 1), 64);
+        BlockOwner codes = _pool.Rent(Math.Max(rows * sizeof(uint), 1), 64);
         Span<byte> into = codes.WritableSpan[..(rows * sizeof(uint))];
         ReadOnlySpan<byte> source = MemoryMarshal.AsBytes(dense);
         if (page.Validity is null)
@@ -3019,22 +3019,22 @@ internal sealed partial class ColumnChunkReader : IDisposable
         internal bool EndsRows;
 
         /// <summary>A nested column's levels, a byte per entry: the repetition levels, then the definition levels.</summary>
-        internal NativeSegmentOwner? Levels;
+        internal BlockOwner? Levels;
 
         /// <summary>The validity bitmap, when the page holds a null.</summary>
-        internal NativeSegmentOwner? Validity;
+        internal BlockOwner? Validity;
 
         /// <summary>The block holding <see cref="Values"/>, or null when they lie in the chunk.</summary>
-        internal NativeSegmentOwner? Slots;
+        internal BlockOwner? Slots;
 
         /// <summary>A dictionary-encoded page's code per row, kept for a scan that keeps encodings, until its values are gathered.</summary>
-        internal NativeSegmentOwner? Codes;
+        internal BlockOwner? Codes;
 
         /// <summary>One slot per row: the values, the bits or the views.</summary>
         internal VortexBuffer Values;
 
         /// <summary>The block holding <see cref="Data"/>, or null when it lies in the chunk.</summary>
-        internal NativeSegmentOwner? DataOwner;
+        internal BlockOwner? DataOwner;
 
         /// <summary>A byte array page's bytes, which its views point into.</summary>
         internal VortexBuffer Data;
@@ -3046,7 +3046,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
         internal bool Lazy;
 
         /// <summary>The block holding <see cref="CodeRuns"/>, or null when they lie in the chunk.</summary>
-        internal NativeSegmentOwner? CodesOwner;
+        internal BlockOwner? CodesOwner;
 
         /// <summary>A page read a batch at a time: its codes' run data, past their width.</summary>
         internal VortexBuffer CodeRuns;

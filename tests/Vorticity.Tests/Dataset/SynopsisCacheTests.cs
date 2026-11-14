@@ -141,7 +141,7 @@ public sealed class SynopsisCacheTests
                 byte[] bytes = new byte[4_096 + seed];
                 new Random(seed).NextBytes(bytes);
                 IndexSegment region = IndexSegment.Of(seed * 65_536L, bytes, 6);
-                Vorticity.Buffers.NativeSegmentOwner block = Vorticity.Buffers.AlignedBufferPool.Shared.Rent(bytes.Length, 64);
+                Vorticity.Buffers.BlockOwner block = Vorticity.Buffers.BlockPool.Shared.Rent(bytes.Length, 64);
                 bytes.CopyTo(block.WritableSpan);
                 cache.Admit(uid, region, block, Vorticity.Buffers.VortexBuffer.FromPinned(block.WritableSpan[..bytes.Length], 6));
                 block.Release();
@@ -200,7 +200,7 @@ public sealed class SynopsisCacheTests
                 byte[] bytes = new byte[4_096 + seed];
                 new Random(seed).NextBytes(bytes);
                 IndexSegment region = IndexSegment.Of(seed * 65_536L, bytes, 6);
-                Vorticity.Buffers.NativeSegmentOwner block = Vorticity.Buffers.AlignedBufferPool.Shared.Rent(bytes.Length, 64);
+                Vorticity.Buffers.BlockOwner block = Vorticity.Buffers.BlockPool.Shared.Rent(bytes.Length, 64);
                 bytes.CopyTo(block.WritableSpan);
                 cache.Admit(uid, region, block, Vorticity.Buffers.VortexBuffer.FromPinned(block.WritableSpan[..bytes.Length], 6));
                 block.Release();

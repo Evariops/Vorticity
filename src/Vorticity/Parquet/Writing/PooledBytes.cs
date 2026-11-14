@@ -19,15 +19,15 @@ internal sealed class PooledBytes : IBufferWriter<byte>, IDisposable
 {
     private const int MinimumCapacity = 4096;
 
-    private readonly AlignedBufferPool _pool;
-    private NativeSegmentOwner? _owner;
+    private readonly BlockPool _pool;
+    private BlockOwner? _owner;
 
     // The block's bytes, a view of its array.
     private Memory<byte> _block;
     private int _capacity;
     private int _length;
 
-    internal PooledBytes(AlignedBufferPool pool) => _pool = pool;
+    internal PooledBytes(BlockPool pool) => _pool = pool;
 
     /// <summary>The bytes written so far.</summary>
     internal int Length => _length;
@@ -100,7 +100,7 @@ internal sealed class PooledBytes : IBufferWriter<byte>, IDisposable
             capacity *= 2;
         }
 
-        NativeSegmentOwner owner = _pool.Rent((int)Math.Min(capacity, Array.MaxLength), VortexLimits.MaxAlignment);
+        BlockOwner owner = _pool.Rent((int)Math.Min(capacity, Array.MaxLength), VortexLimits.MaxAlignment);
         Memory<byte> block = owner.WritableMemory(0, owner.Length);
         if (_owner is { } previous)
         {

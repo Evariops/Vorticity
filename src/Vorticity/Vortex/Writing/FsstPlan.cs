@@ -129,7 +129,7 @@ internal sealed class FsstPlan
             return null;
         }
 
-        // Everything is rented: the values live in native arena buffers and have to be copied to be
+        // Everything is rented: the values live in the arena's pinned blocks and have to be copied to be
         // trained on, and the heap, row tables and code stream are all garbage the moment this
         // column is priced against zstd and loses. A plan that wins keeps the row tables and the
         // code stream, and hands them back once the writer has them.

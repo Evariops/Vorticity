@@ -39,11 +39,11 @@ internal static class CensusMemoryMicro
         GC.Collect();
         GC.WaitForPendingFinalizers();
         GC.Collect();
-        AlignedBufferPool.Shared.Trim();
+        BlockPool.Shared.Trim();
         long rows = 0;
         long begin = Stopwatch.GetTimestamp();
-        long blocksStart = NativeSegmentOwner.LiveBytes;
-        long parkedStart = AlignedBufferPool.Shared.ParkedBytes;
+        long blocksStart = BlockOwner.LiveBytes;
+        long parkedStart = BlockPool.Shared.ParkedBytes;
         int textBound = new VortexWriteOptions().StringBoundBytes;
         PeakMemory memory = new PeakMemory();
         try

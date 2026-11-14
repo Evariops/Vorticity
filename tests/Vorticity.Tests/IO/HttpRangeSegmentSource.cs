@@ -72,10 +72,10 @@ internal sealed class HttpRangeSegmentSource : ISegmentReader
 
         if (length == 0)
         {
-            return PinnedArraySegmentOwner.Allocate(0, 1);
+            return BlockOwner.Allocate(0, 1);
         }
 
-        PinnedArraySegmentOwner owner = PinnedArraySegmentOwner.Allocate(
+        BlockOwner owner = BlockOwner.Allocate(
             length, VortexLimits.CheckAlignmentExponent(spec.AlignmentExponent));
 
         try
@@ -197,7 +197,7 @@ internal sealed class HttpRangeSegmentSource : ISegmentReader
         long available = Length - offset;
         int actual = length <= available ? length : (int)available;
 
-        PinnedArraySegmentOwner owner = PinnedArraySegmentOwner.Allocate(actual, alignment);
+        BlockOwner owner = BlockOwner.Allocate(actual, alignment);
         if (actual == 0)
         {
             return owner;
@@ -246,7 +246,7 @@ internal sealed class HttpRangeSegmentSource : ISegmentReader
                 SegmentSpec spec = sorted[k];
                 int relative = (int)((long)spec.Offset - run.Start);
 
-                PinnedArraySegmentOwner owner = PinnedArraySegmentOwner.CopyOf(
+                BlockOwner owner = BlockOwner.CopyOf(
                     staging.AsSpan(relative, (int)spec.Length),
                     VortexLimits.CheckAlignmentExponent(spec.AlignmentExponent));
 
@@ -262,7 +262,7 @@ internal sealed class HttpRangeSegmentSource : ISegmentReader
     }
 
     private async ValueTask FetchAsync(
-        long offset, int length, PinnedArraySegmentOwner destination, CancellationToken cancellationToken)
+        long offset, int length, BlockOwner destination, CancellationToken cancellationToken)
     {
         byte[] staging = ArrayPool<byte>.Shared.Rent(length);
 

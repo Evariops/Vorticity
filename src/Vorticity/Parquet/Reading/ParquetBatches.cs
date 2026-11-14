@@ -200,7 +200,7 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
         _struct = VortexTypes.ToDType(VortexSchema.Create(read), types);
         DType validity = types.Bool(Nullability.NonNullable);
         long cap = file.Options.MaxDecompressedBytes;
-        AlignedBufferPool pool = file.Session.Options.EnginePool;
+        BlockPool pool = file.Session.Options.EnginePool;
         _context = new ScanContext([], new VortexReadOptions { MaxDecompressedBytes = cap });
         List<ColumnChunkReader> readers = [];
         _nested = new NestedFieldReader?[fields.Length];

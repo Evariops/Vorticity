@@ -71,8 +71,8 @@ internal static class ShredMemoryMicro
         GC.Collect();
         GC.WaitForPendingFinalizers();
         GC.Collect();
-        AlignedBufferPool.Shared.Trim();
-        long blocksStart = NativeSegmentOwner.LiveBytes;
+        BlockPool.Shared.Trim();
+        long blocksStart = BlockOwner.LiveBytes;
         VortexWriteOptions options = VortexWriteOptions.Default with
         {
             ShreddedVariants = new Dictionary<string, VariantShredding> { [name] = plan },

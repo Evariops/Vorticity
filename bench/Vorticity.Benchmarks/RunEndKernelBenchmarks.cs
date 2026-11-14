@@ -26,10 +26,9 @@ public unsafe class RunEndKernelBenchmarks
     private ushort[] _ends = [];
     private ulong[] _values8 = [];
     private Vector128<byte>[] _values16 = [];
-    // Native and aligned, as the blocks a decode writes are: a managed array lies where the GC puts it.
     // The rows the kernels write, 64-byte aligned in blocks on the pinned heap as the library's are, and the blocks.
-    private Vorticity.Buffers.NativeSegmentOwner? _rows8Owner;
-    private Vorticity.Buffers.NativeSegmentOwner? _rows16Owner;
+    private Vorticity.Buffers.BlockOwner? _rows8Owner;
+    private Vorticity.Buffers.BlockOwner? _rows16Owner;
     private ulong* _rows8;
     private Vector128<byte>* _rows16;
 
@@ -71,8 +70,8 @@ public unsafe class RunEndKernelBenchmarks
         random.NextBytes(MemoryMarshal.AsBytes(_values8.AsSpan()));
         _values16 = new Vector128<byte>[_ends.Length];
         random.NextBytes(MemoryMarshal.AsBytes(_values16.AsSpan()));
-        _rows8Owner = Vorticity.Buffers.NativeSegmentOwner.Allocate(Rows * sizeof(ulong), 64);
-        _rows16Owner = Vorticity.Buffers.NativeSegmentOwner.Allocate(Rows * 16, 64);
+        _rows8Owner = Vorticity.Buffers.BlockOwner.Allocate(Rows * sizeof(ulong), 64);
+        _rows16Owner = Vorticity.Buffers.BlockOwner.Allocate(Rows * 16, 64);
         _rows8 = (ulong*)Unsafe.AsPointer(ref MemoryMarshal.GetReference(_rows8Owner.WritableSpan));
         _rows16 = (Vector128<byte>*)Unsafe.AsPointer(ref MemoryMarshal.GetReference(_rows16Owner.WritableSpan));
     }

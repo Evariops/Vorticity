@@ -390,7 +390,7 @@ public sealed class SynopsisCache : IAsyncDisposable
             return true;
         }
 
-        NativeSegmentOwner block = AlignedBufferPool.Shared.Rent(length, VortexLimits.MaxAlignment);
+        BlockOwner block = BlockPool.Shared.Rent(length, VortexLimits.MaxAlignment);
         try
         {
             Span<byte> bytes = block.WritableSpan[..length];
@@ -446,7 +446,7 @@ public sealed class SynopsisCache : IAsyncDisposable
         }
 
         long length = entry.Bytes;
-        NativeSegmentOwner? block = length is > 0 && length <= maxLength ? AlignedBufferPool.Shared.Rent((int)length, VortexLimits.MaxAlignment) : null;
+        BlockOwner? block = length is > 0 && length <= maxLength ? BlockPool.Shared.Rent((int)length, VortexLimits.MaxAlignment) : null;
         if (block is null || !ReadWhole(entry, block.WritableSpan[..(int)length]))
         {
             block?.Release();
@@ -512,7 +512,7 @@ public sealed class SynopsisCache : IAsyncDisposable
             return true;
         }
 
-        NativeSegmentOwner block = AlignedBufferPool.Shared.Rent(length + DataTrailerBytes, VortexLimits.MaxAlignment);
+        BlockOwner block = BlockPool.Shared.Rent(length + DataTrailerBytes, VortexLimits.MaxAlignment);
         try
         {
             Span<byte> bytes = block.WritableSpan[..(length + DataTrailerBytes)];
@@ -1118,7 +1118,7 @@ public sealed class SynopsisCache : IAsyncDisposable
         int length = checked((int)region.Length);
         if (LeasePeer(name, length) is { } file)
         {
-            NativeSegmentOwner block = AlignedBufferPool.Shared.Rent(length, VortexLimits.MaxAlignment);
+            BlockOwner block = BlockPool.Shared.Rent(length, VortexLimits.MaxAlignment);
             try
             {
                 Span<byte> bytes = block.WritableSpan[..length];
@@ -1153,7 +1153,7 @@ public sealed class SynopsisCache : IAsyncDisposable
         int length = checked((int)segment.Length);
         if (LeasePeer(name, length + DataTrailerBytes) is { } file)
         {
-            NativeSegmentOwner block = AlignedBufferPool.Shared.Rent(length + DataTrailerBytes, VortexLimits.MaxAlignment);
+            BlockOwner block = BlockPool.Shared.Rent(length + DataTrailerBytes, VortexLimits.MaxAlignment);
             try
             {
                 // Once its bytes held their checksum, a file's read leaves the checksum unread.
@@ -1305,7 +1305,7 @@ public sealed class SynopsisCache : IAsyncDisposable
         {
             if (file is not null)
             {
-                NativeSegmentOwner block = AlignedBufferPool.Shared.Rent((int)length, VortexLimits.MaxAlignment);
+                BlockOwner block = BlockPool.Shared.Rent((int)length, VortexLimits.MaxAlignment);
                 try
                 {
                     Span<byte> bytes = block.WritableSpan[..(int)length];

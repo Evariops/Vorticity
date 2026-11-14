@@ -504,10 +504,10 @@ internal static class CanonicalConcat
     /// The run it publishes may cross more than one chunk's buffer, and that is the point: since
     /// adjacency is tested by address, two blocks that happen to sit end to end are borrowed as a
     /// single span. Both of the things that usually make such a span wrong are absent here. The
-    /// bytes are native - a raw pointer into a mapping or into a rented block, never a managed
-    /// object - so crossing is pointer arithmetic over memory the collector neither tracks nor
-    /// moves; and the blocks are released together with the batch that holds them, never one while
-    /// another is still borrowed.
+    /// bytes do not move, a raw pointer into a mapping or into a rented block the runtime keeps
+    /// pinned, so crossing is pointer arithmetic over memory the collector never relocates; and
+    /// the blocks are released together with the batch that holds them, never one while another
+    /// is still borrowed.
     /// </para>
     /// </remarks>
     private static bool TryBorrowRun(

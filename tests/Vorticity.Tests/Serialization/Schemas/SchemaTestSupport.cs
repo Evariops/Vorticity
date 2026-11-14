@@ -14,10 +14,10 @@ namespace Vorticity.Tests.Serialization.Schemas;
 /// <summary>A 64-byte aligned copy of a buffer in a pinned array, so alignment tests are deterministic.</summary>
 internal struct AlignedBytes : IDisposable
 {
-    private Vorticity.Buffers.PinnedArraySegmentOwner? _owner;
+    private Vorticity.Buffers.BlockOwner? _owner;
 
     internal static AlignedBytes Copy(ReadOnlySpan<byte> bytes) =>
-        new AlignedBytes { _owner = Vorticity.Buffers.PinnedArraySegmentOwner.CopyOf(bytes, VortexLimits.MaxAlignment) };
+        new AlignedBytes { _owner = Vorticity.Buffers.BlockOwner.CopyOf(bytes, VortexLimits.MaxAlignment) };
 
     internal readonly ReadOnlySpan<byte> Span => _owner is { } owner ? owner.Buffer.Span : default;
 

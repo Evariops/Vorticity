@@ -43,7 +43,7 @@ public class AuditCompareKernelBenchmarks
         Random random = new Random(0x51);
         if (Column.StartsWith("bool", StringComparison.Ordinal))
         {
-            BoolStore bools = (BoolStore)ColumnStores.Create(types.Bool(nullable), AlignedBufferPool.Shared, null);
+            BoolStore bools = (BoolStore)ColumnStores.Create(types.Bool(nullable), BlockPool.Shared, null);
             for (int row = 0; row < Rows; row++)
             {
                 if (nulls && row % 10 == 0)
@@ -63,7 +63,7 @@ public class AuditCompareKernelBenchmarks
         else
         {
             PType ptype = Column.StartsWith("i32", StringComparison.Ordinal) ? PType.I32 : Column.StartsWith("f64", StringComparison.Ordinal) ? PType.F64 : PType.I64;
-            FixedStore store = (FixedStore)ColumnStores.Create(types.Primitive(ptype, nullable), AlignedBufferPool.Shared, null);
+            FixedStore store = (FixedStore)ColumnStores.Create(types.Primitive(ptype, nullable), BlockPool.Shared, null);
             for (int row = 0; row < Rows; row++)
             {
                 if (nulls && row % 10 == 0)

@@ -25,7 +25,7 @@ internal sealed class ChunkBytes : IBufferWriter<byte>, IDisposable
     private const int FirstBlock = 64 * 1024;
     private const int LargestBlock = 1024 * 1024;
 
-    private readonly AlignedBufferPool _pool;
+    private readonly BlockPool _pool;
     private readonly List<Block> _blocks = [];
 
     /// <summary>The block being filled; -1 before the first write.</summary>
@@ -33,7 +33,7 @@ internal sealed class ChunkBytes : IBufferWriter<byte>, IDisposable
 
     private long _length;
 
-    internal ChunkBytes(AlignedBufferPool pool) => _pool = pool;
+    internal ChunkBytes(BlockPool pool) => _pool = pool;
 
     /// <summary>The bytes written since the last <see cref="Clear"/>.</summary>
     internal long Length => _length;
@@ -141,14 +141,14 @@ internal sealed class ChunkBytes : IBufferWriter<byte>, IDisposable
 
     private Block Rent(int length)
     {
-        NativeSegmentOwner owner = _pool.Rent(length, VortexLimits.MaxAlignment);
+        BlockOwner owner = _pool.Rent(length, VortexLimits.MaxAlignment);
         return new Block(owner, owner.WritableMemory(0, owner.Length));
     }
 
     /// <summary>A block and its bytes, as a view of the block's array that the sink writes from where they lie.</summary>
-    private sealed class Block(NativeSegmentOwner owner, Memory<byte> memory)
+    private sealed class Block(BlockOwner owner, Memory<byte> memory)
     {
-        internal NativeSegmentOwner Owner { get; } = owner;
+        internal BlockOwner Owner { get; } = owner;
 
         internal Memory<byte> Memory { get; } = memory;
 

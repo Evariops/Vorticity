@@ -273,7 +273,7 @@ internal sealed class ScanSegments : IDisposable
                 VortexBuffer view = requests.GetBuffer(slot);
                 if (entry.Along && owner.Buffer.Length > view.Length)
                 {
-                    NativeSegmentOwner copy = SegmentCache.Copy(view);
+                    BlockOwner copy = SegmentCache.Copy(view);
                     entry.Owner = copy;
                     entry.View = copy.Buffer;
                 }

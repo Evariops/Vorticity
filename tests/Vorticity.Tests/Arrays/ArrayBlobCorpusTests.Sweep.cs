@@ -60,7 +60,7 @@ public sealed class ArrayBlobCorpusSweepTests
             for (int i = 0; i < expected.Count; i++)
             {
                 FlatLeaf leaf = parsed.Leaves[i];
-                using PinnedArraySegmentOwner owner = PinnedArraySegmentOwner.CopyOf(leaf.Segment, 64);
+                using BlockOwner owner = BlockOwner.CopyOf(leaf.Segment, 64);
                 try
                 {
                     if (leaf.InlinedArrayTree is null)

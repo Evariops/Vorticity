@@ -19,11 +19,11 @@ namespace Vorticity.Buffers;
 /// is the only allocator of the library's blocks: there is nothing to free by hand and no finalizer.
 /// </para>
 /// <para>
-/// An instance handed out by <see cref="AlignedBufferPool"/> returns itself to that pool when its reference count reaches
+/// An instance handed out by <see cref="BlockPool"/> returns itself to that pool when its reference count reaches
 /// zero, instead of letting its array go.
 /// </para>
 /// </remarks>
-internal sealed class NativeSegmentOwner : SegmentOwner
+internal sealed class BlockOwner : SegmentOwner
 {
     // Null once the block let its array go: one exchange takes it, so that two releases cannot both drop it.
     private byte[]? _array;
@@ -32,7 +32,7 @@ internal sealed class NativeSegmentOwner : SegmentOwner
     // first byte aligned to it.
     private readonly int _offset;
 
-    private readonly AlignedBufferPool? _pool;
+    private readonly BlockPool? _pool;
     private readonly int _bucketIndex;
     private readonly int _capacity;
     private readonly byte _alignmentExponent;
@@ -44,7 +44,7 @@ internal sealed class NativeSegmentOwner : SegmentOwner
     /// The next block rented by the same arena, while an arena holds this one: the arena chains
     /// its blocks through them rather than listing them in an array it would have to grow.
     /// </summary>
-    internal NativeSegmentOwner? NextOwned;
+    internal BlockOwner? NextOwned;
 
     /// <summary>
     /// Whether the arena whose chain holds this block kept it from the batch before, for an
@@ -52,7 +52,7 @@ internal sealed class NativeSegmentOwner : SegmentOwner
     /// </summary>
     internal bool Idle;
 
-    private NativeSegmentOwner(byte[] array, int offset, int capacity, int length, int alignmentExponent, AlignedBufferPool? pool, int bucketIndex)
+    private BlockOwner(byte[] array, int offset, int capacity, int length, int alignmentExponent, BlockPool? pool, int bucketIndex)
     {
         _array = array;
         _offset = offset;
@@ -82,11 +82,23 @@ internal sealed class NativeSegmentOwner : SegmentOwner
     /// two within the supported cap.
     /// </exception>
     /// <exception cref="OutOfMemoryException">The allocation failed.</exception>
-    public static NativeSegmentOwner Allocate(int length, int alignment)
+    public static BlockOwner Allocate(int length, int alignment)
     {
         int exponent = CheckLengthAndAlignment(length, alignment);
         (byte[] array, int offset) = AllocRaw(length, alignment);
-        return new NativeSegmentOwner(array, offset, length, length, exponent, pool: null, bucketIndex: -1);
+        return new BlockOwner(array, offset, length, length, exponent, pool: null, bucketIndex: -1);
+    }
+
+    /// <summary>A block aligned to <paramref name="alignment"/> holding a copy of <paramref name="data"/>.</summary>
+    /// <param name="data">The bytes to copy.</param>
+    /// <param name="alignment">A power of two in <c>[1, <see cref="VortexLimits.MaxAlignment"/>]</c>.</param>
+    /// <returns>An owner with a reference count of 1.</returns>
+    /// <exception cref="VortexFormatException"><paramref name="alignment"/> is out of range.</exception>
+    public static BlockOwner CopyOf(ReadOnlySpan<byte> data, int alignment)
+    {
+        BlockOwner owner = Allocate(data.Length, alignment);
+        data.CopyTo(owner.WritableSpan);
+        return owner;
     }
 
     /// <summary>
@@ -116,7 +128,7 @@ internal sealed class NativeSegmentOwner : SegmentOwner
 
     /// <summary><see langword="true"/> when this owner was rented from <paramref name="pool"/>.</summary>
     /// <param name="pool">The candidate pool.</param>
-    internal bool BelongsTo(AlignedBufferPool pool) => ReferenceEquals(_pool, pool);
+    internal bool BelongsTo(BlockPool pool) => ReferenceEquals(_pool, pool);
 
     /// <inheritdoc/>
     private protected override bool IsRecycled => _pool is not null;
@@ -127,10 +139,10 @@ internal sealed class NativeSegmentOwner : SegmentOwner
     /// <inheritdoc/>
     protected override void FreeCore()
     {
-        AlignedBufferPool? pool = _pool;
+        BlockPool? pool = _pool;
         if (pool is not null)
         {
-            AlignedBufferPool.Watch?.Released(this);
+            BlockPool.Watch?.Released(this);
         }
 
         // A parked owner keeps its array for the next rent; any other lets it go to the collector.
@@ -191,8 +203,8 @@ internal sealed class NativeSegmentOwner : SegmentOwner
         return (array, (int)(Alignment.AlignUp(address, alignment) - address));
     }
 
-    internal static NativeSegmentOwner AllocatePooled(
-        AlignedBufferPool pool,
+    internal static BlockOwner AllocatePooled(
+        BlockPool pool,
         int bucketIndex,
         int capacity,
         int length)
@@ -201,7 +213,7 @@ internal sealed class NativeSegmentOwner : SegmentOwner
         // aligned to 64 satisfies every legal segment alignment, so buckets stay
         // alignment-agnostic and blocks are genuinely interchangeable.
         (byte[] array, int offset) = AllocRaw(capacity, VortexLimits.MaxAlignment);
-        return new NativeSegmentOwner(array, offset, capacity, length, VortexLimits.MaxAlignmentExponent, pool, bucketIndex);
+        return new BlockOwner(array, offset, capacity, length, VortexLimits.MaxAlignmentExponent, pool, bucketIndex);
     }
 
     internal static int CheckLengthAndAlignment(int length, int alignment)
@@ -247,6 +259,6 @@ internal sealed class NativeSegmentOwner : SegmentOwner
     [DoesNotReturn]
     private static byte[] ThrowFreed() =>
         throw new ObjectDisposedException(
-            nameof(NativeSegmentOwner),
+            nameof(BlockOwner),
             "The block has been released; its memory is no longer addressable.");
 }

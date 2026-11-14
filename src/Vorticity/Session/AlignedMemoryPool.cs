@@ -20,7 +20,7 @@ public sealed class AlignedMemoryPool : MemoryPool<byte>
 {
     private readonly int _alignment = VortexLimits.MaxAlignment;
 
-    internal AlignedMemoryPool(AlignedBufferPool inner)
+    internal AlignedMemoryPool(BlockPool inner)
     {
         Inner = inner;
     }
@@ -37,14 +37,14 @@ public sealed class AlignedMemoryPool : MemoryPool<byte>
         }
 
         _alignment = alignment;
-        Inner = new AlignedBufferPool(maxRetainedBytes).Swept();
+        Inner = new BlockPool(maxRetainedBytes).Swept();
     }
 
     /// <summary>The process-wide pool, which <see cref="VortexSession.Default"/> uses.</summary>
-    public static new AlignedMemoryPool Shared { get; } = new AlignedMemoryPool(AlignedBufferPool.Shared);
+    public static new AlignedMemoryPool Shared { get; } = new AlignedMemoryPool(BlockPool.Shared);
 
     /// <summary>The engine's pool behind this one.</summary>
-    internal AlignedBufferPool Inner { get; }
+    internal BlockPool Inner { get; }
 
     /// <inheritdoc/>
     public override int MaxBufferSize => int.MaxValue - VortexLimits.MaxAlignment;
@@ -65,9 +65,9 @@ public sealed class AlignedMemoryPool : MemoryPool<byte>
     {
         private readonly AlignedMemoryPool _pool;
         private readonly int _length;
-        private NativeSegmentOwner? _block;
+        private BlockOwner? _block;
 
-        internal Lease(AlignedMemoryPool pool, NativeSegmentOwner block, int length)
+        internal Lease(AlignedMemoryPool pool, BlockOwner block, int length)
         {
             _pool = pool;
             _block = block;
@@ -76,7 +76,7 @@ public sealed class AlignedMemoryPool : MemoryPool<byte>
 
         public override Span<byte> GetSpan()
         {
-            NativeSegmentOwner block = _block ?? throw new ObjectDisposedException(nameof(AlignedMemoryPool), "The block has been returned to its pool.");
+            BlockOwner block = _block ?? throw new ObjectDisposedException(nameof(AlignedMemoryPool), "The block has been returned to its pool.");
             return block.WritableSpan[.._length];
         }
 
@@ -99,7 +99,7 @@ public sealed class AlignedMemoryPool : MemoryPool<byte>
 
         protected override void Dispose(bool disposing)
         {
-            NativeSegmentOwner? block = Interlocked.Exchange(ref _block, null);
+            BlockOwner? block = Interlocked.Exchange(ref _block, null);
             if (block is null)
             {
                 return;

@@ -437,7 +437,7 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
     // whose counts went, and the whole null once the column holds more than AttachLimit values.
     private readonly int _field;
     private int[] _batchEntries = [];
-    private NativeSegmentOwner?[]? _distinct;
+    private BlockOwner?[]? _distinct;
 
     /// <param name="sheet">The column's sheet, fed first, which numbers its rows' values.</param>
     /// <param name="plan">What the file's counts share.</param>
@@ -448,7 +448,7 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
         _sheet = sheet;
         _plan = plan;
         _field = field;
-        _distinct = new NativeSegmentOwner?[plan.Wide.Count];
+        _distinct = new BlockOwner?[plan.Wide.Count];
 
         _self = plan.MeasureOf(field);
         _number = _self >= 0;
@@ -667,7 +667,7 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
         get
         {
             long bytes = 0;
-            foreach (NativeSegmentOwner? block in _distinct ?? [])
+            foreach (BlockOwner? block in _distinct ?? [])
             {
                 bytes += block?.Length ?? 0;
             }
@@ -734,18 +734,18 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
     /// twice over when they pass it, the registers past those it held zeroed: a column's registers were an array an entry,
     /// a sixth of what a consolidation allocated, and its block goes back to the pool for the next object's.
     /// </summary>
-    private static Span<byte> Registers(ref NativeSegmentOwner? block, int entries)
+    private static Span<byte> Registers(ref BlockOwner? block, int entries)
     {
         int bytes = checked(entries * ColumnSheet.Registers);
         if (block is null || block.Length < bytes)
         {
             int held = block?.Length ?? 0;
-            NativeSegmentOwner grown = AlignedBufferPool.Shared.Rent(Math.Max(bytes, Math.Max(16 * ColumnSheet.Registers, 2 * held)), 64);
+            BlockOwner grown = BlockPool.Shared.Rent(Math.Max(bytes, Math.Max(16 * ColumnSheet.Registers, 2 * held)), 64);
             Span<byte> into = grown.WritableSpan;
             if (block is not null)
             {
                 block.WritableSpan.CopyTo(into);
-                AlignedBufferPool.Shared.Return(block);
+                BlockPool.Shared.Return(block);
             }
 
             into[held..].Clear();
@@ -756,11 +756,11 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
     }
 
     /// <summary>Gives a column's registers back to the pool.</summary>
-    private static void Release(ref NativeSegmentOwner? block)
+    private static void Release(ref BlockOwner? block)
     {
         if (block is not null)
         {
-            AlignedBufferPool.Shared.Return(block);
+            BlockPool.Shared.Return(block);
             block = null;
         }
     }
@@ -1102,7 +1102,7 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
             int at = 1;
             for (int a = 0; registers is not null && a < attached.Count; a++)
             {
-                NativeSegmentOwner? held = _distinct![attached[a]];
+                BlockOwner? held = _distinct![attached[a]];
                 ReadOnlySpan<byte> ranks = held is not null && (long)(entry + 1) * ColumnSheet.Registers <= held.Length
                     ? held.WritableSpan.Slice(entry * ColumnSheet.Registers, ColumnSheet.Registers)
                     : default;

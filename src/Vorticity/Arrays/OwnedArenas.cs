@@ -29,7 +29,7 @@ internal static class OwnedArenas
     }
 
     /// <summary>An arena a batch gave back that rents from <paramref name="pool"/>, or a new one of <paramref name="capacity"/> records.</summary>
-    internal static CanonicalArena Rent(int capacity, AlignedBufferPool pool)
+    internal static CanonicalArena Rent(int capacity, BlockPool pool)
     {
         lock (Gate)
         {

@@ -22,7 +22,7 @@ internal interface IPositionalReader
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>How a coalesced run is delivered.</b> One 64-byte-aligned native buffer is taken per run,
+/// <b>How a coalesced run is delivered.</b> One 64-byte-aligned pooled block is taken per run,
 /// the run is read into it with a single positional read, and every segment in the run is
 /// published as a <em>view</em> into that buffer, with no per-segment copy. The alternative, a
 /// vectored read scattering into one buffer per segment plus throwaways for the gaps, transfers
@@ -72,7 +72,7 @@ internal static class CoalescedReads
             for (int r = 0; r < runCount; r++)
             {
                 CoalescedRun run = runs[r];
-                NativeSegmentOwner block = RentBlock(run.Length, options);
+                BlockOwner block = RentBlock(run.Length, options);
                 try
                 {
                     ReadExact(reader, block.WritableSpan[..run.Length], run.Start);
@@ -149,7 +149,7 @@ internal static class CoalescedReads
     /// <returns>Whether the segments were published as views.</returns>
     internal static bool Publish(
         SegmentRequestSet requests,
-        NativeSegmentOwner block,
+        BlockOwner block,
         in CoalescedRun run,
         SegmentSpec[] sorted,
         int[] order,
@@ -169,10 +169,10 @@ internal static class CoalescedReads
     /// A block of at least <paramref name="length"/> bytes, pooled up to the options' ceiling, and past
     /// the shared pool's classes by the one block it keeps beyond them.
     /// </summary>
-    internal static NativeSegmentOwner RentBlock(int length, SegmentReadOptions options) =>
-        length <= options.MaxPooledBytes || length > AlignedBufferPool.Shared.MaxPooledLength
-            ? AlignedBufferPool.Shared.Rent(length, VortexLimits.MaxAlignment)
-            : NativeSegmentOwner.Allocate(length, VortexLimits.MaxAlignment);
+    internal static BlockOwner RentBlock(int length, SegmentReadOptions options) =>
+        length <= options.MaxPooledBytes || length > BlockPool.Shared.MaxPooledLength
+            ? BlockPool.Shared.Rent(length, VortexLimits.MaxAlignment)
+            : BlockOwner.Allocate(length, VortexLimits.MaxAlignment);
 
     /// <summary>
     /// Whether a run's segments should be published as views into its buffer, or copied out.
@@ -206,7 +206,7 @@ internal static class CoalescedReads
     /// <summary>Copies each segment of a sparse run into its own buffer, freeing the run buffer.</summary>
     private static void PublishRunByCopy(
         SegmentRequestSet requests,
-        NativeSegmentOwner block,
+        BlockOwner block,
         in CoalescedRun run,
         SegmentSpec[] sorted,
         int[] order,
@@ -225,7 +225,7 @@ internal static class CoalescedReads
             }
 
             int length = (int)spec.Length;
-            NativeSegmentOwner owner = RentBlock(length, options);
+            BlockOwner owner = RentBlock(length, options);
 
             try
             {
@@ -250,7 +250,7 @@ internal static class CoalescedReads
     /// <summary>Publishes every segment of a completed run as a zero-copy view into its block.</summary>
     private static void PublishRun(
         SegmentRequestSet requests,
-        NativeSegmentOwner block,
+        BlockOwner block,
         in CoalescedRun run,
         SegmentSpec[] sorted,
         int[] order)

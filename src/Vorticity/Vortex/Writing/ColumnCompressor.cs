@@ -988,7 +988,7 @@ internal static class ColumnCompressor
     /// thing it means everywhere else here: measure it yourself.
     /// </param>
     /// <param name="workspace">
-    /// The writer's blob workspace, whose zstd encoder a trial compresses in so that the native
+    /// The writer's blob workspace, whose zstd encoder a trial compresses in so that the encoder's
     /// context is made once per writer rather than once per trial; absent, a trial makes its own.
     /// </param>
     /// <returns>The plan; <see cref="ColumnPlan.Canonical"/> when nothing wins.</returns>

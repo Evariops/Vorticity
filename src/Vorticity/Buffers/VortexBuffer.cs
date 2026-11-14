@@ -78,8 +78,8 @@ internal readonly unsafe struct VortexBuffer
 
     /// <summary>
     /// Wraps an already-pinned span. Pins nothing: the caller guarantees
-    /// <paramref name="pinned"/> is fixed (pinned object heap, <c>fixed</c>, native memory, or a
-    /// memory-mapped view) for the whole lifetime of the returned buffer.
+    /// <paramref name="pinned"/> is fixed (pinned object heap, <c>fixed</c>, a caller's pinned
+    /// lease, or a memory-mapped view) for the whole lifetime of the returned buffer.
     /// </summary>
     /// <param name="pinned">The pinned bytes.</param>
     /// <param name="alignmentExponent">Declared alignment exponent, in

@@ -19,7 +19,7 @@ public sealed class ObjectSegmentSinkTailTests
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
         await using MemoryObjectStore store = new MemoryObjectStore();
-        AlignedBufferPool pool = new AlignedBufferPool();
+        BlockPool pool = new BlockPool();
         ObjectSegmentSink sink = new ObjectSegmentSink(store, "data/tail.vortex", streamedFrom: 1 << 10);
         byte[] body = new byte[8 << 10];
         byte[] tail = new byte[1 << 10];

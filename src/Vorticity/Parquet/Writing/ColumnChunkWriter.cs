@@ -68,7 +68,7 @@ internal sealed class ColumnChunkWriter : IDisposable
     private readonly PooledBytes _compressed;
     private readonly ChunkBytes _chunk;
     private readonly byte[] _validity;
-    private NativeSegmentOwner? _levelBytes;
+    private BlockOwner? _levelBytes;
 
     /// <summary>The page's validity as the words the compressing kernel takes, a block's worth.</summary>
     private readonly ulong[] _mask;
@@ -124,8 +124,8 @@ internal sealed class ColumnChunkWriter : IDisposable
     /// <summary>The dictionary page, written ahead of the data pages when the chunk closes.</summary>
     private readonly PooledBytes _dictionaryPage;
 
-    private NativeSegmentOwner? _pageCodes;
-    private NativeSegmentOwner? _firstOccurrences;
+    private BlockOwner? _pageCodes;
+    private BlockOwner? _firstOccurrences;
     private DistinctTable? _table;
 
     /// <summary>Whether the chunk's pages are still dictionary-encoded.</summary>
@@ -153,9 +153,9 @@ internal sealed class ColumnChunkWriter : IDisposable
     /// <summary>A page encoded otherwise than PLAIN, and a byte array page's values without their lengths.</summary>
     private readonly PooledBytes _encoded;
     private readonly PooledBytes _data;
-    private NativeSegmentOwner? _lengths;
-    private NativeSegmentOwner? _prefixes;
-    private NativeSegmentOwner? _suffixes;
+    private BlockOwner? _lengths;
+    private BlockOwner? _prefixes;
+    private BlockOwner? _suffixes;
 
     /// <summary>Per encoding, the chunk's data pages that took it.</summary>
     private readonly int[] _pagesBy = new int[16];
@@ -232,7 +232,7 @@ internal sealed class ColumnChunkWriter : IDisposable
     private PooledBytes? _plain;
 
     /// <summary>The pool the writer's buffers are of.</summary>
-    private readonly AlignedBufferPool _pool;
+    private readonly BlockPool _pool;
 
     /// <summary>
     /// The encoding the caller pinned the column to, which the writer checked the column takes: a
@@ -283,7 +283,7 @@ internal sealed class ColumnChunkWriter : IDisposable
     /// <summary>The PLAIN values of a page's entries, its bounds' input.</summary>
     private PooledBytes? _entriesBounded;
 
-    internal ColumnChunkWriter(WriteColumn column, CompressionCodec codec, int level, Compressors? compressors, int blockRows, CompressionProfile profile, AlignedBufferPool pool, double bloomRate = 0, int rowGroupRows = 0)
+    internal ColumnChunkWriter(WriteColumn column, CompressionCodec codec, int level, Compressors? compressors, int blockRows, CompressionProfile profile, BlockPool pool, double bloomRate = 0, int rowGroupRows = 0)
     {
         _rowValidity = column.Nullable && !column.Nested;
         if (column.Nested)
@@ -993,7 +993,7 @@ internal sealed class ColumnChunkWriter : IDisposable
     /// a column allocates only the arrays its encodings use, a fixed-width one with no null and no
     /// dictionary none.
     /// </summary>
-    private Span<T> Scratch<T>(ref NativeSegmentOwner? block, int count)
+    private Span<T> Scratch<T>(ref BlockOwner? block, int count)
         where T : unmanaged
     {
         int held = Held<T>(block).Length;
@@ -1011,7 +1011,7 @@ internal sealed class ColumnChunkWriter : IDisposable
     }
 
     /// <summary>The elements one of the scratch arrays holds; empty before its first use.</summary>
-    private static Span<T> Held<T>(NativeSegmentOwner? block)
+    private static Span<T> Held<T>(BlockOwner? block)
         where T : unmanaged =>
         block is null ? default : MemoryMarshal.Cast<byte, T>(block.WritableSpan);
 
@@ -1998,8 +1998,8 @@ internal sealed class ColumnChunkWriter : IDisposable
         private const int HeaderBound = 256;
 
         private readonly ColumnChunkWriter _writer;
-        private readonly NativeSegmentOwner _source;
-        private readonly NativeSegmentOwner _target;
+        private readonly BlockOwner _source;
+        private readonly BlockOwner _target;
         private readonly int _levels;
         private readonly int _input;
         private int _stored;

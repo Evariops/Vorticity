@@ -62,7 +62,7 @@ public sealed class SegmentSourceFailureTests
                     }
 
                     SegmentSpec spec = requests.GetSpec(slot);
-                    PinnedArraySegmentOwner owner = PinnedArraySegmentOwner.CopyOf(
+                    BlockOwner owner = BlockOwner.CopyOf(
                         _content.AsSpan((int)spec.Offset, (int)spec.Length),
                         1 << spec.AlignmentExponent);
 

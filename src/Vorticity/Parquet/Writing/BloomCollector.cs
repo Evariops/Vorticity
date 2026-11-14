@@ -51,7 +51,7 @@ internal sealed class BloomCollector : IDisposable
     /// <param name="rate">The false-positive rate asked, in (0, 1).</param>
     /// <param name="mostValues">The most values a chunk holds: a flat column's row group's rows.</param>
     /// <param name="pool">The engine's pool.</param>
-    internal BloomCollector(WriteColumn column, double rate, long mostValues, AlignedBufferPool pool)
+    internal BloomCollector(WriteColumn column, double rate, long mostValues, BlockPool pool)
     {
         _ppm = (int)Math.Clamp(Math.Round(rate * 1_000_000), 1, 999_999);
         _width = column.Conversion == ValueConversion.ByteArray ? 0 : column.ValueWidth;

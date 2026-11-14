@@ -305,7 +305,7 @@ internal sealed class ObjectSegmentSink : ISegmentSink, IAsyncDisposable
     /// nor beside them: the tail is an array of the shared pool, which they give back. A segment read before is the bytes
     /// copied out of it (<see cref="SourceReader"/> copies a lease over a managed array), and outlives the sink.
     /// </summary>
-    internal ISegmentReader? Tail(Buffers.AlignedBufferPool pool) =>
+    internal ISegmentReader? Tail(Buffers.BlockPool pool) =>
         _pipe is not null && _tailFrom >= 0 && _tail is not null && !_released
             ? new TailReader(new SourceReader(new TailSource(this), ownsSource: true, pool), _tailUsed)
             : null;

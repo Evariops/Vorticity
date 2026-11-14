@@ -386,7 +386,7 @@ public sealed class ScanContextTests
     private static void Load(ScanContext scan, byte[] blob)
     {
         // The owner lives as long as the test method, which outlives every use of the arena here.
-        PinnedArraySegmentOwner owner = PinnedArraySegmentOwner.CopyOf(blob, 64);
+        BlockOwner owner = BlockOwner.CopyOf(blob, 64);
         scan.Decode.LoadBlob(owner.Buffer);
     }
 }

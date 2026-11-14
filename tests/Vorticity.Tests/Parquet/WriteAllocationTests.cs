@@ -71,7 +71,7 @@ public sealed class WriteAllocationTests : IDisposable
 
     /// <summary>A session over a pool of its own, graded as the shared pool is.</summary>
     private static VortexSession Isolated() =>
-        VortexSession.Create(options => options.MemoryPool = new AlignedMemoryPool(AlignedBufferPool.Graded(32 * 1024 * 1024, 8, demandBudget: 256L * 1024 * 1024)));
+        VortexSession.Create(options => options.MemoryPool = new AlignedMemoryPool(BlockPool.Graded(32 * 1024 * 1024, 8, demandBudget: 256L * 1024 * 1024)));
 
     /// <summary>A schema of every kind of column the writer stages: integers, floats, text, bytes, booleans, nulls and lists.</summary>
     private static VortexSchema Mixed =>

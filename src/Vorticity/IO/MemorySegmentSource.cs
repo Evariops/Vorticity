@@ -48,7 +48,7 @@ public sealed class MemorySegmentSource : ISegmentSource, ISegmentReader
 
         try
         {
-            PinnedArraySegmentOwner copy = PinnedArraySegmentOwner.CopyOf(bytes.Span, VortexLimits.MaxAlignment);
+            BlockOwner copy = BlockOwner.CopyOf(bytes.Span, VortexLimits.MaxAlignment);
             _owner = copy;
             _base = (byte*)Unsafe.AsPointer(ref MemoryMarshal.GetReference(copy.WritableSpan));
         }
@@ -180,7 +180,7 @@ public sealed class MemorySegmentSource : ISegmentSource, ISegmentReader
             _owner.Retain();
             try
             {
-                return PinnedArraySegmentOwner.CopyOf(new ReadOnlySpan<byte>(at, length), alignment);
+                return BlockOwner.CopyOf(new ReadOnlySpan<byte>(at, length), alignment);
             }
             finally
             {

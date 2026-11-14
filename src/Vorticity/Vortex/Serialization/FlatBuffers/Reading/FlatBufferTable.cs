@@ -339,7 +339,7 @@ internal readonly ref struct FlatBufferTable
     /// The alignment tested is that of the element <em>address</em>, and the requirement is
     /// <c>alignof(T)</c>, never <c>sizeof(T)</c>: <c>Buffer</c> is 8 bytes but only 4-byte aligned,
     /// so demanding 8 would reject legal files. The test is meaningful because the buffers this
-    /// reader is handed are pinned or native and 64-byte aligned; an unpinned managed array can in
+    /// reader is handed are pinned or mapped and 64-byte aligned; an unpinned managed array can in
     /// principle be moved by the garbage collector after the check.
     /// </para>
     /// </remarks>

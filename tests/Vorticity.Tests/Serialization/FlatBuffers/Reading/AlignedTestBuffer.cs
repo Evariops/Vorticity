@@ -10,10 +10,10 @@ namespace Vorticity.Tests.Serialization.FlatBuffers;
 
 internal struct AlignedTestBuffer : IDisposable
 {
-    private PinnedArraySegmentOwner? _owner;
+    private BlockOwner? _owner;
 
     internal static AlignedTestBuffer Copy(ReadOnlySpan<byte> bytes) =>
-        new AlignedTestBuffer { _owner = PinnedArraySegmentOwner.CopyOf(bytes, VortexLimits.MaxAlignment) };
+        new AlignedTestBuffer { _owner = BlockOwner.CopyOf(bytes, VortexLimits.MaxAlignment) };
 
     internal readonly ReadOnlySpan<byte> Span => _owner is { } owner ? owner.Buffer.Span : default;
 

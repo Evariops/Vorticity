@@ -48,7 +48,7 @@ internal sealed class NestedFieldReader
     /// column under it; a variant read as its group when <paramref name="storage"/>, its columns'
     /// values as the file holds them.
     /// </summary>
-    internal NestedFieldReader(ParquetField field, DType type, ParquetSchema schema, DTypeArena types, DType validity, AlignedBufferPool pool, long cap, bool storage = false)
+    internal NestedFieldReader(ParquetField field, DType type, ParquetSchema schema, DTypeArena types, DType validity, BlockPool pool, long cap, bool storage = false)
     {
         _validity = validity;
         List<ColumnChunkReader> readers = [];
@@ -399,7 +399,7 @@ internal sealed class NestedFieldReader
 
     /// <summary>What the plan of a field's parts is made with.</summary>
     /// <summary>What the plan of a field's parts is made with; <c>Storage</c> reads a variant as its group.</summary>
-    private sealed record Columns(ParquetSchema Schema, DTypeArena Types, DType Validity, AlignedBufferPool Pool, long Cap, List<ColumnChunkReader> Readers, bool Storage);
+    private sealed record Columns(ParquetSchema Schema, DTypeArena Types, DType Validity, BlockPool Pool, long Cap, List<ColumnChunkReader> Readers, bool Storage);
 
     /// <summary>A node of the field's tree: its dtype, its children, and the column that describes its structure.</summary>
     private sealed class Part

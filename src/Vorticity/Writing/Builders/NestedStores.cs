@@ -10,14 +10,14 @@ internal sealed class StructStore : ColumnStore
 {
     private int _rows;
 
-    internal StructStore(DType dtype, ColumnStore[] children, AlignedBufferPool pool)
+    internal StructStore(DType dtype, ColumnStore[] children, BlockPool pool)
         : base(dtype, pool)
     {
         Children = children;
     }
 
     /// <summary>A struct whose type is given rather than read off the dtype: the one column of a file whose root is not a struct, seen as a struct of it.</summary>
-    internal StructStore(DType dtype, VortexType type, ColumnStore[] children, AlignedBufferPool pool)
+    internal StructStore(DType dtype, VortexType type, ColumnStore[] children, BlockPool pool)
         : base(dtype, type, pool)
     {
         Children = children;
@@ -178,17 +178,17 @@ internal sealed class StructStore : ColumnStore
 /// <summary>A list column: an offset and a size per row over one elements column, the form the engine's list view reads.</summary>
 internal sealed unsafe class ListStore : ColumnStore
 {
-    private NativeSegmentOwner? _offsetsOwner;
+    private BlockOwner? _offsetsOwner;
     private byte* _offsets;
     private int _offsetBytes;
-    private NativeSegmentOwner? _sizesOwner;
+    private BlockOwner? _sizesOwner;
     private byte* _sizes;
     private int _sizeBytes;
     private int _capacity;
     private bool _open;
     private int _openStart;
 
-    internal ListStore(DType dtype, ColumnStore elements, AlignedBufferPool pool)
+    internal ListStore(DType dtype, ColumnStore elements, BlockPool pool)
         : base(dtype, pool)
     {
         Elements = elements;
@@ -407,7 +407,7 @@ internal sealed class FixedListStore : ColumnStore
     private bool _open;
     private int _openStart;
 
-    internal FixedListStore(DType dtype, ColumnStore elements, AlignedBufferPool pool)
+    internal FixedListStore(DType dtype, ColumnStore elements, BlockPool pool)
         : base(dtype, pool)
     {
         Elements = elements;
@@ -548,7 +548,7 @@ internal sealed class FixedListStore : ColumnStore
 /// <summary>An extension column: its storage, labelled with the extension's dtype when it is built.</summary>
 internal sealed class ExtensionStore : ColumnStore
 {
-    internal ExtensionStore(DType dtype, ColumnStore storage, AlignedBufferPool pool)
+    internal ExtensionStore(DType dtype, ColumnStore storage, BlockPool pool)
         : base(dtype, pool)
     {
         Storage = storage;
@@ -594,7 +594,7 @@ internal sealed class ExtensionStore : ColumnStore
 /// <summary>Makes the store tree of a dtype.</summary>
 internal static class ColumnStores
 {
-    internal static ColumnStore Create(DType dtype, AlignedBufferPool pool, VortexExtensionRegistry? extensions)
+    internal static ColumnStore Create(DType dtype, BlockPool pool, VortexExtensionRegistry? extensions)
     {
         ColumnStore store = Create(dtype, pool);
         Attach(store, extensions);
@@ -605,7 +605,7 @@ internal static class ColumnStores
     /// The store of a file's rows, whose root is <paramref name="schema"/>: the struct of its columns,
     /// or, for a root that is not a struct, its one column seen as a struct of it.
     /// </summary>
-    internal static StructStore Root(DType schema, AlignedBufferPool pool, VortexExtensionRegistry? extensions)
+    internal static StructStore Root(DType schema, BlockPool pool, VortexExtensionRegistry? extensions)
     {
         ColumnStore store = Create(schema, pool, extensions);
         return schema.Kind == DTypeKind.Struct
@@ -639,7 +639,7 @@ internal static class ColumnStores
         }
     }
 
-    private static ColumnStore Create(DType dtype, AlignedBufferPool pool)
+    private static ColumnStore Create(DType dtype, BlockPool pool)
     {
         switch (dtype.Kind)
         {

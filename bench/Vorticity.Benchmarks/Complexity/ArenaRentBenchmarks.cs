@@ -59,7 +59,7 @@ public class ArenaRentBenchmarks
 
     private const int SmallBytes = 1024;
 
-    private AlignedBufferPool _pool = null!;
+    private BlockPool _pool = null!;
     private ChainedBlocks _original = null!;
     private CanonicalArena _library = null!;
     private int _batch;
@@ -68,7 +68,7 @@ public class ArenaRentBenchmarks
     [GlobalSetup]
     public void Setup()
     {
-        _pool = AlignedBufferPool.Graded(32 * 1024 * 1024, 8, demandBudget: 1L << 30);
+        _pool = BlockPool.Graded(32 * 1024 * 1024, 8, demandBudget: 1L << 30);
         _original = new ChainedBlocks(_pool);
         _library = new CanonicalArena(64, _pool);
     }
@@ -137,18 +137,18 @@ public class ArenaRentBenchmarks
     /// own here carries the same three fields a rent reads, so that a step of the walk touches one
     /// object, as it did.
     /// </remarks>
-    private sealed class Block(NativeSegmentOwner owner)
+    private sealed class Block(BlockOwner owner)
     {
-        internal readonly NativeSegmentOwner Owner = owner;
+        internal readonly BlockOwner Owner = owner;
         internal readonly int Capacity = owner.Capacity;
         internal Block? Next;
         internal bool Idle;
     }
 
     /// <summary>The arena's blocks before the change: one chain, in service and idle together.</summary>
-    private sealed class ChainedBlocks(AlignedBufferPool pool)
+    private sealed class ChainedBlocks(BlockPool pool)
     {
-        private readonly AlignedBufferPool _pool = pool;
+        private readonly BlockPool _pool = pool;
         private Block? _owned;
         private int _slabUsed = -1;
 
@@ -232,14 +232,14 @@ public class ArenaRentBenchmarks
 
             idle.Next = null;
             idle.Idle = false;
-            NativeSegmentOwner.CheckLengthAndAlignment(length, alignment);
+            BlockOwner.CheckLengthAndAlignment(length, alignment);
             idle.Owner.ResetForRent(length);
             return idle;
         }
 
         private int Carve(int byteLength, int alignment)
         {
-            NativeSegmentOwner.CheckLengthAndAlignment(byteLength, alignment);
+            BlockOwner.CheckLengthAndAlignment(byteLength, alignment);
             int start = (_slabUsed + alignment - 1) & -alignment;
             Block? slab = _owned;
             if (_slabUsed < 0 || start + byteLength > slab!.Owner.Length)
@@ -278,7 +278,7 @@ public class ArenaRentBenchmarks
 
     private const int LargestSlabBytes = 64 * 1024;
 
-    private static int CapacityFor(AlignedBufferPool pool, int length) =>
+    private static int CapacityFor(BlockPool pool, int length) =>
         length > pool.MaxPooledLength ? length
             : length <= 4096 ? 4096 : (int)BitOperations.RoundUpToPowerOf2((uint)length);
 }

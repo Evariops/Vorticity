@@ -31,7 +31,7 @@ internal sealed class PeakMemory : IDisposable
 
     internal long Peak => Interlocked.Read(ref _peak);
 
-    /// <summary>The bytes of the blocks the library held at the peak, rented or parked (<see cref="NativeSegmentOwner.LiveBytes"/>).</summary>
+    /// <summary>The bytes of the blocks the library held at the peak, rented or parked (<see cref="BlockOwner.LiveBytes"/>).</summary>
     internal long PeakBlocks { get; private set; }
 
     /// <summary>The bytes of <see cref="PeakBlocks"/> parked in the shared pool, held for a later rent rather than in use.</summary>
@@ -48,8 +48,8 @@ internal sealed class PeakMemory : IDisposable
             long bytes = PrivateBytes(self);
             if (bytes > Interlocked.Read(ref _peak))
             {
-                PeakBlocks = NativeSegmentOwner.LiveBytes;
-                PeakParked = AlignedBufferPool.Shared.ParkedBytes;
+                PeakBlocks = BlockOwner.LiveBytes;
+                PeakParked = BlockPool.Shared.ParkedBytes;
                 PeakCommitted = GC.GetGCMemoryInfo().TotalCommittedBytes;
                 Interlocked.Exchange(ref _peak, bytes);
             }

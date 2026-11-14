@@ -85,7 +85,7 @@ public class SegmentCacheEvictBenchmarks
 
     private void Keep(object source, long offset)
     {
-        NativeSegmentOwner owner = AlignedBufferPool.Shared.Rent(64, 64);
+        BlockOwner owner = BlockPool.Shared.Rent(64, 64);
         _cache.Add(source, offset * 64, owner, owner.Buffer);
         owner.Release();
     }

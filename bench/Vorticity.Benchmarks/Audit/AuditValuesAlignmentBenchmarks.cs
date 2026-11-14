@@ -19,8 +19,8 @@ public unsafe class AuditValuesAlignmentBenchmarks : IDisposable
 {
     private const int Values = 65_536;
 
-    private Vorticity.Buffers.NativeSegmentOwner? _blockOwner;
-    private Vorticity.Buffers.NativeSegmentOwner? _copyOwner;
+    private Vorticity.Buffers.BlockOwner? _blockOwner;
+    private Vorticity.Buffers.BlockOwner? _copyOwner;
     private byte* _block;
     private byte* _copy;
 
@@ -28,8 +28,8 @@ public unsafe class AuditValuesAlignmentBenchmarks : IDisposable
     [GlobalSetup]
     public void Setup()
     {
-        _blockOwner = Vorticity.Buffers.NativeSegmentOwner.Allocate((Values * 8) + 64, 64);
-        _copyOwner = Vorticity.Buffers.NativeSegmentOwner.Allocate(Values * 8, 64);
+        _blockOwner = Vorticity.Buffers.BlockOwner.Allocate((Values * 8) + 64, 64);
+        _copyOwner = Vorticity.Buffers.BlockOwner.Allocate(Values * 8, 64);
         _block = (byte*)Unsafe.AsPointer(ref MemoryMarshal.GetReference(_blockOwner.WritableSpan));
         _copy = (byte*)Unsafe.AsPointer(ref MemoryMarshal.GetReference(_copyOwner.WritableSpan));
         Random random = new Random(3);

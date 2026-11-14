@@ -42,7 +42,7 @@ internal sealed class RetainingArena : CanonicalArena
     // the arena is reset.
     private CanonicalOrigin[]? _origins;
 
-    /// <summary>Creates an arena backed by <see cref="Buffers.AlignedBufferPool.Shared"/>.</summary>
+    /// <summary>Creates an arena backed by <see cref="Buffers.BlockPool.Shared"/>.</summary>
     /// <param name="initialCapacity">Hint for the record array's initial size. Must be positive.</param>
     internal RetainingArena(int initialCapacity = 64)
         : base(initialCapacity)

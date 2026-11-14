@@ -143,7 +143,7 @@ public sealed class QueryMemoryBudget
             }
 
             Aggregating.ArrayShelf.Retained.Relieve();
-            AlignedBufferPool.Shared.Trim();
+            BlockPool.Shared.Trim();
             if (TryAdd(ref _reserved, bytes, Available()))
             {
                 return true;

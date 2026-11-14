@@ -30,11 +30,11 @@ namespace Vorticity.Parquet.Writing;
 /// block of rows to the next and given back when the writer is.
 /// </para>
 /// </remarks>
-internal sealed class Shredder(AlignedBufferPool pool) : IDisposable
+internal sealed class Shredder(BlockPool pool) : IDisposable
 {
     private Entries _current = new(pool);
     private Entries _next = new(pool);
-    private NativeSegmentOwner? _valueBlock;
+    private BlockOwner? _valueBlock;
 
     /// <summary>A list view's offsets and sizes widened, when they are of two types no shape reads as they lie.</summary>
     private long[] _wideOffsets = [];
@@ -424,9 +424,9 @@ internal sealed class Shredder(AlignedBufferPool pool) : IDisposable
     }
 
     /// <summary>Entries' levels and rows, in one block of the pool: repetition levels, definition levels, rows.</summary>
-    private sealed class Entries(AlignedBufferPool pool) : IDisposable
+    private sealed class Entries(BlockPool pool) : IDisposable
     {
-        private NativeSegmentOwner? _block;
+        private BlockOwner? _block;
         private int _capacity;
 
         internal Span<byte> Repetition => _block is null ? default : _block.WritableSpan[.._capacity];

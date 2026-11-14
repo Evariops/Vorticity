@@ -614,7 +614,7 @@ internal sealed class LocalFileSource : ISegmentReader, IReadAnticipation, IPosi
     /// <paramref name="length"/> bytes at <paramref name="offset"/>, validated against the file
     /// already, into a buffer whose 64-byte base satisfies every alignment a segment may declare.
     /// </summary>
-    private NativeSegmentOwner ReadPositionally(long offset, int length)
+    private BlockOwner ReadPositionally(long offset, int length)
     {
         // Only a disposed reader without a handle gets here: its mapping is gone with its dispose.
         if (_handle is null)
@@ -623,7 +623,7 @@ internal sealed class LocalFileSource : ISegmentReader, IReadAnticipation, IPosi
         }
 
         // The shared pool keeps a block past its classes as well, for the next read of a segment that large.
-        NativeSegmentOwner owner = AlignedBufferPool.Shared.Rent(length, VortexLimits.MaxAlignment);
+        BlockOwner owner = BlockPool.Shared.Rent(length, VortexLimits.MaxAlignment);
         try
         {
             Span<byte> destination = owner.WritableSpan[..length];
