@@ -47,6 +47,13 @@ internal readonly struct Block<T>
     /// <summary>The empty block, which nothing was rented for: the default.</summary>
     internal static Block<T> Empty => default;
 
+    /// <summary>
+    /// The block of <paramref name="length"/> elements over <paramref name="bytes"/>, the empty block
+    /// when there are none: for an owner that knows the length and so keeps <see cref="Bytes"/> alone,
+    /// a field of 8 bytes rather than 16 in an object made for every write.
+    /// </summary>
+    internal static Block<T> Over(byte[]? bytes, int length) => bytes is null ? default : new Block<T>(bytes, length);
+
     /// <summary>The elements the block holds: the length it was rented at.</summary>
     public int Length => _length;
 

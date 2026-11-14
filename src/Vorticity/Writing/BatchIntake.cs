@@ -1,7 +1,7 @@
 using System;
-using System.Buffers;
 using System.Numerics;
 using Vorticity.Arrays;
+using Vorticity.Buffers;
 using Vorticity.Compute;
 using Vorticity.Types;
 
@@ -50,7 +50,7 @@ internal static class BatchIntake
     internal static int Columns<TRecord>(CanonicalArena scratch, Columns<TRecord> columns, int[] members, DType schema)
         where TRecord : IVortexRecord<TRecord>
     {
-        int[] fields = ArrayPool<int>.Shared.Rent(members.Length);
+        Block<int> fields = Blocks.Rent<int>(members.Length);
         try
         {
             for (int column = 0; column < members.Length; column++)
@@ -72,7 +72,7 @@ internal static class BatchIntake
         }
         finally
         {
-            ArrayPool<int>.Shared.Return(fields);
+            Blocks.Return(fields);
         }
     }
 
@@ -85,7 +85,7 @@ internal static class BatchIntake
             count += BitOperations.PopCount(word);
         }
 
-        int[] indices = ArrayPool<int>.Shared.Rent(Math.Max(count, 1));
+        Block<int> indices = Blocks.Rent<int>(Math.Max(count, 1));
         try
         {
             int n = 0;
@@ -103,7 +103,7 @@ internal static class BatchIntake
         }
         finally
         {
-            ArrayPool<int>.Shared.Return(indices);
+            Blocks.Return(indices);
         }
     }
 

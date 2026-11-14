@@ -1,5 +1,4 @@
 using System;
-using System.Buffers;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Vorticity.Arrays;
@@ -885,8 +884,8 @@ internal static class VariantShredder
             int idWidth = ParquetVariant.WidthOf((uint)maxId);
             int offsetWidth = ParquetVariant.WidthOf((uint)size);
             int length = checked(1 + countWidth + (count * idWidth) + ((count + 1) * offsetWidth) + size);
-            byte[]? rented = null;
-            Span<byte> into = length <= 512 ? stackalloc byte[512] : (rented = ArrayPool<byte>.Shared.Rent(length));
+            Block<byte> rented = default;
+            Span<byte> into = length <= 512 ? stackalloc byte[512] : (rented = Blocks.Rent<byte>(length));
             into = into[..length];
             try
             {
@@ -917,10 +916,7 @@ internal static class VariantShredder
             }
             finally
             {
-                if (rented is not null)
-                {
-                    ArrayPool<byte>.Shared.Return(rented);
-                }
+                Blocks.Return(rented);
             }
         }
 

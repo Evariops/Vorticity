@@ -318,7 +318,7 @@ public static class VortexFileIndexer
     {
         const int ChunkBytes = 1 << 20;
         long length = RandomAccess.GetLength(source);
-        byte[] chunk = ArrayPool<byte>.Shared.Rent((int)Math.Min(ChunkBytes, Math.Max(length, 1)));
+        Buffers.Block<byte> chunk = Buffers.Blocks.Rent<byte>((int)Math.Min(ChunkBytes, Math.Max(length, 1)));
         try
         {
             for (long done = 0; done < length;)
@@ -336,7 +336,7 @@ public static class VortexFileIndexer
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(chunk);
+            Buffers.Blocks.Return(chunk);
         }
     }
 

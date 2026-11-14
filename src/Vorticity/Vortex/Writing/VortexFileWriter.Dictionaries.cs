@@ -223,7 +223,7 @@ public sealed partial class VortexFileWriter
         {
             if (dictionaries[field] is { } dictionary && segments[field] >= 0)
             {
-                SegmentSpec spec = _segments[segments[field]];
+                SegmentSpec spec = Segments[segments[field]];
                 placed[field] = new ColumnDictionary(
                     spec.Offset, spec.Length, spec.AlignmentExponent, dictionary.Count, dictionary.CodesPType, Ordered: true);
             }

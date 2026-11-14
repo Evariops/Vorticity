@@ -1,5 +1,4 @@
 using System;
-using System.Buffers;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
@@ -129,7 +128,7 @@ internal static class RunAbsorb
             scratch, hasRows, layout.Width, checked((int)run.FirstBlock), checked((int)run.BlockCount));
         using ScanContext context = file.CreateIndexContext(run);
         ISegmentReader source = file.IndexSourceOf(run);
-        uint[] absolute = ArrayPool<uint>.Shared.Rent(256);
+        Block<uint> absolute = Blocks.Rent<uint>(256);
         try
         {
             for (long s = 0; s < table!.SegmentCount; s++)
@@ -184,7 +183,7 @@ internal static class RunAbsorb
         }
         finally
         {
-            ArrayPool<uint>.Shared.Return(absolute);
+            Blocks.Return(absolute);
         }
 
         return await writer.FinishAsync(cancellationToken).ConfigureAwait(false);
@@ -251,7 +250,7 @@ internal static class RunAbsorb
     /// </summary>
     private static int Lay(
         ScanContext context, SegmentNodes nodes, int entries, IndexRun run, KeyLayout layout, bool hasRows, bool wide,
-        long firstRow, int from, ref uint[] absolute, RawRunWriter writer)
+        long firstRow, int from, ref Block<uint> absolute, RawRunWriter writer)
     {
         CanonicalNode keys = context.Canonical.GetNode(nodes.Keys);
         if (hasRows)
@@ -284,11 +283,7 @@ internal static class RunAbsorb
                 return -1;
             }
 
-            if (absolute.Length < end - start)
-            {
-                ArrayPool<uint>.Shared.Return(absolute);
-                absolute = ArrayPool<uint>.Shared.Rent(end - start);
-            }
+            Blocks.Ensure(ref absolute, end - start);
 
             for (int b = start; b < end; b++)
             {

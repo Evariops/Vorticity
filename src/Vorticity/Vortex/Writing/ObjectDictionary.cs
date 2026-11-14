@@ -1,5 +1,4 @@
 using System;
-using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Numerics;
@@ -317,16 +316,16 @@ internal sealed class ObjectDictionary
         {
             // An encoded column's values, each looked up once, then its codes through them.
             int values = column.EncodedValuesIndex;
-            int[] table = ArrayPool<int>.Shared.Rent(Math.Max(arena.GetNode(values).Length, 1));
+            Block<int> table = Blocks.Rent<int>(arena.GetNode(values).Length);
             try
             {
-                Span<int> translation = table.AsSpan(0, arena.GetNode(values).Length);
+                Span<int> translation = table;
                 Translation(arena, values, translation);
                 missing = Translate(column.Codes.Span, PType.U32, translation, in valid, into, codesPType, rows);
             }
             finally
             {
-                ArrayPool<int>.Shared.Return(table);
+                Blocks.Return(table);
             }
         }
         else if (_width == 0)

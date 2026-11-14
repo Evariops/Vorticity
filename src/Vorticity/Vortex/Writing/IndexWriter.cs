@@ -1,11 +1,11 @@
 using System;
-using System.Buffers;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
+using Vorticity.Buffers;
 using Vorticity.Expressions;
 using Vorticity.Indexes;
 using Vorticity.Layouts;
@@ -461,12 +461,12 @@ internal sealed class IndexWriter : IDisposable
             slices.Reset();
 
             // Rented for the batch, as a nested column's are: two arrays a key and a batch were made new.
-            int[] rentedColumns = ArrayPool<int>.Shared.Rent(fields.Length);
-            bool[] rentedInclude = ArrayPool<bool>.Shared.Rent(count);
+            Block<int> rentedColumns = Buffers.Blocks.Rent<int>(fields.Length);
+            Block<bool> rentedInclude = Buffers.Blocks.Rent<bool>(count);
             try
             {
-                Span<int> columns = rentedColumns.AsSpan(0, fields.Length);
-                Span<bool> include = rentedInclude.AsSpan(0, count);
+                Span<int> columns = rentedColumns;
+                Span<bool> include = rentedInclude;
                 include.Fill(true);
                 bool masked = true;
                 for (int c = 0; c < fields.Length; c++)
@@ -510,8 +510,8 @@ internal sealed class IndexWriter : IDisposable
             }
             finally
             {
-                ArrayPool<int>.Shared.Return(rentedColumns);
-                ArrayPool<bool>.Shared.Return(rentedInclude);
+                Buffers.Blocks.Return(rentedColumns);
+                Buffers.Blocks.Return(rentedInclude);
             }
         }
     }
@@ -535,11 +535,11 @@ internal sealed class IndexWriter : IDisposable
                 continue;
             }
 
-            bool[] include = ArrayPool<bool>.Shared.Rent(count);
+            Block<bool> include = Buffers.Blocks.Rent<bool>(count);
             try
             {
                 bool masked = false;
-                int leaf = Descend(arena, fieldNodes, chain, start, include.AsSpan(0, count), ref masked);
+                int leaf = Descend(arena, fieldNodes, chain, start, include, ref masked);
                 if (leaf < 0)
                 {
                     foreach (IndexBuilder builder in _builders[field])
@@ -555,7 +555,7 @@ internal sealed class IndexWriter : IDisposable
                 if (masked)
                 {
                     source = _keySlices ??= new CanonicalArena();
-                    leaf = Masked(arena, leaf, start, include.AsSpan(0, count));
+                    leaf = Masked(arena, leaf, start, include);
                     from = 0;
                 }
 
@@ -566,7 +566,7 @@ internal sealed class IndexWriter : IDisposable
             }
             finally
             {
-                ArrayPool<bool>.Shared.Return(include);
+                Buffers.Blocks.Return(include);
             }
         }
     }

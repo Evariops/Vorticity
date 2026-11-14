@@ -143,6 +143,14 @@ internal static class Blocks
     }
 
     /// <summary>
+    /// The length a block of <paramref name="held"/> elements grows to for <paramref name="needed"/>: twice it at least,
+    /// <paramref name="least"/> at the fewest, and a power of two, so that the bytes are a class's whole and the next
+    /// growth as far finds them again.
+    /// </summary>
+    internal static int Grown(int needed, int held, int least = 1_024) =>
+        (int)BitOperations.RoundUpToPowerOf2((uint)Math.Max(needed, Math.Max(least, 2 * held)));
+
+    /// <summary>
     /// <paramref name="block"/> made <paramref name="length"/> elements long at least, what it held let go: within its
     /// bytes when they have room, as long as they go, otherwise a block rented for it, the old one given back.
     /// </summary>

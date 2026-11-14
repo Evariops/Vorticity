@@ -1,5 +1,4 @@
 using System;
-using System.Buffers;
 using System.Buffers.Binary;
 using System.Numerics;
 using System.Runtime.CompilerServices;
@@ -58,25 +57,25 @@ internal sealed class DistinctTable
     /// <summary>Bytes per value for a fixed-width column, 0 for a view column.</summary>
     private readonly int _width;
 
-    // `_slotCode` holds code + 1 so that zero means empty. The capacity is `_mask + 1`, never an
-    // array's length: a rented array is as long as the pool felt like.
-    private int[] _slotCode;
-    private ulong[] _slotKey;
-    private int[]? _slotOffset;
-    private int[]? _slotLength;
+    // `_slotCode` holds code + 1 so that zero means empty. The capacity is `_mask + 1`. The slots'
+    // offsets and lengths, the codes' offsets and lengths and the heap are a byte kind's only.
+    private Block<int> _slotCode;
+    private Block<ulong> _slotKey;
+    private Block<int> _slotOffset;
+    private Block<int> _slotLength;
     private int _mask;
 
-    private byte[]? _heap;
+    private Block<byte> _heap;
     private int _heapUsed;
 
     // Per code, in code order: the row of first occurrence and the key itself -- the word for a
     // fixed-width kind, the heap span for a byte kind.
-    private int[] _firstRows;
-    private ulong[] _codeKey;
-    private int[]? _codeOffset;
-    private int[]? _codeLength;
+    private Block<int> _firstRows;
+    private Block<ulong> _codeKey;
+    private Block<int> _codeOffset;
+    private Block<int> _codeLength;
 
-    private int[] _codes;
+    private Block<int> _codes;
     private int _rows;
     private int _distinct;
     private int _nullCode = -1;
@@ -92,11 +91,6 @@ internal sealed class DistinctTable
         _shape = shape;
         _kind = kind;
         _width = width;
-        _slotCode = [];
-        _slotKey = [];
-        _firstRows = [];
-        _codeKey = [];
-        _codes = [];
         _mask = -1;
     }
 
@@ -167,58 +161,50 @@ internal sealed class DistinctTable
         int entries = Math.Max(
             InitialCapacity, (int)BitOperations.RoundUpToPowerOf2((uint)((_lastDistinct * 2) + 1)));
         int capacity = Math.Max(entries, Sparse(_lastDistinct));
-        _slotCode = ArrayPool<int>.Shared.Rent(capacity);
-        _slotKey = ArrayPool<ulong>.Shared.Rent(capacity);
+        _slotCode = Blocks.RentCleared<int>(capacity);
+        _slotKey = Blocks.Rent<ulong>(capacity);
         _mask = capacity - 1;
-        Array.Clear(_slotCode, 0, capacity);
         if (_shape == Shape.Bytes)
         {
-            _slotOffset = ArrayPool<int>.Shared.Rent(capacity);
-            _slotLength = ArrayPool<int>.Shared.Rent(capacity);
-            _codeOffset = ArrayPool<int>.Shared.Rent(entries);
-            _codeLength = ArrayPool<int>.Shared.Rent(entries);
-            _heap = ArrayPool<byte>.Shared.Rent(Math.Max(1024, _lastHeap));
+            _slotOffset = Blocks.Rent<int>(capacity);
+            _slotLength = Blocks.Rent<int>(capacity);
+            _codeOffset = Blocks.Rent<int>(entries);
+            _codeLength = Blocks.Rent<int>(entries);
+            _heap = Blocks.Rent<byte>(Math.Max(1024, _lastHeap));
         }
 
-        _firstRows = ArrayPool<int>.Shared.Rent(entries);
-        _codeKey = ArrayPool<ulong>.Shared.Rent(entries);
-        _codes = ArrayPool<int>.Shared.Rent(Math.Max(Math.Max(256, rows), _lastRows));
+        _firstRows = Blocks.Rent<int>(entries);
+        _codeKey = Blocks.Rent<ulong>(entries);
+        _codes = Blocks.Rent<int>(Math.Max(Math.Max(256, rows), _lastRows));
     }
 
-    /// <summary>Forgets the chunk: every buffer back to the pool, its size kept for the next one.</summary>
+    /// <summary>Forgets the chunk: every block back to the pool, its size kept for the next one.</summary>
     internal void Reset()
     {
         _lastDistinct = _distinct;
         _lastRows = _rows;
         _lastHeap = _heapUsed;
 
-        if (_mask >= 0)
-        {
-            ArrayPool<int>.Shared.Return(_slotCode);
-            ArrayPool<ulong>.Shared.Return(_slotKey);
-            ArrayPool<int>.Shared.Return(_firstRows);
-            ArrayPool<ulong>.Shared.Return(_codeKey);
-            ArrayPool<int>.Shared.Return(_codes);
-            if (_slotOffset is not null)
-            {
-                ArrayPool<int>.Shared.Return(_slotOffset);
-                ArrayPool<int>.Shared.Return(_slotLength!);
-                ArrayPool<int>.Shared.Return(_codeOffset!);
-                ArrayPool<int>.Shared.Return(_codeLength!);
-                ArrayPool<byte>.Shared.Return(_heap!);
-            }
-        }
-
-        _slotCode = [];
-        _slotKey = [];
-        _slotOffset = null;
-        _slotLength = null;
-        _codeOffset = null;
-        _codeLength = null;
-        _heap = null;
-        _firstRows = [];
-        _codeKey = [];
-        _codes = [];
+        Blocks.Return(_slotCode);
+        Blocks.Return(_slotKey);
+        Blocks.Return(_firstRows);
+        Blocks.Return(_codeKey);
+        Blocks.Return(_codes);
+        Blocks.Return(_slotOffset);
+        Blocks.Return(_slotLength);
+        Blocks.Return(_codeOffset);
+        Blocks.Return(_codeLength);
+        Blocks.Return(_heap);
+        _slotCode = default;
+        _slotKey = default;
+        _slotOffset = default;
+        _slotLength = default;
+        _codeOffset = default;
+        _codeLength = default;
+        _heap = default;
+        _firstRows = default;
+        _codeKey = default;
+        _codes = default;
         _mask = -1;
         _rows = 0;
         _distinct = 0;
@@ -348,8 +334,8 @@ internal sealed class DistinctTable
 
             default:
             {
-                int[] offsets = _codeOffset!;
-                int[] lengths = _codeLength!;
+                ReadOnlySpan<int> offsets = _codeOffset;
+                ReadOnlySpan<int> lengths = _codeLength;
                 if (_width > 0)
                 {
                     // A wide decimal: the key heap holds each value at its full width. Every slot is
@@ -584,10 +570,10 @@ internal sealed class DistinctTable
     private void ProbeHashed<T>(ReadOnlySpan<T> values, int i)
         where T : unmanaged, IBinaryInteger<T>, IUnsignedNumber<T>
     {
-        ref int into = ref MemoryMarshal.GetArrayDataReference(_codes);
+        ref int into = ref _codes.GetReference();
         int rows = _rows;
-        int[] slotCodes = _slotCode;
-        ulong[] slotKeys = _slotKey;
+        Block<int> slotCodes = _slotCode;
+        Block<ulong> slotKeys = _slotKey;
         int mask = _mask;
         ulong hash = KeyHash.Mix(ulong.CreateTruncating(values[i]));
         while (i < values.Length)
@@ -598,9 +584,9 @@ internal sealed class DistinctTable
             ulong nextHash = next < values.Length ? KeyHash.Mix(ulong.CreateTruncating(values[next])) : 0;
             ulong key = ulong.CreateTruncating(value);
             int slot = (int)hash & mask;
-            int occupant = Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(slotCodes), slot);
+            int occupant = Unsafe.Add(ref slotCodes.GetReference(), slot);
             int code;
-            if (occupant != 0 && Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(slotKeys), slot) == key)
+            if (occupant != 0 && Unsafe.Add(ref slotKeys.GetReference(), slot) == key)
             {
                 code = occupant - 1;
                 Unsafe.Add(ref into, rows++) = code;
@@ -661,7 +647,7 @@ internal sealed class DistinctTable
         }
 
         ref ulong first = ref MemoryMarshal.GetReference(values);
-        ref int into = ref MemoryMarshal.GetArrayDataReference(_codes);
+        ref int into = ref _codes.GetReference();
         for (; i <= values.Length - 8; i += 8)
         {
             Vector256<ulong> low = Vector256.LoadUnsafe(ref first, (nuint)i);
@@ -704,7 +690,7 @@ internal sealed class DistinctTable
         }
 
         ref uint first = ref MemoryMarshal.GetReference(values);
-        ref int into = ref MemoryMarshal.GetArrayDataReference(_codes);
+        ref int into = ref _codes.GetReference();
         for (; i <= values.Length - 8; i += 8)
         {
             Vector256<uint> rows = Vector256.LoadUnsafe(ref first, (nuint)i);
@@ -930,10 +916,10 @@ internal sealed class DistinctTable
             }
 
             _codeKey[_nullCode] = 0;
-            if (_codeOffset is not null)
+            if (_shape == Shape.Bytes)
             {
                 _codeOffset[_nullCode] = 0;
-                _codeLength![_nullCode] = 0;
+                _codeLength[_nullCode] = 0;
             }
         }
 
@@ -978,8 +964,8 @@ internal sealed class DistinctTable
 
     private void InsertBytes(ReadOnlySpan<byte> bytes)
     {
-        int[] offsets = _slotOffset!;
-        int[] lengths = _slotLength!;
+        Block<int> offsets = _slotOffset;
+        Block<int> lengths = _slotLength;
         ulong hash = KeyHash.Bytes(bytes);
         int slot = (int)hash & _mask;
         while (true)
@@ -998,8 +984,8 @@ internal sealed class DistinctTable
                 _slotKey[slot] = hash;
                 offsets[slot] = offset;
                 lengths[slot] = bytes.Length;
-                _codeOffset![code] = offset;
-                _codeLength![code] = bytes.Length;
+                _codeOffset[code] = offset;
+                _codeLength[code] = bytes.Length;
                 _codes[_rows++] = code;
                 GrowIfLoaded();
                 return;
@@ -1008,7 +994,7 @@ internal sealed class DistinctTable
             // Equality is on bytes: the stored hash and the length are cheap rejections in front of
             // the compare, never a substitute for it.
             if (_slotKey[slot] == hash && lengths[slot] == bytes.Length
-                && Same(ref _heap![offsets[slot]], ref MemoryMarshal.GetReference(bytes), bytes.Length))
+                && Same(ref _heap[offsets[slot]], ref MemoryMarshal.GetReference(bytes), bytes.Length))
             {
                 _codes[_rows++] = occupant - 1;
                 return;
@@ -1038,8 +1024,8 @@ internal sealed class DistinctTable
         ulong tail = (high >> 32) & tailMask;
         ulong hash = KeyHash.Pair(head, tail, size);
 
-        int[] offsets = _slotOffset!;
-        int[] lengths = _slotLength!;
+        Block<int> offsets = _slotOffset;
+        Block<int> lengths = _slotLength;
         int slot = (int)hash & _mask;
         while (true)
         {
@@ -1057,8 +1043,8 @@ internal sealed class DistinctTable
                 _slotKey[slot] = hash;
                 offsets[slot] = offset;
                 lengths[slot] = size;
-                _codeOffset![code] = offset;
-                _codeLength![code] = size;
+                _codeOffset[code] = offset;
+                _codeLength[code] = size;
                 _codes[_rows++] = code;
                 GrowIfLoaded();
                 return;
@@ -1066,7 +1052,7 @@ internal sealed class DistinctTable
 
             if (_slotKey[slot] == hash && lengths[slot] == size)
             {
-                ref byte stored = ref _heap![offsets[slot]];
+                ref byte stored = ref _heap[offsets[slot]];
                 if ((Unsafe.ReadUnaligned<ulong>(ref stored) & headMask) == head
                     && (Unsafe.ReadUnaligned<uint>(ref Unsafe.Add(ref stored, 8)) & tailMask) == tail)
                 {
@@ -1125,12 +1111,12 @@ internal sealed class DistinctTable
         if (code == _firstRows.Length)
         {
             int grown = _firstRows.Length * 2;
-            Grow(ref _firstRows, grown, code);
-            Grow(ref _codeKey, grown, code);
-            if (_codeOffset is not null)
+            Blocks.Grow(ref _firstRows, grown);
+            Blocks.Grow(ref _codeKey, grown);
+            if (_shape == Shape.Bytes)
             {
-                Grow(ref _codeOffset, grown, code);
-                Grow(ref _codeLength!, grown, code);
+                Blocks.Grow(ref _codeOffset, grown);
+                Blocks.Grow(ref _codeLength, grown);
             }
         }
 
@@ -1140,23 +1126,19 @@ internal sealed class DistinctTable
 
     private int Append(ReadOnlySpan<byte> bytes)
     {
-        byte[] heap = _heap!;
-        if (_heapUsed + bytes.Length + HeapSlack > heap.Length)
+        if (_heapUsed + bytes.Length + HeapSlack > _heap.Length)
         {
-            int grown = heap.Length * 2;
+            int grown = _heap.Length * 2;
             while (grown < _heapUsed + bytes.Length + HeapSlack)
             {
                 grown *= 2;
             }
 
-            byte[] larger = ArrayPool<byte>.Shared.Rent(grown);
-            heap.AsSpan(0, _heapUsed).CopyTo(larger);
-            ArrayPool<byte>.Shared.Return(heap);
-            _heap = heap = larger;
+            Blocks.Grow(ref _heap, grown);
         }
 
         int offset = _heapUsed;
-        bytes.CopyTo(heap.AsSpan(offset));
+        bytes.CopyTo(_heap.AsSpan(offset));
         _heapUsed += bytes.Length;
         return offset;
     }
@@ -1174,16 +1156,7 @@ internal sealed class DistinctTable
             grown *= 2;
         }
 
-        Grow(ref _codes, grown, _rows);
-    }
-
-    /// <summary>Rents the next size up, keeps the first <paramref name="used"/>, returns the old.</summary>
-    private static void Grow<T>(ref T[] array, int length, int used)
-    {
-        T[] larger = ArrayPool<T>.Shared.Rent(length);
-        array.AsSpan(0, used).CopyTo(larger);
-        ArrayPool<T>.Shared.Return(array);
-        array = larger;
+        Blocks.Grow(ref _codes, grown);
     }
 
     /// <summary>Doubles the slots once the load passes one half.</summary>
@@ -1214,23 +1187,31 @@ internal sealed class DistinctTable
     private void Resize(int grown)
     {
         int capacity = _mask + 1;
-        int[] codes = ArrayPool<int>.Shared.Rent(grown);
-        Array.Clear(codes, 0, grown);
-        ulong[] keys = ArrayPool<ulong>.Shared.Rent(grown);
-        int[]? offsets = _slotOffset is null ? null : ArrayPool<int>.Shared.Rent(grown);
-        int[]? lengths = _slotLength is null ? null : ArrayPool<int>.Shared.Rent(grown);
+        bool bytes = _shape == Shape.Bytes;
+        Block<int> codeBlock = Blocks.RentCleared<int>(grown);
+        Block<ulong> keyBlock = Blocks.Rent<ulong>(grown);
+        Block<int> offsetBlock = bytes ? Blocks.Rent<int>(grown) : default;
+        Block<int> lengthBlock = bytes ? Blocks.Rent<int>(grown) : default;
+        Span<int> codes = codeBlock;
+        Span<ulong> keys = keyBlock;
+        Span<int> offsets = offsetBlock;
+        Span<int> lengths = lengthBlock;
+        ReadOnlySpan<int> oldCodes = _slotCode.AsSpan(0, capacity);
+        ReadOnlySpan<ulong> oldKeys = _slotKey;
+        ReadOnlySpan<int> oldOffsets = _slotOffset;
+        ReadOnlySpan<int> oldLengths = _slotLength;
         int mask = grown - 1;
 
-        for (int old = 0; old < capacity; old++)
+        for (int old = 0; old < oldCodes.Length; old++)
         {
-            int occupant = _slotCode[old];
+            int occupant = oldCodes[old];
             if (occupant == 0)
             {
                 continue;
             }
 
-            ulong key = _slotKey[old];
-            ulong hash = _shape == Shape.Bytes ? key : KeyHash.Mix(key);
+            ulong key = oldKeys[old];
+            ulong hash = bytes ? key : KeyHash.Mix(key);
             int slot = (int)hash & mask;
             while (codes[slot] != 0)
             {
@@ -1239,25 +1220,21 @@ internal sealed class DistinctTable
 
             codes[slot] = occupant;
             keys[slot] = key;
-            if (offsets is not null)
+            if (bytes)
             {
-                offsets[slot] = _slotOffset![old];
-                lengths![slot] = _slotLength![old];
+                offsets[slot] = oldOffsets[old];
+                lengths[slot] = oldLengths[old];
             }
         }
 
-        ArrayPool<int>.Shared.Return(_slotCode);
-        ArrayPool<ulong>.Shared.Return(_slotKey);
-        if (_slotOffset is not null)
-        {
-            ArrayPool<int>.Shared.Return(_slotOffset);
-            ArrayPool<int>.Shared.Return(_slotLength!);
-        }
-
-        _slotCode = codes;
-        _slotKey = keys;
-        _slotOffset = offsets;
-        _slotLength = lengths;
+        Blocks.Return(_slotCode);
+        Blocks.Return(_slotKey);
+        Blocks.Return(_slotOffset);
+        Blocks.Return(_slotLength);
+        _slotCode = codeBlock;
+        _slotKey = keyBlock;
+        _slotOffset = offsetBlock;
+        _slotLength = lengthBlock;
         _mask = mask;
     }
 }

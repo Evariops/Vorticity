@@ -1,5 +1,4 @@
 using System;
-using System.Buffers;
 using System.Runtime.InteropServices;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
@@ -241,9 +240,10 @@ internal static class ChunkCompactor
         VortexBuffer rebased = arena.AllocateUninitialized(
             checked(rows * sizeof(uint)), sizeof(uint), out Span<byte> writable);
         Span<uint> destination = MemoryMarshal.Cast<byte, uint>(writable);
-        int[] places = ArrayPool<int>.Shared.Rent(Math.Max(count, 1));
+        Block<int> rented = Blocks.Rent<int>(count);
         try
         {
+            Span<int> places = rented;
             int at = 0;
             for (int i = 0; i < rows; i++)
             {
@@ -255,7 +255,7 @@ internal static class ChunkCompactor
                 }
 
                 int first = checked((int)ListViewDecoder.Widen(offsets[i]));
-                Span<int> row = places.AsSpan(at, (int)size);
+                Span<int> row = places.Slice(at, (int)size);
                 for (int j = 0; j < row.Length; j++)
                 {
                     row[j] = first + j;
@@ -264,13 +264,13 @@ internal static class ChunkCompactor
                 at += row.Length;
             }
 
-            int gathered = CanonicalFilter.Apply(arena, elements, places.AsSpan(0, count));
+            int gathered = CanonicalFilter.Apply(arena, elements, places[..count]);
             gathered = Compact(arena, gathered);
             return arena.AddListView(dtype, rows, validity, gathered, rebased, PType.U32, sizeBuffer, sizePType);
         }
         finally
         {
-            ArrayPool<int>.Shared.Return(places);
+            Blocks.Return(rented);
         }
     }
 

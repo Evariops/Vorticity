@@ -1,8 +1,8 @@
 using System;
-using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Collections.Immutable;
+using Vorticity.Buffers;
 using Vorticity.Editions;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -43,11 +43,14 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     private readonly EncodingDictionary _layoutEncodings;
 
     /// <summary>
-    /// Where every segment written so far lies, which the footer lists in one vector: a rented
-    /// array, grown in the shared pool and given back when the writer is disposed.
+    /// Where every segment written so far lies, which the footer lists in one vector: a block grown in
+    /// the pool and given back when the writer is disposed, held by its bytes, its count beside them.
     /// </summary>
-    private SegmentSpec[] _segments = [];
+    private byte[]? _segmentBytes;
     private int _segmentCount;
+
+    /// <summary>The segments written so far.</summary>
+    private Block<SegmentSpec> Segments => Block<SegmentSpec>.Over(_segmentBytes, _segmentCount);
 
     /// <summary>Per root field, the segment index of each batch's column.</summary>
     private readonly AppendList<int>[] _columnSegments;
@@ -648,7 +651,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             long row = 0;
             for (int chunk = 0; chunk < spans.Length; chunk++)
             {
-                SegmentSpec spec = _segments[segments[chunk]];
+                SegmentSpec spec = Segments[segments[chunk]];
                 spans[chunk] = new ChunkSpan(spec.Offset, spec.Length, spec.AlignmentExponent, row, chunkRows[chunk], chunk);
                 row += chunkRows[chunk];
             }
@@ -2616,7 +2619,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             if (_pathMaps?[field] is { } map)
             {
                 // Each key's range is its bytes, toward the share Auto gives the indexes of the paths.
-                map.Add(blob.Memory.Span, _segments[segment].Offset, _columnSegments[field].Count);
+                map.Add(blob.Memory.Span, Segments[segment].Offset, _columnSegments[field].Count);
                 for (int key = 0; key < map.Keys.Count; key++)
                 {
                     _indexes?.AddVariantKeyBytes(field, map.Keys[key], map.LastBytes[key]);
@@ -2624,8 +2627,9 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             }
 
             _columnSegments[field].Add(segment);
-            _indexes?.AddColumnBytes(field, _segments[segment].Length);
-            _gathering?[field]?.Measured(_segments[segment].Length);
+            uint length = Segments[segment].Length;
+            _indexes?.AddColumnBytes(field, length);
+            _gathering?[field]?.Measured(length);
         }
 
         // The compact summaries stay -- the zone map wants them at completion -- and only the sized
@@ -3189,7 +3193,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         long footerOffset = _sink.Position;
         builder.Clear();
         ReadOnlyMemory<byte> footer = Footer(
-            builder, _arrayEncodings.Ids, _layoutEncodings.Ids, _segments.AsSpan(0, _segmentCount));
+            builder, _arrayEncodings.Ids, _layoutEncodings.Ids, Segments);
         int footerLength = footer.Length;
         await _sink.WriteAsync(footer, cancellationToken).ConfigureAwait(false);
 
@@ -3459,26 +3463,23 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// <summary>Records where a segment lies and returns its index.</summary>
     private int AddSegment(in SegmentSpec segment)
     {
-        if (_segmentCount == _segments.Length)
+        Block<SegmentSpec> segments = Segments;
+        if (_segmentCount == segments.Capacity)
         {
-            SegmentSpec[] grown = ArrayPool<SegmentSpec>.Shared.Rent(Math.Max(64, _segmentCount * 2));
-            _segments.AsSpan(0, _segmentCount).CopyTo(grown);
-            ReleaseSegments();
-            _segments = grown;
+            Buffers.Blocks.Grow(ref segments, Math.Max(64, _segmentCount * 2));
+            _segmentBytes = segments.Bytes;
         }
 
-        _segments[_segmentCount] = segment;
-        return _segmentCount++;
+        _segmentCount++;
+        Segments[_segmentCount - 1] = segment;
+        return _segmentCount - 1;
     }
 
-    /// <summary>Gives the segment table back to the shared pool; the count is kept for a growth.</summary>
+    /// <summary>Gives the segment table back to the pool.</summary>
     private void ReleaseSegments()
     {
-        if (_segments.Length != 0)
-        {
-            ArrayPool<SegmentSpec>.Shared.Return(_segments);
-            _segments = [];
-        }
+        Buffers.Blocks.ReturnBytes(_segmentBytes);
+        _segmentBytes = null;
     }
 
     /// <summary>Pads the sink to the format's widest alignment and returns where the next byte lands.</summary>
@@ -3510,8 +3511,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
         Span<uint> segmentIds = stackalloc uint[1];
         _flatMetadata.Seal();
-        int[] fieldLayouts = ArrayPool<int>.Shared.Rent(Math.Max(_fieldCount, 1));
-        int[] chunks = ArrayPool<int>.Shared.Rent(Math.Max(_chunkRows.Count, 1));
+        Buffers.Block<int> fieldLayouts = Buffers.Blocks.Rent<int>(Math.Max(_fieldCount, 1));
+        Buffers.Block<int> chunks = Buffers.Blocks.Rent<int>(Math.Max(_chunkRows.Count, 1));
         try
         {
             for (int field = 0; field < _fieldCount; field++)
@@ -3547,8 +3548,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         }
         finally
         {
-            ArrayPool<int>.Shared.Return(fieldLayouts);
-            ArrayPool<int>.Shared.Return(chunks);
+            Buffers.Blocks.Return(fieldLayouts);
+            Buffers.Blocks.Return(chunks);
         }
     }
 
@@ -3595,8 +3596,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     private static ReadOnlyMemory<byte> Footer(
         FlatBufferBuilder builder, IReadOnlyList<string> arrays, IReadOnlyList<string> layouts, ReadOnlySpan<SegmentSpec> segments)
     {
-        int[] arraySpecs = ArrayPool<int>.Shared.Rent(Math.Max(arrays.Count, 1));
-        int[] layoutSpecs = ArrayPool<int>.Shared.Rent(Math.Max(layouts.Count, 1));
+        Buffers.Block<int> arraySpecs = Buffers.Blocks.Rent<int>(Math.Max(arrays.Count, 1));
+        Buffers.Block<int> layoutSpecs = Buffers.Blocks.Rent<int>(Math.Max(layouts.Count, 1));
         try
         {
             CreateStrings(builder, arrays, arraySpecs);
@@ -3613,8 +3614,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         }
         finally
         {
-            ArrayPool<int>.Shared.Return(arraySpecs);
-            ArrayPool<int>.Shared.Return(layoutSpecs);
+            Buffers.Blocks.Return(arraySpecs);
+            Buffers.Blocks.Return(layoutSpecs);
         }
     }
 
@@ -3687,17 +3688,17 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         }
 
         // EOF: u16 version, u16 postscript length, then the magic. Read backwards by every reader.
-        byte[] eof = ArrayPool<byte>.Shared.Rent(VortexFileFormat.EofSize);
+        Buffers.Block<byte> eof = Buffers.Blocks.Rent<byte>(VortexFileFormat.EofSize);
         try
         {
             BinaryPrimitives.WriteUInt16LittleEndian(eof, (ushort)VortexFileFormat.Version);
             BinaryPrimitives.WriteUInt16LittleEndian(eof.AsSpan(2), (ushort)postscriptLength);
             VortexFileFormat.MagicBytes.CopyTo(eof.AsSpan(VortexFileFormat.EofMagicOffset));
-            await sink.WriteAsync(eof.AsMemory(0, VortexFileFormat.EofSize), cancellationToken).ConfigureAwait(false);
+            await sink.WriteAsync(eof.AsMemory(), cancellationToken).ConfigureAwait(false);
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(eof);
+            Buffers.Blocks.Return(eof);
         }
     }
 
@@ -3766,7 +3767,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     {
         ScalarStore scalars = Blobs.Scalars();
         int fields = _isTabular ? _fieldCount : 1;
-        int[] entries = ArrayPool<int>.Shared.Rent(Math.Max(fields, 1));
+        Buffers.Block<int> entries = Buffers.Blocks.Rent<int>(Math.Max(fields, 1));
         for (int field = 0; field < fields; field++)
         {
             ColumnWriter writer = _columns[field];
@@ -3803,7 +3804,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         }
 
         int vector = builder.CreateOffsetVector(entries.AsSpan(0, fields));
-        ArrayPool<int>.Shared.Return(entries);
+        Buffers.Blocks.Return(entries);
         builder.StartTable();
         builder.AddOffset(SchemaFieldIds.FileStatisticsFieldStats, vector);
         int table = builder.EndTable();
@@ -3845,7 +3846,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         };
     }
 
-    private static void CreateStrings(FlatBufferBuilder builder, IReadOnlyList<string> ids, int[] offsets)
+    private static void CreateStrings(FlatBufferBuilder builder, IReadOnlyList<string> ids, Span<int> offsets)
     {
         for (int i = 0; i < ids.Count; i++)
         {

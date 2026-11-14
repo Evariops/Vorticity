@@ -1,5 +1,4 @@
 using System;
-using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.IO.Hashing;
@@ -768,8 +767,8 @@ internal sealed class KeyIndexBuilder : IndexBuilder
     private static void Feed(BucketBuffers buffers, int count, uint split, HashedRunSink? main, HashedRunSink? last)
     {
         Span<byte> key = stackalloc byte[sizeof(ulong)];
-        ulong[] hashes = buffers.Hashes;
-        uint[] blocks = buffers.Blocks;
+        ReadOnlySpan<ulong> hashes = buffers.Hashes;
+        ReadOnlySpan<uint> blocks = buffers.Blocks;
         for (int at = 0; at < count;)
         {
             ulong hash = hashes[at];
@@ -790,14 +789,14 @@ internal sealed class KeyIndexBuilder : IndexBuilder
             if (cut > at)
             {
                 main!.BeginKey(key);
-                main.AddBlocks(blocks.AsSpan(at, cut - at));
+                main.AddBlocks(blocks.Slice(at, cut - at));
                 main.EndKey();
             }
 
             if (end > cut)
             {
                 last!.BeginKey(key);
-                last.AddBlocks(blocks.AsSpan(cut, end - cut));
+                last.AddBlocks(blocks.Slice(cut, end - cut));
                 last.EndKey();
             }
 

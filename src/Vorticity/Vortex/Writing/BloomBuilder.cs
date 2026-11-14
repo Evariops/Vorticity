@@ -1,5 +1,4 @@
 using System;
-using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
@@ -87,9 +86,9 @@ internal sealed class BloomBuilder : IndexBuilder
     private long _rawBytes;
 
     // The trigrams a text column's values met lately, made at the first trigram, and the open block's mark above them.
-    private uint[]? _recentTrigrams;
+    private Block<uint> _recentTrigrams;
     private uint _trigramMark = 1u << 24;
-    private uint[]? _generationBlockWords;
+    private Block<uint> _generationBlockWords;
     private int _generationBlockWordCount;
     private int _blocks;
 
@@ -427,7 +426,12 @@ internal sealed class BloomBuilder : IndexBuilder
                 Span<byte> trigram = stackalloc byte[Trigrams.Length];
                 Span<ulong> hashes = stackalloc ulong[CheckStride];
                 Span<ulong> recent = stackalloc ulong[RecentHashes];
-                Span<uint> recentTrigrams = _recentTrigrams ??= Aggregating.ArrayShelf.Retained.Take<uint>(1 << RecentTrigramBits, zeroed: true);
+                if (_recentTrigrams.IsEmpty)
+                {
+                    _recentTrigrams = Blocks.RentCleared<uint>(1 << RecentTrigramBits);
+                }
+
+                Span<uint> recentTrigrams = _recentTrigrams;
                 uint mark = _trigramMark;
                 Span<ulong> seen = stackalloc ulong[2 * RecentViews];
                 ReadOnlySpan<byte> views = node.Views.Span;
@@ -705,7 +709,7 @@ internal sealed class BloomBuilder : IndexBuilder
         _trigramMark += 1u << 24;
         if (_trigramMark == 0)
         {
-            _recentTrigrams?.AsSpan().Clear();
+            _recentTrigrams.Clear();
             _trigramMark = 1u << 24;
         }
         if (Abandoned is not null)
@@ -980,21 +984,12 @@ internal sealed class BloomBuilder : IndexBuilder
         _tree?.Abandon();
     }
 
-    private static void EnsureWords(ref uint[]? words, int needed)
+    private static void EnsureWords(ref Block<uint> words, int needed)
     {
-        if (words is not null && words.Length >= needed)
+        if (words.Length < needed)
         {
-            return;
+            Blocks.Grow(ref words, Math.Max(needed, words.Length * 2));
         }
-
-        uint[] grown = ArrayPool<uint>.Shared.Rent(Math.Max(needed, (words?.Length ?? 0) * 2));
-        if (words is not null)
-        {
-            words.AsSpan().CopyTo(grown);
-            ArrayPool<uint>.Shared.Return(words);
-        }
-
-        words = grown;
     }
 
     public override void Dispose()
@@ -1003,17 +998,10 @@ internal sealed class BloomBuilder : IndexBuilder
         _file?.Dispose();
         _file = null;
         _tree?.Dispose();
-        if (_generationBlockWords is not null)
-        {
-            ArrayPool<uint>.Shared.Return(_generationBlockWords);
-            _generationBlockWords = null;
-        }
-
-        if (_recentTrigrams is { } recent)
-        {
-            Aggregating.ArrayShelf.Retained.Give(recent);
-            _recentTrigrams = null;
-        }
+        Blocks.Return(_generationBlockWords);
+        _generationBlockWords = default;
+        Blocks.Return(_recentTrigrams);
+        _recentTrigrams = default;
     }
 }
 

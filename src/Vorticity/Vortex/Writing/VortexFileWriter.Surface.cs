@@ -1,5 +1,4 @@
 using System;
-using System.Buffers;
 using System.Collections.Generic;
 using System.IO;
 using System.Runtime.CompilerServices;
@@ -138,7 +137,14 @@ public sealed partial class VortexFileWriter
     {
         ThrowIfDone();
         cancellationToken.ThrowIfCancellationRequested();
-        ColumnsBuilder<TRecord> builder = Builder<TRecord>();
+        Append(Builder<TRecord>(), rows);
+        return AcceptAsync(cancellationToken);
+    }
+
+    /// <summary>Appends <paramref name="rows"/> through the writer's builder without taking them; a failure leaves the builder as it was.</summary>
+    private static void Append<TRecord>(ColumnsBuilder<TRecord> builder, ReadOnlySpan<TRecord> rows)
+        where TRecord : IVortexRecord<TRecord>
+    {
         int before = builder.Store.Rows;
         try
         {
@@ -149,9 +155,10 @@ public sealed partial class VortexFileWriter
             builder.Store.Truncate(before);
             throw;
         }
-
-        return AcceptAsync(cancellationToken);
     }
+
+    /// <summary>The rows a stream gathers before it appends them to the builder, a column at a time.</summary>
+    private const int StreamedRows = 256;
 
     /// <summary>Writes a stream of rows, grouped by <see cref="BlockRows"/>, flushing as the sink fills.</summary>
     /// <typeparam name="TRecord">The record type.</typeparam>
@@ -164,21 +171,38 @@ public sealed partial class VortexFileWriter
         ArgumentNullException.ThrowIfNull(rows);
         ThrowIfDone();
         int block = _blockRows > 0 ? _blockRows : VortexWriteOptions.Default.BlockRows;
-        TRecord[] buffer = ArrayPool<TRecord>.Shared.Rent(block);
+        ColumnsBuilder<TRecord> builder = Builder<TRecord>();
+
+        // The rows go to the builder a few hundred at a time and are taken a block at a time, as a
+        // block's worth of rows written at once would be. The stream's own staging array is small: a
+        // record may hold references, which no block of bytes can.
+        TRecord[] staged = new TRecord[Math.Min(block, StreamedRows)];
         long flushAt = Math.Max(StreamingFlushBytes, 4L * _blockBytes);
+        int count = 0;
+        int appended = 0;
+        int start = builder.Store.Rows;
         try
         {
-            int count = 0;
             await foreach (TRecord row in rows.WithCancellation(cancellationToken).ConfigureAwait(false))
             {
-                buffer[count++] = row;
-                if (count < block)
+                staged[count++] = row;
+                if (count < staged.Length && appended + count < block)
                 {
                     continue;
                 }
 
-                await WriteAsync<TRecord>(buffer.AsSpan(0, count), cancellationToken).ConfigureAwait(false);
+                Append(builder, staged.AsSpan(0, count));
+                appended += count;
                 count = 0;
+                if (appended < block)
+                {
+                    continue;
+                }
+
+                cancellationToken.ThrowIfCancellationRequested();
+                appended = 0;
+                await AcceptAsync(cancellationToken).ConfigureAwait(false);
+                start = builder.Store.Rows;
                 if (UnflushedBytes >= flushAt)
                 {
                     await FlushAsync(cancellationToken).ConfigureAwait(false);
@@ -187,12 +211,26 @@ public sealed partial class VortexFileWriter
 
             if (count > 0)
             {
-                await WriteAsync<TRecord>(buffer.AsSpan(0, count), cancellationToken).ConfigureAwait(false);
+                Append(builder, staged.AsSpan(0, count));
+                appended += count;
+            }
+
+            if (appended > 0)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                appended = 0;
+                await AcceptAsync(cancellationToken).ConfigureAwait(false);
             }
         }
-        finally
+        catch
         {
-            ArrayPool<TRecord>.Shared.Return(buffer, RuntimeHelpers.IsReferenceOrContainsReferences<TRecord>());
+            // The rows of a block not taken leave the builder, as a block never written would have.
+            if (appended > 0)
+            {
+                builder.Store.Truncate(start);
+            }
+
+            throw;
         }
     }
 

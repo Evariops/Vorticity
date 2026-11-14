@@ -34,12 +34,17 @@ internal sealed class StringZones : IReadOnlyList<ZoneString>
 
     private readonly AppendList<ZoneString?> _closed = new AppendList<ZoneString?>();
     private StringBounds? _open;
+
+    /// <summary>The chunk being filled, a block of the pool held by its bytes: all of them are room.</summary>
     private byte[] _chunk = [];
     private int _chunkUsed;
 
-    /// <summary>Every chunk rented so far, to give back at <see cref="Release"/>.</summary>
-    private byte[][] _chunks = [];
-    private int _chunkCount;
+    /// <summary>
+    /// The chunks filled before it, to give back at <see cref="Release"/>: a list of the zones' own, made
+    /// at the second chunk only, which a column of one block never reaches, and kept for the next file.
+    /// </summary>
+    private byte[]?[] _filled = [];
+    private int _filledCount;
 
     /// <param name="limit">The byte limit; at least 1.</param>
     internal StringZones(int limit) => Limit = limit;
@@ -89,21 +94,18 @@ internal sealed class StringZones : IReadOnlyList<ZoneString>
             // The chunk before stays where it is: the slices already handed out point into it. The
             // first holds one zone's two bounds, which is all a column of one block ever needs.
             int first = 2 * (Limit + 1);
-            _chunk = ArrayPool<byte>.Shared.Rent(Math.Max(bytes.Length, Math.Min(Math.Max(_chunk.Length * 2, first), MaxChunk)));
-            _chunkUsed = 0;
-            if (_chunkCount == _chunks.Length)
+            if (_chunk.Length != 0)
             {
-                byte[][] grown = ArrayPool<byte[]>.Shared.Rent(Math.Max(4, _chunks.Length * 2));
-                _chunks.AsSpan(0, _chunkCount).CopyTo(grown);
-                if (_chunks.Length != 0)
+                if (_filledCount == _filled.Length)
                 {
-                    ArrayPool<byte[]>.Shared.Return(_chunks, clearArray: true);
+                    Array.Resize(ref _filled, Math.Max(4, _filled.Length * 2));
                 }
 
-                _chunks = grown;
+                _filled[_filledCount++] = _chunk;
             }
 
-            _chunks[_chunkCount++] = _chunk;
+            _chunk = Blocks.Rent<byte>(Math.Max(bytes.Length, Math.Min(Math.Max(_chunk.Length * 2, first), MaxChunk))).Array();
+            _chunkUsed = 0;
         }
 
         Memory<byte> slice = _chunk.AsMemory(_chunkUsed, bytes.Length);
@@ -113,24 +115,20 @@ internal sealed class StringZones : IReadOnlyList<ZoneString>
     }
 
     /// <summary>
-    /// Gives the chunks and the list back to the shared pools, once the file is done: the bounds
-    /// handed out are slices of those chunks, and nothing reads them any more.
+    /// Gives the chunks back to the pool, once the file is done: the bounds handed out are slices
+    /// of those chunks, and nothing reads them any more. The list of them stays, for the next file.
     /// </summary>
     internal void Release()
     {
         _closed.Release();
-        for (int i = 0; i < _chunkCount; i++)
+        for (int i = 0; i < _filledCount; i++)
         {
-            ArrayPool<byte>.Shared.Return(_chunks[i]);
+            Blocks.ReturnBytes(_filled[i]);
+            _filled[i] = null;
         }
 
-        if (_chunks.Length != 0)
-        {
-            ArrayPool<byte[]>.Shared.Return(_chunks, clearArray: true);
-        }
-
-        _chunks = [];
-        _chunkCount = 0;
+        Blocks.ReturnBytes(_chunk);
+        _filledCount = 0;
         _chunk = [];
         _chunkUsed = 0;
     }

@@ -1,10 +1,11 @@
 using System;
-using System.Buffers;
 using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.Numerics;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+using Vorticity.Buffers;
 
 namespace Vorticity.Writing;
 
@@ -14,14 +15,21 @@ namespace Vorticity.Writing;
 /// reads back at completion.
 /// </summary>
 /// <remarks>
+/// <para>
 /// Up to 64 entries it is a <see cref="List{T}"/>: one array, doubled by copying, and an object of
 /// the same size, so a column of a few blocks costs what it did. Past that, a
 /// <see cref="List{T}"/> keeps doubling, copying the whole list each time and leaving the old array
 /// behind -- ten arrays for a column of 1 280 blocks, the last two past the large object threshold
 /// -- while this one keeps the full array as its first segment and adds segments of 64, 128, 256
 /// and then 512 entries, never copying one: under half the bytes at that length, none of them large.
-/// Every array comes from the shared pools and goes back to them at <see cref="Release"/>, so a
-/// process that writes file after file grows its lists in the same arrays.
+/// </para>
+/// <para>
+/// Entries that hold no reference live in blocks of the pool (<see cref="Blocks"/>), given back at
+/// <see cref="Release"/>, so that a process that writes file after file grows its lists in the same
+/// bytes. Entries that hold one live in arrays of the list's own, which no block of bytes can be:
+/// <see cref="Release"/> keeps the single array for the next file the writer writes, and lets the
+/// segments go.
+/// </para>
 /// </remarks>
 /// <typeparam name="T">The entry.</typeparam>
 internal sealed class AppendList<T> : IReadOnlyList<T>
@@ -35,9 +43,15 @@ internal sealed class AppendList<T> : IReadOnlyList<T>
     /// <summary>The entries the single array starts with.</summary>
     private const int FirstLength = 4;
 
-    /// <summary>Null, the single array while short, then the array of segments.</summary>
+    /// <summary>
+    /// Null, the single array while short, then the array of segments: arrays of entries, or the
+    /// bytes of blocks when <see cref="InBlocks"/>.
+    /// </summary>
     private object? _store;
     private int _count;
+
+    /// <summary>Whether the entries hold no reference, and so live in blocks of the pool: a constant to the compiler.</summary>
+    private static bool InBlocks => !RuntimeHelpers.IsReferenceOrContainsReferences<T>();
 
     /// <inheritdoc/>
     public int Count => _count;
@@ -57,11 +71,11 @@ internal sealed class AppendList<T> : IReadOnlyList<T>
         // reference type is itself an array of that type's base.
         if (_count <= 1 << SingleShift)
         {
-            return ref Unsafe.As<T[]>(_store!)[index];
+            return ref Entry(_store!, index);
         }
 
         (int segment, int offset) = Locate(index);
-        return ref Unsafe.As<T[][]>(_store!)[segment][offset];
+        return ref Entry(Segment(_store!, segment), offset);
     }
 
     /// <summary>Appends <paramref name="item"/>.</summary>
@@ -70,100 +84,164 @@ internal sealed class AppendList<T> : IReadOnlyList<T>
         int index = _count;
         if (index < 1 << SingleShift)
         {
-            T[]? single = Unsafe.As<T[]?>(_store);
-            if (single is null || index == single.Length)
+            object? single = _store;
+            if (single is null || index == Capacity(single))
             {
                 single = Grow(single, index);
                 _store = single;
             }
 
-            single[index] = item;
+            Entry(single, index) = item;
         }
         else
         {
             (int segment, int offset) = Locate(index);
-            T[][] segments = index == 1 << SingleShift
-                ? Segmented()
-                : Unsafe.As<T[][]>(_store!);
+            object segments = index == 1 << SingleShift ? Segmented() : _store!;
             if (offset == 0)
             {
-                if (segment == segments.Length)
-                {
-                    T[][] grown = ArrayPool<T[]>.Shared.Rent(segments.Length * 2);
-                    segments.AsSpan().CopyTo(grown);
-                    ArrayPool<T[]>.Shared.Return(segments, clearArray: true);
-                    segments = grown;
-                    _store = segments;
-                }
-
-                segments[segment] = ArrayPool<T>.Shared.Rent(Length(segment));
+                segments = AddSegment(segments, segment);
+                _store = segments;
             }
 
-            segments[segment][offset] = item;
+            Entry(Segment(segments, segment), offset) = item;
         }
 
         _count = index + 1;
     }
 
     /// <summary>
-    /// Gives every array back to the shared pools and empties the list; for a writer that is done
-    /// with the file, whose next file then grows its lists in the same arrays.
+    /// Empties the list, for a writer that is done with the file. Blocks go back to the pool. Arrays
+    /// of the list's own leave the single one, its references cleared, for the next file's list to
+    /// grow in, and the segments to the collector.
     /// </summary>
     internal void Release()
     {
         object? store = _store;
         int count = _count;
-        _store = null;
         _count = 0;
         if (store is null)
         {
             return;
         }
 
-        if (count <= 1 << SingleShift)
+        if (InBlocks)
         {
-            Give(Unsafe.As<T[]>(store));
+            _store = null;
+            if (count <= 1 << SingleShift)
+            {
+                Blocks.ReturnBytes(Unsafe.As<byte[]>(store));
+                return;
+            }
+
+            foreach (byte[]? segment in Unsafe.As<byte[]?[]>(store))
+            {
+                Blocks.ReturnBytes(segment);
+            }
+
             return;
         }
 
-        T[][] segments = Unsafe.As<T[][]>(store);
-        for (int i = 0; i < segments.Length && segments[i] is { } segment; i++)
+        T[] single = count <= 1 << SingleShift ? Unsafe.As<T[]>(store) : Unsafe.As<T[][]>(store)[0];
+        if (RuntimeHelpers.IsReferenceOrContainsReferences<T>())
         {
-            Give(segment);
+            single.AsSpan(0, Math.Min(count, single.Length)).Clear();
         }
 
-        ArrayPool<T[]>.Shared.Return(segments, clearArray: true);
+        _store = single;
     }
 
-    /// <summary>The single array, twice as long, holding its <paramref name="count"/> entries; the old one goes back.</summary>
-    /// <remarks>
-    /// Below <see cref="PooledLength"/> the array is the list's own: the pools hand out nothing
-    /// shorter, and a schema of a thousand one-block columns would take a thousand of their
-    /// shortest arrays, four times the entries it needs and more arrays than they keep.
-    /// </remarks>
-    private static T[] Grow(T[]? single, int count)
+    /// <summary>Entry <paramref name="offset"/> of an array of the store.</summary>
+    private static ref T Entry(object array, int offset)
     {
-        int length = single is null ? FirstLength : single.Length * 2;
-        T[] grown = length < PooledLength ? new T[length] : ArrayPool<T>.Shared.Rent(length);
-        if (single is not null)
+        if (!InBlocks)
         {
-            single.AsSpan(0, count).CopyTo(grown);
-            Give(single);
+            return ref Unsafe.As<T[]>(array)[offset];
+        }
+
+        byte[] bytes = Unsafe.As<byte[]>(array);
+        if ((uint)offset >= (uint)(bytes.Length / Unsafe.SizeOf<T>()))
+        {
+            ThrowIndex(offset, bytes.Length / Unsafe.SizeOf<T>());
+        }
+
+        return ref Unsafe.Add(ref Unsafe.As<byte, T>(ref MemoryMarshal.GetArrayDataReference(bytes)), offset);
+    }
+
+    /// <summary>The entries an array of the store has room for.</summary>
+    private static int Capacity(object array) =>
+        InBlocks ? Unsafe.As<byte[]>(array).Length / Unsafe.SizeOf<T>() : Unsafe.As<T[]>(array).Length;
+
+    /// <summary>Segment <paramref name="segment"/> of the array of segments.</summary>
+    private static object Segment(object segments, int segment) =>
+        InBlocks ? Unsafe.As<byte[][]>(segments)[segment] : Unsafe.As<T[][]>(segments)[segment];
+
+    /// <summary>An array of the store for <paramref name="length"/> entries: a block of the pool, or the list's own.</summary>
+    private static object NewArray(int length) =>
+        InBlocks ? Blocks.Rent<byte>(length * Unsafe.SizeOf<T>()).Array() : new T[length];
+
+    /// <summary>The single array, twice as long, holding its <paramref name="count"/> entries; a block it leaves goes back.</summary>
+    private static object Grow(object? single, int count)
+    {
+        object grown = NewArray(single is null ? FirstLength : Capacity(single) * 2);
+        if (single is null)
+        {
+            return grown;
+        }
+
+        if (InBlocks)
+        {
+            Unsafe.As<byte[]>(single).AsSpan(0, count * Unsafe.SizeOf<T>()).CopyTo(Unsafe.As<byte[]>(grown));
+            Blocks.ReturnBytes(Unsafe.As<byte[]>(single));
+        }
+        else
+        {
+            Unsafe.As<T[]>(single).AsSpan(0, count).CopyTo(Unsafe.As<T[]>(grown));
         }
 
         return grown;
     }
 
-    /// <summary>The shortest array the shared pools hand out, below which the list keeps its own.</summary>
-    private const int PooledLength = 16;
-
-    /// <summary>Returns <paramref name="array"/> to the shared pool when it came from there.</summary>
-    private static void Give(T[] array)
+    /// <summary>The full single array, now the first of the segments; the array of them is the list's own.</summary>
+    private object Segmented()
     {
-        if (array.Length >= PooledLength)
+        object single = _store!;
+        if (InBlocks)
         {
-            ArrayPool<T>.Shared.Return(array, RuntimeHelpers.IsReferenceOrContainsReferences<T>());
+            byte[][] blocks = new byte[8][];
+            blocks[0] = Unsafe.As<byte[]>(single);
+            _store = blocks;
+            return blocks;
         }
+
+        T[][] segments = new T[8][];
+        segments[0] = Unsafe.As<T[]>(single);
+        _store = segments;
+        return segments;
+    }
+
+    /// <summary>Segment <paramref name="segment"/> made, the array of segments doubled when it is full; returns that array.</summary>
+    private static object AddSegment(object segments, int segment)
+    {
+        if (InBlocks)
+        {
+            byte[][] blocks = Unsafe.As<byte[][]>(segments);
+            if (segment == blocks.Length)
+            {
+                Array.Resize(ref blocks, blocks.Length * 2);
+            }
+
+            blocks[segment] = Unsafe.As<byte[]>(NewArray(Length(segment)));
+            return blocks;
+        }
+
+        T[][] arrays = Unsafe.As<T[][]>(segments);
+        if (segment == arrays.Length)
+        {
+            Array.Resize(ref arrays, arrays.Length * 2);
+        }
+
+        arrays[segment] = new T[Length(segment)];
+        return arrays;
     }
 
     /// <inheritdoc/>
@@ -176,15 +254,6 @@ internal sealed class AppendList<T> : IReadOnlyList<T>
     }
 
     IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
-
-    /// <summary>The full single array, now the first of the segments.</summary>
-    private T[][] Segmented()
-    {
-        T[][] segments = ArrayPool<T[]>.Shared.Rent(8);
-        segments[0] = Unsafe.As<T[]>(_store!);
-        _store = segments;
-        return segments;
-    }
 
     /// <summary>The entries segment <paramref name="segment"/> holds: 64, 64, 128, 256, then 512.</summary>
     /// <remarks>The doubling is bounded before it is shifted: a shift past 31 wraps rather than saturates.</remarks>

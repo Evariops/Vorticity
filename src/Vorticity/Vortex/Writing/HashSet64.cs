@@ -1,5 +1,5 @@
 using System;
-using System.Buffers;
+using Vorticity.Buffers;
 
 namespace Vorticity.Writing;
 
@@ -26,16 +26,15 @@ internal sealed class HashSet64 : IDisposable
     /// <summary>Hashes whose slots are mixed ahead of their probes, on the stack.</summary>
     private const int Batch = 64;
 
-    private ulong[] _slots;
+    private Block<ulong> _slots;
     private int _mask;
     private int _count;
     private bool _hasZero;
 
     internal HashSet64()
     {
-        _slots = ArrayPool<ulong>.Shared.Rent(InitialSlots);
+        _slots = Blocks.RentCleared<ulong>(InitialSlots);
         _mask = InitialSlots - 1;
-        _slots.AsSpan(0, InitialSlots).Clear();
     }
 
     internal int Count => _count + (_hasZero ? 1 : 0);
@@ -71,7 +70,7 @@ internal sealed class HashSet64 : IDisposable
             return;
         }
 
-        ulong[] slots = _slots;
+        Span<ulong> slots = _slots;
         int mask = _mask;
         int slot = (int)mixed & mask;
         while (true)
@@ -153,11 +152,11 @@ internal sealed class HashSet64 : IDisposable
 
     private void Grow()
     {
-        ulong[] old = _slots;
+        Block<ulong> old = _slots;
         int oldLength = _mask + 1;
         int length = oldLength * 2;
-        ulong[] grown = ArrayPool<ulong>.Shared.Rent(length);
-        grown.AsSpan(0, length).Clear();
+        Block<ulong> block = Blocks.RentCleared<ulong>(length);
+        Span<ulong> grown = block;
         int mask = length - 1;
         foreach (ulong hash in old.AsSpan(0, oldLength))
         {
@@ -175,8 +174,8 @@ internal sealed class HashSet64 : IDisposable
             grown[slot] = hash;
         }
 
-        ArrayPool<ulong>.Shared.Return(old);
-        _slots = grown;
+        Blocks.Return(old);
+        _slots = block;
         _mask = mask;
     }
 
@@ -184,8 +183,8 @@ internal sealed class HashSet64 : IDisposable
     {
         if (_slots.Length > 0)
         {
-            ArrayPool<ulong>.Shared.Return(_slots);
-            _slots = [];
+            Blocks.Return(_slots);
+            _slots = default;
             _mask = -1;
         }
     }
