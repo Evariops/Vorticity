@@ -134,7 +134,8 @@ A merge never takes away what a reader holds: a reader holds a version, and ever
 
 - A question opens the small objects of level 0 it reads side by side, as many at once as the session reads at once (`VortexSessionOptions.MaxConcurrentReads`, 128 by default). On 1,712 small objects at 20 ms a request, a count of one service takes about 0.4 s.
 - An object a question cannot rule out costs it one request and all its bytes: 41.6 MB for that count, at every question, until the merges catch up.
-- A handle keeps the objects it opened (`DatasetOptions.MaxOpenObjectBytes`, 64 MiB by default), about 81 KB for a small object, so 830 of them by default. A question that reads more of them than that finds none open the next time.
+- A question that reads the rows of an object of 320 KiB at most opens it whole, in one request. A larger object costs it two at least, its tail and then its data. On 24 objects of 75 to 164 KB, the rows of one service took 24 requests where they took 48, for 8 to 16 % fewer bytes.
+- A handle keeps the objects it opened (`DatasetOptions.MaxOpenObjectBytes`, 64 MiB by default), about 81 KB for a small object, so 830 of them by default, and an object opened whole at its bytes. A question that reads more of them than that finds none open the next time.
 - Keep readers' handles open and refresh them rather than open a new one per question. A commit carries only the pages it wrote, so a handle opened cold reads, one request per level, the pages of the tree its question passes through that the last commit did not write. An open handle keeps them from one version to the next and reads them once.
 - Watch the lag: `CompactionPlan.Partitions` gives it by partition, without opening an object. Past a few hundred small objects in a partition, its readers pay for it.
 

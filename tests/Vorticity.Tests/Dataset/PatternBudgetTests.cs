@@ -58,15 +58,22 @@ public sealed partial class PatternBudgetTests : IClassFixture<PatternBudgetTest
     /// any more, so the objects these questions read weigh 3.7 KB less, and the 64 KiB an open reads of an object's tail,
     /// which start on a multiple of 64 bytes, start 21 bytes earlier in the lighter object.
     /// </para>
+    /// <para>
+    /// Lowered on 2026-11-14, a read of rows opening whole an object that goes past its tail by a request's worth at most
+    /// (<c>ObjectCache.WholeBytesUnder</c>). These objects weigh 66.6 KB, a kilobyte past the tail. QP-1 goes from 8
+    /// requests cold to 4 and from 4 warm to none, QP-4 from 5 to 4 and from 1 to none, QP-6 from 2 to 1 and from 1 to none,
+    /// each for fewer bytes. QP-2, QP-3 and QP-10 asked for nothing past the tail: they read that kilobyte of each of their
+    /// four objects at the same requests, 4,096 bytes more, 1.6 %.
+    /// </para>
     /// </summary>
     private static readonly Dictionary<string, Budget> Ceilings = new(StringComparer.Ordinal)
     {
-        ["QP-1 a service's routes under 5xx, per hour"] = new(8, 361233, 4, 98960, 86741),
-        ["QP-2 the pods of a route"] = new(4, 262273, 0, 0, 78260),
-        ["QP-3 the services under a shredded status of 500 or more"] = new(4, 262273, 0, 0, 101796),
-        ["QP-4 the spans of a trace"] = new(5, 287013, 1, 24740, 81960),
-        ["QP-6 the 99th percentile per service, the last quarter of an hour"] = new(2, 90308, 1, 24740, 140948),
-        ["QP-10 the services of a residual key"] = new(4, 262273, 0, 0, 108692),
+        ["QP-1 a service's routes under 5xx, per hour"] = new(4, 266369, 0, 0, 86741),
+        ["QP-2 the pods of a route"] = new(4, 266369, 0, 0, 78260),
+        ["QP-3 the services under a shredded status of 500 or more"] = new(4, 266369, 0, 0, 101796),
+        ["QP-4 the spans of a trace"] = new(4, 266369, 0, 0, 81960),
+        ["QP-6 the 99th percentile per service, the last quarter of an hour"] = new(1, 66528, 0, 0, 140948),
+        ["QP-10 the services of a residual key"] = new(4, 266369, 0, 0, 108692),
     };
 
     private readonly Fixture _fixture;

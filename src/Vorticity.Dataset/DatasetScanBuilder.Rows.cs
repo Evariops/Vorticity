@@ -54,8 +54,10 @@ internal sealed partial class DatasetScanBuilder
     /// A lease of <paramref name="held"/>: for a scan that reads keys of variant columns, an object of level 0
     /// through the node's memo of it shredded in memory, which parses its keys once; the object itself otherwise. The
     /// question keeps what its scans read of the object until the last of its leases is given back (<see cref="Reads"/>).
+    /// A caller that reads the object's rows says so (<paramref name="rows"/>): an object that goes little past its tail is
+    /// then opened whole (<see cref="ObjectCache.WholeBytesUnder"/>).
     /// </summary>
-    private async ValueTask<ObjectLease> RentAsync(PositionedObject held, CancellationToken cancellationToken)
+    private async ValueTask<ObjectLease> RentAsync(PositionedObject held, CancellationToken cancellationToken, bool rows = false)
     {
         // Once a scan, the memo lets go of the objects that have left level 0 since it last looked.
         if (!_memoChecked)
@@ -70,7 +72,7 @@ internal sealed partial class DatasetScanBuilder
 #pragma warning disable VSTHRD003 // The open was started by this scan's walk, a few objects before (OpenedAheadAsync).
             ? await opened.ConfigureAwait(false)
 #pragma warning restore VSTHRD003
-            : await _version.RentAsync(held.Entry, cancellationToken).ConfigureAwait(false);
+            : await _version.RentAsync(held.Entry, cancellationToken, rows).ConfigureAwait(false);
         if (lease.IsCopy)
         {
             HashSet<UInt128> copies = LazyInitializer.EnsureInitialized(ref _copies);
@@ -863,7 +865,7 @@ internal sealed partial class DatasetScanBuilder
     private async IAsyncEnumerable<RecordBatch> OpenedRowsAsync(
         PositionedObject held, int open, Task<Indexes.ColumnMarks?[]>? marks, [EnumeratorCancellation] CancellationToken cancellationToken)
     {
-        ObjectLease lease = await RentAsync(held, cancellationToken).ConfigureAwait(false);
+        ObjectLease lease = await RentAsync(held, cancellationToken, rows: true).ConfigureAwait(false);
         await using (lease.ConfigureAwait(false))
         {
             RecordOpen(lease, open);

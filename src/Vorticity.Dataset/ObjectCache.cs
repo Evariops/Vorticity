@@ -47,13 +47,27 @@ internal sealed class ObjectCache : IAsyncDisposable
     private long _heldBytes;
     private bool _disposed;
 
-    internal ObjectCache(IObjectStore store, int capacity, VortexSession? session = null, long byteCapacity = long.MaxValue)
+    // The bytes of an object up to which a read of its rows opens it whole (WholeBytesUnder).
+    private readonly long _wholeBytes;
+
+    internal ObjectCache(
+        IObjectStore store, int capacity, VortexSession? session = null, long byteCapacity = long.MaxValue, long wholeBytes = 0)
     {
         _store = store;
         _capacity = Math.Max(1, capacity);
         _byteCapacity = Math.Max(0, byteCapacity);
         _session = session ?? VortexSession.Default;
+        _wholeBytes = wholeBytes;
     }
+
+    /// <summary>
+    /// The bytes of an object up to which a read of its rows opens it whole, where requests cost what
+    /// <paramref name="profile"/> says: the tail an open reads, and the gap the profile reads two ranges across as one. A
+    /// read of rows asks for the tail, then for the data ahead of it. An object that goes past the tail by no more than
+    /// that gap costs less read whole than a second request: 320 KiB at the remote tier, and no more than the tail
+    /// in memory, where a request costs nothing.
+    /// </summary>
+    internal static long WholeBytesUnder(CostProfile profile) => VortexOpenOptions.DefaultInitialReadBytes + (long)profile.JoinedGap;
 
     /// <summary>What the open objects weigh, leased or idle (<see cref="Held.Weight"/>).</summary>
     internal long HeldBytes
@@ -91,11 +105,17 @@ internal sealed class ObjectCache : IAsyncDisposable
 
     /// <summary>
     /// <see cref="OpenOptionsWith"/>, with the footer's length when the entry records one: the open
-    /// then reads the object's footer in one request where it would take two.
+    /// then reads the object's footer in one request where it would take two. An object of
+    /// <paramref name="wholeBytes"/> at most is read whole, its rows with its footer.
     /// </summary>
-    internal static VortexOpenOptions OpenOptionsOf(ObjectEntry entry, List<ReadOnlyMemory<byte>> fragments)
+    internal static VortexOpenOptions OpenOptionsOf(ObjectEntry entry, List<ReadOnlyMemory<byte>> fragments, long wholeBytes = 0)
     {
         VortexOpenOptions options = OpenOptionsWith(fragments);
+        if (entry.Bytes > VortexOpenOptions.DefaultInitialReadBytes && entry.Bytes <= Math.Min(wholeBytes, int.MaxValue))
+        {
+            return options with { InitialReadBytes = (int)entry.Bytes };
+        }
+
         return entry.FooterBytes > 0
             ? options with { InitialReadBytes = (int)Math.Min(entry.FooterBytes, int.MaxValue) }
             : options;
@@ -110,10 +130,13 @@ internal sealed class ObjectCache : IAsyncDisposable
     /// <summary>
     /// Opens an object with the index fragments its entry names, or hands back the handle already
     /// open on that view of it.
-    /// The caller disposes the lease when it is done reading.
+    /// The caller disposes the lease when it is done reading. A caller that will read the object's rows says so
+    /// (<paramref name="rows"/>): an open then reads whole an object that goes little past its tail
+    /// (<see cref="WholeBytesUnder"/>), where the rows would cost a second request. An object open already is handed
+    /// back as it is.
     /// </summary>
     internal async ValueTask<ObjectLease> RentAsync(
-        ObjectEntry entry, CommitPageSource pages, CancellationToken cancellationToken)
+        ObjectEntry entry, CommitPageSource pages, CancellationToken cancellationToken, bool rows = false)
     {
         string handle = HandleOf(entry);
         while (true)
@@ -146,7 +169,7 @@ internal sealed class ObjectCache : IAsyncDisposable
 
             if (mine is not null)
             {
-                return await OpenAsync(entry, pages, handle, mine, cancellationToken).ConfigureAwait(false);
+                return await OpenAsync(entry, pages, handle, mine, rows, cancellationToken).ConfigureAwait(false);
             }
 
             // Another rent is opening this object, and shares it once open. An open cancelled by its
@@ -163,12 +186,12 @@ internal sealed class ObjectCache : IAsyncDisposable
 
     /// <summary>Opens an object outside the gate, then publishes it to the rents waiting on it.</summary>
     private async ValueTask<ObjectLease> OpenAsync(
-        ObjectEntry entry, CommitPageSource pages, string handle, TaskCompletionSource<Held> opening, CancellationToken cancellationToken)
+        ObjectEntry entry, CommitPageSource pages, string handle, TaskCompletionSource<Held> opening, bool rows, CancellationToken cancellationToken)
     {
         Held held;
         try
         {
-            held = await OpenHeldAsync(entry, pages, handle, cancellationToken).ConfigureAwait(false);
+            held = await OpenHeldAsync(entry, pages, handle, rows, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception failure)
         {
@@ -208,7 +231,7 @@ internal sealed class ObjectCache : IAsyncDisposable
     }
 
     /// <summary>Opens an object with the index fragments its entry names, leased once to the caller.</summary>
-    private async ValueTask<Held> OpenHeldAsync(ObjectEntry entry, CommitPageSource pages, string handle, CancellationToken cancellationToken)
+    private async ValueTask<Held> OpenHeldAsync(ObjectEntry entry, CommitPageSource pages, string handle, bool rows, CancellationToken cancellationToken)
     {
         // A fragment whose bytes are not what its reference says is left out rather than fatal: an
         // index claims nothing it cannot prove, and the object answers exactly without it. A missing
@@ -245,7 +268,8 @@ internal sealed class ObjectCache : IAsyncDisposable
             ISegmentReader read = source is ObjectStoreSource
                 ? SynopsisCacheReader.Over(source, _session.Options.SynopsisCache, entry.Uid, entry.Contents)
                 : source;
-            VortexFile file = await VortexFile.OpenAsync(SessionReader.Wrap(read, _session), OpenOptionsOf(entry, fragments), cancellationToken).ConfigureAwait(false);
+            VortexOpenOptions options = OpenOptionsOf(entry, fragments, rows ? _wholeBytes : 0);
+            VortexFile file = await VortexFile.OpenAsync(SessionReader.Wrap(read, _session), options, cancellationToken).ConfigureAwait(false);
             file.Session = _session;
 
             // What it keeps while open: the tail it read, and what it parses of its footer (ParsedPerFooterByte).
