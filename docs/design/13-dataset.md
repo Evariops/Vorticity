@@ -27,6 +27,7 @@ referencing it, and which any other library can implement.
 | bytes of data | nothing on the read path | identity from bytes the open already reads. The content hash is the writer's, checked only offline ([identity](#7-identity-and-integrity)) |
 | data objects | O(log N) pages read; a key lookup touches the objects of the partitions it reaches, one of a consolidated partition and its few late ones | a copy-on-write tree of objects led by the partition, with summaries per node ([the tree](#4-the-tree)), size classes and consolidation within a partition, or levels for a sort key without one ([levels](#5-levels-and-compaction)) |
 | commits | one `List` finds the latest, and a commit writes O(depth) pages in one object | newest-first keys ([the latest version](#83-the-latest-version-in-one-request)), path copying into one commit object ([commits](#43-commits-are-paths-written-as-one-object)) |
+| bytes a commit writes | the pages of its path, one per level and 64 to 256 KiB each, plus what its header inlines: bounded by the tree's depth, never by its objects, and held by a ratchet | path copying, and the header's inlining ([the price](#54-the-price)) |
 | appends since compaction | at most four runs per index entry per object; at most `k − 1` objects a size class in a partition, or 8 objects in level 0 under levels | one rule inside a file and across files ([the invariant](#52-the-invariant), [runs](#61-one-run-per-entry-per-object)) |
 | blocks of an object | `1 + 16 · log₁₆ blocks` filter reads, output-sensitive | the filter tree ([the directory and the runs](10-indexes.md#3-the-directory-and-the-runs)) |
 | entries of a run | two fence pages up to 10¹² entries | fence pages ([the directory and the runs](10-indexes.md#3-the-directory-and-the-runs)) |
@@ -53,6 +54,7 @@ referencing it, and which any other library can implement.
    the read path hashes data.
 7. Derived data folds back into the data. A compaction that rewrites an object embeds its indexes, so
    external fragments are a transient layer between "written without an index" and "next rewritten".
+8. A commit writes in proportion to its change. Its metadata is a cost of the write path like its rewrites of rows, bounded and held by a test, so that a dataset that takes a small append every few seconds does not keep more metadata than data.
 
 ## 3. Objects and keys
 
@@ -406,6 +408,8 @@ there: nothing overlaps, so past level 0 every crossing moves an object up rathe
 ([what compaction buys](15-compaction.md#1-what-compaction-buys-and-what-it-costs)), and a row is
 rewritten once by the merge that takes it out of level 0, then once a size class as the merges of
 neighbours grow its objects: 2.78 times on the lifecycle bench (`--partition off --late off`).
+
+A commit's metadata has a price of its own, in bytes rather than in rewrites. A commit rewrites the pages of its path whatever it changed, a page of 64 to 256 KiB per level, and its header inlines pages for a cold reader. On real rows, with entries of about 2.5 KB, an append writes about 25 KB of commit object to a dataset whose writer merges level 0 in its own commits, 212 KB to one of 40 consolidated partitions, and 356 to 385 KB to one whose level 0 holds 3,300 objects. `CommitBytesBudgetTests` holds five such commits under ceilings, with synthetic entries of the same size and fixed keys, and a change that writes less lowers them.
 
 Who pays it, and when, is the caller's decision. Compaction runs when `CompactAsync` is called, in a
 loop any host runs (`RunCompactionAsync`, which plans, runs the job that is due at the rate it is
