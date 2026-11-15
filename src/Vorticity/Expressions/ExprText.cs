@@ -1,7 +1,7 @@
 using System;
-using System.Buffers;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Unicode;
 using Vorticity.Compute;
@@ -335,46 +335,38 @@ internal static class ExprText
         bool isAnd, VortexExpr left, int position, VortexExpr right, List<Token> tokens, ref int at, int nesting)
     {
         string word = isAnd ? "and" : "or";
-        VortexExpr[] operands = ArrayPool<VortexExpr>.Shared.Rent(128);
-        int[] operators = ArrayPool<int>.Shared.Rent(16);
-        int count = 0;
-        int read = 0;
-        try
+
+        // Lists of their own: the operands are references, which no block of the pool holds, and a run is parsed
+        // once, as its text is read.
+        List<VortexExpr> operands = [];
+        List<int> operators = [];
+        Expr.Flatten(isAnd, left, operands);
+        int taken = operands.Count;
+        operators.Add(position);
+        operands.Add(right);
+        while (IsWord(tokens, at, word))
         {
-            Expr.Flatten(isAnd, left, ref operands, ref count);
-            int taken = count;
-            Expr.Append(ref operators, ref read, position);
-            Expr.Append(ref operands, ref count, right);
-            while (IsWord(tokens, at, word))
-            {
-                Expr.Append(ref operators, ref read, tokens[at++].Position);
-                Expr.Append(ref operands, ref count, isAnd ? ParseUnary(tokens, ref at, nesting) : ParseAnd(tokens, ref at, nesting));
-            }
-
-            ReadOnlySpan<VortexExpr> run = operands.AsSpan(0, count);
-            if (Expr.Balance(isAnd, run) is { } balanced)
-            {
-                return balanced;
-            }
-
-            // The operands taken apart were joined within the depth as the run leaned: one refused
-            // among them is reported at the operator that brought the run here.
-            VortexExpr joined = run[0];
-            for (int i = 1; i < count; i++)
-            {
-                joined = ExprDepth.TooDeep(joined, run[i])
-                    ? throw TooDeep(operators[Math.Max(i - taken, 0)])
-                    : Expr.Joined(isAnd, joined, run[i]);
-            }
-
-            return joined;
+            operators.Add(tokens[at++].Position);
+            operands.Add(isAnd ? ParseUnary(tokens, ref at, nesting) : ParseAnd(tokens, ref at, nesting));
         }
-        finally
+
+        ReadOnlySpan<VortexExpr> run = CollectionsMarshal.AsSpan(operands);
+        if (Expr.Balance(isAnd, run) is { } balanced)
         {
-            Array.Clear(operands, 0, count);
-            ArrayPool<VortexExpr>.Shared.Return(operands);
-            ArrayPool<int>.Shared.Return(operators);
+            return balanced;
         }
+
+        // The operands taken apart were joined within the depth as the run leaned: one refused
+        // among them is reported at the operator that brought the run here.
+        VortexExpr joined = run[0];
+        for (int i = 1; i < run.Length; i++)
+        {
+            joined = ExprDepth.TooDeep(joined, run[i])
+                ? throw TooDeep(operators[Math.Max(i - taken, 0)])
+                : Expr.Joined(isAnd, joined, run[i]);
+        }
+
+        return joined;
     }
 
     /// <remarks>

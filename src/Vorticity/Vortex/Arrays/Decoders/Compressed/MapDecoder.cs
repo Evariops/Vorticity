@@ -58,26 +58,14 @@ internal sealed class MapDecoder : ArrayDecoder
         DType value = DTypeImport.Into(types, dtype.ValueType);
         DType entriesList;
 
-        // Interned handles and a pooled pair rather than two `new[]`s per decode. DType is a
-        // managed type, so the fields cannot be `stackalloc`; Scratch is the house answer and is
-        // what DTypeImport uses for the same two spans.
+        // Interned handles and the pair's nodes on the stack rather than two `new[]`s per decode.
         Span<int> nameStack = stackalloc int[2];
-        Scratch<DType> fields = new Scratch<DType>(2, default);
-        try
-        {
-            nameStack[0] = types.InternName("key"u8);
-            nameStack[1] = types.InternName("value"u8);
-            Span<DType> fieldSpan = fields.Span;
-            fieldSpan[0] = key;
-            fieldSpan[1] = value;
-
-            entriesList = types.List(
-                types.Struct(nameStack, fieldSpan, Nullability.NonNullable), dtype.Nullability);
-        }
-        finally
-        {
-            fields.Dispose();
-        }
+        nameStack[0] = types.InternName("key"u8);
+        nameStack[1] = types.InternName("value"u8);
+        Span<int> fieldNodes = stackalloc int[2];
+        fieldNodes[0] = key.NodeIndex;
+        fieldNodes[1] = value.NodeIndex;
+        entriesList = types.List(types.StructOfNodes(nameStack, fieldNodes, Nullability.NonNullable), dtype.Nullability);
 
         int child = context.DecodeChild(in node, 0, entriesList, length);
         CanonicalNode list = context.Canonical.GetNode(child);

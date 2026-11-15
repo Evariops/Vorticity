@@ -1,11 +1,11 @@
 using System;
-using System.Buffers;
 using System.Collections.Generic;
 using System.IO.Hashing;
 using System.Numerics;
 using System.Runtime.InteropServices;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
+using Vorticity.Buffers;
 using Vorticity.Expressions;
 using Vorticity.Types;
 using Vorticity.Types.Numerics;
@@ -115,15 +115,15 @@ internal sealed class TupleSet
     {
         int rows = destination.Length;
         int arity = _arity;
-        ulong[] keys = ArrayPool<ulong>.Shared.Rent(Math.Max(rows * arity, 1));
-        ushort[] states = ArrayPool<ushort>.Shared.Rent(Math.Max(rows, 1));
+        Block<ulong> rentedKeys = Blocks.Rent<ulong>(rows * arity);
+        Block<ushort> states = Blocks.RentCleared<ushort>(rows);
         try
         {
-            Span<ushort> held = states.AsSpan(0, rows);
-            held.Clear();
+            Span<ulong> keys = rentedKeys;
+            Span<ushort> held = states;
             for (int column = 0; column < arity; column++)
             {
-                KeysOf(arena, columns[column], _kinds[column], keys.AsSpan(column * rows, rows), held, (ushort)(1 << column));
+                KeysOf(arena, columns[column], _kinds[column], keys.Slice(column * rows, rows), held, (ushort)(1 << column));
             }
 
             int full = (1 << arity) - 1;
@@ -149,8 +149,8 @@ internal sealed class TupleSet
         }
         finally
         {
-            ArrayPool<ulong>.Shared.Return(keys);
-            ArrayPool<ushort>.Shared.Return(states);
+            Blocks.Return(rentedKeys);
+            Blocks.Return(states);
         }
     }
 
@@ -198,7 +198,7 @@ internal sealed class TupleSet
     }
 
     /// <summary>Whether a tuple holds row <paramref name="row"/>'s values of the columns of <paramref name="table"/>'s mask.</summary>
-    private bool Holds(Table table, CanonicalArena arena, ReadOnlySpan<int> columns, ulong[] keys, int rows, int row)
+    private bool Holds(Table table, CanonicalArena arena, ReadOnlySpan<int> columns, ReadOnlySpan<ulong> keys, int rows, int row)
     {
         int mask = table.Mask;
         ulong hash = Seed();
@@ -227,7 +227,7 @@ internal sealed class TupleSet
     }
 
     /// <summary>Whether tuple <paramref name="tuple"/> holds row <paramref name="row"/>'s values of the columns of <paramref name="mask"/>.</summary>
-    private bool Matches(int tuple, int mask, CanonicalArena arena, ReadOnlySpan<int> columns, ulong[] keys, int rows, int row)
+    private bool Matches(int tuple, int mask, CanonicalArena arena, ReadOnlySpan<int> columns, ReadOnlySpan<ulong> keys, int rows, int row)
     {
         for (int column = 0; column < _arity; column++)
         {

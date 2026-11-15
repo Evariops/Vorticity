@@ -512,8 +512,8 @@ internal sealed class ZoneKeyReads
                 int zones = last - first + 1;
                 VortexBuffer endsBuffer = arena.AllocateUninitialized(zones * sizeof(uint), sizeof(uint), out Span<byte> endBytes);
                 Span<uint> ends = MemoryMarshal.Cast<byte, uint>(endBytes);
-                int[]? rented = zones <= StackZones ? null : System.Buffers.ArrayPool<int>.Shared.Rent(zones);
-                Span<int> kept = rented is null ? stackalloc int[StackZones] : rented;
+                Block<int> rented = zones <= StackZones ? default : Blocks.Rent<int>(zones);
+                Span<int> kept = rented.IsDefault ? stackalloc int[StackZones] : rented;
                 try
                 {
                     int runs = Ends(context, rows, first, ends, kept);
@@ -535,10 +535,7 @@ internal sealed class ZoneKeyReads
                 }
                 finally
                 {
-                    if (rented is not null)
-                    {
-                        System.Buffers.ArrayPool<int>.Shared.Return(rented);
-                    }
+                    Blocks.Return(rented);
                 }
             }
 

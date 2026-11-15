@@ -13,6 +13,7 @@ using System.Linq;
 using System.Threading.Tasks;
 
 using Vorticity.Arrays;
+using Vorticity.Buffers;
 using Vorticity.Layouts;
 
 using Xunit;
@@ -171,7 +172,8 @@ public sealed class LayoutExecutionTests
             expected.AddRange(await DigestAsync(file, tree, context, new RowRange(row, row + 1)));
         }
 
-        int[] selection = [.. rows];
+        Block<int> selection = Blocks.Allocate<int>(rows.Length);
+        rows.CopyTo(selection.AsSpan());
         ScanContext.SavedSelection saved = context.ExchangeSelection(selection, selection.Length);
         byte[] actual;
         try
@@ -208,7 +210,12 @@ public sealed class LayoutExecutionTests
             expected.AddRange(await DigestAsync(file, tree, context, new RowRange(row, row + 1)));
         }
 
-        int[] selection = [.. rows.Select(row => row - 150)];
+        Block<int> selection = Blocks.Allocate<int>(rows.Length);
+        for (int i = 0; i < rows.Length; i++)
+        {
+            selection[i] = rows[i] - 150;
+        }
+
         ScanContext.SavedSelection saved = context.ExchangeSelection(selection, selection.Length, selectionBase: 150);
         byte[] actual;
         try

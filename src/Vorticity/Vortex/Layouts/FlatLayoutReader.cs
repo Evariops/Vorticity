@@ -389,7 +389,7 @@ internal sealed class FlatLayoutReader : LayoutReader
         if (!context.TryPeekRetained(answerKey, out CanonicalArena held, out int retained))
         {
             int words = Compute.PredicateBits.WordsOf(Math.Max(total, 1));
-            ulong[] rented = System.Buffers.ArrayPool<ulong>.Shared.Rent(2 * words);
+            Block<ulong> rented = Blocks.Rent<ulong>(2 * words);
             try
             {
                 Compute.PredicateBits bits = new Compute.PredicateBits(rented.AsSpan(0, words), rented.AsSpan(words, words), total);
@@ -414,7 +414,7 @@ internal sealed class FlatLayoutReader : LayoutReader
             }
             finally
             {
-                System.Buffers.ArrayPool<ulong>.Shared.Return(rented);
+                Blocks.Return(rented);
             }
         }
 
@@ -729,8 +729,8 @@ internal sealed class FlatLayoutReader : LayoutReader
             return spanned == context.SelectionCount ? decoded : GatherRebased(context, decoded, from);
         }
 
-        int[] parts = System.Buffers.ArrayPool<int>.Shared.Rent(clusters);
-        int[] local = System.Buffers.ArrayPool<int>.Shared.Rent(selection.Length);
+        Block<int> parts = Blocks.Rent<int>(clusters);
+        Block<int> local = Blocks.Rent<int>(selection.Length);
         uint? outer = context.Decode.BeginNodeCheckScope(node.Segments[0]);
         try
         {
@@ -767,13 +767,13 @@ internal sealed class FlatLayoutReader : LayoutReader
             }
 
             return Arrays.Decoders.Canonical.CanonicalConcat.Concat(
-                context.Decode, context.Canonical.GetNode(parts[0]).DType, selection.Length, parts.AsSpan(0, clusters));
+                context.Decode, context.Canonical.GetNode(parts[0]).DType, selection.Length, parts);
         }
         finally
         {
             context.Decode.EndNodeCheckScope(outer);
-            System.Buffers.ArrayPool<int>.Shared.Return(local);
-            System.Buffers.ArrayPool<int>.Shared.Return(parts);
+            Blocks.Return(local);
+            Blocks.Return(parts);
         }
     }
 
@@ -813,10 +813,10 @@ internal sealed class FlatLayoutReader : LayoutReader
         }
 
         ReadOnlySpan<int> selection = context.Selection;
-        int[] rented = System.Buffers.ArrayPool<int>.Shared.Rent(selection.Length);
+        Block<int> rented = Blocks.Rent<int>(selection.Length);
         try
         {
-            Span<int> rebased = rented.AsSpan(0, selection.Length);
+            Span<int> rebased = rented;
             for (int i = 0; i < selection.Length; i++)
             {
                 rebased[i] = selection[i] - origin;
@@ -826,7 +826,7 @@ internal sealed class FlatLayoutReader : LayoutReader
         }
         finally
         {
-            System.Buffers.ArrayPool<int>.Shared.Return(rented);
+            Blocks.Return(rented);
         }
     }
 
@@ -1113,7 +1113,7 @@ internal sealed class FlatLayoutReader : LayoutReader
             return false;
         }
 
-        ulong[] rented = System.Buffers.ArrayPool<ulong>.Shared.Rent(2 * Compute.PredicateBits.WordsOf(Math.Max(total, 1)));
+        Block<ulong> rented = Blocks.Rent<ulong>(2 * Compute.PredicateBits.WordsOf(Math.Max(total, 1)));
         try
         {
             int words = Compute.PredicateBits.WordsOf(total);
@@ -1148,7 +1148,7 @@ internal sealed class FlatLayoutReader : LayoutReader
         }
         finally
         {
-            System.Buffers.ArrayPool<ulong>.Shared.Return(rented);
+            Blocks.Return(rented);
         }
     }
 
@@ -1177,7 +1177,7 @@ internal sealed class FlatLayoutReader : LayoutReader
             return -1;
         }
 
-        ulong[] rented = System.Buffers.ArrayPool<ulong>.Shared.Rent(2 * Compute.PredicateBits.WordsOf(Math.Max(total, 1)));
+        Block<ulong> rented = Blocks.Rent<ulong>(2 * Compute.PredicateBits.WordsOf(Math.Max(total, 1)));
         try
         {
             int words = Compute.PredicateBits.WordsOf(total);
@@ -1192,7 +1192,7 @@ internal sealed class FlatLayoutReader : LayoutReader
         }
         finally
         {
-            System.Buffers.ArrayPool<ulong>.Shared.Return(rented);
+            Blocks.Return(rented);
         }
     }
 
@@ -1229,7 +1229,7 @@ internal sealed class FlatLayoutReader : LayoutReader
             return -1;
         }
 
-        ulong[] rented = System.Buffers.ArrayPool<ulong>.Shared.Rent(2 * Compute.PredicateBits.WordsOf(Math.Max(count, 1)));
+        Block<ulong> rented = Blocks.Rent<ulong>(2 * Compute.PredicateBits.WordsOf(Math.Max(count, 1)));
         try
         {
             int words = Compute.PredicateBits.WordsOf(count);
@@ -1245,7 +1245,7 @@ internal sealed class FlatLayoutReader : LayoutReader
         }
         finally
         {
-            System.Buffers.ArrayPool<ulong>.Shared.Return(rented);
+            Blocks.Return(rented);
         }
     }
 

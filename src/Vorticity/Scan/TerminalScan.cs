@@ -1,9 +1,9 @@
 using System;
-using System.Buffers;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
+using Vorticity.Buffers;
 using Vorticity.Compute;
 using Vorticity.Expressions;
 using Vorticity.Keys;
@@ -263,7 +263,7 @@ internal sealed class TerminalScan
         // One evaluation window for the whole count, sized for the largest split the plan
         // produces: rented once, so a block costs no allocation.
         int capacity = (int)Math.Min(plan.MaxRows, int.MaxValue);
-        byte[] states = ArrayPool<byte>.Shared.Rent(Math.Max(capacity, 1));
+        Block<byte> states = Blocks.Rent<byte>(Math.Max(capacity, 1));
         try
         {
             SplitCursor cursor = plan.CreateCursor();
@@ -306,7 +306,7 @@ internal sealed class TerminalScan
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(states);
+            Blocks.Return(states);
         }
 
         return total;
@@ -409,7 +409,7 @@ internal sealed class TerminalScan
             context.Granules = _granules is { } geometry ? new Indexes.GranulePlans(geometry, _file, _take, live, _rows, context.GranuleScratch) : null;
             context.VariantKeys = keys;
             Lane lane = new Lane();
-            byte[] states = ArrayPool<byte>.Shared.Rent(Math.Max(capacity, 1));
+            Block<byte> states = Blocks.Rent<byte>(Math.Max(capacity, 1));
             try
             {
                 for (int run = work.Take(); run >= 0; run = work.Take())
@@ -448,7 +448,7 @@ internal sealed class TerminalScan
             }
             finally
             {
-                ArrayPool<byte>.Shared.Return(states);
+                Blocks.Return(states);
                 ScanContexts.Shared.Return(context);
             }
         }
@@ -666,7 +666,7 @@ internal sealed class TerminalScan
     /// else one decode, one evaluation, one count, no copy.
     /// </summary>
     private async ValueTask<long> DecodeAndCountAsync(
-        ScanContext context, Decodes decodes, RowRange split, byte[] states, CancellationToken cancellationToken, Lane? lane = null)
+        ScanContext context, Decodes decodes, RowRange split, Block<byte> states, CancellationToken cancellationToken, Lane? lane = null)
     {
         if (Pushable() is { } pushable && await PushedCountAsync(context, decodes, split, pushable, cancellationToken, lane).ConfigureAwait(false) is long pushed)
         {
@@ -769,14 +769,14 @@ internal sealed class TerminalScan
             return Arrays.Decoders.Canonical.BitmapKernels.CountSet(node.Bits.Span, node.BitOffset, node.Length);
         }
 
-        int[] kept = ArrayPool<int>.Shared.Rent(Math.Max(node.Length, 1));
+        Block<int> kept = Blocks.Rent<int>(node.Length);
         try
         {
             return BatchAsyncEnumerator.Selected(context, answer, kept);
         }
         finally
         {
-            ArrayPool<int>.Shared.Return(kept);
+            Blocks.Return(kept);
         }
     }
 
@@ -861,7 +861,7 @@ internal sealed class TerminalScan
     }
 
     /// <summary>The rows of a decoded split the filter keeps; without a take, row <c>i</c> of the split is file row <paramref name="start"/> + <c>i</c>.</summary>
-    private long CountTrue(ScanContext context, int root, byte[] states, long start)
+    private long CountTrue(ScanContext context, int root, Block<byte> states, long start)
     {
         int rows = context.Canonical.GetNode(root).Length;
         if (rows == 0)
@@ -871,7 +871,7 @@ internal sealed class TerminalScan
 
         // The window is sized for the plan's largest split; a decoder cannot produce more rows
         // than the split has, but a rent covers the day one does.
-        byte[] buffer = states.Length >= rows ? states : ArrayPool<byte>.Shared.Rent(rows);
+        Block<byte> buffer = states.Length >= rows ? states : Blocks.Rent<byte>(rows);
         try
         {
             Span<byte> window = buffer.AsSpan(0, rows);
@@ -890,9 +890,9 @@ internal sealed class TerminalScan
         }
         finally
         {
-            if (!ReferenceEquals(buffer, states))
+            if (!buffer.SameBytes(states))
             {
-                ArrayPool<byte>.Shared.Return(buffer);
+                Blocks.Return(buffer);
             }
         }
     }
@@ -1079,8 +1079,8 @@ internal sealed class TerminalScan
         using ScanSegments held = new ScanSegments(1);
         Decodes decodes = new Decodes(plan, held, live?.BlockRows ?? scope.BlockRows, live);
         int capacity = (int)Math.Min(plan.MaxRows, int.MaxValue);
-        byte[] states = ArrayPool<byte>.Shared.Rent(Math.Max(capacity, 1));
-        int[] indices = ArrayPool<int>.Shared.Rent(Math.Max(capacity, 1));
+        Block<byte> states = Blocks.Rent<byte>(Math.Max(capacity, 1));
+        Block<int> indices = Blocks.Rent<int>(Math.Max(capacity, 1));
         try
         {
             if (undecided is not null)
@@ -1120,8 +1120,8 @@ internal sealed class TerminalScan
         }
         finally
         {
-            ArrayPool<int>.Shared.Return(indices);
-            ArrayPool<byte>.Shared.Return(states);
+            Blocks.Return(indices);
+            Blocks.Return(states);
         }
 
         return best;
@@ -1214,7 +1214,7 @@ internal sealed class TerminalScan
 
     /// <summary>The decode resolution over one split: the filter's rows, the extreme among them.</summary>
     private async ValueTask<FilterLiteral> DecodeExtremeAsync(
-        ScanContext context, Decodes decodes, RowRange split, FieldExpr field, bool wantMin, byte[] states, int[] indices,
+        ScanContext context, Decodes decodes, RowRange split, FieldExpr field, bool wantMin, Block<byte> states, Block<int> indices,
         CancellationToken cancellationToken)
     {
         try
@@ -1229,7 +1229,7 @@ internal sealed class TerminalScan
     }
 
     private FilterLiteral Extreme(
-        ScanContext context, int root, FieldExpr field, bool wantMin, byte[] states, int[] indices)
+        ScanContext context, int root, FieldExpr field, bool wantMin, Block<byte> states, Block<int> indices)
     {
         int rows = context.Canonical.GetNode(root).Length;
         if (rows == 0)
@@ -1240,8 +1240,8 @@ internal sealed class TerminalScan
         int column = FilterEvaluator.Resolve(context.Canonical, root, field, rows);
         ReadOnlySpan<int> selected = default;
         bool listed = false;
-        byte[] window = states.Length >= rows ? states : ArrayPool<byte>.Shared.Rent(rows);
-        int[] list = indices.Length >= rows ? indices : ArrayPool<int>.Shared.Rent(rows);
+        Block<byte> window = states.Length >= rows ? states : Blocks.Rent<byte>(rows);
+        Block<int> list = indices.Length >= rows ? indices : Blocks.Rent<int>(rows);
         try
         {
             if (_filter is not null)
@@ -1277,14 +1277,14 @@ internal sealed class TerminalScan
         }
         finally
         {
-            if (!ReferenceEquals(window, states))
+            if (!window.SameBytes(states))
             {
-                ArrayPool<byte>.Shared.Return(window);
+                Blocks.Return(window);
             }
 
-            if (!ReferenceEquals(list, indices))
+            if (!list.SameBytes(indices))
             {
-                ArrayPool<int>.Shared.Return(list);
+                Blocks.Return(list);
             }
         }
     }

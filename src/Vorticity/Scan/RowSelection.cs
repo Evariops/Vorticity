@@ -12,7 +12,13 @@ namespace Vorticity.Scanning;
 /// </summary>
 internal sealed class RowSelection
 {
-    private readonly long[] _rows;
+    /// <summary>
+    /// The rows: a <c>long[]</c> of the caller's or the selection's own, or the bytes of the block its owner refills
+    /// (<see cref="Over"/>). One field for either, of 8 bytes, in an object made for every take; the count says how
+    /// many rows it holds.
+    /// </summary>
+    private readonly Array _rows;
+
     private int _count;
 
     private RowSelection(long[] rows)
@@ -21,19 +27,34 @@ internal sealed class RowSelection
         _count = rows.Length;
     }
 
+    private RowSelection(Buffers.Block<long> rows)
+    {
+        _rows = rows.Bytes ?? [];
+    }
+
     /// <summary>How many distinct rows were asked for.</summary>
     internal int Count => _count;
 
     /// <summary>The range that covers every requested row.</summary>
-    internal RowRange Bounds =>
-        _count == 0 ? RowRange.Empty : new RowRange(_rows[0], _rows[_count - 1] + 1);
+    internal RowRange Bounds
+    {
+        get
+        {
+            ReadOnlySpan<long> rows = Rows;
+            return rows.IsEmpty ? RowRange.Empty : new RowRange(rows[0], rows[^1] + 1);
+        }
+    }
+
+    /// <summary>The rows selected, ascending, whichever holds them.</summary>
+    private ReadOnlySpan<long> Rows =>
+        _rows is long[] array ? array.AsSpan(0, _count) : Buffers.Block<long>.Over((byte[])_rows, _count).AsSpan();
 
     /// <summary>
     /// A selection over <paramref name="buffer"/>, which its owner refills and hands back through
     /// <see cref="Reset"/>: the key-ordered scan's one selection per scan rather than per window.
     /// </summary>
-    /// <param name="buffer">The rows, owned by the caller.</param>
-    internal static RowSelection Over(long[] buffer) => new RowSelection(buffer) { _count = 0 };
+    /// <param name="buffer">The rows, a block the caller owns.</param>
+    internal static RowSelection Over(Buffers.Block<long> buffer) => new RowSelection(buffer);
 
     /// <summary>Selects the first <paramref name="count"/> rows of the buffer.</summary>
     /// <param name="count">How many; the caller has sorted, deduplicated and bounded them.</param>
@@ -126,11 +147,12 @@ internal sealed class RowSelection
     /// <returns>How many rows of the split were asked for.</returns>
     internal int LocalIndices(RowRange split, Span<int> destination)
     {
-        int first = LowerBound(split.Start);
+        ReadOnlySpan<long> rows = Rows;
+        int first = LowerBound(rows, split.Start);
         int count = 0;
-        for (int i = first; i < _count && _rows[i] < split.End; i++)
+        for (int i = first; i < rows.Length && rows[i] < split.End; i++)
         {
-            destination[count++] = (int)(_rows[i] - split.Start);
+            destination[count++] = (int)(rows[i] - split.Start);
         }
 
         return count;
@@ -140,13 +162,18 @@ internal sealed class RowSelection
     /// <param name="split">The split's row range.</param>
     internal bool Touches(RowRange split)
     {
-        int first = LowerBound(split.Start);
-        return first < _count && _rows[first] < split.End;
+        ReadOnlySpan<long> rows = Rows;
+        int first = LowerBound(rows, split.Start);
+        return first < rows.Length && rows[first] < split.End;
     }
 
     /// <summary>How many selected rows fall in <paramref name="split"/>: two binary searches.</summary>
     /// <param name="split">A row range, in file coordinates.</param>
-    internal int CountIn(RowRange split) => LowerBound(split.End) - LowerBound(split.Start);
+    internal int CountIn(RowRange split)
+    {
+        ReadOnlySpan<long> rows = Rows;
+        return LowerBound(rows, split.End) - LowerBound(rows, split.Start);
+    }
 
     /// <summary>
     /// Whether any requested row falls inside <paramref name="split"/>, for a caller walking its
@@ -159,14 +186,15 @@ internal sealed class RowSelection
     /// </param>
     internal bool Touches(RowRange split, ref int at)
     {
+        ReadOnlySpan<long> rows = Rows;
         int first = at;
-        while (first < _count && _rows[first] < split.Start)
+        while (first < rows.Length && rows[first] < split.Start)
         {
             first++;
         }
 
         at = first;
-        return first < _count && _rows[first] < split.End;
+        return first < rows.Length && rows[first] < split.End;
     }
 
     /// <summary>
@@ -180,15 +208,16 @@ internal sealed class RowSelection
     /// </param>
     internal int CountIn(RowRange split, ref int at)
     {
+        ReadOnlySpan<long> rows = Rows;
         int first = at;
-        while (first < _count && _rows[first] < split.Start)
+        while (first < rows.Length && rows[first] < split.Start)
         {
             first++;
         }
 
         at = first;
         int end = first;
-        while (end < _count && _rows[end] < split.End)
+        while (end < rows.Length && rows[end] < split.End)
         {
             end++;
         }
@@ -196,15 +225,15 @@ internal sealed class RowSelection
         return end - first;
     }
 
-    /// <summary>The first index whose row is at or after <paramref name="row"/>.</summary>
-    private int LowerBound(long row)
+    /// <summary>The first index of <paramref name="rows"/> whose row is at or after <paramref name="row"/>.</summary>
+    private static int LowerBound(ReadOnlySpan<long> rows, long row)
     {
         int low = 0;
-        int high = _count;
+        int high = rows.Length;
         while (low < high)
         {
             int mid = (int)(((uint)low + (uint)high) >> 1);
-            if (_rows[mid] < row)
+            if (rows[mid] < row)
             {
                 low = mid + 1;
             }

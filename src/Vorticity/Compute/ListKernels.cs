@@ -1,9 +1,9 @@
 using System;
-using System.Buffers;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
+using Vorticity.Buffers;
 using Vorticity.Expressions;
 using Vorticity.Layouts;
 using Vorticity.Types;
@@ -84,10 +84,10 @@ internal static class ListKernels
             return;
         }
 
-        byte[] matches = ArrayPool<byte>.Shared.Rent(count);
+        Block<byte> matches = Blocks.Rent<byte>(count);
         try
         {
-            ComparisonKernels.Compare(arena, elements, ComparisonOp.Equal, literal, matches.AsSpan(0, count));
+            ComparisonKernels.Compare(arena, elements, ComparisonOp.Equal, literal, matches);
             for (int row = 0; row < rows; row++)
             {
                 destination[row] = !mask.AllValid && !mask.IsValid(row)
@@ -97,7 +97,7 @@ internal static class ListKernels
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(matches);
+            Blocks.Return(matches);
         }
     }
 
@@ -179,11 +179,11 @@ internal static class ListKernels
             ? elements
             : CanonicalSlice.SliceAcross(arena, arena, elements, from, length);
 
-        byte[] matches = ArrayPool<byte>.Shared.Rent(length);
+        Block<byte> matches = Blocks.Rent<byte>(length);
         try
         {
-            ReadOnlySpan<byte> equal = matches.AsSpan(0, length);
-            ComparisonKernels.Compare(arena, window, ComparisonOp.Equal, literal, matches.AsSpan(0, length));
+            ReadOnlySpan<byte> equal = matches;
+            ComparisonKernels.Compare(arena, window, ComparisonOp.Equal, literal, matches);
 
             // Rows whose views overlap name far more elements than the window holds: each asks a
             // count of the matches before its end and before its start rather than reading its
@@ -199,7 +199,7 @@ internal static class ListKernels
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(matches);
+            Blocks.Return(matches);
         }
     }
 
@@ -244,10 +244,10 @@ internal static class ListKernels
         where TOffset : unmanaged
         where TSize : unmanaged
     {
-        int[] counted = ArrayPool<int>.Shared.Rent(equal.Length + 1);
+        Block<int> counted = Blocks.Rent<int>(equal.Length + 1);
         try
         {
-            Span<int> before = counted.AsSpan(0, equal.Length + 1);
+            Span<int> before = counted;
             int count = 0;
             for (int i = 0; i < equal.Length; i++)
             {
@@ -278,7 +278,7 @@ internal static class ListKernels
         }
         finally
         {
-            ArrayPool<int>.Shared.Return(counted);
+            Blocks.Return(counted);
         }
     }
 }

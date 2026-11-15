@@ -60,6 +60,12 @@ internal readonly struct Block<T>
     /// <summary>Whether it holds no element.</summary>
     public bool IsEmpty => _length == 0;
 
+    /// <summary>
+    /// Whether no bytes lie behind it: the default, which a rent of no element gives too. A holder that tells "none" from
+    /// "none yet" rents at least one element for the second.
+    /// </summary>
+    internal bool IsDefault => _bytes is null;
+
     /// <summary>The elements its bytes have room for, at least <see cref="Length"/>.</summary>
     public int Capacity => _bytes is null ? 0 : _bytes.Length / Unsafe.SizeOf<T>();
 

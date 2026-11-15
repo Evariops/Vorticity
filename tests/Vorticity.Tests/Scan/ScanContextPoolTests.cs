@@ -12,6 +12,7 @@ using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
+using Vorticity.Buffers;
 using Vorticity.Compute;
 using Vorticity.Expressions;
 using Vorticity.File;
@@ -112,7 +113,11 @@ public sealed class ScanContextPoolTests
         context.MarkNodeChecked(key);
         context.EndNodeCheckScope(outer);
         Assert.True(context.IsNodeChecked(key));
-        context.ExchangeSelection([1, 2, 3], 3);
+        Block<int> selection = Blocks.Allocate<int>(3);
+        selection[0] = 1;
+        selection[1] = 2;
+        selection[2] = 3;
+        context.ExchangeSelection(selection, 3);
 
         ScanContexts.Shared.Return(context);
         ScanContext again = ScanContexts.Shared.Rent(second);

@@ -1,6 +1,6 @@
 using System;
-using System.Buffers;
 using Vorticity.Arrays;
+using Vorticity.Buffers;
 using Vorticity.Serialization.Schemas;
 
 namespace Vorticity.Scanning;
@@ -46,9 +46,9 @@ internal sealed class AlongWalk
     /// <summary>Whether a window found nothing to read along: the walk then plans no other for the scan.</summary>
     internal bool Stopped;
 
-    private (ulong Start, ulong End)[]? _own;
+    private Block<(ulong Start, ulong End)> _own;
     private int _owned;
-    private (SegmentSpec Spec, long Batch)[]? _candidates;
+    private Block<(SegmentSpec Spec, long Batch)> _candidates;
     private int _candidateCount;
     private Segments _previousLarge;
     private Segments _large;
@@ -85,23 +85,23 @@ internal sealed class AlongWalk
     /// <summary>Adds the extent of a segment of the batch's own.</summary>
     internal void AddOwn(ulong start, ulong end)
     {
-        if (_own is null || _owned == _own.Length)
+        if (_owned == _own.Length)
         {
             Grow(ref _own, _owned);
         }
 
-        _own![_owned++] = (start, end);
+        _own[_owned++] = (start, end);
     }
 
     /// <summary>Adds a small segment of the split batch <paramref name="batch"/> will be.</summary>
     internal void AddCandidate(in SegmentSpec spec, long batch)
     {
-        if (_candidates is null || _candidateCount == _candidates.Length)
+        if (_candidateCount == _candidates.Length)
         {
             Grow(ref _candidates, _candidateCount);
         }
 
-        _candidates![_candidateCount++] = (spec, batch);
+        _candidates[_candidateCount++] = (spec, batch);
     }
 
     /// <summary>Moves on to the next split: the segments the last one, or the batch, read or took become the previous split's.</summary>
@@ -163,40 +163,30 @@ internal sealed class AlongWalk
         return context;
     }
 
-    /// <summary>Takes an array of the pool's twice as long as <paramref name="count"/>, or the first, and moves the entries into it.</summary>
-    private static void Grow<T>(ref T[]? array, int count)
-    {
-        T[] grown = ArrayPool<T>.Shared.Rent(count == 0 ? 16 : count * 2);
-        if (array is { } held)
-        {
-            held.AsSpan(0, count).CopyTo(grown);
-            ArrayPool<T>.Shared.Return(held);
-        }
+    /// <summary>Takes a block of the pool's twice as long as <paramref name="count"/>, or the first, and moves the entries into it.</summary>
+    private static void Grow<T>(ref Block<T> block, int count)
+        where T : unmanaged => Blocks.Grow(ref block, count == 0 ? 16 : count * 2);
 
-        array = grown;
+    private static void Return<T>(ref Block<T> block)
+        where T : unmanaged
+    {
+        Blocks.Return(block);
+        block = default;
     }
 
-    private static void Return<T>(ref T[]? array)
-    {
-        if (array is { } held)
-        {
-            array = null;
-            ArrayPool<T>.Shared.Return(held);
-        }
-    }
-
-    /// <summary>The segments of one split, by offset and length, in an array of the pool's.</summary>
+    /// <summary>The segments of one split, by offset and length, in a block of the pool's.</summary>
     private struct Segments
     {
-        private (ulong Offset, uint Length)[]? _items;
+        private Block<(ulong Offset, uint Length)> _items;
 
         internal int Count;
 
         internal readonly bool Contains(in SegmentSpec spec)
         {
-            for (int i = 0; i < Count; i++)
+            ReadOnlySpan<(ulong Offset, uint Length)> items = _items.AsSpan(0, Count);
+            foreach ((ulong offset, uint length) in items)
             {
-                if (_items![i].Offset == spec.Offset && _items[i].Length == spec.Length)
+                if (offset == spec.Offset && length == spec.Length)
                 {
                     return true;
                 }
@@ -207,12 +197,12 @@ internal sealed class AlongWalk
 
         internal void Add(in SegmentSpec spec)
         {
-            if (_items is null || Count == _items.Length)
+            if (Count == _items.Length)
             {
                 Grow(ref _items, Count);
             }
 
-            _items![Count++] = (spec.Offset, spec.Length);
+            _items[Count++] = (spec.Offset, spec.Length);
         }
 
         internal void Return()

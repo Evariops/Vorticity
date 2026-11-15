@@ -1,6 +1,6 @@
 using System;
-using System.Buffers;
 using Vorticity.Arrays;
+using Vorticity.Buffers;
 using Vorticity.Layouts;
 using Vorticity.Types;
 
@@ -48,7 +48,7 @@ internal static class ProjectionTrim
                 $"{read.NamedFieldCount}; the projection and the decode disagree.");
         }
 
-        int[] children = ArrayPool<int>.Shared.Rent(Math.Max(target.FieldCount, 1));
+        Block<int> children = Blocks.Rent<int>(target.FieldCount);
         try
         {
             int kept = 0;
@@ -86,7 +86,7 @@ internal static class ProjectionTrim
         }
         finally
         {
-            ArrayPool<int>.Shared.Return(children);
+            Blocks.Return(children);
         }
     }
 }

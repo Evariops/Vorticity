@@ -1,11 +1,11 @@
 using System;
-using System.Buffers;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
 
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
+using Vorticity.Buffers;
 using Vorticity.IO;
 using Vorticity.Types;
 
@@ -160,7 +160,8 @@ internal sealed class ChunkedLayoutReader : LayoutReader
         in LayoutNode chunk, RowRange local, in FieldMask fields, ScanContext context)
     {
         int length = BatchLength(local);
-        int[] range = ArrayPool<int>.Shared.Rent(Math.Max(length, 1));
+        // One entry at least: a selection of no row is still a selection, which the default block is not.
+        Block<int> range = Blocks.Rent<int>(Math.Max(length, 1));
         try
         {
             ScanContext.SavedSelection saved = context.ExchangeSelectionRange(range, (int)local.Start, length);
@@ -181,7 +182,7 @@ internal sealed class ChunkedLayoutReader : LayoutReader
         }
         finally
         {
-            ArrayPool<int>.Shared.Return(range);
+            Blocks.Return(range);
         }
     }
 
@@ -206,7 +207,7 @@ internal sealed class ChunkedLayoutReader : LayoutReader
         // move by it into their space, and the run into the chunk's own.
         long origin = context.SelectionBase;
         ReadOnlySpan<int> run = NextRun(context.Selection, ref taken, start - origin, end - origin);
-        int[] rebased = ArrayPool<int>.Shared.Rent(Math.Max(run.Length, 1));
+        Block<int> rebased = Blocks.Rent<int>(Math.Max(run.Length, 1));
         try
         {
             Shift(run, start - origin, rebased);
@@ -222,7 +223,7 @@ internal sealed class ChunkedLayoutReader : LayoutReader
         }
         finally
         {
-            ArrayPool<int>.Shared.Return(rebased);
+            Blocks.Return(rebased);
         }
     }
 

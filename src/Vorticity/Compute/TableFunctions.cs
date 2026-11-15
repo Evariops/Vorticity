@@ -1,5 +1,4 @@
 using System;
-using System.Buffers;
 using System.Collections.Generic;
 using System.IO.Hashing;
 using System.Runtime.InteropServices;
@@ -247,10 +246,10 @@ internal sealed class MappedFieldExpr : FieldExpr
             // The table applies to the dictionary's values once, and the codes are translated a row each.
             int values = EncodedForms.Dictionary(arena, node, out ReadOnlySpan<uint> from);
             int distinct = arena.GetNode(values).Length;
-            int[] translated = ArrayPool<int>.Shared.Rent(Math.Max(distinct, 1));
+            Block<int> translated = Blocks.Rent<int>(distinct);
             try
             {
-                Translate(arena, values, translated.AsSpan(0, distinct));
+                Translate(arena, values, translated);
                 for (int row = 0; row < rows; row++)
                 {
                     int image = mask.IsValid(row) ? translated[from[row]] : -1;
@@ -259,7 +258,7 @@ internal sealed class MappedFieldExpr : FieldExpr
             }
             finally
             {
-                ArrayPool<int>.Shared.Return(translated);
+                Blocks.Return(translated);
             }
         }
         else
@@ -283,11 +282,11 @@ internal sealed class MappedFieldExpr : FieldExpr
         ValidityMask mask = ValidityMask.From(arena, node.Validity);
         Span<uint> codes = MemoryMarshal.Cast<int, uint>(into);
         Span<byte> valid = stackalloc byte[0];
-        byte[]? rented = null;
+        Block<byte> rented = default;
         try
         {
             int bytes = Math.Max(CanonicalSupport.BitmapByteCount(into.Length), 1);
-            valid = bytes <= 256 ? stackalloc byte[bytes] : (rented = ArrayPool<byte>.Shared.Rent(bytes)).AsSpan(0, bytes);
+            valid = bytes <= 256 ? stackalloc byte[bytes] : (rented = Blocks.Rent<byte>(bytes));
             valid.Clear();
             Lookup(node, mask, codes, valid);
 
@@ -302,10 +301,7 @@ internal sealed class MappedFieldExpr : FieldExpr
         }
         finally
         {
-            if (rented is not null)
-            {
-                ArrayPool<byte>.Shared.Return(rented);
-            }
+            Blocks.Return(rented);
         }
     }
 

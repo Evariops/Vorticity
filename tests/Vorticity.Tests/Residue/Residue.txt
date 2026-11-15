@@ -1,7 +1,7 @@
 # What the memory refactoring still has to take out (PLAN-MEMORY, section 7): a pattern, then its occurrences in
 # src, tests, bench (with samples and tools) and docs, separated by tabs. Lowered in the commit that takes some out,
 # removed at zero, never raised.
-ArrayPool<[^;()=]+?>\.Shared	381	20	2	0
+ArrayPool<[^;()=]+?>\.Shared	205	20	2	0
 \bArrayShelf\b	214	22	1	0
 \bQueryArrays\b	36	0	0	0
 \bEnginePool\b	58	5	0	0

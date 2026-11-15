@@ -93,7 +93,7 @@ internal sealed class ListLayoutReader : LayoutReader
         bool wholeLayout = rows.Start == 0 && span == NodeLength(in node);
         long elementsKey = ScanContext.LayoutKey(elementsLayout.Index);
 
-        ScanContext.SavedSelection saved = context.ExchangeSelection(null, 0);
+        ScanContext.SavedSelection saved = context.ExchangeSelection(default, 0);
         int elementsIndex;
         int offsetsIndex;
         try

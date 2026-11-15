@@ -1,5 +1,4 @@
 using System;
-using System.Buffers;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
@@ -9,6 +8,7 @@ using System.Threading.Tasks.Sources;
 
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
+using Vorticity.Buffers;
 using Vorticity.Compute;
 using Vorticity.Expressions;
 using Vorticity.IO;
@@ -1949,13 +1949,14 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         ProjectionWindow(context, split);
 
         int rows = arena.GetNode(first).Length;
-        byte[] states = ArrayPool<byte>.Shared.Rent(Math.Max(rows, 1));
+        Block<byte> states = Blocks.Rent<byte>(rows);
 
-        // Room for every row: the selection writes a slot per row before deciding.
-        int[] kept = ArrayPool<int>.Shared.Rent(Math.Max(rows, 1));
+        // Room for every row: the selection writes a slot per row before deciding. One at least: a selection of no row
+        // is still one, which the default block is not.
+        Block<int> kept = Blocks.Rent<int>(Math.Max(rows, 1));
         try
         {
-            Span<byte> window = states.AsSpan(0, rows);
+            Span<byte> window = states;
             if (alone)
             {
                 _evaluator!.EvaluateColumn(arena, first, rows, window);
@@ -1970,8 +1971,8 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(states);
-            ArrayPool<int>.Shared.Return(kept);
+            Blocks.Return(states);
+            Blocks.Return(kept);
         }
     }
 
@@ -1987,7 +1988,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     /// <param name="rows">The split's rows.</param>
     /// <param name="window">The filter's state a row, where the filter was evaluated here: what a mask of the kept rows is taken from.</param>
     /// <returns>The batch's root.</returns>
-    private int ExecuteKept(Lane lane, RowRange split, int[] kept, int count, int rows, ReadOnlySpan<byte> window = default)
+    private int ExecuteKept(Lane lane, RowRange split, Block<int> kept, int count, int rows, ReadOnlySpan<byte> window = default)
     {
         ScanContext context = lane.Context;
         CanonicalArena arena = context.Canonical;
@@ -2226,14 +2227,14 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         }
 
         int rows = (int)(split.End - split.Start);
-        int[] kept = ArrayPool<int>.Shared.Rent(Math.Max(rows, 1));
+        Block<int> kept = Blocks.Rent<int>(Math.Max(rows, 1));
         try
         {
             return ExecuteKept(lane, split, kept, Selected(context, answer, kept), rows);
         }
         finally
         {
-            ArrayPool<int>.Shared.Return(kept);
+            Blocks.Return(kept);
         }
     }
 
@@ -2367,11 +2368,11 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         }
 
         int rows = context.Canonical.GetNode(root).Length;
-        byte[] states = ArrayPool<byte>.Shared.Rent(Math.Max(rows, 1));
-        int[]? selected = null;
+        Block<byte> states = Blocks.Rent<byte>(rows);
+        Block<int> selected = default;
         try
         {
-            Span<byte> window = states.AsSpan(0, rows);
+            Span<byte> window = states;
             _evaluator!.Evaluate(context.Canonical, root, rows, window);
 
             int count = Trilean.CountTrue(window);
@@ -2384,18 +2385,15 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
             else if (count != rows)
             {
                 // Room for every row: the selection writes a slot per row before deciding.
-                selected = ArrayPool<int>.Shared.Rent(rows);
+                selected = Blocks.Rent<int>(rows);
                 CanonicalFilter.Select(window, selected);
                 root = Keep(context.Canonical, root, selected.AsSpan(0, count), window);
             }
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(states);
-            if (selected is not null)
-            {
-                ArrayPool<int>.Shared.Return(selected);
-            }
+            Blocks.Return(states);
+            Blocks.Return(selected);
         }
 
         return ProjectionTrim.Apply(context.Canonical, root, in _mask, in _keep, _schema);
@@ -2425,11 +2423,11 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
             return ProjectionTrim.Apply(context.Canonical, root, in _mask, in _keep, _schema);
         }
 
-        byte[] states = ArrayPool<byte>.Shared.Rent(Math.Max(rows, 1));
-        int[]? local = null;
+        Block<byte> states = Blocks.Rent<byte>(rows);
+        Block<int> local = default;
         try
         {
-            Span<byte> window = states.AsSpan(0, rows);
+            Span<byte> window = states;
             if (_evaluator is not null && !proven)
             {
                 _evaluator.Evaluate(context.Canonical, root, rows, window);
@@ -2442,13 +2440,12 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
             if (_take is not null)
             {
                 // A row outside the take is not selected, whatever the filter says of it.
-                local = ArrayPool<int>.Shared.Rent(Math.Max(rows, 1));
+                local = Blocks.Rent<int>(rows);
                 int wanted = _take.LocalIndices(split, local);
-                byte[] kept = ArrayPool<byte>.Shared.Rent(Math.Max(rows, 1));
+                Block<byte> kept = Blocks.RentCleared<byte>(rows);
                 try
                 {
-                    Span<byte> taken = kept.AsSpan(0, rows);
-                    taken.Clear();
+                    Span<byte> taken = kept;
                     for (int i = 0; i < wanted; i++)
                     {
                         taken[local[i]] = 1;
@@ -2464,7 +2461,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
                 }
                 finally
                 {
-                    ArrayPool<byte>.Shared.Return(kept);
+                    Blocks.Return(kept);
                 }
             }
 
@@ -2473,11 +2470,8 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(states);
-            if (local is not null)
-            {
-                ArrayPool<int>.Shared.Return(local);
-            }
+            Blocks.Return(states);
+            Blocks.Return(local);
         }
 
         return ProjectionTrim.Apply(context.Canonical, root, in _mask, in _keep, _schema);
@@ -2526,11 +2520,10 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         CanonicalSupport.CopyBits(node.Bits.Span, node.BitOffset, raw, 0, rows);
         if (!valid.AllValid)
         {
-            ulong[] known = ArrayPool<ulong>.Shared.Rent(words);
+            Block<ulong> known = Blocks.RentCleared<ulong>(words);
             try
             {
-                Span<ulong> knownWords = known.AsSpan(0, words);
-                knownWords.Clear();
+                Span<ulong> knownWords = known;
                 CanonicalSupport.CopyBits(valid.Bits, valid.BitOffset, System.Runtime.InteropServices.MemoryMarshal.AsBytes(knownWords), 0, rows);
                 for (int w = 0; w < words; w++)
                 {
@@ -2539,7 +2532,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
             }
             finally
             {
-                ArrayPool<ulong>.Shared.Return(known);
+                Blocks.Return(known);
             }
         }
 
@@ -2568,15 +2561,15 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         }
 
         int words = (window.Length + 63) >> 6;
-        ulong[] mask = ArrayPool<ulong>.Shared.Rent(words);
+        Block<ulong> mask = Blocks.Rent<ulong>(words);
         try
         {
-            Trilean.ToWords(window, Trilean.True, equal: true, mask.AsSpan(0, words));
-            return CanonicalFilter.Apply(arena, root, kept, mask.AsSpan(0, words));
+            Trilean.ToWords(window, Trilean.True, equal: true, mask);
+            return CanonicalFilter.Apply(arena, root, kept, mask);
         }
         finally
         {
-            ArrayPool<ulong>.Shared.Return(mask);
+            Blocks.Return(mask);
         }
     }
 

@@ -1,8 +1,8 @@
 using System;
-using System.Buffers;
 using System.Collections.Generic;
 
 using Vorticity.Arrays;
+using Vorticity.Buffers;
 using Vorticity.Compute;
 using Vorticity.Layouts;
 using Vorticity.Types;
@@ -457,12 +457,12 @@ internal sealed class SplitPlan
     }
 
     /// <summary>
-    /// A growable ascending set of boundaries, gathered in a rented array: the plan keeps an exact
-    /// copy of what survives the sort, since the walk cannot know beforehand how many that is.
+    /// A growable ascending set of boundaries, gathered in a block of the pool seen at its whole capacity: the plan
+    /// keeps an exact copy of what survives the sort, since the walk cannot know beforehand how many that is.
     /// </summary>
     private struct BoundaryList
     {
-        internal long[] Items;
+        internal Block<long> Items;
         private int _count;
 
         // Where the first boundary below the one before it was pushed, -1 while none was: a list in order is
@@ -471,7 +471,8 @@ internal sealed class SplitPlan
 
         internal BoundaryList(int capacity)
         {
-            Items = ArrayPool<long>.Shared.Rent(capacity);
+            Items = Blocks.Rent<long>(capacity);
+            Items = Items.WithLength(Items.Capacity);
             _count = 0;
             _descent = -1;
         }
@@ -483,10 +484,8 @@ internal sealed class SplitPlan
         {
             if (_count == Items.Length)
             {
-                long[] grown = ArrayPool<long>.Shared.Rent(Items.Length * 2);
-                Items.AsSpan(0, _count).CopyTo(grown);
-                ArrayPool<long>.Shared.Return(Items);
-                Items = grown;
+                Blocks.Grow(ref Items, Math.Max(Items.Length * 2, 16));
+                Items = Items.WithLength(Items.Capacity);
             }
 
             if (_descent < 0 && _count > 0 && row < Items[_count - 1])
@@ -517,17 +516,17 @@ internal sealed class SplitPlan
             }
         }
 
-        /// <summary>Gives the rented array back.</summary>
+        /// <summary>Gives the block back.</summary>
         internal void Return()
         {
-            ArrayPool<long>.Shared.Return(Items);
-            Items = [];
+            Blocks.Return(Items);
+            Items = default;
         }
 
         /// <summary>Sorts and de-duplicates in place; returns the surviving count.</summary>
         internal int Finish()
         {
-            long[] items = Items;
+            Span<long> items = Items;
             int count = _count;
             if (count <= 1)
             {
@@ -536,7 +535,7 @@ internal sealed class SplitPlan
 
             if (_descent >= 0)
             {
-                SpanSort.Sort(items.AsSpan(0, count));
+                SpanSort.Sort(items[..count]);
             }
 
             int write = 1;

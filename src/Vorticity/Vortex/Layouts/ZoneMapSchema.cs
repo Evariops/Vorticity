@@ -1,10 +1,10 @@
 using System;
-using System.Buffers;
 using System.Collections.Generic;
 using System.Globalization;
 
 using Vorticity.Arrays;
 using Vorticity.Arrays.Metadata;
+using Vorticity.Buffers;
 using Vorticity.Serialization.Protobuf;
 using Vorticity.Types;
 
@@ -88,9 +88,11 @@ internal static class ZoneMapSchema
             return false;
         }
 
-        // Scratch for the struct the table is: the struct keeps its own copy of both.
-        int[] names = ArrayPool<int>.Shared.Rent(Math.Max(count, 1));
-        DType[] fields = ArrayPool<DType>.Shared.Rent(Math.Max(count, 1));
+        // Scratch for the struct the table is, the names' handles then the fields' nodes in the arena: the struct keeps
+        // its own copy of both.
+        Block<int> scratch = Blocks.Rent<int>(2 * count);
+        Span<int> names = scratch.AsSpan(0, count);
+        Span<int> fields = scratch.AsSpan(count, count);
         Span<byte> name = stackalloc byte[MaxDisplayNameBytes];
         try
         {
@@ -119,19 +121,17 @@ internal static class ZoneMapSchema
                 // first, then flip the nullability: flipping a foreign node writes to that node's
                 // own arena, and the file schema's arena is shared by every concurrent scan, so
                 // that write would be a data race.
-                fields[columns] = DTypeImport.Into(types, state).WithNullability(Nullability.Nullable);
+                fields[columns] = DTypeImport.Into(types, state).WithNullability(Nullability.Nullable).NodeIndex;
                 aggregates[i] = ZoneMap.Pack(aggregate, columns);
                 columns++;
             }
 
-            tableDType = types.Struct(
-                new ReadOnlySpan<int>(names, 0, columns), fields.AsSpan(0, columns), Nullability.NonNullable);
+            tableDType = types.StructOfNodes(names[..columns], fields[..columns], Nullability.NonNullable);
             return true;
         }
         finally
         {
-            ArrayPool<int>.Shared.Return(names);
-            ArrayPool<DType>.Shared.Return(fields, clearArray: true);
+            Blocks.Return(scratch);
         }
     }
 
@@ -150,9 +150,11 @@ internal static class ZoneMapSchema
     {
         // Two columns per stat at most: the value and its truncation flag. Scratch for the struct
         // the table is, which keeps its own copy of both.
-        int capacity = Math.Max(presentStats.Length * 2, 1);
-        string[] names = ArrayPool<string>.Shared.Rent(capacity);
-        DType[] fields = ArrayPool<DType>.Shared.Rent(capacity);
+        // The names' handles then the fields' nodes in the arena.
+        int capacity = presentStats.Length * 2;
+        Block<int> scratch = Blocks.Rent<int>(2 * capacity);
+        Span<int> names = scratch.AsSpan(0, capacity);
+        Span<int> fields = scratch.AsSpan(capacity, capacity);
         try
         {
             int columns = 0;
@@ -165,33 +167,32 @@ internal static class ZoneMapSchema
                     continue;
                 }
 
-                names[columns] = LegacyStatName(stat);
+                names[columns] = types.InternName(LegacyStatName(stat));
                 // Import first, then flip the nullability, so the flip never writes to the arena
                 // the column's dtype came from.
-                fields[columns] = DTypeImport.Into(types, value).WithNullability(Nullability.Nullable);
+                fields[columns] = DTypeImport.Into(types, value).WithNullability(Nullability.Nullable).NodeIndex;
                 columns++;
 
                 // Max and Min each emit a second, immediately-following non-nullable Bool column.
                 if (stat == LegacyStat.Max)
                 {
-                    names[columns] = "max_is_truncated";
-                    fields[columns] = types.Bool(Nullability.NonNullable);
+                    names[columns] = types.InternName("max_is_truncated");
+                    fields[columns] = types.Bool(Nullability.NonNullable).NodeIndex;
                     columns++;
                 }
                 else if (stat == LegacyStat.Min)
                 {
-                    names[columns] = "min_is_truncated";
-                    fields[columns] = types.Bool(Nullability.NonNullable);
+                    names[columns] = types.InternName("min_is_truncated");
+                    fields[columns] = types.Bool(Nullability.NonNullable).NodeIndex;
                     columns++;
                 }
             }
 
-            return types.Struct(names.AsSpan(0, columns), fields.AsSpan(0, columns), Nullability.NonNullable);
+            return types.StructOfNodes(names[..columns], fields[..columns], Nullability.NonNullable);
         }
         finally
         {
-            ArrayPool<string>.Shared.Return(names, clearArray: true);
-            ArrayPool<DType>.Shared.Return(fields, clearArray: true);
+            Blocks.Return(scratch);
         }
     }
 
@@ -439,14 +440,15 @@ internal static class ZoneMapSchema
     private static bool SupportsUncompressedSize(DType dtype)
     {
         // An explicit stack rather than recursion: the branching cases (struct, union, map) make
-        // this the one derivation whose work is not bounded by the dtype depth cap. A DType is a
-        // managed type, so the stack is a rented array; this runs at parse time for a legacy
-        // layout, never on a decode path.
-        DType[] stack = ArrayPool<DType>.Shared.Rent(32);
+        // this the one derivation whose work is not bounded by the dtype depth cap. The stack holds
+        // the dtypes' nodes in their arena, which is every child's, so that a block holds it; this
+        // runs at parse time for a legacy layout, never on a decode path.
+        DTypeArena arena = dtype.Arena;
+        Block<int> stack = Blocks.Rent<int>(32);
         try
         {
             int top = 0;
-            stack[top++] = dtype;
+            stack[top++] = dtype.NodeIndex;
 
             int visits = 0;
             HashSet<int>? seen = null;
@@ -457,7 +459,7 @@ internal static class ZoneMapSchema
                     seen = new HashSet<int>();
                 }
 
-                DType current = stack[--top];
+                DType current = new DType(arena, stack[--top]);
                 if (seen is not null && !seen.Add(current.NodeIndex))
                 {
                     // Already inspected; a second visit can only reach the same verdict.
@@ -505,22 +507,18 @@ internal static class ZoneMapSchema
         }
         finally
         {
-            // Cleared: a DType holds its arena, which the pool would otherwise keep alive.
-            ArrayPool<DType>.Shared.Return(stack, clearArray: true);
+            Blocks.Return(stack);
         }
     }
 
-    private static void Push(ref DType[] stack, ref int top, DType value)
+    private static void Push(ref Block<int> stack, ref int top, DType value)
     {
         if (top == stack.Length)
         {
-            DType[] grown = ArrayPool<DType>.Shared.Rent(stack.Length * 2);
-            stack.AsSpan().CopyTo(grown);
-            ArrayPool<DType>.Shared.Return(stack, clearArray: true);
-            stack = grown;
+            Blocks.Grow(ref stack, stack.Length * 2);
         }
 
-        stack[top++] = value;
+        stack[top++] = value.NodeIndex;
     }
 
     /// <summary>The longest display name, <c>vortex.bounded_max(4294967295)</c>, rounded up.</summary>
