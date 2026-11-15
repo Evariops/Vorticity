@@ -70,13 +70,14 @@ internal sealed class JobInputs : IAsyncDisposable
     internal long CopiedBytes => Interlocked.Read(ref _copied);
 
     /// <summary>
-    /// The inputs of <paramref name="job"/> of <paramref name="dataset"/> read through the scratch, their copies counted
-    /// under <paramref name="account"/>; null for a job that reads less than <see cref="FromBytes"/>, which reads from the store.
+    /// The inputs of <paramref name="job"/> of <paramref name="dataset"/> read through the scratch, <paramref name="bytes"/>
+    /// of them read whole, their copies counted under <paramref name="account"/>; null for a job that reads less than
+    /// <see cref="FromBytes"/> of them whole, which reads from the store.
     /// </summary>
     /// <exception cref="VortexMemoryException">No scratch on a disk, or not room enough there for the job's inputs.</exception>
-    internal static JobInputs? For(VortexDataset dataset, CompactionJob job, MemoryAccount account)
+    internal static JobInputs? For(VortexDataset dataset, CompactionJob job, long bytes, MemoryAccount account)
     {
-        if (job.Bytes < FromBytes)
+        if (bytes < FromBytes)
         {
             return null;
         }
@@ -91,23 +92,23 @@ internal sealed class JobInputs : IAsyncDisposable
         Directory.CreateDirectory(scratch);
         SweepLeftovers(scratch);
         ScratchBudget? budget = dataset.Session.Options.ScratchBudget;
-        if (budget is not null && !budget.TryReserve(job.Bytes))
+        if (budget is not null && !budget.TryReserve(bytes))
         {
             throw new VortexMemoryException(string.Create(
                 CultureInfo.InvariantCulture,
-                $"A compaction of {job.Inputs.Count} objects reads {job.Bytes:N0} bytes through its scratch, past what the session's scratch budget leaves. Give the budget more room, or the layout smaller objects."));
+                $"A compaction of {job.Inputs.Count} objects reads {bytes:N0} bytes through its scratch, past what the session's scratch budget leaves. Give the budget more room, or the layout smaller objects."));
         }
 
-        if (budget is null && GroupCore.Free(scratch) is long free && job.Bytes > free - (free / 10))
+        if (budget is null && GroupCore.Free(scratch) is long free && bytes > free - (free / 10))
         {
             throw new VortexMemoryException(string.Create(
                 CultureInfo.InvariantCulture,
-                $"A compaction of {job.Inputs.Count} objects reads {job.Bytes:N0} bytes through its scratch {scratch}, which has {free:N0} bytes free, a tenth of which it keeps. Give the scratch more room."));
+                $"A compaction of {job.Inputs.Count} objects reads {bytes:N0} bytes through its scratch {scratch}, which has {free:N0} bytes free, a tenth of which it keeps. Give the scratch more room."));
         }
 
         string directory = Path.Combine(scratch, string.Create(CultureInfo.InvariantCulture, $"{DirectoryPrefix}{Environment.ProcessId}-{Guid.NewGuid():N}"));
         Directory.CreateDirectory(directory);
-        return new JobInputs(dataset, directory, account, budget, budget is null ? 0 : job.Bytes);
+        return new JobInputs(dataset, directory, account, budget, budget is null ? 0 : bytes);
     }
 
     /// <summary>

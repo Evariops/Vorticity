@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Buffers;
@@ -67,14 +68,30 @@ internal sealed class JobMemory : IAsyncDisposable
 
     /// <summary>
     /// Reads the inputs of <paramref name="job"/> through the local scratch when they are large enough
-    /// (<see cref="JobInputs.FromBytes"/>), each copied once as the first pass asks for it.
+    /// (<see cref="JobInputs.FromBytes"/>), each copied once as the first pass asks for it; but those it reads a part of,
+    /// <paramref name="partly"/>, from the store, a range of their rows each time.
     /// </summary>
     /// <exception cref="VortexMemoryException">No scratch on a disk, or not room enough there for the job's inputs.</exception>
-    internal void ReadThroughScratch(CompactionJob job) => _copies ??= JobInputs.For(_dataset, job, _inputs);
+    internal void ReadThroughScratch(CompactionJob job, IReadOnlySet<string>? partly = null)
+    {
+        long whole = 0;
+        foreach (CompactionInput input in job.Inputs)
+        {
+            whole += partly is not null && partly.Contains(input.Entry.Key) ? 0 : input.Entry.Bytes;
+        }
+
+        _partly = partly;
+        _copies ??= JobInputs.For(_dataset, job, whole, _inputs);
+    }
+
+    // The inputs the job reads a part of, from the store rather than from a copy; null for none.
+    private IReadOnlySet<string>? _partly;
 
     /// <summary>A lease of the job's input <paramref name="entry"/>: from its copy in the scratch, or from the store.</summary>
     internal ValueTask<ObjectLease> RentAsync(ObjectEntry entry, CancellationToken cancellationToken) =>
-        _copies is { } copies ? copies.RentAsync(entry, cancellationToken) : _dataset.RentAsync(entry, cancellationToken);
+        _copies is { } copies && _partly?.Contains(entry.Key) != true
+            ? copies.RentAsync(entry, cancellationToken)
+            : _dataset.RentAsync(entry, cancellationToken);
 
     /// <summary>
     /// Closes the copies and removes them, gives back what the inputs' blocks still hold, and has the pool let go of what it

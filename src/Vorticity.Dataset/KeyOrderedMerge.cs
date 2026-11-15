@@ -103,6 +103,12 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable, IOrderedKeys
     /// </summary>
     internal Func<ObjectEntry, CancellationToken, ValueTask<ObjectLease>>? Rent { get; init; }
 
+    /// <summary>
+    /// The rows emitted of each input, by its rank: what a piece of a consolidation took of each input, which it marks once
+    /// its objects are committed; null when nothing counts them.
+    /// </summary>
+    internal long[]? Emitted { get; init; }
+
     /// <summary>The run the merge is on: an input's batch, or a window of it.</summary>
     /// <exception cref="InvalidOperationException">The merge is not on a run.</exception>
     internal RecordBatch Current => _current ?? throw new InvalidOperationException("The merge is not on a run.");
@@ -157,6 +163,10 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable, IOrderedKeys
         (MergeInput chosen, int count) = Choose();
         _emitting = chosen;
         _count = count;
+        if (Emitted is { } emitted && (ulong)chosen.Rank < (ulong)emitted.Length)
+        {
+            emitted[chosen.Rank] += count;
+        }
         RecordBatch batch = chosen.Batch;
         if (chosen.Row == 0 && count == batch.RowCount)
         {

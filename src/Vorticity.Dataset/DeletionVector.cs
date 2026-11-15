@@ -95,6 +95,44 @@ internal sealed class DeletionVector : IRowExclusion, IEquatable<DeletionVector>
     }
 
     /// <summary>
+    /// This vector with every row below <paramref name="end"/> marked: the runs it held there joined into one, those past
+    /// it kept. What a consolidation in pieces marks of an input of level 0, whose rows below a key a piece took to level 1,
+    /// its own rows in its order, the key's.
+    /// </summary>
+    internal DeletionVector Through(long end)
+    {
+        if (end <= 0)
+        {
+            return this;
+        }
+
+        List<long> starts = [];
+        List<long> ends = [];
+        long at = 0;
+        for (int run = 0; run < _starts.Length && _starts[run] < end; run++)
+        {
+            if (_starts[run] > at)
+            {
+                starts.Add(at);
+                ends.Add(_starts[run]);
+            }
+
+            at = Math.Max(at, _ends[run]);
+        }
+
+        if (at < end)
+        {
+            starts.Add(at);
+            ends.Add(end);
+        }
+
+        return WithRuns(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(starts), System.Runtime.InteropServices.CollectionsMarshal.AsSpan(ends));
+    }
+
+    /// <summary>The end of the run that starts at row 0, the rows a piece of a consolidation took; 0 when row 0 is kept.</summary>
+    internal long LeadingRun => _starts.Length > 0 && _starts[0] == 0 ? _ends[0] : 0;
+
+    /// <summary>
     /// This vector with the rows of the runs <c>[starts[i], ends[i])</c> deleted too: ascending, apart
     /// or meeting, none of their rows deleted already. What a delete marks comes as runs, the rows a
     /// range takes as one, so no row is listed on its own.

@@ -166,8 +166,25 @@ internal static partial class DatasetCompactor
         DatasetSchema schema = dataset.Snapshot.Schema;
         bool merge = job.Style is CompactionStyle.Leveled || (job.Style is CompactionStyle.Tiered && schema.Keyed);
 
-        // Inputs large enough are read through the local scratch, each copied once as the first pass asks for it.
-        memory.ReadThroughScratch(job);
+        // A consolidation of more than an object's size runs its first piece alone, and commits it (DatasetCompactor.Pieces).
+        Piece? piece = merge ? await PieceAsync(dataset, schema, job, cancellationToken).ConfigureAwait(false) : null;
+        HashSet<string>? partly = null;
+        if (piece is not null)
+        {
+            job = piece.Job;
+            partly = new HashSet<string>(StringComparer.Ordinal);
+            foreach (CompactionInput input in job.Inputs)
+            {
+                if (input.Level == 0)
+                {
+                    partly.Add(input.Entry.Key);
+                }
+            }
+        }
+
+        // Inputs large enough are read through the local scratch, each copied once as the first pass asks for it; those a
+        // piece reads a part of, from the store, the range it reads.
+        memory.ReadThroughScratch(job, partly);
         if (merge)
         {
             Check(schema);
@@ -195,7 +212,7 @@ internal static partial class DatasetCompactor
         if (indexed && VariantColumns(schema.DType).Length > 0)
         {
             using Activity? planning = DatasetTelemetry.StartCompactionPass("plan");
-            shreddings = await PlanValuesAsync(dataset, schema, job, memory, cancellationToken).ConfigureAwait(false);
+            shreddings = await PlanValuesAsync(dataset, schema, job, memory, piece?.Ranges, cancellationToken).ConfigureAwait(false);
         }
 
         // A merge writes each column every input writes against an object dictionary against their union, sorted, when the
@@ -244,7 +261,7 @@ internal static partial class DatasetCompactor
         // whatever the session gave it, 336 ms for level 0's sixteen objects of 2 M rows at eight lanes, 93 ms in ranges.
         // Not one of a value, since each object of a range shreds the paths of the first.
         KeyRanges? ranges = null;
-        if (late is null && merge && shreddings is not { Count: > 1 })
+        if (late is null && merge && shreddings is not { Count: > 1 } && piece is null)
         {
             using Activity? cutting = DatasetTelemetry.StartCompactionPass("ranges");
             ranges = await KeyRangesAsync(dataset, schema, job, cancellationToken).ConfigureAwait(false);
@@ -288,8 +305,16 @@ internal static partial class DatasetCompactor
                     ObjectStream outputs = OutputsOf(ran, doublings);
                     try
                     {
+                        // A piece reads its first range alone, below its cut, and counts what it takes of each input.
+                        if (piece is not null)
+                        {
+                            Array.Clear(piece.Emitted);
+                        }
+
                         rows = merge
-                            ? await MergeAsync(dataset, schema, ran, outputs, late, lateOutputs, batchRows, meter, memory, cancellationToken).ConfigureAwait(false)
+                            ? await MergeAsync(
+                                dataset, schema, ran, outputs, late, lateOutputs, batchRows, meter, memory, cancellationToken,
+                                piece?.Ranges, 0, piece?.Emitted).ConfigureAwait(false)
                             : await ConcatenateAsync(dataset, schema, ran, outputs, memory, cancellationToken).ConfigureAwait(false);
                         await outputs.FinishAsync(cancellationToken).ConfigureAwait(false);
                         if (lateOutputs is not null)
@@ -326,10 +351,12 @@ internal static partial class DatasetCompactor
             writing?.Dispose();
         }
 
-        if (rows != ran.Rows)
+        // A piece writes what it took of its inputs, which is what the merge emitted of each.
+        long read = piece is null ? ran.Rows : Sum(piece.Emitted);
+        if (rows != read)
         {
             throw new DatasetIntegrityException(
-                $"The compaction read {ran.Rows} row(s) from {ran.Inputs.Count} object(s) and wrote " +
+                $"The compaction read {read} row(s) from {ran.Inputs.Count} object(s) and wrote " +
                 $"{rows}: a rewrite that loses rows is the one failure it must not have.");
         }
 
@@ -342,14 +369,21 @@ internal static partial class DatasetCompactor
             dataset.LearnJobCosts(memory.InputsPeak / open, batchRows, memory.WriterPeak / atOnce);
         }
 
-        List<(int Level, ReadOnlyMemory<byte> Key)> consumed = [];
-        foreach (CompactionInput input in ran.Inputs)
+        // A piece takes out the objects of level 1 it read and those of level 0 it emptied, and puts back at level 0 those it
+        // took some rows of, those rows marked; the inputs it took nothing of stay out of its commit.
+        (List<(int Level, ReadOnlyMemory<byte> Key)> Consumed, List<(int Level, ReadOnlyMemory<byte> Key, ObjectEntry Entry)> Marked, List<ObjectEntry> Read, List<string> Gone)? taken =
+            piece is null ? null : PieceCommit(piece);
+        List<(int Level, ReadOnlyMemory<byte> Key)> consumed = taken?.Consumed ?? [];
+        if (taken is null)
         {
-            consumed.Add((input.Level, input.Key));
+            foreach (CompactionInput input in ran.Inputs)
+            {
+                consumed.Add((input.Level, input.Key));
+            }
         }
 
         // The late rows' objects go back to level 0, the others to the destination, past every object there they met.
-        List<(int Level, ReadOnlyMemory<byte> Key, ObjectEntry Entry)> produced = [];
+        List<(int Level, ReadOnlyMemory<byte> Key, ObjectEntry Entry)> produced = [.. taken?.Marked ?? []];
         List<CompactionInput> filled = [];
         DateTimeOffset? firstPut = null;
         long? generation = null;
@@ -374,10 +408,29 @@ internal static partial class DatasetCompactor
 
         // What each input was read as: a delete that marked rows in one meanwhile leaves it under its
         // key, and outputs worked out from the rows before the delete would bring them back.
-        List<ObjectEntry> read = new List<ObjectEntry>(ran.Inputs.Count);
-        foreach (CompactionInput input in ran.Inputs)
+        List<ObjectEntry> expected = taken?.Read ?? new List<ObjectEntry>(ran.Inputs.Count);
+        if (taken is null)
         {
-            read.Add(input.Entry);
+            foreach (CompactionInput input in ran.Inputs)
+            {
+                expected.Add(input.Entry);
+            }
+        }
+
+        // A piece's objects take over the part of level 1 they fill with those of level 1 it read, which lie below its cut.
+        LevelRange? pieceRange = null;
+        if (piece is not null)
+        {
+            List<CompactionInput> span = [.. filled];
+            foreach (CompactionInput input in ran.Inputs)
+            {
+                if (input.Level >= 1)
+                {
+                    span.Add(input);
+                }
+            }
+
+            pieceRange = span.Count == 0 ? null : LevelRange.Of(job.ToLevel, span, key);
         }
 
         DatasetOperation.PartitionIndexChange? partitionIndex = null;
@@ -392,11 +445,11 @@ internal static partial class DatasetCompactor
 
         DatasetOperation.ReplaceObjects replacement = new DatasetOperation.ReplaceObjects(consumed, produced)
         {
-            Expected = read,
+            Expected = expected,
             Pointer = job.Stop.IsEmpty ? null : (job.FromLevel, job.Stop),
 
             // Apart, the outputs take over the part of the destination they fill alone, which no object it holds may meet.
-            Range = late is null ? job.Range : filled.Count == 0 ? null : LevelRange.Of(job.ToLevel, filled, key),
+            Range = piece is not null ? pieceRange : late is null ? job.Range : filled.Count == 0 ? null : LevelRange.Of(job.ToLevel, filled, key),
             PartitionIndex = partitionIndex,
             FirstPutAt = firstPut,
             KeyGeneration = generation,
@@ -412,10 +465,18 @@ internal static partial class DatasetCompactor
         OperationOutcome outcome = commit.Outcomes.Count > 0 ? commit.Outcomes[0] : OperationOutcome.Applied;
         if (outcome == OperationOutcome.Applied)
         {
+            // Of a piece, only the inputs it emptied: those it marked stay in level 0, the same objects.
             List<string> replaced = new List<string>(ran.Inputs.Count + 1);
-            foreach (CompactionInput input in ran.Inputs)
+            if (taken is { } pieceTaken)
             {
-                replaced.Add(input.Entry.Key);
+                replaced.AddRange(pieceTaken.Gone);
+            }
+            else
+            {
+                foreach (CompactionInput input in ran.Inputs)
+                {
+                    replaced.Add(input.Entry.Key);
+                }
             }
 
             if (partitionIndex?.Previous is { } previousIndex)
@@ -427,10 +488,16 @@ internal static partial class DatasetCompactor
         }
         else
         {
+            // The objects the job wrote, which no version names: never an input it put back marked, which another holds.
             List<string> unnamed = [];
-            foreach ((int _, ReadOnlyMemory<byte> _, ObjectEntry entry) in produced)
+            foreach (CompactionInput output in filled)
             {
-                unnamed.Add(entry.Key);
+                unnamed.Add(output.Entry.Key);
+            }
+
+            for (int i = 0; i < (lateOutputs?.Written.Count ?? 0); i++)
+            {
+                unnamed.Add(lateOutputs!.Written[i].Entry.Key);
             }
 
             await dataset.DeleteUnnamedAsync(unnamed, cancellationToken).ConfigureAwait(false);
@@ -951,9 +1018,10 @@ internal static partial class DatasetCompactor
         JobMemory memory,
         CancellationToken cancellationToken,
         KeyRanges? ranges = null,
-        int range = 0)
+        int range = 0,
+        long[]? emitted = null)
     {
-        KeyOrderedMerge merge = InputsMerged(dataset, schema, job, batchRows, cancellationToken, ranges: ranges, range: range, meter: meter, memory: memory);
+        KeyOrderedMerge merge = InputsMerged(dataset, schema, job, batchRows, cancellationToken, ranges: ranges, range: range, meter: meter, memory: memory, emitted: emitted);
         ValueCut? values = schema.Cut;
         long rows = 0;
         await using (merge.ConfigureAwait(false))
@@ -1069,7 +1137,8 @@ internal static partial class DatasetCompactor
         int range = 0,
         int only = -1,
         RowMeter? meter = null,
-        JobMemory? memory = null)
+        JobMemory? memory = null,
+        long[]? emitted = null)
     {
         Buffers.MemoryAccount? account = memory?.InputsAccount;
         List<(ReadOnlyMemory<byte> Key, MergeObject Object)> inputs = new(job.Inputs.Count);
@@ -1112,6 +1181,7 @@ internal static partial class DatasetCompactor
         {
             Account = account ?? QueryMemoryBudget.JobsOf(dataset.Session).Account,
             Rent = memory is null ? null : memory.RentAsync,
+            Emitted = emitted,
         };
     }
 
@@ -1130,7 +1200,7 @@ internal static partial class DatasetCompactor
     /// where every input's census, kept to the end, made the job's keys as many times over as it has inputs.
     /// </remarks>
     private static async ValueTask<IReadOnlyList<ValueShredding>> PlanValuesAsync(
-        VortexDataset dataset, DatasetSchema schema, CompactionJob job, JobMemory memory, CancellationToken cancellationToken)
+        VortexDataset dataset, DatasetSchema schema, CompactionJob job, JobMemory memory, KeyRanges? piece, CancellationToken cancellationToken)
     {
         int[] variants = VariantColumns(schema.DType);
         ValueCut? values = schema.Cut;
@@ -1159,7 +1229,7 @@ internal static partial class DatasetCompactor
         };
         await Parallel.ForAsync(0, job.Inputs.Count, lanes, async (input, token) =>
         {
-            List<ValueCount> counted = await CountAsync(dataset, schema, job, input, variants, memory, token).ConfigureAwait(false);
+            List<ValueCount> counted = await CountAsync(dataset, schema, job, input, variants, memory, piece, token).ConfigureAwait(false);
             lock (gate)
             {
                 counts[input] = counted;
@@ -1282,7 +1352,8 @@ internal static partial class DatasetCompactor
     /// one that holds several, the key's columns too, the input merged alone so that its keys tell its values apart.
     /// </summary>
     private static async ValueTask<List<ValueCount>> CountAsync(
-        VortexDataset dataset, DatasetSchema schema, CompactionJob job, int input, int[] variants, JobMemory memory, CancellationToken cancellationToken)
+        VortexDataset dataset, DatasetSchema schema, CompactionJob job, int input, int[] variants, JobMemory memory, KeyRanges? piece,
+        CancellationToken cancellationToken)
     {
         int textBound = dataset.Options.Write.StringBoundBytes;
         CompactionInput held = job.Inputs[input];
@@ -1294,7 +1365,7 @@ internal static partial class DatasetCompactor
             ObjectLease lease = await memory.RentAsync(held.Entry, cancellationToken).ConfigureAwait(false);
             await using (lease.ConfigureAwait(false))
             {
-                await foreach (RecordBatch batch in RowsOfAsync(lease, held.Entry, schema, cancellationToken, variants, account: memory.InputsAccount)
+                await foreach (RecordBatch batch in RowsOfAsync(lease, held.Entry, schema, cancellationToken, variants, piece?.RowsOf(input, 0), account: memory.InputsAccount)
                     .WithCancellation(cancellationToken).ConfigureAwait(false))
                 {
                     for (int v = 0; v < variants.Length; v++)
@@ -1319,7 +1390,7 @@ internal static partial class DatasetCompactor
         int[] counted = Counted(schema);
         int[] read = [.. variants.Select(field => Array.BinarySearch(counted, field))];
         byte[]? last = null;
-        KeyOrderedMerge merge = InputsMerged(dataset, schema, job, CensusRows(dataset, job), cancellationToken, counted, only: input, memory: memory);
+        KeyOrderedMerge merge = InputsMerged(dataset, schema, job, CensusRows(dataset, job), cancellationToken, counted, ranges: piece, only: input, memory: memory);
         await using (merge.ConfigureAwait(false))
         {
             while (await merge.MoveNextAsync().ConfigureAwait(false))

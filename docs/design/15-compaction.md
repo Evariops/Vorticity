@@ -397,6 +397,20 @@ to lose less were weighed, none built:
 | the object built from parts | a partition's rows written as several objects first, each committed alone, then the partition's object assembled from theirs | parts that keep the shredding they chose; the object's tables merged from the parts' | the partition rewritten whole a second time, unless it is assembled by copying the parts' segments, a format change |
 | a smaller object | the size the layout's objects aim at (`DatasetLayout.ObjectBytes`) cuts a partition's rows into objects of that size | nothing new | more objects over a window, a request each |
 
+A fourth way is built: a consolidation that reads more than the layout's object size runs a piece at a
+time (`DatasetCompactor.Pieces`). Each job takes the keys of the partition below a cut, the first key of
+a granule of its inputs' sparse indexes past an object's size of what is left, moved up so that no object
+of level 1 lies across it; it writes them to level 1 and commits. The inputs of level 0 it took rows of go
+back to level 0 in the same commit with those rows marked, as a delete marks them, a run from row 0 since
+an input's rows are in the key's order; one it took every row of goes. The next job's plan finds what is
+left and consolidates the next piece, each input read from past its marked run, the objects of level 1 the
+earlier pieces wrote left out. A failure loses one piece, and each piece commits within its own share of
+the window. A consolidation runs in one piece when an input keeps no sparse index of its keys, or carries
+the counts of rows a delete marked, which a piece's marks would leave behind. Each piece writes the
+partition's index again, its objects' postings with those the index before covers still: a partition of
+`P` pieces writes its index `P` times, a cost that grows as `P²` in the index's bytes, measured before it
+is changed.
+
 The third is there today: a dataset whose failed jobs cost too much declares a smaller size, and each
 job at risk is that much smaller. The second is the shape of a job that resumes, at the price of a
 format change, and waits for a measure of how often jobs fail. A delete that marks an input while the
