@@ -91,6 +91,10 @@ internal sealed class PackedKeys<TKey> : GroupKeys
     private ScratchBlock<int> _renumbered;
     private ScratchBlock<int> _held;
 
+    // For a spill, each part number's place among the distinct numbers a part writes, -1 for one not met: -1 throughout
+    // between two writes.
+    private ScratchBlock<int> _placeOf;
+
     // The lane's account its tables grow under, the query's memory's.
     private readonly TableArrays _account;
 
@@ -608,6 +612,7 @@ internal sealed class PackedKeys<TKey> : GroupKeys
         Scratch.Return(ref _partIds);
         Scratch.Return(ref _renumbered);
         Scratch.Return(ref _held);
+        Scratch.Return(ref _placeOf);
         Count = 0;
     }
 
@@ -617,7 +622,7 @@ internal sealed class PackedKeys<TKey> : GroupKeys
         get
         {
             long bytes = ((long)_keys.Length * Unsafe.SizeOf<TKey>()) + _tags.Length
-                + ((long)(_hashed.Length + _table.Length + _slots.Length + _partIds.Length + _renumbered.Length + _held.Length) * sizeof(int));
+                + ((long)(_hashed.Length + _table.Length + _slots.Length + _partIds.Length + _renumbered.Length + _held.Length + _placeOf.Length) * sizeof(int));
             foreach (GroupKeys part in _parts)
             {
                 bytes += part.Footprint;
@@ -802,29 +807,74 @@ internal sealed class PackedKeys<TKey> : GroupKeys
         }
     }
 
-    /// <summary>Each column's values, a column after the other, as its index writes them.</summary>
+    /// <summary>
+    /// Each column's values, a column after the other: how many distinct values the groups hold of it, those values as its
+    /// index writes them, then each group's place among them. A column's index writes distinct groups, its null at one
+    /// place, a null past it skipped or written as a value. Written once a tuple, two tuples that shared a column's null
+    /// had the second read as the column's next value: the read ran past the section's end, or gave the tuple's rows to
+    /// another group, under a process held to 768 MiB (2026-11-15).
+    /// </summary>
     internal override void WriteKeys(ReadOnlySpan<int> groups, SpillBuffer buffer)
     {
-        Scratch.Grow(ref _partIds, groups.Length);
-        Span<int> ids = _partIds.AsSpan(0, groups.Length);
+        int count = groups.Length;
+        Scratch.Grow(ref _partIds, 2 * count);
+        Span<int> distinct = _partIds.AsSpan(0, count);
+        Span<int> places = _partIds.AsSpan(count, count);
         for (int p = 0; p < _parts.Length; p++)
         {
-            for (int i = 0; i < groups.Length; i++)
+            int most = 0;
+            for (int i = 0; i < count; i++)
             {
-                ids[i] = Id(_keys[groups[i]], p);
+                most = Math.Max(most, Id(_keys[groups[i]], p) + 1);
             }
 
-            _parts[p].WriteKeys(ids, buffer);
+            if (_placeOf.Length < most)
+            {
+                Scratch.Grow(ref _placeOf, most);
+                _placeOf.AsSpan(0, _placeOf.Length).Fill(-1);
+            }
+
+            Span<int> placeOf = _placeOf.AsSpan(0, most);
+            int values = 0;
+            for (int i = 0; i < count; i++)
+            {
+                int id = Id(_keys[groups[i]], p);
+                if (placeOf[id] < 0)
+                {
+                    placeOf[id] = values;
+                    distinct[values++] = id;
+                }
+
+                places[i] = placeOf[id];
+            }
+
+            buffer.Write(values);
+            _parts[p].WriteKeys(distinct[..values], buffer);
+            MemoryMarshal.AsBytes(places).CopyTo(buffer.Take(count * sizeof(int)));
+            foreach (int id in distinct[..values])
+            {
+                placeOf[id] = -1;
+            }
         }
     }
 
     internal override void ReadKeys(ref SpillReader reader, Span<int> groups)
     {
         int count = groups.Length;
-        int[] ids = new int[_parts.Length * count];
+        Scratch.Grow(ref _partIds, (_parts.Length + 2) * count);
+        Span<int> ids = _partIds.AsSpan(0, _parts.Length * count);
+        Span<int> values = _partIds.AsSpan(_parts.Length * count, count);
+        Span<int> places = _partIds.AsSpan((_parts.Length + 1) * count, count);
         for (int p = 0; p < _parts.Length; p++)
         {
-            _parts[p].ReadKeys(ref reader, ids.AsSpan(p * count, count));
+            int distinct = reader.Read<int>();
+            _parts[p].ReadKeys(ref reader, values[..distinct]);
+            reader.Read(places);
+            Span<int> part = ids.Slice(p * count, count);
+            for (int i = 0; i < count; i++)
+            {
+                part[i] = values[places[i]];
+            }
         }
 
         Span<int> tuple = stackalloc int[_parts.Length];

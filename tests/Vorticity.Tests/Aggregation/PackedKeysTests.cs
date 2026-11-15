@@ -57,6 +57,51 @@ public sealed partial class PackedKeysTests
         }
     }
 
+    /// <summary>
+    /// The same keys spilled: under a budget of a few hundred KiB the lanes' tables go to runs and come back, each part's
+    /// values written once and every group pointing to its own, a text's null among them. Written once a group, two groups
+    /// that shared a part's null had the second read as the part's next value, which ran past the run's section at every
+    /// degree and budget tried, from 128 KiB to 1 MiB.
+    /// </summary>
+    [Theory]
+    [InlineData(1, 256)]
+    [InlineData(4, 512)]
+    public async Task APackedKeySpilledReadsEachPartBackItsNullsIncluded(int degree, int kib)
+    {
+        Item[] rows = Items();
+        string path = await WriteAsync(rows);
+        string scratch = TestScratch.Create("vorticity-packed-spill-");
+        try
+        {
+            QueryMemoryBudget budget = new QueryMemoryBudget((long)kib << 10);
+            await using VortexSession session = VortexSession.Create(options =>
+            {
+                options.MaxDegreeOfParallelism = degree;
+                options.MemoryBudget = budget;
+                options.ScratchDirectory = scratch;
+            });
+            await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
+
+            Vorticity.Aggregation byName = file.Scan<Item>().GroupBy(r => (r.Small, r.Name)).Select(g => (g.Key.Small, g.Key.Name, g.Count(), g.Sum(r => r.Value)));
+            Assert.Equal(
+                rows.GroupBy(r => (r.Small, r.Name)).Select(g => new SmallName(g.Key.Small, g.Key.Name, g.Count(), g.Sum(r => r.Value))).OrderBy(g => $"{g.Small:D4}|{g.Name}"),
+                (await ListAsync(byName.As<SmallName>())).OrderBy(g => $"{g.Small:D4}|{g.Name}"));
+            AggregationRun run = byName.Plan.LastRun!;
+            Assert.True(run.SpilledRuns + (run.Core?.SpilledParts ?? 0) > 0, $"nothing spilled under {budget.CeilingBytes:N0} bytes");
+
+            Vorticity.Aggregation byFlag = file.Scan<Item>().GroupBy(r => (r.Small, r.Name, r.Flag)).Select(g => (g.Key.Small, g.Key.Name, g.Key.Flag, g.Count()));
+            Assert.Equal(
+                rows.GroupBy(r => (r.Small, r.Name, r.Flag)).Select(g => new SmallNameFlag(g.Key.Small, g.Key.Name, g.Key.Flag, g.Count())).OrderBy(g => $"{g.Small:D4}|{g.Name}|{g.Flag}"),
+                (await ListAsync(byFlag.As<SmallNameFlag>())).OrderBy(g => $"{g.Small:D4}|{g.Name}|{g.Flag}"));
+            Assert.Equal(0, budget.ReservedBytes);
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+            Directory.Delete(scratch, recursive: true);
+        }
+    }
+
     [Theory]
     [InlineData(1)]
     [InlineData(4)]
