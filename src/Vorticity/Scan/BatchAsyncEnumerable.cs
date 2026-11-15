@@ -307,7 +307,7 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
 /// pays, not what the scan costs across every thread.
 /// </para>
 /// </remarks>
-internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
+internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerator<RecordBatch>
 {
     private readonly LayoutTree _tree;
     private readonly ISegmentReader _source;
@@ -331,8 +331,9 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     private readonly ScanSegments _segments;
 
     // Whom the scan's blocks are counted for: its question's account, or its own, which it closes as it ends.
+    // Whom the scan's blocks are counted for: the question's account, or the scan itself, its own account, closed once its
+    // lanes are given back.
     private readonly Buffers.MemoryAccount _account;
-    private readonly Buffers.WorkAccount? _ownAccount;
     private readonly RetainedChunks _retained;
     private readonly bool _sinkDecodes;
 
@@ -514,15 +515,16 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         int widenRows = 0,
         int readAhead = 0,
         Buffers.MemoryAccount? account = null)
+        : base(QueryMemoryBudget.Of(file.Session), "scan")
     {
-        // The question's account when the scan serves one; else one of the scan's own, closed once its lanes are given back.
-        if (account is null)
+        // The question's account when the scan serves one, the scan holding nothing of its own to give back; else the scan
+        // itself, an account no other object, closed once its lanes are given back.
+        _account = account ?? this;
+        if (account is not null)
         {
-            _ownAccount = new Buffers.WorkAccount(QueryMemoryBudget.Of(file.Session), "scan");
-            account = _ownAccount;
+            GC.SuppressFinalize(this);
         }
 
-        _account = account;
         _compact = compact;
         _widenRows = widenRows > plan.MaxRows && compact && !filterProven && !reverse && take is null &&
             filter is not null && zones is not null
@@ -3088,7 +3090,11 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         (_extras as LaneWindow)?.ReturnGate();
 
         // Last: what the scan's blocks still hold goes back to its budget; a batch the caller keeps is the caller's.
-        _ownAccount?.Dispose();
+        if (ReferenceEquals(_account, this))
+        {
+            Close();
+            GC.SuppressFinalize(this);
+        }
     }
 
     /// <summary>

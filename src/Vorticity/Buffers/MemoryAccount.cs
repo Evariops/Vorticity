@@ -124,9 +124,10 @@ internal class BudgetAccount : MemoryAccount
 /// <summary>
 /// The account of a piece of work that ends, a scan or a writer outside a query: what its blocks hold is given back at its end
 /// (<see cref="Close"/>), whatever its holders still hold, and what comes back after is ignored. Nothing holding it, the
-/// collector's finalizer gives back what a piece of work never closed held.
+/// collector's finalizer gives back what a piece of work never closed held. A scan's enumerator, made once a scan, is its
+/// own account, which spares the scan an object.
 /// </summary>
-internal sealed class WorkAccount : BudgetAccount, IDisposable
+internal class WorkAccount : BudgetAccount, IDisposable
 {
     // What the work's blocks hold now; -1 once the account has given back everything.
     private long _held;
