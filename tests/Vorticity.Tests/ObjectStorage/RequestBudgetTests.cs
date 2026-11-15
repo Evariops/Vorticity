@@ -1,9 +1,8 @@
-// The process's budget of requests over a store: eight questions at once never pass its requests in flight nor its
-// requests a second, and a service that throttles past a rate sees the budget's rate halve under it, every read ending.
+// The process's budget of requests over a store: a burst then a pace, a bound in flight, and a store's own rate that a
+// throttle halves once per episode, down to a floor, and that grows back once its service is calm. The budget's rule runs
+// on a clock the test moves; the stores are checked on a few requests for what they wire to it.
 using System;
 using System.Collections.Concurrent;
-using System.Collections.Generic;
-using System.Diagnostics;
 using System.Linq;
 using System.Net;
 using System.Threading;
@@ -21,85 +20,176 @@ public sealed class RequestBudgetTests
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
 
     /// <summary>
-    /// Eight readers of 60 reads each, a millisecond a read at the service, under a budget of 4 in flight and 400 a second:
-    /// the service never sees more than 4 at once, nor more in any quarter of a second than the quarter's rate and the
-    /// bucket's tenth of a second.
+    /// 100 requests a second: a tenth of a second's requests go at once, the next one waits for its turn, a hundredth of a
+    /// second, and not a tick less.
     /// </summary>
     [Fact]
-    public async Task EightQuestionsAtOnceKeepWithinTheBudget()
+    public async Task ABudgetLetsABurstThroughThenPacesEachRequest()
+    {
+        StepClock clock = new StepClock();
+        RequestBudget budget = new RequestBudget(maxInFlight: 1_000, requestsPerSecond: 100, clock);
+        for (int burst = 0; burst < 10; burst++)
+        {
+            Assert.True(budget.EnterAsync(Ct).IsCompletedSuccessfully, $"request {burst} of the burst waited");
+        }
+
+        Task next = budget.EnterAsync(Ct).AsTask();
+        clock.Advance(TimeSpan.FromMilliseconds(10) - TimeSpan.FromTicks(1));
+        Assert.False(next.IsCompleted, "a request went before its turn");
+        clock.Advance(TimeSpan.FromTicks(1));
+        await next.WaitAsync(TimeSpan.FromSeconds(10), Ct);
+
+        // Another second: a hundred turns, and no more.
+        Task[] second = [.. Enumerable.Range(0, 101).Select(_ => budget.EnterAsync(Ct).AsTask())];
+        for (int step = 0; step < 100; step++)
+        {
+            clock.Advance(TimeSpan.FromMilliseconds(10));
+        }
+
+        await Task.WhenAll(second.Take(100)).WaitAsync(TimeSpan.FromSeconds(10), Ct);
+        Assert.False(second[100].IsCompleted, "a second gave more than its hundred turns");
+        clock.Advance(TimeSpan.FromMilliseconds(10));
+        await second[100].WaitAsync(TimeSpan.FromSeconds(10), Ct);
+    }
+
+    /// <summary>Two in flight: a third waits until one of them leaves.</summary>
+    [Fact]
+    public async Task ABudgetHoldsItsRequestsInFlight()
+    {
+        RequestBudget budget = new RequestBudget(maxInFlight: 2, requestsPerSecond: 1_000_000, new StepClock());
+        Assert.True(budget.EnterAsync(Ct).IsCompletedSuccessfully);
+        Assert.True(budget.EnterAsync(Ct).IsCompletedSuccessfully);
+        Task third = budget.EnterAsync(Ct).AsTask();
+        Assert.False(third.IsCompleted, "a third request went while two were in flight");
+        budget.Exit();
+        await third.WaitAsync(TimeSpan.FromSeconds(10), Ct);
+    }
+
+    /// <summary>
+    /// A store's rate of 1 600 a second: a throttle halves it, and its bucket empties; a throttle of a request that entered
+    /// before that halving, the same episode, leaves it; each new episode halves it again, down to a sixty-fourth.
+    /// </summary>
+    [Fact]
+    public void AThrottleHalvesAStoresRateOncePerEpisodeDownToItsFloor()
+    {
+        StepClock clock = new StepClock();
+        RequestBudget store = RequestBudget.ForStore(1_600, clock);
+        int entered = store.Episode;
+        store.Throttled(entered);
+        Assert.Equal(800, store.CurrentRequestsPerSecond);
+        Assert.False(store.EnterAsync(Ct).IsCompleted, "the bucket kept its turns past the throttle");
+
+        store.Throttled(entered);
+        Assert.Equal(800, store.CurrentRequestsPerSecond);
+
+        for (int episode = 0; episode < 10; episode++)
+        {
+            store.Throttled(store.Episode);
+        }
+
+        Assert.Equal(1_600.0 / 64, store.CurrentRequestsPerSecond);
+    }
+
+    /// <summary>
+    /// After a throttle, a store's rate stays down for a second of calm, then grows back by a sixteenth of its ceiling a
+    /// second, up to the ceiling.
+    /// </summary>
+    [Fact]
+    public void AStoresRateGrowsBackOnceItsServiceIsCalm()
+    {
+        StepClock clock = new StepClock();
+        RequestBudget store = RequestBudget.ForStore(1_600, clock);
+        store.Throttled(store.Episode);
+        Assert.Equal(800, store.CurrentRequestsPerSecond);
+
+        // Calm for a second, then a second more before the first step.
+        clock.Advance(TimeSpan.FromMilliseconds(1_999));
+        store.Succeeded();
+        Assert.Equal(800, store.CurrentRequestsPerSecond);
+        clock.Advance(TimeSpan.FromMilliseconds(1));
+        store.Succeeded();
+        Assert.Equal(900, store.CurrentRequestsPerSecond);
+
+        // A step a second, whatever the successes between.
+        clock.Advance(TimeSpan.FromMilliseconds(500));
+        store.Succeeded();
+        Assert.Equal(900, store.CurrentRequestsPerSecond);
+        for (int second = 0; second < 20; second++)
+        {
+            clock.Advance(TimeSpan.FromSeconds(1));
+            store.Succeeded();
+        }
+
+        Assert.Equal(1_600, store.CurrentRequestsPerSecond);
+    }
+
+    /// <summary>A budget the stores share does not move when one of their services throttles: the other stores' may not.</summary>
+    [Fact]
+    public void ASharedBudgetDoesNotMoveWhenAServiceThrottles()
+    {
+        RequestBudget shared = new RequestBudget(maxInFlight: 16, requestsPerSecond: 1_600, new StepClock());
+        shared.Throttled(shared.Episode);
+        Assert.Equal(1_600, shared.CurrentRequestsPerSecond);
+    }
+
+    /// <summary>
+    /// Eight readers at once through a store under a budget of four in flight, each read held a millisecond at the service:
+    /// the service never sees more than four at once.
+    /// </summary>
+    [Fact]
+    public async Task AStoreSendsWithinItsBudgetsRequestsInFlight()
     {
         using S3Emulator emulator = new S3Emulator();
         Seed(emulator);
         int inFlight = 0;
         int most = 0;
-        ConcurrentQueue<long> sent = new ConcurrentQueue<long>();
+        int sent = 0;
         emulator.Hold = async (request, _, token) =>
         {
-            sent.Enqueue(Stopwatch.GetTimestamp());
-            int now = Interlocked.Increment(ref inFlight);
-            InterlockedMax(ref most, now);
+            Interlocked.Increment(ref sent);
+            InterlockedMax(ref most, Interlocked.Increment(ref inFlight));
             await Task.Delay(1, token);
             Interlocked.Decrement(ref inFlight);
         };
 
-        RequestBudget budget = new RequestBudget(maxInFlight: 4, requestsPerSecond: 400);
-        await using S3ObjectStore store = Store(emulator, budget);
-        long begin = Stopwatch.GetTimestamp();
-        await Task.WhenAll(Enumerable.Range(0, 8).Select(reader => ReadAsync(store, reader, reads: 60)));
-        double seconds = Stopwatch.GetElapsedTime(begin).TotalSeconds;
+        await using S3ObjectStore store = Store(emulator, new RequestBudget(maxInFlight: 4, requestsPerSecond: 1_000_000));
+        await Task.WhenAll(Enumerable.Range(0, 8).Select(reader => ReadAsync(store, reader, reads: 6)));
 
         Assert.InRange(most, 1, 4);
-        Assert.Equal(480, sent.Count);
-        Assert.True(seconds >= (480 - 40) / 400.0 * 0.95, $"480 reads in {seconds:F2} s, past 400 a second");
-        Assert.True(MostIn(sent, TimeSpan.FromMilliseconds(250)) <= (400 * 0.25) + 40 + 2, $"{MostIn(sent, TimeSpan.FromMilliseconds(250))} reads in a quarter of a second");
+        Assert.Equal(48, sent);
     }
 
     /// <summary>
-    /// A service that throttles every request past 150 a second over its last 200 ms: under a budget of 1 600 a second the
-    /// store's rate halves until the service stops throttling, then grows and halves around what the service sustains; every
-    /// read ends, the throttles stay a few dozen, and the store's rate ends within twice the service's.
+    /// A service that throttles its first requests: every read ends once it answers, the store's own rate halved, the
+    /// budget the stores share and the process's left as they were.
     /// </summary>
     [Fact]
-    public async Task AServiceThatThrottlesPastARateIsReadUnderIt()
+    public async Task AStoreWhoseServiceThrottlesHalvesItsOwnRateAndEndsEveryRead()
     {
         using S3Emulator emulator = new S3Emulator();
         Seed(emulator);
-        object gate = new object();
-        Queue<long> recent = new Queue<long>();
-        ConcurrentQueue<long> answered = new ConcurrentQueue<long>();
-        long window = Stopwatch.Frequency / 5;
         int throttled = 0;
+        ConcurrentQueue<int> answered = new ConcurrentQueue<int>();
         emulator.Intercept = (request, _) =>
         {
-            long now = Stopwatch.GetTimestamp();
-            lock (gate)
+            if (Interlocked.Increment(ref throttled) <= 4)
             {
-                while (recent.Count > 0 && now - recent.Peek() > window)
-                {
-                    recent.Dequeue();
-                }
-
-                if (recent.Count >= 30)
-                {
-                    Interlocked.Increment(ref throttled);
-                    return S3Emulator.Error(HttpStatusCode.ServiceUnavailable, "SlowDown", "Please reduce your request rate.");
-                }
-
-                recent.Enqueue(now);
+                return S3Emulator.Error(HttpStatusCode.ServiceUnavailable, "SlowDown", "Please reduce your request rate.");
             }
 
-            answered.Enqueue(now);
+            answered.Enqueue(0);
             return null;
         };
 
-        RequestBudget budget = new RequestBudget(maxInFlight: 16, requestsPerSecond: 1_600);
-        await using S3ObjectStore store = Store(emulator, budget, retryDelay: TimeSpan.FromMilliseconds(20));
-        await Task.WhenAll(Enumerable.Range(0, 8).Select(reader => ReadAsync(store, reader, reads: 50)));
+        // A rate no read waits for once halved: the pace is the budget's own test's, the halving this one's.
+        RequestBudget budget = new RequestBudget(maxInFlight: 16, requestsPerSecond: 1_000_000);
+        await using S3ObjectStore store = Store(emulator, budget);
+        await Task.WhenAll(Enumerable.Range(0, 8).Select(reader => ReadAsync(store, reader, reads: 5)));
 
-        Assert.InRange(throttled, 1, 80);
-        Assert.True(store.Transport.RequestRate <= 2 * 150, $"the store sends {store.Transport.RequestRate} a second after the throttles");
+        Assert.Equal(40, answered.Count);
+        Assert.True(store.Transport.RequestRate < 1_000_000, $"the store still sends {store.Transport.RequestRate} a second");
+        Assert.Equal(1_000_000, budget.CurrentRequestsPerSecond);
         Assert.Equal(RequestBudget.DefaultRequestsPerSecond, RequestBudget.Process.RequestsPerSecond);
-        Assert.Equal(400, answered.Count);
     }
 
     /// <summary>Reads <paramref name="reads"/> of the seeded objects, one after the other.</summary>
@@ -121,26 +211,6 @@ public sealed class RequestBudgetTests
         }
     }
 
-    /// <summary>The most of <paramref name="times"/> that fall in any span of <paramref name="span"/>.</summary>
-    private static int MostIn(IEnumerable<long> times, TimeSpan span)
-    {
-        long[] sorted = [.. times];
-        Array.Sort(sorted);
-        long width = (long)(span.TotalSeconds * Stopwatch.Frequency);
-        int most = 0;
-        for (int first = 0, last = 0; last < sorted.Length; last++)
-        {
-            while (sorted[last] - sorted[first] >= width)
-            {
-                first++;
-            }
-
-            most = Math.Max(most, last - first + 1);
-        }
-
-        return most;
-    }
-
     private static void InterlockedMax(ref int target, int value)
     {
         int seen = Volatile.Read(ref target);
@@ -156,13 +226,13 @@ public sealed class RequestBudgetTests
         }
     }
 
-    private static S3ObjectStore Store(S3Emulator emulator, RequestBudget budget, TimeSpan? retryDelay = null) =>
+    private static S3ObjectStore Store(S3Emulator emulator, RequestBudget budget) =>
         new S3ObjectStore(new S3StoreOptions
         {
             Bucket = Bucket,
             Region = "eu-west-3",
             Credentials = StoreCredentials.AccessKey(S3Emulator.AccessKey, S3Emulator.Secret),
             Handler = emulator,
-            Transport = new StoreTransportOptions { RetryBaseDelay = retryDelay ?? TimeSpan.Zero, RequestBudget = budget, MaxAttempts = 10 },
+            Transport = new StoreTransportOptions { RetryBaseDelay = TimeSpan.Zero, RequestBudget = budget, MaxAttempts = 10 },
         });
 }
