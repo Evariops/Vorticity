@@ -350,6 +350,47 @@ internal sealed class ObjectDictionary
         return arena.AddPrimitive(codesType, rows, column.Validity, codesPType, codes);
     }
 
+    /// <summary>
+    /// The codes of the rows of <paramref name="node"/>, a column of this dictionary's values in <paramref name="source"/>, as
+    /// a primitive node of <paramref name="codesType"/> in <paramref name="target"/>, its validity copied there: what a
+    /// writer gathers of a column written against an object dictionary, its codes rather than its values, from a batch it
+    /// does not own. A column delivered encoded is copied first and coded in <paramref name="target"/>, as
+    /// <see cref="Code"/> does it.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">A row holds a value the dictionary lacks.</exception>
+    internal int CodeInto(CanonicalArena source, int node, CanonicalArena target, DType codesType)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        ArgumentNullException.ThrowIfNull(target);
+        CanonicalNode column = source.GetNode(node);
+        if (column.Kind is CanonicalKind.Constant or CanonicalKind.RunEnd or CanonicalKind.Dictionary)
+        {
+            return Code(target, target.CopyFrom(source, node), codesType);
+        }
+
+        int rows = column.Length;
+        PType codesPType = CodesPType;
+        VortexBuffer codes = target.AllocateUninitialized(rows * codesPType.ByteWidth(), codesPType.ByteWidth(), out Span<byte> into);
+        ValidityMask valid = ValidityMask.From(source, column.Validity);
+        int missing = _width == 0
+            ? codesPType == PType.U8
+                ? CodeViews(column, in valid, MemoryMarshal.Cast<byte, byte>(into))
+                : CodeViews(column, in valid, MemoryMarshal.Cast<byte, ushort>(into))
+            : codesPType == PType.U8
+                ? CodeNumbers(column, in valid, MemoryMarshal.Cast<byte, byte>(into))
+                : CodeNumbers(column, in valid, MemoryMarshal.Cast<byte, ushort>(into));
+        if (missing >= 0)
+        {
+            throw new InvalidOperationException(
+                $"Row {missing} of a chunk holds a value its column's object dictionary of {Count} values lacks.");
+        }
+
+        Validity validity = column.Validity.Kind == ValidityKind.Bitmap
+            ? Validity.Bitmap(target.CopyFrom(source, column.Validity.CanonicalNodeIndex))
+            : column.Validity;
+        return target.AddPrimitive(codesType, rows, validity, codesPType, codes);
+    }
+
     /// <summary>A text column's codes; the first row whose value the dictionary lacks, or -1.</summary>
     private int CodeViews<T>(CanonicalNode column, in ValidityMask valid, Span<T> into)
         where T : unmanaged, IBinaryInteger<T>

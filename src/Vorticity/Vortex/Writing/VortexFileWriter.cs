@@ -2374,7 +2374,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                         await EmitGatheredAsync(field, gathering, cancellationToken).ConfigureAwait(false);
                     }
 
-                    Gather(gathering, arena, node, rows, blocks);
+                    Gather(field, gathering, arena, node, rows, blocks);
                     if (gathering.Due)
                     {
                         await EmitGatheredAsync(field, gathering, cancellationToken).ConfigureAwait(false);
@@ -2417,10 +2417,10 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// <summary>
     /// Writes node <paramref name="node"/> of <paramref name="arena"/> as one chunk of column
     /// <paramref name="field"/>: <paramref name="rows"/> rows, <paramref name="blocks"/> blocks from
-    /// <paramref name="firstBlock"/>.
+    /// <paramref name="firstBlock"/>; the node holds the column's codes already when <paramref name="coded"/>.
     /// </summary>
     private async ValueTask EmitColumnChunkAsync(
-        int field, CanonicalArena arena, int node, long rows, int firstBlock, int blocks, CancellationToken cancellationToken)
+        int field, CanonicalArena arena, int node, long rows, int firstBlock, int blocks, CancellationToken cancellationToken, bool coded = false)
     {
         // A shredded variant's chunk is written as its residual and its typed columns, which the
         // statistics of its rows as they came do not describe.
@@ -2433,8 +2433,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         }
         else if (Codes(field))
         {
-            // The chunk's codes, which the statistics of its values do not describe.
-            node = Coded(field, arena, node);
+            // The chunk's codes, which the statistics of its values do not describe; gathered as codes already.
+            node = coded ? node : Coded(field, arena, node);
         }
         else
         {
@@ -2675,8 +2675,12 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         return false;
     }
 
-    /// <summary>Copies a column's share of one of the file's chunks in with the rows it gathers.</summary>
-    private void Gather(Gathering gathering, CanonicalArena arena, int node, long rows, int blocks)
+    /// <summary>
+    /// Copies column <paramref name="field"/>'s share of one of the file's chunks in with the rows it gathers: its codes,
+    /// for a column written against an object dictionary, rather than its values, which a merge's writer gathered as text
+    /// up to sixteen times a chunk's target, 482 MiB of a job's 691 over metric records.
+    /// </summary>
+    private void Gather(int field, Gathering gathering, CanonicalArena arena, int node, long rows, int blocks)
     {
         CanonicalArena into = (gathering.Context ??= TransitContexts.Rent(Account)).Canonical;
         if (gathering.Rows == 0)
@@ -2684,7 +2688,9 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             gathering.FirstBlock = _emittedBlocks;
         }
 
-        int owned = into.CopyFrom(arena, node);
+        int owned = _dictionaries?[field] is { } dictionary
+            ? dictionary.CodeInto(arena, node, into, _codesTypes![field])
+            : into.CopyFrom(arena, node);
         gathering.Nodes.Add(owned);
         gathering.Rows += rows;
         gathering.Blocks += blocks;
@@ -2696,10 +2702,12 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     {
         ScanContext context = gathering.Context!;
         int rows = checked((int)gathering.Rows);
+
+        // A column written against an object dictionary gathered its codes, of the codes' type.
         int node = gathering.Nodes.Count == 1
             ? gathering.Nodes[0]
             : CanonicalConcat.Concat(
-                context.Decode, _isTabular ? _schema.GetField(field) : _schema, rows,
+                context.Decode, ChunkType(field), rows,
                 System.Runtime.InteropServices.CollectionsMarshal.AsSpan(gathering.Nodes));
         int firstBlock = gathering.FirstBlock;
         int blocks = gathering.Blocks;
@@ -2710,7 +2718,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         gathering.Blocks = 0;
         try
         {
-            await EmitColumnChunkAsync(field, context.Canonical, node, rows, firstBlock, blocks, cancellationToken).ConfigureAwait(false);
+            await EmitColumnChunkAsync(field, context.Canonical, node, rows, firstBlock, blocks, cancellationToken, coded: Codes(field)).ConfigureAwait(false);
             gathering.ChunkRows.Add(rows);
         }
         finally

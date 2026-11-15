@@ -695,7 +695,7 @@ public sealed partial class VortexFileWriter
             VortexFileWriter writer = _writer!;
             if (!_flushing)
             {
-                writer.Gather(gathering, chunk!, _nodes[field], _rows, _blocks);
+                writer.Gather(field, gathering, chunk!, _nodes[field], _rows, _blocks);
                 if (!gathering.Due)
                 {
                     return;
@@ -707,7 +707,7 @@ public sealed partial class VortexFileWriter
             int node = gathering.Nodes.Count == 1
                 ? gathering.Nodes[0]
                 : CanonicalConcat.Concat(
-                    context.Decode, writer._isTabular ? writer._schema.GetField(field) : writer._schema, rows,
+                    context.Decode, writer.ChunkType(field), rows,
                     System.Runtime.InteropServices.CollectionsMarshal.AsSpan(gathering.Nodes));
             _gatheredFirst[field] = gathering.FirstBlock;
             _gatheredBlocks[field] = gathering.Blocks;
@@ -759,7 +759,8 @@ public sealed partial class VortexFileWriter
                 Types.Variants.VariantShredding? plan = writer._shredding?[field];
                 if (plan is null && writer.Codes(field))
                 {
-                    local = writer.Coded(field, lane.Arena, local);
+                    // A column that gathers gathered its codes already.
+                    local = _gathered[field] is null ? writer.Coded(field, lane.Arena, local) : local;
                     stats = default;
                 }
 
