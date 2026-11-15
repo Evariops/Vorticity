@@ -1171,6 +1171,9 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
 
             // Such an object, which a job writes in its key's order, in blocks, keeps each column's statistics over them.
             Granulated = contents && synopses,
+
+            // A job's writer gathers its columns within its share of the jobs' budget, writing a chunk early past it.
+            GatheredBytesCeiling = budget is null ? 0 : DatasetCompactor.GatherCeiling(this),
         };
 
         // The variant columns a job shreds, each in long chunks of its own; an append shreds the declared paths when its

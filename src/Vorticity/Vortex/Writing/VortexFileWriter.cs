@@ -396,6 +396,16 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// <summary>The encoded bytes the columns that gather aim their chunks at, or 0 (<see cref="VortexWriteOptions.GatheredChunkBytes"/>).</summary>
     private long _gatheredBytes;
 
+    /// <summary>The canonical bytes the columns that gather may hold together, or 0 (<see cref="VortexWriteOptions.GatheredBytesCeiling"/>).</summary>
+    private long _gatheredCeiling;
+
+    /// <summary>The canonical bytes the columns that gather hold together now, which lanes add to side by side.</summary>
+    private long _gatheredHeld;
+
+    /// <summary>Whether <paramref name="gathering"/> writes what it holds: its target reached, or the columns together past their ceiling.</summary>
+    private bool DueOrOver(Gathering gathering) =>
+        gathering.Due || (_gatheredCeiling > 0 && Volatile.Read(ref _gatheredHeld) > _gatheredCeiling);
+
     /// <summary>The rows the columns that gather took since their chunks last ended together.</summary>
     private long _groupTaken;
 
@@ -1020,6 +1030,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             }
 
             writer._gatheredBytes = options.GatheredChunkBytes;
+            writer._gatheredCeiling = options.GatheredBytesCeiling;
         }
 
         writer._groupRows = writer._gathering is null ? 0 : options.GatheredGroupRows;
@@ -2375,7 +2386,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                     }
 
                     Gather(field, gathering, arena, node, rows, blocks);
-                    if (gathering.Due)
+                    if (DueOrOver(gathering))
                     {
                         await EmitGatheredAsync(field, gathering, cancellationToken).ConfigureAwait(false);
                     }
@@ -2691,10 +2702,12 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         int owned = _dictionaries?[field] is { } dictionary
             ? dictionary.CodeInto(arena, node, into, _codesTypes![field])
             : into.CopyFrom(arena, node);
+        long bytes = into.ByteSize(owned);
         gathering.Nodes.Add(owned);
         gathering.Rows += rows;
         gathering.Blocks += blocks;
-        gathering.Bytes += into.ByteSize(owned);
+        gathering.Bytes += bytes;
+        Interlocked.Add(ref _gatheredHeld, bytes);
     }
 
     /// <summary>Writes what column <paramref name="field"/> has gathered as one chunk of its own.</summary>
@@ -2714,6 +2727,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         gathering.Nodes.Clear();
         gathering.Rows = 0;
         gathering.Cut = gathering.Bytes;
+        Interlocked.Add(ref _gatheredHeld, -gathering.Bytes);
         gathering.Bytes = 0;
         gathering.Blocks = 0;
         try

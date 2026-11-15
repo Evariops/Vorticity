@@ -82,8 +82,10 @@ public sealed partial class JobScratchTests
         Session = session,
         Layout = new DatasetLayout
         {
+            Partition = LayoutValue.Column(nameof(Row.Day)),
             SortKey = [LayoutValue.Column(nameof(Row.Service)), LayoutValue.Column(nameof(Row.Sequence))],
             MergeFanout = 8,
+            CalmAfter = null,
         },
     };
 
@@ -99,7 +101,7 @@ public sealed partial class JobScratchTests
             for (int i = 0; i < rows.Length; i++)
             {
                 random.NextBytes(noise);
-                rows[i] = new Row($"svc-{i % 7}", all.Count + i, Convert.ToBase64String(noise));
+                rows[i] = new Row(0, $"svc-{i % 7}", all.Count + i, Convert.ToBase64String(noise));
             }
 
             all.AddRange(rows);
@@ -112,5 +114,5 @@ public sealed partial class JobScratchTests
     }
 
     [VortexRecord]
-    public partial record struct Row(string Service, long Sequence, string Payload);
+    public partial record struct Row(int Day, string Service, long Sequence, string Payload);
 }

@@ -276,7 +276,17 @@ internal static partial class DatasetCompactor
     /// metrics was priced 2.6 GB for chunks it never filled, and held 380 MB in all.
     /// </summary>
     private static long WriterBytes(VortexDataset dataset, DatasetSchema schema, CompactionJob job, IReadOnlyList<ValueShredding>? shreddings) =>
-        Math.Min(TargetsBytes(dataset, schema, shreddings), job.Rows * RowBytes(dataset, job));
+        Math.Min(Math.Min(TargetsBytes(dataset, schema, shreddings), job.Rows * RowBytes(dataset, job)), GatherCeiling(dataset));
+
+    /// <summary>
+    /// 🧪 The share of the jobs' budget, one in this many, a job's writer gathers its columns in together, past which a column
+    /// writes its chunk early (<see cref="VortexWriteOptions.GatheredBytesCeiling"/>): the rest for its inputs. Provisional,
+    /// calibrated by measurement.
+    /// </summary>
+    private const int GatherShare = 4;
+
+    /// <summary>What a job's writer gathers its columns in together at most: its share of the jobs' budget, a mebibyte at least.</summary>
+    internal static long GatherCeiling(VortexDataset dataset) => Math.Max(1L << 20, JobBudget(dataset) / GatherShare);
 
     /// <summary>What the writer of a job's objects holds once each column gathers its chunk's target (<see cref="WriterBytes"/>).</summary>
     private static long TargetsBytes(VortexDataset dataset, DatasetSchema schema, IReadOnlyList<ValueShredding>? shreddings)

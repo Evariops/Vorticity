@@ -82,8 +82,10 @@ public sealed partial class CompactionCleanupTests
     {
         Layout = new DatasetLayout
         {
+            Partition = LayoutValue.Column(nameof(Row.Day)),
             SortKey = [LayoutValue.Column(nameof(Row.Service)), LayoutValue.Column(nameof(Row.Sequence))],
             MergeFanout = 8,
+            CalmAfter = null,
         },
         RetentionWindow = TimeSpan.FromHours(1),
         TimeProvider = clock,
@@ -95,7 +97,7 @@ public sealed partial class CompactionCleanupTests
         List<Row> all = [];
         for (int a = 0; a < appends; a++)
         {
-            Row[] rows = [.. Enumerable.Range(0, 64).Select(i => new Row($"svc-{i % 5}", first + all.Count + i))];
+            Row[] rows = [.. Enumerable.Range(0, 64).Select(i => new Row(0, $"svc-{i % 5}", first + all.Count + i))];
             all.AddRange(rows);
             await using ObjectDraft draft = dataset.StartObject();
             await draft.Writer.WriteAsync<Row>(rows, Ct);
@@ -106,5 +108,5 @@ public sealed partial class CompactionCleanupTests
     }
 
     [VortexRecord]
-    public partial record struct Row(string Service, long Sequence);
+    public partial record struct Row(int Day, string Service, long Sequence);
 }

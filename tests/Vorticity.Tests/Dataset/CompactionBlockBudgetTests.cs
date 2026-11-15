@@ -57,20 +57,23 @@ public sealed partial class CompactionBlockBudgetTests
     }
 
     /// <summary>
-    /// A budget too small for the job first planned, which takes the whole class: the job is refused a block, given up, and
-    /// a narrower one runs in its place within the budget; once it ends, the budget holds nothing, and the next job has it
-    /// whole.
+    /// A budget of 16 MiB and a handle that learned an input and a writer cost a byte each, so that its plan takes the whole
+    /// class: the job is refused a block, given up, and a narrower one runs in its place within the budget; once it ends,
+    /// the budget holds nothing, and the next job has it whole.
     /// </summary>
     [Fact]
     public async Task AJobTheBudgetRefusesGivesWayToANarrowerOneAndLeavesTheBudgetWhole()
     {
-        const long Small = 6L << 20;
+        const long Small = 16L << 20;
         QueryMemoryBudget budget = new QueryMemoryBudget(Small);
         await using VortexSession session = VortexSession.Create(o => o.JobMemoryBudget = budget);
         await using MemoryObjectStore store = new MemoryObjectStore();
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Row.Schema, Options(session), Ct);
         List<Row> all = await AppendAsync(dataset, appends: 64, rows: 4_096);
+        dataset.LearnDecodedRowBytes(1);
+        dataset.LearnJobCosts(DatasetCompactor.InputFloorBytes + 1, 8_192, 1);
         int planned = (await dataset.PlanCompactionAsync(cancellationToken: Ct)).Job!.Inputs.Count;
+        Assert.Equal(64, planned);
 
         CompactionResult? first = await dataset.CompactAsync(cancellationToken: Ct);
 

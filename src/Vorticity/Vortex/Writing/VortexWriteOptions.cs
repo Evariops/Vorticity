@@ -306,6 +306,13 @@ public sealed record VortexWriteOptions
     internal int GatheredChunkBytes { get; init; }
 
     /// <summary>
+    /// The canonical bytes the columns that gather may hold together, or 0 for no bound but each column's own: past it, a
+    /// column that gathers writes what it holds at its next rows, as if its target were reached. What a compaction job gives
+    /// its writer of its budget, which a writer of a dozen columns, each gathering up to sixteen times its target, would pass.
+    /// </summary>
+    internal long GatheredBytesCeiling { get; init; }
+
+    /// <summary>
     /// The rows after which every column that gathers writes what it holds, or 0 for no bound: the chunks of every column
     /// end together at least that often, where a reader cuts the rows between lanes without a chunk two of them read.
     /// A flush ends such a group too.
