@@ -130,6 +130,16 @@ The grain of the partition sets the largest job: its duration, its memory, and w
 
 A job holds what the session's jobs' budget gives it (`VortexSessionOptions.JobMemoryBudget`). It prices an open input at 128 KiB at least, plus three times what its batch weighs decoded, and its writer at the rows the job writes at most. A merge of 3,305 small objects reserves about 500 MB. A partition whose level 0 does not fit the budget at once is merged by size class first, a pass at a time. Give a maintenance process a budget a few times the largest partition's level 0 in open inputs.
 
+An append holds what its rows weigh in the writer's columns, which grow by doubling. Measured with the backlog bench (`--micro backlog --build-only`), metric records whose every append spans 20 000 series, the process holding its own rows too:
+
+| Append | Under 1 GiB | Under 2 GiB | Under 4 GiB |
+|---|---|---|---|
+| 300 appends of 30 000 rows | 228 MiB resident, 72 MiB of blocks | 229 MiB, 72 MiB | 229 MiB, 72 MiB |
+| 30 appends of 324 000 rows | refused: no room for a block of 64 MiB | 1 152 MiB, 720 MiB | 1 816 MiB, 720 MiB |
+| the same while 8 scans read the dataset | refused | 1 253 MiB, 975 MiB | 1 949 MiB, 1 043 MiB |
+
+Appends of a few tens of thousands of rows, a flush of a few seconds, hold in a quarter of a gibibyte whatever the limit. An append of hundreds of thousands of rows needs a limit of 2 GiB: its columns end in blocks of 32 to 64 MiB, each an array of its own, which a heap held to 1 GiB, the caller's rows beside them, has no room for. The append then throws `VortexMemoryException` and commits nothing. Under a larger limit the process holds more, since the collector runs less often.
+
 ## Readers
 
 A merge never takes away what a reader holds: a reader holds a version, and every object it names stays until the vacuum, a retention window after it was replaced. What costs a reader is a level 0 that fell behind.
