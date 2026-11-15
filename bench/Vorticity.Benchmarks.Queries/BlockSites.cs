@@ -22,7 +22,7 @@ internal sealed class BlockSites : BlockPool.IBlockWatch, IDisposable
 {
     private const int LeastBytes = 64 * 1024;
     private const long Step = 64L << 20;
-    private const int Frames = 6;
+    private const int Frames = 16;
 
     private readonly string _path;
     private readonly Lock _gate = new Lock();
