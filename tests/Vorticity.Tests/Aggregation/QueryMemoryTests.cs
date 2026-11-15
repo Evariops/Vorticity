@@ -59,6 +59,35 @@ public sealed partial class QueryMemoryTests
         Assert.Equal(4, made);
     }
 
+    /// <summary>
+    /// A query gives back what it holds at most: past that, the bytes were given back already, and the budget keeps
+    /// counting what the query holds. The core's small batch, under a page, is neither counted when it is rented nor when
+    /// it is dropped; given back all the same, a core under pressure gave back half a megabyte more than it held.
+    /// </summary>
+    [Fact]
+    public void AQueryGivesBackNoMoreThanItHolds()
+    {
+        QueryMemoryBudget budget = new QueryMemoryBudget(1 << 20);
+        using QueryMemory memory = new QueryMemory(budget);
+        Assert.True(memory.TryGrow(10_000));
+        memory.Shrink(4_000);
+        memory.Shrink(10_000);
+        Assert.Equal(0, memory.Held);
+        Assert.Equal(0, budget.ReservedBytes);
+        Assert.Equal(4_000, memory.Overdraft);
+
+        using QueryMemory core = new QueryMemory(budget);
+        TableArrays account = TableArrays.OfCore(core);
+        Block<ulong> small = account.Rent<ulong>(255, zeroed: false, overdraw: true);
+        Block<ulong> large = account.Rent<ulong>(1_024, zeroed: false, overdraw: true);
+        Assert.Equal(8_192, core.Held);
+        account.Drop(small);
+        account.Drop(large);
+        Assert.Equal(0, core.Held);
+        Assert.Equal(0, core.Overdraft);
+        Assert.Equal(0, budget.ReservedBytes);
+    }
+
     [Theory]
     [InlineData(1)]
     [InlineData(14)]

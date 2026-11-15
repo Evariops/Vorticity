@@ -755,11 +755,15 @@ public sealed partial class GroupSpillTests
             await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
             Vorticity.Aggregation grouped = query(file);
             Dictionary<TKey, TResult> read = [];
+            long overdrawn = QueryMemory.OverdrawnBytes;
             await foreach (TResult record in grouped.As<TResult>().ToRecordsAsync(Ct))
             {
                 read.Add(keyOf(record), record);
             }
 
+            // No step gave back what the query no longer held: the spill's parts were given back twice, and the budget
+            // counted less than the query held until it ended. The class runs alone, so the process's count is its own.
+            Assert.Equal(overdrawn, QueryMemory.OverdrawnBytes);
             Assert.Equal(expected.Count, read.Count);
             foreach ((TKey key, TResult answer) in expected)
             {

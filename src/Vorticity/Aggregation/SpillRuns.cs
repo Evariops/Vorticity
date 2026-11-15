@@ -801,7 +801,14 @@ internal sealed class RunMerge(
                 throw memory.Exceeded("merge of a spilled group by", keys.Count, account.Out);
             }
 
-            return (keys, slots, account.Reserved + room, account.Out);
+            // What the account holds goes to the part, which gives it back once its batches are done with: the account
+            // forgets it, and the part's arrays go back to the pool counted nowhere. Kept by both, each part was given
+            // back twice, its arrays when built and its reservation when read, and the query's memory fell below zero
+            // in every spilled group by, the budget counting less than the query held until it ended.
+            long reserved = account.Reserved + room;
+            long measured = account.Out;
+            account.Forget();
+            return (keys, slots, reserved, measured);
         }
         catch
         {
@@ -870,6 +877,13 @@ internal sealed class RunMerge(
 
     /// <summary>The runs' files closed and gone.</summary>
     internal override void Release() => spill.Dispose();
+
+    /// <summary>The part's keys and slots back to the pool, counted nowhere: what they held is the part's to give back.</summary>
+    internal override void LetPartGo(GroupKeys keys, AggregateSlot[] slots)
+    {
+        keys.Release();
+        AggregationPartition.ReleaseSlots(slots);
+    }
 
     internal override AggregationRun Finished(AggregationRun run) => run.Spilled(spill);
 }

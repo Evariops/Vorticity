@@ -284,7 +284,15 @@ internal sealed class TableArrays
     internal void Drop<T>(Block<T> block)
         where T : unmanaged
     {
-        Leave((long)block.Length * Unsafe.SizeOf<T>());
+        // Out of the count as it came in: a block under a page, or one handed out once the account forgot, never counted.
+        // Given back all the same, the small batches a core applied gave back hundreds of bytes each that the query never
+        // reserved, and a core under pressure gave back half a megabyte more than it held.
+        long bytes = (long)block.Length * Unsafe.SizeOf<T>();
+        if (!_forgotten && bytes >= LeastCounted)
+        {
+            Leave(bytes);
+        }
+
         Blocks.Return(block);
     }
 

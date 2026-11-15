@@ -337,12 +337,61 @@ internal sealed class QueryMemory : IDisposable
         Raise(Interlocked.Add(ref _held, bytes));
     }
 
-    /// <summary>Gives back <paramref name="bytes"/> the query held.</summary>
+    /// <summary>
+    /// Gives back <paramref name="bytes"/> the query held, what it holds at most: past that, the bytes were given back
+    /// already, and giving them back again would have the budget count less than the query holds.
+    /// </summary>
+    /// <remarks>
+    /// The spill's parts were given back twice, their arrays as they were built and their reservation as they were read,
+    /// and a core's small batches gave back bytes no one had reserved: the query's memory fell below zero in every spilled
+    /// group by, to −1.8 MB under a process held to 8 GiB, and the budget counted that much less than the query held
+    /// until it ended (2026-11-15). Both are fixed; what a step still gives back past what the query holds is counted
+    /// (<see cref="OverdrawnBytes"/>) and told (<see cref="Overdrawn"/>), never given back.
+    /// </remarks>
     internal void Shrink(long bytes)
     {
-        Interlocked.Add(ref _held, -bytes);
-        _budget.Release(bytes);
+        long held = Volatile.Read(ref _held);
+        while (true)
+        {
+            long given = Math.Min(bytes, Math.Max(0, held));
+            long seen = Interlocked.CompareExchange(ref _held, held - given, held);
+            if (seen != held)
+            {
+                held = seen;
+                continue;
+            }
+
+            if (given < bytes)
+            {
+                Interlocked.Add(ref _overdrawn, bytes - given);
+                Interlocked.Add(ref s_overdrawn, bytes - given);
+                Overdrawn?.Invoke(this, held, bytes);
+            }
+
+            if (given > 0)
+            {
+                _budget.Release(given);
+            }
+
+            return;
+        }
     }
+
+    // The bytes the queries of the process gave back past what they held, since it started; and this query's.
+    private static long s_overdrawn;
+    private long _overdrawn;
+
+    /// <summary>The bytes this query gave back past what it held: zero, unless a step gives back twice.</summary>
+    internal long Overdraft => Interlocked.Read(ref _overdrawn);
+
+    /// <summary>The bytes the queries of the process gave back past what they held, since it started: zero, unless a step gives back twice.</summary>
+    internal static long OverdrawnBytes => Interlocked.Read(ref s_overdrawn);
+
+    /// <summary>
+    /// What a tool is told of each time a query gives back more than it holds, the query's memory, the bytes it held and
+    /// those it gave back; null, and nothing is.
+    /// </summary>
+    internal static Action<QueryMemory, long, long>? Overdrawn;
 
     /// <summary>Its tables hold <paramref name="delta"/> bytes more, or less: what they let go stays in the heap until a collection takes it.</summary>
     internal void Measure(long delta)

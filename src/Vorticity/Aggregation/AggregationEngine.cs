@@ -4014,7 +4014,7 @@ internal static class AggregationEngine
                     memory.LetGo(partitions.Length * Working(pass.Options.BatchRows));
                     (GroupKeys none, AggregateSlot[] noSlots) = engaged.Empty();
                     AggregationOutcome first = new AggregationOutcome(plan, noSlots, none, default) { Parts = applying };
-                    return Counted(first, memory, memory.Held);
+                    return Counted(first, memory, All);
                 }
 
                 (GroupKeys held, AggregateSlot[] heldSlots, long heldBytes, CorePart[] spilled) = await engaged.FinishAsync(joined, lanes, cancellationToken).ConfigureAwait(false);
@@ -4041,7 +4041,7 @@ internal static class AggregationEngine
 
                 memory.LetGo(partitions.Length * Working(pass.Options.BatchRows));
                 outcome.Parts = new CoreParts(engaged, spilled, plan, builder ?? (plan.Emitter is not null ? null : throw new InvalidOperationException("A group by whose core spills delivers its parts through a builder.")));
-                return Counted(outcome, memory, memory.Held);
+                return Counted(outcome, memory, All);
             }
 
             (GroupKeys? keys, AggregateSlot[] slots, int parts, long mergedBytes, MergedParts? delivery, long entries) =
@@ -4054,7 +4054,7 @@ internal static class AggregationEngine
                 plan.LastGroups = 0;
                 memory.LetGo(partitions.Length * Working(pass.Options.BatchRows));
                 AggregationOutcome first = new AggregationOutcome(plan, slots, keys, default) { Parts = delivery };
-                return Counted(first, memory, memory.Held);
+                return Counted(first, memory, All);
             }
 
             plan.LastRun = (Gathered(partitions, Stopwatch.GetTimestamp() - merging, parts, mergedBytes) with { MergeEntries = entries }).Spilled(spill);
@@ -4179,8 +4179,11 @@ internal static class AggregationEngine
         (GroupKeys none, AggregateSlot[] noSlots) = merge.Empty();
         plan.LastGroups = 0;
         AggregationOutcome first = new AggregationOutcome(plan, noSlots, none, default) { Parts = delivery };
-        return Counted(first, memory, memory.Held);
+        return Counted(first, memory, All);
     }
+
+    /// <summary>What <see cref="Counted"/> keeps of a result whose memory stays as it is: everything.</summary>
+    private const long All = -1;
 
     /// <summary>
     /// The first <paramref name="count"/> groups of <paramref name="order"/>, as the merge gives them, or, under
@@ -4243,11 +4246,19 @@ internal static class AggregationEngine
 
     /// <summary>
     /// The result keeps <paramref name="bytes"/> of its query's memory, what its groups hold, and the
-    /// order they are delivered in, until it is delivered; the rest is given back.
+    /// order they are delivered in, until it is delivered; the rest is given back. With <see cref="All"/>,
+    /// everything it holds stays as it is: its parts, merged in the background, reserve and give back as
+    /// they come.
     /// </summary>
     private static AggregationOutcome Counted(AggregationOutcome outcome, QueryMemory memory, long bytes)
     {
-        memory.Keep(bytes + ((long)outcome.Order.Length * sizeof(int)));
+        // Kept whole, nothing is read twice: the held bytes read as the argument and read again in Keep let a part a
+        // worker reserved in between be given back here, then again once read, under four lanes on four cores.
+        if (bytes != All)
+        {
+            memory.Keep(bytes + ((long)outcome.Order.Length * sizeof(int)));
+        }
+
         outcome.Memory = memory;
         outcome.Plan.LastGroups = outcome.Count;
         outcome.Plan.LastPeakBytes = memory.Peak;
