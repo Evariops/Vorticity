@@ -71,7 +71,7 @@ internal static class ShredMemoryMicro
         GC.Collect();
         GC.WaitForPendingFinalizers();
         GC.Collect();
-        BlockPool.Shared.Trim();
+        MemoryAccount.Pool.Trim();
         long blocksStart = BlockOwner.LiveBytes;
         VortexWriteOptions options = VortexWriteOptions.Default with
         {

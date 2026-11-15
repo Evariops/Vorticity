@@ -71,7 +71,7 @@ internal sealed class BlockSites : BlockPool.IBlockWatch, IDisposable
                 _peak = [.. _sites.Values.Where(static site => site.Bytes > 0).Select(static site => (site.Name, site.Bytes, site.Blocks))];
                 _peakSeconds = _clock.Elapsed.TotalSeconds;
                 _peakBlocks = BlockOwner.LiveBytes;
-                _peakParked = BlockPool.Shared.ParkedBytes;
+                _peakParked = MemoryAccount.Pool.ParkedBytes;
             }
         }
     }

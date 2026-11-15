@@ -574,7 +574,7 @@ internal partial class CanonicalArena
     /// <param name="initialCapacity">Hint for the record array's initial size. Must be positive.</param>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="initialCapacity"/> is not positive.</exception>
     public CanonicalArena(int initialCapacity = 64)
-        : this(initialCapacity, MemoryAccount.Caller, BlockPool.Shared)
+        : this(initialCapacity, MemoryAccount.Caller, MemoryAccount.Pool)
     {
     }
 
@@ -583,7 +583,7 @@ internal partial class CanonicalArena
     /// <param name="account">Whom the arena's blocks are counted for.</param>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="initialCapacity"/> is not positive.</exception>
     public CanonicalArena(int initialCapacity, MemoryAccount account)
-        : this(initialCapacity, account, BlockPool.Shared)
+        : this(initialCapacity, account, MemoryAccount.Pool)
     {
     }
 

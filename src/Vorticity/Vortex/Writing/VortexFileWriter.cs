@@ -1235,7 +1235,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         FilePipeWriter pipe = FilePipeWriter.Create(path, new AccountMemoryPool(account), options.Durable);
         try
         {
-            VortexFileWriter writer = Create(SinkOver(pipe, session, options), schema, options, session, account);
+            VortexFileWriter writer = Create(SinkOver(pipe, session, options, account), schema, options, session, account);
             writer._filePipe = pipe;
             return writer;
         }
@@ -1251,7 +1251,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     internal static VortexFileWriter Create(System.IO.Pipelines.PipeWriter sink, DType schema, VortexWriteOptions options, VortexSession session)
     {
         options = Identified(options, session);
-        VortexFileWriter writer = Create(SinkOver(sink, session, options), schema, options, session);
+        WorkAccount account = AccountFor(session);
+        VortexFileWriter writer = Create(SinkOver(sink, session, options, account), schema, options, session, account);
         writer._callerPipe = sink;
         return writer;
     }
@@ -1266,8 +1267,11 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             ? options
             : (options.Identity is null ? options.WithIdentity(Guid.NewGuid()) : options) with { SealScratch = true };
 
-    /// <summary>The sink over <paramref name="pipe"/>: a sealing stage when the session seals its files, a plain one otherwise.</summary>
-    private static ISegmentSink SinkOver(System.IO.Pipelines.PipeWriter pipe, VortexSession session, VortexWriteOptions options)
+    /// <summary>
+    /// The sink over <paramref name="pipe"/>: a sealing stage when the session seals its files, its frame counted for
+    /// <paramref name="account"/>, the writer's; a plain one otherwise.
+    /// </summary>
+    private static ISegmentSink SinkOver(System.IO.Pipelines.PipeWriter pipe, VortexSession session, VortexWriteOptions options, WorkAccount account)
     {
         if (!session.Seals)
         {
@@ -1277,7 +1281,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         byte[] objectId = new byte[Sealing.SealedFormat.ObjectIdBytes];
         options.Identity!.Value.TryWriteBytes(objectId);
         Sealing.SealParameters parameters = Sealing.SealParameters.ForFile() with { ObjectId = objectId };
-        return new Sealing.SealingSegmentSink(pipe, parameters, session.Keys!.FileKeyAsync);
+        return new Sealing.SealingSegmentSink(pipe, parameters, session.Keys!.FileKeyAsync) { Account = account };
     }
 
     /// <summary>The session the writer belongs to.</summary>
@@ -1827,7 +1831,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// <summary>Copies a small batch in with the ones waiting before it.</summary>
     private Staging Stage(CanonicalArena arena, int root, int rows)
     {
-        Staging staging = _staging ??= new Staging(TransitContexts.Rent());
+        Staging staging = _staging ??= new Staging(TransitContexts.Rent(Account));
         CanonicalArena into = staging.Context.Canonical;
         int owned = Owned(into, arena, root);
         staging.Nodes.Add(owned);
@@ -2217,7 +2221,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         // and CanonicalSlice take, and has no file to scan. The second one is taken only when a
         // block actually splits.
         _transit ??= new ScanContext?[2];
-        return (_transit[_current] ??= TransitContexts.Rent()).Canonical;
+        return (_transit[_current] ??= TransitContexts.Rent(Account)).Canonical;
     }
 
     /// <summary>
@@ -2282,7 +2286,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
         // The remainder moves to the other arena before this one is reset, because a slice is a
         // view onto the storage the reset would hand back.
-        ScanContext to = _transit[_current ^ 1] ??= TransitContexts.Rent();
+        ScanContext to = _transit[_current ^ 1] ??= TransitContexts.Rent(Account);
         _carry.Clear();
         if (straddleTail >= 0)
         {
@@ -2674,7 +2678,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// <summary>Copies a column's share of one of the file's chunks in with the rows it gathers.</summary>
     private void Gather(Gathering gathering, CanonicalArena arena, int node, long rows, int blocks)
     {
-        CanonicalArena into = (gathering.Context ??= TransitContexts.Rent()).Canonical;
+        CanonicalArena into = (gathering.Context ??= TransitContexts.Rent(Account)).Canonical;
         if (gathering.Rows == 0)
         {
             gathering.FirstBlock = _emittedBlocks;

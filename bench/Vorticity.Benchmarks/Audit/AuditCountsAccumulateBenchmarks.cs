@@ -73,7 +73,7 @@ public class AuditCountsAccumulateBenchmarks
     public int Accumulate()
     {
         using ColumnSheetBuilder sheet = new ColumnSheetBuilder();
-        using ColumnCountsBuilder counts = new ColumnCountsBuilder(sheet, _plan, field: 1);
+        using ColumnCountsBuilder counts = new ColumnCountsBuilder(sheet, _plan, field: 1, QueryMemoryBudget.Process.Account);
         for (int b = 0; b < _arenas.Length; b++)
         {
             _plan.Prepare(_arenas[b], _nodes[b], Block);

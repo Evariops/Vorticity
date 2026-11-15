@@ -186,7 +186,7 @@ public sealed partial class VortexFileWriter
             pipe = new FilePipeWriter(handle, origin, new AccountMemoryPool(account)) { Durable = options.Durable };
             ISegmentSink sink = sealedLayout is null
                 ? new PipeSegmentSink(pipe, plan.FileLength)
-                : new Sealing.SealingSegmentSink(pipe, sealedLayout, cancellationToken => session.Keys!.UnwrapAsync(sealedLayout.Descriptor, cancellationToken));
+                : new Sealing.SealingSegmentSink(pipe, sealedLayout, cancellationToken => session.Keys!.UnwrapAsync(sealedLayout.Descriptor, cancellationToken)) { Account = account };
             VortexFileWriter writer = Create(sink, plan.Schema, options, session, account);
             writer._filePipe = pipe;
             return writer;

@@ -115,6 +115,10 @@ internal sealed class KeyOrderedBatches : IAsyncEnumerable<RecordBatch>
         private bool _started;
         private bool _disposed;
 
+        // Whom the walk's blocks are counted for: its question's account, or its own, closed once it is disposed.
+        private readonly Buffers.MemoryAccount _account;
+        private readonly Buffers.WorkAccount? _ownAccount;
+
         // The window's batch, current while `_hasCurrent`, and once released kept for the next
         // window to bind again, as the scan underneath keeps its own.
         private RecordBatch? _current;
@@ -128,6 +132,15 @@ internal sealed class KeyOrderedBatches : IAsyncEnumerable<RecordBatch>
             _read = _scan.ReadProjection.RootMask;
             _keep = _scan.Projection.RootMask;
             _token = token;
+            if (_scan.Account is { } account)
+            {
+                _account = account;
+            }
+            else
+            {
+                _ownAccount = new Buffers.WorkAccount(_scan.File.Session.Options.MemoryBudget ?? QueryMemoryBudget.Process, "scan");
+                _account = _ownAccount;
+            }
 
             // What the windows read and decode is held across them, and shared with the key source
             // that walks the same column: a window of a sorted key is the next window of the same
@@ -164,7 +177,7 @@ internal sealed class KeyOrderedBatches : IAsyncEnumerable<RecordBatch>
         /// <summary>A context of the process's pool bound to the scan's file, counting into its metrics.</summary>
         private ScanContext Lent()
         {
-            ScanContext context = ScanContexts.Shared.Rent(_scan.File);
+            ScanContext context = ScanContexts.Shared.Rent(_scan.File, _account);
             context.Metrics = _scan.Metrics;
             return context;
         }
@@ -272,6 +285,9 @@ internal sealed class KeyOrderedBatches : IAsyncEnumerable<RecordBatch>
             _retained.Dispose();
             Blocks.Return(_rows);
             Blocks.Return(_sorted);
+
+            // Last: what the walk's blocks still hold goes back to its budget; a batch the caller keeps is the caller's.
+            _ownAccount?.Dispose();
         }
 
         /// <summary>Drops the current batch and everything the lanes decoded for it.</summary>

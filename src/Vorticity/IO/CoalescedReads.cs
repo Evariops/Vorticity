@@ -69,7 +69,7 @@ internal static class CoalescedReads
             for (int r = 0; r < runCount; r++)
             {
                 CoalescedRun run = scratch.Runs[r];
-                BlockOwner block = RentBlock(run.Length, options);
+                BlockOwner block = RentBlock(run.Length, options, requests.Account);
                 try
                 {
                     ReadExact(reader, block.WritableSpan[..run.Length], run.Start);
@@ -161,11 +161,12 @@ internal static class CoalescedReads
 
     /// <summary>
     /// A block of at least <paramref name="length"/> bytes, pooled up to the options' ceiling, and past
-    /// the shared pool's classes by the one block it keeps beyond them.
+    /// the shared pool's classes by the one block it keeps beyond them, counted for <paramref name="account"/>:
+    /// the scan whose batch reads it, or the memory a file keeps for its own reads.
     /// </summary>
-    internal static BlockOwner RentBlock(int length, SegmentReadOptions options) =>
-        length <= options.MaxPooledBytes || length > BlockPool.Shared.MaxPooledLength
-            ? MemoryAccount.Unassigned.Rent(length, VortexLimits.MaxAlignment)
+    internal static BlockOwner RentBlock(int length, SegmentReadOptions options, MemoryAccount account) =>
+        length <= options.MaxPooledBytes || length > MemoryAccount.Pool.MaxPooledLength
+            ? account.Rent(length, VortexLimits.MaxAlignment)
             : BlockOwner.Allocate(length, VortexLimits.MaxAlignment);
 
     /// <summary>
@@ -219,7 +220,7 @@ internal static class CoalescedReads
             }
 
             int length = (int)spec.Length;
-            BlockOwner owner = RentBlock(length, options);
+            BlockOwner owner = RentBlock(length, options, requests.Account);
 
             try
             {

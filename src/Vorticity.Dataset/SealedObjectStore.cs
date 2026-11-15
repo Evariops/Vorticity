@@ -444,11 +444,15 @@ internal sealed class SealedObjectStore : IObjectStore
         PipeWriter sealedBytes, PipeReader content, long length, SealParameters parameters, DataKey dataKey, CancellationToken cancellationToken)
     {
         bool handedOver = false;
+        // Released in the finally below whatever happens: the process's account.
         SealingSegmentSink sink = new SealingSegmentSink(sealedBytes, parameters, _ =>
         {
             handedOver = true;
             return new ValueTask<DataKey>(dataKey);
-        });
+        })
+        {
+            Account = QueryMemoryBudget.Process.Account,
+        };
         Exception? failure = null;
         long taken = 0;
         try

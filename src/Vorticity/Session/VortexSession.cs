@@ -179,12 +179,13 @@ public sealed class VortexSessionOptions
     }
 
     /// <summary>
-    /// The memory the session's queries share with those of every session given the same budget: the
-    /// tables of their groups and the parts their merges build. Null, the default, shares the process's,
-    /// a margin under the memory the process may use.
+    /// The memory the session's queries and scans share with those of every session given the same budget:
+    /// the segments a scan reads and the batches it builds until it ends, the tables of a query's groups and
+    /// the parts its merges build. Null, the default, shares the process's, a margin under the memory the
+    /// process may use.
     /// </summary>
     /// <remarks>
-    /// A query that needs more than its budget grants fails with a <see cref="VortexMemoryException"/>.
+    /// A query or a scan that needs more than its budget grants fails with a <see cref="VortexMemoryException"/>.
     /// The budget is the host's: disposing the session leaves it to the others.
     /// </remarks>
     public QueryMemoryBudget? MemoryBudget

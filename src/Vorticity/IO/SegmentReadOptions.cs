@@ -72,7 +72,7 @@ internal sealed class SegmentReadOptions
     }
 
     /// <summary>
-    /// Buffers of at most this size come from <see cref="BlockPool.Shared"/>; larger ones
+    /// Buffers of at most this size come from the library's pool of blocks; larger ones
     /// are allocated and freed outright. Default <see cref="DefaultMaxPooledBytes"/>.
     /// </summary>
     /// <exception cref="ArgumentOutOfRangeException">The value is negative.</exception>

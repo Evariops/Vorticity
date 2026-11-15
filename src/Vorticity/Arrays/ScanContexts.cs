@@ -143,9 +143,13 @@ internal sealed class ScanContexts : ISweptAfterCollections
     /// <summary>The sweeps run so far, for tests.</summary>
     internal int Sweeps => Volatile.Read(ref _sweeps);
 
-    /// <summary>A context an earlier scan gave back, bound to <paramref name="file"/>, or a new one.</summary>
+    /// <summary>
+    /// A context an earlier scan gave back, bound to <paramref name="file"/>, or a new one, its blocks and its reads counted
+    /// for <paramref name="account"/> until it is given back.
+    /// </summary>
     /// <param name="file">The file the scan reads.</param>
-    internal ScanContext Rent(VortexFile file)
+    /// <param name="account">Whom the scan's blocks are counted for: its query's, its own, or the file's kept memory for metadata.</param>
+    internal ScanContext Rent(VortexFile file, MemoryAccount account)
     {
         ScanContext? context = null;
         lock (_gate)
@@ -155,10 +159,14 @@ internal sealed class ScanContexts : ISweptAfterCollections
 
         if (context is null)
         {
-            return _metadata ? new ScanContext(file, ScanContext.MetadataCapacity) : ScanContext.Pooled(file);
+            context = _metadata ? new ScanContext(file, ScanContext.MetadataCapacity) : ScanContext.Pooled(file);
+        }
+        else
+        {
+            context.Rebind(file);
         }
 
-        context.Rebind(file);
+        context.Account = account;
         return context;
     }
 
@@ -168,7 +176,8 @@ internal sealed class ScanContexts : ISweptAfterCollections
     /// detached or bound to files, never both.
     /// </summary>
     /// <param name="options">The read options the scan decodes under.</param>
-    internal ScanContext RentDetached(VortexReadOptions options)
+    /// <param name="account">Whom the scan's blocks are counted for.</param>
+    internal ScanContext RentDetached(VortexReadOptions options, MemoryAccount account)
     {
         ScanContext? context = null;
         lock (_gate)
@@ -178,10 +187,14 @@ internal sealed class ScanContexts : ISweptAfterCollections
 
         if (context is null)
         {
-            return new ScanContext([], options);
+            context = new ScanContext([], options);
+        }
+        else
+        {
+            context.RebindDetached(options);
         }
 
-        context.RebindDetached(options);
+        context.Account = account;
         return context;
     }
 

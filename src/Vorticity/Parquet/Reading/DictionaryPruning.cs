@@ -83,9 +83,14 @@ internal sealed class DictionaryPruning : IDisposable
     private readonly SegmentRequestSet _requests = new();
     private byte[] _states = [];
 
-    private DictionaryPruning(FilterColumns filter, Part plan, bool[] alone, ScanContext? context)
+    // Whom the dictionaries' pages and decodes are counted for: the scan the pruning serves.
+    private readonly MemoryAccount _account;
+
+    private DictionaryPruning(FilterColumns filter, Part plan, bool[] alone, MemoryAccount account, ScanContext? context)
     {
         _filter = filter;
+        _account = account;
+        _requests.Account = account;
         _shared = context;
         _plan = plan;
         _alone = alone;
@@ -99,9 +104,10 @@ internal sealed class DictionaryPruning : IDisposable
     /// <summary>
     /// The pruning of <paramref name="filter"/>'s row groups by their dictionaries; null when no part
     /// of it reads one of its columns alone. A scan gives its <paramref name="context"/>, whose arena
-    /// holds nothing while the next row group is chosen; without one, the pruning makes its own.
+    /// holds nothing while the next row group is chosen; without one, the pruning makes its own. Its reads and decodes are
+    /// counted for <paramref name="account"/>, the scan's.
     /// </summary>
-    internal static DictionaryPruning? For(FilterColumns? filter, ScanContext? context = null)
+    internal static DictionaryPruning? For(FilterColumns? filter, MemoryAccount account, ScanContext? context = null)
     {
         if (filter is null)
         {
@@ -110,7 +116,7 @@ internal sealed class DictionaryPruning : IDisposable
 
         bool[] alone = new bool[filter.Columns.Length];
         Part plan = Plan(filter.Filter, filter, alone, new HashSet<string>(StringComparer.Ordinal));
-        return Array.IndexOf(alone, true) < 0 ? null : new DictionaryPruning(filter, plan, alone, context);
+        return Array.IndexOf(alone, true) < 0 ? null : new DictionaryPruning(filter, plan, alone, account, context);
     }
 
     /// <summary>
@@ -155,7 +161,7 @@ internal sealed class DictionaryPruning : IDisposable
 
         ScanCounters.Note(metrics, asked, bytes);
         await file.Reader.ReadManyAsync(_requests, cancellationToken).ConfigureAwait(false);
-        ScanContext context = _shared ?? (_owned ??= new ScanContext([], new VortexReadOptions { MaxDecompressedBytes = file.Options.MaxDecompressedBytes }));
+        ScanContext context = _shared ?? (_owned ??= new ScanContext([], new VortexReadOptions { MaxDecompressedBytes = file.Options.MaxDecompressedBytes }) { Account = _account });
         context.ResetBatch();
         _arena = context.Canonical;
         bool kept = false;
@@ -245,7 +251,7 @@ internal sealed class DictionaryPruning : IDisposable
         ParquetColumn column = file.Compiled.Columns[_filter.Columns[i]];
         DTypeArena types = new();
         return _readers[i] = new ColumnChunkReader(
-            column, VortexTypes.ToDType(column.Type, types), types.Bool(Nullability.NonNullable), MemoryAccount.Unassigned, file.Options.MaxDecompressedBytes)
+            column, VortexTypes.ToDType(column.Type, types), types.Bool(Nullability.NonNullable), _account, file.Options.MaxDecompressedBytes)
         {
             VerifyChecksums = file.Options.VerifyChecksums,
             Counters = file.Counters,

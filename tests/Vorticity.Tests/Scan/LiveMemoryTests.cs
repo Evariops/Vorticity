@@ -25,7 +25,7 @@ namespace Vorticity.Tests.Scan;
 
 /// <summary>Repeated scans settle instead of growing.</summary>
 /// <remarks>
-/// Shares <see cref="AllocationCollection"/>: <see cref="BlockPool.Shared"/> is
+/// Shares <see cref="AllocationCollection"/>: <see cref="MemoryAccount.Pool"/> is
 /// process-global, so a neighbouring class renting from it would move the parked counts under this
 /// one's feet.
 /// </remarks>
@@ -118,7 +118,7 @@ public sealed class LiveMemoryTests
         int total = 0;
         for (int size = 4096; size <= 1 << 22; size <<= 1)
         {
-            total += BlockPool.Shared.ParkedCount(size);
+            total += MemoryAccount.Pool.ParkedCount(size);
         }
 
         return total;

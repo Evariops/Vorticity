@@ -102,6 +102,12 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
             : question?.Projected(keep, tree.Root.DType) ?? keep.ProjectedSchema(tree.Root.DType, new DTypeArena());
     }
 
+    /// <summary>
+    /// Whom each scan's blocks are counted for: the question it serves; null, each scan counts under an account of its own,
+    /// under its session's memory budget, closed when its enumerator is disposed.
+    /// </summary>
+    internal Buffers.MemoryAccount? Account { get; init; }
+
     /// <summary>The schema every batch of this scan carries.</summary>
     /// <remarks>
     /// It is what <see cref="RecordBatch.DType"/> reports for every batch, and the two are
@@ -132,7 +138,7 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
         Keyed(new BatchAsyncEnumerator(
             _file, _tree, _read, _keep, _schema, _plan, Lanes, WindowFor(_take), _filter, _take, live: null, _metrics,
             cancellationToken, reverse: _reverse, compact: Compact, keepEncodings: KeepEncodings, sinkDecodes: SinkDecodes,
-            readAhead: ReadsAhead));
+            readAhead: ReadsAhead, account: Account));
 
     /// <summary>
     /// The chunks of the variant columns the scan reads through some shredded keys alone; null when it
@@ -234,7 +240,7 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
         Keyed(new BatchAsyncEnumerator(
             _file, _tree, _read, _keep, _schema, _plan, Lanes, WindowFor(_take), _filter, _take, live, _metrics,
             cancellationToken, reverse: _reverse, compact: Compact, keepEncodings: KeepEncodings, sinkDecodes: SinkDecodes,
-            zones: zones, widenRows: WidenRows, readAhead: ReadsAhead));
+            zones: zones, widenRows: WidenRows, readAhead: ReadsAhead, account: Account));
 
     /// <summary>
     /// The most rows a run of zones the zone maps prove whole is read in as one batch, rather than
@@ -256,7 +262,7 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
         Keyed(new BatchAsyncEnumerator(
             _file, _tree, _read, _keep, _schema, _plan, Lanes, WindowFor(proven), _filter, proven, live, _metrics,
             cancellationToken, filterProven: true, reverse: _reverse, keepEncodings: KeepEncodings, sinkDecodes: SinkDecodes,
-            readAhead: ReadsAhead));
+            readAhead: ReadsAhead, account: Account));
 #pragma warning restore VSTHRD200
 
     /// <summary>Whether the scan already has a take of the caller's.</summary>
@@ -323,6 +329,10 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     private readonly CancellationToken _token;
     private readonly Lane?[] _lanes;
     private readonly ScanSegments _segments;
+
+    // Whom the scan's blocks are counted for: its question's account, or its own, which it closes as it ends.
+    private readonly Buffers.MemoryAccount _account;
+    private readonly Buffers.WorkAccount? _ownAccount;
     private readonly RetainedChunks _retained;
     private readonly bool _sinkDecodes;
 
@@ -502,8 +512,17 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         bool sinkDecodes = false,
         ZonePruner? zones = null,
         int widenRows = 0,
-        int readAhead = 0)
+        int readAhead = 0,
+        Buffers.MemoryAccount? account = null)
     {
+        // The question's account when the scan serves one; else one of the scan's own, closed once its lanes are given back.
+        if (account is null)
+        {
+            _ownAccount = new Buffers.WorkAccount(file.Session.Options.MemoryBudget ?? QueryMemoryBudget.Process, "scan");
+            account = _ownAccount;
+        }
+
+        _account = account;
         _compact = compact;
         _widenRows = widenRows > plan.MaxRows && compact && !filterProven && !reverse && take is null &&
             filter is not null && zones is not null
@@ -589,7 +608,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         // The mask, the metrics sink and the encoded delivery outlive every batch of the scan, so
         // they are set once here and never by `ResetBatch`; the readers read the mask in file
         // coordinates and add what they materialize to the sink.
-        ScanContext context = ScanContexts.Shared.Rent(file);
+        ScanContext context = ScanContexts.Shared.Rent(file, _account);
         context.LiveBlocks = live;
         context.Metrics = metrics;
         context.KeepEncodings = keepEncodings;
@@ -1357,7 +1376,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
                 return;
             }
 
-            walk = _along = AlongWalk.Begin(ScanContexts.Shared.Rent(lane.Context.File));
+            walk = _along = AlongWalk.Begin(ScanContexts.Shared.Rent(lane.Context.File, _account));
         }
 
         if (walk.Batch <= batch)
@@ -3067,6 +3086,9 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         _segments.Dispose();
         _retained.Dispose();
         (_extras as LaneWindow)?.ReturnGate();
+
+        // Last: what the scan's blocks still hold goes back to its budget; a batch the caller keeps is the caller's.
+        _ownAccount?.Dispose();
     }
 
     /// <summary>

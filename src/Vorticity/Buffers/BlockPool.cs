@@ -15,7 +15,7 @@ namespace Vorticity.Buffers;
 /// segments of slightly different sizes still hits the same bucket. Requests above
 /// <see cref="MaxPooledLength"/> bypass the classes: they are allocated and freed directly, which
 /// keeps a single outsized read from evicting the whole steady-state working set. A graded pool,
-/// <see cref="Shared"/>, keeps one of them up to 256 MiB in a slot of its own, which the next
+/// <see cref="MemoryAccount.Pool"/>, keeps one of them up to 256 MiB in a slot of its own, which the next
 /// outsized read it is long enough for takes, and which the sweeps free as they free an idle class.
 /// </para>
 /// <para>
@@ -172,7 +172,7 @@ internal sealed class BlockPool : ISweptAfterCollections, IHeldMemory
     /// When set, the small classes retain more than <paramref name="maxPerBucket"/> under
     /// <see cref="RetentionBudget"/>. It stays private because the public constructor's count
     /// means exactly what it says: a pool asked for zero retains nothing, and one asked for two is
-    /// never quietly handed more. Grading is a policy for <see cref="Shared"/>, not a
+    /// never quietly handed more. Grading is a policy for <see cref="MemoryAccount.Pool"/>, not a
     /// reinterpretation of a caller's number.
     /// </param>
     /// <param name="maxPooledLength">Requests above this length bypass the pool.</param>
@@ -238,11 +238,13 @@ internal sealed class BlockPool : ISweptAfterCollections, IHeldMemory
         }
     }
 
-    /// <summary>The process-wide pool used by the default segment sources.</summary>
-    public static BlockPool Shared { get; }
-        = new BlockPool(32 * 1024 * 1024, 8, graded: true).Swept();
+    /// <summary>
+    /// The process's pool, graded, swept after collections, blocks up to 32 MiB pooled: built once, by
+    /// <see cref="MemoryAccount.Pool"/>, the only way to it, so that no block leaves it without an account.
+    /// </summary>
+    internal static BlockPool ForProcess() => new BlockPool(32 * 1024 * 1024, 8, graded: true).Swept();
 
-    /// <summary>A pool graded as <see cref="Shared"/> is, with a budget of its own for widening its classes.</summary>
+    /// <summary>A pool graded as the process's is, with a budget of its own for widening its classes.</summary>
     /// <param name="maxPooledLength">Requests above this length bypass the pool.</param>
     /// <param name="maxPerBucket">Blocks retained per size class, before grading.</param>
     /// <param name="demandBudget">Bytes parked across every class, base retention included, under which a class may keep more than its base retention.</param>
@@ -253,7 +255,7 @@ internal sealed class BlockPool : ISweptAfterCollections, IHeldMemory
     public int MaxPooledLength { get; }
 
     /// <summary>
-    /// Blocks retained per size class. <see cref="Shared"/> keeps more of a class while the blocks
+    /// Blocks retained per size class. <see cref="MemoryAccount.Pool"/> keeps more of a class while the blocks
     /// of it rented at once outnumber that, within a budget in bytes per class and for the pool.
     /// </summary>
     public int MaxPerBucket { get; }

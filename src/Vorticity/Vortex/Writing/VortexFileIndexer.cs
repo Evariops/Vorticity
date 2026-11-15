@@ -247,7 +247,7 @@ public static class VortexFileIndexer
                     new AccountMemoryPool(account));
                 ISegmentSink sink = sealedLayout is null
                     ? new PipeSegmentSink(tail, file.FileLength)
-                    : new Sealing.SealingSegmentSink(tail, sealedLayout, ct => session.Keys!.UnwrapAsync(sealedLayout.Descriptor, ct));
+                    : new Sealing.SealingSegmentSink(tail, sealedLayout, ct => session.Keys!.UnwrapAsync(sealedLayout.Descriptor, ct)) { Account = account };
                 try
                 {
                     EncodingDictionary encodings = new EncodingDictionary(ComponentKind.Array, options?.TargetEdition ?? EditionRegistry.Newest);
@@ -423,8 +423,9 @@ public static class VortexFileIndexer
         // Sealed as a file the session writes is, as it is written: its plaintext is never whole in memory.
         System.IO.Pipelines.PipeWriter pipe = System.IO.Pipelines.PipeWriter.Create(
             bytes, new System.IO.Pipelines.StreamPipeWriterOptions(leaveOpen: true));
+        // Released in the finally below whatever happens: the process's account.
         Sealing.SealingSegmentSink sealing = new Sealing.SealingSegmentSink(
-            pipe, Sealing.SealParameters.ForFile(), file.Session.Keys!.FileKeyAsync);
+            pipe, Sealing.SealParameters.ForFile(), file.Session.Keys!.FileKeyAsync) { Account = QueryMemoryBudget.Process.Account };
         try
         {
             IReadOnlyList<IndexWriteReport> reports = await WriteContainerAsync(

@@ -396,6 +396,9 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
     private const int OtherValues = -2;
 
     private readonly ColumnSheetBuilder _sheet;
+
+    // Whom the distinct columns' registers are counted for: the writer the counts are built for.
+    private readonly MemoryAccount _account;
     private readonly CountsPlan _plan;
     private readonly int _limit;
     private readonly int _self;
@@ -442,9 +445,11 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
     /// <param name="sheet">The column's sheet, fed first, which numbers its rows' values.</param>
     /// <param name="plan">What the file's counts share.</param>
     /// <param name="field">The column.</param>
+    /// <param name="account">Whom the distinct columns' registers are counted for: the writer's or the indexer's work.</param>
     /// <param name="entryLimit">The entries kept at most, <see cref="EntryLimit"/> unless a test asks for fewer.</param>
-    internal ColumnCountsBuilder(ColumnSheetBuilder sheet, CountsPlan plan, int field, int entryLimit = EntryLimit)
+    internal ColumnCountsBuilder(ColumnSheetBuilder sheet, CountsPlan plan, int field, MemoryAccount account, int entryLimit = EntryLimit)
     {
+        _account = account;
         _sheet = sheet;
         _plan = plan;
         _field = field;
@@ -712,7 +717,7 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
                 continue;
             }
 
-            Span<byte> registers = Registers(ref distinct[w], _entries);
+            Span<byte> registers = Registers(ref distinct[w], _entries, _account);
             for (int row = 0; row < rows; row++)
             {
                 ulong hash = hashes[row];
@@ -732,18 +737,18 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
     /// twice over when they pass it, the registers past those it held zeroed: a column's registers were an array an entry,
     /// a sixth of what a consolidation allocated, and its block goes back to the pool for the next object's.
     /// </summary>
-    private static Span<byte> Registers(ref BlockOwner? block, int entries)
+    private static Span<byte> Registers(ref BlockOwner? block, int entries, MemoryAccount account)
     {
         int bytes = checked(entries * ColumnSheet.Registers);
         if (block is null || block.Length < bytes)
         {
             int held = block?.Length ?? 0;
-            BlockOwner grown = MemoryAccount.Unassigned.Rent(Math.Max(bytes, Math.Max(16 * ColumnSheet.Registers, 2 * held)), 64);
+            BlockOwner grown = account.Rent(Math.Max(bytes, Math.Max(16 * ColumnSheet.Registers, 2 * held)), 64);
             Span<byte> into = grown.WritableSpan;
             if (block is not null)
             {
                 block.WritableSpan.CopyTo(into);
-                BlockPool.Shared.Return(block);
+                block.Release();
             }
 
             into[held..].Clear();
@@ -758,7 +763,7 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
     {
         if (block is not null)
         {
-            BlockPool.Shared.Return(block);
+            block.Release();
             block = null;
         }
     }

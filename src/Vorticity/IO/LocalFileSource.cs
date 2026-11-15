@@ -268,7 +268,7 @@ internal sealed class LocalFileSource : ISegmentReader, IReadAnticipation, IPosi
         {
             SegmentIo.ValidateSpec(in spec, out long offset, out int length);
             SegmentIo.CheckInFile(offset, length, Length);
-            return new ValueTask<SegmentOwner>(length == 0 ? new EmptySegmentOwner() : ReadPositionally(offset, length));
+            return new ValueTask<SegmentOwner>(length == 0 ? new EmptySegmentOwner() : ReadPositionally(offset, length, MemoryAccount.Kept));
         }
 
         try
@@ -338,7 +338,7 @@ internal sealed class LocalFileSource : ISegmentReader, IReadAnticipation, IPosi
         if (mapping is null)
         {
             int actual = SegmentIo.ClampRange(offset, length, alignment, Length);
-            return new ValueTask<SegmentOwner>(actual == 0 ? new EmptySegmentOwner() : ReadPositionally(offset, actual));
+            return new ValueTask<SegmentOwner>(actual == 0 ? new EmptySegmentOwner() : ReadPositionally(offset, actual, MemoryAccount.Kept));
         }
 
         try
@@ -565,7 +565,7 @@ internal sealed class LocalFileSource : ISegmentReader, IReadAnticipation, IPosi
                         {
                             cancellationToken.ThrowIfCancellationRequested();
                             (_, long offset, int length) = reads[i];
-                            owners[i] = length == 0 ? new EmptySegmentOwner() : ReadPositionally(offset, length);
+                            owners[i] = length == 0 ? new EmptySegmentOwner() : ReadPositionally(offset, length, requests.Account);
                         }
                     },
                     cancellationToken);
@@ -606,7 +606,7 @@ internal sealed class LocalFileSource : ISegmentReader, IReadAnticipation, IPosi
             SegmentSpec spec = requests.GetSpec(slot);
             SegmentIo.ValidateSpec(in spec, out long offset, out int length);
             SegmentIo.CheckInFile(offset, length, Length);
-            requests.SetResult(slot, length == 0 ? new EmptySegmentOwner() : ReadPositionally(offset, length));
+            requests.SetResult(slot, length == 0 ? new EmptySegmentOwner() : ReadPositionally(offset, length, requests.Account));
         }
     }
 
@@ -614,7 +614,7 @@ internal sealed class LocalFileSource : ISegmentReader, IReadAnticipation, IPosi
     /// <paramref name="length"/> bytes at <paramref name="offset"/>, validated against the file
     /// already, into a buffer whose 64-byte base satisfies every alignment a segment may declare.
     /// </summary>
-    private BlockOwner ReadPositionally(long offset, int length)
+    private BlockOwner ReadPositionally(long offset, int length, MemoryAccount account)
     {
         // Only a disposed reader without a handle gets here: its mapping is gone with its dispose.
         if (_handle is null)
@@ -623,7 +623,7 @@ internal sealed class LocalFileSource : ISegmentReader, IReadAnticipation, IPosi
         }
 
         // The shared pool keeps a block past its classes as well, for the next read of a segment that large.
-        BlockOwner owner = MemoryAccount.Unassigned.Rent(length, VortexLimits.MaxAlignment);
+        BlockOwner owner = account.Rent(length, VortexLimits.MaxAlignment);
         try
         {
             Span<byte> destination = owner.WritableSpan[..length];

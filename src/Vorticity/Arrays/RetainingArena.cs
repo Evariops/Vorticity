@@ -53,7 +53,7 @@ internal sealed class RetainingArena : CanonicalArena
     {
     }
 
-    /// <summary>Creates an arena backed by <see cref="Buffers.BlockPool.Shared"/>, its blocks counted for <paramref name="account"/>.</summary>
+    /// <summary>Creates an arena backed by <see cref="Buffers.MemoryAccount.Pool"/>, its blocks counted for <paramref name="account"/>.</summary>
     /// <param name="account">Whom the arena's blocks are counted for: the scan its chunks are retained for.</param>
     /// <param name="initialCapacity">Hint for the record array's initial size. Must be positive.</param>
     internal RetainingArena(MemoryAccount account, int initialCapacity = 64)

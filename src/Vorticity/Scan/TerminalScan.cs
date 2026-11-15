@@ -35,6 +35,12 @@ namespace Vorticity.Scanning;
 /// </remarks>
 internal sealed class TerminalScan
 {
+    /// <summary>
+    /// Whom the pass's blocks are counted for: the question it serves, or the process's, since the pass gives every
+    /// context back before it returns and delivers a value, not a batch.
+    /// </summary>
+    internal required Buffers.MemoryAccount Account { get; init; }
+
     private readonly VortexFile _file;
     private readonly LayoutTree _tree;
     private readonly VortexExpr? _filter;
@@ -244,7 +250,7 @@ internal sealed class TerminalScan
             return await LanesAsync(plan, live, zones, blockRows, stopAtFirst, cancellationToken).ConfigureAwait(false);
         }
 
-        using LentContext lent = new LentContext(ScanContexts.Shared.Rent(_file));
+        using LentContext lent = new LentContext(ScanContexts.Shared.Rent(_file, Account));
         ScanContext context = lent.Context;
         context.LiveBlocks = live;
         context.Metrics = _metrics;
@@ -403,7 +409,7 @@ internal sealed class TerminalScan
 
         async Task LaneAsync()
         {
-            ScanContext context = ScanContexts.Shared.Rent(_file);
+            ScanContext context = ScanContexts.Shared.Rent(_file, Account);
             context.LiveBlocks = live;
             context.Metrics = _metrics;
             context.Granules = _granules is { } geometry ? new Indexes.GranulePlans(geometry, _file, _take, live, _rows, context.GranuleScratch) : null;
@@ -1071,7 +1077,7 @@ internal sealed class TerminalScan
         // readers a mask of exactly its split, so that the restricted decode materializes the split
         // and not the chunk around it: on a single-chunk file, one block instead of the whole
         // column, which is the point of deciding from the bounds at all.
-        using LentContext lent = new LentContext(ScanContexts.Shared.Rent(_file));
+        using LentContext lent = new LentContext(ScanContexts.Shared.Rent(_file, Account));
         ScanContext context = lent.Context;
         BlockMask scope = new BlockMask(_tree.Root.RowCount, SplitPlan.NaturalBatchRows(_tree));
         context.LiveBlocks = scope;

@@ -121,7 +121,7 @@ internal static class ConsolidationMemoryMicro
         GC.Collect();
         GC.WaitForPendingFinalizers();
         GC.Collect();
-        BlockPool.Shared.Trim();
+        MemoryAccount.Pool.Trim();
         Dictionary<string, IncrementalBuild.Pass> passes = new(StringComparer.Ordinal);
         using System.Diagnostics.ActivityListener listener = IncrementalBuild.ListenToPasses(passes);
         await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = lanes);

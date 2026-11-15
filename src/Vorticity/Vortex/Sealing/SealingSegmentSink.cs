@@ -70,6 +70,12 @@ internal sealed class SealingSegmentSink : ISegmentSink
     private long _unflushed;
     private bool _finished;
 
+    /// <summary>
+    /// Whom the stage's frame of plaintext is counted for: the writer it serves, or the process's for a stage its maker
+    /// releases in a <c>finally</c>.
+    /// </summary>
+    internal required MemoryAccount Account { get; init; }
+
     /// <summary>A stage over <paramref name="pipe"/>, which takes the data key from <paramref name="dataKey"/> when the first byte arrives.</summary>
     /// <param name="pipe">Where the sealed bytes go; the writer completes it.</param>
     /// <param name="parameters">The frame size and the ids.</param>
@@ -265,7 +271,7 @@ internal sealed class SealingSegmentSink : ISegmentSink
 
         _descriptor = descriptor;
         _aes = _cipher.Rent();
-        _frame = MemoryAccount.Unassigned.Rent(_frameSize, VortexLimits.MaxAlignment);
+        _frame = Account.Rent(_frameSize, VortexLimits.MaxAlignment);
         if (_continued is not null)
         {
             return;

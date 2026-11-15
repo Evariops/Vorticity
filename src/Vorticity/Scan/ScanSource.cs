@@ -49,6 +49,12 @@ internal sealed record ScanSpec
 
     internal ScanOptions Options { get; init; } = ScanOptions.Default;
 
+    /// <summary>
+    /// Whom the scan's blocks are counted for, its reads' and its batches': the question it serves, whose account the engine
+    /// sets with the question's memory; null for a scan that counts under an account of its own.
+    /// </summary>
+    internal Buffers.MemoryAccount? Account { get; init; }
+
     /// <summary>Whether the decoders may deliver dictionary and run-end columns in their encoded form, for a consumer that reads it.</summary>
     internal bool KeepEncodings { get; init; }
 
@@ -378,7 +384,7 @@ internal sealed class FileScanSource : ScanSource, IRowsCapability, IStatisticsC
     /// <summary>The engine's builder for <paramref name="spec"/>.</summary>
     internal ScanBuilder Builder(ScanSpec spec, ScanCounters metrics)
     {
-        ScanBuilder builder = _file.ScanBuilder().WithMetrics(metrics).WithVariantKeys(spec.VariantKeys).WithZoneKeys(spec.ZoneKeys);
+        ScanBuilder builder = _file.ScanBuilder().WithMetrics(metrics).WithVariantKeys(spec.VariantKeys).WithZoneKeys(spec.ZoneKeys).WithAccount(spec.Account);
         if (spec.Projection is { } mask)
         {
             builder.ProjectMask(in mask);

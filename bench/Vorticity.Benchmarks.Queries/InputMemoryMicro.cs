@@ -82,14 +82,14 @@ internal static class InputMemoryMicro
         GC.Collect();
         GC.WaitForPendingFinalizers();
         GC.Collect();
-        BlockPool.Shared.Trim();
+        MemoryAccount.Pool.Trim();
         List<VortexFile> opened = [];
         List<IAsyncEnumerator<RecordBatch>> scans = [];
         long rows = 0;
         long batches = 0;
         long begin = Stopwatch.GetTimestamp();
         long blocksStart = BlockOwner.LiveBytes;
-        long parkedStart = BlockPool.Shared.ParkedBytes;
+        long parkedStart = MemoryAccount.Pool.ParkedBytes;
         PeakMemory memory = new PeakMemory();
         try
         {
@@ -119,7 +119,7 @@ internal static class InputMemoryMicro
                         {
                             Console.WriteLine(string.Create(
                                 CultureInfo.InvariantCulture,
-                                $"    batch {batches,5}: {rows,12:N0} rows, blocks {(BlockOwner.LiveBytes - blocksStart) / 1e6,8:F0} MB, parked {(BlockPool.Shared.ParkedBytes - parkedStart) / 1e6,6:F0} MB"));
+                                $"    batch {batches,5}: {rows,12:N0} rows, blocks {(BlockOwner.LiveBytes - blocksStart) / 1e6,8:F0} MB, parked {(MemoryAccount.Pool.ParkedBytes - parkedStart) / 1e6,6:F0} MB"));
                         }
                     }
                     else

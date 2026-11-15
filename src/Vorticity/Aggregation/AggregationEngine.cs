@@ -4436,6 +4436,12 @@ internal static class AggregationEngine
     /// </summary>
     internal static ScanSpec Batched(ScanSpec pass, QueryMemory memory, int lanes, int spilledRow = 0)
     {
+        // The pass's scans count their reads and their batches under the question's account.
+        if (pass.Account is null)
+        {
+            pass = pass with { Account = memory.Account };
+        }
+
         int asked = pass.Options.BatchRows > 0 ? pass.Options.BatchRows : GroupBatches.BatchRows;
         long room = spilledRow > 0 ? memory.Ceiling / 16 / Math.Max(1, lanes) / spilledRow : memory.Ceiling / 4 / Math.Max(1, lanes) / CoreRowBytes;
         if (room >= asked)

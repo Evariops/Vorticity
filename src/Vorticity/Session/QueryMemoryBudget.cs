@@ -7,8 +7,10 @@ using Vorticity.Buffers;
 namespace Vorticity;
 
 /// <summary>
-/// The memory the queries of the sessions that share it may hold at once: the tables of their groups,
-/// lane by lane, and the parts their merges build. A host makes one and gives it to each session it
+/// The memory the work of the sessions that share it may hold at once: the segments their scans read and
+/// the batches built from them, the tables of their queries' groups, lane by lane, and the parts their
+/// merges build; given as a session's <see cref="VortexSessionOptions.JobMemoryBudget"/>, what its
+/// writers and its datasets' background work hold. A host makes one and gives it to each session it
 /// shares through <see cref="VortexSessionOptions.MemoryBudget"/>; a session given none shares the
 /// process's, whose ceiling is what the process's limit leaves past the rest of its memory.
 /// </summary>
@@ -149,7 +151,7 @@ public sealed class QueryMemoryBudget
             }
 
             Blocks.Trim();
-            BlockPool.Shared.Trim();
+            MemoryAccount.Pool.Trim();
             if (TryAdd(ref _reserved, bytes, Available()))
             {
                 return true;

@@ -48,7 +48,7 @@ internal sealed class SourceReader : ISegmentReader
         }
 
         SegmentLease lease = await _source.ReadAsync(new SegmentRange(offset, length), cancellationToken).ConfigureAwait(false);
-        return Adopt(ref lease, offset, length, 1 << spec.AlignmentExponent);
+        return Adopt(ref lease, offset, length, 1 << spec.AlignmentExponent, MemoryAccount.Kept);
     }
 
     [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder))]
@@ -104,7 +104,7 @@ internal sealed class SourceReader : ISegmentReader
             for (; adopted < n; adopted++)
             {
                 SegmentSpec spec = requests.GetSpec(slots[adopted]);
-                requests.SetResult(slots[adopted], Adopt(ref leases[adopted], ranges[adopted].Offset, ranges[adopted].Length, 1 << spec.AlignmentExponent));
+                requests.SetResult(slots[adopted], Adopt(ref leases[adopted], ranges[adopted].Offset, ranges[adopted].Length, 1 << spec.AlignmentExponent, requests.Account));
             }
 
             requests.Complete();
@@ -136,12 +136,12 @@ internal sealed class SourceReader : ISegmentReader
         }
 
         SegmentLease lease = await _source.ReadAsync(new SegmentRange(offset, actual), cancellationToken).ConfigureAwait(false);
-        return Adopt(ref lease, offset, actual, alignment);
+        return Adopt(ref lease, offset, actual, alignment, MemoryAccount.Kept);
     }
 
     public ValueTask DisposeAsync() => _ownsSource ? _source.DisposeAsync() : ValueTask.CompletedTask;
 
-    private unsafe SegmentOwner Adopt(ref SegmentLease lease, long offset, int length, int alignment)
+    private unsafe SegmentOwner Adopt(ref SegmentLease lease, long offset, int length, int alignment, MemoryAccount account)
     {
         SegmentLease taken = lease;
         lease = default;
@@ -162,7 +162,7 @@ internal sealed class SourceReader : ISegmentReader
             pin.Dispose();
         }
 
-        BlockOwner block = MemoryAccount.Unassigned.Rent(length, VortexLimits.MaxAlignment);
+        BlockOwner block = account.Rent(length, VortexLimits.MaxAlignment);
         try
         {
             taken.Bytes.CopyTo(block.WritableSpan);

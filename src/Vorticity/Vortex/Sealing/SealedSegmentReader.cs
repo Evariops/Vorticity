@@ -180,7 +180,7 @@ internal sealed class SealedSegmentReader : ISegmentReader
             long tailStart = TailOf(layout, endStart);
             if (tailStart < layout.PlainLength)
             {
-                tail = Decrypt(layout, ciphers, end.Buffer.Span, endStart, tailStart, layout.PlainLength);
+                tail = Decrypt(layout, ciphers, end.Buffer.Span, endStart, tailStart, layout.PlainLength, MemoryAccount.Kept);
             }
             else if (layout.Epochs[^1] is { PlainLength: 0 } empty && empty.FramesStart >= endStart)
             {
@@ -391,6 +391,7 @@ internal sealed class SealedSegmentReader : ISegmentReader
         Block<int> groups = Blocks.Rent<int>(registered + 1);
         Block<int> stored = Blocks.Rent<int>(registered);
         SegmentRequestSet ciphertext = RentSet();
+        ciphertext.Account = requests.Account;
         try
         {
             int pending = CoalescedReads.CollectPending(requests, order, scratch.Keys);
@@ -569,12 +570,13 @@ internal sealed class SealedSegmentReader : ISegmentReader
     /// </summary>
     /// <exception cref="VortexEncryptionException">A frame does not authenticate; the block is wiped and released.</exception>
     private static BlockOwner Decrypt(
-        SealedLayout layout, EpochCipher[] ciphers, ReadOnlySpan<byte> ciphertext, long cipherBase, long frameStart, long frameEnd)
+        SealedLayout layout, EpochCipher[] ciphers, ReadOnlySpan<byte> ciphertext, long cipherBase, long frameStart, long frameEnd,
+        MemoryAccount account)
     {
         int pad = (int)(frameStart & (VortexLimits.MaxAlignment - 1));
         int plainBytes = checked((int)(frameEnd - frameStart));
         BlockOwner block = plainBytes + pad <= SegmentReadOptions.DefaultMaxPooledBytes
-            ? MemoryAccount.Unassigned.Rent(plainBytes + pad, VortexLimits.MaxAlignment)
+            ? account.Rent(plainBytes + pad, VortexLimits.MaxAlignment)
             : BlockOwner.Allocate(plainBytes + pad, VortexLimits.MaxAlignment);
         Span<byte> plain = block.WritableSpan.Slice(pad, plainBytes);
         int frameSize = layout.FrameSize;
@@ -642,7 +644,7 @@ internal sealed class SealedSegmentReader : ISegmentReader
                 SegmentIo.ThrowTruncatedRead(cipherStart, cipherLength, cipher.Length);
             }
 
-            block = Decrypt(_layout, _ciphers, cipher.Buffer.Span, cipherStart, frameStart, frameEnd);
+            block = Decrypt(_layout, _ciphers, cipher.Buffer.Span, cipherStart, frameStart, frameEnd, MemoryAccount.Kept);
         }
         finally
         {
@@ -657,7 +659,7 @@ internal sealed class SealedSegmentReader : ISegmentReader
             }
 
             // An offset that is not a multiple of the alignment asked for: copied to a block's base.
-            BlockOwner copy = MemoryAccount.Unassigned.Rent(length, VortexLimits.MaxAlignment);
+            BlockOwner copy = MemoryAccount.Kept.Rent(length, VortexLimits.MaxAlignment);
             view.Span.CopyTo(copy.WritableSpan);
             return copy;
         }
@@ -737,7 +739,7 @@ internal sealed class SealedSegmentReader : ISegmentReader
         long frameStart = FrameStart(runs[firstRun].Start);
         long frameEnd = FrameEnd(runs[endRun - 1].End - 1);
         long cipherStart = CipherOffset(_layout, frameStart);
-        BlockOwner block = Decrypt(_layout, _ciphers, cipher, cipherStart, frameStart, frameEnd);
+        BlockOwner block = Decrypt(_layout, _ciphers, cipher, cipherStart, frameStart, frameEnd, requests.Account);
         try
         {
             SetResults(requests, block, frameStart, runs, firstRun, endRun, sorted, order, kept: false);
@@ -776,9 +778,9 @@ internal sealed class SealedSegmentReader : ISegmentReader
 
         (long cipherStart, long cipherEnd) = CipherRange(frameStart, frameEnd);
         int cipherLength = checked((int)(cipherEnd - cipherStart));
-        // Released in the finally below whatever happens: the process's account.
+        // The scan's, as the plaintext is: a sealed read holds its two blocks under the account of the scan that asks.
         BlockOwner cipher = cipherLength <= _options.MaxPooledBytes
-            ? QueryMemoryBudget.Process.Account.Rent(cipherLength, VortexLimits.MaxAlignment)
+            ? requests.Account.Rent(cipherLength, VortexLimits.MaxAlignment)
             : BlockOwner.Allocate(cipherLength, VortexLimits.MaxAlignment);
         BlockOwner? block = null;
         try
@@ -796,7 +798,7 @@ internal sealed class SealedSegmentReader : ISegmentReader
 
             try
             {
-                block = Decrypt(_layout, _ciphers, bytes, cipherStart, frameStart, frameEnd);
+                block = Decrypt(_layout, _ciphers, bytes, cipherStart, frameStart, frameEnd, requests.Account);
             }
             catch (VortexEncryptionException)
             {
@@ -848,7 +850,7 @@ internal sealed class SealedSegmentReader : ISegmentReader
 
                 // A sparse run would pin its whole block for a few segments: each is copied out.
                 BlockOwner owner = spec.Length <= _options.MaxPooledBytes
-                    ? MemoryAccount.Unassigned.Rent((int)spec.Length, VortexLimits.MaxAlignment)
+                    ? requests.Account.Rent((int)spec.Length, VortexLimits.MaxAlignment)
                     : BlockOwner.Allocate((int)spec.Length, VortexLimits.MaxAlignment);
                 try
                 {

@@ -175,7 +175,7 @@ public class SealedScanBenchmarks
         byte[] bytes = await System.IO.File.ReadAllBytesAsync(plain);
         await using FileStream target = System.IO.File.Create(sealedPath);
         PipeWriter pipe = PipeWriter.Create(target, new StreamPipeWriterOptions(leaveOpen: true));
-        SealingSegmentSink sink = new SealingSegmentSink(pipe, SealParameters.ForFile(frameLog2), _ => new ValueTask<DataKey>(key.Retain()));
+        SealingSegmentSink sink = new SealingSegmentSink(pipe, SealParameters.ForFile(frameLog2), _ => new ValueTask<DataKey>(key.Retain())) { Account = QueryMemoryBudget.Process.Account };
         try
         {
             await sink.WriteAsync(bytes, CancellationToken.None);

@@ -78,7 +78,7 @@ public sealed class CountsAllocationTests
         int Feed(int parts)
         {
             ColumnSheetBuilder sheet = new ColumnSheetBuilder();
-            ColumnCountsBuilder counts = new ColumnCountsBuilder(sheet, plan, field: 0);
+            ColumnCountsBuilder counts = new ColumnCountsBuilder(sheet, plan, field: 0, TestAccount.Shared);
             for (int part = 0; part < parts; part++)
             {
                 plan.Prepare(arenas[part], nodes[part], Part);

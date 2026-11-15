@@ -1932,7 +1932,7 @@ internal sealed class IndexWriter : IDisposable
         {
             if (SheetOf(field) is { } sheet)
             {
-                _builders[field].Add(new ColumnCountsBuilder(sheet, plan, field));
+                _builders[field].Add(new ColumnCountsBuilder(sheet, plan, field, _account));
             }
         }
     }

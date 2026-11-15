@@ -322,7 +322,7 @@ public sealed class BlockPoolTests
 
     [Fact]
     public void Return_rejects_null() =>
-        Assert.Throws<ArgumentNullException>(() => BlockPool.Shared.Return(null!));
+        Assert.Throws<ArgumentNullException>(() => MemoryAccount.Pool.Return(null!));
 
     [Fact]
     public void Return_rejects_a_block_this_pool_does_not_own()
@@ -755,7 +755,7 @@ public sealed class BlockPoolTests
 }
 
 /// <summary>
-/// The tests that rent from <see cref="BlockPool.Shared"/> and read back what it parks.
+/// The tests that rent from <see cref="MemoryAccount.Pool"/> and read back what it parks.
 /// </summary>
 /// <remarks>
 /// The pool is the process's, and every test runs beside the others: a neighbour that rents or gives
@@ -778,43 +778,43 @@ public sealed class SharedPoolTests
     /// of the blocks the class holds: what the tests run earlier left parked would decide what these
     /// read, and xunit orders the collections differently from one run to the next.
     /// </summary>
-    public SharedPoolTests() => BlockPool.Shared.Trim();
+    public SharedPoolTests() => MemoryAccount.Pool.Trim();
 
     [Fact]
     public void The_shared_pool_rents_and_recycles()
     {
-        BlockOwner first = BlockPool.Shared.Rent(TestAccount.Shared, 64 * 1024, 64);
+        BlockOwner first = MemoryAccount.Pool.Rent(TestAccount.Shared, 64 * 1024, 64);
         nint address = BlockPoolTests.AddressOf(first);
-        BlockPool.Shared.Return(first);
+        MemoryAccount.Pool.Return(first);
 
-        BlockOwner second = BlockPool.Shared.Rent(TestAccount.Shared, 64 * 1024, 64);
+        BlockOwner second = MemoryAccount.Pool.Rent(TestAccount.Shared, 64 * 1024, 64);
         Assert.Equal(address, BlockPoolTests.AddressOf(second));
-        BlockPool.Shared.Return(second);
+        MemoryAccount.Pool.Return(second);
     }
 
     [Fact]
     public void The_shared_pool_parks_chunk_sized_blocks_up_to_their_class_ceiling()
     {
         const int large = 32 * 1024 * 1024;
-        Assert.True(BlockPool.Shared.MaxPooledLength >= large);
+        Assert.True(MemoryAccount.Pool.MaxPooledLength >= large);
 
         // A class of blocks past 8 MiB keeps 16 MiB of them a processor, 64 MiB at least: two of these on four processors.
-        int ceiling = (int)(BlockPool.Shared.ClassCeilingBytes(large) / large);
+        int ceiling = (int)(MemoryAccount.Pool.ClassCeilingBytes(large) / large);
         Assert.Equal(Math.Max(2, Environment.ProcessorCount / 2), ceiling);
         BlockOwner[] rented = new BlockOwner[ceiling + 1];
         for (int i = 0; i < rented.Length; i++)
         {
-            rented[i] = BlockPool.Shared.Rent(TestAccount.Shared, large, 64);
+            rented[i] = MemoryAccount.Pool.Rent(TestAccount.Shared, large, 64);
         }
 
-        int before = BlockPool.Shared.ParkedCount(large);
+        int before = MemoryAccount.Pool.ParkedCount(large);
         foreach (BlockOwner owner in rented)
         {
-            BlockPool.Shared.Return(owner);
+            MemoryAccount.Pool.Return(owner);
         }
 
         // The ceiling's blocks are the budget; a return past it is freed rather than parked.
-        Assert.Equal(Math.Min(ceiling, before + rented.Length), BlockPool.Shared.ParkedCount(large));
+        Assert.Equal(Math.Min(ceiling, before + rented.Length), MemoryAccount.Pool.ParkedCount(large));
     }
 
     /// <summary>
@@ -824,12 +824,12 @@ public sealed class SharedPoolTests
     [Fact]
     public void The_shared_pool_gives_back_what_it_parks_when_a_process_budget_refuses()
     {
-        BlockOwner block = BlockPool.Shared.Rent(TestAccount.Shared, 64 * 1024, 64);
-        BlockPool.Shared.Return(block);
-        Assert.True(BlockPool.Shared.ParkedBytes > 0);
+        BlockOwner block = MemoryAccount.Pool.Rent(TestAccount.Shared, 64 * 1024, 64);
+        MemoryAccount.Pool.Return(block);
+        Assert.True(MemoryAccount.Pool.ParkedBytes > 0);
 
         QueryMemoryBudget process = new QueryMemoryBudget(1 << 20, process: null);
         Assert.False(process.TryReserve(1L << 40));
-        Assert.Equal(0, BlockPool.Shared.ParkedBytes);
+        Assert.Equal(0, MemoryAccount.Pool.ParkedBytes);
     }
 }

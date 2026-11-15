@@ -46,7 +46,7 @@ internal abstract class MemoryAccount
     /// The pool every account rents from, the process's one: reached through the accounts alone, so that no block leaves it
     /// without one, and here for what reads its state, the memory report and the tests.
     /// </summary>
-    internal static BlockPool Pool => BlockPool.Shared;
+    internal static BlockPool Pool { get; } = BlockPool.ForProcess();
 
     /// <summary>Takes <paramref name="bytes"/>, reserved and measured; false, and nothing taken, when the account refuses them.</summary>
     internal abstract bool TryTake(long bytes);

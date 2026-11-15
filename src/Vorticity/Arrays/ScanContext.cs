@@ -106,7 +106,8 @@ internal sealed class ScanContext : IDisposable
         // takes the hint nor gives one.
         _notesTrees = capacity >= ScanCapacity;
         _scratchNodes = new ArrayNodeArena(capacity, _notesTrees ? file.LargestArrayTree : 0);
-        _batchCanonical = retaining ? new RetainingArena(MemoryAccount.Unassigned, capacity) : new CanonicalArena(capacity, MemoryAccount.Unassigned);
+        // Kept until a scan takes the context and names its own account (ScanContexts.Rent).
+        _batchCanonical = retaining ? new RetainingArena(MemoryAccount.Kept, capacity) : new CanonicalArena(capacity, MemoryAccount.Kept);
 
         // Deliberately not sized from the arena capacity. A batch registers one segment per leaf it
         // reads, which the set's own default already covers, so widening it to the arena capacity
@@ -156,7 +157,7 @@ internal sealed class ScanContext : IDisposable
 
         Scalars = new ScalarStore();
         _scratchNodes = new ArrayNodeArena();
-        _batchCanonical = new CanonicalArena(64, MemoryAccount.Unassigned);
+        _batchCanonical = new CanonicalArena(64, MemoryAccount.Kept);
         Segments = new SegmentRequestSet();
         Decode = new ArrayDecodeContext(this);
     }
@@ -328,6 +329,12 @@ internal sealed class ScanContext : IDisposable
         set
         {
             _batchCanonical.Account = value;
+            Segments.Account = value;
+            if (Along?.Own is { } own)
+            {
+                own.Account = value;
+            }
+
             if (_memory?.Slice is { } slice)
             {
                 slice.Account = value;
@@ -621,7 +628,7 @@ internal sealed class ScanContext : IDisposable
     /// The set a batch reads the segments it claimed through while it waits for those another batch of its scan reads
     /// (<see cref="Scanning.ScanSegments.ReadOwnAsync"/>): <see cref="AlongSegments.Own"/>, made at the first such wait.
     /// </summary>
-    internal SegmentRequestSet OwnSegments() => (Along ??= new AlongSegments()).Own ??= new SegmentRequestSet();
+    internal SegmentRequestSet OwnSegments() => (Along ??= new AlongSegments()).Own ??= new SegmentRequestSet { Account = Account };
 
     /// <summary>
     /// The segments of the splits ahead a batch reads along with its own, and the batch that asks for each; and, for a
@@ -1559,6 +1566,7 @@ internal sealed class ScanContext : IDisposable
         _childClaim = null;
         _child = claim;
         CanonicalArena arena = claim.Arena ??= new RetainingArena(Account);
+        arena.Account = Account;
         claim.Depend(Segments.OwnerHolding(Nodes.FirstBlobBuffer()));
         return arena;
     }
@@ -1692,8 +1700,10 @@ internal sealed class ScanContext : IDisposable
         _building = claim;
 
         // The arena is made for the first decode the entry holds, not for the claim: a claim given
-        // back without a decode, an answer an encoding declined, never needs one.
+        // back without a decode, an answer an encoding declined, never needs one. An entry kept from another scan counts
+        // for this one from now on.
         CanonicalArena arena = claim.Arena ??= new RetainingArena(Account);
+        arena.Account = Account;
 
         // What the decode views is the blob in the node arena, which a flat reader loads just
         // before it begins; a child decoded inside the redirect notes its own segment as it loads.
@@ -1919,6 +1929,9 @@ internal sealed class ScanContext : IDisposable
         ResetBatch();
         _batchCanonical.Reset();
         (_batchCanonical as RetainingArena)?.ForgetKept();
+
+        // Kept again until the next scan names its account: the scan's own is let go with the scan.
+        Account = MemoryAccount.Kept;
         AbandonRetained();
         if (_ownsRetained)
         {

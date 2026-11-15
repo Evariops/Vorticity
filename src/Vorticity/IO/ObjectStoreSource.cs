@@ -136,7 +136,7 @@ internal sealed class ObjectStoreSource : ISegmentReader
         // The tail and the length in one answer. The block is read from its start, then the bytes are
         // moved to keep each file offset's alignment, so the open's 64-byte aligned read is a slice.
         int wanted = TailBytes + VortexLimits.MaxAlignment;
-        BlockOwner block = MemoryAccount.Unassigned.Rent(wanted + VortexLimits.MaxAlignment, VortexLimits.MaxAlignment);
+        BlockOwner block = MemoryAccount.Kept.Rent(wanted + VortexLimits.MaxAlignment, VortexLimits.MaxAlignment);
         try
         {
             ObjectRead read = await TailAsync(block.WritableMemory(0, wanted), cancellationToken).ConfigureAwait(false);
@@ -263,7 +263,7 @@ internal sealed class ObjectStoreSource : ISegmentReader
                 CoalescedRun run = runs[started];
                 int pad = (int)(run.Start & (VortexLimits.MaxAlignment - 1));
                 int length = checked((int)run.Length);
-                BlockOwner block = Rent(pad + length);
+                BlockOwner block = Rent(pad + length, requests.Account);
                 blocks[started] = block;
 
                 // Kept to be awaited below, each exactly once: the runs are in flight together, the
@@ -369,8 +369,9 @@ internal sealed class ObjectStoreSource : ISegmentReader
     [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder<>))]
     private async ValueTask<SegmentOwner> ReadBlockAsync(long offset, int length, int alignmentExponent, bool exact, CancellationToken cancellationToken)
     {
+        // A block read alone is a file's own read, its footer or a metadata segment: memory it keeps.
         int pad = (int)(offset & (VortexLimits.MaxAlignment - 1));
-        BlockOwner block = Rent(pad + length);
+        BlockOwner block = Rent(pad + length, MemoryAccount.Kept);
         try
         {
             ObjectRead read;
@@ -408,10 +409,13 @@ internal sealed class ObjectStoreSource : ISegmentReader
     private ValueTask<ObjectRead> TailAsync(Memory<byte> destination, CancellationToken cancellationToken) =>
         _store.ReadTailAsync(_readKey, destination, cancellationToken);
 
-    /// <summary>A 64-byte aligned block of <paramref name="length"/> bytes: pooled up to the pool's largest size class.</summary>
-    private BlockOwner Rent(int length) =>
+    /// <summary>
+    /// A 64-byte aligned block of <paramref name="length"/> bytes: pooled up to the pool's largest size class, counted for
+    /// <paramref name="account"/>, the scan whose batch reads it or the memory a file keeps for its own reads.
+    /// </summary>
+    private BlockOwner Rent(int length, MemoryAccount account) =>
         length <= _options.MaxPooledBytes
-            ? MemoryAccount.Unassigned.Rent(length, VortexLimits.MaxAlignment)
+            ? account.Rent(length, VortexLimits.MaxAlignment)
             : BlockOwner.Allocate(length, VortexLimits.MaxAlignment);
 
     /// <summary>Records the object's token, and refuses an answer about another object.</summary>

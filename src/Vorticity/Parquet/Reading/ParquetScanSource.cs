@@ -467,9 +467,10 @@ internal sealed class ParquetScanSource(ParquetFile file) : StreamScanSource, IR
         ScanCounters blooms = new();
         ScanCounters indexes = new();
         bool bloom = filter is not null && spec.Options.UseIndexes && BloomPruning.Asks(spec.Filter!);
-        using DictionaryPruning? dictionaries = DictionaryPruning.For(filter);
+        // Given back by the usings whatever happens, and only counts leave the pass: the process's account.
+        using DictionaryPruning? dictionaries = DictionaryPruning.For(filter, QueryMemoryBudget.Process.Account);
         ScanCounters dictionaryReads = new();
-        using SegmentRequestSet requests = new();
+        using SegmentRequestSet requests = new() { Account = QueryMemoryBudget.Process.Account };
         long rows = 0;
         int segments = 0;
         long bytes = 0;

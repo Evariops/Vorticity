@@ -30,7 +30,7 @@ internal static class SealedObjects
         ReadOnlyMemory<byte> plaintext, DataKey key, SealParameters parameters, int chunk, CancellationToken cancellationToken)
     {
         Pipe pipe = new Pipe(new PipeOptions(pauseWriterThreshold: 0, resumeWriterThreshold: 0));
-        SealingSegmentSink sink = new SealingSegmentSink(pipe.Writer, parameters, _ => new ValueTask<DataKey>(key.Retain()));
+        SealingSegmentSink sink = new SealingSegmentSink(pipe.Writer, parameters, _ => new ValueTask<DataKey>(key.Retain())) { Account = TestAccount.Shared };
         try
         {
             for (int at = 0; at < plaintext.Length; at += chunk)
@@ -64,7 +64,7 @@ internal static class SealedObjects
         }
 
         Pipe pipe = new Pipe(new PipeOptions(pauseWriterThreshold: 0, resumeWriterThreshold: 0));
-        SealingSegmentSink sink = new SealingSegmentSink(pipe.Writer, layout, _ => new ValueTask<DataKey>((appendWith ?? key).Retain()));
+        SealingSegmentSink sink = new SealingSegmentSink(pipe.Writer, layout, _ => new ValueTask<DataKey>((appendWith ?? key).Retain())) { Account = TestAccount.Shared };
         try
         {
             if (sink.Position != layout.PlainLength)
@@ -93,7 +93,7 @@ internal static class SealedObjects
         IReadOnlyList<Reading> rows, DataKey key, SealParameters parameters, CancellationToken cancellationToken)
     {
         Pipe pipe = new Pipe(new PipeOptions(pauseWriterThreshold: 0, resumeWriterThreshold: 0));
-        SealingSegmentSink sink = new SealingSegmentSink(pipe.Writer, parameters, _ => new ValueTask<DataKey>(key.Retain()));
+        SealingSegmentSink sink = new SealingSegmentSink(pipe.Writer, parameters, _ => new ValueTask<DataKey>(key.Retain())) { Account = TestAccount.Shared };
         await using (VortexFileWriter writer = VortexFileWriter.Create(sink, VortexTypes.ToDType(Reading.Schema, new DTypeArena()), VortexWriteOptions.Default))
         {
             writer.Declare(Reading.Schema);

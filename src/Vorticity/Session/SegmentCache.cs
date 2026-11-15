@@ -210,7 +210,8 @@ public sealed class SegmentCache : IHeldMemory
             return;
         }
 
-        SegmentOwner? copy = owner.Buffer.Length > length ? Copy(buffer) : null;
+        // The cache's own copy: memory it keeps, given back in the order the caches let go of theirs.
+        SegmentOwner? copy = owner.Buffer.Length > length ? Copy(buffer, MemoryAccount.Kept) : null;
         List<SegmentOwner>? evicted = null;
         lock (_gate)
         {
@@ -288,10 +289,13 @@ public sealed class SegmentCache : IHeldMemory
         }
     }
 
-    /// <summary>The bytes of <paramref name="segment"/> in a 64-byte aligned block of their own, which keeps every alignment a segment may declare.</summary>
-    internal static BlockOwner Copy(VortexBuffer segment)
+    /// <summary>
+    /// The bytes of <paramref name="segment"/> in a 64-byte aligned block of their own, which keeps every alignment a segment
+    /// may declare, counted for <paramref name="account"/>: the scan that reads them.
+    /// </summary>
+    internal static BlockOwner Copy(VortexBuffer segment, MemoryAccount account)
     {
-        BlockOwner copy = MemoryAccount.Unassigned.Rent(segment.Length, VortexLimits.MaxAlignment);
+        BlockOwner copy = account.Rent(segment.Length, VortexLimits.MaxAlignment);
         segment.Span.CopyTo(copy.WritableSpan);
         return copy;
     }

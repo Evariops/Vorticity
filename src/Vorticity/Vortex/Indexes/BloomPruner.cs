@@ -455,7 +455,7 @@ internal sealed class BloomPruner : IDisposable
             }
 
             Copied++;
-            BlockOwner copy = MemoryAccount.Unassigned.Rent(expected * sizeof(uint), sizeof(uint));
+            BlockOwner copy = requests.Account.Rent(expected * sizeof(uint), sizeof(uint));
             Hold(copy);
             values.Span[..(expected * sizeof(uint))].CopyTo(copy.WritableSpan);
             words = BloomWords.InPlace(copy.Buffer);

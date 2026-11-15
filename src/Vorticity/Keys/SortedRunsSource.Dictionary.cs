@@ -197,9 +197,10 @@ internal sealed partial class SortedRunsSource
         DictionaryClaims claims = new DictionaryClaims(keys.Length);
 
         // A batch's segments in one context, each chunk decoded alone in another, both the process's: the
-        // pruning of a scan of one part of an object probes a chunk or two.
-        ScanContext reading = ScanContexts.Shared.Rent(file);
-        ScanContext decoding = ScanContexts.Shared.Rent(file);
+        // pruning of a scan of one part of an object probes a chunk or two. Both are given back below whatever happens,
+        // and nothing they decode leaves the pruning: the process's account.
+        ScanContext reading = ScanContexts.Shared.Rent(file, QueryMemoryBudget.Process.Account);
+        ScanContext decoding = ScanContexts.Shared.Rent(file, QueryMemoryBudget.Process.Account);
         try
         {
             int[] slots = new int[asked.Count];

@@ -49,7 +49,7 @@ internal sealed class PeakMemory : IDisposable
             if (bytes > Interlocked.Read(ref _peak))
             {
                 PeakBlocks = BlockOwner.LiveBytes;
-                PeakParked = BlockPool.Shared.ParkedBytes;
+                PeakParked = MemoryAccount.Pool.ParkedBytes;
                 PeakCommitted = GC.GetGCMemoryInfo().TotalCommittedBytes;
                 Interlocked.Exchange(ref _peak, bytes);
             }

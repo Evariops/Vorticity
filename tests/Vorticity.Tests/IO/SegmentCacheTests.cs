@@ -250,7 +250,7 @@ public sealed class SegmentCacheTests
             int at = model.FindIndex(entry => ReferenceEquals(entry.File, file) && entry.Offset == offset);
             if (what < 5)
             {
-                BlockOwner owner = BlockPool.Shared.Rent(TestAccount.Shared, 64, 64);
+                BlockOwner owner = MemoryAccount.Pool.Rent(TestAccount.Shared, 64, 64);
                 cache.Add(file, offset, owner, owner.Buffer);
                 owner.Release();
                 if (at < 0)
