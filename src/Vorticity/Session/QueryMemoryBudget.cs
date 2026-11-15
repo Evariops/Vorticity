@@ -41,14 +41,9 @@ public sealed class QueryMemoryBudget
     /// <summary>🧪 How often the process's budget reads its container's memory again, in milliseconds: provisional, to be measured.</summary>
     internal const int ContainerReadMilliseconds = 1_000;
 
-    // What the collector may commit, read once: a hard limit, its share of a container's limit, or the machine's memory.
-    private static readonly long s_collector = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes;
-
-    // What the container said of its memory at its last reading; null outside a container.
-    private static ContainerMemory? s_reading = ContainerMemory.Read();
-
-    // A limit a bench sets, as a container's would be, under the one read; 0 for none.
-    private static long s_limitOverride;
+    // What the process used against its limit at the last reading: a container's, or the limit the host set and the
+    // process's resident memory (VortexMemory); null when nothing holds the process but the collector.
+    private static ContainerMemory? s_reading = VortexMemory.Read();
 
     /// <summary>
     /// 🧪 The share of the process's limit, one in this many, the jobs' own budget holds by default (<see cref="Jobs"/>): what
@@ -87,10 +82,10 @@ public sealed class QueryMemoryBudget
     // The count of collections at which the reservations nearing the ceiling last had the memory kept let go of a share.
     private int _keptGivenAt = -1;
 
-    // The process's own, in a container: what the container used past what the registry knows, at its last reading; and the
-    // timer that reads it again.
+    // The process's own, held to a container's limit or the host's: what the process used past what the registry knows, at
+    // its last reading; and the timer that reads it again, made once something holds the process.
     private long _containerRest;
-    private readonly Timer? _containerTimer;
+    private Timer? _containerTimer;
 
     /// <summary>A budget under which the queries of its sessions hold <paramref name="ceilingBytes"/> at most, together.</summary>
     /// <param name="ceilingBytes">The bytes they may hold at once.</param>
@@ -129,13 +124,48 @@ public sealed class QueryMemoryBudget
         Account = new BudgetAccount(this, process is null ? "library's own work" : "work");
         if (process is null && Volatile.Read(ref s_reading) is not null)
         {
-            // In a container, its memory read again off the threads that reserve. Made with no flow of the thread that makes
-            // the budget: its locals are no business of the timer's.
-            ReadContainer();
-            using (ExecutionContext.SuppressFlow())
-            {
-                _containerTimer = new Timer(static budget => ((QueryMemoryBudget)budget!).ReadContainer(), this, ContainerReadMilliseconds, ContainerReadMilliseconds);
-            }
+            Watch();
+        }
+    }
+
+    /// <summary>
+    /// Reads again what the process uses against its limit, once the host set one (<see cref="VortexMemory.SetLimit"/>), and
+    /// from then on each second: the process's own budget alone.
+    /// </summary>
+    internal void ReadMemory()
+    {
+        Volatile.Write(ref s_reading, VortexMemory.Read());
+        if (_process is null && Volatile.Read(ref s_reading) is not null)
+        {
+            Watch();
+        }
+    }
+
+    /// <summary>
+    /// Reads the process's memory now, and starts the timer that reads it again off the threads that reserve, once. Made with
+    /// no flow of the thread that starts it: its locals are no business of the timer's.
+    /// </summary>
+    private void Watch()
+    {
+        ReadContainer();
+        if (Volatile.Read(ref _containerTimer) is not null)
+        {
+            return;
+        }
+
+        Timer timer;
+        using (ExecutionContext.SuppressFlow())
+        {
+            timer = new Timer(static budget => ((QueryMemoryBudget)budget!).ReadContainer(), this, Timeout.Infinite, Timeout.Infinite);
+        }
+
+        if (Interlocked.CompareExchange(ref _containerTimer, timer, null) is null)
+        {
+            timer.Change(ContainerReadMilliseconds, ContainerReadMilliseconds);
+        }
+        else
+        {
+            timer.Dispose();
         }
     }
 
@@ -203,9 +233,6 @@ public sealed class QueryMemoryBudget
     /// </summary>
     internal QueryMemoryBudget HardChild(long ceilingBytes = long.MaxValue / 4) => new QueryMemoryBudget(ceilingBytes, this) { Hard = true };
 
-    /// <summary>Holds the process to <paramref name="bytes"/> at most, as a container's limit would: a bench's, never the library's.</summary>
-    internal static void OverrideLimit(long bytes) => Volatile.Write(ref s_limitOverride, Math.Max(0, bytes));
-
     /// <summary>
     /// The rest of the process's memory: what its heap held past the queries' tables at the last full
     /// collection, what the collector kept committed past its heap, and what the queries let go since; in
@@ -218,7 +245,7 @@ public sealed class QueryMemoryBudget
         {
             Rest rest = Volatile.Read(ref _rest);
             long modelled = rest.Live + rest.Uncertain + rest.Reclaimable + Volatile.Read(ref _pending);
-            return _containerTimer is null ? modelled : Math.Max(modelled, Volatile.Read(ref _containerRest));
+            return Volatile.Read(ref _containerTimer) is null ? modelled : Math.Max(modelled, Volatile.Read(ref _containerRest));
         }
     }
 
@@ -226,12 +253,13 @@ public sealed class QueryMemoryBudget
     private long Ceiling => _process is null ? ProcessLimit() : OwnCeiling;
 
     /// <summary>
-    /// Reads the container's memory again, and what it uses past what the registry knows: the reservations, and the memory
-    /// kept (<see cref="HeldMemory"/>). On the budget's timer, and after a collection the budget asked for.
+    /// Reads the process's memory again, a container's or its resident memory under the host's limit, and what it uses past
+    /// what the registry knows: the reservations, and the memory kept (<see cref="HeldMemory"/>). On the budget's timer, and
+    /// after a collection the budget asked for.
     /// </summary>
     private void ReadContainer()
     {
-        if (ContainerMemory.Read() is { } reading)
+        if (VortexMemory.Read() is { } reading)
         {
             Volatile.Write(ref s_reading, reading);
         }
@@ -617,7 +645,7 @@ public sealed class QueryMemoryBudget
             }
 
             // What the collection gave back, as the container counts it: read now rather than at the timer's next turn.
-            if (_containerTimer is not null)
+            if (Volatile.Read(ref _containerTimer) is not null)
             {
                 ReadContainer();
             }
@@ -670,20 +698,16 @@ public sealed class QueryMemoryBudget
     /// <summary>
     /// The process's limit, less a margin for what the collector needs to work: an eighth of the
     /// collector's limit, and in a container, read again as it runs, an eighth 🧪 of the container's when
-    /// that is less, the container's use being measured rather than modelled.
+    /// that is less, the container's use being measured rather than modelled. A limit the host set is
+    /// taken as a container's is (<see cref="VortexMemory"/>).
     /// </summary>
     internal static long ProcessLimit()
     {
-        long limit = s_collector - (s_collector / 8);
+        long collector = VortexMemory.CollectorBytes;
+        long limit = collector - (collector / 8);
         if (Volatile.Read(ref s_reading) is { } container)
         {
             limit = Math.Min(limit, container.Limit - (container.Limit / ContainerMarginShare));
-        }
-
-        // A bench's limit, taken as a container's is, its margin less.
-        if (Volatile.Read(ref s_limitOverride) is > 0 and long set)
-        {
-            limit = Math.Min(limit, set - (set / ContainerMarginShare));
         }
 
         return Math.Max(limit, 64L << 20);

@@ -304,6 +304,7 @@ guide's writing pages show each form.
 | `ScanMetrics`, `GroupMetrics` | the same quantities, measured after the scan, and for a group by its groups, the most held at once and their bytes, what its core did, how each key block was grouped, and the time to its first batch |
 | `WriteReport` | what the writer chose, per column and per chunk, and every index built or abandoned |
 | `VortexDiagnostics` | the names of the meter and the activity source (see [observability](09-contracts.md#5-observability)) |
+| `VortexMemory` | the memory the host holds the process to, set in code or by `VORTICITY_MEMORY_LIMIT`, taken as a container's limit would be (see [the governor](16-queries.md#the-governor)) |
 | `VortexException` and its four kinds | a malformed file, an unsupported component with its id and `ComponentKind`, a schema that does not fit, and a query that outgrows its memory or scratch budget (see [error handling](03-architecture.md#5-error-handling)) |
 | `VortexEditions` | the default, newest and floor editions, and the Rust version that reads each |
 

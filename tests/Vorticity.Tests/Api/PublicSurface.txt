@@ -2797,6 +2797,10 @@ Vorticity:     const int MaxMetadataKeyLength = 64
 Vorticity:     const int MaxMetadataSegments = 16
 Vorticity:     const int MaxPostscriptSize = 65527
 Vorticity:     const long DefaultMaxDecompressedBytes = 268435456
+Vorticity: static class Vorticity.VortexMemory
+Vorticity:     const string LimitVariable = VORTICITY_MEMORY_LIMIT
+Vorticity:     method void SetLimit(long)
+Vorticity:     property Nullable<long> LimitBytes { get; }
 Vorticity: sealed class Vorticity.VortexMemoryException : VortexException
 Vorticity:     ctor VortexMemoryException(string)
 Vorticity:     ctor VortexMemoryException(string, Exception)

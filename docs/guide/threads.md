@@ -101,6 +101,41 @@ await using VortexSession session = VortexSession.Create(o =>
 What the pool keeps parked between rents is counted in no budget: it is the process's, and its
 budgets grow with `Environment.ProcessorCount`, which a container's CPU limit lowers.
 
+## The memory limit
+
+The library holds its work to the process's limit. In a container, the limit is the container's,
+read from its cgroup, v2 then v1, when the process starts and again every second. Outside a
+container, nothing holds the process but the collector, whose limit is the machine's memory unless
+the host configured the heap's. A host that wants its process held to less sets the limit itself, in
+code or in its environment:
+
+```csharp
+VortexMemory.SetLimit(4L << 30);   // as a container's limit of 4 GiB would hold the process
+```
+
+```
+VORTICITY_MEMORY_LIMIT=4g          # read when the library first needs a limit; 4294967296, 4096m and 4Gi say the same
+```
+
+A limit set is taken as a container's limit of that size would be, and in a container the least of
+the two holds. The collector's heap is held to three quarters of it, what the runtime gives itself in
+a container: near that, the collector runs full collections before an allocation fails. The library's
+own limit is seven eighths of the heap's, and its budgets read what the process uses every second,
+its resident memory outside a container. The questions reserve within it, and the jobs within their
+share, half of it by default. The quarter of the limit the heap leaves is for what the collector does
+not hold: the runtime, the threads' stacks, the native allocator.
+
+| limit | the collector's heap | the library's limit | the jobs' budget |
+|---|---|---|---|
+| 2 GiB | 1 536 MiB | 1 344 MiB | 672 MiB |
+| 4 GiB | 3 072 MiB | 2 688 MiB | 1 344 MiB |
+| 8 GiB | 6 144 MiB | 5 376 MiB | 2 688 MiB |
+
+Set the limit when the process starts, before it holds data: `SetLimit` refuses a limit whose heap
+the collector already passes after a full collection, and the limit set before stays.
+`VortexMemory.LimitBytes` says the limit set, and `VortexDiagnostics.GetMemoryReport().LimitBytes`
+the library's own.
+
 ## What is safe to share
 
 | type | contract |

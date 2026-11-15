@@ -132,7 +132,7 @@ The memory the library holds is on the same meter as gauges, read when a listene
 
 | gauge | what it says |
 |---|---|
-| `vortex.memory.limit` | the limit the process is held to, the collector's or the container's, less a margin |
+| `vortex.memory.limit` | the limit the process is held to, the collector's, the container's or the one the host set ([threads.md](threads.md#the-memory-limit)), less a margin |
 | `vortex.memory.ceiling` | what the reservations of questions and jobs may reach now: the limit, less the rest of the process |
 | `vortex.memory.reserved` | what the questions and the jobs reserved, every budget's together |
 | `vortex.memory.rented` | the bytes of the blocks in use |

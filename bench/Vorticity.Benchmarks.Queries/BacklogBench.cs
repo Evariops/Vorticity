@@ -20,8 +20,8 @@ namespace Vorticity.Benchmarks.Queries;
 /// </summary>
 /// <remarks>
 /// <para>
-/// <c>--block-limit BYTES</c> holds the process to that limit as a container's would (<see cref="QueryMemoryBudget"/>): the
-/// jobs' budget is its share of it. <c>--series</c> sets the series (20 000), <c>--store DIR</c> where the dataset lies, and
+/// <c>--memory-limit SIZE</c>, such as <c>2g</c>, holds the process to that limit as a container's would
+/// (<see cref="VortexMemory.SetLimit"/>): the collector's heap to three quarters of it, the jobs' budget to its share. <c>--series</c> sets the series (20 000), <c>--store DIR</c> where the dataset lies, and
 /// <c>--compact-only</c> compacts the backlog an earlier run left there, copied first so that it stays whole.
 /// </para>
 /// <para>
@@ -34,11 +34,11 @@ internal static class BacklogBench
 {
     private static readonly DateTimeOffset Start = new DateTimeOffset(2026, 11, 15, 0, 0, 0, TimeSpan.Zero);
 
-    internal static async Task<int> RunAsync(string root, int appends, int rows, int series, long blockLimit, bool compactOnly, int latency)
+    internal static async Task<int> RunAsync(string root, int appends, int rows, int series, long memoryLimit, bool compactOnly, int latency)
     {
-        if (blockLimit > 0)
+        if (memoryLimit > 0)
         {
-            QueryMemoryBudget.OverrideLimit(blockLimit);
+            VortexMemory.SetLimit(memoryLimit);
         }
 
         string backlog = Path.Combine(root, "backlog");
@@ -161,6 +161,7 @@ internal static class BacklogBench
         private long _resident;
         private long _blocks;
         private long _parked;
+        private long _slabs;
         private long _beside;
 
         internal Sampler() => _timer = new Timer(_ => Sample(), null, 0, 50);
@@ -170,12 +171,16 @@ internal static class BacklogBench
             Interlocked.Exchange(ref _resident, 0);
             Interlocked.Exchange(ref _blocks, 0);
             Interlocked.Exchange(ref _parked, 0);
+            Interlocked.Exchange(ref _slabs, 0);
             Interlocked.Exchange(ref _beside, 0);
         }
 
         internal string Peaks() => string.Create(
             CultureInfo.InvariantCulture,
-            $"peaks: resident {Mib(Interlocked.Read(ref _resident))} MiB, blocks {Mib(Interlocked.Read(ref _blocks))}, of which the pool keeps {Mib(Interlocked.Read(ref _parked))}, heap beside the blocks {Mib(Interlocked.Read(ref _beside))}");
+            $"peaks: resident {Mib(Interlocked.Read(ref _resident))} MiB, blocks {Mib(Interlocked.Read(ref _blocks))}, of which the pool keeps {Mib(Interlocked.Read(ref _parked))}, slabs {Mib(Interlocked.Read(ref _slabs))}, heap beside the blocks and slabs {Mib(Interlocked.Read(ref _beside))}");
+
+        /// <summary>The pinned bytes of the blocks: the slabs whole, and the blocks of an array of their own.</summary>
+        private static long Pinned() => Slabs.HeldBytes + BlockOwner.LiveBytes - Slabs.PieceBytes;
 
         /// <summary>What the process and the library hold now.</summary>
         internal static string Now()
@@ -185,7 +190,7 @@ internal static class BacklogBench
             string kept = string.Join(" ", report.RetainedByHolder.Where(h => h.Value > 0).OrderBy(h => h.Key, StringComparer.Ordinal).Select(h => $"{h.Key} {Mib(h.Value)}"));
             return string.Create(
                 CultureInfo.InvariantCulture,
-                $"now: resident {Mib(MemoryPeaks.Read().Working)} MiB, blocks {Mib(blocks)}, heap beside them {Mib(GC.GetTotalMemory(false) - blocks)}; reserved {Mib(report.ReservedBytes)}, rented {Mib(report.RentedBytes)}, kept {Mib(report.RetainedBytes)} [{kept}], rest {Mib(report.RestBytes)}, ceiling {Mib(report.CeilingBytes)} of {Mib(report.LimitBytes)}");
+                $"now: resident {Mib(MemoryPeaks.Read().Working)} MiB, blocks {Mib(blocks)}, slabs {Mib(Slabs.HeldBytes)}, heap beside them {Mib(GC.GetTotalMemory(false) - Pinned())}; reserved {Mib(report.ReservedBytes)}, rented {Mib(report.RentedBytes)}, kept {Mib(report.RetainedBytes)} [{kept}], rest {Mib(report.RestBytes)}, ceiling {Mib(report.CeilingBytes)} of {Mib(report.LimitBytes)}");
         }
 
         public void Dispose() => _timer.Dispose();
@@ -196,7 +201,8 @@ internal static class BacklogBench
             Raise(ref _resident, MemoryPeaks.Read().Working);
             Raise(ref _blocks, blocks);
             Raise(ref _parked, MemoryAccount.Pool.ParkedBytes);
-            Raise(ref _beside, GC.GetTotalMemory(false) - blocks);
+            Raise(ref _slabs, Slabs.HeldBytes);
+            Raise(ref _beside, GC.GetTotalMemory(false) - Pinned());
         }
 
         private static void Raise(ref long peak, long value)

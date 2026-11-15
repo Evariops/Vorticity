@@ -16,7 +16,7 @@ namespace Vorticity;
 /// </remarks>
 public sealed record MemoryReport
 {
-    /// <summary>The limit the process is held to: the collector's or the container's, less a margin.</summary>
+    /// <summary>The limit the process is held to: the collector's, the container's or the one the host set (<see cref="VortexMemory"/>), less a margin.</summary>
     public long LimitBytes { get; init; }
 
     /// <summary>What the reservations of every question and job may reach now: the limit, less the rest of the process.</summary>
