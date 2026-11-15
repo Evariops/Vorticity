@@ -218,7 +218,7 @@ public class ArenaRentBenchmarks
 
             if (idle is null)
             {
-                return new Block(_pool.Rent(length, alignment));
+                return new Block(_pool.Rent(QueryMemoryBudget.Process.Account, length, alignment));
             }
 
             if (previous is null)

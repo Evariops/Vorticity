@@ -141,7 +141,7 @@ internal sealed class ChunkBytes : IBufferWriter<byte>, IDisposable
 
     private Block Rent(int length)
     {
-        BlockOwner owner = _pool.Rent(length, VortexLimits.MaxAlignment);
+        BlockOwner owner = _pool.Rent(MemoryAccount.Unassigned,length, VortexLimits.MaxAlignment);
         return new Block(owner, owner.WritableMemory(0, owner.Length));
     }
 

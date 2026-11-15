@@ -902,7 +902,7 @@ internal partial class CanonicalArena
             }
         }
 
-        BlockOwner rented = _pool.Rent(length, alignment);
+        BlockOwner rented = _pool.Rent(MemoryAccount.Unassigned, length, alignment);
         if (!slab)
         {
             SetCursor(Behind(cursor, rented));

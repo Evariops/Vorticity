@@ -35,7 +35,7 @@ public class AuditScanSegmentsClaimBenchmarks
     public void Setup()
     {
         _segments = new ScanSegments(Lanes);
-        _owner = BlockPool.Shared.Rent(Length, 64);
+        _owner = QueryMemoryBudget.Process.Account.Rent(Length, 64);
         _sets = new SegmentRequestSet[Lanes];
         for (int l = 0; l < Lanes; l++)
         {

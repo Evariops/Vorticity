@@ -260,8 +260,10 @@ internal sealed class BlockPool : ISweptAfterCollections, IHeldMemory
 
     /// <summary>
     /// Rents a block of at least <paramref name="length"/> bytes, whose
-    /// <see cref="SegmentOwner.Buffer"/> is exactly <paramref name="length"/> bytes long.
+    /// <see cref="SegmentOwner.Buffer"/> is exactly <paramref name="length"/> bytes long, its capacity counted in
+    /// <paramref name="account"/> until its last holder gives it back.
     /// </summary>
+    /// <param name="account">Whom the block is counted for: no rent without one.</param>
     /// <param name="length">Length in bytes, non-negative.</param>
     /// <param name="alignment">
     /// The alignment the caller needs: a power of two in
@@ -272,9 +274,18 @@ internal sealed class BlockPool : ISweptAfterCollections, IHeldMemory
     /// <exception cref="VortexFormatException">
     /// <paramref name="length"/> is negative or <paramref name="alignment"/> is out of range.
     /// </exception>
-    public BlockOwner Rent(int length, int alignment)
+    /// <exception cref="VortexMemoryException">The account refuses the block's capacity: the block goes back to the pool.</exception>
+    public BlockOwner Rent(MemoryAccount account, int length, int alignment)
     {
         BlockOwner owner = RentCore(length, alignment);
+        if (!account.TryTake(owner.Capacity))
+        {
+            // Counted nowhere yet: the release parks it, or lets it go, as any block given back.
+            owner.Release();
+            throw account.Refused(owner.Capacity);
+        }
+
+        owner.Charge(account);
         Watch?.Rented(owner);
         return owner;
     }

@@ -55,7 +55,7 @@ public sealed class AlignedMemoryPool : MemoryPool<byte>
     public override IMemoryOwner<byte> Rent(int minBufferSize = -1)
     {
         int length = minBufferSize < 0 ? 4096 : minBufferSize;
-        return new Lease(this, Inner.Rent(length, _alignment), length);
+        return new Lease(this, Inner.Rent(MemoryAccount.Unassigned, length, _alignment), length);
     }
 
     /// <summary>Frees every parked block.</summary>

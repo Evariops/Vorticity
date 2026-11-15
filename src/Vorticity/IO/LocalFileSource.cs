@@ -623,7 +623,7 @@ internal sealed class LocalFileSource : ISegmentReader, IReadAnticipation, IPosi
         }
 
         // The shared pool keeps a block past its classes as well, for the next read of a segment that large.
-        BlockOwner owner = BlockPool.Shared.Rent(length, VortexLimits.MaxAlignment);
+        BlockOwner owner = MemoryAccount.Unassigned.Rent(length, VortexLimits.MaxAlignment);
         try
         {
             Span<byte> destination = owner.WritableSpan[..length];

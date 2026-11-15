@@ -265,7 +265,7 @@ internal sealed class SealingSegmentSink : ISegmentSink
 
         _descriptor = descriptor;
         _aes = _cipher.Rent();
-        _frame = BlockPool.Shared.Rent(_frameSize, VortexLimits.MaxAlignment);
+        _frame = MemoryAccount.Unassigned.Rent(_frameSize, VortexLimits.MaxAlignment);
         if (_continued is not null)
         {
             return;

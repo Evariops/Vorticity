@@ -165,7 +165,7 @@ internal static class CoalescedReads
     /// </summary>
     internal static BlockOwner RentBlock(int length, SegmentReadOptions options) =>
         length <= options.MaxPooledBytes || length > BlockPool.Shared.MaxPooledLength
-            ? BlockPool.Shared.Rent(length, VortexLimits.MaxAlignment)
+            ? MemoryAccount.Unassigned.Rent(length, VortexLimits.MaxAlignment)
             : BlockOwner.Allocate(length, VortexLimits.MaxAlignment);
 
     /// <summary>

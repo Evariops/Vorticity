@@ -242,14 +242,14 @@ public sealed class SegmentOwnerTests
     public void A_second_dispose_of_a_pooled_block_throws()
     {
         BlockPool pool = new BlockPool();
-        BlockOwner owner = pool.Rent(4096, 64);
+        BlockOwner owner = pool.Rent(TestAccount.Shared, 4096, 64);
         owner.Dispose();
 
         // The next rent hands out this same owner, where a late Dispose would release the new
         // rental: it is refused while the block is still parked.
         Assert.Throws<ObjectDisposedException>(owner.Dispose);
 
-        BlockOwner again = pool.Rent(4096, 64);
+        BlockOwner again = pool.Rent(TestAccount.Shared, 4096, 64);
         Assert.Same(owner, again);
         Assert.Equal(1, again.RefCount);
         again.Dispose();

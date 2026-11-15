@@ -574,7 +574,7 @@ internal sealed class SealedSegmentReader : ISegmentReader
         int pad = (int)(frameStart & (VortexLimits.MaxAlignment - 1));
         int plainBytes = checked((int)(frameEnd - frameStart));
         BlockOwner block = plainBytes + pad <= SegmentReadOptions.DefaultMaxPooledBytes
-            ? BlockPool.Shared.Rent(plainBytes + pad, VortexLimits.MaxAlignment)
+            ? MemoryAccount.Unassigned.Rent(plainBytes + pad, VortexLimits.MaxAlignment)
             : BlockOwner.Allocate(plainBytes + pad, VortexLimits.MaxAlignment);
         Span<byte> plain = block.WritableSpan.Slice(pad, plainBytes);
         int frameSize = layout.FrameSize;
@@ -657,7 +657,7 @@ internal sealed class SealedSegmentReader : ISegmentReader
             }
 
             // An offset that is not a multiple of the alignment asked for: copied to a block's base.
-            BlockOwner copy = BlockPool.Shared.Rent(length, VortexLimits.MaxAlignment);
+            BlockOwner copy = MemoryAccount.Unassigned.Rent(length, VortexLimits.MaxAlignment);
             view.Span.CopyTo(copy.WritableSpan);
             return copy;
         }
@@ -776,8 +776,9 @@ internal sealed class SealedSegmentReader : ISegmentReader
 
         (long cipherStart, long cipherEnd) = CipherRange(frameStart, frameEnd);
         int cipherLength = checked((int)(cipherEnd - cipherStart));
+        // Released in the finally below whatever happens: the process's account.
         BlockOwner cipher = cipherLength <= _options.MaxPooledBytes
-            ? BlockPool.Shared.Rent(cipherLength, VortexLimits.MaxAlignment)
+            ? QueryMemoryBudget.Process.Account.Rent(cipherLength, VortexLimits.MaxAlignment)
             : BlockOwner.Allocate(cipherLength, VortexLimits.MaxAlignment);
         BlockOwner? block = null;
         try
@@ -847,7 +848,7 @@ internal sealed class SealedSegmentReader : ISegmentReader
 
                 // A sparse run would pin its whole block for a few segments: each is copied out.
                 BlockOwner owner = spec.Length <= _options.MaxPooledBytes
-                    ? BlockPool.Shared.Rent((int)spec.Length, VortexLimits.MaxAlignment)
+                    ? MemoryAccount.Unassigned.Rent((int)spec.Length, VortexLimits.MaxAlignment)
                     : BlockOwner.Allocate((int)spec.Length, VortexLimits.MaxAlignment);
                 try
                 {

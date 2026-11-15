@@ -136,7 +136,7 @@ internal sealed class ObjectStoreSource : ISegmentReader
         // The tail and the length in one answer. The block is read from its start, then the bytes are
         // moved to keep each file offset's alignment, so the open's 64-byte aligned read is a slice.
         int wanted = TailBytes + VortexLimits.MaxAlignment;
-        BlockOwner block = BlockPool.Shared.Rent(wanted + VortexLimits.MaxAlignment, VortexLimits.MaxAlignment);
+        BlockOwner block = MemoryAccount.Unassigned.Rent(wanted + VortexLimits.MaxAlignment, VortexLimits.MaxAlignment);
         try
         {
             ObjectRead read = await TailAsync(block.WritableMemory(0, wanted), cancellationToken).ConfigureAwait(false);
@@ -411,7 +411,7 @@ internal sealed class ObjectStoreSource : ISegmentReader
     /// <summary>A 64-byte aligned block of <paramref name="length"/> bytes: pooled up to the pool's largest size class.</summary>
     private BlockOwner Rent(int length) =>
         length <= _options.MaxPooledBytes
-            ? BlockPool.Shared.Rent(length, VortexLimits.MaxAlignment)
+            ? MemoryAccount.Unassigned.Rent(length, VortexLimits.MaxAlignment)
             : BlockOwner.Allocate(length, VortexLimits.MaxAlignment);
 
     /// <summary>Records the object's token, and refuses an answer about another object.</summary>

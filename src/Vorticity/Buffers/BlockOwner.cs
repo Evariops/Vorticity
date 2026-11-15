@@ -37,6 +37,9 @@ internal sealed class BlockOwner : SegmentOwner
     private readonly int _capacity;
     private readonly byte _alignmentExponent;
 
+    // The account the block's bytes are counted in while it is rented, given its capacity back when the block returns.
+    private MemoryAccount? _account;
+
     // The bytes of every block alive, rented or kept by a pool: what the gauge of rented bytes is worked out from.
     private static long s_liveBytes;
 
@@ -136,9 +139,18 @@ internal sealed class BlockOwner : SegmentOwner
     /// <summary>The array, or a throw once the block let it go.</summary>
     private byte[] Array => Volatile.Read(ref _array) ?? ThrowFreed();
 
+    /// <summary>Counts the block's capacity in <paramref name="account"/>, which took it, until the block returns.</summary>
+    internal void Charge(MemoryAccount account) => _account = account;
+
     /// <inheritdoc/>
     protected override void FreeCore()
     {
+        if (_account is { } account)
+        {
+            _account = null;
+            account.Give(_capacity);
+        }
+
         BlockPool? pool = _pool;
         if (pool is not null)
         {

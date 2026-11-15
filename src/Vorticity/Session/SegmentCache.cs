@@ -291,7 +291,7 @@ public sealed class SegmentCache : IHeldMemory
     /// <summary>The bytes of <paramref name="segment"/> in a 64-byte aligned block of their own, which keeps every alignment a segment may declare.</summary>
     internal static BlockOwner Copy(VortexBuffer segment)
     {
-        BlockOwner copy = BlockPool.Shared.Rent(segment.Length, VortexLimits.MaxAlignment);
+        BlockOwner copy = MemoryAccount.Unassigned.Rent(segment.Length, VortexLimits.MaxAlignment);
         segment.Span.CopyTo(copy.WritableSpan);
         return copy;
     }

@@ -164,7 +164,7 @@ internal sealed class SourceReader : ISegmentReader
             pin.Dispose();
         }
 
-        BlockOwner block = _pool.Rent(length, VortexLimits.MaxAlignment);
+        BlockOwner block = _pool.Rent(MemoryAccount.Unassigned,length, VortexLimits.MaxAlignment);
         try
         {
             taken.Bytes.CopyTo(block.WritableSpan);

@@ -112,7 +112,7 @@ internal sealed class PageDecryption : IDisposable
             ParquetThrow.Format($"An encrypted page holds {plain} bytes where its header, less the module's, declares {header.CompressedPageSize}.");
         }
 
-        BlockOwner owner = pool.Rent(Math.Max(plain, 1), 64);
+        BlockOwner owner = pool.Rent(MemoryAccount.Unassigned, Math.Max(plain, 1), 64);
         try
         {
             if (_ctr)

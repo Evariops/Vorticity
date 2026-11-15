@@ -270,7 +270,7 @@ internal abstract unsafe class ColumnStore
         long doubled = Math.Max(4096L, (long)capacity * 2);
         long size = Math.Max(needed, doubled);
         size = size <= 1L << 30 ? (long)BitOperations.RoundUpToPowerOf2((ulong)size) : Math.Min(size, Ceiling);
-        BlockOwner next = pool.Rent((int)size, VortexLimits.MaxAlignment);
+        BlockOwner next = pool.Rent(MemoryAccount.Unassigned, (int)size, VortexLimits.MaxAlignment);
         byte* target = (byte*)Unsafe.AsPointer(ref MemoryMarshal.GetReference(next.WritableSpan));
         if (used > 0)
         {

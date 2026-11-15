@@ -1001,7 +1001,7 @@ internal sealed class ColumnChunkWriter : IDisposable
             int grown = Math.Max(count, Math.Max(_blockRows, held * 2));
             block?.Dispose();
             block = null;
-            block = _pool.Rent(checked(grown * Unsafe.SizeOf<T>()), 64);
+            block = _pool.Rent(MemoryAccount.Unassigned,checked(grown * Unsafe.SizeOf<T>()), 64);
         }
 
         return Held<T>(block)[..count];
@@ -2010,10 +2010,10 @@ internal sealed class ColumnChunkWriter : IDisposable
             _levels = levels.Length;
             _input = input.Length;
             int bound = PageCodecs.MaxCompressedLength(writer._codec, input.Length);
-            _source = writer._pool.Rent(Math.Max(1, _levels + _input), 64);
+            _source = writer._pool.Rent(MemoryAccount.Unassigned,Math.Max(1, _levels + _input), 64);
             try
             {
-                _target = writer._pool.Rent(_levels + bound, 64);
+                _target = writer._pool.Rent(MemoryAccount.Unassigned,_levels + bound, 64);
             }
             catch
             {

@@ -373,7 +373,7 @@ internal sealed class Shredder(BlockPool pool) : IDisposable
             int size = Math.Max(bytes, 2 * (_valueBlock?.Length ?? 2048));
             _valueBlock?.Dispose();
             _valueBlock = null;
-            _valueBlock = pool.Rent(size, 64);
+            _valueBlock = pool.Rent(MemoryAccount.Unassigned,size, 64);
         }
 
         Span<int> values = MemoryMarshal.Cast<byte, int>(_valueBlock.WritableSpan);
@@ -447,7 +447,7 @@ internal sealed class Shredder(BlockPool pool) : IDisposable
             int capacity = (Math.Max(count, Math.Max(2 * _capacity, 1024)) + 63) & ~63;
             _block?.Dispose();
             _block = null;
-            _block = pool.Rent(checked(capacity * (2 + sizeof(int))), 64);
+            _block = pool.Rent(MemoryAccount.Unassigned,checked(capacity * (2 + sizeof(int))), 64);
             _capacity = capacity;
         }
 

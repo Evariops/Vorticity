@@ -738,7 +738,7 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
         if (block is null || block.Length < bytes)
         {
             int held = block?.Length ?? 0;
-            BlockOwner grown = BlockPool.Shared.Rent(Math.Max(bytes, Math.Max(16 * ColumnSheet.Registers, 2 * held)), 64);
+            BlockOwner grown = MemoryAccount.Unassigned.Rent(Math.Max(bytes, Math.Max(16 * ColumnSheet.Registers, 2 * held)), 64);
             Span<byte> into = grown.WritableSpan;
             if (block is not null)
             {

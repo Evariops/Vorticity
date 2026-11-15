@@ -66,7 +66,14 @@ public sealed class QueryMemoryBudget
     {
         _ceiling = ceilingBytes;
         _process = process;
+        Account = new BudgetAccount(this, process is null ? "library's own work" : "work");
     }
+
+    /// <summary>
+    /// The account of the work under the budget that is not a query and gives its blocks back itself, in a <c>finally</c> or
+    /// at its own end: for the process's own, a sealed read's buffers, a sealing sink's frame, an index builder's rents.
+    /// </summary>
+    internal BudgetAccount Account { get; }
 
     /// <summary>
     /// The bytes the queries under the budget may hold at once: the host's ceiling; for the process's

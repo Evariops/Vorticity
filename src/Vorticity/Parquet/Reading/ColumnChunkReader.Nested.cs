@@ -373,7 +373,7 @@ internal sealed partial class ColumnChunkReader
             int size = Math.Max(bytes, _levels is null ? 4096 : 2 * _levels.WritableSpan.Length);
             _levels?.Dispose();
             _levels = null;
-            _levels = _pool.Rent(size, 64);
+            _levels = _pool.Rent(MemoryAccount.Unassigned,size, 64);
         }
 
         return _levels.WritableSpan[..bytes];
@@ -463,7 +463,7 @@ internal sealed partial class ColumnChunkReader
             return default;
         }
 
-        page.Levels = _pool.Rent(2 * entries, 64);
+        page.Levels = _pool.Rent(MemoryAccount.Unassigned,2 * entries, 64);
         return page.Levels.WritableSpan[..(2 * entries)];
     }
 
