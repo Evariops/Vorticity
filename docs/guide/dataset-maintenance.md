@@ -221,7 +221,17 @@ stopped: 1 compactions, 13 objects, lag 0
 Each turn refreshes the handle (one round trip), plans, and runs the job that is due. When nothing
 is due, the first loop (`Loop` 0) sums the counts of the deepest level's new runs of objects into
 rollups (`RollUpAsync`, see [Rollups](datasets.md#how-an-aggregation-is-answered)), reading no row,
-then sleeps for `Idle`, a minute by default, and asks again. `BytesPerSecond` paces the loop:
+deletes what its jobs replaced once no retained version reads it, runs a vacuum when one is due,
+then sleeps for `Idle`, a minute by default, and asks again.
+
+The first loop runs the vacuum itself: within its first four idle turns, at a point drawn at random so
+that loops started together spread, then every half of the retention window, a quarter either way.
+The vacuum is what deletes the commit objects of the versions past the window, which no job can tell
+apart, and what a crash or a closed handle left behind. `CompactionSchedule.VacuumEvery` sets another
+period, and `Timeout.InfiniteTimeSpan` turns it off for an application that runs its own. A vacuum
+that fails ends its activity, `vortex.dataset.vacuum`, as an error, and the loop goes on. No loop
+vacuums a dataset on a store under retention locks, where a vacuum asks for a head per object to read
+its lock: run it yourself there. `BytesPerSecond` paces the loop:
 after a job it waits until what the job wrote fits the rate, which leaves the store's bandwidth to
 the writers. The task ends with `OperationCanceledException` once the token is cancelled, or with
 the exception a job raised, which the host catches before starting the loop again.
@@ -340,7 +350,11 @@ await using VortexSession session = VortexSession.Create(options =>
 ```
 
 The vacuum stays for what the jobs do not delete: the objects of a job that died before its commit,
-what a closed handle left noted, and the commit objects. Run it at a low pace, every few hours.
+what a closed handle left noted, and the commit objects. A maintainer's loop runs it every half
+window. If you compact by hand rather than with the loop, run it at a low pace, every few hours.
+What the bucket holds at rest follows the window first: commit objects are kept for the versions
+inside it, so a window of 15 minutes keeps a quarter of what a window of an hour keeps, and the
+loop's vacuum lets it pass the window by half a window at most.
 
 ## Watch out
 
@@ -348,8 +362,8 @@ what a closed handle left noted, and the commit objects. Run it at a low pace, e
   the window, as a vacuum would judge it: the handle notes the objects its jobs took out, and deletes
   them at the end of a later job, or when `CompactAsync` finds nothing due. The outputs of a job whose
   commit applied nothing go at once, since no version names them. What a handle closed or a process
-  ended leaves noted, and what a crash leaves behind, the vacuum still removes: run it for those, at
-  a low pace.
+  ended leaves noted, and what a crash leaves behind, the vacuum still removes: the loop runs it, and
+  a host that compacts by hand runs it for those at a low pace.
 * A reader that outlives the window loses its objects. Vacuum works from the store's latest version,
   not from yours, so a handle still on an old version may find an object missing.
   `ObjectNotFoundException` then tells it to refresh.

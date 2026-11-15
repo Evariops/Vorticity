@@ -175,6 +175,8 @@ jobs so that no two read or write the same level (a job on levels that share not
 another's input), and a loop takes the one ranked at its index. A descent and a read of every leaf
 rank the same jobs.
 
+When nothing is due, the first loop also runs the vacuum, every `VacuumEvery`, half the retention window by default, a quarter either way, the first within its first four idle turns. A job deletes the data objects it replaced once no retained version reads them, but not the commit objects, which the trees of later versions share: only the vacuum's walk of the retained versions tells which one no version reads any more. Left to the application, the vacuum was forgotten: a pipeline's bucket held 11 664 commit objects for 925 MB. A vacuum is cheap since its walk reads each retained version once, 0.4 to 0.6 s for 800 versions at 20 ms a request. The first one runs soon after the loop starts, since a period of 3.5 days, half the default window, would never come for a maintainer restarted every day. No loop vacuums a store under retention locks, where the vacuum asks for a head per object to read its lock.
+
 Leases were weighed and set aside. A loop would create `leases/<level>/<end of a span>` with
 put-if-absent before a job, and hold its levels until the span ends. Once the commit of a job checks
 the part of the level it writes ([three drivers](#2-three-drivers-for-one-job)), a lease protects

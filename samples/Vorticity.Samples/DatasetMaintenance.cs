@@ -96,6 +96,7 @@ internal static class DatasetMaintenance
         Console.WriteLine($"{Appends} more appends: {dataset.ObjectCount} objects, lag {dataset.Lag}");
         int ran = 0;
         using CancellationTokenSource stop = new CancellationTokenSource();
+        // The loop also vacuums, every half of the retention window; VacuumEvery sets another period, or turns it off.
         Task loop = dataset.RunCompactionAsync(
             new CompactionSchedule { Idle = TimeSpan.FromMilliseconds(10), Progress = new Counting(() => Interlocked.Increment(ref ran)) },
             stop.Token);

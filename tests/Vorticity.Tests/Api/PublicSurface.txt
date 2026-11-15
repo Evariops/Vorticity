@@ -3140,6 +3140,7 @@ Vorticity.Dataset:     method int GetHashCode()
 Vorticity.Dataset:     method string ToString()
 Vorticity.Dataset:     property CompactionOptions Compaction { get; init; }
 Vorticity.Dataset:     property IProgress<CompactionResult> Progress { get; init; }
+Vorticity.Dataset:     property Nullable<TimeSpan> VacuumEvery { get; init; }
 Vorticity.Dataset:     property TimeProvider TimeProvider { get; init; }
 Vorticity.Dataset:     property TimeSpan Idle { get; init; }
 Vorticity.Dataset:     property int Loop { get; init; }

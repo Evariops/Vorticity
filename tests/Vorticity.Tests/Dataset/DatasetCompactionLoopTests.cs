@@ -6,6 +6,7 @@
 // take distinct jobs from one plan, and that the pace is the rate it was given.
 using System;
 using System.Collections.Concurrent;
+using System.Diagnostics.Metrics;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -33,8 +34,9 @@ public sealed class DatasetCompactionLoopTests
 
         ConcurrentQueue<CompactionResult> ran = new ConcurrentQueue<CompactionResult>();
         using CancellationTokenSource stop = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        // No vacuum: its first turn comes among the first idle ones, which this test counts the requests of. It has a test of its own.
         Task loop = dataset.RunCompactionAsync(
-            new CompactionSchedule { Compaction = Compaction, Idle = TimeSpan.FromMilliseconds(40), Progress = new Recorder(ran) },
+            new CompactionSchedule { Compaction = Compaction, Idle = TimeSpan.FromMilliseconds(40), Progress = new Recorder(ran), VacuumEvery = Timeout.InfiniteTimeSpan },
             stop.Token);
         await UntilDrainedAsync(dataset, ct);
 
@@ -155,6 +157,85 @@ public sealed class DatasetCompactionLoopTests
         Assert.Equal(TimeSpan.Zero, new CompactionSchedule().PauseAfter(10L << 20, TimeSpan.Zero));
     }
 
+    /// <summary>
+    /// A loop over 200 appends, its jobs done, the clock two windows on: unasked, the loop's vacuum deletes what only the
+    /// versions past the window read, commit objects included, until a vacuum would find nothing more. The counter of what
+    /// vacuums deleted rises with it. Then, at rest, its turns list nothing: the next vacuum is a period away.
+    /// </summary>
+    [Fact]
+    public async Task ALoopVacuumsWhatLeftTheWindowUnasked()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        ManualClock clock = new ManualClock(new DateTimeOffset(2026, 11, 16, 12, 0, 0, TimeSpan.Zero));
+        await using MemoryObjectStore inner = new MemoryObjectStore { TimeProvider = clock };
+        await using CountingObjectStore store = new CountingObjectStore(inner);
+        Decoders.EnsureRegistered();
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, ChangeRow.Schema, Options() with { TimeProvider = clock }, ct);
+        await CreateMoreAsync(dataset, 200, ct);
+        long deleted = 0;
+        using MeterListener counted = Deletions(objects => Interlocked.Add(ref deleted, objects));
+
+        using CancellationTokenSource stop = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        Task loop = dataset.RunCompactionAsync(new CompactionSchedule { Compaction = Compaction, Idle = TimeSpan.FromMilliseconds(5), TimeProvider = clock }, stop.Token);
+        await UntilDrainedAsync(dataset, ct);
+        int objects = inner.Count;
+        int commits = await CommitObjectsAsync(inner, ct);
+        Assert.True(commits > 200, $"{commits} commit objects");
+
+        // Two windows on, only the latest version is retained: what a vacuum would delete, the loop's deletes.
+        clock.Advance(TimeSpan.FromHours(2));
+        using CancellationTokenSource patience = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        patience.CancelAfter(TimeSpan.FromSeconds(60));
+        while ((await dataset.VacuumAsync(new VacuumOptions { TimeProvider = clock, DryRun = true }, patience.Token)).Deleted.Length > 0)
+        {
+            await Task.Delay(20, patience.Token);
+        }
+
+        // The data objects its jobs replaced went by the loop's own deletes; the commit objects, by its vacuum alone.
+        int left = await CommitObjectsAsync(inner, ct);
+        Assert.True(left < commits / 4, $"{left} commit objects of {commits} left");
+        Assert.True(Interlocked.Read(ref deleted) >= commits - left, $"{deleted} counted for {commits - left} commit objects deleted");
+        Assert.True(inner.Count < objects - (commits - left), $"{inner.Count} objects left of {objects}");
+
+        // At rest, inside the period: a turn refreshes and plans, and lists nothing.
+        store.Reset();
+        await Task.Delay(100, ct);
+        Assert.Equal(0, store.CountOf(ObjectOperation.List));
+        stop.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => loop);
+        Assert.Equal(dataset.RowCount, await RowsAsync(dataset, ct));
+    }
+
+    /// <summary>The commit objects <paramref name="store"/> holds.</summary>
+    private static async Task<int> CommitObjectsAsync(IObjectStore store, CancellationToken ct)
+    {
+        int count = 0;
+        await foreach (ObjectListing _ in store.ListAsync(CommitKey.Prefix, null, ct))
+        {
+            count++;
+        }
+
+        return count;
+    }
+
+    /// <summary>Listens to what every vacuum of the process deletes: the counter only rises, whatever other tests vacuum.</summary>
+    private static MeterListener Deletions(Action<long> add)
+    {
+        MeterListener listener = new MeterListener
+        {
+            InstrumentPublished = static (instrument, listening) =>
+            {
+                if (instrument.Name == "vortex.dataset.vacuum.objects_deleted")
+                {
+                    listening.EnableMeasurementEvents(instrument);
+                }
+            },
+        };
+        listener.SetMeasurementEventCallback<long>((_, value, _, _) => add(value));
+        listener.Start();
+        return listener;
+    }
+
     [Fact]
     public async Task AScheduleOutOfRangeIsRefusedBeforeAnythingRuns()
     {
@@ -168,6 +249,7 @@ public sealed class DatasetCompactionLoopTests
                 new CompactionSchedule { Loops = 0 },
                 new CompactionSchedule { Idle = TimeSpan.Zero },
                 new CompactionSchedule { BytesPerSecond = -1 },
+                new CompactionSchedule { VacuumEvery = TimeSpan.Zero },
             ])
         {
             await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => dataset.RunCompactionAsync(wrong, ct));
