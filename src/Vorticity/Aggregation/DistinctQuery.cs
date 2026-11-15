@@ -5,6 +5,7 @@ using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
+using Vorticity.Buffers;
 using Vorticity.Layouts;
 using Vorticity.Scanning;
 using Vorticity.Types;
@@ -185,8 +186,8 @@ internal sealed class DistinctBatches : IAsyncEnumerator<RecordBatch>
     private StructStore? _store;
     private CanonicalArena? _arena;
     private RecordBatch? _current;
-    private int[] _groups = [];
-    private int[] _open = [];
+    private ScratchBlock<int> _groups;
+    private ScratchBlock<int> _open;
     private int _streaming = -1;
     private long _met;
     private bool _begun;
@@ -282,7 +283,7 @@ internal sealed class DistinctBatches : IAsyncEnumerator<RecordBatch>
                 Spill = _spill,
             };
             plan.Watch?.Invoke([_partition]);
-            _outcome = new AggregationOutcome(plan, _partition.Slots, _partition.Keys, []);
+            _outcome = new AggregationOutcome(plan, _partition.Slots, _partition.Keys, default);
             _inner = projection.Host.Source.Rows.BatchesAsync(spec, projection.Counters).GetAsyncEnumerator(_cancellationToken);
         }
 
@@ -389,7 +390,7 @@ internal sealed class DistinctBatches : IAsyncEnumerator<RecordBatch>
 
             StructStore store = Store();
             store.Truncate(0);
-            AggregationOutcome outcome = _told ??= new AggregationOutcome(_query.Plan, [], set, []);
+            AggregationOutcome outcome = _told ??= new AggregationOutcome(_query.Plan, [], set, default);
             outcome.Over(set);
             ResultColumn[] columns = _query.Columns;
             for (int c = 0; c < columns.Length; c++)
@@ -771,6 +772,8 @@ internal sealed class DistinctBatches : IAsyncEnumerator<RecordBatch>
         _current?.Dispose();
         _store?.Release();
         _arena?.Reset();
+        Scratch.Return(ref _groups);
+        Scratch.Return(ref _open);
         LetPartGo();
         _spill?.Dispose();
         _memory?.Dispose();
@@ -858,6 +861,7 @@ internal sealed class DistinctEmitter : CoreEmitter
         Emission emission = new Emission(_query.NewColumns());
         Copy(emission, keys, from, to);
         Publish(emission);
+        Scratch.Return(ref emission.Groups);
     }
 
     /// <summary>
@@ -875,6 +879,8 @@ internal sealed class DistinctEmitter : CoreEmitter
             from = end;
             await RoomAsync(cancellationToken).ConfigureAwait(false);
         }
+
+        Scratch.Return(ref emission.Groups);
     }
 
     internal override bool Overflowing => !_released && Volatile.Read(ref _waiting) > Volatile.Read(ref _reserved);
@@ -1059,7 +1065,7 @@ internal sealed class DistinctEmitter : CoreEmitter
     /// <summary>The keys of groups [<paramref name="from"/>, <paramref name="to"/>) written into the applier's batch, handed on each time it fills.</summary>
     private void Copy(Emission emission, GroupKeys keys, int from, int to)
     {
-        AggregationOutcome outcome = emission.Outcome ??= new AggregationOutcome(_query.Plan, [], keys, []);
+        AggregationOutcome outcome = emission.Outcome ??= new AggregationOutcome(_query.Plan, [], keys, default);
         outcome.Over(keys);
         while (from < to)
         {
@@ -1138,7 +1144,7 @@ internal sealed class DistinctEmitter : CoreEmitter
 
         internal PartSlate? Slate;
 
-        internal int[] Groups = [];
+        internal ScratchBlock<int> Groups;
 
         /// <summary>The outcome its copies read keys through, pointed at each sub-table's (<see cref="AggregationOutcome.Over"/>).</summary>
         internal AggregationOutcome? Outcome;

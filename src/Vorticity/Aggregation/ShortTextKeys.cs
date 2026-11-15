@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Vorticity.Arrays;
+using Vorticity.Buffers;
 using Vorticity.Writing;
 
 namespace Vorticity.Aggregating;
@@ -146,7 +147,7 @@ internal sealed class ShortTextKeys : GroupKeys
     // The words while every value met is short, then the bytes for good: one of them, never both.
     private FixedKeys<TextWord>? _words;
     private BytesKeys? _bytes;
-    private TextWord[] _block = [];
+    private ScratchBlock<TextWord> _block;
 
     internal ShortTextKeys(ColumnShape shape, bool sorted, int probeAhead = AggregationPlan.DefaultProbeAhead, ArrayShelf? shelf = null, long aheadBytes = long.MaxValue)
     {
@@ -161,7 +162,7 @@ internal sealed class ShortTextKeys : GroupKeys
     /// <summary>Whether the keys are still words: every value met so far 12 bytes or less.</summary>
     internal bool Words => _words is not null;
 
-    internal override bool Assign(CanonicalArena arena, ReadOnlySpan<int> nodes, int rows, ReadOnlySpan<ulong> selection, int[] rowGroups, GroupRanges ranges)
+    internal override bool Assign(CanonicalArena arena, ReadOnlySpan<int> nodes, int rows, ReadOnlySpan<ulong> selection, Block<int> rowGroups, GroupRanges ranges)
     {
         if (_words is not { } words)
         {
@@ -260,7 +261,7 @@ internal sealed class ShortTextKeys : GroupKeys
             return canonical.TryWords(start, _block.AsSpan(0, end - start));
         }
 
-        TextWord[] block = _block;
+        Block<TextWord> block = _block;
         for (int row = start; row < end; row++)
         {
             if (!StorageValues.IsValid(validity, row))
@@ -278,7 +279,7 @@ internal sealed class ShortTextKeys : GroupKeys
 
     /// <summary>A block of runs or of codes, its few values looked up as bytes then as words, each once.</summary>
     private bool AssignEncoded(
-        CanonicalArena arena, ReadOnlySpan<int> nodes, int rows, ReadOnlySpan<ulong> selection, int[] rowGroups, GroupRanges ranges, ColumnEncoding encoding)
+        CanonicalArena arena, ReadOnlySpan<int> nodes, int rows, ReadOnlySpan<ulong> selection, Block<int> rowGroups, GroupRanges ranges, ColumnEncoding encoding)
     {
         int node = nodes[0];
         if (encoding == ColumnEncoding.RunEnd)
@@ -350,11 +351,11 @@ internal sealed class ShortTextKeys : GroupKeys
     }
 
     /// <summary>A run-end block with nulls among its runs, in canonical form row by row.</summary>
-    private bool AssignPlain(CanonicalArena arena, ReadOnlySpan<int> nodes, int rows, ReadOnlySpan<ulong> selection, int[] rowGroups, GroupRanges ranges)
+    private bool AssignPlain(CanonicalArena arena, ReadOnlySpan<int> nodes, int rows, ReadOnlySpan<ulong> selection, Block<int> rowGroups, GroupRanges ranges)
     {
         BytesBlock canonical = BytesBlock.Canonical(arena, nodes[0], out ReadOnlySpan<ulong> validity);
         Scratch.Grow(ref _block, rows);
-        TextWord[] block = _block;
+        Block<TextWord> block = _block;
         for (int row = 0; row < rows; row++)
         {
             if (!StorageValues.IsValid(validity, row))
@@ -389,7 +390,7 @@ internal sealed class ShortTextKeys : GroupKeys
     }
 
     /// <summary>The block through the table of bytes, the keys turned into it.</summary>
-    private bool AssignBytes(CanonicalArena arena, ReadOnlySpan<int> nodes, int rows, ReadOnlySpan<ulong> selection, int[] rowGroups, GroupRanges ranges)
+    private bool AssignBytes(CanonicalArena arena, ReadOnlySpan<int> nodes, int rows, ReadOnlySpan<ulong> selection, Block<int> rowGroups, GroupRanges ranges)
     {
         Saw(EncodedForms.EncodingOf(arena, nodes[0]));
         bool byRange = _bytes!.Assign(arena, nodes, rows, selection, rowGroups, ranges);

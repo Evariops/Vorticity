@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
+using Vorticity.Buffers;
 
 namespace Vorticity.Aggregating;
 
@@ -65,8 +66,8 @@ internal sealed class PartMerge : PartSource
 {
     private readonly AggregationPartition[] _partitions;
     private readonly GroupKeys[] _keysOf;
-    private readonly int[][] _placed;
-    private readonly int[][] _starts;
+    private readonly Block<int>[] _placed;
+    private readonly Block<int>[] _starts;
     private readonly AggregationPlan _plan;
     private readonly AggregateSlot?[] _settled;
     private readonly int[] _inputs;
@@ -80,7 +81,7 @@ internal sealed class PartMerge : PartSource
     private long _doneEntries;
 
     internal PartMerge(
-        AggregationPartition[] partitions, GroupKeys[] keysOf, int[][] placed, int[][] starts, int parts, AggregationPlan plan, AggregateSlot?[] settled,
+        AggregationPartition[] partitions, GroupKeys[] keysOf, Block<int>[] placed, Block<int>[] starts, int parts, AggregationPlan plan, AggregateSlot?[] settled,
         int[] inputs, ScanSource source, QueryMemory memory, bool byValue, long perGroup)
     {
         _partitions = partitions;
@@ -110,18 +111,11 @@ internal sealed class PartMerge : PartSource
             partition.LetGo();
         }
 
-        // The places of the lanes' groups and where each part's begin, lent by the process's shelf (Cut).
+        // The places of the lanes' groups and where each part's begin, rented from the pool (Cut).
         for (int p = 0; p < _placed.Length; p++)
         {
-            if (_placed[p] is { } placed)
-            {
-                ArrayShelf.Return(placed);
-            }
-
-            if (_starts[p] is { } starts)
-            {
-                ArrayShelf.Return(starts);
-            }
+            Blocks.Return(_placed[p]);
+            Blocks.Return(_starts[p]);
         }
 
         Array.Clear(_keysOf);
@@ -209,9 +203,9 @@ internal sealed class PartMerge : PartSource
             slot.EnsureGroups(reserve);
         }
 
-        // Where each partition's groups land in the part, the largest partition's share at most, lent by
-        // the process's shelf, which budgets what it keeps, until the part is merged.
-        int[] map = ArrayShelf.Rent<int>(Math.Max(1, most));
+        // Where each partition's groups land in the part, the largest partition's share at most, rented
+        // from the pool until the part is merged.
+        Block<int> map = Blocks.Rent<int>(Math.Max(1, most));
         int merged = 0;
         int sending = 0;
         try
@@ -247,7 +241,7 @@ internal sealed class PartMerge : PartSource
         }
         finally
         {
-            ArrayShelf.Return(map);
+            Blocks.Return(map);
         }
 
         // Twice what the part's table came to, beside the lanes', which live until the merge is done.
@@ -456,15 +450,15 @@ internal sealed class MergedParts : ResultParts
 
         Built built = new Built(reserved, measured);
 
-        // The part's order lent by the process's shelf, which counts nothing, as the order the part made
-        // did not; given back once the part is built.
+        // The part's order rented from the pool, which counts nothing, as the order the part made did
+        // not; given back once the part is built.
         int count = keys.Count;
-        int[] order = AggregationEngine.LentOrder(ArrayShelf.Retained, count);
+        Block<int> order = AggregationEngine.LentOrder(count);
         try
         {
             AggregationOutcome outcome = new AggregationOutcome(_plan, slots, keys, AggregationEngine.Shuffled(order, count), count) { Memory = _memory };
             built.Result = await _builder.BuildAsync(outcome, cancellationToken).ConfigureAwait(false);
-            ArrayShelf.Retained.Give(order);
+            Blocks.Return(order);
             return built;
         }
         catch

@@ -7,6 +7,7 @@ using System.Runtime.Intrinsics.X86;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
+using Vorticity.Buffers;
 using Vorticity.Writing;
 
 namespace Vorticity.Aggregating;
@@ -65,7 +66,7 @@ internal sealed class PackedKeys<TKey> : GroupKeys
     private readonly ColumnShape[] _shapes;
     private readonly KeyFacts? _facts;
     private readonly GroupKeys[] _parts;
-    private readonly int[][] _ids;
+    private readonly ScratchBlock<int>[] _ids;
     private readonly GroupRanges[] _partRanges;
     private readonly bool[] _ranged;
     private TKey[] _keys = new TKey[16];
@@ -81,13 +82,13 @@ internal sealed class PackedKeys<TKey> : GroupKeys
     private int[]? _table;
     private readonly int[] _bits;
     private readonly int[] _shifts;
-    private int[] _slots = [];
+    private ScratchBlock<int> _slots;
 
     // Scratch kept from one call to the next: a part's numbers for an append, and for a keep the
     // numbers the kept groups hold and their new ones.
-    private int[] _partIds = [];
-    private int[] _renumbered = [];
-    private int[] _held = [];
+    private ScratchBlock<int> _partIds;
+    private ScratchBlock<int> _renumbered;
+    private ScratchBlock<int> _held;
 
     // The lane's shelf its tables grow from, under the query's memory; null for tables nothing counts.
     private readonly ArrayShelf? _shelf;
@@ -108,7 +109,7 @@ internal sealed class PackedKeys<TKey> : GroupKeys
         _shelf = shelf;
         _ownsParts = shared is null;
         _parts = new GroupKeys[shapes.Length];
-        _ids = new int[shapes.Length][];
+        _ids = new ScratchBlock<int>[shapes.Length];
         _partRanges = new GroupRanges[shapes.Length];
         _ranged = new bool[shapes.Length];
         _bits = new int[shapes.Length];
@@ -116,7 +117,6 @@ internal sealed class PackedKeys<TKey> : GroupKeys
         for (int p = 0; p < shapes.Length; p++)
         {
             _parts[p] = shared?[p] ?? AggregationPlan.Single(shapes[p], facts?.Sorted[p] ?? false, facts?.Bounds[p], shelf: shelf);
-            _ids[p] = [];
             _partRanges[p] = new GroupRanges();
             _bits[p] = 2;
         }
@@ -128,7 +128,7 @@ internal sealed class PackedKeys<TKey> : GroupKeys
         }
     }
 
-    internal override bool Assign(CanonicalArena arena, ReadOnlySpan<int> nodes, int rows, ReadOnlySpan<ulong> selection, int[] rowGroups, GroupRanges ranges)
+    internal override bool Assign(CanonicalArena arena, ReadOnlySpan<int> nodes, int rows, ReadOnlySpan<ulong> selection, Block<int> rowGroups, GroupRanges ranges)
     {
         bool ranged = true;
         for (int p = 0; p < _parts.Length; p++)
@@ -271,15 +271,15 @@ internal sealed class PackedKeys<TKey> : GroupKeys
     }
 
     /// <summary>Each selected row's group by its tuple's word, a row whose word is the row before's taking its group.</summary>
-    private void HashedRows(int rows, ReadOnlySpan<ulong> selection, int[] rowGroups)
+    private void HashedRows(int rows, ReadOnlySpan<ulong> selection, Block<int> rowGroups)
     {
         TKey last = default;
         int lastGroup = -1;
         RowCursor cursor = new RowCursor(selection, 0, rows);
         if (typeof(TKey) == typeof(ulong) && _parts.Length == 2)
         {
-            int[] first = _ids[0];
-            int[] second = _ids[1];
+            Block<int> first = _ids[0];
+            Block<int> second = _ids[1];
             while (cursor.Next(out int row))
             {
                 TKey key = Unsafe.BitCast<ulong, TKey>(((uint)first[row] | ((ulong)(uint)second[row] << 32)) * Odd);
@@ -315,7 +315,7 @@ internal sealed class PackedKeys<TKey> : GroupKeys
     }
 
     /// <summary>Each selected row's group read from the table, a tuple not met yet looked up in the hash once.</summary>
-    private void TableRows(int rows, ReadOnlySpan<ulong> selection, int[] rowGroups)
+    private void TableRows(int rows, ReadOnlySpan<ulong> selection, Block<int> rowGroups)
     {
         // The slots a part at a time; a row the selection leaves out holds a number of no
         // consequence, never read below.
@@ -380,11 +380,11 @@ internal sealed class PackedKeys<TKey> : GroupKeys
     /// reads it.
     /// </summary>
     /// <returns>The rows taken, a multiple of eight.</returns>
-    private unsafe int Gathered(int[] table, ReadOnlySpan<int> slots, int[] rowGroups, Span<int> tuple)
+    private unsafe int Gathered(int[] table, ReadOnlySpan<int> slots, Block<int> rowGroups, Span<int> tuple)
     {
         int rows = slots.Length;
         ref int slot = ref MemoryMarshal.GetReference(slots);
-        ref int into = ref MemoryMarshal.GetArrayDataReference(rowGroups);
+        ref int into = ref rowGroups.GetReference();
         Vector256<int> within = Vector256.Create(table.Length - 1);
         int row = 0;
         fixed (int* groups = table)
@@ -721,7 +721,7 @@ internal sealed class PackedKeys<TKey> : GroupKeys
         // The parts' numbers here become their numbers in the target's parts, then each tuple its
         // group there. The target's table learns them as its rows meet them: a tuple new to it had
         // no slot, and its next batch covers its parts' new numbers first. The parts' maps lie in one
-        // array rented for the merge, where every lane's merge made one a part, a tenth of what a
+        // block rented for the merge, where every lane's merge made one a part, a tenth of what a
         // question answered at sixteen lanes allocated.
         Span<int> starts = stackalloc int[_parts.Length + 1];
         for (int p = 0; p < _parts.Length; p++)
@@ -729,7 +729,7 @@ internal sealed class PackedKeys<TKey> : GroupKeys
             starts[p + 1] = starts[p] + _parts[p].Count;
         }
 
-        int[] partMaps = System.Buffers.ArrayPool<int>.Shared.Rent(Math.Max(starts[^1], 1));
+        Block<int> partMaps = Buffers.Blocks.Rent<int>(Math.Max(starts[^1], 1));
         try
         {
             for (int p = 0; p < _parts.Length; p++)
@@ -751,7 +751,7 @@ internal sealed class PackedKeys<TKey> : GroupKeys
         }
         finally
         {
-            System.Buffers.ArrayPool<int>.Shared.Return(partMaps);
+            Buffers.Blocks.Return(partMaps);
         }
 
         MergeSeen(target);

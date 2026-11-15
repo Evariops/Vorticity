@@ -53,7 +53,7 @@ public sealed class TopFrontierNarrowTests
             {
                 FixedKeys<T> keys = new FixedKeys<T>(Shape(type), sorted: false);
                 (CanonicalArena first, int one) = Column(new[] { edge }, ptype);
-                int[] groups = new int[1];
+                Block<int> groups = Blocks.Allocate<int>(1);
                 keys.Assign(first, [one], 1, [], groups, new GroupRanges());
                 ulong[] narrowed = new ulong[(Rows + 63) >> 6];
                 Assert.True(keys.Narrow(arena, [node], Rows, [], groups[0], descending, narrowed));

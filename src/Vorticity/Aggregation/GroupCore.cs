@@ -7,6 +7,7 @@ using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
+using Vorticity.Buffers;
 
 namespace Vorticity.Aggregating;
 
@@ -580,25 +581,20 @@ internal sealed partial class GroupCore
         return batch;
     }
 
-    // The batches the core made, every one, which the process keeps once its slabs go: under _freeGate.
-    private PartBatch[] _batchesMade = [];
-    private int _batchesMadeCount;
+    // The batches the core made, every one, which the process keeps once its slabs go, linked through their MadeNext:
+    // under _freeGate. A list in an array of the core's own grew with the batches, a slot each, at every query.
+    private PartBatch? _madeBatches;
+    private int _madeCount;
 
     /// <summary>The <paramref name="count"/> batches linked from <paramref name="first"/> counted among those the core made, under <c>_freeGate</c>.</summary>
     private void Made(PartBatch first, int count)
     {
-        if (_batchesMadeCount + count > _batchesMade.Length)
-        {
-            PartBatch[] grown = ArrayShelf.Retained.Take<PartBatch>(Aggregating.Scratch.Capacity(_batchesMadeCount + count, _batchesMade.Length), zeroed: false);
-            _batchesMade.AsSpan(0, _batchesMadeCount).CopyTo(grown);
-            ArrayShelf.Retained.Give(_batchesMade);
-            _batchesMade = grown;
-        }
-
         PartBatch batch = first;
         for (int b = 0; b < count; b++)
         {
-            _batchesMade[_batchesMadeCount++] = batch;
+            batch.MadeNext = _madeBatches;
+            _madeBatches = batch;
+            _madeCount++;
             if (b + 1 < count)
             {
                 batch = batch.Next!;
@@ -870,7 +866,7 @@ internal sealed partial class GroupCore
         // The sub-table's places in the directory share its bits; the half of them past the next bit
         // go to the upper half.
         int bit = part.Depth - depth - 1;
-        int[] directory = part.Directory;
+        Block<int> directory = part.Directory;
         for (int j = 0; j < directory.Length; j++)
         {
             if (directory[j] == index && ((j >> bit) & 1) != 0)
@@ -1002,9 +998,9 @@ internal sealed partial class GroupCore
             }
 
             _slabs.Clear();
-            PartBatch.Keep(_batchesMade.AsSpan(0, _batchesMadeCount));
-            _batchesMadeCount = 0;
-            Aggregating.Scratch.Return(ref _batchesMade);
+            PartBatch.Keep(_madeBatches, _madeCount);
+            _madeBatches = null;
+            _madeCount = 0;
         }
     }
 
@@ -1198,7 +1194,7 @@ internal sealed partial class GroupCore
         (GroupKeys keys, AggregateSlot[] slots) = Joined(part);
         Held(keys.Count);
         int count = keys.Count;
-        int[] order = AggregationEngine.LentOrder(_shelf, count);
+        Block<int> order = AggregationEngine.LentOrder(count);
         bool built = false;
         try
         {
@@ -1211,14 +1207,11 @@ internal sealed partial class GroupCore
         {
             Held(-count);
 
-            // An order whose build failed may still be read by a ranking the build started: let go, not lent again.
+            // An order whose build failed may still be read by a ranking the build started: left to the collector, not
+            // rented again.
             if (built)
             {
-                _shelf.Give(order);
-            }
-            else
-            {
-                _shelf.Drop(order);
+                Blocks.Return(order);
             }
 
             Let(part);
@@ -1249,6 +1242,7 @@ internal sealed partial class GroupCore
             }
 
             part.Tables.Clear();
+            part.LetDirectoryGo();
         }
     }
 
@@ -1604,6 +1598,9 @@ internal sealed class PartBatch
     /// <summary>The batch below it on a stack, or in a lane's batches to fill.</summary>
     internal PartBatch? Next;
 
+    /// <summary>The batch its core made before it, in the list of every batch the core made, which the process keeps once the query is done.</summary>
+    internal PartBatch? MadeNext;
+
     /// <summary>
     /// Whether the batch is an array of its own, a part's share of a lane's table emptied into the core
     /// under pressure: given back to the budget once applied, never filled again.
@@ -1672,22 +1669,23 @@ internal sealed class PartBatch
     }
 
     /// <summary>
-    /// <paramref name="batches"/>, which a query is done with, kept for the next queries as far as the
-    /// process keeps them, nothing of their slabs kept with them.
+    /// The <paramref name="count"/> batches linked from <paramref name="made"/> through <see cref="MadeNext"/>, which a
+    /// query is done with, kept for the next queries as far as the process keeps them, nothing of their slabs kept with them.
     /// </summary>
-    internal static void Keep(ReadOnlySpan<PartBatch> batches)
+    internal static void Keep(PartBatch? made, int count)
     {
         PartBatch? first = null;
         PartBatch? last = null;
-        int count = 0;
-        foreach (PartBatch batch in batches)
+        for (PartBatch? batch = made; batch is not null;)
         {
+            PartBatch? before = batch.MadeNext;
+            batch.MadeNext = null;
             batch.Words = [];
             batch.Count = 0;
             batch.Next = first;
             first = batch;
             last ??= batch;
-            count++;
+            batch = before;
         }
 
         if (first is null)
@@ -1731,7 +1729,8 @@ internal sealed class SubTable(GroupKeys keys, AggregateSlot[] slots, GroupRecor
     /// </summary>
     internal void DropUnmet()
     {
-        if (Keys.Met(out int count) is not { } met)
+        Block<int> met = Keys.Met(out int count);
+        if (met.IsDefault)
         {
             return;
         }
@@ -1744,7 +1743,7 @@ internal sealed class SubTable(GroupKeys keys, AggregateSlot[] slots, GroupRecor
             slot.Keep(kept);
         }
 
-        ArrayShelf.Return(met);
+        Blocks.Return(met);
     }
 
     /// <summary>Makes room for <paramref name="groups"/> groups at once: keys and records.</summary>
@@ -1829,8 +1828,14 @@ internal sealed class CorePart
     /// <summary>The sub-tables, each once.</summary>
     internal readonly List<SubTable> Tables = [];
 
-    /// <summary>The sub-table of each value of the bits the directory takes, an index into <see cref="Tables"/>.</summary>
-    internal int[] Directory = [0];
+    /// <summary>
+    /// The sub-table of each value of the bits the directory takes, an index into <see cref="Tables"/>: as many places as
+    /// <see cref="Depth"/> gives, in a block of the pool the part keeps as its bytes alone, one field on each of a core's
+    /// parts; empty once the part is let go.
+    /// </summary>
+    internal Block<int> Directory => Block<int>.Over(_directory, 1 << Depth);
+
+    private byte[]? _directory = Blocks.RentCleared<int>(1).Bytes;
 
     /// <summary>The bits of the hash past the part's the directory takes.</summary>
     internal int Depth;
@@ -1855,31 +1860,40 @@ internal sealed class CorePart
 
     /// <summary>
     /// Doubles the directory: one more bit of the hash, each sub-table at both places its old one gave;
-    /// the directories from the process's shelf, which the next part's take again.
+    /// the directories from the pool, which the next part's take again.
     /// </summary>
     internal void Grow()
     {
-        int[] grown = ArrayShelf.Retained.Take<int>(Directory.Length * 2, zeroed: false);
+        Block<int> directory = Directory;
+        Block<int> grown = Blocks.Rent<int>(directory.Length * 2);
         for (int j = 0; j < grown.Length; j++)
         {
-            grown[j] = Directory[j >> 1];
+            grown[j] = directory[j >> 1];
         }
 
-        ArrayShelf.Retained.Give(Directory);
-        Directory = grown;
+        Blocks.Return(directory);
+        _directory = grown.Bytes;
         Depth++;
     }
 
-    /// <summary>The part's directory back to one place, its first sub-table's, the one it held given back to the process's shelf.</summary>
+    /// <summary>The part's directory back to one place, its first sub-table's, the one it held given back to the pool.</summary>
     internal void Restart()
     {
-        if (Directory.Length > 1)
+        if (Depth > 0 || _directory is null)
         {
-            ArrayShelf.Retained.Give(Directory);
-            Directory = ArrayShelf.Retained.Take<int>(1, zeroed: false);
+            Blocks.ReturnBytes(_directory);
+            _directory = Blocks.Rent<int>(1).Bytes;
         }
 
+        Depth = 0;
         Directory[0] = 0;
+    }
+
+    /// <summary>The part's directory given back to the pool, the part read and its sub-tables let go.</summary>
+    internal void LetDirectoryGo()
+    {
+        Blocks.ReturnBytes(_directory);
+        _directory = null;
         Depth = 0;
     }
 }
@@ -2404,22 +2418,22 @@ internal sealed class CoreApplier
     private readonly GroupRecords? _view;
     private readonly int _keyBytes;
     private PartBatch[] _taken = [];
-    private int[] _map = [];
-    private ulong[] _keys = [];
-    private int[] _tableOf = [];
-    private int[] _starts = [];
-    private int[] _next = [];
-    private int[] _entryAt = [];
-    private int[] _batchAt = [];
+    private ScratchBlock<int> _map;
+    private ScratchBlock<ulong> _keys;
+    private ScratchBlock<int> _tableOf;
+    private ScratchBlock<int> _starts;
+    private ScratchBlock<int> _next;
+    private ScratchBlock<int> _entryAt;
+    private ScratchBlock<int> _batchAt;
 
     /// <summary>The numbers 0, 1, 2 and on, as many as a batch of entries has held: shared by every applier, never written once made.</summary>
     private static int[] s_identity = [];
 
-    private byte[] _bits = [];
-    private int[] _clear = [];
-    private int[] _set = [];
-    private int[] _setEntries = [];
-    private int[] _setBatches = [];
+    private ScratchBlock<byte> _bits;
+    private ScratchBlock<int> _clear;
+    private ScratchBlock<int> _set;
+    private ScratchBlock<int> _setEntries;
+    private ScratchBlock<int> _setBatches;
 
     // Whether the part applied tells its new groups to the core's emitter.
     private bool _emitting;
@@ -2447,10 +2461,10 @@ internal sealed class CoreApplier
         }
     }
 
-    /// <summary>The applier's scratch back to the process's shelf, its worker or its lane done with it: the next query's appliers grow into it.</summary>
+    /// <summary>The applier's scratch back to the pool, its worker or its lane done with it: the next query's appliers grow into it.</summary>
     internal void Release()
     {
-        Scratch.Return(ref _taken);
+        _taken = [];
         Scratch.Return(ref _map);
         Scratch.Return(ref _keys);
         Scratch.Return(ref _tableOf);
@@ -2479,9 +2493,9 @@ internal sealed class CoreApplier
         {
             if (count == _taken.Length)
             {
-                PartBatch[] grown = ArrayShelf.Retained.Take<PartBatch>(Math.Max(16, count * 2), zeroed: false);
+                // The applier's own, which holds references no block can.
+                PartBatch[] grown = new PartBatch[Math.Max(16, count * 2)];
                 _taken.AsSpan(0, count).CopyTo(grown);
-                ArrayShelf.Retained.Give(_taken);
                 _taken = grown;
             }
 
@@ -2596,7 +2610,7 @@ internal sealed class CoreApplier
 
         int shift = GroupCore.PartShift - part.Depth;
         int mask = (1 << part.Depth) - 1;
-        int[] directory = part.Directory;
+        Block<int> directory = part.Directory;
         Scratch.Grow(ref _tableOf, entries);
         int at = 0;
         for (int i = 0; i < count; i++)

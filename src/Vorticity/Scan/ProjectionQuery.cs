@@ -5,6 +5,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Aggregating;
 using Vorticity.Arrays;
+using Vorticity.Buffers;
 using Vorticity.Compute;
 using Vorticity.Expressions;
 using Vorticity.Layouts;
@@ -287,8 +288,8 @@ internal sealed class ProjectedBatches : IAsyncEnumerator<RecordBatch>
     private readonly DType _dtype;
     private IAsyncEnumerator<RecordBatch>? _inner;
     private RecordBatch? _current;
-    private int[] _rows = [];
-    private int[] _children = [];
+    private ScratchBlock<int> _rows;
+    private ScratchBlock<int> _children;
     private long _position;
     private bool _begun;
     private bool _ended;
@@ -347,6 +348,8 @@ internal sealed class ProjectedBatches : IAsyncEnumerator<RecordBatch>
             column.Release();
         }
 
+        Scratch.Return(ref _rows);
+        Scratch.Return(ref _children);
         End();
     }
 

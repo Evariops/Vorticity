@@ -197,27 +197,25 @@ internal abstract class SketchSlot<TSketch, TResult> : AggregateSlot<TResult>
 
     internal override void Keep(ReadOnlySpan<int> groups)
     {
-        // The kept sketches taken aside, then those left let go, then the kept ones put first.
-        TSketch?[] kept = ArrayPool<TSketch?>.Shared.Rent(groups.Length);
+        // In place, the groups ascending: a kept sketch moves down to its place, which its own group's or one before it
+        // emptied already, and one left is let go. No array aside: a sketch is a reference, which no block holds.
         long bytes = 0;
-        for (int i = 0; i < groups.Length; i++)
-        {
-            kept[i] = _sketches[groups[i]];
-            _sketches[groups[i]] = null;
-            bytes += kept[i]?.Bytes ?? 0;
-        }
-
+        int next = 0;
         for (int group = 0; group < _groups; group++)
         {
-            if (_sketches[group] is { } left)
+            TSketch? sketch = _sketches[group];
+            _sketches[group] = null;
+            if (next < groups.Length && groups[next] == group)
             {
-                Released(left);
+                _sketches[next++] = sketch;
+                bytes += sketch?.Bytes ?? 0;
+            }
+            else if (sketch is not null)
+            {
+                Released(sketch);
             }
         }
 
-        kept.AsSpan(0, groups.Length).CopyTo(_sketches);
-        ArrayPool<TSketch?>.Shared.Return(kept, clearArray: true);
-        Array.Clear(_sketches, groups.Length, _groups - groups.Length);
         _groups = groups.Length;
         _bytes = bytes;
     }

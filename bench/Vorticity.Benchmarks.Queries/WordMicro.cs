@@ -85,7 +85,7 @@ internal static class WordMicro
         ColumnShape shape = new ColumnShape(new ColumnSym(Expr.Field("k"), VortexType.Utf8, null, null, -1, []));
         ShortTextKeys groups = new ShortTextKeys(shape, sorted: false);
         ulong[] selection = [];
-        int[] rowGroups = new int[BatchRows];
+        Block<int> rowGroups = Blocks.Allocate<int>(BatchRows);
         GroupRanges ranges = new GroupRanges();
         long start = Stopwatch.GetTimestamp();
         for (int at = 0; at < rows; at += BatchRows)

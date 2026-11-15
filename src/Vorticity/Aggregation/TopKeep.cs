@@ -2,6 +2,7 @@ using System;
 using System.Runtime.InteropServices;
 using System.Threading;
 using Vorticity.Arrays;
+using Vorticity.Buffers;
 using Vorticity.Compute;
 using Vorticity.Expressions;
 using Vorticity.Types;
@@ -39,7 +40,7 @@ internal sealed class TopKeep : IDisposable
     private int _edgeRoot;
     private long _edgePlace;
     private FilterLiteral? _edgeInteger;
-    private int[] _rows = [];
+    private ScratchBlock<int> _rows;
     private long _held;
 
     /// <param name="session">The session whose pool the rows are held in.</param>
@@ -155,6 +156,7 @@ internal sealed class TopKeep : IDisposable
         _edge?.Release();
         _memory?.LetGo(_held);
         _held = 0;
+        Scratch.Return(ref _rows);
     }
 
     /// <summary>The store's rows ranked, the best <c>keep</c> kept in a store of their own; the last of them the edge.</summary>
@@ -231,11 +233,11 @@ internal sealed class TopKeep : IDisposable
     {
         // The verdicts a byte a row, then a bit a row: the ties and the selection joined a word of 64 rows at a time.
         int wordCount = (rows + 63) >> 6;
-        byte[] states = System.Buffers.ArrayPool<byte>.Shared.Rent(rows);
-        ulong[] held = System.Buffers.ArrayPool<ulong>.Shared.Rent(2 * wordCount);
+        Block<byte> states = Blocks.Rent<byte>(rows);
+        Block<ulong> held = Blocks.Rent<ulong>(2 * wordCount);
         try
         {
-            Span<byte> verdicts = states.AsSpan(0, rows);
+            Span<byte> verdicts = states;
             Span<ulong> words = held.AsSpan(0, wordCount);
             ComparisonKernels.Compare(arena, node, _descending ? ComparisonOp.Greater : ComparisonOp.Less, edge, verdicts);
             Trilean.ToWords(verdicts, Trilean.True, equal: true, words);
@@ -263,8 +265,8 @@ internal sealed class TopKeep : IDisposable
         }
         finally
         {
-            System.Buffers.ArrayPool<byte>.Shared.Return(states);
-            System.Buffers.ArrayPool<ulong>.Shared.Return(held);
+            Blocks.Return(states);
+            Blocks.Return(held);
         }
     }
 

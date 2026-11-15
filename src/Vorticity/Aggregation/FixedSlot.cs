@@ -6,6 +6,7 @@ using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
+using Vorticity.Buffers;
 using Vorticity.Writing;
 
 namespace Vorticity.Aggregating;
@@ -28,7 +29,7 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : RecordSlot<TStat
     private readonly bool _seeded;
     private ValuesCache<TValue> _values;
     private MaskCache _rows;
-    private int[] _counts = [];
+    private ScratchBlock<int> _counts;
 
     // The windows an exact float sum folds a row at a time from now on, the last window's groups mostly at
     // tops of their own: the window's top then missed them, and the branch between the two paths, taken at
@@ -70,7 +71,7 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : RecordSlot<TStat
 
     internal override TState Seed => _seed;
 
-    /// <summary>The values widened, the masks joined and the dictionary's counts, back to the process's shelf.</summary>
+    /// <summary>The values widened, the masks joined and the dictionary's counts, back to the pool.</summary>
     private protected override void ReleaseScratch()
     {
         _values.Release();

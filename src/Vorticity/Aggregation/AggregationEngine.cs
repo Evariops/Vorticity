@@ -5,6 +5,7 @@ using System.Numerics;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
+using Vorticity.Buffers;
 using Vorticity.Compute;
 using Vorticity.Expressions;
 using Vorticity.Layouts;
@@ -728,7 +729,7 @@ internal sealed class AggregationOutcome
     private AggregateSlot?[]? _views;
 
     /// <summary>The groups of <paramref name="keys"/> in their states, delivered in the first <paramref name="count"/> of <paramref name="order"/>, every one by default.</summary>
-    internal AggregationOutcome(AggregationPlan plan, AggregateSlot[] slots, GroupKeys? keys, int[] order, int count = -1)
+    internal AggregationOutcome(AggregationPlan plan, AggregateSlot[] slots, GroupKeys? keys, Block<int> order, int count = -1)
     {
         _plan = plan;
         _slots = slots;
@@ -759,7 +760,7 @@ internal sealed class AggregationOutcome
     /// <summary>The core whose sub-tables are the result read whole: their arrays go back to the process's shelf once it is delivered.</summary>
     internal GroupCore? Core { get; init; }
 
-    /// <summary>Whether <see cref="Order"/> is lent by the process's shelf, which takes it back once the result is delivered.</summary>
+    /// <summary>Whether <see cref="Order"/> is rented from the pool, which takes it back once the result is delivered.</summary>
     internal bool OrderLent { get; init; }
 
     private int _givenBack;
@@ -786,30 +787,28 @@ internal sealed class AggregationOutcome
             Core?.LetDelivered();
             if (OrderLent)
             {
-                ArrayShelf.Retained.Give(Order);
+                Blocks.Return(Order);
             }
 
-            if (Interlocked.Exchange(ref _operated, null) is { Length: > 0 } operated)
-            {
-                ArrayShelf.Retained.Give(operated);
-            }
+            Blocks.ReturnBytes(Interlocked.Exchange(ref _operated, null));
         }
     }
 
-    // The groups the operators on groups left last, in an array of the process's shelf: given back with the result.
-    private int[]? _operated;
+    // The bytes of the block of groups the operators on groups left last, rented from the pool: given back with the
+    // result. Its bytes alone, which one exchange swaps.
+    private byte[]? _operated;
 
     /// <summary>
-    /// Holds <paramref name="groups"/>, the groups an operator on groups left in an array of the process's shelf, until the
-    /// result is delivered; the array the operator before it left, which it read, goes back now, measured no more.
+    /// Holds <paramref name="groups"/>, the groups an operator on groups left in a block of the pool, until the result is
+    /// delivered; the block the operator before it left, which it read, goes back now, measured no more.
     /// </summary>
-    internal void HoldOperated(int[] groups)
+    internal void HoldOperated(Block<int> groups)
     {
-        int[]? previous = Interlocked.Exchange(ref _operated, groups);
-        if (previous is { Length: > 0 } && !ReferenceEquals(previous, groups))
+        byte[]? previous = Interlocked.Exchange(ref _operated, groups.Bytes);
+        if (previous is not null && !ReferenceEquals(previous, groups.Bytes))
         {
-            Memory?.Measure(-(long)previous.Length * sizeof(int));
-            ArrayShelf.Retained.Give(previous);
+            Memory?.Measure(-(long)previous.Length);
+            Blocks.ReturnBytes(previous);
         }
     }
 
@@ -830,9 +829,9 @@ internal sealed class AggregationOutcome
 
     /// <summary>
     /// The groups in delivery order, its first <see cref="Count"/>; the one group of a scalar aggregation.
-    /// An order lent by a shelf is longer.
+    /// An order rented from the pool is longer.
     /// </summary>
-    internal int[] Order { get; }
+    internal Block<int> Order { get; }
 
     /// <summary>The groups delivered: the first ones of <see cref="Order"/>.</summary>
     internal int Count { get; }
@@ -911,11 +910,11 @@ internal sealed class AggregationPartition
     private readonly FilterMasks? _masks;
     private readonly GroupRanges _ranges = new GroupRanges();
 
-    // The group of each row of a batch, rented from the shared pool and given back with the partition's
-    // groups (Release): a lane's of 512 KB, made anew by every lane of every query, were 89 % of what a
-    // count and a sum by 10³ keys allocated at fourteen lanes, 7.3 of 8.2 MB a query. The lane's admission
-    // counts it (a batch's scratch).
-    private int[] _rowGroups = [];
+    // The group of each row of a batch, rented from the pool and given back with the partition's groups
+    // (Release): a lane's of 512 KB, made anew by every lane of every query, were 89 % of what a count and
+    // a sum by 10³ keys allocated at fourteen lanes, 7.3 of 8.2 MB a query. The lane's admission counts it
+    // (a batch's scratch).
+    private ScratchBlock<int> _rowGroups;
     private long _batch;
 
     // The rows the slots fold together before the next window (AggregationPlan.FoldWindow).
@@ -954,12 +953,12 @@ internal sealed class AggregationPartition
     private readonly int _streaming = -1;
     private readonly GroupKeys? _componentKeys;
     private readonly GroupRanges _componentRanges = new GroupRanges();
-    private int[] _componentOf = [];
-    private int[] _componentRows = [];
+    private ScratchBlock<int> _componentOf;
+    private ScratchBlock<int> _componentRows;
 
     // What following the partition of the next range maps its groups and its component's values with.
-    private int[] _followMap = [];
-    private int[] _followComponents = [];
+    private ScratchBlock<int> _followMap;
+    private ScratchBlock<int> _followComponents;
 
     // The rows the partition folded, and whether its groups had seen SettledRows each at the batch folded.
     private long _rowsFolded;
@@ -1841,8 +1840,8 @@ internal sealed class AggregationPartition
     internal long Footprint => (Keys?.Footprint ?? 0) + (_componentKeys?.Footprint ?? 0) + AggregateSlot.FootprintOf(Slots);
 
     /// <summary>
-    /// Room for the group of each of <paramref name="rows"/> rows, the one held before given back: taken
-    /// from the process's shelf a power of two long, cleared, as a new array starts, since a row a
+    /// Room for the group of each of <paramref name="rows"/> rows, the one held before given back: rented
+    /// from the pool a power of two long, cleared, as a new array starts, since a row a
     /// selection leaves out keeps what the array held, and another query's groups would be past this
     /// one's. The shared array pool kept an array for each thread that gave one back, which the lane of
     /// the next query, on another thread, did not find: half a megabyte a query at fourteen lanes.
@@ -1850,18 +1849,11 @@ internal sealed class AggregationPartition
     private void RentRowGroups(int rows)
     {
         GiveBackRowGroups();
-        _rowGroups = ArrayShelf.Retained.Take<int>((int)BitOperations.RoundUpToPowerOf2((uint)Math.Max(rows, 16)), zeroed: true);
+        _rowGroups = ScratchBlock<int>.Rent((int)BitOperations.RoundUpToPowerOf2((uint)Math.Max(rows, 16)));
     }
 
-    /// <summary>The groups of the rows given back to the process's shelf, once nothing folds into the partition.</summary>
-    private void GiveBackRowGroups()
-    {
-        if (_rowGroups.Length > 0)
-        {
-            ArrayShelf.Retained.Give(_rowGroups);
-            _rowGroups = [];
-        }
-    }
+    /// <summary>The groups of the rows given back to the pool, once nothing folds into the partition.</summary>
+    private void GiveBackRowGroups() => Scratch.Return(ref _rowGroups);
 
     /// <summary>
     /// Drops the partition's groups, its keys, states and scratch, once another holds them: a lane's
@@ -1879,8 +1871,8 @@ internal sealed class AggregationPartition
         Records = null;
         GiveBackRowGroups();
 
-        // The scratch of the folds, back to the process's shelf, which the next query's lanes take
-        // theirs from: dropped, each lane of a top on 32 lanes allocated its narrowed selection anew.
+        // The scratch of the folds, back to the pool, which the next query's lanes take theirs from:
+        // dropped, each lane of a top on 32 lanes allocated its narrowed selection anew.
         Scratch.Return(ref _narrowed);
         Scratch.Return(ref _componentOf);
         Scratch.Return(ref _componentRows);
@@ -2590,16 +2582,16 @@ internal sealed class AggregationPartition
     /// </summary>
     internal void DropUnmet()
     {
-        if (Keys?.Met(out int count) is { } met)
+        if (Keys?.Met(out int count) is { IsDefault: false } met)
         {
             Keep(met.AsSpan(0, count));
             GroupsAtEnd = count;
-            ArrayShelf.Return(met);
+            Buffers.Blocks.Return(met);
         }
     }
 
     /// <summary>
-    /// The lane folds no more rows: the group of each row back to the process's shelf now, where it went
+    /// The lane folds no more rows: the group of each row back to the pool now, where it went
     /// back with the partition's release, which the partition a merge in series keeps as the result
     /// never has: the next query's lane made another, half a megabyte.
     /// </summary>
@@ -2619,7 +2611,7 @@ internal sealed class AggregationPartition
     internal long? TopEdge { get; set; }
 
     // The batch's selection less the rows past the top's frontier.
-    private ulong[] _narrowed = [];
+    private ScratchBlock<ulong> _narrowed;
 
     /// <summary>Folds the settled blocks no batch came after: what the end of the rows leaves.</summary>
     internal void Finish()
@@ -3409,17 +3401,24 @@ internal sealed class AggregationPartition
 
     /// <summary>
     /// <see cref="MergeFrom(AggregationPartition, ref int[], bool[])"/> for a caller that keeps no map: the
-    /// map lent by the process's shelf and given back, where every lane merged in series made one.
+    /// map rented from the pool and given back, where every lane merged in series made one.
     /// </summary>
     internal void MergeFrom(AggregationPartition other, ref int[]? numbers) => MergeFrom(other, ref numbers, apart: null, kept: false);
 
     private int[]? MergeFrom(AggregationPartition other, ref int[]? numbers, bool[]? apart, bool kept)
     {
+        // The map the caller keeps is its own; one it does not, a block of the pool.
         int count = Keys is null ? 1 : other.Keys!.Count;
-        int[] map = Keys is null ? [0] : kept ? new int[count] : ArrayShelf.Rent<int>(count);
-        if (Keys is not null)
+        int[]? owned = kept ? new int[count] : null;
+        Block<int> rented = owned is null ? Buffers.Blocks.Rent<int>(count) : default;
+        Span<int> map = owned is not null ? owned : rented.AsSpan();
+        if (Keys is null)
         {
-            other.Keys!.MergeInto(Keys, Numbers.Upto(count, ref numbers), map.AsSpan(0, count));
+            map[0] = 0;
+        }
+        else
+        {
+            other.Keys!.MergeInto(Keys, Numbers.Upto(count, ref numbers), map);
             foreach (AggregateSlot slot in Slots)
             {
                 slot.EnsureGroups(Keys.Count);
@@ -3431,21 +3430,12 @@ internal sealed class AggregationPartition
         {
             if (_inputs[i] != Settled && (apart is null || !apart[i]))
             {
-                Slots[i].MergeFrom(other.Slots[i], all, map.AsSpan(0, count));
+                Slots[i].MergeFrom(other.Slots[i], all, map);
             }
         }
 
-        if (kept)
-        {
-            return map;
-        }
-
-        if (Keys is not null)
-        {
-            ArrayShelf.Return(map);
-        }
-
-        return null;
+        Buffers.Blocks.Return(rented);
+        return owned;
     }
 
     /// <summary>The input of an aggregate settled before the scan, which is never stepped.</summary>
@@ -3576,20 +3566,25 @@ internal abstract class AggregationHost
             if (plan.Chosen.Length > 0)
             {
                 // The columns of the chosen rows, read once every group's row is known.
-                int[] groups = new int[outcome.Keys?.Count ?? 1];
-                for (int g = 0; g < groups.Length; g++)
-                {
-                    groups[g] = g;
-                }
-
+                int count = outcome.Keys?.Count ?? 1;
+                Block<int> groups = Blocks.Rent<int>(count);
                 try
                 {
-                    await ChosenFetch.FetchAsync(outcome, Source, spec, Counters, groups, cancellationToken).ConfigureAwait(false);
+                    for (int g = 0; g < count; g++)
+                    {
+                        groups[g] = g;
+                    }
+
+                    await ChosenFetch.FetchAsync(outcome, Source, spec, Counters, new BlockSlice<int>(groups, 0, count), cancellationToken).ConfigureAwait(false);
                 }
                 catch
                 {
                     outcome.Delivered();
                     throw;
+                }
+                finally
+                {
+                    Blocks.Return(groups);
                 }
             }
 
@@ -3610,7 +3605,7 @@ internal abstract class AggregationHost
     /// <param name="builder">What builds the batches of the parts a core delivers one at a time.</param>
     /// <param name="cancellationToken">Cancels the run.</param>
     /// <returns>The merged states and keys, and the groups delivered, in order, before the result's window.</returns>
-    internal async ValueTask<(AggregationOutcome Outcome, int[] Groups, int Count)> RunAsync(AggregationQuery query, PartBuilder builder, CancellationToken cancellationToken)
+    internal async ValueTask<(AggregationOutcome Outcome, Block<int> Groups, int Count)> RunAsync(AggregationQuery query, PartBuilder builder, CancellationToken cancellationToken)
     {
         Begin();
         try
@@ -3629,12 +3624,12 @@ internal abstract class AggregationHost
             {
                 // Groups spilled under an order: the reader sorts them in runs, each part through the
                 // operators before the order as it comes.
-                return (outcome, [], 0);
+                return (outcome, default, 0);
             }
 
             try
             {
-                (int[] groups, int count) = await GroupSelection.ApplyAsync(query, outcome, spec, cancellationToken).ConfigureAwait(false);
+                (Block<int> groups, int count) = await GroupSelection.ApplyAsync(query, outcome, spec, cancellationToken).ConfigureAwait(false);
                 return (outcome, groups, count);
             }
             catch
@@ -3771,7 +3766,7 @@ internal static class AggregationEngine
                     : new SettledSlot<long>((await source.Rows.AnswerAsync(rows, LogicalShape.Count, metrics, cancellationToken).ConfigureAwait(false)).Rows);
             }
 
-            return new AggregationOutcome(plan, answers, null, [0]);
+            return new AggregationOutcome(plan, answers, null, Blocks.Allocate<int>(1));
         }
 
         (ColumnShape[] columns, int[] inputs) = Columns(plan, settled);
@@ -4017,13 +4012,13 @@ internal static class AggregationEngine
 
                     memory.LetGo(partitions.Length * Working(pass.Options.BatchRows));
                     (GroupKeys none, AggregateSlot[] noSlots) = engaged.Empty();
-                    AggregationOutcome first = new AggregationOutcome(plan, noSlots, none, []) { Parts = applying };
+                    AggregationOutcome first = new AggregationOutcome(plan, noSlots, none, default) { Parts = applying };
                     return Counted(first, memory, memory.Held);
                 }
 
                 (GroupKeys held, AggregateSlot[] heldSlots, long heldBytes, CorePart[] spilled) = await engaged.FinishAsync(joined, lanes, cancellationToken).ConfigureAwait(false);
                 plan.LastRun = Gathered(partitions, Stopwatch.GetTimestamp() - merging, 0, heldBytes) with { Core = engaged.Run() };
-                (int[] heldOrder, bool heldLent) = LentWholeOrder(held.Count);
+                (Block<int> heldOrder, bool heldLent) = LentWholeOrder(held.Count);
                 AggregationOutcome outcome = new AggregationOutcome(plan, heldSlots, held, heldOrder, held.Count) { OrderLent = heldLent, Core = engaged };
                 if (spilled.Length == 0)
                 {
@@ -4057,7 +4052,7 @@ internal static class AggregationEngine
                 // fold their batches is given back now.
                 plan.LastGroups = 0;
                 memory.LetGo(partitions.Length * Working(pass.Options.BatchRows));
-                AggregationOutcome first = new AggregationOutcome(plan, slots, keys, []) { Parts = delivery };
+                AggregationOutcome first = new AggregationOutcome(plan, slots, keys, default) { Parts = delivery };
                 return Counted(first, memory, memory.Held);
             }
 
@@ -4082,13 +4077,13 @@ internal static class AggregationEngine
             }
 
             // Groups as they were first met, or part after part: an order is asked for, with OrderBy.
-            // Lent by the process's shelf, and given back with the result.
+            // Rented from the pool, and given back with the result.
             if (keys is null)
             {
-                return Counted(new AggregationOutcome(plan, slots, keys, [0]) { Kept = whole }, memory, result);
+                return Counted(new AggregationOutcome(plan, slots, keys, Blocks.Allocate<int>(1)) { Kept = whole }, memory, result);
             }
 
-            (int[] order, bool lent) = LentWholeOrder(keys.Count);
+            (Block<int> order, bool lent) = LentWholeOrder(keys.Count);
             return Counted(new AggregationOutcome(plan, slots, keys, order, keys.Count) { Kept = whole, OrderLent = lent }, memory, result);
         }
         catch
@@ -4182,7 +4177,7 @@ internal static class AggregationEngine
         MergedParts delivery = new MergedParts(merge, builder, Math.Min(workers, merge.Parts), plan, memory, 0, merging, cancellationToken);
         (GroupKeys none, AggregateSlot[] noSlots) = merge.Empty();
         plan.LastGroups = 0;
-        AggregationOutcome first = new AggregationOutcome(plan, noSlots, none, []) { Parts = delivery };
+        AggregationOutcome first = new AggregationOutcome(plan, noSlots, none, default) { Parts = delivery };
         return Counted(first, memory, memory.Held);
     }
 
@@ -4191,30 +4186,31 @@ internal static class AggregationEngine
     /// <see cref="AggregationPlan.ShuffledOrder"/>, a copy of them alone shuffled by a draw the process's seed and the
     /// groups' count make: the same for two identical queries of a process, and unlike the merge's.
     /// </summary>
-    internal static int[] Shuffled(int[] order, int count)
+    internal static Block<int> Shuffled(Block<int> order, int count)
     {
         if (!AggregationPlan.ShuffledOrder || count < 2)
         {
             return order;
         }
 
-        int[] shuffled = order.AsSpan(0, count).ToArray();
-        new Random(unchecked((int)(MergeHash.Seed ^ (ulong)count))).Shuffle(shuffled);
+        Block<int> shuffled = Blocks.Allocate<int>(count);
+        order.AsSpan(0, count).CopyTo(shuffled);
+        new Random(unchecked((int)(MergeHash.Seed ^ (ulong)count))).Shuffle(shuffled.AsSpan());
         return shuffled;
     }
 
     /// <summary>
-    /// The order of a whole result, the groups 0 to <paramref name="count"/> less one, lent by the
-    /// process's shelf a power of two long: the identity a result's keys made new at every query. Under
-    /// the tests' shuffle, the shuffled copy is the result's, and the lent one goes back at once.
+    /// The order of a whole result, the groups 0 to <paramref name="count"/> less one, rented from the
+    /// pool a power of two long: the identity a result's keys made new at every query. Under the tests'
+    /// shuffle, the shuffled copy is the result's, and the rented one goes back at once.
     /// </summary>
-    internal static (int[] Order, bool Lent) LentWholeOrder(int count)
+    internal static (Block<int> Order, bool Lent) LentWholeOrder(int count)
     {
-        int[] order = LentOrder(ArrayShelf.Retained, count);
-        int[] shuffled = Shuffled(order, count);
-        if (!ReferenceEquals(shuffled, order))
+        Block<int> order = LentOrder(count);
+        Block<int> shuffled = Shuffled(order, count);
+        if (!shuffled.SameBytes(order))
         {
-            ArrayShelf.Retained.Give(order);
+            Blocks.Return(order);
             return (shuffled, false);
         }
 
@@ -4222,20 +4218,20 @@ internal static class AggregationEngine
     }
 
     /// <summary>
-    /// The groups 0 to <paramref name="count"/> less one in their order, in an array of
-    /// <paramref name="shelf"/>'s a power of two long, so that the parts of a query take the same
-    /// arrays again, and the next query those its shelf handed to the process's: given back once the
-    /// groups are built into their batches. Taken past the budget when it must: it is held only while
-    /// its part is built, and the part's keys and states hold several times its bytes.
+    /// The groups 0 to <paramref name="count"/> less one in their order, in a block of the pool a power
+    /// of two long, so that the parts of a query take the same bytes again, and the next query those
+    /// this one gave back: given back once the groups are built into their batches. Rented past the
+    /// budget: it is held only while its part is built, and the part's keys and states hold several
+    /// times its bytes.
     /// </summary>
-    internal static int[] LentOrder(ArrayShelf shelf, int count)
+    internal static Block<int> LentOrder(int count)
     {
         if (count == 0)
         {
-            return [];
+            return default;
         }
 
-        int[] order = shelf.Take<int>(Scratch.Capacity(count, 0), zeroed: false, overdraw: true);
+        Block<int> order = Blocks.Rent<int>(Scratch.Capacity(count, 0));
         for (int g = 0; g < count; g++)
         {
             order[g] = g;
@@ -4653,8 +4649,8 @@ internal static class AggregationEngine
         bool byValue = values is not null && plan.MergeByValue;
         ulong seed = MergeHash.Seed;
         int shift = 64 - BitOperations.Log2((uint)parts);
-        int[][] placed = new int[partitions.Length][];
-        int[][] starts = new int[partitions.Length][];
+        Block<int>[] placed = new Block<int>[partitions.Length];
+        Block<int>[] starts = new Block<int>[partitions.Length];
         Task[] cutting = new Task[partitions.Length];
         for (int p = 0; p < partitions.Length; p++)
         {
@@ -4803,24 +4799,24 @@ internal static class AggregationEngine
     }
 
     /// <summary>A partition's groups placed by part, the top bits of their keys' hashes, or of their numbers when <paramref name="byValue"/>; where each part's begin, and the end.</summary>
-    private static (int[] Placed, int[] Starts) Cut(GroupKeys keys, ulong seed, int shift, int parts, bool byValue)
+    private static (Block<int> Placed, Block<int> Starts) Cut(GroupKeys keys, ulong seed, int shift, int parts, bool byValue)
     {
         int count = keys.Count;
-        byte[] partOf = ArrayShelf.Rent<byte>(count);
+        Block<byte> partOf = Blocks.Rent<byte>(count);
         try
         {
             if (byValue)
             {
-                keys.PartsByValue(64 - shift, partOf.AsSpan(0, count));
+                keys.PartsByValue(64 - shift, partOf.AsSpan());
             }
             else
             {
-                keys.Parts(seed, shift, partOf.AsSpan(0, count));
+                keys.Parts(seed, shift, partOf.AsSpan());
             }
-            // The places and the starts lent by the process's shelf for as long as the merge reads them:
-            // given back with the lanes' tables (PartMerge.Release).
-            int[] starts = ArrayShelf.Rent<int>(parts + 1);
-            starts.AsSpan(0, parts + 1).Clear();
+
+            // The places and the starts rented from the pool for as long as the merge reads them: given
+            // back with the lanes' tables (PartMerge.Release).
+            Block<int> starts = Blocks.RentCleared<int>(parts + 1);
             for (int g = 0; g < count; g++)
             {
                 starts[partOf[g] + 1]++;
@@ -4833,7 +4829,7 @@ internal static class AggregationEngine
 
             Span<int> next = stackalloc int[parts];
             starts.AsSpan(0, parts).CopyTo(next);
-            int[] placed = ArrayShelf.Rent<int>(count);
+            Block<int> placed = Blocks.Rent<int>(count);
             for (int g = 0; g < count; g++)
             {
                 placed[next[partOf[g]]++] = g;
@@ -4843,7 +4839,7 @@ internal static class AggregationEngine
         }
         finally
         {
-            ArrayShelf.Return(partOf);
+            Blocks.Return(partOf);
         }
     }
 

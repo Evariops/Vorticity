@@ -62,8 +62,8 @@ internal sealed class RowSelection
 
     /// <summary>
     /// The rows of <paramref name="rows"/>, which their owner holds unchanged while the selection is read: kept where they
-    /// lie when they ascend, each a row of the file, as the engine's own takes hand them; sorted into a copy of their own
-    /// otherwise, as <see cref="Create"/> does.
+    /// lie when they ascend, each a row of the file, as the engine's own takes hand them, in an array or in a block of the
+    /// pool (<see cref="Buffers.BlockMemory{T}"/>); sorted into a copy of their own otherwise, as <see cref="Create"/> does.
     /// </summary>
     /// <param name="rows">The wanted rows.</param>
     /// <param name="rowCount">The file's row count.</param>
@@ -74,6 +74,12 @@ internal sealed class RowSelection
         if (MemoryMarshal.TryGetArray(rows, out ArraySegment<long> segment) && segment.Offset == 0 && Ascends(rows.Span, rowCount))
         {
             return new RowSelection(segment.Array!) { _count = segment.Count };
+        }
+
+        if (MemoryMarshal.TryGetMemoryManager(rows, out Buffers.BlockMemory<long>? block, out int start, out int length)
+            && start == 0 && Ascends(rows.Span, rowCount))
+        {
+            return new RowSelection(block.Block) { _count = length };
         }
 
         return Create(rows.Span, rowCount);

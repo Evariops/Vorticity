@@ -1,5 +1,6 @@
 using System;
 using Vorticity.Arrays;
+using Vorticity.Buffers;
 using Vorticity.Writing;
 
 namespace Vorticity.Aggregating;
@@ -62,7 +63,7 @@ internal sealed class JoinedKeys : GroupKeys
     /// </summary>
     internal override void Append(int component, ColumnStore store, ReadOnlySpan<int> groups)
     {
-        int[] local = ArrayShelf.Rent<int>(groups.Length);
+        Block<int> local = Buffers.Blocks.Rent<int>(groups.Length);
         try
         {
             int start = 0;
@@ -84,11 +85,11 @@ internal sealed class JoinedKeys : GroupKeys
         }
         finally
         {
-            ArrayShelf.Return(local);
+            Buffers.Blocks.Return(local);
         }
     }
 
-    internal override bool Assign(CanonicalArena arena, ReadOnlySpan<int> nodes, int rows, ReadOnlySpan<ulong> selection, int[] rowGroups, GroupRanges ranges) =>
+    internal override bool Assign(CanonicalArena arena, ReadOnlySpan<int> nodes, int rows, ReadOnlySpan<ulong> selection, Block<int> rowGroups, GroupRanges ranges) =>
         throw JoinedParts.Read();
 
     internal override GroupKeys Fresh() => throw JoinedParts.Read();

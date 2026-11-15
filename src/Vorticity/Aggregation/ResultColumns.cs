@@ -1,4 +1,5 @@
 using System;
+using Vorticity.Buffers;
 using Vorticity.Writing;
 
 namespace Vorticity.Aggregating;
@@ -65,7 +66,7 @@ internal sealed class ValueResultColumn<T> : ResultColumn
 {
     private readonly ResultNode<T> _node;
     private readonly IVortexRecord? _record;
-    private T[] _values = [];
+    private ValueScratch<T> _values;
     private AggregationOutcome? _outcome;
     private AggregateSlot<T>? _slot;
     private Func<int, T>? _read;
@@ -89,12 +90,21 @@ internal sealed class ValueResultColumn<T> : ResultColumn
             return;
         }
 
-        Scratch.Grow(ref _values, groups.Length);
-        Read(outcome, groups, _values.AsSpan(0, groups.Length));
-        ResultValues.Append(store, _values, groups.Length, _record);
+        // A record reads its values as an array, which no block can be.
+        _values.Grow(groups.Length, owned: _record is not null);
+        Span<T> values = _values.Values[..groups.Length];
+        Read(outcome, groups, values);
+        if (_record is not null)
+        {
+            ResultValues.Append(store, _values.Owned, groups.Length, _record);
+        }
+        else
+        {
+            ResultValues.Append<T>(store, values);
+        }
     }
 
-    internal override void Release() => Scratch.Return(ref _values);
+    internal override void Release() => _values.Return();
 
     internal override bool ReadsOrder => _record is null && ValuesOrder.Orders<T>();
 
@@ -105,8 +115,8 @@ internal sealed class ValueResultColumn<T> : ResultColumn
             return null;
         }
 
-        // Read straight into the array of their keys, which they become where they lie.
-        long[] keys = ValuesOrder.Rent<T>(outcome.Memory, groups.Length);
+        // Read straight into the block of their keys, which they become where they lie.
+        Block<long> keys = ValuesOrder.Rent<T>(outcome.Memory, groups.Length);
         Read(outcome, groups, ValuesOrder.Values<T>(keys, groups.Length));
         return ValuesOrder.Over<T>(keys, groups.Length, descending, outcome.Memory);
     }

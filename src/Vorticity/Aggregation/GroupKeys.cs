@@ -9,6 +9,7 @@ using System.Runtime.Intrinsics.X86;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
+using Vorticity.Buffers;
 using Vorticity.Compute;
 using Vorticity.Writing;
 
@@ -18,77 +19,78 @@ namespace Vorticity.Aggregating;
 internal sealed class GroupRanges
 {
     // Made at the first range: a key that is not in runs never adds one, and every partition made three
-    // arrays for them all the same.
-    private int[] _starts = [];
-    private int[] _ends = [];
-    private int[] _groups = [];
+    // arrays for them all the same. The starts, the ends and the groups lie in one block, a third each, as
+    // many places as the capacity.
+    private Block<int> _ranges;
+    private int _capacity;
 
     internal int Count { get; private set; }
 
     /// <summary>The ranges' first rows, ascending: a range starts where the one before it ends, or past it.</summary>
-    internal ReadOnlySpan<int> Starts => _starts.AsSpan(0, Count);
+    internal ReadOnlySpan<int> Starts => _ranges.AsSpan(0, Count);
 
     /// <summary>The rows past the ranges.</summary>
-    internal ReadOnlySpan<int> Ends => _ends.AsSpan(0, Count);
+    internal ReadOnlySpan<int> Ends => _ranges.AsSpan(_capacity, Count);
 
     /// <summary>The ranges' groups.</summary>
-    internal ReadOnlySpan<int> Groups => _groups.AsSpan(0, Count);
+    internal ReadOnlySpan<int> Groups => _ranges.AsSpan(2 * _capacity, Count);
 
-    internal int StartAt(int index) => _starts[index];
+    internal int StartAt(int index) => _ranges[index];
 
-    internal int EndAt(int index) => _ends[index];
+    internal int EndAt(int index) => _ranges[_capacity + index];
 
-    internal int GroupAt(int index) => _groups[index];
+    internal int GroupAt(int index) => _ranges[(2 * _capacity) + index];
 
     internal void Clear() => Count = 0;
 
     internal void Add(int start, int end, int group)
     {
-        if (Count > 0 && _groups[Count - 1] == group && _ends[Count - 1] == start)
+        int capacity = _capacity;
+        int count = Count;
+        if (count > 0 && _ranges[(2 * capacity) + count - 1] == group && _ranges[capacity + count - 1] == start)
         {
-            _ends[Count - 1] = end;
+            _ranges[capacity + count - 1] = end;
             return;
         }
 
-        if (Count == _starts.Length)
+        if (count == capacity)
         {
             Grow();
+            capacity = _capacity;
         }
 
-        _starts[Count] = start;
-        _ends[Count] = end;
-        _groups[Count] = group;
-        Count++;
+        _ranges[count] = start;
+        _ranges[capacity + count] = end;
+        _ranges[(2 * capacity) + count] = group;
+        Count = count + 1;
     }
 
     /// <summary>
-    /// Gives the arrays back to the process's shelf, their partition done with them, for the next query's ranges: grown
-    /// by doubling at every query, a batch of many runs made them anew, 7 % of what the services under 5xx allocated
+    /// Gives the block back to the pool, its partition done with it, for the next query's ranges: grown by doubling at
+    /// every query, a batch of many runs made the arrays anew, 7 % of what the services under 5xx allocated
     /// (2026-11-08).
     /// </summary>
     internal void Release()
     {
-        Scratch.Return(ref _starts);
-        Scratch.Return(ref _ends);
-        Scratch.Return(ref _groups);
+        Buffers.Blocks.Return(_ranges);
+        _ranges = default;
+        _capacity = 0;
         Count = 0;
     }
 
-    /// <summary>The arrays twice as long at least, from the process's shelf, the ranges copied and the old ones given back.</summary>
+    /// <summary>The block twice as long at least, from the pool, each third's ranges copied and the old one given back.</summary>
     private void Grow()
     {
-        int length = Scratch.Capacity(Math.Max(16, Count + 1), _starts.Length);
-        _starts = Moved(_starts, length);
-        _ends = Moved(_ends, length);
-        _groups = Moved(_groups, length);
-    }
+        int length = Scratch.Capacity(Math.Max(16, Count + 1), _capacity);
+        Block<int> grown = Blocks.Rent<int>(3 * length);
+        for (int third = 0; third < 3; third++)
+        {
+            _ranges.AsSpan(third * _capacity, Count).CopyTo(grown.AsSpan(third * length, Count));
+        }
 
-    private int[] Moved(int[] array, int length)
-    {
-        int[] grown = ArrayShelf.Retained.Take<int>(length, zeroed: false);
-        array.AsSpan(0, Count).CopyTo(grown);
-        ArrayShelf.Retained.Give(array);
-        return grown;
+        Blocks.Return(_ranges);
+        _ranges = grown;
+        _capacity = length;
     }
 }
 
@@ -105,7 +107,7 @@ internal abstract class GroupKeys
     private long _rangeBlocks;
     private long _dictionaryBlocks;
     private long _hashedBlocks;
-    private int[] _codeGroups = [];
+    private ScratchBlock<int> _codeGroups;
     private CanonicalOrigin _codeOrigin;
 
     internal int Count { get; private protected set; }
@@ -146,7 +148,7 @@ internal abstract class GroupKeys
     /// ranges of one group each when the key's form yields them, a group per row otherwise.
     /// </summary>
     /// <returns>True when <paramref name="ranges"/> holds the answer, false when <paramref name="rowGroups"/> does.</returns>
-    internal abstract bool Assign(CanonicalArena arena, ReadOnlySpan<int> nodes, int rows, ReadOnlySpan<ulong> selection, int[] rowGroups, GroupRanges ranges);
+    internal abstract bool Assign(CanonicalArena arena, ReadOnlySpan<int> nodes, int rows, ReadOnlySpan<ulong> selection, Block<int> rowGroups, GroupRanges ranges);
 
     /// <summary>An empty index of the same kind, for another partition.</summary>
     internal abstract GroupKeys Fresh();
@@ -193,14 +195,14 @@ internal abstract class GroupKeys
 
     /// <summary>
     /// The groups an index that numbered its span whole keeps once the rows are folded, the values no
-    /// row met left out: the first <paramref name="count"/> of an array the process's shelf lends, which
-    /// the caller gives back (<see cref="ArrayShelf.Return{T}"/>); null when it keeps them all. It
+    /// row met left out: the first <paramref name="count"/> of a block of the pool, which the caller
+    /// gives back (<see cref="Blocks.Return{T}(Block{T})"/>); the default when it keeps them all. It
     /// numbers values as they first come from then on.
     /// </summary>
-    internal virtual int[]? Met(out int count)
+    internal virtual Block<int> Met(out int count)
     {
         count = 0;
-        return null;
+        return default;
     }
 
     /// <summary>
@@ -502,7 +504,7 @@ internal abstract class GroupKeys
     }
 
     /// <summary>
-    /// The table of <see cref="CodeGroups"/> back to the process's shelf, for a release of the keys' arrays: kept by the
+    /// The table of <see cref="CodeGroups"/> back to the pool, for a release of the keys' arrays: kept by the
     /// keys, a query that grouped a dictionary's codes took one new, with every lane.
     /// </summary>
     private protected void ReleaseCodes()
@@ -663,7 +665,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
     // of six keys over 4M rows at fourteen lanes, 4 MB on the small object heap.
     private TValue[] _keys = [];
     private int _null = -1;
-    private TValue[] _values = [];
+    private ScratchBlock<TValue> _values;
     private ValuesCache<TValue> _entries;
 
     // The hashed path in two passes (AggregationPlan.ProbeAhead): each row's home slot, then the rows
@@ -673,8 +675,8 @@ internal sealed class FixedKeys<TValue> : GroupKeys
     private readonly int _probeAhead;
     private readonly long _aheadBytes;
     private readonly int _aheadFrom;
-    private uint[] _homes = [];
-    private int[] _left = [];
+    private ScratchBlock<uint> _homes;
+    private ScratchBlock<int> _left;
     private int _sink;
 
     // The group of each value by its number, the value less the statistics' smallest, in pages of
@@ -907,10 +909,10 @@ internal sealed class FixedKeys<TValue> : GroupKeys
             return;
         }
 
-        TValue[] keys = ArrayShelf.Rent<TValue>(groups.Length);
+        Block<TValue> keys = Buffers.Blocks.Rent<TValue>(groups.Length);
         try
         {
-            Span<TValue> values = keys.AsSpan(0, groups.Length);
+            Span<TValue> values = keys.AsSpan();
             for (int i = 0; i < groups.Length; i++)
             {
                 values[i] = _keys[groups[i]];
@@ -920,7 +922,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         }
         finally
         {
-            ArrayShelf.Return(keys);
+            Buffers.Blocks.Return(keys);
         }
     }
 
@@ -942,10 +944,10 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         }
 
         int span = (int)(most - least) + 1;
-        int[] places = ArrayShelf.Rent<int>(span);
+        Block<int> places = Buffers.Blocks.Rent<int>(span);
         try
         {
-            Span<int> at = places.AsSpan(0, span);
+            Span<int> at = places.AsSpan();
             at.Fill(-1);
             foreach (int group in groups)
             {
@@ -963,7 +965,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         }
         finally
         {
-            ArrayShelf.Return(places);
+            Buffers.Blocks.Return(places);
         }
 
         return true;
@@ -1051,7 +1053,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
     private static ulong Reached(ReadOnlySpan<TValue> values, TValue edge, bool descending) =>
         ComparisonKernels.Bounded(values, edge, atMost: !descending);
 
-    internal override bool Assign(CanonicalArena arena, ReadOnlySpan<int> nodes, int rows, ReadOnlySpan<ulong> selection, int[] rowGroups, GroupRanges ranges)
+    internal override bool Assign(CanonicalArena arena, ReadOnlySpan<int> nodes, int rows, ReadOnlySpan<ulong> selection, Block<int> rowGroups, GroupRanges ranges)
     {
         int node = nodes[0];
         StorageKind kind = _shape.Kind;
@@ -1135,7 +1137,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
     /// <see cref="Assign"/> over a block's values in canonical form, which a caller may have made: a short
     /// text key's words (<see cref="ShortTextKeys"/>).
     /// </summary>
-    internal bool AssignValues(ReadOnlySpan<TValue> canonical, ReadOnlySpan<ulong> validity, int rows, ReadOnlySpan<ulong> selection, int[] rowGroups, GroupRanges ranges)
+    internal bool AssignValues(ReadOnlySpan<TValue> canonical, ReadOnlySpan<ulong> validity, int rows, ReadOnlySpan<ulong> selection, Block<int> rowGroups, GroupRanges ranges)
     {
         if (_sorted)
         {
@@ -1224,7 +1226,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
     /// selects, <paramref name="values"/> theirs, none null: a block made a chunk at a time
     /// (<see cref="TupleKeys"/>), each found as <see cref="AssignValues"/> finds a block whole.
     /// </summary>
-    internal void AssignChunk(ReadOnlySpan<TValue> values, int start, ReadOnlySpan<ulong> selection, int[] rowGroups)
+    internal void AssignChunk(ReadOnlySpan<TValue> values, int start, ReadOnlySpan<ulong> selection, Block<int> rowGroups)
     {
         if (selection.IsEmpty && _appending)
         {
@@ -1264,7 +1266,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
     /// without a branch either. A block whole, or a short text's words a few thousand rows at a time
     /// (<see cref="ShortTextKeys"/>); never keys in runs, numbered by value or appended.
     /// </summary>
-    internal void TwoPasses(ReadOnlySpan<TValue> values, ReadOnlySpan<ulong> validity, int start, int[] rowGroups)
+    internal void TwoPasses(ReadOnlySpan<TValue> values, ReadOnlySpan<ulong> validity, int start, Block<int> rowGroups)
     {
         int rows = values.Length;
         int ahead = _probeAhead > 0 ? _probeAhead : Count >= _aheadFrom ? AggregationPlan.ReadAhead : 0;
@@ -1283,7 +1285,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         }
 
         Scratch.Grow(ref _left, rows);
-        int[] left = _left;
+        Span<int> left = _left.AsSpan();
         int count = 0;
         if (validity.IsEmpty)
         {
@@ -1315,7 +1317,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
     /// yet numbered there; a value past the statistics' bounds, which exact statistics never leave, in
     /// the index alone.
     /// </summary>
-    private void Direct(ReadOnlySpan<TValue> canonical, ReadOnlySpan<ulong> validity, int rows, ReadOnlySpan<ulong> selection, int[] rowGroups)
+    private void Direct(ReadOnlySpan<TValue> canonical, ReadOnlySpan<ulong> validity, int rows, ReadOnlySpan<ulong> selection, Block<int> rowGroups)
     {
         long min = _directMin;
         ulong span = _span;
@@ -1352,7 +1354,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
     /// time one after the other, ten million keys in the order of the rows, made the first pass read
     /// every page for nothing, 14 % of the scan.
     /// </remarks>
-    private void DirectTwoPasses(ReadOnlySpan<TValue> canonical, ReadOnlySpan<ulong> validity, int rows, int[] rowGroups)
+    private void DirectTwoPasses(ReadOnlySpan<TValue> canonical, ReadOnlySpan<ulong> validity, int rows, Block<int> rowGroups)
     {
         long min = _directMin;
         ulong span = _span;
@@ -1552,22 +1554,22 @@ internal sealed class FixedKeys<TValue> : GroupKeys
     /// order, then a null's group and the values past the bounds; null when every value was met, or the
     /// span is not numbered whole. The keys number values as they first come from then on.
     /// </summary>
-    internal override int[]? Met(out int count)
+    internal override Block<int> Met(out int count)
     {
         int unmet = _unmet;
         _unmet = -1;
         count = 0;
         if (unmet <= 0)
         {
-            return null;
+            return default;
         }
 
         // The groups are still the span's numbers in order, which the keep that follows reads once (KeepNumbered).
         _numbered = true;
 
-        // Lent by the process's shelf: read once by the keep that follows, a new list a sub-table was a
-        // quarter of what a core of 20M rows allocated at 32 lanes.
-        int[] met = ArrayShelf.Rent<int>(Count - unmet);
+        // Rented from the pool: read once by the keep that follows, a new list a sub-table was a quarter
+        // of what a core of 20M rows allocated at 32 lanes.
+        Block<int> met = Buffers.Blocks.Rent<int>(Count - unmet);
         int kept = 0;
         int span = (int)_span;
         if (_metBits is { } bits)
@@ -2047,7 +2049,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
             _metBits = null;
         }
 
-        // The scratch of the two passes and of the values widened, from the process's shelf, back to it.
+        // The scratch of the two passes and of the values widened, from the pool, back to it.
         Scratch.Return(ref _homes);
         Scratch.Return(ref _left);
         Scratch.Return(ref _values);
@@ -2720,7 +2722,7 @@ internal sealed class BytesKeys : GroupKeys
         _table = new ByteKeyTable(shelf);
     }
 
-    internal override bool Assign(CanonicalArena arena, ReadOnlySpan<int> nodes, int rows, ReadOnlySpan<ulong> selection, int[] rowGroups, GroupRanges ranges)
+    internal override bool Assign(CanonicalArena arena, ReadOnlySpan<int> nodes, int rows, ReadOnlySpan<ulong> selection, Block<int> rowGroups, GroupRanges ranges)
     {
         int node = nodes[0];
         ColumnEncoding encoding = EncodedForms.EncodingOf(arena, node);
@@ -3026,7 +3028,7 @@ internal sealed class BytesKeys : GroupKeys
     /// whole lookup, their hashes known, which numbers a key as it first comes.
     /// </summary>
     [SkipLocalsInit]
-    private void Chunked(BytesBlock canonical, ReadOnlySpan<ulong> validity, int rows, int[] rowGroups)
+    private void Chunked(BytesBlock canonical, ReadOnlySpan<ulong> validity, int rows, Block<int> rowGroups)
     {
         Span<ulong> hashes = stackalloc ulong[TextChunk];
         Span<int> found = stackalloc int[TextChunk];
@@ -3071,12 +3073,19 @@ internal sealed class BoolKeys : GroupKeys
     private readonly ColumnShape _shape;
     private readonly int[] _groups = [-1, -1, -1];
     private readonly byte[] _keyOf = new byte[3];
-    private ulong[] _bits = [];
-    private ulong[] _validity = [];
+    private ScratchBlock<ulong> _bits;
+    private ScratchBlock<ulong> _validity;
 
     internal BoolKeys(ColumnShape shape) => _shape = shape;
 
-    internal override bool Assign(CanonicalArena arena, ReadOnlySpan<int> nodes, int rows, ReadOnlySpan<ulong> selection, int[] rowGroups, GroupRanges ranges)
+    /// <summary>The words a batch read, back to the pool.</summary>
+    internal override void Release()
+    {
+        Scratch.Return(ref _bits);
+        Scratch.Return(ref _validity);
+    }
+
+    internal override bool Assign(CanonicalArena arena, ReadOnlySpan<int> nodes, int rows, ReadOnlySpan<ulong> selection, Block<int> rowGroups, GroupRanges ranges)
     {
         int node = nodes[0];
         Saw(EncodedForms.EncodingOf(arena, node));

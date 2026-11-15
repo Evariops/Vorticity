@@ -7,63 +7,6 @@ using System.Threading;
 namespace Vorticity.Aggregating;
 
 /// <summary>
-/// The scratch arrays of the steps that grow with the groups — the order of a result, its top, the
-/// sort of the rows a fetch reads, a lane's top — rented from the process's shelf under the query's
-/// memory: reserved before they are rented, at the length
-/// the shelf hands out, and given back with them. What the shelf keeps of them afterwards is the rest
-/// of the process's memory, which the process's budget reads at its next full collection. An array
-/// under a page goes uncounted both ways, as a shelf's.
-/// </summary>
-internal static class QueryArrays
-{
-    /// <summary>The least array counted: a page.</summary>
-    private const long LeastCounted = 4096;
-
-    /// <summary>An array of <paramref name="length"/> elements at least, from the process's shelf (<see cref="ArrayShelf.Rent{T}"/>), reserved first under <paramref name="memory"/> for <paramref name="what"/>.</summary>
-    /// <exception cref="VortexMemoryException">The query's budget does not grant the array.</exception>
-    internal static T[] Rent<T>(QueryMemory? memory, int length, string what) =>
-        TryRent(memory, length, out T[] array) ? array : throw memory!.Exceeded(what, -1, Bytes<T>(Pooled(length)));
-
-    /// <summary>
-    /// <see cref="Rent{T}"/> for a caller that has a way of its own when the query's budget does not grant the array:
-    /// false then, nothing reserved and <paramref name="array"/> empty.
-    /// </summary>
-    internal static bool TryRent<T>(QueryMemory? memory, int length, out T[] array)
-    {
-        if (memory is not null && Bytes<T>(Pooled(length)) is long bytes and >= LeastCounted)
-        {
-            if (!memory.TryGrow(bytes))
-            {
-                array = [];
-                return false;
-            }
-
-            memory.Measure(bytes);
-        }
-
-        array = ArrayShelf.Rent<T>(length);
-        return true;
-    }
-
-    /// <summary>An array <see cref="Rent{T}"/> handed out, back to the process's shelf, its bytes given back to <paramref name="memory"/>.</summary>
-    internal static void Return<T>(QueryMemory? memory, T[] array)
-    {
-        if (memory is not null && Bytes<T>(array.Length) is long bytes and >= LeastCounted)
-        {
-            memory.Shrink(bytes);
-            memory.Measure(-bytes);
-        }
-
-        ArrayShelf.Return(array);
-    }
-
-    /// <summary>The length the shelf hands out for <paramref name="length"/>: its power of two from sixteen, past a gigabyte of elements the length itself.</summary>
-    private static int Pooled(int length) => length <= 1 << 30 ? (int)BitOperations.RoundUpToPowerOf2((uint)Math.Max(length, 16)) : length;
-
-    private static long Bytes<T>(int length) => (long)length * Unsafe.SizeOf<T>();
-}
-
-/// <summary>
 /// What one query holds of its <see cref="QueryMemoryBudget"/>: reserved at
 /// the rare points where its memory grows, a lane's table after a batch, a part of a merge once built;
 /// brought down to its result once its groups are merged, and given back when the result is delivered,

@@ -105,7 +105,7 @@ internal sealed class ColumnShape
 internal struct ValuesCache<TValue>
     where TValue : unmanaged
 {
-    private TValue[]? _values;
+    private ScratchBlock<TValue> _values;
     private VortexBuffer _view;
     private int _length;
     private long _batch;
@@ -133,16 +133,12 @@ internal struct ValuesCache<TValue>
     }
 
     /// <summary>
-    /// Gives the copy back to the process's shelf it grew from, its reader done with it, for the next
-    /// query's readers to grow into: a batch of decimals or uuids widened was 1 MiB a reader a query.
+    /// Gives the copy back to the pool it grew from, its reader done with it, for the next query's
+    /// readers to grow into: a batch of decimals or uuids widened was 1 MiB a reader a query.
     /// </summary>
     internal void Release()
     {
-        if (_values is { Length: > 0 } values)
-        {
-            ArrayShelf.Retained.Give(values);
-        }
-
+        Scratch.Return(ref _values);
         this = default;
     }
 
@@ -160,7 +156,6 @@ internal struct ValuesCache<TValue>
         }
         else
         {
-            _values ??= [];
             values = FixedReader.Values(arena, node, kind, ref _values, out validity);
             _widened = FixedReader.Widens(arena, node, kind);
             _view = _widened ? default : arena.RecordRef(canonical).BufferA;
@@ -179,7 +174,7 @@ internal struct ValuesCache<TValue>
 internal static class FixedReader
 {
     /// <summary>The values of <paramref name="node"/> in canonical form, decoding it when it is encoded.</summary>
-    internal static ReadOnlySpan<TValue> Values<TValue>(CanonicalArena arena, int node, StorageKind kind, scoped ref TValue[] scratch, out ReadOnlySpan<ulong> validity)
+    internal static ReadOnlySpan<TValue> Values<TValue>(CanonicalArena arena, int node, StorageKind kind, scoped ref ScratchBlock<TValue> scratch, out ReadOnlySpan<ulong> validity)
         where TValue : unmanaged
     {
         int canonical = EncodedForms.Canonical(arena, node);

@@ -5,6 +5,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Aggregating;
 using Vorticity.Arrays;
+using Vorticity.Buffers;
 using Vorticity.Compute;
 using Vorticity.Expressions;
 using Vorticity.Keys;
@@ -114,33 +115,40 @@ internal abstract class StreamScanSource : ScanSource, IRowsCapability, IStatist
     private protected virtual async ValueTask<FilterLiteral> ExtremeAsync(ScanSpec spec, FieldExpr column, bool min, ScanCounters metrics, CancellationToken cancellationToken)
     {
         FilterLiteral best = FilterLiteral.Null;
-        int[] rows = [];
-        await foreach (RecordBatch batch in SelectedAsync(spec, metrics).WithCancellation(cancellationToken).ConfigureAwait(false))
+        ScratchBlock<int> rows = default;
+        try
         {
-            CanonicalArena arena = batch.Arena;
-            int count = batch.RowCount;
-            int node = FilterEvaluator.Resolve(arena, batch.RootIndex, column, count);
-            ReadOnlySpan<ulong> selection = batch.SelectionWords;
-            int listed = 0;
-            if (!selection.IsEmpty)
+            await foreach (RecordBatch batch in SelectedAsync(spec, metrics).WithCancellation(cancellationToken).ConfigureAwait(false))
             {
-                Scratch.Grow(ref rows, count);
-                foreach (int row in new Selection(selection, count, batch.SelectedRows))
+                CanonicalArena arena = batch.Arena;
+                int count = batch.RowCount;
+                int node = FilterEvaluator.Resolve(arena, batch.RootIndex, column, count);
+                ReadOnlySpan<ulong> selection = batch.SelectionWords;
+                int listed = 0;
+                if (!selection.IsEmpty)
                 {
-                    rows[listed++] = row;
+                    Scratch.Grow(ref rows, count);
+                    foreach (int row in new Selection(selection, count, batch.SelectedRows))
+                    {
+                        rows[listed++] = row;
+                    }
+                }
+
+                if (!Extremes.TryFind(arena, node, rows.AsSpan(0, listed), !selection.IsEmpty, min, out int bestRow))
+                {
+                    continue;
+                }
+
+                bool numeric = arena.GetNode(ComparisonKernels.Unwrap(arena, node)).DType.Kind == DTypeKind.Decimal;
+                if (numeric ? LiteralReader.TryReadDecimal(arena, node, bestRow, out FilterLiteral literal) : LiteralReader.TryRead(arena, node, bestRow, out literal))
+                {
+                    TerminalScan.Keep(ref best, literal, min, numeric);
                 }
             }
-
-            if (!Extremes.TryFind(arena, node, rows.AsSpan(0, listed), !selection.IsEmpty, min, out int bestRow))
-            {
-                continue;
-            }
-
-            bool numeric = arena.GetNode(ComparisonKernels.Unwrap(arena, node)).DType.Kind == DTypeKind.Decimal;
-            if (numeric ? LiteralReader.TryReadDecimal(arena, node, bestRow, out FilterLiteral literal) : LiteralReader.TryRead(arena, node, bestRow, out literal))
-            {
-                TerminalScan.Keep(ref best, literal, min, numeric);
-            }
+        }
+        finally
+        {
+            Scratch.Return(ref rows);
         }
 
         return best;
@@ -377,8 +385,8 @@ internal abstract class StreamScanSource : ScanSource, IRowsCapability, IStatist
         private readonly int[]? _fields;
 
         private readonly DType _projected;
-        private byte[] _states = [];
-        private int[] _kept = [];
+        private ScratchBlock<byte> _states;
+        private ScratchBlock<int> _kept;
         private RecordBatch? _current;
         private int _taken;
 
@@ -432,6 +440,8 @@ internal abstract class StreamScanSource : ScanSource, IRowsCapability, IStatist
         public ValueTask DisposeAsync()
         {
             _current?.Dispose();
+            Scratch.Return(ref _states);
+            Scratch.Return(ref _kept);
             return _inner.DisposeAsync();
         }
 

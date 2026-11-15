@@ -1,6 +1,7 @@
 using System;
 using System.Runtime.InteropServices;
 using Vorticity.Arrays;
+using Vorticity.Buffers;
 
 namespace Vorticity.Aggregating;
 
@@ -12,7 +13,7 @@ namespace Vorticity.Aggregating;
 internal static class BoolWords
 {
     /// <summary>The values of a boolean block; a constant is filled, an encoded form decoded.</summary>
-    internal static ReadOnlySpan<ulong> Values(CanonicalArena arena, scoped ref int node, ref ulong[] scratch)
+    internal static ReadOnlySpan<ulong> Values(CanonicalArena arena, scoped ref int node, ref ScratchBlock<ulong> scratch)
     {
         if (arena.RecordRef(node).Kind != CanonicalKind.Constant)
         {
@@ -26,7 +27,7 @@ internal static class BoolWords
     }
 
     /// <summary>The validity of a node; empty when every row holds a value.</summary>
-    internal static ReadOnlySpan<ulong> Validity(CanonicalArena arena, int node, ref ulong[] scratch)
+    internal static ReadOnlySpan<ulong> Validity(CanonicalArena arena, int node, ref ScratchBlock<ulong> scratch)
     {
         ref readonly CanonicalRecord record = ref arena.RecordRef(node);
         Validity validity = record.Validity;
@@ -43,7 +44,7 @@ internal static class BoolWords
         }
     }
 
-    private static ReadOnlySpan<ulong> Filled(bool value, int length, ref ulong[] scratch)
+    private static ReadOnlySpan<ulong> Filled(bool value, int length, ref ScratchBlock<ulong> scratch)
     {
         int words = (length + 63) >> 6;
         Scratch.Grow(ref scratch, words);
@@ -53,7 +54,7 @@ internal static class BoolWords
         return into;
     }
 
-    private static ReadOnlySpan<ulong> Copied(ReadOnlySpan<byte> bits, int bitOffset, int length, ref ulong[] scratch)
+    private static ReadOnlySpan<ulong> Copied(ReadOnlySpan<byte> bits, int bitOffset, int length, ref ScratchBlock<ulong> scratch)
     {
         int words = (length + 63) >> 6;
         Scratch.Grow(ref scratch, words);
@@ -119,8 +120,8 @@ internal sealed class BoolSlot<TResult> : RecordSlot<byte, TResult>
     private readonly Func<byte, TResult> _finish;
     private MaskCache _rows;
     private MaskCache _trues;
-    private ulong[] _bits = [];
-    private ulong[] _validity = [];
+    private ScratchBlock<ulong> _bits;
+    private ScratchBlock<ulong> _validity;
     private long _loadedBatch;
     private int _loadedNode;
     private bool _allValid;
@@ -129,7 +130,7 @@ internal sealed class BoolSlot<TResult> : RecordSlot<byte, TResult>
 
     internal override byte Seed => 0;
 
-    /// <summary>The masks joined and the words of the batch's values and validity, back to the process's shelf.</summary>
+    /// <summary>The masks joined and the words of the batch's values and validity, back to the pool.</summary>
     private protected override void ReleaseScratch()
     {
         _rows.Release();

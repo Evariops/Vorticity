@@ -1,6 +1,7 @@
 using System;
 using System.Numerics;
 using System.Runtime.CompilerServices;
+using Vorticity.Buffers;
 using Vorticity.Compute;
 
 namespace Vorticity.Aggregating;
@@ -23,12 +24,12 @@ internal sealed class DistributionSlot<TValue, TResult> : SketchSlot<QuantileSke
     private readonly int _bits;
     private readonly Func<QuantileSketch?, TResult> _final;
     private readonly bool _shelved;
-    private TValue[] _values = [];
+    private ScratchBlock<TValue> _values;
     private MaskCache _rows;
-    private ulong[] _clip = [];
+    private ScratchBlock<ulong> _clip;
 
     // The values a filter keeps of a range, compacted.
-    private TValue[] _picked = [];
+    private ScratchBlock<TValue> _picked;
 
     // The bytes the sketches grew by, and the values and states stepped into them, over the slot's life: what a value
     // costs them on average once their windows densify and widen, where a sparse bucket's twelve bytes left the budget
@@ -72,7 +73,7 @@ internal sealed class DistributionSlot<TValue, TResult> : SketchSlot<QuantileSke
         _stepped += rows;
     }
 
-    /// <summary>Lets the sketches go, and gives the slot's buffers back to the process's shelf, which the next query's take.</summary>
+    /// <summary>Lets the sketches go, and gives the slot's buffers back to the pool, which the next query's take.</summary>
     internal override void Release()
     {
         base.Release();

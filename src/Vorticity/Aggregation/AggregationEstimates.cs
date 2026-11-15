@@ -4,6 +4,7 @@ using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
+using Vorticity.Buffers;
 using Vorticity.Scanning;
 using Vorticity.Types;
 using Vorticity.Writing;
@@ -466,7 +467,7 @@ internal sealed class EstimateRun
     private (AggregationOutcome Scaled, int[] Place) Scaled(Totals totals, int groups)
     {
         AggregationPlan plan = _question.Plan;
-        int[] order = Order(groups);
+        Block<int> order = Order(groups);
         AggregationOutcome sample = new AggregationOutcome(plan, _sample.Slots, _sample.Keys, order);
         ResultColumn[] columns = AggregationPartials.Columns(plan, _question.Keys, new Scaling(totals, _measures));
         VortexField[] fields = new VortexField[columns.Length];
@@ -557,9 +558,9 @@ internal sealed class EstimateRun
     }
 
     /// <summary>The groups <c>0</c> to <paramref name="groups"/> − 1, in order.</summary>
-    private static int[] Order(int groups)
+    private static Block<int> Order(int groups)
     {
-        int[] order = new int[groups];
+        Block<int> order = Blocks.Allocate<int>(groups);
         for (int g = 0; g < groups; g++)
         {
             order[g] = g;

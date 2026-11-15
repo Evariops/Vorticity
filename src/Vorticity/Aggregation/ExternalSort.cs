@@ -5,6 +5,7 @@ using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
+using Vorticity.Buffers;
 using Vorticity.Compute;
 using Vorticity.Expressions;
 using Vorticity.Layouts;
@@ -180,7 +181,7 @@ internal sealed class ExternalSort : IAsyncDisposable
     }
 
     /// <summary>The positions of the store's rows in the chain's order, ties in the order they came, over a root built in its arena.</summary>
-    private int[] Ranked(int root, int rows, CancellationToken cancellationToken)
+    private Block<int> Ranked(int root, int rows, CancellationToken cancellationToken)
     {
         CanonicalArena arena = _arena!;
         ColumnOrder[] chain = new ColumnOrder[_keys.Length + 1];
@@ -191,7 +192,7 @@ internal sealed class ExternalSort : IAsyncDisposable
         }
 
         chain[^1] = ColumnOrder.Positions;
-        int[] positions = new int[rows];
+        Block<int> positions = Blocks.Rent<int>(rows);
         for (int i = 0; i < rows; i++)
         {
             positions[i] = i;
@@ -212,7 +213,8 @@ internal sealed class ExternalSort : IAsyncDisposable
             return;
         }
 
-        int[] positions = Ranked(store.Build(arena, rows), rows, cancellationToken);
+        // The positions in a block of the pool, given back once the run is written.
+        Block<int> positions = Ranked(store.Build(arena, rows), rows, cancellationToken);
 
         // Under the host's scratch budget, the run reserved at what its rows hold before it is written,
         // then at the bytes it took once it is; all of it given back when the sort is disposed.
@@ -220,6 +222,7 @@ internal sealed class ExternalSort : IAsyncDisposable
         long reserved = _held;
         if (budget is not null && !budget.TryReserve(reserved))
         {
+            Blocks.Return(positions);
             throw GroupCore.ScratchExceeded(budget, "sort of a result", reserved);
         }
 
@@ -248,6 +251,7 @@ internal sealed class ExternalSort : IAsyncDisposable
             finally
             {
                 batch?.Dispose();
+                Blocks.Return(positions);
             }
 
             await writer.CompleteAsync(cancellationToken).ConfigureAwait(false);
@@ -327,7 +331,7 @@ internal sealed class ExternalSort : IAsyncDisposable
         private CanonicalArena? _outArena;
         private CanonicalArena? _cut;
         private RecordBatch? _current;
-        private int[] _positions = [];
+        private Block<int> _positions;
         private int _root;
         private int _rows;
         private int _next = -1;
@@ -378,6 +382,8 @@ internal sealed class ExternalSort : IAsyncDisposable
             _out?.Release();
             _outArena?.Reset();
             _cut?.Reset();
+            Blocks.Return(_positions);
+            _positions = default;
             return ValueTask.CompletedTask;
         }
     }

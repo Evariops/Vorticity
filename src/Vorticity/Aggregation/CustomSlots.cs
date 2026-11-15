@@ -1,5 +1,6 @@
 using System;
 using Vorticity.Arrays;
+using Vorticity.Buffers;
 
 namespace Vorticity.Aggregating;
 
@@ -11,13 +12,13 @@ internal sealed class CustomSlot<T, TAggregator, TState> : RecordSlot<TState, TS
     where T : unmanaged
     where TAggregator : IAggregator<T, TState>
 {
-    private T[] _values = [];
+    private ScratchBlock<T> _values;
     private MaskCache _rows;
-    private ulong[] _clip = [];
+    private ScratchBlock<ulong> _clip;
 
     internal override TState Seed => TAggregator.Seed();
 
-    /// <summary>The values, the masks joined and the window's words, back to the process's shelf.</summary>
+    /// <summary>The values, the masks joined and the window's words, back to the pool.</summary>
     private protected override void ReleaseScratch()
     {
         Scratch.Return(ref _values);
@@ -129,13 +130,13 @@ internal sealed class EncodedCustomSlot<T, TAggregator, TState> : RecordSlot<TSt
     where T : unmanaged
     where TAggregator : IEncodedAggregator<T, TState>
 {
-    private T[] _values = [];
+    private ScratchBlock<T> _values;
     private MaskCache _rows;
-    private ulong[] _clip = [];
+    private ScratchBlock<ulong> _clip;
 
     internal override TState Seed => TAggregator.Seed();
 
-    /// <summary>The values, the masks joined and the window's words, back to the process's shelf.</summary>
+    /// <summary>The values, the masks joined and the window's words, back to the pool.</summary>
     private protected override void ReleaseScratch()
     {
         Scratch.Return(ref _values);

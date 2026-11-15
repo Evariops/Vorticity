@@ -108,7 +108,7 @@ public sealed class WidenedValuesTests
     {
         RetainingArena batch = new RetainingArena();
         int node = CanonicalSlice.SliceAcross(chunk, batch, dictionary, 0, codes.Length);
-        int[] rowGroups = new int[codes.Length];
+        Block<int> rowGroups = Blocks.Allocate<int>(codes.Length);
 
         Assert.False(keys.Assign(batch, [node], codes.Length, [(1UL << codes.Length) - 1], rowGroups, new GroupRanges()));
 

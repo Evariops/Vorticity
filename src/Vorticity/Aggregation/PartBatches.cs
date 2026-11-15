@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
+using Vorticity.Buffers;
 using Vorticity.Types;
 using Vorticity.Writing;
 
@@ -70,7 +71,7 @@ internal sealed class PartBuilder
     {
         // The result's window is the reader's, over every part: each part's chosen rows are read for
         // every group its operators keep.
-        (int[] groups, int count) = await GroupSelection.ApplyAsync(_query, outcome, _spec, cancellationToken, windowed: false, until: _until).ConfigureAwait(false);
+        (Block<int> groups, int count) = await GroupSelection.ApplyAsync(_query, outcome, _spec, cancellationToken, windowed: false, until: _until).ConfigureAwait(false);
         PartResult result = new PartResult(outcome.Keys?.Count ?? 0);
         ResultColumn[]? columns;
         lock (_gate)

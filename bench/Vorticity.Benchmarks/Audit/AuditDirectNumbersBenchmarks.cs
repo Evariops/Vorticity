@@ -24,7 +24,7 @@ public class AuditDirectNumbersBenchmarks
     private const int Rows = 65_536;
     private const int Span = 4_096;
 
-    private readonly int[] _groups = new int[Rows];
+    private readonly Block<int> _groups = Blocks.Allocate<int>(Rows);
     private CanonicalArena _arena = null!;
     private int _node;
     private GroupKeys _keys = null!;
@@ -77,7 +77,7 @@ public class AuditDirectNumbersBenchmarks
         }
 
         (CanonicalArena first, int firstNode) = Column(all, ptype, dtype);
-        keys.Assign(first, [firstNode], Span, [], new int[Span], new GroupRanges());
+        keys.Assign(first, [firstNode], Span, [], Blocks.Allocate<int>(Span), new GroupRanges());
 
         T[] values = new T[Rows];
         Random random = new Random(1012);

@@ -5,6 +5,7 @@ using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
 using System.Runtime.Intrinsics.X86;
 using Vorticity.Arrays;
+using Vorticity.Buffers;
 using Vorticity.Types;
 using Vorticity.Writing;
 
@@ -138,9 +139,9 @@ internal sealed class RawKeys<TWord> : GroupKeys
     private uint[] _slots = new uint[32];
 
     // A batch's words, built a column at a time in two halves.
-    private ulong[] _low = [];
-    private ulong[] _high = [];
-    private TWord[] _words = [];
+    private ScratchBlock<ulong> _low;
+    private ScratchBlock<ulong> _high;
+    private ScratchBlock<TWord> _words;
 
     // Every word a group of its own, no slot looked up (Appending); the shelf a sub-table's arrays come from (ForTable).
     private readonly bool _appending;
@@ -153,7 +154,7 @@ internal sealed class RawKeys<TWord> : GroupKeys
         _shelf = shelf;
     }
 
-    internal override bool Assign(CanonicalArena arena, ReadOnlySpan<int> nodes, int rows, ReadOnlySpan<ulong> selection, int[] rowGroups, GroupRanges ranges)
+    internal override bool Assign(CanonicalArena arena, ReadOnlySpan<int> nodes, int rows, ReadOnlySpan<ulong> selection, Block<int> rowGroups, GroupRanges ranges)
     {
         ReadOnlySpan<TWord> words = Words(arena, nodes, rows);
         bool hasLast = false;
@@ -253,6 +254,9 @@ internal sealed class RawKeys<TWord> : GroupKeys
         _keys = [];
         _slots = new uint[32];
         Count = 0;
+        Scratch.Return(ref _low);
+        Scratch.Return(ref _high);
+        Scratch.Return(ref _words);
     }
 
     /// <summary>The words' array grown to <paramref name="length"/>: from the shelf of a sub-table, the old one given back.</summary>

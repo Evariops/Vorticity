@@ -5,6 +5,7 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
 using Vorticity.Arrays;
+using Vorticity.Buffers;
 using Vorticity.Types;
 using Vorticity.Writing;
 
@@ -290,8 +291,8 @@ internal sealed class TupleKeys : GroupKeys
 
     private readonly TupleLayout _layout;
     private readonly FixedKeys<KeyTuple> _tuples;
-    private KeyTuple[] _block = [];
-    private TextWord[] _words = [];
+    private ScratchBlock<KeyTuple> _block;
+    private ScratchBlock<TextWord> _words;
 
     internal TupleKeys(TupleLayout layout, FixedKeys<KeyTuple> tuples)
     {
@@ -314,7 +315,7 @@ internal sealed class TupleKeys : GroupKeys
 
     private TupleKeys Wrap(GroupKeys tuples) => new TupleKeys(_layout, (FixedKeys<KeyTuple>)tuples);
 
-    internal override bool Assign(CanonicalArena arena, ReadOnlySpan<int> nodes, int rows, ReadOnlySpan<ulong> selection, int[] rowGroups, GroupRanges ranges)
+    internal override bool Assign(CanonicalArena arena, ReadOnlySpan<int> nodes, int rows, ReadOnlySpan<ulong> selection, Block<int> rowGroups, GroupRanges ranges)
     {
         Scratch.Grow(ref _block, Math.Min(rows, Chunk));
         for (int start = 0; start < rows; start += Chunk)
@@ -427,7 +428,7 @@ internal sealed class TupleKeys : GroupKeys
         where T : unmanaged
     {
         // A primitive column is read where it lies: no scratch.
-        T[] none = [];
+        ScratchBlock<T> none = default;
         ReadOnlySpan<T> values = FixedReader.Values(arena, node, StorageKind.Primitive, ref none, out ReadOnlySpan<ulong> validity)[start..end];
         if (validity.IsEmpty)
         {

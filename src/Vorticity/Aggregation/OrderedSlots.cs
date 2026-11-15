@@ -18,7 +18,7 @@ namespace Vorticity.Aggregating;
 internal struct WideColumn<TWide>
     where TWide : unmanaged
 {
-    private TWide[]? _copy;
+    private ScratchBlock<TWide> _copy;
     private VortexBuffer _view;
     private long _batch;
     private int _node;
@@ -55,7 +55,6 @@ internal struct WideColumn<TWide>
             return MemoryMarshal.Cast<byte, TWide>(record.BufferA.Span)[..length];
         }
 
-        _copy ??= [];
         Scratch.Grow(ref _copy, length);
         Span<TWide> into = _copy.AsSpan(0, length);
         Widen(record.BufferA.Span, type, into);
@@ -64,14 +63,10 @@ internal struct WideColumn<TWide>
         return into;
     }
 
-    /// <summary>Gives the copy back to the process's shelf.</summary>
+    /// <summary>Gives the copy back to the pool.</summary>
     internal void Release()
     {
-        if (_copy is { Length: > 0 } copy)
-        {
-            ArrayShelf.Retained.Give(copy);
-        }
-
+        Scratch.Return(ref _copy);
         this = default;
     }
 
@@ -169,8 +164,8 @@ internal struct WideColumn<TWide>
 /// </summary>
 internal struct PointMask
 {
-    private ulong[]? _words;
-    private ulong[]? _scratch;
+    private ScratchBlock<ulong> _words;
+    private ScratchBlock<ulong> _scratch;
     private long _batch;
     private int _node;
     private int _orderNode;
@@ -184,8 +179,6 @@ internal struct PointMask
             _batch = input.Batch;
             _node = input.Node;
             _orderNode = input.OrderNode;
-            _scratch ??= [];
-            _words ??= [];
             ReadOnlySpan<ulong> valid = RowMasks.And(values, orders, input.Rows, ref _scratch);
             ReadOnlySpan<ulong> kept = RowMasks.And(input.Selection, valid, input.Rows, ref _words);
             if (kept.IsEmpty)
@@ -199,7 +192,7 @@ internal struct PointMask
             else
             {
                 // Copied where the conjunction is not already in the words: one of the masks as it was.
-                if (!Unsafe.AreSame(ref MemoryMarshal.GetReference(kept), ref MemoryMarshal.GetArrayDataReference(_words)))
+                if (_words.IsDefault || !Unsafe.AreSame(ref MemoryMarshal.GetReference(kept), ref _words.GetReference()))
                 {
                     Scratch.Grow(ref _words, kept.Length);
                     kept.CopyTo(_words);
@@ -220,16 +213,8 @@ internal struct PointMask
 
     internal void Release()
     {
-        if (_words is { Length: > 0 } words)
-        {
-            ArrayShelf.Retained.Give(words);
-        }
-
-        if (_scratch is { Length: > 0 } scratch)
-        {
-            ArrayShelf.Retained.Give(scratch);
-        }
-
+        Scratch.Return(ref _words);
+        Scratch.Return(ref _scratch);
         this = default;
     }
 }
@@ -837,10 +822,10 @@ internal sealed class GrowthSlot<TWide, TSum, TGrowth, TResult>(PType values, PT
         }
 
         // The runs in the order of their first points, then of their last: each must end where the next starts or before. A
-        // group's few runs on the stack, a run a piece it lay in; more from the process's shelf.
+        // group's few runs on the stack, a run a piece it lay in; more in a block of the pool.
         int count = state.Closed + 1;
-        PointRun<TWide>[]? rented = count > 16 ? ArrayShelf.Rent<PointRun<TWide>>(count) : null;
-        Span<PointRun<TWide>> held = rented is null ? stackalloc PointRun<TWide>[16] : rented;
+        Block<PointRun<TWide>> rented = count > 16 ? Blocks.Rent<PointRun<TWide>>(count) : default;
+        Span<PointRun<TWide>> held = rented.IsDefault ? stackalloc PointRun<TWide>[16] : rented.AsSpan();
         held = held[..count];
         try
         {
@@ -899,10 +884,7 @@ internal sealed class GrowthSlot<TWide, TSum, TGrowth, TResult>(PType values, PT
         }
         finally
         {
-            if (rented is not null)
-            {
-                ArrayShelf.Return(rented);
-            }
+            Blocks.Return(rented);
         }
     }
 
@@ -1111,9 +1093,9 @@ internal sealed class GrowthPoints<TWide, TSum, TGrowth, TResult>(PType values, 
     private WideColumn<TWide> _values;
     private WideColumn<long> _orders;
 
-    private GrowthPoint<TWide>[] _points = [];
+    private Block<GrowthPoint<TWide>> _points;
     private int _count;
-    private ulong[] _rows = [];
+    private ScratchBlock<ulong> _rows;
 
     internal override ReadOnlySpan<ulong> Rows(CanonicalArena arena, long batch, int valueNode, int orderNode, int rows, ReadOnlySpan<ulong> selection)
     {
@@ -1185,7 +1167,7 @@ internal sealed class GrowthPoints<TWide, TSum, TGrowth, TResult>(PType values, 
     /// <summary>Room for <paramref name="length"/> points under the query's memory; false, the points let go, when it refuses it.</summary>
     private bool TryGrow(int length)
     {
-        if (!QueryArrays.TryRent(memory, Scratch.Capacity(length, _points.Length), out GrowthPoint<TWide>[] grown))
+        if (!Blocks.TryRent(memory, Scratch.Capacity(length, _points.Length), out Block<GrowthPoint<TWide>> grown))
         {
             Release();
             return false;
@@ -1221,8 +1203,8 @@ internal sealed class GrowthPoints<TWide, TSum, TGrowth, TResult>(PType values, 
         // Sorted in place by target, then in order: each target's points then lie side by side.
         Span<GrowthPoint<TWide>> points = _points.AsSpan(0, _count);
         points.Sort(default(GrowthPointOrder<TWide>));
-        long[] order = [];
-        TWide[] value = [];
+        ScratchBlock<long> order = default;
+        ScratchBlock<TWide> value = default;
         try
         {
             int start = 0;
@@ -1260,20 +1242,14 @@ internal sealed class GrowthPoints<TWide, TSum, TGrowth, TResult>(PType values, 
     internal override void Release()
     {
         Give();
-        _points = [];
+        _points = default;
         _count = 0;
         _values.Release();
         _orders.Release();
         Scratch.Return(ref _rows);
     }
 
-    private void Give()
-    {
-        if (_points.Length > 0)
-        {
-            QueryArrays.Return(memory, _points);
-        }
-    }
+    private void Give() => Blocks.Return(memory, _points);
 }
 
 /// <summary>A point read again, and the group it goes to among those read.</summary>

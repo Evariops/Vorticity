@@ -5,6 +5,7 @@ using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
+using Vorticity.Buffers;
 using Vorticity.Writing;
 
 namespace Vorticity.Aggregating;
@@ -594,7 +595,7 @@ internal sealed class BytesDistinctSlot : AggregateSlot<long>, IPairedSlot
     private ByteKeyTable _seen = new ByteKeyTable();
     private long[] _counts = [];
     private int _groups;
-    private byte[] _key = new byte[64];
+    private ScratchBlock<byte> _key;
     private MaskCache _rows;
     private CodeSet _distinct;
 
@@ -617,6 +618,7 @@ internal sealed class BytesDistinctSlot : AggregateSlot<long>, IPairedSlot
     internal override void Release()
     {
         _seen.Release();
+        Scratch.Return(ref _key);
         if (_shelf is { } shelf)
         {
             shelf.Give(_counts);
@@ -808,7 +810,7 @@ internal sealed class BytesDistinctSlot : AggregateSlot<long>, IPairedSlot
             part =>
             {
                 ByteKeyTable distinct = new ByteKeyTable();
-                byte[] key = new byte[64];
+                ScratchBlock<byte> key = default;
                 long[] count = byGroup ? owned : new long[groups];
                 for (int p = 0; p < all.Length; p++)
                 {
@@ -829,6 +831,8 @@ internal sealed class BytesDistinctSlot : AggregateSlot<long>, IPairedSlot
                         }
                     }
                 }
+
+                Scratch.Return(ref key);
 
                 // The part's table, held until its pairs are counted.
                 long bytes = distinct.Footprint;

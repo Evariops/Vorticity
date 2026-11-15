@@ -6,6 +6,7 @@ using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Vorticity.Arrays;
+using Vorticity.Buffers;
 
 namespace Vorticity.Aggregating;
 
@@ -144,8 +145,8 @@ internal abstract class CardinalitySlot : SketchSlot<CardinalitySketch, long>
     internal override void Keep(ReadOnlySpan<int> groups)
     {
         // The kept groups' first hashes taken aside in their order, then put first, as the sketches are.
-        byte[] held = ArrayPool<byte>.Shared.Rent(Math.Max(groups.Length, 1));
-        ulong[] firsts = ArrayPool<ulong>.Shared.Rent(Math.Max(groups.Length * Firsts, 1));
+        Block<byte> held = Blocks.Rent<byte>(groups.Length);
+        Block<ulong> firsts = Blocks.Rent<ulong>(groups.Length * Firsts);
         try
         {
             for (int i = 0; i < groups.Length; i++)
@@ -155,14 +156,14 @@ internal abstract class CardinalitySlot : SketchSlot<CardinalitySketch, long>
             }
 
             base.Keep(groups);
-            held.AsSpan(0, groups.Length).CopyTo(_held);
-            firsts.AsSpan(0, groups.Length * Firsts).CopyTo(_firsts);
+            held.CopyTo(_held);
+            firsts.CopyTo(_firsts);
             _held.AsSpan(groups.Length).Clear();
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(held);
-            ArrayPool<ulong>.Shared.Return(firsts);
+            Blocks.Return(held);
+            Blocks.Return(firsts);
         }
     }
 
@@ -396,11 +397,11 @@ internal static class ShortHash
 internal sealed class FixedCardinalitySlot<TValue>(StorageKind kind) : CardinalitySlot
     where TValue : unmanaged
 {
-    private TValue[] _values = [];
+    private ScratchBlock<TValue> _values;
     private MaskCache _rows;
-    private ulong[] _clip = [];
+    private ScratchBlock<ulong> _clip;
 
-    /// <summary>The sketches, then the values widened, the masks joined and the window's words, back to the process's shelf.</summary>
+    /// <summary>The sketches, then the values widened, the masks joined and the window's words, back to the pool.</summary>
     internal override void Release()
     {
         base.Release();
@@ -489,11 +490,11 @@ internal sealed class BytesCardinalitySlot : CardinalitySlot
     private CodeSet _distinct;
 
     // A batch's dictionary entries hashed at their first row: each code's hash, and the batch it was hashed in.
-    private ulong[] _hashes = [];
-    private int[] _hashedIn = [];
+    private ScratchBlock<ulong> _hashes;
+    private ScratchBlock<int> _hashedIn;
     private int _batch;
 
-    /// <summary>The sketches, then the masks joined, the codes met and the entries' hashes, back to the process's shelf.</summary>
+    /// <summary>The sketches, then the masks joined, the codes met and the entries' hashes, back to the pool.</summary>
     internal override void Release()
     {
         base.Release();
@@ -540,13 +541,13 @@ internal sealed class BytesCardinalitySlot : CardinalitySlot
         }
         else if (_batch == int.MaxValue)
         {
-            Array.Clear(_hashedIn);
+            _hashedIn.Clear();
             _batch = 0;
         }
 
         int batch = ++_batch;
-        ulong[] hashes = _hashes;
-        int[] hashedIn = _hashedIn;
+        Span<ulong> hashes = _hashes.AsSpan();
+        Span<int> hashedIn = _hashedIn.AsSpan();
         RowCursor rows = new RowCursor(_rows.And(input, input.Selection, ArenaWords.Validity(arena, input.Node)), input.Start, input.End);
         while (rows.Next(out int row))
         {

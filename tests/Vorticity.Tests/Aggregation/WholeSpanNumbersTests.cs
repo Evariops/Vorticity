@@ -192,8 +192,8 @@ public sealed class WholeSpanNumbersTests
         VortexBuffer buffer = arena.Allocate(values.Length * size, size, out Span<byte> bytes);
         MemoryMarshal.AsBytes(values.AsSpan()).CopyTo(bytes);
         int node = arena.AddPrimitive(Types.Primitive(ptype, Nullability.NonNullable), values.Length, Validity.NonNullable, ptype, buffer);
-        int[] groups = new int[values.Length];
+        Block<int> groups = Blocks.Allocate<int>(values.Length);
         keys.Assign(arena, [node], values.Length, [], groups, new GroupRanges());
-        return groups;
+        return groups.AsSpan().ToArray();
     }
 }

@@ -92,7 +92,7 @@ public sealed class DictionaryGroupKeysTests
     {
         RetainingArena batch = new RetainingArena();
         int node = CanonicalSlice.SliceAcross(chunk, batch, dictionary, start, rows);
-        int[] rowGroups = new int[rows];
+        Block<int> rowGroups = Blocks.Allocate<int>(rows);
 
         bool ranged = keys.Assign(batch, [node], rows, [(1UL << rows) - 1], rowGroups, new GroupRanges());
 

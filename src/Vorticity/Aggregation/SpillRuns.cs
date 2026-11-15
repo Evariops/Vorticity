@@ -5,6 +5,7 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
+using Vorticity.Buffers;
 using Vorticity.Writing;
 
 namespace Vorticity.Aggregating;
@@ -819,7 +820,19 @@ internal sealed class RunMerge(
     private void MergeSections(SpillRun run, int first, int past, ReadOnlySpan<byte> bytes, GroupKeys keys, AggregateSlot[] slots, PairPass pass)
     {
         SpillReader reader = new SpillReader(bytes);
-        int[] map = [];
+        ScratchBlock<int> map = default;
+        try
+        {
+            MergeSections(run, first, past, ref reader, keys, slots, pass, ref map);
+        }
+        finally
+        {
+            Scratch.Return(ref map);
+        }
+    }
+
+    private void MergeSections(SpillRun run, int first, int past, ref SpillReader reader, GroupKeys keys, AggregateSlot[] slots, PairPass pass, ref ScratchBlock<int> map)
+    {
         for (int section = first; section < past; section++)
         {
             int count = run.Counts[section];

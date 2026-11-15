@@ -23,7 +23,7 @@ public class AuditRawKeysBenchmarks
 {
     private const int Rows = 65_536;
 
-    private readonly int[] _groups = new int[Rows];
+    private readonly Block<int> _groups = Blocks.Allocate<int>(Rows);
     private CanonicalArena _arena = null!;
     private int[] _nodes = [];
     private GroupKeys _keys = null!;

@@ -101,7 +101,7 @@ internal sealed class ChosenBySlot<TValue>(bool max, StorageKind kind) : RecordS
 
     internal override ChosenRow<TValue> Seed => new ChosenRow<TValue> { Row = -1 };
 
-    /// <summary>The values widened and the masks joined, back to the process's shelf.</summary>
+    /// <summary>The values widened and the masks joined, back to the pool.</summary>
     private protected override void ReleaseScratch()
     {
         _values.Release();
