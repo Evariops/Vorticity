@@ -43,7 +43,8 @@ internal static class DatasetMaintenance
         if (compacted is not null)
         {
             Console.WriteLine($"compacted: version {compacted.Version}, {compacted.Outcome}, level {compacted.FromLevel} to {compacted.ToLevel}, " +
-                $"{compacted.ObjectsIn} objects in and {compacted.ObjectsOut} out, {compacted.BytesIn} bytes in and {compacted.BytesOut} out, {compacted.Rows} rows");
+                $"{compacted.ObjectsIn} objects in and {compacted.ObjectsOut} out, {compacted.BytesIn} bytes in and {compacted.BytesOut} out, {compacted.Rows} rows, " +
+                $"its blocks {compacted.MemoryReserved} bytes at most, {compacted.ScratchBytes} bytes on the scratch");
         }
 
         Console.WriteLine($"  cost: {Cost(store)}");

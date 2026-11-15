@@ -320,6 +320,28 @@ Measured above with `CountingObjectStore`, on a dataset of one object after comp
 one. On a store where a request costs 30 ms, it is what a job takes. See
 [object-store.md](object-store.md).
 
+## Sizing a maintainer
+
+A process that runs a dataset's jobs, a maintainer, needs three things sized: its memory, its scratch
+and its window.
+
+| | what the library does with it | how to size it |
+|---|---|---|
+| The container's memory limit | The process's limit is the container's, less an eighth. The jobs' budget is half of it by default (`VortexSessionOptions.JobMemoryBudget`), and a job's blocks never pass it: a job that would is given up and a job of half as many inputs runs instead. | 2 Gi at least. Under 2 Gi the jobs' budget is 896 MiB, which holds the merge of a few dozen inputs of metric records. Give the maintainer a process of its own, not one that answers questions too. |
+| The scratch | A job that reads 16 MiB or more copies its inputs there and reads them from the disk. It refuses to start without room for them. | A `ScratchDirectory` on an `emptyDir` on disk, or on a volume, never on memory (`medium: Memory`). A few times the bytes of the largest job, which is an object's size (`DatasetLayout.ObjectBytes`, 1 GiB by default) for a piece of a consolidation. Set a `ScratchBudget` at the volume's limit less what else writes there. |
+| The retention window | A job deletes what it replaced once the version before it is past the window. A job, or a piece of a consolidation, reads no more than it can commit in a quarter of the window. | At least four times the longest piece at the rate your jobs run, and no longer than your readers need: 15 minutes for a pipeline whose readers refresh often. |
+
+```csharp
+await using VortexSession session = VortexSession.Create(options =>
+{
+    options.ScratchDirectory = "/scratch";                         // an emptyDir on disk
+    options.ScratchBudget = new ScratchBudget(16L << 30);          // the volume's limit, less what else writes there
+});
+```
+
+The vacuum stays for what the jobs do not delete: the objects of a job that died before its commit,
+what a closed handle left noted, and the commit objects. Run it at a low pace, every few hours.
+
 ## Watch out
 
 * A compaction deletes what it replaced, once its commit is made and the version before it is past
