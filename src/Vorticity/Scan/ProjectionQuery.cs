@@ -110,7 +110,8 @@ internal sealed class ConvertedColumn<T>(string name, VortexType type, FieldExpr
 
         VortexSessionOptions options = session.Options;
         ResultValues.Copy(null, arena, node, source, options.Extensions, _values, null);
-        _store ??= ColumnStores.Create(VortexTypes.ToDType(Type, new DTypeArena()), Buffers.MemoryAccount.Unassigned, options.Extensions);
+        // Under the account of the batches it builds into: the scan's.
+        _store ??= ColumnStores.Create(VortexTypes.ToDType(Type, new DTypeArena()), arena.Account, options.Extensions);
         _store.Truncate(0);
         ResultValues.Append(_store, _values, rows, null);
         return _store.Build(arena, rows);

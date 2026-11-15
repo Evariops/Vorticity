@@ -138,7 +138,7 @@ internal sealed class KeyOrderedBatches : IAsyncEnumerable<RecordBatch>
             }
             else
             {
-                _ownAccount = new Buffers.WorkAccount(_scan.File.Session.Options.MemoryBudget ?? QueryMemoryBudget.Process, "scan");
+                _ownAccount = new Buffers.WorkAccount(QueryMemoryBudget.Of(_scan.File.Session), "scan");
                 _account = _ownAccount;
             }
 

@@ -91,6 +91,12 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable, IOrderedKeys
         _cancellationToken = cancellationToken;
     }
 
+    /// <summary>
+    /// Whom the windows of the merge's runs are counted for: the question's account, or a budget's for a job, the merge
+    /// giving them back as it ends.
+    /// </summary>
+    internal required Vorticity.Buffers.MemoryAccount Account { get; init; }
+
     /// <summary>The run the merge is on: an input's batch, or a window of it.</summary>
     /// <exception cref="InvalidOperationException">The merge is not on a run.</exception>
     internal RecordBatch Current => _current ?? throw new InvalidOperationException("The merge is not on a run.");
@@ -152,7 +158,7 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable, IOrderedKeys
         }
         else
         {
-            _windows ??= new CanonicalArena(64, Vorticity.Buffers.MemoryAccount.Unassigned);
+            _windows ??= new CanonicalArena(64, Account);
             _window = batch.Window(chosen.Row, count, _windows, _window);
             _current = _window;
         }

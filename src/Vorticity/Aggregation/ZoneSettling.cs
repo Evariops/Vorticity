@@ -220,8 +220,8 @@ internal sealed class ZoneSettling
     /// <summary>The rows of the file settled block <paramref name="index"/> holds.</summary>
     internal RowRange Range(int index) => Live.BlockRange(_blocks[index]);
 
-    /// <summary>What a partition folds the settled blocks in, made once for it.</summary>
-    internal Scratch NewScratch() => new Scratch(_columns);
+    /// <summary>What a partition folds the settled blocks in, made once for it, its blocks counted for <paramref name="account"/>: the question's.</summary>
+    internal Scratch NewScratch(MemoryAccount account) => new Scratch(_columns, account);
 
     /// <summary>
     /// The block folded in place of settled block <paramref name="index"/>, in
@@ -458,8 +458,9 @@ internal sealed class ZoneSettling
     /// <summary>What one partition folds the settled blocks in: an arena emptied for each, and the dtypes, made once.</summary>
     internal sealed class Scratch
     {
-        internal Scratch(Stored[] columns)
+        internal Scratch(Stored[] columns, MemoryAccount account)
         {
+            Arena = new CanonicalArena(64, account);
             DTypeArena types = new DTypeArena();
             Types = new DType[columns.Length];
             Storage = new DType[columns.Length];
@@ -476,7 +477,7 @@ internal sealed class ZoneSettling
             DTypes = types;
         }
 
-        internal CanonicalArena Arena { get; } = new CanonicalArena(64, MemoryAccount.Unassigned);
+        internal CanonicalArena Arena { get; }
 
         /// <summary>The arena of the dtypes below, kept with them.</summary>
         internal DTypeArena DTypes { get; }

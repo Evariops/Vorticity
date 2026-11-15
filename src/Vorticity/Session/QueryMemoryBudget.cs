@@ -108,6 +108,9 @@ public sealed class QueryMemoryBudget
     /// </summary>
     internal static QueryMemoryBudget Process { get; } = new QueryMemoryBudget(ProcessLimit(), process: null);
 
+    /// <summary>The budget the questions and scans of <paramref name="session"/> reserve in: its own, the process's when it gives none.</summary>
+    internal static QueryMemoryBudget Of(VortexSession session) => session.Options.MemoryBudget ?? Process;
+
     /// <summary>
     /// What the process's background jobs hold together, unless a session gives them a budget of their own: the merges of
     /// a dataset's levels, its consolidations and the stores of its appends. Half the process's limit, reserved in the

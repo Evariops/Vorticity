@@ -199,7 +199,7 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
         }
         else
         {
-            _ownAccount = new WorkAccount(file.Session.Options.MemoryBudget ?? QueryMemoryBudget.Process, "Parquet scan");
+            _ownAccount = new WorkAccount(QueryMemoryBudget.Of(file.Session), "Parquet scan");
             _account = _ownAccount;
         }
 

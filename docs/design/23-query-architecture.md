@@ -526,6 +526,8 @@ The union adds one level above the version to the units of [section 8.1](#81-the
 
 Two things do not hold across members. No version does: each member is read at the version its source was made at. No order does either: the rows in the order of a column are asked of each member in that order, so that a member with no key source refuses as it would alone, then merged in a blocking stage. A window of an order is read late ([16-queries.md](16-queries.md)): each member finds the places of its own best rows by the path it takes alone, the members side by side, the best of the whole being among them, and when they are more than the window the column is read at those places alone to settle which are kept, a tie to the earlier place.
 
+Memory does hold across members: a question over a union is one question of its budget, whatever its shape. Its memory is made once, where the question starts, and goes down with the spec to every member, whose tops, sorts, reads ahead and scans reserve and count in it rather than in a memory of their own. The candidates the members bring to a window are held in it, so its budget bounds how many they may bring, and so are the copies of the places a take asks of each member past the first.
+
 ### 8.6 Explanation, and plan tests
 
 An explanation says, per unit, the alternative chosen, its cost, and why each other one lost, from the tree's entries

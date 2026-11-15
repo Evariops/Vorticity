@@ -370,7 +370,7 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
         AggregationHost host = _query.Host;
         host.Begin();
         _begun = true;
-        _memory = new QueryMemory(host.Source.Session.Options.MemoryBudget ?? QueryMemoryBudget.Process);
+        _memory = QueryMemory.Start(host.Source.Session);
         _started = Stopwatch.GetTimestamp();
         _query.PeakGroups = 0;
         _query.Plan.LastGroups = 0;

@@ -165,7 +165,7 @@ internal abstract class StreamScanSource : ScanSource, IRowsCapability, IStatist
             throw new NotSupportedException($"'{path}' has no key cursor: {reason}.");
         }
 
-        QueryMemory memory = new QueryMemory(Session.Options.MemoryBudget ?? QueryMemoryBudget.Process);
+        QueryMemory memory = QueryMemory.Start(Session);
         try
         {
             IAsyncEnumerator<RecordBatch> batches = Stream(new ScanSpec(), ReadsColumns ? [column] : null, new ScanCounters(), cancellationToken);
@@ -302,6 +302,9 @@ internal abstract class StreamScanSource : ScanSource, IRowsCapability, IStatist
         private readonly Enumerator _kept;
         private readonly CancellationToken _cancellationToken;
         private QueryMemory? _memory;
+
+        // Whether the sort started its question, and gives its memory back.
+        private bool _owned;
         private ExternalSort? _sort;
         private IAsyncEnumerator<RecordBatch>? _sorted;
 
@@ -322,7 +325,9 @@ internal abstract class StreamScanSource : ScanSource, IRowsCapability, IStatist
             {
                 VortexSchema schema = _spec.Projection is { IsAll: false } mask ? ToolPaths.Project(_source.Schema, mask) : _source.Schema;
                 VortexSession session = _source.Session;
-                _memory = new QueryMemory(session.Options.MemoryBudget ?? QueryMemoryBudget.Process);
+                // The question's memory, one of its own where the sort starts the question.
+                _owned = _spec.Memory is null;
+                _memory = _spec.Memory ?? QueryMemory.Start(session);
                 VortexType type = schema.IndexOfName(_spec.OrderPath!) is int at and >= 0 ? schema[at].Type : VortexType.Null;
                 int[] delivered = new int[schema.Count];
                 for (int c = 0; c < delivered.Length; c++)
@@ -355,7 +360,10 @@ internal abstract class StreamScanSource : ScanSource, IRowsCapability, IStatist
                 await _sort.DisposeAsync().ConfigureAwait(false);
             }
 
-            _memory?.Dispose();
+            if (_owned)
+            {
+                _memory?.Dispose();
+            }
         }
     }
 

@@ -41,6 +41,61 @@ internal sealed class QueryMemory : IDisposable
         budget.Enter();
     }
 
+    /// <summary>The memory of a question that starts here, under <paramref name="session"/>'s budget, the process's when it gives none.</summary>
+    internal static QueryMemory Start(VortexSession session) => new QueryMemory(QueryMemoryBudget.Of(session));
+
+    /// <summary>
+    /// The memory of the question <paramref name="spec"/> serves, or, for a question that starts here, one made under
+    /// <paramref name="session"/>'s budget: the lease gives back only what it made.
+    /// </summary>
+    internal static Lease For(ScanSpec spec, VortexSession session) =>
+        spec.Memory is { } memory ? new Lease(memory, owned: false) : new Lease(Start(session), owned: true);
+
+    /// <summary>
+    /// What a step that reads ahead reserved: <paramref name="bytes"/> of the question's memory, given back when the step
+    /// ends; or a memory of its own, for a step of no question, given back whole. The default reserves nothing.
+    /// </summary>
+    internal readonly struct Reservation(QueryMemory? memory, long bytes, bool owned) : IDisposable
+    {
+        /// <summary>Whether it reserved anything.</summary>
+        internal bool Holds => memory is not null;
+
+        public void Dispose()
+        {
+            if (memory is null)
+            {
+                return;
+            }
+
+            if (owned)
+            {
+                memory.Dispose();
+            }
+            else
+            {
+                memory.Shrink(bytes);
+            }
+        }
+    }
+
+    /// <summary>A question's memory as a step of it holds it: given back when the step ends only when the step started the question.</summary>
+    internal readonly struct Lease(QueryMemory memory, bool owned) : IDisposable
+    {
+        /// <summary>The question's memory.</summary>
+        internal QueryMemory Memory => memory;
+
+        /// <summary>Whether the step started the question, and gives its memory back.</summary>
+        internal bool Owned => owned;
+
+        public void Dispose()
+        {
+            if (owned)
+            {
+                memory.Dispose();
+            }
+        }
+    }
+
     // The account the query's blocks are counted in, made at the first block it rents.
     private WorkAccount? _account;
 
@@ -70,10 +125,10 @@ internal sealed class QueryMemory : IDisposable
     }
 
     /// <summary>
-    /// The account the blocks of the work <paramref name="memory"/> counts are rented under; for work no query's memory
-    /// counts yet, the account not yet named, until every query carries its memory down to its sources (PLAN-MEMORY, step 6).
+    /// The account the blocks of the work <paramref name="memory"/> counts are rented under; for work of no question, an
+    /// estimate's sample folded, the caller's, counted nowhere: what it builds may reach a caller, whom no account outlives.
     /// </summary>
-    internal static MemoryAccount AccountOf(QueryMemory? memory) => memory?.Account ?? MemoryAccount.Unassigned;
+    internal static MemoryAccount AccountOf(QueryMemory? memory) => memory?.Account ?? MemoryAccount.Caller;
 
     /// <summary>The bytes the query holds of its budget.</summary>
     internal long Held => Volatile.Read(ref _held);

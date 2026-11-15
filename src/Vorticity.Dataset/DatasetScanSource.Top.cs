@@ -44,8 +44,9 @@ internal sealed partial class DatasetScanSource
         }
 
         objects.Sort((left, right) => Better(left.Bound, right.Bound, descending) is int order and not 0 ? order : left.Held.FirstRow.CompareTo(right.Held.FirstRow));
-        using QueryMemory memory = new QueryMemory(Session.Options.MemoryBudget ?? QueryMemoryBudget.Process);
-        using TopKeep top = new TopKeep(Session, type, descending, TopRows.Kept(keep), memory);
+        using QueryMemory.Lease lease = QueryMemory.For(spec, Session);
+        using TopKeep top = new TopKeep(Session, type, descending, TopRows.Kept(keep), lease.Memory);
+        spec = spec.Under(lease.Memory);
         if (stops && field >= 0 && spec.Filter is null && !spec.MatchesNothing)
         {
             await SideBySideAsync(spec, path, field, descending, objects, top, metrics, cancellationToken).ConfigureAwait(false);

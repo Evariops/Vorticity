@@ -159,7 +159,10 @@ internal sealed partial class DatasetScanBuilder
             rankedTies: true,
             (lease, entry) => OrderedBatchesAsync(lease, entry, paths, drop, cancellationToken),
             lease => RecordOpen(lease),
-            cancellationToken);
+            cancellationToken)
+        {
+            Account = _account ?? QueryMemoryBudget.Process.Account,
+        };
         RecordBatch? view = null;
         await using (merge.ConfigureAwait(false))
         {

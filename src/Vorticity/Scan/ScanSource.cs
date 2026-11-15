@@ -55,6 +55,16 @@ internal sealed record ScanSpec
     /// </summary>
     internal Buffers.MemoryAccount? Account { get; init; }
 
+    /// <summary>
+    /// The memory of the question the scan serves, made once where the question starts and carried down with the spec: the
+    /// sources, tops, sorts and unions below reserve in it rather than make their own, so that a budget counts one query
+    /// for one question, whatever its shape. Null at the question's start.
+    /// </summary>
+    internal Aggregating.QueryMemory? Memory { get; init; }
+
+    /// <summary>This spec, of the question whose memory is <paramref name="memory"/>: its scans' blocks counted in its account.</summary>
+    internal ScanSpec Under(Aggregating.QueryMemory memory) => this with { Memory = memory, Account = memory.Account };
+
     /// <summary>Whether the decoders may deliver dictionary and run-end columns in their encoded form, for a consumer that reads it.</summary>
     internal bool KeepEncodings { get; init; }
 

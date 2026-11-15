@@ -478,8 +478,10 @@ internal sealed class EstimateRun
 
         VortexSessionOptions options = _question.Session.Options;
         DType dtype = VortexTypes.ToDType(VortexSchema.Create(fields), new DTypeArena());
-        StructStore store = (StructStore)ColumnStores.Create(dtype, MemoryAccount.Unassigned, options.Extensions);
-        CanonicalArena arena = new CanonicalArena(GroupBatches.ResultNodes(dtype.FieldCount), MemoryAccount.Unassigned);
+        // Scratch given back in the finally below: the process's account.
+        MemoryAccount account = QueryMemoryBudget.Process.Account;
+        StructStore store = (StructStore)ColumnStores.Create(dtype, account, options.Extensions);
+        CanonicalArena arena = new CanonicalArena(GroupBatches.ResultNodes(dtype.FieldCount), account);
         AggregationPartition scaled = new AggregationPartition(plan, new AggregateSlot?[plan.Aggregates.Length], _columns, _inputs, sorted: false);
         int[] place = new int[groups];
         try
@@ -881,6 +883,9 @@ internal sealed class EstimateQuery : ResultQuery
         private ResultColumn[]? _columns;
         private StructStore? _store;
         private CanonicalArena? _arena;
+
+        // The account of the estimate's batches, which the caller reads: closed when the enumeration ends.
+        private WorkAccount? _account;
         private RecordBatch? _current;
         private int[] _order = [];
         private long _next;
@@ -895,8 +900,9 @@ internal sealed class EstimateQuery : ResultQuery
                 _columns = query.NewColumns();
                 VortexSessionOptions options = query.Session.Options;
                 DType dtype = VortexTypes.ToDType(query.Schema, new DTypeArena());
-                _store = (StructStore)ColumnStores.Create(dtype, MemoryAccount.Unassigned, options.Extensions);
-                _arena = new CanonicalArena(GroupBatches.ResultNodes(dtype.FieldCount), MemoryAccount.Unassigned);
+                _account = new WorkAccount(QueryMemoryBudget.Of(query.Session), "estimate");
+                _store = (StructStore)ColumnStores.Create(dtype, _account, options.Extensions);
+                _arena = new CanonicalArena(GroupBatches.ResultNodes(dtype.FieldCount), _account);
                 _order = new int[query._groups];
                 for (int g = 0; g < _order.Length; g++)
                 {
@@ -940,6 +946,7 @@ internal sealed class EstimateQuery : ResultQuery
                 column.Release();
             }
 
+            _account?.Dispose();
             return ValueTask.CompletedTask;
         }
     }

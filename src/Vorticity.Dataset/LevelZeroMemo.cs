@@ -217,7 +217,7 @@ internal sealed class LevelZeroMemo : IAsyncDisposable
                 wanted = Wanted(keys, held.Keys);
             }
 
-            QueryMemoryBudget budget = dataset.Session.Options.MemoryBudget ?? QueryMemoryBudget.Process;
+            QueryMemoryBudget budget = QueryMemoryBudget.Of(dataset.Session);
             long reserved = Math.Max(entry.Bytes, 1);
             if (!budget.TryReserve(reserved))
             {

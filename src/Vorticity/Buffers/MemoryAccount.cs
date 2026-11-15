@@ -37,12 +37,6 @@ internal abstract class MemoryAccount
     internal static MemoryAccount Caller { get; } = new Uncounted("caller's");
 
     /// <summary>
-    /// The rents whose account the refactoring has yet to name (PLAN-MEMORY, steps 3 to 6): counted nowhere, as every rent
-    /// was before it. The residue ratchet holds its uses to zero by the end of the plan.
-    /// </summary>
-    internal static MemoryAccount Unassigned { get; } = new Uncounted("unassigned");
-
-    /// <summary>
     /// The pool every account rents from, the process's one: reached through the accounts alone, so that no block leaves it
     /// without one, and here for what reads its state, the memory report and the tests.
     /// </summary>

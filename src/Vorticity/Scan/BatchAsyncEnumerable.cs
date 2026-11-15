@@ -518,7 +518,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         // The question's account when the scan serves one; else one of the scan's own, closed once its lanes are given back.
         if (account is null)
         {
-            _ownAccount = new Buffers.WorkAccount(file.Session.Options.MemoryBudget ?? QueryMemoryBudget.Process, "scan");
+            _ownAccount = new Buffers.WorkAccount(QueryMemoryBudget.Of(file.Session), "scan");
             account = _ownAccount;
         }
 

@@ -22,8 +22,11 @@ internal static class TopRows
     internal static async IAsyncEnumerable<RecordBatch> BatchesAsync(
         ScanSource source, ScanSpec spec, long keep, ScanCounters metrics, [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
+        // One question: the places found and the rows sorted back under one memory, which the sources below take.
+        using QueryMemory.Lease lease = QueryMemory.For(spec, source.Session);
+        QueryMemory memory = lease.Memory;
         string path = spec.OrderPath!;
-        ScanSpec unordered = spec with { OrderPath = null, Descending = false };
+        ScanSpec unordered = spec.Under(memory) with { OrderPath = null, Descending = false };
         long[] places = await source.Rows.TopPositionsAsync(unordered, path, spec.Descending, keep, metrics, cancellationToken).ConfigureAwait(false)
             ?? await PlacesAsync(source, unordered, path, spec.Descending, keep, metrics, cancellationToken).ConfigureAwait(false);
         if (places.Length == 0)
@@ -56,7 +59,6 @@ internal static class TopRows
             delivered[c] = c;
         }
 
-        using QueryMemory memory = new QueryMemory(source.Session.Options.MemoryBudget ?? QueryMemoryBudget.Process);
         SortKey key = new SortKey(new ColumnFieldExpr(path), TypeOf(source, path), spec.Descending);
         ExternalSort sort = new ExternalSort(source.Session, schema, [key], delivered, memory, GroupBatches.BatchRows);
         await using (sort.ConfigureAwait(false))
@@ -88,9 +90,9 @@ internal static class TopRows
     internal static async ValueTask<long[]> PlacesAsync(
         ScanSource source, ScanSpec spec, string path, bool descending, long keep, ScanCounters metrics, CancellationToken cancellationToken)
     {
-        using QueryMemory memory = new QueryMemory(source.Session.Options.MemoryBudget ?? QueryMemoryBudget.Process);
-        using TopKeep top = new TopKeep(source.Session, TypeOf(source, path), descending, Kept(keep), memory);
-        await FeedAsync(source, spec, path, top, null, metrics, cancellationToken).ConfigureAwait(false);
+        using QueryMemory.Lease lease = QueryMemory.For(spec, source.Session);
+        using TopKeep top = new TopKeep(source.Session, TypeOf(source, path), descending, Kept(keep), lease.Memory);
+        await FeedAsync(source, spec.Under(lease.Memory), path, top, null, metrics, cancellationToken).ConfigureAwait(false);
         return top.Places(cancellationToken);
     }
 

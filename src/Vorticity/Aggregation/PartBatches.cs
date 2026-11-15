@@ -160,6 +160,9 @@ internal sealed class PartBuilder
         }
 
         _columns.Clear();
+
+        // The parts' batches the caller still holds are its own from now on, counted nowhere.
+        Volatile.Read(ref _account)?.Dispose();
     }
 
     /// <summary>A store of the pool, or a new one.</summary>
@@ -181,10 +184,30 @@ internal sealed class PartBuilder
             dtype = _dtype;
         }
 
-        // Made before the run makes the query's memory: the account not yet named until the query's account flows down
-        // with its spec (PLAN-MEMORY, step 6).
+        // Under the result's own account, which its batches are counted in until the result is done (Release).
         VortexSessionOptions options = _query.Session.Options;
-        return new PartSlate((StructStore)ColumnStores.Create(dtype, MemoryAccount.Unassigned, options.Extensions), new CanonicalArena(64, MemoryAccount.Unassigned));
+        WorkAccount account = Account();
+        return new PartSlate((StructStore)ColumnStores.Create(dtype, account, options.Extensions), new CanonicalArena(64, account));
+    }
+
+    // The account of the parts' batches: made with the first store, closed when the result is done.
+    private WorkAccount? _account;
+
+    private WorkAccount Account()
+    {
+        if (Volatile.Read(ref _account) is { } account)
+        {
+            return account;
+        }
+
+        WorkAccount made = new WorkAccount(QueryMemoryBudget.Of(_query.Session), "parts");
+        if (Interlocked.CompareExchange(ref _account, made, null) is { } won)
+        {
+            made.Dispose();
+            return won;
+        }
+
+        return made;
     }
 }
 

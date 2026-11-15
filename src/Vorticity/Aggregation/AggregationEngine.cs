@@ -2968,7 +2968,7 @@ internal sealed class AggregationPartition
         ZoneSettling? settling = _settling;
         while (settling is not null && _settledNext < _settledEnd && settling.Start(_settledNext) < before)
         {
-            _settledScratch ??= settling.NewScratch();
+            _settledScratch ??= settling.NewScratch(QueryMemory.AccountOf(Memory));
             TakeSharedEdge();
             Fold(settling.Batch(_settledNext++, _settledScratch));
         }
@@ -3819,8 +3819,8 @@ internal static class AggregationEngine
                 : null);
         // What the lanes' tables and the merge hold, reserved in the session's budget as they grow,
         // brought down to the result once the groups are merged and given back when it is delivered;
-        // all of it as soon as the query fails.
-        QueryMemory memory = new QueryMemory(source.Session.Options.MemoryBudget ?? QueryMemoryBudget.Process);
+        // all of it as soon as the query fails. The aggregation is where its question starts.
+        QueryMemory memory = QueryMemory.Start(source.Session);
         GroupCore? core = null;
         CorePressure? pressure = null;
 
@@ -4436,10 +4436,11 @@ internal static class AggregationEngine
     /// </summary>
     internal static ScanSpec Batched(ScanSpec pass, QueryMemory memory, int lanes, int spilledRow = 0)
     {
-        // The pass's scans count their reads and their batches under the question's account.
-        if (pass.Account is null)
+        // The pass's scans count their reads and their batches under the question's account, and the sources below take
+        // its memory for what they reserve.
+        if (pass.Memory is null)
         {
-            pass = pass with { Account = memory.Account };
+            pass = pass.Under(memory);
         }
 
         int asked = pass.Options.BatchRows > 0 ? pass.Options.BatchRows : GroupBatches.BatchRows;

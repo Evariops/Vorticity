@@ -266,7 +266,7 @@ internal sealed class DistinctBatches : IAsyncEnumerator<RecordBatch>
             };
 
             (ColumnShape[] columns, int[] inputs) = AggregationEngine.Columns(plan, []);
-            _memory = new QueryMemory(projection.Host.Source.Session.Options.MemoryBudget ?? QueryMemoryBudget.Process);
+            _memory = QueryMemory.Start(projection.Host.Source.Session);
 
             // Under a budget that would cut them, batches of new values a sixteenth of its ceiling at most,
             // which the index takes past it before it goes to the scratch.
@@ -496,7 +496,7 @@ internal sealed class DistinctBatches : IAsyncEnumerator<RecordBatch>
         int degree = spec.Options.DegreeOfParallelism > 0 ? spec.Options.DegreeOfParallelism : projection.Host.Source.Session.Options.MaxDegreeOfParallelism;
         if (!_query.Plan.CoreDistinct || _streaming >= 0 || _query.Take != long.MaxValue || degree <= 1
             || _query.Plan.CreateKeys(sorted: false, facts: null).EntryBytes == 0
-            || Bounded(AggregationEngine.Facts(projection.Host.Source, _query.Keys), (projection.Host.Source.Session.Options.MemoryBudget ?? QueryMemoryBudget.Process).CeilingBytes))
+            || Bounded(AggregationEngine.Facts(projection.Host.Source, _query.Keys), QueryMemoryBudget.Of(projection.Host.Source.Session).CeilingBytes))
         {
             return false;
         }
@@ -510,7 +510,7 @@ internal sealed class DistinctBatches : IAsyncEnumerator<RecordBatch>
         // awaiting it past their bound (DistinctEmitter).
         _stopping = CancellationTokenSource.CreateLinkedTokenSource(_cancellationToken);
         CancellationToken token = _stopping.Token;
-        _memory ??= new QueryMemory(projection.Host.Source.Session.Options.MemoryBudget ?? QueryMemoryBudget.Process);
+        _memory ??= QueryMemory.Start(projection.Host.Source.Session);
         _emitter = new DistinctEmitter(_query, batchRows, _memory);
         AggregationPlan plan = new AggregationPlan([], _query.Keys)
         {

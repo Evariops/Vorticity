@@ -1045,7 +1045,10 @@ internal static partial class DatasetCompactor
             opened: null,
             cancellationToken,
             ranges?.Low(range) ?? default,
-            ranges?.High(range) ?? default);
+            ranges?.High(range) ?? default)
+        {
+            Account = (dataset.Session.Options.JobMemoryBudget ?? QueryMemoryBudget.Jobs).Account,
+        };
     }
 
     /// <summary>

@@ -26,15 +26,16 @@ internal sealed partial class DatasetScanBuilder
     /// then decoding a batch ahead as before. The reservation, held while the scan reads; null when it reads none ahead:
     /// an aggregation's lane, granted its own, a scan of several lanes, of a take, or of a file that costs no round trip.
     /// </summary>
-    private QueryMemory? ReadsAhead(ScanBuilder scan, VortexFile file)
+    private QueryMemory.Reservation ReadsAhead(ScanBuilder scan, VortexFile file)
     {
         if (_readAheadGranted || ScanDegree > 1 || _options.Prefetch > 1 || _take is not null || _orderPaths is not null
             || file.Source.CostsNoRoundTrip || scan.LargestSplitBytes() is not (> 0 and var split))
         {
-            return null;
+            return default;
         }
 
-        QueryMemory memory = new QueryMemory(_dataset.Session.Options.MemoryBudget ?? QueryMemoryBudget.Process);
+        // In the question's memory: a memory of its own only for a scan asked of no question.
+        QueryMemory memory = _memory ?? QueryMemory.Start(_dataset.Session);
         int ahead = AggregationEngine.TotalAhead(split);
         while (ahead >= BatchAsyncEnumerator.ReadAheadSplits && !memory.TryGrow(ahead * split))
         {
@@ -43,12 +44,16 @@ internal sealed partial class DatasetScanBuilder
 
         if (ahead < BatchAsyncEnumerator.ReadAheadSplits)
         {
-            memory.Dispose();
-            return null;
+            if (_memory is null)
+            {
+                memory.Dispose();
+            }
+
+            return default;
         }
 
         scan.WithReadAhead(ahead);
-        return memory;
+        return new QueryMemory.Reservation(memory, (long)ahead * split, owned: _memory is null);
     }
 
     /// <summary>
@@ -933,7 +938,7 @@ internal sealed partial class DatasetScanBuilder
                         ?? throw new InvalidOperationException($"The granules of '{held.Entry.Key}' its statistics leave are not the blocks of its scan."));
                 }
 
-                using QueryMemory? ahead = ReadsAhead(scan, lease.File);
+                using QueryMemory.Reservation ahead = ReadsAhead(scan, lease.File);
                 await foreach (RecordBatch batch in scan.ExecuteAsync()
                     .WithCancellation(cancellationToken).ConfigureAwait(false))
                 {
@@ -1004,12 +1009,13 @@ internal sealed partial class DatasetScanBuilder
     private async IAsyncEnumerable<RecordBatch> SettledAsync(
         VortexFile file, PositionedObject held, ZoneSettling settling, [EnumeratorCancellation] CancellationToken cancellationToken)
     {
-        ZoneSettling.Scratch scratch = settling.NewScratch();
+        // Under the question's account, which ends with it: the scratch is let go with the walk.
+        ZoneSettling.Scratch scratch = settling.NewScratch(_account ?? Vorticity.Buffers.MemoryAccount.Caller);
         DeletionVector deletions = held.Entry.Deletions;
         ScanBuilder? scan = held.Entry.HasDeletions
             ? null
             : Of(file, held).WithPruned(settling.Live).WithMaxBatchRows(BlockBatch(settling.Live)).WithGranules(GeometryOf(file));
-        using QueryMemory? ahead = scan is null ? null : ReadsAhead(scan, file);
+        using QueryMemory.Reservation ahead = scan is null ? default : ReadsAhead(scan, file);
         IAsyncEnumerable<RecordBatch> rows = scan?.ExecuteAsync()
             ?? LiveAsync(file, held, _filter, _mask, held.FirstRow, _options.Compact, reshaped: false, cancellationToken, pruned: settling.Live);
         RecordBatch? view = null;
@@ -1138,7 +1144,7 @@ internal sealed partial class DatasetScanBuilder
             ScanBuilder second = first.ByPlaces
                 ? Configure(file.ScanBuilder(), null, _mask, canonical: false).Take(first.Rows).WithGranules(GeometryOf(file))
                 : Of(file, held).WithGranuleMask(Masked(file, first.Granules)).WithGranules(GeometryOf(file));
-            using QueryMemory? reads = ReadsAhead(second, file);
+            using QueryMemory.Reservation reads = ReadsAhead(second, file);
             await foreach (RecordBatch batch in second.ExecuteAsync().WithCancellation(cancellationToken).ConfigureAwait(false))
             {
                 yield return InDataset(batch, held.FirstRow, ref view);
@@ -1154,7 +1160,7 @@ internal sealed partial class DatasetScanBuilder
         ulong[]? blocked = notes ? new ulong[(blocks + 63) / 64] : null;
         long keptBlocks = 0;
         long selected = 0;
-        using QueryMemory? ahead = ReadsAhead(scan, file);
+        using QueryMemory.Reservation ahead = ReadsAhead(scan, file);
         await foreach (RecordBatch batch in scan.ExecuteAsync().WithCancellation(cancellationToken).ConfigureAwait(false))
         {
             if (noted is not null)
@@ -1689,8 +1695,8 @@ internal sealed partial class DatasetScanBuilder
         }
 
         // The question's reads: what its scans read of a variant's directories a filter may refute, and the schema they
-        // project, each read or made once.
-        scan.WithQuestionReads(Reads);
+        // project, each read or made once; and its account, which every object's scan counts its blocks in.
+        scan.WithQuestionReads(Reads).WithAccount(_account);
 
         if (projection is { } mask)
         {
