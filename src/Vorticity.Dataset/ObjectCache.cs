@@ -32,6 +32,12 @@ internal sealed class ObjectCache : IAsyncDisposable
     /// </summary>
     internal const int ParsedPerFooterByte = 6;
 
+    /// <summary>
+    /// 🧪 What a handle's open objects weigh that it keeps whatever the registry of kept memory asks: provisional,
+    /// calibrated by measurement with the other floors. Opening an object again costs a request for its tail.
+    /// </summary>
+    internal const long FloorBytes = 8L << 20;
+
     private readonly IObjectStore _store;
     private readonly int _capacity;
     private readonly long _byteCapacity;
@@ -46,6 +52,9 @@ internal sealed class ObjectCache : IAsyncDisposable
     // What the open objects weigh (Held.Weight), leased or idle.
     private long _heldBytes;
     private bool _disposed;
+
+    // The turn of the registry's slow timer under way: an object that goes idle in it carries it.
+    private int _turn;
 
     // The bytes of an object up to which a read of its rows opens it whole (WholeBytesUnder).
     private readonly long _wholeBytes;
@@ -345,6 +354,7 @@ internal sealed class ObjectCache : IAsyncDisposable
     private void Idle(Held held)
     {
         held.IsIdle = true;
+        held.IdleTurn = _turn;
         held.IdleOlder = _idleNewest;
         held.IdleNewer = null;
         if (_idleNewest is { } newest)
@@ -486,6 +496,43 @@ internal sealed class ObjectCache : IAsyncDisposable
         return closing;
     }
 
+    /// <summary>
+    /// Closes, on a thread of the pool, up to <paramref name="bytes"/> of the idle objects above the floor, the oldest idle
+    /// first; only those idle since the timer's turn before when <paramref name="stale"/>, which then starts a turn: the
+    /// bytes they weighed. A leased object stays open, as <see cref="Evict"/> leaves it.
+    /// </summary>
+    internal long LetGo(long bytes, bool stale)
+    {
+        long given = 0;
+        List<Held>? closing = null;
+        lock (_gate)
+        {
+            while (given < bytes && _heldBytes > FloorBytes && _idleOldest is { } oldest && (!stale || oldest.IdleTurn != _turn))
+            {
+                Unidle(oldest);
+                _open.Remove(oldest.Handle);
+                _heldBytes -= oldest.Weight;
+                given += oldest.Weight;
+                oldest.Gone = true;
+                (closing ??= []).Add(oldest);
+            }
+
+            if (stale)
+            {
+                _turn++;
+            }
+        }
+
+        if (closing is not null)
+        {
+            // Asked by a reservation or a sweep, which must not wait for files to close: a failure to close is observed.
+            Task closed = Task.Run(() => CloseAsync(closing).AsTask());
+            _ = closed.ContinueWith(static close => _ = close.Exception, CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted, TaskScheduler.Default);
+        }
+
+        return given;
+    }
+
     private static async ValueTask CloseAsync(List<Held> closing)
     {
         foreach (Held held in closing)
@@ -520,6 +567,9 @@ internal sealed class ObjectCache : IAsyncDisposable
 
         /// <summary>The idle object that went idle after it, or null.</summary>
         internal Held? IdleNewer { get; set; }
+
+        /// <summary>The turn of the registry's slow timer it went idle in.</summary>
+        internal int IdleTurn { get; set; }
 
         /// <summary>Whether the cache let it go, evicted or disposed: a lease given back after has nothing to return to.</summary>
         internal bool Gone { get; set; }

@@ -14,9 +14,9 @@ namespace Vorticity.Buffers;
 /// Requests round up to the next power of two with a floor of 4 KiB, so a scan that reads
 /// segments of slightly different sizes still hits the same bucket. Requests above
 /// <see cref="MaxPooledLength"/> bypass the classes: they are allocated and freed directly, which
-/// keeps a single outsized read from evicting the whole steady-state working set. A graded pool,
-/// <see cref="MemoryAccount.Pool"/>, keeps one of them up to 256 MiB in a slot of its own, which the next
-/// outsized read it is long enough for takes, and which the sweeps free as they free an idle class.
+/// keeps a single outsized read from evicting the whole steady-state working set. The process's
+/// pool, <see cref="MemoryAccount.Pool"/>, keeps one of them up to 256 MiB in a slot of its own, which
+/// the next outsized read it is long enough for takes.
 /// </para>
 /// <para>
 /// A rented block returns to the pool when its reference count reaches zero, so a
@@ -33,14 +33,15 @@ namespace Vorticity.Buffers;
 /// between callers that asked for different segment alignments.
 /// </para>
 /// <para>
-/// A swept pool, as the ones the library rents from are, frees after a collection of the oldest
-/// generation what a class no rent has asked for over a minute keeps parked, and everything
-/// parked when the machine's memory load is high: what a process needed while it read some large
-/// files goes back once it has moved on. A class in use keeps its blocks, and a rent pays one read
-/// of a flag for it.
+/// The process's pool keeps every block given back, with no count or budget of its own: it never keeps more than
+/// was rented at once, and the registry of kept memory (<see cref="HeldMemory"/>) takes back what it keeps above its
+/// floor. It lets go of the blocks that sat parked since it was last asked, after each collection of the oldest
+/// generation and at each turn of the registry's slow timer; everything above its floor when a reservation needs the
+/// room or the machine's memory load is high. A pool made with a count per class keeps that count, and never goes
+/// below it unless trimmed.
 /// </para>
 /// </remarks>
-internal sealed class BlockPool : ISweptAfterCollections, IHeldMemory
+internal sealed class BlockPool : IHeldMemory
 {
     /// <summary>Smallest size class. Below this, pooling costs more than it saves.</summary>
     private const int MinBlockSize = 4096;
@@ -48,67 +49,16 @@ internal sealed class BlockPool : ISweptAfterCollections, IHeldMemory
     private const int MinBlockShift = 12; // log2(MinBlockSize)
 
     /// <summary>
-    /// Bytes a single size class may retain before <see cref="RetainedFor"/> stops widening it.
+    /// 🧪 The bytes each class of the process's pool keeps whatever the registry asks: 64 blocks of 4 KiB, one of
+    /// 256 KiB, none larger. Provisional, calibrated by measurement with the other floors: what a question pays when the
+    /// blocks it rents were let go since the one before.
     /// </summary>
-    /// <remarks>
-    /// Retention is bounded in bytes rather than in blocks, because bytes are what it costs. A
-    /// flat count across classes spanning 4 kB to 32 MB means the same number buys 256 kB at the
-    /// bottom and 2 GB at the top, so any count large enough to help the small classes is
-    /// reckless in the large ones. This budget buys depth exactly where blocks are cheap.
-    /// </remarks>
-    private const int RetentionBudget = 256 * 1024;
-
-    /// <summary>The block size above which a class keeps <see cref="LargeRetentionBudget"/> at most.</summary>
-    private const int LargeBlockSize = 8 * 1024 * 1024;
-
-    /// <summary>
-    /// The processors whose lanes and questions rent at once, which the budgets below grow with: 32
-    /// questions of a node, each at one lane, held some 32 blocks of a class where a scan holds a few,
-    /// and past the budgets every block given back was freed and the next rent took it from the
-    /// system again, under its heap's lock and with every page faulted anew.
-    /// </summary>
-    private static readonly long Processors = Math.Max(1, Environment.ProcessorCount);
-
-    /// <summary>
-    /// Bytes a class of blocks above <see cref="LargeBlockSize"/> may retain: 16 MiB a processor,
-    /// 64 MiB at least. A segment that size is a whole column chunk, which a scan reads once per
-    /// column and gives back before the next, so a couple of parked blocks serve a scan; the floor
-    /// that suits the small classes would park hundreds of megabytes here.
-    /// </summary>
-    private static readonly long LargeRetentionBudget = Math.Max(64L << 20, Processors * (16L << 20));
+    internal const int FloorBytesPerClass = 256 * 1024;
 
     /// <summary>Largest permissible <c>maxPooledLength</c>: keeps every rounded size an int.</summary>
     private const int MaxPoolableLength = 1 << 30;
 
-    /// <summary>
-    /// Bytes one class of the graded pool may keep parked when the demand it meets asks for more
-    /// than its base retention: a wide batch holds a block of each of its columns at once, and the
-    /// questions of a node each hold hundreds of blocks of the classes of its segments. 64 MiB a
-    /// processor, 64 MiB at least.
-    /// </summary>
-    private static readonly long DemandClassBudget = Math.Max(64L << 20, Processors * (64L << 20));
-
-    /// <summary>Blocks a class widened to its demand keeps at most, however small they are: 256 a processor, 4 096 at least.</summary>
-    private static readonly int DemandBlocks = (int)Math.Max(4_096, Processors * 256);
-
-    /// <summary>
-    /// Bytes parked across every class, base retention included, under which a class may keep more
-    /// than its base retention: 256 MiB a processor, 256 MiB at least. Thirty-two questions at once
-    /// give back more blocks of 512 KiB and 1 MiB than an eighth of this keeps: freed, they are taken
-    /// anew from the system at the next rent, every page faulted again.
-    /// </summary>
-    private static readonly long DemandBudget = Math.Max(256L << 20, Processors * (256L << 20));
-
-    /// <summary>
-    /// How long a class goes without a rent before a sweep frees what it keeps parked: the minute
-    /// <c>ArrayPool&lt;T&gt;.Shared</c> gives its own buffers.
-    /// </summary>
-    private const long IdleMilliseconds = 60_000;
-
-    /// <summary>The sweeps of each watched pool, counted; null until a pool is watched, so that a pool nobody watches does not look.</summary>
-    private static ConditionalWeakTable<BlockPool, StrongBox<int>>? SweepCounts;
-
-    /// <summary>The longest block past <see cref="MaxPooledLength"/> a graded pool keeps parked, in its one slot for them.</summary>
+    /// <summary>The longest block past <see cref="MaxPooledLength"/> the process's pool keeps parked, in its one slot for them.</summary>
     /// <remarks>
     /// A segment that large is a whole column of a file another writer chunked in millions of rows,
     /// read positionally on Windows when the session keeps no mapping: freed after each scan, the next
@@ -122,82 +72,57 @@ internal sealed class BlockPool : ISweptAfterCollections, IHeldMemory
 
     private readonly Bucket[] _buckets;
 
-    /// <summary>Whether blocks past <see cref="MaxPooledLength"/> are kept, one at a time: the graded pool's policy.</summary>
+    /// <summary>Whether blocks past <see cref="MaxPooledLength"/> are kept, one at a time: the process's pool's policy.</summary>
     private readonly bool _keepsOutsized;
 
     /// <summary>The block past <see cref="MaxPooledLength"/> kept parked, or null.</summary>
     private BlockOwner? _outsized;
 
-    /// <summary>When a block past <see cref="MaxPooledLength"/> was last asked for, in the milliseconds of <see cref="Environment.TickCount64"/>.</summary>
-    private long _outsizedAsked;
-
-    /// <summary>The bytes parked across every class, base retention included, under which a class may keep more than its base retention.</summary>
-    private readonly long _demandBudget;
+    /// <summary>Whether a block past <see cref="MaxPooledLength"/> was asked for since the pool last let go of what it did not use.</summary>
+    private bool _outsizedAsked;
 
     /// <summary>Bytes parked across every class.</summary>
     private long _parkedBytes;
-
-    /// <summary>Blocks to retain in the class serving <paramref name="blockSize"/>.</summary>
-    /// <param name="floor">The pool's base count, never reduced below <see cref="LargeBlockSize"/>.</param>
-    /// <param name="blockSize">The class's block size in bytes.</param>
-    /// <remarks>
-    /// Past the retained set every return is dropped and the next rent has to allocate, so the
-    /// cost of being a few blocks short is not the shortfall but the churn across it: a scattered
-    /// read whose peak concurrent demand in the small classes exceeds the retained count allocates
-    /// on nearly every segment, while a full scan that stays under it allocates nothing. Depth
-    /// only helps where demand is bursty and blocks are small, which is what the budget expresses:
-    /// deepest at 4 kB, halving each class up, and never below <paramref name="floor"/>. Above
-    /// <see cref="LargeBlockSize"/> the count comes from <see cref="LargeRetentionBudget"/> instead:
-    /// a block that large is not a burst, and allocating it fresh costs a page fault per page it
-    /// is read into.
-    /// </remarks>
-    private static int RetainedFor(int floor, int blockSize)
-        => blockSize > LargeBlockSize
-            ? (int)Math.Max(1, LargeRetentionBudget / blockSize)
-            : Math.Max(floor, Math.Min(64, RetentionBudget / blockSize));
 
     /// <summary>Creates a pool.</summary>
     /// <param name="maxPooledLength">
     /// Requests above this length bypass the pool. Rounded up to a power of two; must be in
     /// <c>[4096, 2^30]</c>.
     /// </param>
-    /// <param name="maxPerBucket">Blocks retained per size class. Zero disables retention.</param>
+    /// <param name="maxPerBucket">Blocks retained per size class, whatever the registry asks. Zero disables retention.</param>
     /// <exception cref="ArgumentOutOfRangeException">A parameter is outside its range.</exception>
     public BlockPool(int maxPooledLength = 8 * 1024 * 1024, int maxPerBucket = 8)
-        : this(maxPooledLength, maxPerBucket, graded: false)
+        : this(maxPooledLength, maxPerBucket, keepsAll: false)
     {
     }
 
-    /// <param name="graded">
-    /// When set, the small classes retain more than <paramref name="maxPerBucket"/> under
-    /// <see cref="RetentionBudget"/>. It stays private because the public constructor's count
-    /// means exactly what it says: a pool asked for zero retains nothing, and one asked for two is
-    /// never quietly handed more. Grading is a policy for <see cref="MemoryAccount.Pool"/>, not a
-    /// reinterpretation of a caller's number.
-    /// </param>
+    /// <summary>Creates a pool that keeps a count per class, or every block given back above a floor.</summary>
     /// <param name="maxPooledLength">Requests above this length bypass the pool.</param>
-    /// <param name="maxPerBucket">Blocks retained per size class, before grading.</param>
-    /// <param name="demandBudget">Bytes parked across every class, base retention included, under which a class may keep more than its base retention.</param>
-    /// <summary>Creates a pool, optionally grading retention by size class.</summary>
-    private BlockPool(int maxPooledLength, int maxPerBucket, bool graded, long demandBudget = -1)
+    /// <param name="maxPerBucket">Blocks retained per size class, whatever the registry asks; ignored when <paramref name="keepsAll"/>.</param>
+    /// <param name="keepsAll">
+    /// Whether the pool keeps every block given back, and one past its classes, above a floor of
+    /// <see cref="FloorBytesPerClass"/> a class, for the registry to take back: the process's pool's policy. It stays
+    /// private because the public constructor's count means exactly what it says: a pool asked for zero retains nothing,
+    /// and one asked for two is never quietly handed more.
+    /// </param>
+    private BlockPool(int maxPooledLength, int maxPerBucket, bool keepsAll)
     {
-        _demandBudget = demandBudget < 0 ? DemandBudget : demandBudget;
         ArgumentOutOfRangeException.ThrowIfLessThan(maxPooledLength, MinBlockSize);
         ArgumentOutOfRangeException.ThrowIfGreaterThan(maxPooledLength, MaxPoolableLength);
         ArgumentOutOfRangeException.ThrowIfNegative(maxPerBucket);
 
         int top = (int)BitOperations.RoundUpToPowerOf2((uint)maxPooledLength);
         MaxPooledLength = top;
-        MaxPerBucket = maxPerBucket;
-        _keepsOutsized = graded;
+        MaxPerBucket = keepsAll ? int.MaxValue : maxPerBucket;
+        _keepsOutsized = keepsAll;
 
         int bucketCount = BitOperations.Log2((uint)top) - MinBlockShift + 1;
         Bucket[] buckets = new Bucket[bucketCount];
         for (int i = 0; i < buckets.Length; i++)
         {
-            int blockSize = MinBlockSize << i;
-            int floor = graded ? RetainedFor(maxPerBucket, blockSize) : maxPerBucket;
-            buckets[i] = new Bucket(floor, graded ? DemandFor(floor, blockSize) : floor);
+            buckets[i] = keepsAll
+                ? new Bucket(FloorBytesPerClass / (MinBlockSize << i), int.MaxValue)
+                : new Bucket(maxPerBucket, maxPerBucket);
         }
 
         _buckets = buckets;
@@ -210,54 +135,20 @@ internal sealed class BlockPool : ISweptAfterCollections, IHeldMemory
     /// <summary>The bytes the pool keeps for the next rents: its classes' and the block its outsized slot keeps.</summary>
     public long HeldBytes => ParkedBytes + (Volatile.Read(ref _outsized)?.Capacity ?? 0);
 
-    /// <summary>The most blocks the class serving <paramref name="blockSize"/> keeps when its demand asks.</summary>
-    /// <param name="floor">What it keeps whatever the demand.</param>
-    /// <param name="blockSize">The class's block size in bytes.</param>
-    /// <remarks>
-    /// A class of blocks larger than <see cref="LargeBlockSize"/> keeps its floor: a block that
-    /// large is a column chunk read once per column, not one of many held at once.
-    /// </remarks>
-    private static int DemandFor(int floor, int blockSize)
-        => blockSize > LargeBlockSize
-            ? floor
-            : (int)Math.Max(floor, Math.Min(DemandBlocks, DemandClassBudget / blockSize));
-
     /// <summary>
-    /// A pool whose retention is bounded by bytes: a class keeps a block given back while the pool
-    /// parks less than <paramref name="maxRetainedBytes"/> across every class, so the budget goes to
-    /// the classes in demand rather than in equal shares that most classes would leave unused.
-    /// </summary>
-    /// <param name="maxRetainedBytes">The most bytes the pool keeps parked across every class.</param>
-    internal BlockPool(long maxRetainedBytes)
-        : this(8 * 1024 * 1024, 0, graded: false, demandBudget: maxRetainedBytes)
-    {
-        ArgumentOutOfRangeException.ThrowIfNegative(maxRetainedBytes);
-        for (int i = 0; i < _buckets.Length; i++)
-        {
-            _buckets[i] = new Bucket(0, DemandFor(0, MinBlockSize << i));
-        }
-    }
-
-    /// <summary>
-    /// The process's pool, graded, swept after collections, blocks up to 32 MiB pooled: built once, by
+    /// The process's pool, keeping every block given back above its floors, blocks up to 32 MiB pooled: built once, by
     /// <see cref="MemoryAccount.Pool"/>, the only way to it, so that no block leaves it without an account.
     /// </summary>
-    internal static BlockPool ForProcess() => new BlockPool(32 * 1024 * 1024, 8, graded: true).Swept();
+    internal static BlockPool ForProcess() => KeepingAll(32 * 1024 * 1024);
 
-    /// <summary>A pool graded as the process's is, with a budget of its own for widening its classes.</summary>
-    /// <param name="maxPooledLength">Requests above this length bypass the pool.</param>
-    /// <param name="maxPerBucket">Blocks retained per size class, before grading.</param>
-    /// <param name="demandBudget">Bytes parked across every class, base retention included, under which a class may keep more than its base retention.</param>
-    internal static BlockPool Graded(int maxPooledLength, int maxPerBucket, long demandBudget) =>
-        new BlockPool(maxPooledLength, maxPerBucket, graded: true, demandBudget);
+    /// <summary>A pool that keeps, as the process's does, every block given back above its floors, pooling blocks up to <paramref name="maxPooledLength"/>.</summary>
+    /// <param name="maxPooledLength">Requests above this length bypass the classes.</param>
+    internal static BlockPool KeepingAll(int maxPooledLength) => new BlockPool(maxPooledLength, 0, keepsAll: true);
 
     /// <summary>Requests longer than this bypass the pool. A power of two.</summary>
     public int MaxPooledLength { get; }
 
-    /// <summary>
-    /// Blocks retained per size class. <see cref="MemoryAccount.Pool"/> keeps more of a class while the blocks
-    /// of it rented at once outnumber that, within a budget in bytes per class and for the pool.
-    /// </summary>
+    /// <summary>Blocks retained per size class: <see cref="int.MaxValue"/> for a pool that keeps every block given back.</summary>
     public int MaxPerBucket { get; }
 
     /// <summary>
@@ -317,8 +208,13 @@ internal sealed class BlockPool : ISweptAfterCollections, IHeldMemory
             if (_keepsOutsized && length <= MaxOutsizedLength)
             {
                 // The one block kept past the classes, when it is long enough; a shorter one is freed,
-                // and the block the read gets parks in its place once given back.
-                Volatile.Write(ref _outsizedAsked, Environment.TickCount64);
+                // and the block the read gets parks in its place once given back. Written once between two
+                // lettings go, so that the reads of large segments do not keep writing the line.
+                if (!Volatile.Read(ref _outsizedAsked))
+                {
+                    Volatile.Write(ref _outsizedAsked, true);
+                }
+
                 if (Interlocked.Exchange(ref _outsized, null) is { } kept)
                 {
                     if (kept.Capacity >= length)
@@ -378,66 +274,66 @@ internal sealed class BlockPool : ISweptAfterCollections, IHeldMemory
         owner.Release();
     }
 
-    /// <summary>Frees every retained block. Blocks currently rented out are untouched.</summary>
+    /// <summary>Frees every retained block, floors included. Blocks currently rented out are untouched.</summary>
     public void Trim()
     {
         for (int i = 0; i < _buckets.Length; i++)
         {
-            Free(i);
+            Free(i, int.MaxValue, aboveFloor: false);
         }
 
         FreeOutsized();
     }
 
-    /// <summary>This pool, swept after each collection of the oldest generation for as long as it lives.</summary>
-    /// <returns>This pool.</returns>
-    /// <remarks>
-    /// Asked once, where the pool is made: a pool is swept only once asked, so that its trimming can
-    /// also be driven by hand (<see cref="TrimIdle"/>).
-    /// </remarks>
-    internal BlockPool Swept()
+    /// <summary>
+    /// Lets go of up to <paramref name="bytes"/> of the blocks the pool keeps above its floors: the outsized slot's
+    /// first, then the classes' from the largest down, whose blocks cost the least to make again for what they hold.
+    /// </summary>
+    /// <returns>The bytes let go.</returns>
+    public long GiveBack(KeptKind kind, long bytes)
     {
-        CollectionSweeper<BlockPool>.Register(this);
-        return this;
+        if (kind != KeptKind.Blocks || bytes <= 0)
+        {
+            return 0;
+        }
+
+        long given = 0;
+        if (Interlocked.Exchange(ref _outsized, null) is { } kept)
+        {
+            given += kept.Capacity;
+            kept.FreeParked();
+        }
+
+        for (int i = _buckets.Length - 1; i >= 0 && given < bytes; i--)
+        {
+            int size = MinBlockSize << i;
+            given += (long)Free(i, BlocksFor(bytes - given, size), aboveFloor: true) * size;
+        }
+
+        return given;
     }
 
-    /// <summary>Counts, from now on, the sweeps of <paramref name="pool"/>.</summary>
-    /// <param name="pool">The pool to watch.</param>
-    /// <returns>The count, raised by each sweep.</returns>
-    internal static StrongBox<int> WatchSweeps(BlockPool pool) =>
-        LazyInitializer.EnsureInitialized(ref SweepCounts).GetValue(pool, static _ => new StrongBox<int>());
-
     /// <summary>
-    /// Frees what the classes keep parked: the blocks of every class no rent has asked for over
-    /// <see cref="IdleMilliseconds"/> before <paramref name="now"/>, or of every class when
-    /// <paramref name="everything"/>. A class asked for since the last sweep starts its idle time
-    /// at <paramref name="now"/>.
+    /// Lets go of the blocks that sat parked since the pool was last asked, above its floors: in each class, as many as
+    /// the fewest it held parked in between, which no rent took; and the outsized slot's block when no read asked for one.
     /// </summary>
-    /// <param name="now">The time of the sweep, in the milliseconds of <see cref="Environment.TickCount64"/>.</param>
-    /// <param name="everything">Whether every parked block goes: the machine's memory load is high.</param>
-    internal void TrimIdle(long now, bool everything)
+    public void LetGoUnused(bool collection)
     {
         for (int i = 0; i < _buckets.Length; i++)
         {
-            if (_buckets[i].Idle(now, IdleMilliseconds) || everything)
-            {
-                Free(i);
-            }
+            Free(i, _buckets[i].Unused(), aboveFloor: true);
         }
 
-        if (everything || now - Volatile.Read(ref _outsizedAsked) >= IdleMilliseconds)
+        if (!Volatile.Read(ref _outsizedAsked))
         {
             FreeOutsized();
         }
+
+        Volatile.Write(ref _outsizedAsked, false);
     }
 
     /// <summary>Retains a released block, or refuses it when its bucket is full.</summary>
     /// <param name="owner">The block whose reference count just reached zero.</param>
-    /// <remarks>
-    /// Past its base retention a class keeps a block only while the pool as a whole is under its
-    /// demand budget; the budget is read before the push and counted after it, so
-    /// racing returns may overrun it by a block each, and no more.
-    /// </remarks>
     internal bool TryPark(BlockOwner owner)
     {
         int index = owner.BucketIndex;
@@ -447,19 +343,12 @@ internal sealed class BlockPool : ISweptAfterCollections, IHeldMemory
             return Interlocked.CompareExchange(ref _outsized, owner, null) is null;
         }
 
-        if ((uint)index >= (uint)_buckets.Length)
+        if ((uint)index >= (uint)_buckets.Length || !_buckets[index].TryPush(owner))
         {
             return false;
         }
 
-        int blockSize = MinBlockSize << index;
-        bool widen = Volatile.Read(ref _parkedBytes) + blockSize <= _demandBudget;
-        if (!_buckets[index].TryPush(owner, widen))
-        {
-            return false;
-        }
-
-        Interlocked.Add(ref _parkedBytes, blockSize);
+        Interlocked.Add(ref _parkedBytes, MinBlockSize << index);
         return true;
     }
 
@@ -468,9 +357,14 @@ internal sealed class BlockPool : ISweptAfterCollections, IHeldMemory
     /// a reader may hold of the class at once and find again in the pool once it gives it back.
     /// </summary>
     /// <param name="capacity">A block's capacity, as <see cref="CapacityFor"/> gives it.</param>
-    /// <remarks>A block past <see cref="MaxPooledLength"/> is never parked, so its class holds no more than one.</remarks>
+    /// <remarks>
+    /// A pool that keeps every block given back takes back whatever a reader holds: no bound. A block past
+    /// <see cref="MaxPooledLength"/> is never parked in a class, so its class holds no more than one.
+    /// </remarks>
     internal long ClassCeilingBytes(int capacity) =>
-        capacity > MaxPooledLength ? capacity : (long)Math.Max(1, _buckets[BucketIndexOf(capacity)].Ceiling) * capacity;
+        capacity > MaxPooledLength ? capacity
+            : MaxPerBucket == int.MaxValue ? long.MaxValue
+            : (long)Math.Max(1, MaxPerBucket) * capacity;
 
     /// <summary>The bytes parked across every class: what a bench tells apart from the blocks in use.</summary>
     internal long ParkedBytes => Interlocked.Read(ref _parkedBytes);
@@ -484,7 +378,7 @@ internal sealed class BlockPool : ISweptAfterCollections, IHeldMemory
     /// <remarks>
     /// Nothing in the library asks a bucket how full it is; the count exists for tests. A pool
     /// that is being used answers from under the caller's feet, so the number describes an instant
-    /// that has already passed — what a test on a quiesced pool wants, and what nothing else
+    /// that has already passed: what a test on a quiesced pool wants, and what nothing else
     /// should build on.
     /// </remarks>
     internal int ParkedCount(int length)
@@ -503,27 +397,23 @@ internal sealed class BlockPool : ISweptAfterCollections, IHeldMemory
     /// <summary>Whether the outsized slot keeps a block: for tests, as <see cref="ParkedCount"/> is.</summary>
     internal bool KeepsOutsized => Volatile.Read(ref _outsized) is not null;
 
-    /// <summary>Frees every block class <paramref name="index"/> keeps parked.</summary>
-    private void Free(int index)
+    /// <summary>Frees up to <paramref name="count"/> blocks class <paramref name="index"/> keeps parked, above its floor or all of them: how many.</summary>
+    private int Free(int index, int count, bool aboveFloor)
     {
         Bucket bucket = _buckets[index];
-        while (bucket.TryTake() is { } owner)
+        int freed = 0;
+        while (freed < count && bucket.TryTake(aboveFloor) is { } owner)
         {
             Interlocked.Add(ref _parkedBytes, -(MinBlockSize << index));
             owner.FreeParked();
+            freed++;
         }
+
+        return freed;
     }
 
-    /// <summary>A sweep after a collection: the idle classes, or every class when the machine's memory load is high.</summary>
-    void ISweptAfterCollections.Sweep()
-    {
-        GCMemoryInfo memory = GC.GetGCMemoryInfo();
-        TrimIdle(Environment.TickCount64, memory.MemoryLoadBytes >= memory.HighMemoryLoadThresholdBytes);
-        if (SweepCounts is { } watched && watched.TryGetValue(this, out StrongBox<int>? count))
-        {
-            Interlocked.Increment(ref count.Value);
-        }
-    }
+    /// <summary>The blocks of <paramref name="size"/> bytes that hold <paramref name="bytes"/>, rounded up, <see cref="int.MaxValue"/> at most.</summary>
+    internal static int BlocksFor(long bytes, long size) => (int)Math.Min(int.MaxValue, (bytes / size) + (bytes % size == 0 ? 0 : 1));
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static int RoundedSize(int length) =>
@@ -541,36 +431,26 @@ internal sealed class BlockPool : ISweptAfterCollections, IHeldMemory
             "recycle memory this pool does not own.",
             "owner");
 
-    /// <summary>One size class: a bounded LIFO stack of parked blocks.</summary>
+    /// <summary>One size class: a LIFO stack of parked blocks, bounded or not, above a floor the registry leaves it.</summary>
     private sealed class Bucket
     {
         private readonly Lock _gate = new Lock();
         private readonly int _floor;
         private readonly int _ceiling;
-
-        /// <summary>The most blocks the class keeps parked when its demand asks.</summary>
-        internal int Ceiling => _ceiling;
         private BlockOwner?[] _items;
         private int _count;
 
-        /// <summary>Whether a rent has asked for the class since the last sweep.</summary>
-        private bool _rented;
+        /// <summary>The fewest blocks the class held parked since it was last asked what it did not use: none of them was taken.</summary>
+        private int _fewest;
 
-        /// <summary>When the sweep that last found the class asked for ran.</summary>
-        private long _idleSince;
-
-        /// <summary>
-        /// A class keeping <paramref name="floor"/> blocks, and up to <paramref name="ceiling"/>
-        /// while the pool's budget allows. What it parks is what was given back, so past its floor
-        /// it holds at most as many blocks as were rented at once.
-        /// </summary>
-        /// <param name="floor">Blocks kept whatever the budget.</param>
+        /// <summary>A class keeping up to <paramref name="ceiling"/> blocks, and <paramref name="floor"/> whatever the registry asks.</summary>
+        /// <param name="floor">Blocks kept whatever the registry asks.</param>
         /// <param name="ceiling">Blocks kept at most.</param>
         internal Bucket(int floor, int ceiling)
         {
             _floor = floor;
             _ceiling = Math.Max(floor, ceiling);
-            _items = new BlockOwner?[floor];
+            _items = new BlockOwner?[Math.Min(floor, 64)];
         }
 
         /// <summary>
@@ -584,67 +464,66 @@ internal sealed class BlockPool : ISweptAfterCollections, IHeldMemory
         /// </remarks>
         internal int Count => Volatile.Read(ref _count);
 
-        /// <summary>A parked block for a rent, or null when none is parked; either way the class is in use.</summary>
+        /// <summary>A parked block for a rent, or null when none is parked.</summary>
         internal BlockOwner? TryPop()
         {
             lock (_gate)
             {
-                // Written once per sweep, so that concurrent renters do not keep taking the cache
-                // line from one another.
-                if (!_rented)
+                BlockOwner? owner = Take();
+                if (_count < _fewest)
                 {
-                    _rented = true;
+                    _fewest = _count;
                 }
 
-                return Take();
+                return owner;
             }
         }
 
-        /// <summary>A parked block to free, or null when none is left.</summary>
-        internal BlockOwner? TryTake()
+        /// <summary>A parked block to free, above the floor when <paramref name="aboveFloor"/>, or null when none is left.</summary>
+        internal BlockOwner? TryTake(bool aboveFloor)
         {
             lock (_gate)
             {
-                return Take();
+                if (aboveFloor && _count <= _floor)
+                {
+                    return null;
+                }
+
+                BlockOwner? owner = Take();
+                _fewest = Math.Min(_fewest, _count);
+                return owner;
             }
         }
 
         /// <summary>
-        /// Whether no rent has asked for the class over <paramref name="idleAfter"/> milliseconds
-        /// before <paramref name="now"/>; a class asked for since the last sweep starts its idle
-        /// time at <paramref name="now"/>.
+        /// How many blocks sat parked since the class was last asked, the fewest it held in between, and from now on
+        /// counted again from what it holds.
         /// </summary>
-        internal bool Idle(long now, long idleAfter)
+        internal int Unused()
         {
             lock (_gate)
             {
-                if (_rented)
-                {
-                    _rented = false;
-                    _idleSince = now;
-                    return false;
-                }
-
-                return now - _idleSince >= idleAfter;
+                int unused = _fewest;
+                _fewest = _count;
+                return unused;
             }
         }
 
         /// <summary>Parks a block given back, while the class holds fewer than it keeps.</summary>
         /// <param name="owner">The block.</param>
-        /// <param name="widen">Whether the pool's budget lets the class keep more than its floor.</param>
         /// <returns>Whether the block was parked.</returns>
-        internal bool TryPush(BlockOwner owner, bool widen)
+        internal bool TryPush(BlockOwner owner)
         {
             lock (_gate)
             {
-                if (_count >= (widen ? _ceiling : _floor))
+                if (_count >= _ceiling)
                 {
                     return false;
                 }
 
                 if (_count == _items.Length)
                 {
-                    Array.Resize(ref _items, Math.Min(Math.Max(_items.Length * 2, 8), _ceiling));
+                    Array.Resize(ref _items, (int)Math.Min(Math.Max((long)_items.Length * 2, 8), _ceiling));
                 }
 
                 _items[_count++] = owner;

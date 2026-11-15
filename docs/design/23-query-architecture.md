@@ -656,9 +656,9 @@ Where the code stops short of this design, measured or known:
   datasets, are specified and built when an application asks for them.
 - **The memory of jobs** is reserved from an estimate, its inputs' rows and open chunks and its writer's targets, not
   measured: a consolidation's range over a day of logs reserves 1.4 GB for about 1.5 held, over small inputs 1.65 for
-  about 1.0 ([the memory of a job](15-compaction.md#the-memory-of-a-job)). The shared pool keeps up to 256 MiB a
-  processor of idle blocks parked, which the process's peak counts until the budget refuses, a minute passes without a
-  rent, or the machine's memory runs high.
+  about 1.0 ([the memory of a job](15-compaction.md#the-memory-of-a-job)). The shared pool keeps every block given
+  back, which the process's peak counts until the blocks sit unused from one full collection or timer turn to the
+  next, a reservation needs the room, or the machine's memory runs high.
 
 ## 14. Decisions, and the alternatives weighed
 

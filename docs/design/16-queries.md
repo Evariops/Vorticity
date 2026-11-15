@@ -1147,7 +1147,7 @@ when free), once its pending batches pass α times its groups and 16 384 entries
 the degree, between 1 and 8. A lane whose cache misses more than half its rows over four capacities'
 worth of them sends its rows straight into batches for the next thirty-two. At the end every part
 applies what is pending, its sub-tables split ahead, and the sub-tables are the result, read as one.
-The arrays of its sub-tables and slabs are blocks of the library's pool, rented under the core's account in the query's memory, which counts each one as it comes and keeps what the sub-tables give back reserved until every part is applied; they go back to the pool, which keeps one locked stack per size class. After a collection of the oldest generation, a class no rent asked for over a minute lets go of its blocks, every class does when the machine's memory load is high, and a reservation the process's budget refuses lets go of everything.
+The arrays of its sub-tables and slabs are blocks of the library's pool, rented under the core's account in the query's memory, which counts each one as it comes and keeps what the sub-tables give back reserved until every part is applied; they go back to the pool, which keeps one locked stack per size class. After each collection of the oldest generation, and at each turn of a slow timer, every class lets go of the blocks no rent took since the time before; when the machine's memory load is high, or a reservation the process's budget refuses needs the room, everything above the classes' floors goes.
 
 On the bench the core holds two to three times less memory than the tables of fourteen lanes, and at
 fourteen lanes takes ×0.69 of the time at a million random keys, ×0.46 at ten million, and ×0.64 on
@@ -1213,8 +1213,11 @@ them, the lanes read one split fewer ahead at a time, down to none, before they 
 them back when the pass ends. A mapping reads in place, its reads being views of it, so nothing more
 is admitted. What the queries release stays in the heap until a collection, so when that memory,
 or what the collector keeps committed beyond its heap, stands between a reservation and the ceiling, a
-collection that gives it back comes first, and before it the pool lets go of the blocks it keeps
-for the next rents, for that collection to take. The background jobs reserve in a budget of their
+collection that gives it back comes first, and before it the memory kept lets go of what it holds
+above its floors, in a fixed order: the pool's blocks kept for the next rents, then the segments a
+cache keeps, then the objects a dataset keeps open, then its pages, for that collection to take.
+Reservations that come within an eighth of the ceiling have it let go of that much before they need
+it, once a collection at most. The background jobs reserve in a budget of their
 own, `JobMemoryBudget`, half the process's limit by default and reserved in the process's budget too:
 the queries have the rest ([memory of a job](15-compaction.md#the-memory-of-a-job)). A query that is refused fails with a
 `VortexMemoryException` naming the operator, its groups and its bytes, with everything it held given

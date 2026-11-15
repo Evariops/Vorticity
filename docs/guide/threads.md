@@ -34,7 +34,7 @@ A `VortexSession` holds what would otherwise be process-wide state, so a host de
 
 | option | default | what it governs |
 |---|---|---|
-| `SegmentCache` | the process's, `SegmentCache.Shared`: a sixteenth of the memory the process may use, 1 GiB at most; none for a session with a `Keyring` | segments kept across scans, one budget for every file of the sessions that share it whose reads do I/O. A cache of 0 bytes keeps none |
+| `SegmentCache` | the process's, `SegmentCache.Shared`, with no budget of its own: what the work leaves, given back above a floor when the work needs the room or no scan read it of late; none for a session with a `Keyring` | segments kept across scans, one budget for every file of the sessions that share it whose reads do I/O. A cache of 0 bytes keeps none |
 | `MaxConcurrentReads` | 128 | reads in flight across every scan of every file of the session whose reads do I/O |
 | `MaxDegreeOfParallelism` | 1 | how many chunks a scan decodes and aggregates at once, and how many threads a writer uses |
 | `IndexCacheBytes` | 64 MiB | decoded index runs kept per open file |
@@ -69,20 +69,24 @@ would, because two scans asking for the same segment at the same moment both mis
 ## The memory the pool keeps
 
 Every block a scan, a read or a write gives back is parked in the process-wide pool for the next rent,
-in size classes of powers of two from 4 KiB to 32 MiB. At rest a class keeps a few blocks. Under
-demand a class up to 8 MiB keeps up to 64 MiB per processor, as long as every class together parks
-less than 256 MiB per processor: up to 8 GiB on a machine of 32 processors. A class above 8 MiB keeps
-16 MiB per processor, and one block of up to 256 MiB is kept on its own.
+in size classes of powers of two from 4 KiB to 32 MiB, and one block of up to 256 MiB on its own. The
+pool has no budget of its own and reads no processor count: it keeps every block given back, so it
+never holds more than the work rented at once, and the process takes back what it keeps above a
+floor of 256 KiB a class.
 
-At each full collection, the pool frees what a class keeps once no rent has asked for it for a minute,
-and everything it keeps when the machine's memory load is high. In a container, the runtime measures
-that load against the container's memory limit.
+It lets go in three ways. After each full collection, every class lets go of the blocks no rent took
+since the collection before: under pressure the collector runs more often, and the pool empties
+faster. Every 30 seconds a slow timer does the same, for the process that neither allocates nor
+collects: at rest, the pool is back to its floors within a minute. And when a reservation finds no
+room, or the machine's memory load is high at a collection, the process takes back everything kept
+above the floors, in a fixed order: the pool's blocks first, then the segments a cache keeps, then
+the objects a dataset keeps open, then its pages, what costs no request to rebuild before what does.
+In a container, the runtime measures the memory load against the container's memory limit.
 
-It keeps that much because 32 questions at once each hold dozens of blocks of the same few classes.
-With 1 GiB parked in all, one block in four was freed as it came back, and the next rent took it from
-the system again, every page faulted anew: the declared spans and logs at a tenth of the design's
-rate answered about half as many questions a second as once the blocks were kept. Sealing an hour
-at the design's rate peaks at 9.8 GB instead of 8.8.
+Keeping every block given back serves 32 questions at once, which each hold dozens of blocks of the
+same few classes: with 1 GiB parked in all, one block in four was freed as it came back, and the
+next rent took it from the system again, every page faulted anew. The floors and the timer's period
+are provisional, to be calibrated by measurement.
 
 The blocks parked are managed arrays the runtime keeps pinned: they count in the managed heap, a heap dump shows them on the pinned object heap, and `vortex.memory.retained` tags them `pool` ([observability.md](observability.md#the-memory)). There is one pool in the process. What a session's work holds of it while it runs is counted in its budgets: a query's blocks under `MemoryBudget` until its result is delivered, a writer's under `JobMemoryBudget` until it is disposed. To bound them, give the session budgets of its own:
 

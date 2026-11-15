@@ -22,9 +22,20 @@ namespace Vorticity;
 /// unmarked, and goes on. A hit that relinked its entry, a strict order of use, wrote to two neighbours' lines under the
 /// lock every lane of the process takes, and cost a lookup of 4,096 segments 30 to 40 % more.
 /// </para>
+/// <para>
+/// What it holds is memory kept: the registry of kept memory takes back what it holds above its floor, the oldest
+/// segments first, when a reservation needs the room, and at each turn of its slow timer the segments no scan read
+/// since the turn before.
+/// </para>
 /// </remarks>
 public sealed class SegmentCache : IHeldMemory
 {
+    /// <summary>
+    /// 🧪 The bytes a cache keeps whatever the registry of kept memory asks, its budget when that is less: provisional,
+    /// calibrated by measurement with the other floors. Rebuilding what a cache held costs the reads that filled it.
+    /// </summary>
+    internal const long FloorBytes = 64L << 20;
+
     /// <inheritdoc/>
     string IHeldMemory.Holder => "segments";
 
@@ -43,6 +54,9 @@ public sealed class SegmentCache : IHeldMemory
     private long _hits;
     private long _misses;
 
+    // The turn of the registry's slow timer under way: an entry read or kept in it carries it.
+    private int _turn;
+
     /// <summary>A cache of at most <paramref name="capacityBytes"/> bytes.</summary>
     /// <param name="capacityBytes">The budget; a segment larger than it is never kept.</param>
     public SegmentCache(long capacityBytes)
@@ -54,7 +68,8 @@ public sealed class SegmentCache : IHeldMemory
 
     /// <summary>
     /// The process's cache, which every session that gives none shares (<see cref="VortexSessionOptions.SegmentCache"/>):
-    /// a sixteenth of the memory the process may use, 1 GiB at most.
+    /// with no budget of its own, it keeps what the work leaves, and gives back what it holds above its floor when the
+    /// work needs the room or no scan read it of late.
     /// </summary>
     /// <remarks>
     /// Its segments are keyed by the reader that read them, as any cache's: a file opened by one session finds nothing
@@ -63,7 +78,7 @@ public sealed class SegmentCache : IHeldMemory
     /// </remarks>
     public static SegmentCache Shared => Process.Cache;
 
-    /// <summary>The budget in bytes.</summary>
+    /// <summary>The budget in bytes: <see cref="long.MaxValue"/> for the process's cache, which has none.</summary>
     public long CapacityBytes { get; }
 
     /// <summary>Whether the reads of the flow under way keep nothing new in a cache (<see cref="Pass"/>).</summary>
@@ -124,6 +139,7 @@ public sealed class SegmentCache : IHeldMemory
             if (_entries.TryGetValue(new Key(source, offset, length), out Entry? entry))
             {
                 entry.Referenced = true;
+                entry.Turn = _turn;
                 owner = entry.Owner.Retain();
                 buffer = entry.Buffer;
             }
@@ -165,6 +181,7 @@ public sealed class SegmentCache : IHeldMemory
                 if (_entries.TryGetValue(new Key(source, (long)spec.Offset, (int)spec.Length), out Entry? entry))
                 {
                     entry.Referenced = true;
+                    entry.Turn = _turn;
                     requests.SetSharedResult(slot, entry.Owner, entry.Buffer);
                     requests.NoteCacheHit();
                     hits++;
@@ -237,6 +254,7 @@ public sealed class SegmentCache : IHeldMemory
                 }
 
                 Entry entry = copy is null ? new Entry(key, owner.Retain(), buffer) : new Entry(key, copy, copy.Buffer);
+                entry.Turn = _turn;
                 copy = null;
                 _entries[key] = entry;
                 LinkNewest(entry);
@@ -287,6 +305,64 @@ public sealed class SegmentCache : IHeldMemory
                 owner.Release();
             }
         }
+    }
+
+    /// <summary>Lets go of up to <paramref name="bytes"/> of the segments held above the floor, the oldest first: the bytes let go.</summary>
+    long IHeldMemory.GiveBack(KeptKind kind, long bytes) =>
+        kind == KeptKind.Segments && bytes > 0 ? LetGo(bytes, stale: false) : 0;
+
+    /// <summary>At a turn of the registry's slow timer, lets go of the segments no scan read since the turn before, above the floor.</summary>
+    void IHeldMemory.LetGoUnused(bool collection)
+    {
+        if (!collection)
+        {
+            LetGo(long.MaxValue, stale: true);
+        }
+    }
+
+    /// <summary>
+    /// Lets go of up to <paramref name="bytes"/> of the segments held above the floor, the oldest first, only those no scan
+    /// read since the timer's turn before when <paramref name="stale"/>, which then starts a turn: the bytes let go.
+    /// </summary>
+    private long LetGo(long bytes, bool stale)
+    {
+        long floor = Math.Min(FloorBytes, CapacityBytes);
+        long given = 0;
+        List<SegmentOwner>? released = null;
+        lock (_gate)
+        {
+            Entry? entry = _oldest;
+            while (entry is not null && given < bytes && _size > floor)
+            {
+                Entry? newer = entry.Newer;
+                if (!stale || entry.Turn != _turn)
+                {
+                    Unlink(entry);
+                    UnlinkFromSource(entry);
+                    _entries.Remove(entry.Key);
+                    _size -= entry.Buffer.Length;
+                    given += entry.Buffer.Length;
+                    (released ??= []).Add(entry.Owner);
+                }
+
+                entry = newer;
+            }
+
+            if (stale)
+            {
+                _turn++;
+            }
+        }
+
+        if (released is not null)
+        {
+            foreach (SegmentOwner owner in released)
+            {
+                owner.Release();
+            }
+        }
+
+        return given;
     }
 
     /// <summary>
@@ -378,7 +454,7 @@ public sealed class SegmentCache : IHeldMemory
     // Made at its first use, so that a process whose sessions each give their own makes none.
     private static class Process
     {
-        internal static readonly SegmentCache Cache = new SegmentCache(Math.Min(1L << 30, QueryMemoryBudget.ProcessLimit() / 16));
+        internal static readonly SegmentCache Cache = new SegmentCache(long.MaxValue);
     }
 
     /// <summary>A segment kept, in the order of use and in its source's chain.</summary>
@@ -400,5 +476,8 @@ public sealed class SegmentCache : IHeldMemory
 
         /// <summary>Whether a hit used the entry since an eviction last passed it, which then passes it over once.</summary>
         internal bool Referenced { get; set; }
+
+        /// <summary>The timer's turn the entry was last kept or read in.</summary>
+        internal int Turn { get; set; }
     }
 }

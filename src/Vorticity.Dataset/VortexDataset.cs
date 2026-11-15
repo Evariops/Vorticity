@@ -83,6 +83,24 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
         _objects.HeldBytes + _pageCache.Size + _synopses.Held + PartitionIndexes.Bytes + Snapshot.HeldBytes + Predicates.Held
         + _subtreeEnds.Held + _indexEntries.Held + (_store is SealedObjectStore sealedStore ? sealedStore.HeldBytes : 0);
 
+    /// <summary>Lets go of up to <paramref name="bytes"/> of its idle open objects or of its pages, above their floors.</summary>
+    long Buffers.IHeldMemory.GiveBack(Buffers.KeptKind kind, long bytes) => kind switch
+    {
+        Buffers.KeptKind.Objects when bytes > 0 => _objects.LetGo(bytes, stale: false),
+        Buffers.KeptKind.Pages when bytes > 0 => _pageCache.LetGo(bytes, stale: false),
+        _ => 0,
+    };
+
+    /// <summary>At a turn of the registry's slow timer, lets go of the objects idle and the pages unread since the turn before, above their floors.</summary>
+    void Buffers.IHeldMemory.LetGoUnused(bool collection)
+    {
+        if (!collection)
+        {
+            _objects.LetGo(long.MaxValue, stale: true);
+            _pageCache.LetGo(long.MaxValue, stale: true);
+        }
+    }
+
     /// <summary>The version this handle reads; it moves only when this handle commits or refreshes.</summary>
     public ulong Version => Snapshot.Version;
 

@@ -2,12 +2,6 @@
 # src, tests, bench (with samples and tools) and docs, separated by tabs. Lowered in the commit that takes some out,
 # removed at zero, never raised.
 MemoryAccount\.Unassigned	11	0	0	0
-\bProcessors\b	5	0	0	0
-\bDemandBudget\b	2	0	0	0
-\bDemandClassBudget\b	2	0	0	0
-\bDemandBlocks\b	2	0	0	0
-\bLargeRetentionBudget\b	4	0	0	0
-\bIdleMilliseconds\b	10	2	0	0
 \bPartitionIndexBytes\b	2	0	0	0
 \bPartitionIndexEntriesBytes\b	2	0	0	0
 \bDefaultBudget\b	3	0	0	0

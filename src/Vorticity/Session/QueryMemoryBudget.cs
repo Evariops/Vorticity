@@ -27,6 +27,13 @@ namespace Vorticity;
 /// </remarks>
 public sealed class QueryMemoryBudget
 {
+    /// <summary>
+    /// 🧪 The share of the ceiling, one in this many, within which the reservations have the memory kept let go of that
+    /// much above its floors before they need it, and the least a reservation short of room has it let go of:
+    /// provisional, calibrated by measurement with the floors.
+    /// </summary>
+    private const int KeptMarginShare = 8;
+
     // The container's limit less its margin; null outside a container.
     private static readonly long? s_container = ContainerLimit() is long container ? container / 4 * 3 : null;
 
@@ -49,6 +56,9 @@ public sealed class QueryMemoryBudget
     private long _pending;
     private int _collecting;
     private int _futile = -1;
+
+    // The count of collections at which the reservations nearing the ceiling last had the memory kept let go of a share.
+    private int _keptGivenAt = -1;
 
     /// <summary>A budget under which the queries of its sessions hold <paramref name="ceilingBytes"/> at most, together.</summary>
     /// <param name="ceilingBytes">The bytes they may hold at once.</param>
@@ -137,21 +147,23 @@ public sealed class QueryMemoryBudget
 
     /// <summary>
     /// Reserves <paramref name="bytes"/> under this budget and the process's; false, and nothing reserved,
-    /// when either would pass its ceiling. Short of room, the pools let go of the blocks they keep for the
-    /// next rents, for the collection that follows to take them.
+    /// when either would pass its ceiling. Short of room, the memory kept lets go of what it holds above its
+    /// floors, in the registry's order (<see cref="HeldMemory.GiveBack"/>), for the collection that follows to
+    /// take it; and the reservations nearing the ceiling have it let go of a share before they get there.
     /// </summary>
     internal bool TryReserve(long bytes)
     {
         if (_process is null)
         {
             Observe();
-            if (TryAdd(ref _reserved, bytes, Available()))
+            long available = Available();
+            if (TryAdd(ref _reserved, bytes, available))
             {
+                GiveBackNear(available);
                 return true;
             }
 
-            Blocks.Trim();
-            MemoryAccount.Pool.Trim();
+            LetGo(HeldMemory.GiveBack(Math.Max(bytes, _ceiling / KeptMarginShare)));
             if (TryAdd(ref _reserved, bytes, Available()))
             {
                 return true;
@@ -265,6 +277,44 @@ public sealed class QueryMemoryBudget
 
     /// <summary>Arrays of <paramref name="bytes"/> the queries' tables replaced with larger ones: in the heap until a collection takes them.</summary>
     internal void Discard(long bytes) => Interlocked.Add(ref (_process ?? this)._pending, bytes);
+
+    /// <summary>
+    /// Once the reservations come within <see cref="KeptMarginShare"/> of what the limit leaves, has the memory kept let go
+    /// of that share above its floors, before a reservation finds no room: once a collection at most, which the rest read
+    /// after the next sees.
+    /// </summary>
+    private void GiveBackNear(long available)
+    {
+        long margin = _ceiling / KeptMarginShare;
+        if (ReservedBytes <= available - margin)
+        {
+            return;
+        }
+
+        int collections = GC.CollectionCount(0);
+        if (Volatile.Read(ref _keptGivenAt) == collections || Interlocked.Exchange(ref _keptGivenAt, collections) == collections)
+        {
+            return;
+        }
+
+        LetGo(HeldMemory.GiveBack(margin));
+    }
+
+    /// <summary>
+    /// The memory kept let go of <paramref name="bytes"/>: no longer live, which the last full collection read it as, and
+    /// in the heap until a collection takes it, as what the queries let go is.
+    /// </summary>
+    private void LetGo(long bytes)
+    {
+        if (bytes <= 0)
+        {
+            return;
+        }
+
+        Rest rest = Volatile.Read(ref _rest);
+        Volatile.Write(ref _rest, rest with { Live = Math.Max(0, rest.Live - bytes) });
+        Interlocked.Add(ref _pending, bytes);
+    }
 
     /// <summary>
     /// What the process's limit leaves the queries past the rest of its memory: the library's blocks are

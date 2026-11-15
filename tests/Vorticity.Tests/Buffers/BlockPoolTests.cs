@@ -469,28 +469,35 @@ public sealed class BlockPoolTests
         }
     }
 
+    /// <summary>
+    /// Asked what it did not use, a pool that keeps all lets go, in each class, of the blocks that sat parked since it was
+    /// last asked, the fewest it held in between: a block taken and given back between two askings stays. A class keeps
+    /// its floor, 256 KiB of blocks, however long they sat.
+    /// </summary>
     [Fact]
-    public void A_sweep_frees_a_class_no_rent_asked_for_over_a_minute_and_keeps_one_in_use()
+    public void Letting_go_of_what_was_unused_frees_the_blocks_parked_since_the_time_before_above_the_floor()
     {
-        BlockPool pool = new BlockPool(maxPerBucket: 4);
+        const int megabyte = 1024 * 1024;
+        BlockPool pool = BlockPool.KeepingAll(8 * megabyte);
         try
         {
-            pool.Return(pool.Rent(TestAccount.Shared, 4096, 64));
-            pool.Return(pool.Rent(TestAccount.Shared, 65_536, 64));
-            pool.TrimIdle(now: 1_000, everything: false);
-            Assert.Equal(1, pool.ParkedCount(4096));
-            Assert.Equal(1, pool.ParkedCount(65_536));
+            ReturnAll(pool, RentAll(pool, megabyte, 3));
+            ReturnAll(pool, RentAll(pool, 4096, 100));
+            Assert.Equal(3, pool.ParkedCount(megabyte));
 
-            pool.Return(pool.Rent(TestAccount.Shared, 4096, 64));
-            pool.TrimIdle(now: 60_999, everything: false);
-            Assert.Equal(1, pool.ParkedCount(65_536));
+            // Parked since the start, which counts from here: nothing goes.
+            pool.LetGoUnused(collection: true);
+            Assert.Equal(3, pool.ParkedCount(megabyte));
 
-            pool.TrimIdle(now: 61_000, everything: false);
-            Assert.Equal(1, pool.ParkedCount(4096));
-            Assert.Equal(0, pool.ParkedCount(65_536));
+            // One taken and given back: the two others sat parked through.
+            pool.Return(pool.Rent(TestAccount.Shared, megabyte, 64));
+            pool.LetGoUnused(collection: true);
+            Assert.Equal(1, pool.ParkedCount(megabyte));
+            Assert.Equal(BlockPool.FloorBytesPerClass / 4096, pool.ParkedCount(4096));
 
-            pool.TrimIdle(now: 120_999, everything: false);
-            Assert.Equal(0, pool.ParkedCount(4096));
+            pool.LetGoUnused(collection: false);
+            Assert.Equal(0, pool.ParkedCount(megabyte));
+            Assert.Equal(BlockPool.FloorBytesPerClass / 4096, pool.ParkedCount(4096));
         }
         finally
         {
@@ -498,43 +505,49 @@ public sealed class BlockPoolTests
         }
     }
 
+    /// <summary>
+    /// Asked by the registry, a pool that keeps all gives back what it parks above its floors, the largest classes first,
+    /// up to the bytes asked; of another kind, nothing. A pool made with a count per class keeps it.
+    /// </summary>
     [Fact]
-    public void A_sweep_under_memory_pressure_frees_every_parked_block()
+    public void Giving_back_frees_the_largest_classes_first_above_the_floors()
     {
-        BlockPool pool = new BlockPool(maxPerBucket: 4);
+        const int megabyte = 1024 * 1024;
+        BlockPool pool = BlockPool.KeepingAll(8 * megabyte);
+        BlockPool counted = new BlockPool(maxPerBucket: 4);
         try
         {
-            pool.Return(pool.Rent(TestAccount.Shared, 4096, 64));
-            pool.TrimIdle(now: 0, everything: true);
-            Assert.Equal(0, pool.ParkedCount(4096));
+            ReturnAll(pool, RentAll(pool, megabyte, 2));
+            ReturnAll(pool, RentAll(pool, 4096, 100));
+            ReturnAll(counted, RentAll(counted, megabyte, 4));
 
-            // Still usable afterwards.
-            pool.Return(pool.Rent(TestAccount.Shared, 4096, 64));
-            Assert.Equal(1, pool.ParkedCount(4096));
+            Assert.Equal(0, pool.GiveBack(KeptKind.Segments, long.MaxValue));
+            Assert.Equal(megabyte, pool.GiveBack(KeptKind.Blocks, megabyte));
+            Assert.Equal(1, pool.ParkedCount(megabyte));
+            Assert.Equal(100, pool.ParkedCount(4096));
+
+            int floor = BlockPool.FloorBytesPerClass / 4096;
+            Assert.Equal(megabyte + ((100 - floor) * 4096L), pool.GiveBack(KeptKind.Blocks, long.MaxValue));
+            Assert.Equal(0, pool.ParkedCount(megabyte));
+            Assert.Equal(floor, pool.ParkedCount(4096));
+
+            Assert.Equal(0, counted.GiveBack(KeptKind.Blocks, long.MaxValue));
+            counted.LetGoUnused(collection: true);
+            counted.LetGoUnused(collection: true);
+            Assert.Equal(4, counted.ParkedCount(megabyte));
         }
         finally
         {
             pool.Trim();
+            counted.Trim();
         }
     }
 
+    /// <summary>The registry holds its holders weakly: a pool nothing else references goes with its blocks.</summary>
     [Fact]
-    public void The_pools_the_library_rents_from_are_swept_by_a_full_collection()
+    public void A_pool_nothing_else_holds_is_collected()
     {
-        BlockPool pool = new BlockPool(maxRetainedBytes: 1 << 20).Swept();
-        StrongBox<int> sweeps = BlockPool.WatchSweeps(pool);
-        StrongBox<int> shared = BlockPool.WatchSweeps(MemoryAccount.Pool);
-        GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true);
-        GC.WaitForPendingFinalizers();
-        Assert.True(Volatile.Read(ref sweeps.Value) > 0, "a pool made swept");
-        Assert.True(Volatile.Read(ref shared.Value) > 0, "the shared pool");
-        GC.KeepAlive(pool);
-    }
-
-    [Fact]
-    public void A_swept_pool_nothing_else_holds_is_collected()
-    {
-        WeakReference pool = SweptPool();
+        WeakReference pool = UnheldPool();
         for (int i = 0; i < 3 && pool.IsAlive; i++)
         {
             GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true);
@@ -545,32 +558,7 @@ public sealed class BlockPoolTests
     }
 
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
-    private static WeakReference SweptPool() => new WeakReference(new BlockPool(maxRetainedBytes: 1 << 20).Swept());
-
-    [Fact]
-    public void A_pool_bounded_in_bytes_keeps_what_is_given_back_in_any_class_up_to_its_budget()
-    {
-        const int megabyte = 1024 * 1024;
-        BlockPool large = new BlockPool(maxRetainedBytes: 16L * megabyte);
-        BlockPool small = new BlockPool(maxRetainedBytes: megabyte);
-        try
-        {
-            ReturnAll(large, RentAll(large, 4 * megabyte, 2));
-            Assert.Equal(2, large.ParkedCount(4 * megabyte));
-
-            // The two blocks above hold half the budget: eight blocks of a megabyte fill the rest.
-            ReturnAll(large, RentAll(large, megabyte, 12));
-            Assert.Equal(8, large.ParkedCount(megabyte));
-
-            ReturnAll(small, RentAll(small, 4096, 100));
-            Assert.Equal(100, small.ParkedCount(4096));
-        }
-        finally
-        {
-            large.Trim();
-            small.Trim();
-        }
-    }
+    private static WeakReference UnheldPool() => new WeakReference(BlockPool.KeepingAll(1 << 20));
 
     [Fact]
     public void Concurrent_renters_never_receive_the_same_block()
@@ -604,9 +592,9 @@ public sealed class BlockPoolTests
     }
 
     [Fact]
-    public void A_graded_class_keeps_as_many_blocks_as_were_rented_at_once()
+    public void A_pool_that_keeps_all_keeps_as_many_blocks_as_were_rented_at_once()
     {
-        BlockPool pool = BlockPool.Graded(8 * 1024 * 1024, 8, demandBudget: 64L * 1024 * 1024);
+        BlockPool pool = BlockPool.KeepingAll(8 * 1024 * 1024);
         const int block = 128 * 1024;
         try
         {
@@ -632,9 +620,9 @@ public sealed class BlockPoolTests
     }
 
     [Fact]
-    public void A_graded_pool_keeps_one_outsized_block_for_the_next_read_it_fits()
+    public void A_pool_that_keeps_all_keeps_one_outsized_block_for_the_next_read_it_fits()
     {
-        BlockPool pool = BlockPool.Graded(64 * 1024, 8, demandBudget: 1L << 20);
+        BlockPool pool = BlockPool.KeepingAll(64 * 1024);
         try
         {
             // Past the classes, the block a read gets parks in the pool's one slot once given back.
@@ -662,14 +650,14 @@ public sealed class BlockPoolTests
             pool.Return(longer);
             Assert.True(pool.KeepsOutsized);
 
-            // A sweep frees it once no outsized read has asked for a minute, or at once under a high
-            // memory load.
-            pool.TrimIdle(Environment.TickCount64, everything: false);
+            // Letting go of what was unused frees it once no outsized read asked since the time before, and the
+            // registry's asking first of all.
+            pool.LetGoUnused(collection: true);
             Assert.True(pool.KeepsOutsized);
-            pool.TrimIdle(Environment.TickCount64 + 60_000, everything: false);
+            pool.LetGoUnused(collection: true);
             Assert.False(pool.KeepsOutsized);
             pool.Return(pool.Rent(TestAccount.Shared, 1_000_000, 64));
-            pool.TrimIdle(Environment.TickCount64, everything: true);
+            Assert.Equal(1_000_000, pool.GiveBack(KeptKind.Blocks, 1));
             Assert.False(pool.KeepsOutsized);
         }
         finally
@@ -679,38 +667,9 @@ public sealed class BlockPoolTests
     }
 
     [Fact]
-    public void A_graded_class_widens_within_the_pools_budget_and_its_own_ceiling()
+    public void A_pool_that_keeps_all_parks_no_more_than_was_rented_at_once()
     {
-        const int block = 128 * 1024;
-
-        // A budget of 2 MiB parks sixteen of these, the eight of the floor among them.
-        BlockPool tight = BlockPool.Graded(8 * 1024 * 1024, 8, demandBudget: 2L * 1024 * 1024);
-
-        // 4 MiB blocks keep their class's ceiling at most, 64 MiB a processor and 64 MiB at least: sixteen blocks a
-        // processor, the blocks past it given back freed.
-        BlockPool wide = BlockPool.Graded(8 * 1024 * 1024, 8, demandBudget: 1L << 40);
-        const int big = 4 * 1024 * 1024;
-        int ceiling = (int)(wide.ClassCeilingBytes(big) / big);
-        Assert.Equal(16 * Environment.ProcessorCount, ceiling);
-        try
-        {
-            ReturnAll(tight, RentAll(tight, block, 40));
-            Assert.Equal(16, tight.ParkedCount(block));
-
-            ReturnAll(wide, RentAll(wide, big, ceiling + 4));
-            Assert.Equal(ceiling, wide.ParkedCount(big));
-        }
-        finally
-        {
-            tight.Trim();
-            wide.Trim();
-        }
-    }
-
-    [Fact]
-    public void A_graded_class_parks_no_more_than_was_rented_at_once()
-    {
-        BlockPool pool = BlockPool.Graded(8 * 1024 * 1024, 8, demandBudget: 64L * 1024 * 1024);
+        BlockPool pool = BlockPool.KeepingAll(8 * 1024 * 1024);
         const int block = 128 * 1024;
         try
         {
@@ -792,44 +751,99 @@ public sealed class SharedPoolTests
         MemoryAccount.Pool.Return(second);
     }
 
+    /// <summary>
+    /// The process's pool parks every block given back, however large its class, with no count or budget of its own: it
+    /// never holds more than was rented at once, and the registry takes back what it keeps above its floors.
+    /// </summary>
     [Fact]
-    public void The_shared_pool_parks_chunk_sized_blocks_up_to_their_class_ceiling()
+    public void The_shared_pool_parks_every_chunk_sized_block_given_back()
     {
         const int large = 32 * 1024 * 1024;
         Assert.True(MemoryAccount.Pool.MaxPooledLength >= large);
-
-        // A class of blocks past 8 MiB keeps 16 MiB of them a processor, 64 MiB at least: two of these on four processors.
-        int ceiling = (int)(MemoryAccount.Pool.ClassCeilingBytes(large) / large);
-        Assert.Equal(Math.Max(2, Environment.ProcessorCount / 2), ceiling);
-        BlockOwner[] rented = new BlockOwner[ceiling + 1];
-        for (int i = 0; i < rented.Length; i++)
-        {
-            rented[i] = MemoryAccount.Pool.Rent(TestAccount.Shared, large, 64);
-        }
-
-        int before = MemoryAccount.Pool.ParkedCount(large);
+        Assert.Equal(long.MaxValue, MemoryAccount.Pool.ClassCeilingBytes(large));
+        BlockOwner[] rented = [MemoryAccount.Pool.Rent(TestAccount.Shared, large, 64), MemoryAccount.Pool.Rent(TestAccount.Shared, large, 64)];
         foreach (BlockOwner owner in rented)
         {
             MemoryAccount.Pool.Return(owner);
         }
 
-        // The ceiling's blocks are the budget; a return past it is freed rather than parked.
-        Assert.Equal(Math.Min(ceiling, before + rented.Length), MemoryAccount.Pool.ParkedCount(large));
+        Assert.Equal(2, MemoryAccount.Pool.ParkedCount(large));
+        Assert.Equal(2L * large, MemoryAccount.Pool.GiveBack(KeptKind.Blocks, 2L * large));
+        Assert.Equal(0, MemoryAccount.Pool.ParkedCount(large));
     }
 
     /// <summary>
-    /// A reservation a process's budget refuses first takes back the blocks the pool keeps parked for the next rents: memory
-    /// a container's limit counts, and the room of the queries is what that limit leaves.
+    /// A reservation a process's budget refuses first has the registry take back the memory kept above its floors, the
+    /// blocks the pool parks for the next rents first: memory a container's limit counts, and the room of the queries is
+    /// what that limit leaves.
     /// </summary>
     [Fact]
     public void The_shared_pool_gives_back_what_it_parks_when_a_process_budget_refuses()
     {
-        BlockOwner block = MemoryAccount.Pool.Rent(TestAccount.Shared, 64 * 1024, 64);
+        const int megabyte = 1024 * 1024;
+        BlockOwner block = MemoryAccount.Pool.Rent(TestAccount.Shared, megabyte, 64);
         MemoryAccount.Pool.Return(block);
-        Assert.True(MemoryAccount.Pool.ParkedBytes > 0);
+        Assert.Equal(1, MemoryAccount.Pool.ParkedCount(megabyte));
 
         QueryMemoryBudget process = new QueryMemoryBudget(1 << 20, process: null);
         Assert.False(process.TryReserve(1L << 40));
-        Assert.Equal(0, MemoryAccount.Pool.ParkedBytes);
+        Assert.Equal(0, MemoryAccount.Pool.ParkedCount(megabyte));
+    }
+
+    /// <summary>
+    /// The registry asks the memory kept back kind after kind, the blocks before the objects a dataset keeps open; once a
+    /// kind past the blocks gave something, the blocks are asked again, since a cache's blocks go back to the pool.
+    /// </summary>
+    [Fact]
+    public void The_registry_gives_back_in_the_order_of_the_kinds()
+    {
+        Blocks.Trim();
+        List<string> asked = [];
+        Kept objects = new Kept(KeptKind.Objects, 100, "objects", asked);
+        Kept blocks = new Kept(KeptKind.Blocks, 100, "blocks", asked);
+        HeldMemory.Register(objects);
+        HeldMemory.Register(blocks);
+        try
+        {
+            long given = HeldMemory.GiveBack(150);
+
+            // What the process's own holders gave back, nothing after the trims, would only leave less to ask.
+            Assert.True(given >= 150, $"{given} bytes given back");
+            Assert.Equal(0, blocks.Held);
+            Assert.True(objects.Held >= 50, $"{objects.Held} bytes of objects kept");
+            Assert.Equal(["blocks", "objects", "blocks"], asked);
+        }
+        finally
+        {
+            HeldMemory.Unregister(objects);
+            HeldMemory.Unregister(blocks);
+        }
+    }
+
+    /// <summary>A holder of one kind, which gives back what it is asked of it, and notes each asking.</summary>
+    private sealed class Kept(KeptKind kind, long held, string name, List<string> asked) : IHeldMemory
+    {
+        internal long Held { get; private set; } = held;
+
+        public string Holder => "test";
+
+        public long HeldBytes => Held;
+
+        public long GiveBack(KeptKind of, long bytes)
+        {
+            if (of != kind)
+            {
+                return 0;
+            }
+
+            asked.Add(name);
+            long given = Math.Min(bytes, Held);
+            Held -= given;
+            return given;
+        }
+
+        public void LetGoUnused(bool collection)
+        {
+        }
     }
 }

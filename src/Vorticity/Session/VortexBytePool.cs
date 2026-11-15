@@ -15,9 +15,10 @@ namespace Vorticity;
 /// last renter left. Past a gigabyte, it is allocated at its length and let go when given back.
 /// </para>
 /// <para>
-/// The pool keeps what is given back for the next rent and lets go of a size class no rent has asked for over a minute,
-/// after a collection of the oldest generation, and of every class when the machine's memory load is high. An array given
-/// back may not be read or written after: it is the next renter's.
+/// The pool keeps what is given back for the next rent. It lets go of the arrays no rent took since the time before, after
+/// each collection of the oldest generation and at each turn of a slow timer, and of everything above a small floor when
+/// the library's work needs the room or the machine's memory load is high. An array given back may not be read or written
+/// after: it is the next renter's.
 /// </para>
 /// </remarks>
 public sealed class VortexBytePool : ArrayPool<byte>

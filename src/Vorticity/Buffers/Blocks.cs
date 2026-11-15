@@ -26,10 +26,10 @@ namespace Vorticity.Buffers;
 /// cleared: a block holds whatever its last renter left.
 /// </para>
 /// <para>
-/// The pool frees nothing: it lets go, and the collector takes. After a collection of the oldest
-/// generation, a class no rent has asked for over a minute lets go of its blocks, and every class does
-/// when the machine's memory load is high. A reservation the process's budget refuses lets go of
-/// everything (<see cref="Trim"/>).
+/// The pool frees nothing: it lets go, and the collector takes. It keeps every block given back, and the registry of
+/// kept memory (<see cref="HeldMemory"/>) takes back what it keeps above its floors: after each collection of the
+/// oldest generation and at each turn of the registry's slow timer, the blocks of each class that sat kept since the
+/// time before; everything above the floors when a reservation needs the room or the machine's memory load is high.
 /// </para>
 /// </remarks>
 internal static class Blocks
@@ -40,16 +40,19 @@ internal static class Blocks
     /// <summary>The largest block kept: a gigabyte. A longer one is allocated at its length and let go when given back.</summary>
     private const int MaxShift = 30;
 
-    /// <summary>How long a class goes without a rent before a sweep lets go of its blocks: the minute <c>ArrayPool&lt;T&gt;.Shared</c> gives its own.</summary>
-    private const long IdleMilliseconds = 60_000;
+    /// <summary>
+    /// 🧪 The bytes each class keeps whatever the registry asks: 4 096 blocks of 16 bytes, one of 64 KiB, none larger.
+    /// Provisional, calibrated by measurement with the other floors.
+    /// </summary>
+    internal const int FloorBytesPerClass = 64 * 1024;
 
     /// <summary>The least block a query's memory counts, a page: smaller ones go uncounted both ways.</summary>
     internal const long LeastCounted = 4096;
 
     private static readonly Stack[] s_classes = NewClasses();
 
-    /// <summary>What the collector's sweeps and the memory report see of the pool's typed face, held here for as long as the process runs.</summary>
-    internal static IHeldMemory Holder { get; } = Sweeper.Start();
+    /// <summary>What the registry of kept memory sees of the pool's typed face, held here for as long as the process runs.</summary>
+    internal static IHeldMemory Holder { get; } = Kept.Register();
 
     /// <summary>Whether a block given back is filled with garbage first, in tests: a reader that kept a view of it reads garbage, and fails.</summary>
     internal static bool PoisonsGiven { get; set; }
@@ -259,8 +262,36 @@ internal static class Blocks
         }
     }
 
-    /// <summary>Lets go of every block the pool keeps: a reservation needs their room.</summary>
-    internal static void Trim() => Sweep(Environment.TickCount64, everything: true);
+    /// <summary>Lets go of every block the pool keeps, floors included: for the tests and the benchmarks, which start from nothing.</summary>
+    internal static void Trim()
+    {
+        foreach (Stack stack in s_classes)
+        {
+            stack.LetGo(int.MaxValue, aboveFloor: false);
+        }
+    }
+
+    /// <summary>Lets go of up to <paramref name="bytes"/> of the blocks kept above the floors, the largest classes first: the bytes let go.</summary>
+    internal static long GiveBack(long bytes)
+    {
+        long given = 0;
+        for (int i = s_classes.Length - 1; i >= 0 && given < bytes; i--)
+        {
+            long size = 1L << (i + MinShift);
+            given += s_classes[i].LetGo(BlockPool.BlocksFor(bytes - given, size), aboveFloor: true) * size;
+        }
+
+        return given;
+    }
+
+    /// <summary>Lets go, in each class, of the blocks that sat kept since the last time, above the floors.</summary>
+    internal static void LetGoUnused()
+    {
+        foreach (Stack stack in s_classes)
+        {
+            stack.LetGo(stack.Unused(), aboveFloor: true);
+        }
+    }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static int ShiftOf(int bytes) => bytes <= 1 << MinShift ? MinShift : BitOperations.Log2((uint)bytes - 1) + 1;
@@ -275,38 +306,27 @@ internal static class Blocks
         where T : unmanaged =>
         throw new ArgumentOutOfRangeException("length", "A block's length is not negative.");
 
-    /// <summary>A sweep: the classes no rent asked for over <see cref="IdleMilliseconds"/> let go of their blocks, or every class when <paramref name="everything"/>.</summary>
-    private static void Sweep(long now, bool everything)
-    {
-        foreach (Stack stack in s_classes)
-        {
-            stack.Sweep(now, everything);
-        }
-    }
-
     private static Stack[] NewClasses()
     {
         Stack[] classes = new Stack[MaxShift - MinShift + 1];
         for (int i = 0; i < classes.Length; i++)
         {
-            classes[i] = new Stack(1 << (i + MinShift));
+            int size = 1 << (i + MinShift);
+            classes[i] = new Stack(size, FloorBytesPerClass / size);
         }
 
         return classes;
     }
 
-    /// <summary>One class: a stack of its blocks, under its own lock.</summary>
-    private sealed class Stack(int size)
+    /// <summary>One class: a stack of its blocks, under its own lock, above a floor the registry leaves it.</summary>
+    private sealed class Stack(int size, int floor)
     {
         private readonly Lock _gate = new Lock();
         private byte[]?[] _items = [];
         private int _count;
 
-        /// <summary>Whether a rent has asked for the class since the last sweep.</summary>
-        private bool _rented;
-
-        /// <summary>When the sweep that last found the class asked for ran.</summary>
-        private long _idleSince;
+        /// <summary>The fewest blocks the class kept since it was last asked what it did not use: none of them was taken.</summary>
+        private int _fewest;
 
         /// <summary>The bytes the class keeps, read without its lock: a count, for the memory report.</summary>
         internal long Bytes => (long)Volatile.Read(ref _count) * size;
@@ -315,12 +335,6 @@ internal static class Blocks
         {
             lock (_gate)
             {
-                // Written once per sweep, so that renters do not keep writing the line.
-                if (!_rented)
-                {
-                    _rented = true;
-                }
-
                 if (_count == 0)
                 {
                     return null;
@@ -328,6 +342,11 @@ internal static class Blocks
 
                 byte[]? bytes = _items[--_count];
                 _items[_count] = null;
+                if (_count < _fewest)
+                {
+                    _fewest = _count;
+                }
+
                 return bytes;
             }
         }
@@ -345,57 +364,62 @@ internal static class Blocks
             }
         }
 
-        /// <summary>Lets go of the class's blocks once no rent asked for it over the idle time, or at once when <paramref name="everything"/>.</summary>
-        internal void Sweep(long now, bool everything)
+        /// <summary>
+        /// How many blocks sat kept since the class was last asked, the fewest it kept in between, and from now on counted
+        /// again from what it keeps.
+        /// </summary>
+        internal int Unused()
         {
             lock (_gate)
             {
-                if (!everything)
-                {
-                    if (_rented)
-                    {
-                        _rented = false;
-                        _idleSince = now;
-                        return;
-                    }
+                int unused = _fewest;
+                _fewest = _count;
+                return unused;
+            }
+        }
 
-                    if (now - _idleSince < IdleMilliseconds)
-                    {
-                        return;
-                    }
+        /// <summary>Lets go of up to <paramref name="count"/> blocks, above the floor or all of them: how many.</summary>
+        internal int LetGo(int count, bool aboveFloor)
+        {
+            lock (_gate)
+            {
+                int gone = Math.Min(count, aboveFloor ? Math.Max(0, _count - floor) : _count);
+                if (gone == 0)
+                {
+                    return 0;
                 }
 
-                Array.Clear(_items, 0, _count);
-                _count = 0;
+                Array.Clear(_items, _count - gone, gone);
+                _count -= gone;
+                _fewest = Math.Min(_fewest, _count);
 
                 // An array grown for a burst goes with its blocks.
-                if (_items.Length > 64)
+                if (_count == 0 && _items.Length > 64)
                 {
                     _items = [];
                 }
+
+                return gone;
             }
         }
     }
 
-    /// <summary>What the collector's sweeps and the memory report see of the typed face.</summary>
-    private sealed class Sweeper : ISweptAfterCollections, IHeldMemory
+    /// <summary>What the registry of kept memory and the memory report see of the typed face.</summary>
+    private sealed class Kept : IHeldMemory
     {
-        internal static Sweeper Start()
+        internal static Kept Register()
         {
-            Sweeper sweeper = new Sweeper();
-            CollectionSweeper<Sweeper>.Register(sweeper);
-            HeldMemory.Register(sweeper);
-            return sweeper;
+            Kept kept = new Kept();
+            HeldMemory.Register(kept);
+            return kept;
         }
 
         public string Holder => "pool";
 
         public long HeldBytes => Blocks.HeldBytes;
 
-        public void Sweep()
-        {
-            GCMemoryInfo memory = GC.GetGCMemoryInfo();
-            Blocks.Sweep(Environment.TickCount64, memory.MemoryLoadBytes >= memory.HighMemoryLoadThresholdBytes);
-        }
+        public long GiveBack(KeptKind kind, long bytes) => kind == KeptKind.Blocks && bytes > 0 ? Blocks.GiveBack(bytes) : 0;
+
+        public void LetGoUnused(bool collection) => Blocks.LetGoUnused();
     }
 }

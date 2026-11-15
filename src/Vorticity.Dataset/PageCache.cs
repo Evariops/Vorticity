@@ -54,6 +54,18 @@ internal sealed class PageCache
     /// <summary>The pages read from the store it holds now.</summary>
     public int Count => _pages.Count;
 
+    /// <summary>
+    /// 🧪 The bytes of pages a handle keeps whatever the registry of kept memory asks, its budget when that is less:
+    /// provisional, calibrated by measurement with the other floors. A page let go costs a request to read again.
+    /// </summary>
+    internal const long FloorBytes = 4L << 20;
+
+    /// <summary>
+    /// Lets go of up to <paramref name="bytes"/> of the pages read from the store above the floor, the oldest kept first;
+    /// only those no walk read since the registry's timer turned before when <paramref name="stale"/>: the bytes let go.
+    /// </summary>
+    public long LetGo(long bytes, bool stale) => _pages.LetGo(bytes, Math.Min(FloorBytes, Capacity), stale);
+
     /// <summary>A page read from the store that <paramref name="reference"/> names, when the cache holds it.</summary>
     public bool TryGet(PageReference reference, out ReadOnlyMemory<byte> page) => _pages.TryGet(reference, out page);
 

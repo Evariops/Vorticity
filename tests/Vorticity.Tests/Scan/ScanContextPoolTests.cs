@@ -230,7 +230,7 @@ public sealed class ScanContextPoolTests
         Assert.Equal(8, pool.Count);
 
         // Let go, it forgets the takings of before, and keeps its floor.
-        pool.TrimIdle(1_000, everything: true);
+        pool.LetGoUnused(everything: true);
         Assert.Equal(0, pool.Count);
         Assert.Equal(0, pool.MostLent);
         taken.Clear();
@@ -263,25 +263,31 @@ public sealed class ScanContextPoolTests
     }
 
     [Fact]
-    public async Task APoolNoScanTookFromOverAMinuteLetsItsContextsGo()
+    public async Task APoolLetsGoOfTheContextsNoScanTookSinceTheSweepBefore()
     {
         Decoders.EnsureRegistered();
         await using VortexFile file = await VortexFile.OpenAsync(Corpus.Path(Zoned), CancellationToken.None);
         ScanContexts pool = new ScanContexts(4);
-        pool.Return(pool.Rent(file, TestAccount.Shared));
-        Assert.Equal(1, pool.Count);
+        ScanContext first = pool.Rent(file, TestAccount.Shared);
+        ScanContext second = pool.Rent(file, TestAccount.Shared);
+        pool.Return(first);
+        pool.Return(second);
+        Assert.Equal(2, pool.Count);
 
-        // Taken since the sweep before, so idle from this one on.
-        pool.TrimIdle(1_000, everything: false);
+        // Kept since the start, which counts from this sweep: nothing goes.
+        pool.LetGoUnused(everything: false);
+        Assert.Equal(2, pool.Count);
+
+        // One taken and given back: the other sat kept through, and goes.
+        pool.Return(pool.Rent(file, TestAccount.Shared));
+        pool.LetGoUnused(everything: false);
         Assert.Equal(1, pool.Count);
-        pool.TrimIdle(1_000 + ScanContexts.IdleMilliseconds - 1, everything: false);
-        Assert.Equal(1, pool.Count);
-        pool.TrimIdle(1_000 + ScanContexts.IdleMilliseconds, everything: false);
+        pool.LetGoUnused(everything: false);
         Assert.Equal(0, pool.Count);
 
         // A high memory load lets them go at once, taken or not.
         pool.Return(pool.Rent(file, TestAccount.Shared));
-        pool.TrimIdle(1_000, everything: true);
+        pool.LetGoUnused(everything: true);
         Assert.Equal(0, pool.Count);
     }
 
