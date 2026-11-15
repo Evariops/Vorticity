@@ -90,9 +90,14 @@ internal class BudgetAccount : MemoryAccount
     /// <summary>The budget the account reserves in.</summary>
     internal QueryMemoryBudget Budget { get; }
 
+    /// <summary>
+    /// Reserves and measures <paramref name="bytes"/>; past the budget's ceiling, counted all the same, as a lane's growth in
+    /// the middle of a batch is (<see cref="QueryMemoryBudget.Force"/>): a block is what the work needs to go on, and the work
+    /// beside it that can wait, spill or turn to the core sees the room it took. Only the process past its limit refuses it.
+    /// </summary>
     internal override bool TryTake(long bytes)
     {
-        if (!Budget.TryReserve(bytes))
+        if (!Budget.TryReserve(bytes) && !Budget.Force(bytes))
         {
             return false;
         }
@@ -112,7 +117,7 @@ internal class BudgetAccount : MemoryAccount
         QueryMemoryBudget process = QueryMemoryBudget.Process;
         return new VortexMemoryException(string.Create(
             CultureInfo.InvariantCulture,
-            $"The {_work} asks for a block of {bytes:N0} bytes, past its memory budget of {Budget.CeilingBytes:N0} bytes, {Budget.ReservedBytes:N0} of which is held; the process leaves its work {process.CeilingBytes:N0} bytes, the rest of its memory holding {process.RestBytes:N0}."));
+            $"The {_work} asks for a block of {bytes:N0} bytes, which the process cannot take past its limit: its budget of {Budget.CeilingBytes:N0} bytes holds {Budget.ReservedBytes:N0}, and the process leaves its work {process.CeilingBytes:N0} bytes, the rest of its memory holding {process.RestBytes:N0}."));
     }
 }
 

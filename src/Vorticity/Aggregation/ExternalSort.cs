@@ -29,13 +29,27 @@ internal readonly record struct SortKey(FieldExpr Field, VortexType Type, bool D
 /// <remarks>
 /// It reserves its store's rows twice, a store growing by doubling, and a position and a bit a key
 /// column for each row; the store goes to a run once that passes a quarter of the budget's ceiling,
-/// the rest left to what feeds it, or once the budget refuses it. The merge holds a batch a run and
-/// the batch it builds. The runs' files are written as the writer writes them fastest, without
+/// the rest left to what feeds it, or once the budget refuses it. The merge holds a block a run and
+/// the batch it builds, under the query's account: each run is written in blocks of a
+/// <see cref="RunBlocks"/>th of its rows, a chunk a block, and read back a block at a time, so that
+/// the runs' cursors hold a <see cref="RunBlocks"/>th of a run each, and the batch it builds a quarter
+/// of the ceiling at most. Read whole, as they were written, forty runs of a sort ten times its budget
+/// held ten times its budget. The runs' files are written as the writer writes them fastest, without
 /// statistics, and deleted once the sort is.
 /// </remarks>
 internal sealed class ExternalSort : IAsyncDisposable
 {
     private static readonly VortexWriteOptions RunOptions = new VortexWriteOptions { Compression = CompressionProfile.Fastest, WriteStatistics = false };
+
+    /// <summary>The blocks a run is written in, each read back alone by the merge.</summary>
+    private const int RunBlocks = 32;
+
+    /// <summary>The fewest rows of a run's block.</summary>
+    private const int LeastRunBlockRows = 256;
+
+    // The rows of each run's blocks, and the most bytes a row of the store held: what the merge reads and builds by.
+    private readonly List<int> _runBlockRows = [];
+    private long _rowBytes;
 
     private readonly VortexSession _session;
     private readonly VortexSchema _schema;
@@ -83,6 +97,11 @@ internal sealed class ExternalSort : IAsyncDisposable
 
     /// <summary>Whom the sort's rows and the batches it delivers are counted for: its query, until the query's memory is given back.</summary>
     private MemoryAccount Account => QueryMemory.AccountOf(_memory);
+
+    /// <summary>The rows of a batch the merge builds: what a quarter of the ceiling holds at the store's widest rows, a thousand at the fewest.</summary>
+    private int MergeRows => _memory is null || _rowBytes == 0
+        ? _batchRows
+        : (int)Math.Clamp(_memory.Ceiling / 4 / _rowBytes, 1_024, _batchRows);
 
     /// <summary>
     /// The rows of <paramref name="batch"/>, a struct of the sort's columns, gathered; the rows gathered
@@ -232,18 +251,24 @@ internal sealed class ExternalSort : IAsyncDisposable
         _scratch += budget is null ? 0 : reserved;
         string path = RunPath();
         _runs.Add(path);
-        VortexFileWriter writer = _session.CreateWriter(path, _schema, RunOptions);
+
+        // Blocks of a RunBlocks-th of the run, a chunk each, which the merge reads back one at a time.
+        int blockRows = Math.Clamp(rows / RunBlocks, LeastRunBlockRows, RunOptions.BlockRows);
+        _runBlockRows.Add(blockRows);
+        _rowBytes = Math.Max(_rowBytes, (store.CommittedBytes / rows) + 1);
+        VortexFileWriter writer = _session.CreateWriter(path, _schema, RunOptions with { BlockRows = blockRows, ChunkTargetBytes = 1 });
         await using (writer.ConfigureAwait(false))
         {
             RecordBatch? batch = null;
             try
             {
-                for (int start = 0; start < rows; start += _batchRows)
+                for (int start = 0; start < rows; start += blockRows)
                 {
                     // The store's rows over an arena emptied for each batch: the run's rows are copied a
-                    // batch at a time, not twice whole.
+                    // block at a time, not twice whole, each block a chunk of its own, which a batch of
+                    // many blocks written where it lies would not be.
                     cancellationToken.ThrowIfCancellationRequested();
-                    int count = Math.Min(_batchRows, rows - start);
+                    int count = Math.Min(blockRows, rows - start);
                     batch?.Dispose();
                     arena.ResetKeepingBlocks();
                     int gathered = CanonicalFilter.Apply(arena, store.Build(arena, rows), positions.AsSpan(start, count));
@@ -433,13 +458,14 @@ internal sealed class ExternalSort : IAsyncDisposable
             StructStore output = _out!;
             output.Truncate(0);
             int rows = 0;
-            while (rows < sort._batchRows && _heap.Count > 0)
+            int most = sort.MergeRows;
+            while (rows < most && _heap.Count > 0)
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 Cursor top = _heap[0];
 
                 // The top's rows up to the next cursor's row, within the batch built and the top's own.
-                int end = Math.Min(top.Rows, top.Row + (sort._batchRows - rows));
+                int end = Math.Min(top.Rows, top.Row + (most - rows));
                 if (_heap.Count > 1)
                 {
                     Cursor next = Second();
@@ -567,9 +593,18 @@ internal sealed class ExternalSort : IAsyncDisposable
         /// <summary>The run's next batch, its orders made over it; false past its last.</summary>
         internal async ValueTask<bool> NextBatchAsync()
         {
-            _batches ??= file.ScanSource
-                .Rows.BatchesAsync(new ScanSpec { Options = ScanOptions.Default with { BatchRows = sort._batchRows } }, new ScanCounters())
-                .GetAsyncEnumerator(cancellationToken);
+            // A block of the run at a time, decoded on demand on one lane, under the sort's question: a cursor that decoded
+            // ahead held several of the run's splits, and the runs together ten times the sort's budget.
+            if (_batches is null)
+            {
+                ScanSpec spec = new ScanSpec
+                {
+                    Options = ScanOptions.Default with { BatchRows = sort._runBlockRows[Ordinal], DegreeOfParallelism = 1, Prefetch = 0 },
+                };
+                _batches = file.ScanSource.Rows.BatchesAsync(sort._memory is { } memory ? spec.Under(memory) : spec, new ScanCounters())
+                    .GetAsyncEnumerator(cancellationToken);
+            }
+
             while (await _batches.MoveNextAsync().ConfigureAwait(false))
             {
                 RecordBatch batch = _batches.Current;

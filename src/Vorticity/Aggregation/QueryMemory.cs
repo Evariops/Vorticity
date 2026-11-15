@@ -97,13 +97,14 @@ internal sealed class QueryMemory : IDisposable
     }
 
     // The account the query's blocks are counted in, made at the first block it rents.
-    private WorkAccount? _account;
+    private QuestionAccount? _account;
 
     /// <summary>
-    /// The account the query's blocks are counted in, its result's batches and what its sorts and tops build: under its
-    /// budget, given back whole with the rest of the query's memory, whatever a caller still holds of its result.
+    /// The account the query's blocks are counted in, its scans' reads and batches, its result's batches and what its sorts
+    /// and tops build: under its budget, given back whole with the rest of the query's memory, whatever a caller still holds
+    /// of its result.
     /// </summary>
-    internal WorkAccount Account
+    internal MemoryAccount Account
     {
         get
         {
@@ -112,16 +113,90 @@ internal sealed class QueryMemory : IDisposable
                 return account;
             }
 
-            WorkAccount made = new WorkAccount(_budget, "query");
-            WorkAccount? won = Interlocked.CompareExchange(ref _account, made, null);
-            if (won is null)
+            QuestionAccount made = new QuestionAccount(this);
+            return Interlocked.CompareExchange(ref _account, made, null) ?? made;
+        }
+    }
+
+    /// <summary>
+    /// The account of a question's blocks. What the question reserved already, its lanes' working memory admitted, its
+    /// sorts' and tops' rows, its result, models what its blocks hold: the blocks draw on it first, and only what they hold
+    /// past it is reserved, in the process's budget, where the limit lives, and past its ceiling as a lane's growth is when
+    /// it must be. Without it, a block would be reserved twice, once by the model and once as it is rented, and a question
+    /// would run out at half its budget. A host's budget governs its questions through their models, which give way, spill
+    /// or turn to the core when it refuses them: their blocks past the models, which cannot, would leave those no room.
+    /// </summary>
+    private sealed class QuestionAccount(QueryMemory memory) : MemoryAccount
+    {
+        // What the question's blocks hold now, -1 once its memory is given back; and what they reserved past its own.
+        private long _held;
+        private long _reserved;
+
+        internal override bool TryTake(long bytes)
+        {
+            long held = Interlocked.Add(ref _held, bytes);
+            if (held < bytes)
             {
-                return made;
+                // Given back: a block rented now is the caller's, counted nowhere.
+                return true;
             }
 
-            GC.SuppressFinalize(made);
-            return won;
+            long extra = Math.Max(0, held - memory.Held) - Volatile.Read(ref _reserved);
+            if (extra <= 0)
+            {
+                return true;
+            }
+
+            QueryMemoryBudget budget = memory._budget.Root;
+            if (!budget.TryReserve(extra) && !budget.Force(extra))
+            {
+                Interlocked.Add(ref _held, -bytes);
+                return false;
+            }
+
+            budget.Measure(extra);
+            Interlocked.Add(ref _reserved, extra);
+            return true;
         }
+
+        internal override void Give(long bytes)
+        {
+            long held = Interlocked.Add(ref _held, -bytes);
+            if (held < 0)
+            {
+                return;
+            }
+
+            // What the blocks reserved past what they still need is given back.
+            long need = Math.Max(0, held - memory.Held);
+            long reserved = Volatile.Read(ref _reserved);
+            while (reserved > need)
+            {
+                long seen = Interlocked.CompareExchange(ref _reserved, need, reserved);
+                if (seen == reserved)
+                {
+                    memory._budget.Root.Release(reserved - need);
+                    memory._budget.Root.Measure(need - reserved);
+                    return;
+                }
+
+                reserved = seen;
+            }
+        }
+
+        /// <summary>Gives back what the blocks reserved: what comes back after is ignored.</summary>
+        internal void Close()
+        {
+            Interlocked.Exchange(ref _held, long.MinValue / 2);
+            long reserved = Interlocked.Exchange(ref _reserved, 0);
+            if (reserved > 0)
+            {
+                memory._budget.Root.Release(reserved);
+                memory._budget.Root.Measure(-reserved);
+            }
+        }
+
+        internal override VortexMemoryException Refused(long bytes) => memory.Exceeded("query's block", -1, bytes);
     }
 
     /// <summary>
@@ -347,7 +422,7 @@ internal sealed class QueryMemory : IDisposable
         }
 
         // The blocks' account closed: a result's batches are the caller's from now on, counted nowhere.
-        Volatile.Read(ref _account)?.Dispose();
+        Volatile.Read(ref _account)?.Close();
 
         if (Interlocked.Exchange(ref _left, 1) == 0)
         {

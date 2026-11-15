@@ -185,6 +185,10 @@ internal sealed class ProjectionQuery : ResultQuery
 
     internal override IAsyncEnumerator<RecordBatch> Batches(CancellationToken cancellationToken) => new ProjectedBatches(this, cancellationToken);
 
+    /// <summary>The projected rows, read under <paramref name="memory"/>, the question's that sorts them, when one is given.</summary>
+    internal override IAsyncEnumerator<RecordBatch> Batches(Aggregating.QueryMemory? memory, CancellationToken cancellationToken) =>
+        new ProjectedBatches(this, cancellationToken, memory);
+
     internal override ValueTask<ScanPlan> ExplainAsync(bool analyze, CancellationToken cancellationToken) =>
         Host.Source.PlanAsync(SourceSpec(keepEncodings: true, out _), analyze, cancellationToken);
 
@@ -295,11 +299,12 @@ internal sealed class ProjectedBatches : IAsyncEnumerator<RecordBatch>
     private bool _begun;
     private bool _ended;
 
-    internal ProjectedBatches(ProjectionQuery query, CancellationToken cancellationToken)
+    internal ProjectedBatches(ProjectionQuery query, CancellationToken cancellationToken, Aggregating.QueryMemory? memory = null)
     {
         _query = query;
         _cancellationToken = cancellationToken;
-        _spec = query.SourceSpec(keepEncodings: true, out bool narrowed);
+        ScanSpec spec = query.SourceSpec(keepEncodings: true, out bool narrowed);
+        _spec = memory is null ? spec : spec.Under(memory);
         _skip = narrowed ? 0 : query.Skip;
         _end = narrowed || query.Take == long.MaxValue ? long.MaxValue : query.Skip + query.Take;
         _dtype = VortexTypes.ToDType(query.Schema, new DTypeArena());

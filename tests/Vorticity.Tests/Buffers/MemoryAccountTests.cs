@@ -72,8 +72,12 @@ public sealed class MemoryAccountTests
         Assert.Equal(0, budget.ReservedBytes);
     }
 
+    /// <summary>
+    /// A budget's account reserves in it, and past its ceiling counts the block all the same, as a lane's growth in the
+    /// middle of a batch: the work beside it sees the room taken, and only the process past its limit refuses.
+    /// </summary>
     [Fact]
-    public void ABudgetsAccountReservesInItAndRefusesPastItsCeiling()
+    public void ABudgetsAccountReservesInItAndCountsPastItsCeiling()
     {
         QueryMemoryBudget budget = new QueryMemoryBudget(64 << 10);
         BlockPool pool = new BlockPool(maxPerBucket: 4);
@@ -81,11 +85,37 @@ public sealed class MemoryAccountTests
         BlockOwner block = pool.Rent(budget.Account, 32 << 10, 64);
         Assert.Equal(32 << 10, budget.ReservedBytes);
 
-        VortexMemoryException refused = Assert.Throws<VortexMemoryException>(() => pool.Rent(budget.Account, 64 << 10, 64));
-        Assert.Contains("memory budget of 65,536 bytes", refused.Message, System.StringComparison.Ordinal);
-        Assert.Equal(32 << 10, budget.ReservedBytes);
+        BlockOwner past = pool.Rent(budget.Account, 64 << 10, 64);
+        Assert.Equal(96 << 10, budget.ReservedBytes);
+        Assert.False(budget.CanReserve(1));
 
+        past.Release();
         block.Release();
+        Assert.Equal(0, budget.ReservedBytes);
+    }
+
+    /// <summary>
+    /// A question's blocks draw on what the question reserved already, its model of them: what they hold past it is reserved
+    /// in the process's budget, where the limit lives, and not in the host's, which governs the question through its model.
+    /// </summary>
+    [Fact]
+    public void AQuestionsBlocksDrawOnWhatItReservedFirst()
+    {
+        QueryMemoryBudget budget = new QueryMemoryBudget(1 << 20);
+        BlockPool pool = new BlockPool(maxPerBucket: 4);
+        using Vorticity.Aggregating.QueryMemory memory = new Vorticity.Aggregating.QueryMemory(budget);
+        Assert.True(memory.TryGrow(64 << 10));
+
+        BlockOwner within = pool.Rent(memory.Account, 32 << 10, 64);
+        Assert.Equal(64 << 10, budget.ReservedBytes);
+        BlockOwner past = pool.Rent(memory.Account, 64 << 10, 64);
+        Assert.Equal(64 << 10, budget.ReservedBytes);
+        Assert.Same(QueryMemoryBudget.Process, budget.Root);
+
+        past.Release();
+        within.Release();
+        Assert.Equal(64 << 10, budget.ReservedBytes);
+        memory.Dispose();
         Assert.Equal(0, budget.ReservedBytes);
     }
 

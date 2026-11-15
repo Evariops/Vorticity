@@ -277,15 +277,19 @@ internal abstract class StreamScanSource : ScanSource, IRowsCapability, IStatist
                 return new Enumerator(source, spec, EmptyBatches.Instance, null);
             }
 
-            int[]? columns = source.ColumnsOf(spec);
+            // An order the source does not arrive in is a sort of the rows kept, held whole: a question whose memory, made
+            // here when no question gave one, the rows are read under too.
+            bool sorts = spec.OrderPath is not null && !source.ArrivesInOrder(spec);
+            QueryMemory? memory = sorts && spec.Memory is null ? QueryMemory.Start(source.Session) : null;
+            ScanSpec read = memory is null ? spec : spec.Under(memory);
+            int[]? columns = source.ColumnsOf(read);
             IAsyncEnumerator<RecordBatch> stream = part is null
-                ? source.Stream(spec, columns, metrics, cancellationToken)
-                : source.Stream(spec, columns, metrics, part, cancellationToken);
+                ? source.Stream(read, columns, metrics, cancellationToken)
+                : source.Stream(read, columns, metrics, part, cancellationToken);
 
-            // An order the source does not arrive in is a sort of the rows kept, held whole.
             return spec.OrderPath is null ? new Enumerator(source, spec, stream, columns)
-                : source.ArrivesInOrder(spec) ? new Enumerator(source, spec with { OrderPath = null, Descending = false }, stream, columns)
-                : new SortedEnumerator(source, spec, stream, columns, cancellationToken);
+                : !sorts ? new Enumerator(source, spec with { OrderPath = null, Descending = false }, stream, columns)
+                : new SortedEnumerator(source, read, stream, columns, owned: memory is not null, cancellationToken);
         }
     }
 
@@ -301,17 +305,25 @@ internal abstract class StreamScanSource : ScanSource, IRowsCapability, IStatist
         private readonly ScanSpec _spec;
         private readonly Enumerator _kept;
         private readonly CancellationToken _cancellationToken;
-        private QueryMemory? _memory;
+        private readonly QueryMemory? _memory;
 
         // Whether the sort started its question, and gives its memory back.
-        private bool _owned;
+        private readonly bool _owned;
         private ExternalSort? _sort;
         private IAsyncEnumerator<RecordBatch>? _sorted;
 
-        internal SortedEnumerator(StreamScanSource source, ScanSpec spec, IAsyncEnumerator<RecordBatch> inner, int[]? columns, CancellationToken cancellationToken)
+        /// <param name="source">The source sorted.</param>
+        /// <param name="spec">The spec, of the question whose memory the rows were read under and are sorted under.</param>
+        /// <param name="inner">The rows read.</param>
+        /// <param name="columns">The columns the rows hold.</param>
+        /// <param name="owned">Whether the sort started its question, and gives its memory back.</param>
+        /// <param name="cancellationToken">Stops the sort.</param>
+        internal SortedEnumerator(StreamScanSource source, ScanSpec spec, IAsyncEnumerator<RecordBatch> inner, int[]? columns, bool owned, CancellationToken cancellationToken)
         {
             _source = source;
             _spec = spec;
+            _memory = spec.Memory;
+            _owned = owned;
             _cancellationToken = cancellationToken;
             _kept = new Enumerator(source, spec with { OrderPath = null, Descending = false, Options = spec.Options with { Compact = true } }, inner, columns);
         }
@@ -325,9 +337,6 @@ internal abstract class StreamScanSource : ScanSource, IRowsCapability, IStatist
             {
                 VortexSchema schema = _spec.Projection is { IsAll: false } mask ? ToolPaths.Project(_source.Schema, mask) : _source.Schema;
                 VortexSession session = _source.Session;
-                // The question's memory, one of its own where the sort starts the question.
-                _owned = _spec.Memory is null;
-                _memory = _spec.Memory ?? QueryMemory.Start(session);
                 VortexType type = schema.IndexOfName(_spec.OrderPath!) is int at and >= 0 ? schema[at].Type : VortexType.Null;
                 int[] delivered = new int[schema.Count];
                 for (int c = 0; c < delivered.Length; c++)

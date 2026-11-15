@@ -16,8 +16,8 @@ namespace Vorticity.Tests.Dataset;
 public sealed partial class DatasetSetTests
 {
     /// <summary>
-    /// 🧪 What a question over the set may hold past the same question over one dataset, a share of the one dataset's peak:
-    /// each member keeps a top of its own and reads its own objects ahead. Provisional, calibrated by measurement.
+    /// What an aggregation over the set may hold past the same aggregation over one dataset, a share of the one dataset's
+    /// peak: the set's tables are one, and only what its members read ahead differs.
     /// </summary>
     private const double SetPeakShare = 0.25;
 
@@ -40,19 +40,20 @@ public sealed partial class DatasetSetTests
     }
 
     /// <summary>
-    /// A question over a set of three datasets holds no more of its budget than the same question over one dataset of the
-    /// same rows, within <see cref="SetPeakShare"/>: its best rows of a column, and an aggregation.
+    /// A question over a set of three datasets holds what the same question over one dataset of the same rows holds: an
+    /// aggregation within <see cref="SetPeakShare"/>, its tables being the set's one; a window of its best rows a top a
+    /// member at most, each member finding its own best rows side by side, as the union reads them
+    /// (23-query-architecture.md, 8.5): measured at 2.1 times one dataset's for three members.
     /// </summary>
     [Fact]
     public async Task AQuestionOverASetHoldsWhatItHoldsOverOneDataset()
     {
+        const int Parts = 3;
         long[] whole = await PeaksAsync(parts: 1);
-        long[] set = await PeaksAsync(parts: 3);
-        for (int q = 0; q < whole.Length; q++)
-        {
-            Assert.True(whole[q] > 0, $"question {q} held nothing over one dataset");
-            Assert.True(set[q] <= whole[q] * (1 + SetPeakShare), $"question {q}: {set[q]:N0} bytes over the set, {whole[q]:N0} over one dataset");
-        }
+        long[] set = await PeaksAsync(Parts);
+        Assert.All(whole, peak => Assert.True(peak > 0, "a question held nothing over one dataset"));
+        Assert.True(set[0] <= whole[0] * Parts, $"the window: {set[0]:N0} bytes over the set, {whole[0]:N0} over one dataset");
+        Assert.True(set[1] <= whole[1] * (1 + SetPeakShare), $"the aggregation: {set[1]:N0} bytes over the set, {whole[1]:N0} over one dataset");
     }
 
     /// <summary>The most each question held of a budget of its own, over the rows in <paramref name="parts"/> datasets.</summary>

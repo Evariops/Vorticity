@@ -86,7 +86,7 @@ internal sealed class PartBuilder
             for (int from = 0; from < count; from += _batchRows)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                PartSlate slate = Take();
+                PartSlate slate = Take(QueryMemory.AccountOf(outcome.Memory));
                 result.Slates.Add(slate);
                 slate.Build(columns, outcome, groups.AsSpan(from, Math.Min(_batchRows, count - from)));
             }
@@ -160,13 +160,10 @@ internal sealed class PartBuilder
         }
 
         _columns.Clear();
-
-        // The parts' batches the caller still holds are its own from now on, counted nowhere.
-        Volatile.Read(ref _account)?.Dispose();
     }
 
-    /// <summary>A store of the pool, or a new one.</summary>
-    private PartSlate Take()
+    /// <summary>A store of the pool, or a new one under <paramref name="account"/>: the question's, which its result's batches count in until it is delivered.</summary>
+    private PartSlate Take(MemoryAccount account)
     {
         DType dtype;
         lock (_gate)
@@ -184,30 +181,8 @@ internal sealed class PartBuilder
             dtype = _dtype;
         }
 
-        // Under the result's own account, which its batches are counted in until the result is done (Release).
         VortexSessionOptions options = _query.Session.Options;
-        WorkAccount account = Account();
         return new PartSlate((StructStore)ColumnStores.Create(dtype, account, options.Extensions), new CanonicalArena(64, account));
-    }
-
-    // The account of the parts' batches: made with the first store, closed when the result is done.
-    private WorkAccount? _account;
-
-    private WorkAccount Account()
-    {
-        if (Volatile.Read(ref _account) is { } account)
-        {
-            return account;
-        }
-
-        WorkAccount made = new WorkAccount(QueryMemoryBudget.Of(_query.Session), "parts");
-        if (Interlocked.CompareExchange(ref _account, made, null) is { } won)
-        {
-            made.Dispose();
-            return won;
-        }
-
-        return made;
     }
 }
 

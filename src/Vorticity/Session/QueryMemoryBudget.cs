@@ -137,6 +137,9 @@ public sealed class QueryMemoryBudget
     /// <summary>The budget the questions and scans of <paramref name="session"/> reserve in: its own, the process's when it gives none.</summary>
     internal static QueryMemoryBudget Of(VortexSession session) => session.Options.MemoryBudget ?? Process;
 
+    /// <summary>The process's budget, which this one reserves in too: itself for the process's own.</summary>
+    internal QueryMemoryBudget Root => _process ?? this;
+
     /// <summary>The budget the jobs and writers of <paramref name="session"/> reserve in: its own, the process's when it gives none.</summary>
     internal static QueryMemoryBudget JobsOf(VortexSession session) => session.Options.JobMemoryBudget ?? Process;
 
