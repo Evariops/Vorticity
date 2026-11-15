@@ -153,18 +153,23 @@ internal static partial class DatasetCompactor
         Math.Max(InputFloorBytes, OpenChunkBytes(dataset, schema, job));
 
     /// <summary>
-    /// The rows of an input's batch in a merge of <paramref name="inputs"/> of the job's inputs, rows of
-    /// <paramref name="rowBytes"/> decoded, whose batches may hold <paramref name="share"/> bytes together: the rows
-    /// <see cref="MergeRows"/> gives each, fewer where the share holds fewer, a power of two between a block of 8 192 rows
-    /// and a window (<see cref="FlatLayoutReader.WindowRows"/>). Rows of a metric's maps and lists weigh four times a
-    /// log's: by rows alone, eight inputs of a window each held 1.7 GB of batches.
+    /// 🧪 The fewest rows an input's batch holds, however tight the budget: under a block of 8 192 rows, the decoders
+    /// decode a range of a chunk all the same. Provisional: if a merge of batches of 1 024 rows takes more than twice the
+    /// time a row of batches of a block takes, the floor goes back to a block.
+    /// </summary>
+    internal const int LeastBatchRows = 1_024;
+
+    /// <summary>
+    /// The rows of an input's batch in a merge of <paramref name="inputs"/> of the job's inputs, a row of the batch holding
+    /// <paramref name="rowBytes"/> (<see cref="HeldPerRow"/>), whose batches may hold <paramref name="share"/> bytes
+    /// together: what the share holds of each, by bytes alone, a power of two between <see cref="LeastBatchRows"/> and a
+    /// window (<see cref="FlatLayoutReader.WindowRows"/>). Rows of a metric's maps and lists weigh four times a log's: by
+    /// rows alone, eight inputs of a window each held 1.7 GB of batches, and a floor of a block held 4.7 GB for 201 inputs.
     /// </summary>
     internal static int InputBatchRows(int inputs, long rowBytes, long share)
     {
-        long byCount = MergeRows / Math.Max(1, inputs);
-        long byBytes = share / ((long)Math.Max(1, inputs) * Math.Max(rowBytes, 1));
-        long rows = Math.Max(Math.Min(byCount, byBytes), 1);
-        return Math.Clamp(1 << BitOperations.Log2((ulong)Math.Min(rows, int.MaxValue)), 8_192, FlatLayoutReader.WindowRows);
+        long rows = Math.Max(share / ((long)Math.Max(1, inputs) * Math.Max(rowBytes, 1)), 1);
+        return Math.Clamp(1 << BitOperations.Log2((ulong)Math.Min(rows, int.MaxValue)), LeastBatchRows, FlatLayoutReader.WindowRows);
     }
 
     /// <summary>

@@ -809,13 +809,6 @@ internal static partial class DatasetCompactor
     private static ScanBuilder Batched(ScanBuilder scan, int rows) => rows > 0 ? scan.WithMaxBatchRows(rows).WithWindowRows(rows) : scan;
 
     /// <summary>
-    /// The rows a merge's inputs hold at once together, about: each input holds a batch of its rows while the others step,
-    /// so a merge of many inputs reads each in smaller batches than a merge of a few. A million rows of a log's columns,
-    /// their attributes rebuilt, held some 360 MB as eight inputs of a window each.
-    /// </summary>
-    private const int MergeRows = 1 << 20;
-
-    /// <summary>
     /// The job's inputs opened before its passes, as many at once as the session reads at once, and held until the job ends:
     /// each object is read once, whichever pass asks for it first, in one request when it fits the read that opens it. The
     /// census and the merge read each of 3 305 small inputs one after the other, twice: 6 749 requests, 148 s at 20 ms a
