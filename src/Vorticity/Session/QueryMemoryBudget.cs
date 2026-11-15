@@ -338,6 +338,14 @@ public sealed class QueryMemoryBudget
             soft = parent;
         }
 
+        // The pool is the process's: only a share carved out of the process's limit speaks for what it keeps. A host's budget
+        // of a few mebibytes would empty it for every other work of the process at each rent, and the process's governor
+        // already has it let go as the reservations under that budget near the limit.
+        if (soft._share == 0)
+        {
+            return;
+        }
+
         BlockPool pool = MemoryAccount.Pool;
         long over = soft.ReservedBytes + pool.ParkedBytes - soft.CeilingBytes - PoolSlackBytes;
         if (over > 0)
