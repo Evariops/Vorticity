@@ -22,18 +22,19 @@ public sealed partial class FanTests
     // judges once every range is taken has no batch left to turn at, and the query ends on its tables.
     private const int Rows = 3_200_000;
 
+    /// <remarks>
+    /// Without the fan, the lanes start on the queue's first ranges as the pool runs them: one that starts late meets other
+    /// rows first, and the outcome is the scheduler's, so few values then many is not asked without it. Many then few
+    /// turns on the first lane fan or not, and is asked both ways. The answers are exact on either path, which the
+    /// lanes' and the core's own tests hold.
+    /// </remarks>
     [Theory]
     [InlineData("rising", true, GroupCoreReason.Spread)]
-    [InlineData("rising", false, null)]
     [InlineData("falling", true, GroupCoreReason.Spread)]
     [InlineData("falling", false, GroupCoreReason.Spread)]
     [InlineData("hashed", true, GroupCoreReason.FirstRows)]
-    [InlineData("hashed", false, null)]
-    public async Task TheFirstLaneThatMeetsManyValuesTurnsTheQuery(string shape, bool fan, GroupCoreReason? expected)
+    public async Task TheFirstLaneThatMeetsManyValuesTurnsTheQuery(string shape, bool fan, GroupCoreReason expected)
     {
-        // Without the fan, the lanes start on the queue's first ranges as the pool runs them: one that
-        // starts late meets other rows first, and the outcome is the scheduler's. The answers are exact
-        // whatever it is.
         Row[] rows = Rows_(shape);
         string path = await WriteAsync(rows);
         try
@@ -49,13 +50,8 @@ public sealed partial class FanTests
                 got.Add(total.Key, total);
             }
 
-            Assert.Equal(rows.GroupBy(r => r.Key).ToDictionary(g => g.Key, g => new KeyTotal(g.Key, g.Count(), g.Sum(r => r.Value))), got);
+            Assert.Equal(Totals(rows), got);
             GroupMetrics grouping = query.Metrics.Grouping!;
-            if (expected is null)
-            {
-                return;
-            }
-
             Assert.Equal(expected, grouping.CoreReason);
 
             // The first batch turns a lane before it folds a row: an integer key by its spread, a hashed one
@@ -134,6 +130,19 @@ public sealed partial class FanTests
         }
 
         return rows;
+    }
+
+    /// <summary>Each key's rows and their values' sum, in one pass.</summary>
+    private static Dictionary<long, KeyTotal> Totals(Row[] rows)
+    {
+        Dictionary<long, KeyTotal> totals = [];
+        foreach (Row row in rows)
+        {
+            ref KeyTotal total = ref System.Runtime.InteropServices.CollectionsMarshal.GetValueRefOrAddDefault(totals, row.Key, out bool held);
+            total = held ? total with { Count = total.Count + 1, Total = total.Total + row.Value } : new KeyTotal(row.Key, 1, row.Value);
+        }
+
+        return totals;
     }
 
     private static async Task<string> WriteAsync(Row[] rows)
