@@ -45,8 +45,9 @@ M:System.GC.AddMemoryPressure(System.Int64); the library's memory is managed, an
 M:System.GC.RemoveMemoryPressure(System.Int64); the library's memory is managed, and the collector already counts it.
 # ---------------------------------------------------------------- pooled arrays
 # Every array the library rents comes from one pool, Blocks, which keeps one stack per size class, counts what it holds in
-# the memory report and lets it go after a full collection or when the process's budget refuses a reservation. The
-# runtime's shared pool keeps arrays per type and per core, outside every count, and a private pool is one more such.
+# the memory report and gives it back to the registry of kept memory (HeldMemory) when the work needs the room or no rent
+# took it of late. The runtime's shared pool keeps arrays per type and per core, outside every count, and a private pool is
+# one more such.
 P:System.Buffers.ArrayPool`1.Shared; rent a Block<T> from Blocks (Blocks.Rent, Blocks.Return), under the query's memory where one counts (Blocks.Rent(memory, ...)), or bytes from VortexBytePool.Instance; an array that holds references is owned by what lasts, or allocated.
 M:System.Buffers.ArrayPool`1.Create; rent from Blocks, which every array of the library comes from, rather than a pool of its own.
 # ---------------------------------------------------------------- accounts

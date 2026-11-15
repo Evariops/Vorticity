@@ -1,3 +1,0 @@
-# What the memory refactoring still has to take out (PLAN-MEMORY, section 7): a pattern, then its occurrences in
-# src, tests, bench (with samples and tools) and docs, separated by tabs. Lowered in the commit that takes some out,
-# removed at zero, never raised.
