@@ -176,16 +176,23 @@ public sealed partial class DatasetGranuleStatsTests
             ColumnLocate endpoints = locates[2]!;
             Assert.True(endpoints.IsEverywhere(endpoints.Find("/health"u8)));
             // A source lies everywhere where its rows fill more than three granules in four, as a large one's may.
+            // Each source's granules gathered in one pass over the rows, where a pass a source rendered every row in hex.
             ColumnLocate sources = locates[0]!;
             long most = sources.Granules - (sources.Granules / 4);
+            Dictionary<string, HashSet<long>> granulesOf = [];
+            for (int row = 0; row < stored.Length; row++)
+            {
+                if (!granulesOf.TryGetValue(stored[row].Source, out HashSet<long>? spanned))
+                {
+                    granulesOf[stored[row].Source] = spanned = [];
+                }
+
+                spanned.Add(row / sources.GranuleRows);
+            }
+
             for (int place = 0; place < sources.Values.Count; place++)
             {
-                string value = Convert.ToHexString(sources.Values[place]);
-                long holding = Enumerable.Range(0, stored.Length)
-                    .Where(row => Convert.ToHexString(BytesOf(stored[row], 0)!) == value)
-                    .Select(row => row / sources.GranuleRows)
-                    .Distinct()
-                    .LongCount();
+                long holding = granulesOf[Encoding.UTF8.GetString(sources.Values[place])].Count;
                 Assert.Equal(holding > most, sources.IsEverywhere(place));
             }
         }
