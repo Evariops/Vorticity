@@ -223,6 +223,43 @@ internal static partial class DatasetCompactor
     internal static long JobBudget(VortexDataset dataset) =>
         QueryMemoryBudget.JobsOf(dataset.Session).CeilingBytes;
 
+    /// <summary>
+    /// The share of the retention window, one in this many, a job or a piece of a consolidation commits within at the bytes
+    /// a second the handle's last job read: a commit refuses objects begun half the window ago, and the other quarter is
+    /// for a slower turn.
+    /// </summary>
+    private const int WindowShare = 4;
+
+    /// <summary>
+    /// The most bytes a job of the handle reads, by what it can commit in time and what its scratch holds: a quarter of the
+    /// retention window at the rate of the handle's last job (<see cref="VortexDataset.JobBytesPerSecond"/>), and what the
+    /// session's scratch leaves, which a job of large inputs copies them to (<see cref="JobInputs"/>). No bound before a job
+    /// measured its rate, nor of the scratch below the bytes a job reads through it from.
+    /// </summary>
+    internal static long JobBytesBound(VortexDataset dataset)
+    {
+        long bound = long.MaxValue;
+        if (dataset.JobBytesPerSecond > 0)
+        {
+            TimeSpan window = DatasetVacuum.WindowOf(dataset.Snapshot.Header.Retention);
+            bound = (long)Math.Min(long.MaxValue / 2, dataset.JobBytesPerSecond * window.TotalSeconds / WindowShare);
+        }
+
+        return Math.Min(bound, Math.Max(ScratchRoom(dataset), JobInputs.FromBytes - 1));
+    }
+
+    /// <summary>What the session's scratch leaves a job's copies: its budget's room, or nine tenths of its directory's free space.</summary>
+    private static long ScratchRoom(VortexDataset dataset)
+    {
+        if (dataset.Session.Options.ScratchBudget is { } budget)
+        {
+            return Math.Max(0, budget.CeilingBytes - budget.ReservedBytes);
+        }
+
+        string scratch = ScratchDirectories.Of(dataset.Session.Options.ScratchDirectory);
+        return GroupCore.Free(scratch) is long free ? free - (free / 10) : long.MaxValue;
+    }
+
     /// <summary>What the jobs' budget of the handle's session leaves now, what the jobs running hold taken off.</summary>
     internal static long JobRoom(VortexDataset dataset)
     {
@@ -342,6 +379,7 @@ internal static partial class DatasetCompactor
     {
         DatasetSchema schema = dataset.Snapshot.Schema;
         long budget = JobBudget(dataset);
+        bytes = Math.Min(bytes, JobBytesBound(dataset));
         int cap = dataset.JobWidthCap;
         least = cap > 0 ? Math.Min(least, Math.Max(2, cap)) : least;
         long rowBytes = RowBytesOf(dataset);

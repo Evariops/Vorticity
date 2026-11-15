@@ -363,6 +363,7 @@ internal static partial class DatasetCompactor
         // What the job measured, which the handle's next plan sizes a job by: what an input and the writer held at most.
         long reserved = memory.Peak;
         dataset.LearnDecodedRowBytes(meter.BytesPerRow);
+        dataset.LearnJobRate(ran.Bytes, dataset.Options.TimeProvider.GetUtcNow() - started);
         if (merge)
         {
             int open = ranges is null ? ran.Inputs.Count : Math.Max(1, ranges.MostInputs * atOnce);

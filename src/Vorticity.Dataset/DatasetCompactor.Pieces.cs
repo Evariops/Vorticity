@@ -51,7 +51,8 @@ internal static partial class DatasetCompactor
     /// </summary>
     private static async ValueTask<Piece?> PieceAsync(VortexDataset dataset, DatasetSchema schema, CompactionJob job, CancellationToken cancellationToken)
     {
-        long pieceBytes = Math.Max(1, job.TargetBytes);
+        // An object's size, or less, so that a piece commits within its share of the window and its copies fit the scratch.
+        long pieceBytes = Math.Max(1, Math.Min(job.TargetBytes, JobBytesBound(dataset)));
         if (job.Trigger != CompactionTrigger.Consolidation || job.Moves || !schema.Keyed || job.Bytes <= pieceBytes)
         {
             return null;

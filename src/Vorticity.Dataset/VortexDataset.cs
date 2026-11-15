@@ -235,6 +235,23 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
     private int _jobBatchRows;
     private int _jobWidthCap;
 
+    /// <summary>
+    /// The bytes a second the last job of this handle that ran to its end read and wrote, its inputs' bytes over its time:
+    /// what the next plan bounds a job's bytes by, so that it commits within its share of the retention window; 0 before any.
+    /// </summary>
+    internal double JobBytesPerSecond => Volatile.Read(ref _jobBytesPerSecond);
+
+    private double _jobBytesPerSecond;
+
+    /// <summary>Keeps what a job that ran to its end did: <paramref name="bytes"/> of inputs in <paramref name="elapsed"/>.</summary>
+    internal void LearnJobRate(long bytes, TimeSpan elapsed)
+    {
+        if (bytes > 0 && elapsed > TimeSpan.Zero)
+        {
+            Volatile.Write(ref _jobBytesPerSecond, bytes / elapsed.TotalSeconds);
+        }
+    }
+
     /// <summary>The data objects this handle's compactions replaced, which it deletes once no retained version reads them.</summary>
     internal RetiredObjects Retired { get; } = new RetiredObjects();
 
