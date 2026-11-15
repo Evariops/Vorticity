@@ -994,7 +994,7 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
         Guid identity = Guid.NewGuid();
         string key = CommitKey.ForData(identity.ToString("N", CultureInfo.InvariantCulture));
         ObjectSegmentSink sink = new ObjectSegmentSink(
-            _store, key, _options.Session.Options.JobMemoryBudget ?? QueryMemoryBudget.Process, _options.MaxObjectBytes, _options.StreamedObjectBytes, byteBound);
+            _store, key, QueryMemoryBudget.JobsOf(_options.Session), _options.MaxObjectBytes, _options.StreamedObjectBytes, byteBound);
 
         VortexWriteOptions write = _options.Write.WithIdentity(identity) with
         {

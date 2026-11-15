@@ -244,7 +244,7 @@ internal static partial class DatasetCompactor
             {
                 // A job in one piece runs whether the budget holds it or not; what it reserves tells the other jobs it holds it.
                 // Its inputs' batches take what the budget leaves of it once its writer and its open inputs are counted.
-                using QueryMemory memory = new QueryMemory(dataset.Session.Options.JobMemoryBudget ?? QueryMemoryBudget.Jobs);
+                using QueryMemory memory = new QueryMemory(QueryMemoryBudget.JobsOf(dataset.Session));
                 int open = merge ? ran.Inputs.Count : 1;
                 batchRows = InputBatchRows(dataset, schema, ran, open, JobBudget(dataset), writer);
                 memory.TryGrow(InputsBytes(dataset, schema, ran, open, batchRows) + writer);
@@ -1047,7 +1047,7 @@ internal static partial class DatasetCompactor
             ranges?.Low(range) ?? default,
             ranges?.High(range) ?? default)
         {
-            Account = (dataset.Session.Options.JobMemoryBudget ?? QueryMemoryBudget.Jobs).Account,
+            Account = QueryMemoryBudget.JobsOf(dataset.Session).Account,
         };
     }
 
@@ -1078,7 +1078,7 @@ internal static partial class DatasetCompactor
 
         // Each lane reserves what it holds as it counts an input, the first whether the budget grants it or not: a batch of
         // the input's rows decoded, its own rows when it holds fewer, and a slice of a wide shredding.
-        using QueryMemory memory = new QueryMemory(dataset.Session.Options.JobMemoryBudget ?? QueryMemoryBudget.Jobs);
+        using QueryMemory memory = new QueryMemory(QueryMemoryBudget.JobsOf(dataset.Session));
         long mostRows = 0;
         foreach (CompactionInput input in job.Inputs)
         {

@@ -48,7 +48,7 @@ internal static class IncrementalBuild
         // the hour being written starts while that budget is less than half reserved, so that the drafts leave the jobs
         // their share, as an ingestion that appends as it goes would. The 4 hours ahead of S1's logs held 9.7 GB at its
         // peak, beside the consolidation's 14.
-        QueryMemoryBudget share = options.Session.Options.JobMemoryBudget ?? QueryMemoryBudget.Jobs;
+        QueryMemoryBudget share = QueryMemoryBudget.JobsOf(options.Session);
         void Start()
         {
             while (next < hours && next < Volatile.Read(ref appended) + parallel

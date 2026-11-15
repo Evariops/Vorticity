@@ -334,9 +334,9 @@ own directory, on another lane than its writer's (`DatasetOptions.PathDirectoryO
 
 ### The memory of a job
 
-A job holds what it reserves in the session's jobs' budget (`VortexSessionOptions.JobMemoryBudget`), half the process's
-limit by default and reserved in the process's budget too, so that the queries have the rest ([the
-governor](16-queries.md#the-governor)). The stores of an append reserve there what they hold, and write their largest
+A job holds what it reserves in the session's jobs' budget (`VortexSessionOptions.JobMemoryBudget`), by default the
+process's budget, which the queries share, and reserved in the process's budget too when the host sets a share of its
+own ([the governor](16-queries.md#the-governor)). The stores of an append reserve there what they hold, and write their largest
 partition sooner when it is refused.
 
 A job prices what it holds by the rows it holds, not by the bytes its inputs are written in. A row is priced at what the handle's last merge measured it to weigh decoded, the bytes of the batches its inputs handed over. A handle that has measured none reads the first batch of the job's largest input and measures it before the job sizes anything, and a plan prices a row at the least its schema's columns take until then. An open input holds its batch three times over, the batch, the chunks it was cut from and what its columns' reshaping keeps: 1.78 KB of resident memory a row for 530 bytes of batch, on metric records of maps and lists. It holds besides four times the chunks it keeps open, a chunk of each column as its object's contents count them, and 128 KiB at least, its reader and its footer: 0.10 to 0.15 MB an input, measured linear from 8 to 3 283 open inputs of 24 KB. The writer gathers sixteen times the dataset's chunk bytes for each column at most, the least rate a column is taken to encode to, and five times its chunk's target for a variant column it shreds, but never more than the rows the job writes, which it holds once at most: priced by its chunks alone, a job of 200 000 rows of metrics was priced 2.6 GB and held 380 MB.

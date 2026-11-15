@@ -187,7 +187,7 @@ internal static partial class DatasetCompactor
     /// The bytes of the jobs' memory budget of the handle's session: what one job may plan to hold.
     /// </summary>
     internal static long JobBudget(VortexDataset dataset) =>
-        (dataset.Session.Options.JobMemoryBudget ?? QueryMemoryBudget.Jobs).CeilingBytes;
+        QueryMemoryBudget.JobsOf(dataset.Session).CeilingBytes;
 
     /// <summary>
     /// What the writer of a job's objects holds, about: each column what it gathers before it writes a chunk, at most
@@ -638,7 +638,7 @@ internal static partial class DatasetCompactor
         // Each range reserves what it holds before it starts, the first whether the budget grants it or not, as a job in one
         // piece runs; the others wait for a lane, as many lanes as the budget holds ranges. A range's batches take what the
         // budget leaves once its writer and its open inputs are counted, so that one range alone fits it.
-        using QueryMemory memory = new QueryMemory(dataset.Session.Options.JobMemoryBudget ?? QueryMemoryBudget.Jobs);
+        using QueryMemory memory = new QueryMemory(QueryMemoryBudget.JobsOf(dataset.Session));
         int batchRows = InputBatchRows(dataset, schema, job, ranges.MostInputs, JobBudget(dataset), writer);
         long perRange = RangeBytes(dataset, schema, job, ranges, writer, batchRows);
         memory.TryGrow(perRange);

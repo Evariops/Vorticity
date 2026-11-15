@@ -1289,7 +1289,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
     /// <summary>A writer's account in <paramref name="session"/>: under its jobs' budget, the process's without one (D3).</summary>
     internal static WorkAccount AccountFor(VortexSession session) =>
-        new WorkAccount(session.Options.JobMemoryBudget ?? QueryMemoryBudget.Process, "writer");
+        new WorkAccount(QueryMemoryBudget.JobsOf(session), "writer");
 
     /// <summary>
     /// The account the writer's blocks are counted in, its builders' stores and arenas, its dictionaries', its indexes' and

@@ -85,7 +85,7 @@ public sealed class DatasetWriter
     internal DatasetWriter(VortexDataset dataset, DatasetSchema schema, IReadOnlyDictionary<string, VariantShredding>? shredded)
     {
         _dataset = dataset;
-        _account = new WorkAccount(dataset.Session.Options.JobMemoryBudget ?? QueryMemoryBudget.Process, "dataset writer");
+        _account = new WorkAccount(QueryMemoryBudget.JobsOf(dataset.Session), "dataset writer");
         _schema = schema;
         _shredded = shredded;
         _bufferBytes = dataset.Options.AppendBufferBytes;
@@ -718,7 +718,7 @@ public sealed class DatasetWriter
             return true;
         }
 
-        _memory ??= new QueryMemory(_dataset.Session.Options.JobMemoryBudget ?? QueryMemoryBudget.Jobs);
+        _memory ??= new QueryMemory(QueryMemoryBudget.JobsOf(_dataset.Session));
         long more = (bytes - _reserved + QueryMemory.Chunk - 1) / QueryMemory.Chunk * QueryMemory.Chunk;
         if (!_memory.TryGrow(more))
         {

@@ -334,7 +334,7 @@ internal static class DatasetRowChanges
 
         // A lane holds the object it rewrites, at most as much as the store takes in one request, a window of its rows
         // decoded besides; the first is admitted whatever the budget grants.
-        using Aggregating.QueryMemory memory = new Aggregating.QueryMemory(dataset.Session.Options.JobMemoryBudget ?? Vorticity.QueryMemoryBudget.Jobs);
+        using Aggregating.QueryMemory memory = new Aggregating.QueryMemory(Vorticity.QueryMemoryBudget.JobsOf(dataset.Session));
         long largest = 0;
         foreach (int o in read)
         {

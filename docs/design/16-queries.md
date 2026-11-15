@@ -1187,11 +1187,12 @@ A query's memory is reserved from a budget: the process's by default, or a `Quer
 host creates and gives to the sessions that share it, whose ceiling bounds their queries together. A
 query reserves in its budget, and the budget in the process's, whatever the sum of the ceilings the
 host sets. The process's ceiling is its limit (the managed heap's,
-`GC.GetGCMemoryInfo().TotalAvailableMemoryBytes`, and in a container three quarters of the
-container's, the engine's blocks being managed and counted by the heap), minus an eighth for the garbage
-collector, minus the rest of the process: what its heap held beyond the queries' tables at the last
-full collection, what the collector kept committed beyond its heap, and what the queries released
-since. A limit of 4 GB is not 4 GB for the queries.
+`GC.GetGCMemoryInfo().TotalAvailableMemoryBytes`, minus an eighth for the garbage collector, and in a
+container seven eighths of the container's when that is less, read again as the process runs, the
+engine's blocks being managed and counted by the heap), minus the rest of the process: what its heap
+held beyond the queries' tables at the last full collection, what the collector kept committed beyond
+its heap, and what the queries released since; in a container, what the container measures beyond the
+reservations and the memory kept, when that is more. A limit of 4 GB is not 4 GB for the queries.
 
 A query reserves where its memory grows, at the moment it does: each array of a lane's tables before
 it is allocated (a doubling holding the old arrays next to the new ones for the copy, and no more),
@@ -1217,9 +1218,13 @@ collection that gives it back comes first, and before it the memory kept lets go
 above its floors, in a fixed order: the pool's blocks kept for the next rents, then the segments a
 cache keeps, then the objects a dataset keeps open, then its pages, for that collection to take.
 Reservations that come within an eighth of the ceiling have it let go of that much before they need
-it, once a collection at most. The background jobs reserve in a budget of their
-own, `JobMemoryBudget`, half the process's limit by default and reserved in the process's budget too:
-the queries have the rest ([memory of a job](15-compaction.md#the-memory-of-a-job)). A query that is refused fails with a
+it, once a collection at most. The background jobs reserve in `JobMemoryBudget`, by default the
+process's budget itself, one registry for the queries and the jobs; a host that wants them held to a
+share gives the session one, reserved in the process's budget too ([memory of a job](15-compaction.md#the-memory-of-a-job)).
+In a container, the rest of the process is measured: what the container uses, less the file pages the
+kernel reclaims first, past what the budget and the memory kept account for, read again every second
+with the container's limit, whose margin is an eighth. Outside a container, it is what the collector
+reports after its full collections. A query that is refused fails with a
 `VortexMemoryException` naming the operator, its groups and its bytes, with everything it held given
 back.
 

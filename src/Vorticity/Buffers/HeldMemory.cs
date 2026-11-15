@@ -154,6 +154,18 @@ internal static class HeldMemory
         return held;
     }
 
+    /// <summary>The bytes every holder holds now: what the registry knows of the memory kept.</summary>
+    internal static long TotalBytes()
+    {
+        long bytes = 0;
+        foreach (KeyValuePair<IHeldMemory, object?> pair in Holders)
+        {
+            bytes += pair.Key.HeldBytes;
+        }
+
+        return bytes;
+    }
+
     /// <summary>The bytes the holders of type <typeparamref name="T"/> hold now.</summary>
     internal static long BytesOf<T>()
         where T : IHeldMemory

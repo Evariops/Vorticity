@@ -680,7 +680,7 @@ public sealed partial class VortexFileWriter
             List<RecordBatch> reopened = [];
             if (reopen)
             {
-                WorkAccount reopening = new WorkAccount(file.Session.Options.JobMemoryBudget ?? QueryMemoryBudget.Process, "append");
+                WorkAccount reopening = new WorkAccount(QueryMemoryBudget.JobsOf(file.Session), "append");
                 await foreach (RecordBatch batch in file.ScanBuilder()
                     .Rows(new RowRange(keptRows, rows))
                     .WithPruning(false)
