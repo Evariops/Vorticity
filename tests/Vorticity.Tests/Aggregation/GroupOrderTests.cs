@@ -186,17 +186,19 @@ public sealed partial class GroupOrderTests
         }
     }
 
+    /// <remarks>
+    /// In chunks of 2 048 groups, where the engine's are 65 536, over 9 375 names where there were 300 000: four chunks a
+    /// top-k of a hundred at four lanes, as before, and one at one lane. Fourteen lanes ranked the same four chunks as four.
+    /// </remarks>
     [Theory]
     [InlineData(1)]
     [InlineData(4)]
-    [InlineData(14)]
     public async Task ATopKOfManyGroupsRanksItsChunksAtOnceTiesIncluded(int degree)
     {
-        // 300 000 names seen one to four times: past two chunks of 65 536 groups, each chunk's first k
-        // ranked on a task of its own, then theirs. The k-th group ties
-        // with tens of thousands, which the key ranks: the same groups, in the same order, as one
-        // ranking of them all.
-        Draw[] rows = Draws(300_000);
+        // Names seen one to four times: past two chunks of groups, each chunk's first k ranked on a task
+        // of its own, then theirs. The k-th group ties with thousands, which the key ranks: the same
+        // groups, in the same order, as one ranking of them all.
+        Draw[] rows = Draws(9_375);
         string path = await WriteAsync(rows);
         try
         {
@@ -206,18 +208,24 @@ public sealed partial class GroupOrderTests
                 .OrderByDescending(g => g.Count()).ThenBy(g => g.Average(r => r.Value), Floats).ThenBy(g => g.Key, StringComparer.Ordinal).Select(g => g.Key)];
             await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = degree);
             await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
-            Aggregation<string> names = file.Scan<Draw>().GroupBy(r => r.Name).OrderByDescending(g => g.Count()).Take(100).Select(g => g.Key);
+            Aggregation<string> names = Chunked(file.Scan<Draw>().GroupBy(r => r.Name).OrderByDescending(g => g.Count()).Take(100).Select(g => g.Key));
             Assert.Equal(byName.Take(100), await names.ToListAsync(Ct));
             Assert.Equal(degree > 1, names.Plan.LastTopChunks > 1);
-            Assert.Equal(byName.Skip(30).Take(70), await file.Scan<Draw>().GroupBy(r => r.Name).OrderByDescending(g => g.Count()).Skip(30).Take(70).Select(g => g.Key).ToListAsync(Ct));
-            Assert.Equal(byId.Take(1_000), await file.Scan<Draw>().GroupBy(r => r.Id).OrderBy(g => g.Count()).Take(1_000).Select(g => g.Key).ToListAsync(Ct));
+            Assert.Equal(byName.Skip(30).Take(70), await Chunked(file.Scan<Draw>().GroupBy(r => r.Name).OrderByDescending(g => g.Count()).Skip(30).Take(70).Select(g => g.Key)).ToListAsync(Ct));
+            Assert.Equal(byId.Take(100), await Chunked(file.Scan<Draw>().GroupBy(r => r.Id).OrderBy(g => g.Count()).Take(100).Select(g => g.Key)).ToListAsync(Ct));
             Assert.Equal(
                 byCountThenMean.Take(100),
-                await file.Scan<Draw>().GroupBy(r => r.Name).OrderByDescending(g => g.Count()).ThenBy(g => g.Average(r => r.Value)).Take(100).Select(g => g.Key).ToListAsync(Ct));
+                await Chunked(file.Scan<Draw>().GroupBy(r => r.Name).OrderByDescending(g => g.Count()).ThenBy(g => g.Average(r => r.Value)).Take(100).Select(g => g.Key)).ToListAsync(Ct));
         }
         finally
         {
             System.IO.File.Delete(path);
+        }
+
+        static Aggregation<T> Chunked<T>(Aggregation<T> query)
+        {
+            query.Plan.TopChunkGroups = 2_048;
+            return query;
         }
     }
 

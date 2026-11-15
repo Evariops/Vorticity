@@ -368,6 +368,12 @@ internal sealed class AggregationPlan
     /// </summary>
     internal int? CoreLanes { get; set; }
 
+    /// <summary>
+    /// The groups a chunk of a top-k ranks at least (<see cref="GroupSelection.TopChunk"/>): fewer only in the tests, so that
+    /// a few thousand groups rank in chunks.
+    /// </summary>
+    internal int TopChunkGroups { get; set; } = GroupSelection.TopChunk;
+
     /// <summary>The groups of a lane's cache in the core, or null for the core's own: tiny in the tests, so that every batch copies the cache.</summary>
     internal int? CoreCapacity { get; set; }
 

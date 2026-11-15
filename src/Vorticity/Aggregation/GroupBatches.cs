@@ -1033,8 +1033,11 @@ internal static class GroupSelection
 
     private static long Saturated(long skip, long take) => take == long.MaxValue || skip > long.MaxValue - take ? long.MaxValue : skip + take;
 
-    /// <summary>The groups a chunk of a top-k ranks at least: fewer, its task costs more than it shares.</summary>
-    private const int TopChunk = 65_536;
+    /// <summary>
+    /// The groups a chunk of a top-k ranks at least: fewer, its task costs more than it shares. The plan's
+    /// <see cref="AggregationPlan.TopChunkGroups"/>, fewer only where a test ranks a few groups in chunks.
+    /// </summary>
+    internal const int TopChunk = 65_536;
 
     /// <summary>
     /// The chunks a top-k of <paramref name="keep"/> among <paramref name="count"/> groups ranks on tasks
@@ -1050,7 +1053,7 @@ internal static class GroupSelection
             return 1;
         }
 
-        int chunks = (int)Math.Clamp(Math.Min(count / TopChunk, count / (16 * keep)), 1, Math.Max(1, degree));
+        int chunks = (int)Math.Clamp(Math.Min(count / query.Plan.TopChunkGroups, count / (16 * keep)), 1, Math.Max(1, degree));
         if (chunks == 1 || order.Keys.Length == 0 || outcome.Keys is not { } index)
         {
             return 1;
