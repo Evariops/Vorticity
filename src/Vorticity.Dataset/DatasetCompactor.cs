@@ -79,6 +79,9 @@ public sealed record CompactionResult
     /// first, in which case its outputs are left for vacuum.
     /// </summary>
     public OperationOutcome Outcome { get; init; }
+
+    /// <summary>Whether it was a piece of a consolidation, which leaves the partition's next keys in level 0 for the next job.</summary>
+    internal bool Piece { get; init; }
 }
 
 /// <summary>Runs one compaction: a k-way merge of the inputs on the sort key when there is
@@ -167,6 +170,7 @@ internal static partial class DatasetCompactor
         bool merge = job.Style is CompactionStyle.Leveled || (job.Style is CompactionStyle.Tiered && schema.Keyed);
 
         // A consolidation of more than an object's size runs its first piece alone, and commits it (DatasetCompactor.Pieces).
+        CompactionJob whole = job;
         Piece? piece = merge ? await PieceAsync(dataset, schema, job, cancellationToken).ConfigureAwait(false) : null;
         HashSet<string>? partly = null;
         if (piece is not null)
@@ -351,6 +355,18 @@ internal static partial class DatasetCompactor
             writing?.Dispose();
         }
 
+        // A piece that took nothing, its cut where no row lies: the partition is consolidated in one piece, now and after.
+        if (piece is not null && rows == 0)
+        {
+            foreach (ObjectStream outputs in streams)
+            {
+                await outputs.AbandonAsync().ConfigureAwait(false);
+            }
+
+            dataset.ConsolidateWhole(CompactionPolicy.PartitionOf(dataset, whole));
+            return await RewriteUnderAsync(dataset, whole, memory, cancellationToken).ConfigureAwait(false);
+        }
+
         // A piece writes what it took of its inputs, which is what the merge emitted of each.
         long read = piece is null ? ran.Rows : Sum(piece.Emitted);
         if (rows != read)
@@ -532,6 +548,7 @@ internal static partial class DatasetCompactor
             RangesAtOnce = atOnce,
             ScratchBytes = scratch,
             Outcome = outcome,
+            Piece = piece is not null && piece.Ranges.Count > 1,
         };
     }
 

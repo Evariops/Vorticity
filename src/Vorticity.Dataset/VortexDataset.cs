@@ -255,6 +255,28 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
     /// <summary>The data objects this handle's compactions replaced, which it deletes once no retained version reads them.</summary>
     internal RetiredObjects Retired { get; } = new RetiredObjects();
 
+    // The partitions, by their row-encoded value in hexadecimal, whose consolidation a piece took no row of: consolidated in one
+    // piece from then on, rather than cut again where nothing lies.
+    private readonly HashSet<string> _whole = new HashSet<string>(StringComparer.Ordinal);
+
+    /// <summary>Whether the consolidations of <paramref name="partition"/> run in one piece, a piece having taken nothing there.</summary>
+    internal bool ConsolidatesWhole(string partition)
+    {
+        lock (_whole)
+        {
+            return _whole.Contains(partition);
+        }
+    }
+
+    /// <summary>Has the consolidations of <paramref name="partition"/> run in one piece from now on.</summary>
+    internal void ConsolidateWhole(string partition)
+    {
+        lock (_whole)
+        {
+            _whole.Add(partition);
+        }
+    }
+
     /// <summary>
     /// Notes the objects <paramref name="keys"/>, which the commit of <paramref name="version"/>, known at
     /// <paramref name="at"/>, took out of the dataset; nothing on a store under a retention lock, whose deletes the vacuum
@@ -2289,15 +2311,24 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
             {
                 if (merges.Count == 0)
                 {
+                    // A consolidation too large for one commit ran its first piece: the loop plans the next, until none is left.
+                    bool pieces = false;
                     foreach (CompactionJob job in plan.Jobs)
                     {
                         if (job.Trigger == CompactionTrigger.Consolidation)
                         {
-                            results.Add(await DatasetCompactor.RunAsync(this, job, cancellationToken).ConfigureAwait(false));
+                            CompactionResult result = await DatasetCompactor.RunAsync(this, job, cancellationToken).ConfigureAwait(false);
+                            results.Add(result);
+                            pieces |= result.Piece && result.Outcome == OperationOutcome.Applied;
                         }
                     }
 
-                    return results;
+                    if (!pieces)
+                    {
+                        return results;
+                    }
+
+                    continue;
                 }
 
                 foreach (CompactionJob merge in merges)
