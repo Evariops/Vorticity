@@ -1,4 +1,4 @@
-// A column's locate builder grows its arrays on the process's shelf, at powers of two, gives them back when it is done, and
+// A column's locate builder grows its arrays in the pool, at powers of two, gives them back when it is done, and
 // reads its sheet's values where they lie: the builders of the next objects find the arrays again and copy no value.
 using System;
 using System.Runtime.InteropServices;
@@ -22,7 +22,7 @@ public sealed class LocateBuilderAllocationTests
     /// column and shredded key of each object of a consolidation of log records did.
     /// </summary>
     [Fact]
-    public void LocateBuildersFindTheirArraysOnTheShelfAndCopyNoValue()
+    public void LocateBuildersFindTheirArraysInThePoolAndCopyNoValue()
     {
         DTypeArena types = new DTypeArena();
         DType i64 = types.Primitive(PType.I64, Nullability.NonNullable);

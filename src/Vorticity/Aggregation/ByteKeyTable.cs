@@ -1,6 +1,7 @@
 using System;
 using System.IO.Hashing;
 using System.Runtime.CompilerServices;
+using Vorticity.Buffers;
 
 namespace Vorticity.Aggregating;
 
@@ -56,23 +57,30 @@ internal sealed class ByteKeyTable
     // Each key's number, its length and its bytes, one after the other, in the order keys came, in
     // pages; a page past the last a key took, null, or kept from before a Clear or a Retain. And where
     // the next key goes, a position over the pages.
+    // The pages are the bytes of blocks the table rents whole, a class each, so that a page's length is its bytes'.
     private byte[]?[] _pages = new byte[]?[4];
     private long _used;
 
     // Where each key lies, its place, 0 for a detached number; the hash it was placed by.
-    private uint[] _places = new uint[16];
-    private ulong[] _hashes = new ulong[16];
-    private Slot[] _slots = new Slot[32];
+    private Block<uint> _places;
+    private Block<ulong> _hashes;
+    private Block<Slot> _slots;
     private long _seed;
 
-    // The lane's shelf its arrays grow from, under the query's memory; null for a table nothing counts.
-    private readonly ArrayShelf? _shelf;
+    // The lane's account its blocks are rented under, the query's memory's.
+    private readonly TableArrays _account;
 
-    /// <summary>A table whose arrays grow from <paramref name="shelf"/>, which reserves each before it comes; new ones when null.</summary>
-    internal ByteKeyTable(ArrayShelf? shelf = null)
+    /// <summary>A table whose blocks are rented under <paramref name="account"/>, which reserves each before it comes; under none, uncounted.</summary>
+    internal ByteKeyTable(TableArrays? account = null)
     {
-        _shelf = shelf;
-        _pages[0] = new byte[FirstBytes];
+        _account = account ?? TableArrays.Uncounted;
+
+        // The first blocks made at their size, uncounted, as a table's first arrays were made outside its account: given
+        // back, they join the pool; a table never released leaves them to the collector, never taking the pool's.
+        _pages[0] = Blocks.Allocate<byte>(FirstBytes).Bytes;
+        _places = Blocks.Allocate<uint>(16);
+        _hashes = Blocks.Allocate<ulong>(16);
+        _slots = Blocks.Allocate<Slot>(32);
     }
 
     /// <summary>The number of distinct keys.</summary>
@@ -187,7 +195,7 @@ internal sealed class ByteKeyTable
     internal void FindAtHome(ReadOnlySpan<ulong> hashes, BytesBlock keys, int first, ReadOnlySpan<ulong> validity, Span<int> numbers)
     {
         // The first pass keeps each candidate's place, its bits as an int, 0 for none.
-        Slot[] slots = _slots;
+        Span<Slot> slots = _slots.AsSpan();
         int mask = slots.Length - 1;
         numbers = numbers[..hashes.Length];
         for (int i = 0; i < hashes.Length; i++)
@@ -224,35 +232,30 @@ internal sealed class ByteKeyTable
     {
         Count = 0;
         _used = 0;
-        Array.Clear(_slots);
+        _slots.Clear();
     }
 
     /// <summary>
-    /// Gives the pages, the places, the hashes and the slots back to the shelf they grew from: the keys
-    /// let go, read no more. Nothing for a table nothing counts, whose arrays the collector takes.
+    /// Gives the pages, the places, the hashes and the slots back to the account they were rented under:
+    /// the keys let go, read no more.
     /// </summary>
     internal void Release()
     {
-        if (_shelf is not { } shelf)
-        {
-            return;
-        }
-
         for (int p = 0; p < _pages.Length; p++)
         {
             if (_pages[p] is { } page)
             {
-                shelf.Give(page);
+                Give(page);
                 _pages[p] = null;
             }
         }
 
-        shelf.Give(_places);
-        shelf.Give(_hashes);
-        shelf.Give(_slots);
-        _places = [];
-        _hashes = [];
-        _slots = [];
+        _account.Return(_places);
+        _account.Return(_hashes);
+        _account.Return(_slots);
+        _places = default;
+        _hashes = default;
+        _slots = default;
         Count = 0;
         _used = 0;
     }
@@ -293,7 +296,7 @@ internal sealed class ByteKeyTable
                 {
                     if (_pages[to >> PageBits] is { } stale)
                     {
-                        _shelf?.Give(stale);
+                        Give(stale);
                     }
 
                     _pages[to >> PageBits] = source;
@@ -313,7 +316,7 @@ internal sealed class ByteKeyTable
 
         Count = entries.Length;
         _used = used;
-        Array.Clear(_slots);
+        _slots.Clear();
         Rehash(_slots);
     }
 
@@ -447,7 +450,7 @@ internal sealed class ByteKeyTable
             {
                 if (page is not null)
                 {
-                    _shelf?.Give(page);
+                    Give(page);
                 }
 
                 page = _pages[index] = Take(length);
@@ -463,16 +466,24 @@ internal sealed class ByteKeyTable
         }
         else if (page.Length < end)
         {
-            // The first page alone is shorter than a page: a few kilobytes for a table of a few keys.
-            ArrayShelf.Resize(_shelf, ref page, Math.Min(PageBytes, Math.Max(end, 2 * page.Length)));
-            _pages[index] = page;
+            // The first page alone is shorter than a page: a few kilobytes for a table of a few keys. Grown its whole class
+            // long, as every page is.
+            Block<byte> grown = Block<byte>.Over(page, page.Length);
+            TableArrays.Resize(_account, ref grown, (int)Blocks.BytesFor<byte>(Math.Min(PageBytes, Math.Max(end, 2 * page.Length))));
+            page = _pages[index] = grown.Bytes!;
         }
 
         return page;
     }
 
-    /// <summary>An array of <paramref name="length"/> bytes for keys, from the shelf when the table has one.</summary>
-    private byte[] Take(int length) => _shelf is null ? GC.AllocateUninitializedArray<byte>(length) : _shelf.Take<byte>(length, zeroed: false);
+    /// <summary>
+    /// The bytes of a block of <paramref name="length"/> bytes at least for keys, rented under the account its whole
+    /// class long, so that a page's length is all its bytes and what the account counts of it.
+    /// </summary>
+    private byte[] Take(int length) => _account.Rent<byte>((int)Blocks.BytesFor<byte>(length), zeroed: false).Bytes!;
+
+    /// <summary>A page of the table's given back to its account.</summary>
+    private void Give(byte[] page) => _account.Return(Block<byte>.Over(page, page.Length));
 
     /// <summary>Room for <paramref name="count"/> numbers.</summary>
     private void Grow(int count)
@@ -480,8 +491,8 @@ internal sealed class ByteKeyTable
         if (count > _places.Length)
         {
             int grown = Math.Max(count, GroupKeys.Doubled(_places.Length));
-            ArrayShelf.Resize(_shelf, ref _places, grown);
-            ArrayShelf.Resize(_shelf, ref _hashes, grown);
+            TableArrays.Resize(_account, ref _places, grown);
+            TableArrays.Resize(_account, ref _hashes, grown);
         }
     }
 
@@ -500,13 +511,13 @@ internal sealed class ByteKeyTable
         Rehash(NewSlots(_slots.Length));
     }
 
-    /// <summary>Empty slots, from the shelf when the table has one.</summary>
-    private Slot[] NewSlots(int length) => _shelf is null ? new Slot[length] : _shelf.Take<Slot>(length, zeroed: true);
+    /// <summary>Empty slots, rented under the table's account.</summary>
+    private Block<Slot> NewSlots(int length) => _account.Rent<Slot>(length, zeroed: true);
 
     /// <summary>Places every key in <paramref name="slots"/>, empty, by the hash it keeps, and makes them the table's; the slots it held given back.</summary>
-    private void Rehash(Slot[] slots)
+    private void Rehash(Block<Slot> slots)
     {
-        Slot[] old = _slots;
+        Block<Slot> old = _slots;
         int mask = slots.Length - 1;
         for (int index = 0; index < Count; index++)
         {
@@ -527,9 +538,9 @@ internal sealed class ByteKeyTable
         }
 
         _slots = slots;
-        if (!ReferenceEquals(old, slots))
+        if (!old.SameBytes(slots))
         {
-            _shelf?.Give(old);
+            _account.Return(old);
         }
     }
 

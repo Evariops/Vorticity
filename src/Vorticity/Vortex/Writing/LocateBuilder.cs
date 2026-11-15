@@ -16,8 +16,8 @@ namespace Vorticity.Writing;
 /// A row costs a look at its value's mark; a value met in a granule, a pair of eight bytes. A column whose values make more
 /// than <see cref="MostPairsAGranule"/> pairs a granule is no column a filter skips granules by: its index is given up,
 /// and its pairs with it. At the end, a value that lies in more than three granules in four lies everywhere. Its arrays are
-/// the process's shelf's, at powers of two, given back with the builder: a consolidation writes a builder for each column
-/// and shredded key of each object, whose arrays a shelf lending by length finds again only at such lengths.
+/// blocks of the pool, at powers of two, given back with the builder: a consolidation writes a builder for each column
+/// and shredded key of each object, and each finds the blocks the one before gave back.
 /// </remarks>
 internal sealed class LocateBuilder : IndexBuilder
 {

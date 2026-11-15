@@ -806,7 +806,7 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
         _otherEntry = -1;
     }
 
-    /// <summary>Gives every measure's sketches back, their arrays to the process's shelf, and keeps none.</summary>
+    /// <summary>Gives every measure's sketches back, their arrays to the pool, and keeps none.</summary>
     private void ReleaseSketches()
     {
         if (_sketches is { } sketches)

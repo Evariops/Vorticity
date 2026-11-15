@@ -23,8 +23,8 @@ internal abstract class CardinalitySlot : SketchSlot<CardinalitySketch, long>
     // generation, 645 ms and 146 MB a question.
     private const int Firsts = 4;
     private const byte InSketch = Firsts + 1;
-    private ulong[] _firsts = [];
-    private byte[] _held = [];
+    private Block<ulong> _firsts;
+    private Block<byte> _held;
 
     /// <summary>What a value may add at most: a register entry, or a hash kept exactly.</summary>
     private protected override long ValueBytes => sizeof(ulong);
@@ -102,8 +102,8 @@ internal abstract class CardinalitySlot : SketchSlot<CardinalitySketch, long>
         if (groups > _held.Length)
         {
             int capacity = Capacity(groups);
-            ArrayShelf.Resize(Shelf, ref _held, capacity);
-            ArrayShelf.Resize(Shelf, ref _firsts, capacity * Firsts);
+            TableArrays.Resize(Account, ref _held, capacity);
+            TableArrays.Resize(Account, ref _firsts, capacity * Firsts);
         }
     }
 
@@ -172,16 +172,16 @@ internal abstract class CardinalitySlot : SketchSlot<CardinalitySketch, long>
         base.Release();
         if (_held.Length > 0)
         {
-            Shelf?.Give(_held);
-            Shelf?.Give(_firsts);
-            (_held, _firsts) = ([], []);
+            Account.Return(_held);
+            Account.Return(_firsts);
+            (_held, _firsts) = (default, default);
         }
     }
 
     internal override long Footprint => base.Footprint + ((long)_firsts.Length * sizeof(ulong)) + _held.Length;
 
     /// <remarks>
-    /// The arrays of first hashes grow by doubling, which takes their whole new length from the shelf: asked as such. Asked
+    /// The arrays of first hashes grow by doubling, which takes their whole new length from the account: asked as such. Asked
     /// as a few bytes a group more, a doubling of a lane's arrays went past the budget by a megabyte, overdrawn at a
     /// tenth of the peak.
     /// </remarks>

@@ -1,5 +1,6 @@
 using System;
 using System.Runtime.CompilerServices;
+using Vorticity.Buffers;
 using Vorticity.Writing;
 
 namespace Vorticity.Aggregating;
@@ -21,45 +22,47 @@ namespace Vorticity.Aggregating;
 internal sealed class DistinctPairs<TValue>
     where TValue : unmanaged, IEquatable<TValue>
 {
-    private Pair[] _pairs = new Pair[16];
+    // The first blocks made at their size, as a table's first arrays were: given back, they join the pool; a table never
+    // released leaves them to the collector, never taking the pool's for good.
+    private Block<Pair> _pairs = Blocks.Allocate<Pair>(16);
 
     // A pair's number plus one, read only where its slot's tag agrees: a power of two of them, at most half full.
-    private int[] _slots = new int[32];
+    private Block<int> _slots = Blocks.Allocate<int>(32);
 
     // Each slot's tag, 0 for none: its top bit set over the top seven bits of the pair's hash, read
     // first, so that a new pair finds its free slot without reading the pairs its chain passes.
-    private byte[] _tags = new byte[32];
+    private Block<byte> _tags = Blocks.Allocate<byte>(32);
 
     // Each group's last pair, its number plus one, 0 for a group with none.
-    private int[] _first = [];
+    private Block<int> _first;
 
     private int _count;
 
-    // The arrays the last Keep moved the pairs out of, which the next moves them into (Keep).
-    private Pair[] _sparePairs = [];
-    private int[] _spareSlots = [];
-    private byte[] _spareTags = [];
-    private int[] _spareFirst = [];
+    // The blocks the last Keep moved the pairs out of, which the next moves them into (Keep).
+    private Block<Pair> _sparePairs;
+    private Block<int> _spareSlots;
+    private Block<byte> _spareTags;
+    private Block<int> _spareFirst;
 
-    // The shelf its arrays grow from, under the query's memory; null for pairs nothing counts.
-    private ArrayShelf? _shelf;
+    // The account its blocks grow under, the query's memory's.
+    private TableArrays _account = TableArrays.Uncounted;
 
-    /// <summary>The shelf the pairs' arrays grow from from now on.</summary>
-    internal void Govern(ArrayShelf? shelf) => _shelf = shelf;
+    /// <summary>The account the pairs' blocks grow under from now on; none counts nothing.</summary>
+    internal void Govern(TableArrays? account) => _account = account ?? TableArrays.Uncounted;
 
-    /// <summary>Gives the pairs' arrays back to their shelf: the pairs are let go, and read no more.</summary>
+    /// <summary>Gives the pairs' blocks back to their account: the pairs are let go, and read no more.</summary>
     internal void Release()
     {
         Give(_pairs, _slots, _tags, _first);
         Give(_sparePairs, _spareSlots, _spareTags, _spareFirst);
-        _pairs = [];
-        _slots = [];
-        _tags = [];
-        _first = [];
-        _sparePairs = [];
-        _spareSlots = [];
-        _spareTags = [];
-        _spareFirst = [];
+        _pairs = default;
+        _slots = default;
+        _tags = default;
+        _first = default;
+        _sparePairs = default;
+        _spareSlots = default;
+        _spareTags = default;
+        _spareFirst = default;
         _count = 0;
     }
 
@@ -81,7 +84,7 @@ internal sealed class DistinctPairs<TValue>
     {
         if (groups > _first.Length)
         {
-            ArrayShelf.Resize(_shelf, ref _first, Scratch.Capacity(groups, _first.Length));
+            TableArrays.Resize(_account, ref _first, Scratch.Capacity(groups, _first.Length));
         }
     }
 
@@ -99,13 +102,13 @@ internal sealed class DistinctPairs<TValue>
     {
         // The tags first: a new pair, every row of a count of
         // distinct values that are distinct, reads no pair of its chain, each a miss to memory.
-        byte[] tags = _tags;
+        Block<byte> tags = _tags;
         int mask = tags.Length - 1;
         int shift = Shift(tags.Length);
         ulong spread = Spread(group, value);
         int at = (int)(spread >> shift);
         byte tag = Tag(spread, shift);
-        Pair[] pairs = _pairs;
+        Block<Pair> pairs = _pairs;
         while (true)
         {
             byte seen = tags[at];
@@ -128,7 +131,7 @@ internal sealed class DistinctPairs<TValue>
 
         if (_count == pairs.Length)
         {
-            ArrayShelf.Resize(_shelf, ref _pairs, GroupKeys.Doubled(_count));
+            TableArrays.Resize(_account, ref _pairs, GroupKeys.Doubled(_count));
             pairs = _pairs;
         }
 
@@ -180,7 +183,7 @@ internal sealed class DistinctPairs<TValue>
     /// <summary>Adds every pair of <paramref name="other"/>, its group <c>g</c> as <c>map[g]</c>, in the order they lie; each new one counted at its group.</summary>
     internal void MergeAll(DistinctPairs<TValue> other, ReadOnlySpan<int> map, Span<long> counts)
     {
-        Pair[] pairs = other._pairs;
+        Block<Pair> pairs = other._pairs;
         for (int number = 0; number < other._count; number++)
         {
             int group = map[pairs[number].Group];
@@ -201,7 +204,7 @@ internal sealed class DistinctPairs<TValue>
         }
 
         int added = 0;
-        Pair[] pairs = other._pairs;
+        Block<Pair> pairs = other._pairs;
         for (int number = other._first[from]; number != 0; number = pairs[number - 1].Next)
         {
             added += Add(into, pairs[number - 1].Value) ? 1 : 0;
@@ -219,7 +222,7 @@ internal sealed class DistinctPairs<TValue>
         }
 
         int added = 0;
-        Pair[] pairs = _pairs;
+        Block<Pair> pairs = _pairs;
         for (int number = _first[from]; number != 0; number = pairs[number - 1].Next)
         {
             added += set.Add(pairs[number - 1].Value) ? 1 : 0;
@@ -237,7 +240,7 @@ internal sealed class DistinctPairs<TValue>
         }
 
         int written = 0;
-        Pair[] pairs = _pairs;
+        Block<Pair> pairs = _pairs;
         for (int number = _first[group]; number != 0; number = pairs[number - 1].Next)
         {
             buffer.Write(pairs[number - 1].Value);
@@ -263,7 +266,7 @@ internal sealed class DistinctPairs<TValue>
     internal int[] PartsOf(ReadOnlySpan<int> map, int shift, int parts, bool byGroup, int[] partOf)
     {
         int[] starts = new int[parts + 1];
-        Pair[] pairs = _pairs;
+        Block<Pair> pairs = _pairs;
         for (int number = 0; number < _count; number++)
         {
             int target = map[pairs[number].Group];
@@ -289,12 +292,12 @@ internal sealed class DistinctPairs<TValue>
     internal void Clear()
     {
         Give(_sparePairs, _spareSlots, _spareTags, _spareFirst);
-        _sparePairs = [];
-        _spareSlots = [];
-        _spareTags = [];
-        _spareFirst = [];
-        Array.Clear(_tags);
-        Array.Clear(_first);
+        _sparePairs = default;
+        _spareSlots = default;
+        _spareTags = default;
+        _spareFirst = default;
+        _tags.Clear();
+        _first.Clear();
         _count = 0;
     }
 
@@ -304,8 +307,8 @@ internal sealed class DistinctPairs<TValue>
     /// </summary>
     internal void Keep(ReadOnlySpan<int> groups)
     {
-        Pair[] pairs = _pairs;
-        int[] first = _first;
+        Block<Pair> pairs = _pairs;
+        Block<int> first = _first;
         int kept = 0;
         foreach (int group in groups)
         {
@@ -322,8 +325,8 @@ internal sealed class DistinctPairs<TValue>
         // moved them out of, and leave theirs to the next: arrays new at every batch cost those 365 days
         // 850 MiB of the large object heap and 77 full collections a query at one lane, and a fifth of
         // its time (232 ms against 185).
-        int[] slots = _slots;
-        byte[] tags = _tags;
+        Block<int> slots = _slots;
+        Block<byte> tags = _tags;
         int length = (int)Math.Max(Math.Max(32, System.Numerics.BitOperations.RoundUpToPowerOf2((uint)(2 * kept + 1))), slots.Length);
         _pairs = Spare(ref _sparePairs, Math.Max(16, Math.Max(kept, pairs.Length)), exact: false, zeroed: false);
         _slots = Spare(ref _spareSlots, length, exact: true, zeroed: false);
@@ -345,54 +348,48 @@ internal sealed class DistinctPairs<TValue>
     }
 
     /// <summary>
-    /// The array kept for <paramref name="length"/> elements, that length exactly when <paramref name="exact"/>
+    /// The block kept for <paramref name="length"/> elements, that length exactly when <paramref name="exact"/>
     /// or at least, zeroed when <paramref name="zeroed"/>; a new one, zeroed, when it does not fit, the kept
     /// one given back. A slot is read only where its tag is set: the slots are not zeroed.
     /// </summary>
-    private T[] Spare<T>(ref T[] spare, int length, bool exact, bool zeroed)
+    private Block<T> Spare<T>(ref Block<T> spare, int length, bool exact, bool zeroed)
+        where T : unmanaged
     {
-        T[] array = spare;
-        spare = [];
-        if (exact ? array.Length == length : array.Length >= length)
+        Block<T> block = spare;
+        spare = default;
+        if (exact ? block.Length == length : block.Length >= length)
         {
             if (zeroed)
             {
-                Array.Clear(array);
+                block.Clear();
             }
 
-            return array;
+            return block;
         }
 
-        if (array.Length > 0)
-        {
-            _shelf?.Give(array);
-        }
-
-        return NewArray<T>(length);
+        _account.Return(block);
+        return _account.Rent<T>(length, zeroed: true);
     }
 
-    /// <summary>Gives a set of the pairs' arrays back to their shelf.</summary>
-    private void Give(Pair[] pairs, int[] slots, byte[] tags, int[] first)
+    /// <summary>Gives a set of the pairs' blocks back to their account.</summary>
+    private void Give(Block<Pair> pairs, Block<int> slots, Block<byte> tags, Block<int> first)
     {
-        _shelf?.Give(pairs);
-        _shelf?.Give(slots);
-        _shelf?.Give(tags);
-        _shelf?.Give(first);
+        _account.Return(pairs);
+        _account.Return(slots);
+        _account.Return(tags);
+        _account.Return(first);
     }
-
-    /// <summary>A zeroed array, from the shelf when the pairs have one.</summary>
-    private T[] NewArray<T>(int length) => _shelf is null ? new T[length] : _shelf.Take<T>(length, zeroed: true);
 
     /// <summary>The slots at <paramref name="length"/>, a power of two, every pair placed again.</summary>
     private void Rehash(int length)
     {
-        int[] old = _slots;
-        byte[] oldTags = _tags;
-        byte[] tags = NewArray<byte>(length);
-        int[] slots = _shelf is null ? GC.AllocateUninitializedArray<int>(length) : _shelf.Take<int>(length, zeroed: false);
+        Block<int> old = _slots;
+        Block<byte> oldTags = _tags;
+        Block<byte> tags = _account.Rent<byte>(length, zeroed: true);
+        Block<int> slots = _account.Rent<int>(length, zeroed: false);
         int mask = length - 1;
         int shift = Shift(length);
-        Pair[] pairs = _pairs;
+        Block<Pair> pairs = _pairs;
         for (int number = 0; number < _count; number++)
         {
             ulong spread = Spread(pairs[number].Group, pairs[number].Value);
@@ -408,8 +405,8 @@ internal sealed class DistinctPairs<TValue>
 
         _slots = slots;
         _tags = tags;
-        _shelf?.Give(old);
-        _shelf?.Give(oldTags);
+        _account.Return(old);
+        _account.Return(oldTags);
     }
 
     /// <summary>A value, the group that saw it, and the number plus one of that group's pair before it.</summary>

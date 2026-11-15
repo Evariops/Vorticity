@@ -50,7 +50,7 @@ internal abstract class PartSource
     /// <summary>What every part reads let go, once: every part is merged, or none will be.</summary>
     internal abstract void Release();
 
-    /// <summary>A part's table let go once its batches are built: its keys' arrays back to the shelf they came from.</summary>
+    /// <summary>A part's table let go once its batches are built: its keys' arrays back to the account they came from.</summary>
     internal virtual void LetPartGo(GroupKeys keys, AggregateSlot[] slots) => keys.Release();
 
     /// <summary>The run's counts once every part is merged, with what the merge itself counted.</summary>
@@ -124,7 +124,7 @@ internal sealed class PartMerge : PartSource
     }
 
     /// <summary>
-    /// The part's keys, records and slots back to the process's shelf they came from: left to the
+    /// The part's keys, records and slots back to the pool they came from: left to the
     /// collector, every query at 32 lanes made its parts' tables again, 134 MB over two million names.
     /// </summary>
     internal override void LetPartGo(GroupKeys keys, AggregateSlot[] slots)
@@ -193,11 +193,11 @@ internal sealed class PartMerge : PartSource
             throw _memory.Exceeded("merge of a group by", reserve, ahead);
         }
 
-        // The part's table from the process's shelf, which counts nothing, as the reservation above
-        // stands for it: given back once the part is built (LetPartGo), for the next part or query.
-        GroupKeys keys = _byValue ? _keysOf[0].ForValuePart(part, _partBits, ArrayShelf.Retained) : _keysOf[0].ForPart(ArrayShelf.Retained);
+        // The part's table from the pool, counted by no account, as the reservation above stands
+        // for it: given back once the part is built (LetPartGo), for the next part or query.
+        GroupKeys keys = _byValue ? _keysOf[0].ForValuePart(part, _partBits, TableArrays.Uncounted) : _keysOf[0].ForPart(TableArrays.Uncounted);
         keys.Reserve(reserve);
-        AggregateSlot[] slots = AggregationPartition.NewSlots(_plan, _settled, _source, out _, ArrayShelf.Retained);
+        AggregateSlot[] slots = AggregationPartition.NewSlots(_plan, _settled, _source, out _, TableArrays.Uncounted);
         foreach (AggregateSlot slot in slots)
         {
             slot.EnsureGroups(reserve);

@@ -188,7 +188,7 @@ internal sealed class ShreddedVariant
         if (_scratch.Length == 0)
         {
             // As large as the last batch's values, which a plan kept from a batch to the next knows: doubled from 256 bytes,
-            // each batch copied its values eleven times over and took its last array from the shelf.
+            // each batch copied its values eleven times over and took its last array from the pool.
             _scratch = Blocks.Rent<byte>(Math.Max(256, _lastUsed));
         }
     }

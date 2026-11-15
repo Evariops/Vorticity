@@ -5,6 +5,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Aggregating;
+using Vorticity.Buffers;
 using Xunit;
 
 namespace Vorticity.Tests.Aggregation;
@@ -57,7 +58,7 @@ public sealed partial class TextExtremePagesTests
             }
 
             // Twenty thousand groups' values in a few pages a slot, the long values' own included,
-            // in every lane that read rows; every page back on the shelf once the query is done.
+            // in every lane that read rows; every page back in the pool once the query is done.
             Assert.Contains(slots, slot => slot.MostPages > 0);
             Assert.All(slots, slot => Assert.InRange(slot.MostPages, 0, 200));
             Assert.All(slots, slot => Assert.Equal(0, slot.Pages));
@@ -69,10 +70,10 @@ public sealed partial class TextExtremePagesTests
     }
 
     /// <summary>
-    /// The slot counts the bytes of its pages as it takes them, its footprint: what the thread
-    /// allocates, the headers of the arrays aside. Values of 104 bytes' room for a page and a half fill
-    /// pages of 4 KiB, then each twice the one before up to a page; a value longer than a quarter of a
-    /// page takes one of its own.
+    /// The slot counts the bytes of its pages as it takes them, its footprint: blocks of the pool, each its
+    /// class's whole. Values of 104 bytes' room for a page and a half fill pages of 4 KiB, then each twice
+    /// the one before up to a page; a value longer than a quarter of a page takes one of its own. The
+    /// thread allocates the pages the pool did not hold at most, and nothing for the values themselves.
     /// </summary>
     [Fact]
     public void ThePagesAreCountedAsTheyAreTaken()
@@ -103,9 +104,9 @@ public sealed partial class TextExtremePagesTests
             pages++;
         }
 
-        Assert.Equal(paged + longest.Length, slot.PagedBytes);
+        Assert.Equal(paged + Blocks.BytesFor<byte>(longest.Length), slot.PagedBytes);
         Assert.Equal(pages + 1, slot.Pages);
-        Assert.InRange(allocated - slot.PagedBytes, 0, 512);
+        Assert.InRange(allocated, 0, slot.PagedBytes + 512);
         Assert.InRange(slot.Footprint - slot.PagedBytes, groups * (sizeof(long) + sizeof(int)), 3 * groups * (sizeof(long) + sizeof(int)));
     }
 

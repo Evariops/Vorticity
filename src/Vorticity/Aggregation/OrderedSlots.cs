@@ -418,18 +418,18 @@ internal sealed class GrowthSlot<TWide, TSum, TGrowth, TResult>(PType values, PT
     where TSum : unmanaged
     where TGrowth : IGrowth<TWide, TSum>
 {
-    private GrowthState<TWide, TSum>[] _states = [];
+    private Block<GrowthState<TWide, TSum>> _states;
     private int _groups;
 
     // The closed runs, each with the next of its chain (its index plus one; 0 at the end), the runs taken from the arrays'
     // start, the first one let go (its index plus one; 0 for none), and those the chains hold.
-    private PointRun<TWide>[] _runs = [];
-    private int[] _next = [];
+    private Block<PointRun<TWide>> _runs;
+    private Block<int> _next;
     private int _used;
     private int _free;
     private int _held;
 
-    private ArrayShelf? _shelf;
+    private TableArrays _account = TableArrays.Uncounted;
     private WideColumn<TWide> _values;
     private WideColumn<long> _orders;
     private PointMask _mask;
@@ -438,13 +438,13 @@ internal sealed class GrowthSlot<TWide, TSum, TGrowth, TResult>(PType values, PT
 
     private static int RunSize => Unsafe.SizeOf<PointRun<TWide>>() + sizeof(int);
 
-    internal override void Govern(ArrayShelf shelf) => _shelf = shelf;
+    internal override void Govern(TableArrays account) => _account = account;
 
     internal override void EnsureGroups(int groups)
     {
         if (groups > _states.Length)
         {
-            ArrayShelf.Resize(_shelf, ref _states, Scratch.Capacity(groups, _states.Length));
+            TableArrays.Resize(_account, ref _states, Scratch.Capacity(groups, _states.Length));
         }
 
         _groups = Math.Max(_groups, groups);
@@ -705,8 +705,8 @@ internal sealed class GrowthSlot<TWide, TSum, TGrowth, TResult>(PType values, PT
         if (_used == _runs.Length)
         {
             int capacity = Scratch.Capacity(_used + 1, _runs.Length);
-            ArrayShelf.Resize(_shelf, ref _runs, capacity);
-            ArrayShelf.Resize(_shelf, ref _next, capacity);
+            TableArrays.Resize(_account, ref _runs, capacity);
+            TableArrays.Resize(_account, ref _next, capacity);
         }
 
         return _used++;
@@ -984,16 +984,16 @@ internal sealed class GrowthSlot<TWide, TSum, TGrowth, TResult>(PType values, PT
     {
         if (_states.Length > 0)
         {
-            _shelf?.Give(_states);
-            _states = [];
+            _account.Return(_states);
+            _states = default;
         }
 
         if (_runs.Length > 0)
         {
-            _shelf?.Give(_runs);
-            _shelf?.Give(_next);
-            _runs = [];
-            _next = [];
+            _account.Return(_runs);
+            _account.Return(_next);
+            _runs = default;
+            _next = default;
         }
 
         _groups = 0;

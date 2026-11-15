@@ -319,9 +319,9 @@ internal sealed class CountsMerge
                 slot = encoded;
                 break;
             case byte[] first:
-                // Its arrays from the process's shelf, given back once it is sealed: an entry's sketch opened at its second
+                // Its arrays from the pool, uncounted, given back once it is sealed: an entry's sketch opened at its second
                 // sight made a window of 4 KiB each, two thirds of the bytes a merge of a day's hourly counts allocated.
-                QuantileSketch open = new QuantileSketch(ColumnCountsBuilder.SketchBits, ArrayShelf.Retained);
+                QuantileSketch open = new QuantileSketch(ColumnCountsBuilder.SketchBits, TableArrays.Uncounted);
                 open.MergeEncoded(first);
                 open.MergeEncoded(encoded);
                 slot = open;

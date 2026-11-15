@@ -301,9 +301,9 @@ internal sealed class TupleKeys : GroupKeys
         Count = tuples.Count;
     }
 
-    /// <summary>The keys of a plan's columns as tuples, their arrays from <paramref name="shelf"/>.</summary>
-    internal TupleKeys(TupleLayout layout, int probeAhead, ArrayShelf? shelf)
-        : this(layout, new FixedKeys<KeyTuple>(TupleShape(layout), sorted: false, probeAhead: probeAhead, shelf: shelf))
+    /// <summary>The keys of a plan's columns as tuples, their arrays from <paramref name="account"/>.</summary>
+    internal TupleKeys(TupleLayout layout, int probeAhead, TableArrays? account)
+        : this(layout, new FixedKeys<KeyTuple>(TupleShape(layout), sorted: false, probeAhead: probeAhead, account: account))
     {
     }
 
@@ -506,13 +506,13 @@ internal sealed class TupleKeys : GroupKeys
 
     internal override GroupKeys Fresh() => Wrap(_tuples.Fresh());
 
-    internal override GroupKeys ForPart(ArrayShelf? shelf = null) => Wrap(_tuples.ForPart(shelf));
+    internal override GroupKeys ForPart(TableArrays? account = null) => Wrap(_tuples.ForPart(account));
 
-    internal override GroupKeys ForTable(ArrayShelf shelf) => Wrap(_tuples.ForTable(shelf));
+    internal override GroupKeys ForTable(TableArrays account) => Wrap(_tuples.ForTable(account));
 
-    internal override GroupKeys ForSpill(ArrayShelf? shelf) => Wrap(_tuples.ForSpill(shelf));
+    internal override GroupKeys ForSpill(TableArrays? account) => Wrap(_tuples.ForSpill(account));
 
-    internal override GroupKeys? Appending(ArrayShelf? shelf) => _tuples.Appending(shelf) is { } appending ? Wrap(appending) : null;
+    internal override GroupKeys? Appending(TableArrays? account) => _tuples.Appending(account) is { } appending ? Wrap(appending) : null;
 
     internal override long Footprint => _tuples.Footprint + ((long)_block.Length * TupleLayout.Bytes) + ((long)_words.Length * TupleLayout.WordBytes);
 

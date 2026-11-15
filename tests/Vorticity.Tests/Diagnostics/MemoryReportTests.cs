@@ -54,7 +54,7 @@ public sealed partial class MemoryReportTests
         Assert.True(handle > 0, "the handle's caches hold what the question read");
         Assert.Equal(handle, retained["datasets"]);
         Assert.Equal(handle, report.RetainedByHolder["datasets"]);
-        Assert.Equal(HeldMemory.BytesOf<BlockPool>() + ArrayShelf.Retained.HeldBytes + Blocks.HeldBytes, retained["pool"]);
+        Assert.Equal(HeldMemory.BytesOf<BlockPool>() + Blocks.HeldBytes, retained["pool"]);
         Assert.Equal(report.RetainedByHolder.Values.Sum(), report.RetainedBytes);
 
         await dataset.DisposeAsync();

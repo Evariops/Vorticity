@@ -208,7 +208,7 @@ internal sealed class DistinctBatches : IAsyncEnumerator<RecordBatch>
     private int _part = -1;
     private int _bits;
     private GroupKeys? _set;
-    private ArrayShelf? _setShelf;
+    private TableArrays? _setAccount;
     private int _next;
 
     // The core's path: the pass on its own task, on several lanes, each
@@ -409,15 +409,15 @@ internal sealed class DistinctBatches : IAsyncEnumerator<RecordBatch>
     }
 
     /// <summary>
-    /// Part <paramref name="part"/> of the runs read into a set of its own, from a shelf under the query's
+    /// Part <paramref name="part"/> of the runs read into a set of its own, from an account under the query's
     /// memory: the told run's values first, silently, then the others'; the values to tell, those past
     /// the told run's, are the set's last numbers.
     /// </summary>
     private async ValueTask ReadPartAsync(int part)
     {
         (int first, int past) = SpillRun.Of(part, _bits);
-        _setShelf = new ArrayShelf(_memory!) { Exact = true };
-        GroupKeys set = _partition!.Keys!.ForSpill(_setShelf);
+        _setAccount = new TableArrays(_memory!) { Exact = true };
+        GroupKeys set = _partition!.Keys!.ForSpill(_setAccount);
         _set = set;
         SpillBuffer buffer = new SpillBuffer(_memory);
         try
@@ -461,12 +461,12 @@ internal sealed class DistinctBatches : IAsyncEnumerator<RecordBatch>
         }
     }
 
-    /// <summary>The part's set let go, with what its shelf held of the query's memory.</summary>
+    /// <summary>The part's set let go, with what its account held of the query's memory.</summary>
     private void LetPartGo()
     {
         _set = null;
-        _setShelf?.LetGo();
-        _setShelf = null;
+        _setAccount?.LetGo();
+        _setAccount = null;
         _next = 0;
     }
 

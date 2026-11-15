@@ -5,6 +5,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Aggregating;
+using Vorticity.Buffers;
 using Xunit;
 
 namespace Vorticity.Tests.Aggregation;
@@ -187,14 +188,14 @@ public sealed partial class QueryMemoryTests
         QueryMemoryBudget budget = new QueryMemoryBudget(8 * MiB);
         using (QueryMemory memory = new QueryMemory(budget))
         {
-            ArrayShelf shared = new ArrayShelf(memory);
+            TableArrays shared = new TableArrays(memory);
             Assert.False(shared.ReserveAhead(9 * MiB));
             Assert.Equal(0, memory.Held);
             Assert.True(shared.ReserveAhead(6 * MiB));
 
-            // A table of the merge doubles: its new array from the reservation, its old one back to it.
-            long[] table = shared.Take<long>(64 * 1024, zeroed: false);
-            ArrayShelf.Resize(shared, ref table, 128 * 1024);
+            // A table of the merge doubles: its new block from the reservation, its old one back to it.
+            Block<long> table = shared.Rent<long>(64 * 1024, zeroed: false);
+            TableArrays.Resize(shared, ref table, 128 * 1024);
             Assert.Equal(6 * MiB, memory.Held);
             Assert.False(memory.TryGrow(3 * MiB));
 
@@ -447,7 +448,7 @@ public sealed partial class QueryMemoryTests
     [Theory]
     [InlineData(1)]
     [InlineData(14)]
-    public async Task EveryTableAShelfGrowsGivesBackWhatItReserved(int degree)
+    public async Task EveryTableAnAccountGrowsGivesBackWhatItReserved(int degree)
     {
         const int rows = 200_000;
         Wide[] data = new Wide[rows];

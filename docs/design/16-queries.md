@@ -1147,8 +1147,7 @@ when free), once its pending batches pass α times its groups and 16 384 entries
 the degree, between 1 and 8. A lane whose cache misses more than half its rows over four capacities'
 worth of them sends its rows straight into batches for the next thirty-two. At the end every part
 applies what is pending, its sub-tables split ahead, and the sub-tables are the result, read as one.
-The arrays of its sub-tables and slabs come from a shelf of the query and go back to the process's
-shelf, kept within a budget and swept after garbage collections.
+The arrays of its sub-tables and slabs are blocks of the library's pool, rented under the core's account in the query's memory, which counts each one as it comes and keeps what the sub-tables give back reserved until every part is applied; they go back to the pool, which keeps one locked stack per size class. After a collection of the oldest generation, a class no rent asked for over a minute lets go of its blocks, every class does when the machine's memory load is high, and a reservation the process's budget refuses lets go of everything.
 
 On the bench the core holds two to three times less memory than the tables of fourteen lanes, and at
 fourteen lanes takes ×0.69 of the time at a million random keys, ×0.46 at ten million, and ×0.64 on
@@ -1288,8 +1287,8 @@ half the groups merged into it came new to it, the lanes' keys being apart, the 
 runs.
 
 At the end every table goes to the scratch, and the result comes back part by part, as a merge in
-parts delivers it. A part is a stretch of every run's sections, merged into a table that grows from a
-shelf of its own under the budget, built into batches and let go, with as few parts as keep one within
+parts delivers it. A part is a stretch of every run's sections, merged into a table that grows from an
+account of its own under the budget, built into batches and let go, with as few parts as keep one within
 half the room the budget leaves, and as many built ahead as that half holds (none when one part takes
 it all). A distinct count over the whole scan spills its set alone, by the top byte of its values'
 hash, its parts counted from sets sized by their sections. A `Distinct` on a key the core cannot take

@@ -86,7 +86,7 @@ internal sealed class GranuleStatsBuilder : IndexBuilder
         _sheet = sheet;
         _plan = plan;
         _measure = plan.MeasureOf(field);
-        _histogram = _measure >= 0 ? new QuantileSketch(GranuleHistograms.WrittenBits, ArrayShelf.Retained) : null;
+        _histogram = _measure >= 0 ? new QuantileSketch(GranuleHistograms.WrittenBits, TableArrays.Uncounted) : null;
         _own = _measure < 0 ? OwnOf(dtype) : null;
         _measured = _measure >= 0 || _own is not null;
         _state = new long[_measured ? MeasureLayout.Words(Kind == MeasureKind.Float) : 0];

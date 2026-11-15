@@ -1,6 +1,7 @@
 using System;
 using System.Numerics;
 using System.Runtime.CompilerServices;
+using Vorticity.Buffers;
 using Vorticity.Writing;
 
 namespace Vorticity.Aggregating;
@@ -24,7 +25,7 @@ internal sealed class DistinctValues<TValue>
     where TValue : unmanaged, IEquatable<TValue>
 {
     // The values, a power of two of slots at most half full.
-    private TValue[] _slots;
+    private Block<TValue> _slots;
 
     // The values in the slots.
     private int _count;
@@ -35,8 +36,8 @@ internal sealed class DistinctValues<TValue>
     // The top bits of the hash every value shares, a part's of a parallel merge, which a home skips.
     private readonly int _skip;
 
-    // The shelf the slots grow from, under the query's memory; null for values nothing counts.
-    private ArrayShelf? _shelf;
+    // The account the slots grow under, the query's memory's.
+    private TableArrays _account = TableArrays.Uncounted;
 
     // The seeds of the values' hash, the process's, kept here (KeyHash.SeededPair).
     private readonly KeyHash.PairSeeds _seeds = KeyHash.Seeds;
@@ -49,7 +50,8 @@ internal sealed class DistinctValues<TValue>
     /// </summary>
     internal DistinctValues(int capacity = 0, int skip = 0)
     {
-        _slots = new TValue[Length(capacity)];
+        // Made at its size, as the first array was: given back, it joins the pool.
+        _slots = Blocks.Allocate<TValue>(Length(capacity));
         _skip = skip;
     }
 
@@ -65,22 +67,15 @@ internal sealed class DistinctValues<TValue>
         }
     }
 
-    /// <summary>The shelf the slots grow from from now on.</summary>
-    internal void Govern(ArrayShelf? shelf) => _shelf = shelf;
+    /// <summary>The account the slots grow under from now on; none counts nothing.</summary>
+    internal void Govern(TableArrays? account) => _account = account ?? TableArrays.Uncounted;
 
-    /// <summary>The set moved to another lane's slot: its slots handed from its shelf to <paramref name="shelf"/>, which they grow from from now on.</summary>
-    internal void MoveTo(ArrayShelf? shelf)
+    /// <summary>The set moved to another lane's slot: its slots handed from its account to <paramref name="account"/>, which they grow under from now on.</summary>
+    internal void MoveTo(TableArrays? account)
     {
-        if (_shelf is { } from)
-        {
-            from.Hand(_slots, shelf);
-        }
-        else
-        {
-            shelf?.Adopt(_slots);
-        }
-
-        _shelf = shelf;
+        TableArrays to = account ?? TableArrays.Uncounted;
+        _account.Hand(_slots, to);
+        _account = to;
     }
 
     /// <summary>The values held.</summary>
@@ -96,11 +91,11 @@ internal sealed class DistinctValues<TValue>
     internal long GrowthFor(int values) =>
         (_count + (long)values) * 2 > _slots.Length ? FootprintOf((int)Math.Min(_count + (long)values, int.MaxValue / 4)) : 0;
 
-    /// <summary>Gives the slots back to their shelf: the values are let go, and read no more.</summary>
+    /// <summary>Gives the slots back to their account: the values are let go, and read no more.</summary>
     internal void Release()
     {
-        _shelf?.Give(_slots);
-        _slots = [];
+        _account.Return(_slots);
+        _slots = default;
         _count = 0;
         _zero = false;
     }
@@ -108,7 +103,7 @@ internal sealed class DistinctValues<TValue>
     /// <summary>Forgets every value, keeping the slots at their length: a set taken again for another group.</summary>
     internal void Clear()
     {
-        Array.Clear(_slots);
+        _slots.Clear();
         _count = 0;
         _zero = false;
     }
@@ -169,7 +164,7 @@ internal sealed class DistinctValues<TValue>
     /// </summary>
     internal void AddPart(DistinctValues<TValue> lane, int part, int bits)
     {
-        TValue[] slots = lane._slots;
+        Block<TValue> slots = lane._slots;
         int mask = slots.Length - 1;
         int laneBits = BitOperations.Log2((uint)slots.Length);
         int from = laneBits >= bits ? part << (laneBits - bits) : part >> (bits - laneBits);
@@ -205,7 +200,7 @@ internal sealed class DistinctValues<TValue>
     /// <returns>The values copied.</returns>
     internal int CopyPart(int part, int bits, ref int at, Span<TValue> into)
     {
-        TValue[] slots = _slots;
+        Block<TValue> slots = _slots;
         int mask = slots.Length - 1;
         int laneBits = BitOperations.Log2((uint)slots.Length);
         int from = laneBits >= bits ? part << (laneBits - bits) : part >> (bits - laneBits);
@@ -252,7 +247,7 @@ internal sealed class DistinctValues<TValue>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private bool Insert(TValue value, ulong hash)
     {
-        TValue[] slots = _slots;
+        Block<TValue> slots = _slots;
         int mask = slots.Length - 1;
         int at = Home(hash, Shift(slots.Length));
         while (true)
@@ -287,8 +282,8 @@ internal sealed class DistinctValues<TValue>
     /// </summary>
     private void Rehash(int length)
     {
-        TValue[] old = _slots;
-        TValue[] slots = _shelf is null ? new TValue[length] : _shelf.Take<TValue>(length, zeroed: true);
+        Block<TValue> old = _slots;
+        Block<TValue> slots = _account.Rent<TValue>(length, zeroed: true);
         int mask = length - 1;
         int shift = Shift(length);
         foreach (TValue value in old)
@@ -306,7 +301,7 @@ internal sealed class DistinctValues<TValue>
         }
 
         _slots = slots;
-        _shelf?.Give(old);
+        _account.Return(old);
     }
 
     /// <summary>The part of <c>2^<paramref name="bits"/></c> that <paramref name="value"/>, not the free one, falls in.</summary>

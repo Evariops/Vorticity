@@ -37,7 +37,7 @@ internal abstract class ResultColumn
     /// <summary>Whether <see cref="OrderOf"/> reads the values into an array: the column is built for an order otherwise.</summary>
     internal virtual bool ReadsOrder => false;
 
-    /// <summary>The column's scratch back to the process's shelf: the result is done with it.</summary>
+    /// <summary>The column's scratch back to the pool: the result is done with it.</summary>
     internal virtual void Release()
     {
     }

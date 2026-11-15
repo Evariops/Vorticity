@@ -175,10 +175,10 @@ internal abstract class GroupKeys
 
     /// <summary>
     /// An empty index a part of a parallel merge is merged into: <see cref="Fresh"/>, or one sharing what
-    /// the partitions were rebased on; its arrays taken from and given back to <paramref name="shelf"/>,
+    /// the partitions were rebased on; its arrays taken from and given back to <paramref name="account"/>,
     /// where the index keeps any, or new ones when null.
     /// </summary>
-    internal virtual GroupKeys ForPart(ArrayShelf? shelf = null) => Fresh();
+    internal virtual GroupKeys ForPart(TableArrays? account = null) => Fresh();
 
     /// <summary>
     /// The span of values the index numbers its groups by, its least value and its width; null when it
@@ -219,24 +219,24 @@ internal abstract class GroupKeys
     internal virtual void PartsByValue(int partBits, Span<byte> parts) => throw new NotSupportedException("Only keys numbered by value are cut by value.");
 
     /// <summary>An empty index the part <paramref name="part"/> of a merge by value is merged into: numbered by value over its run of the span.</summary>
-    internal virtual GroupKeys ForValuePart(int part, int partBits, ArrayShelf? shelf = null) => ForPart(shelf);
+    internal virtual GroupKeys ForValuePart(int part, int partBits, TableArrays? account = null) => ForPart(account);
 
-    /// <summary>An empty index a sub-table of the core holds its groups in, its arrays taken from and given back to <paramref name="shelf"/>.</summary>
-    internal virtual GroupKeys ForTable(ArrayShelf shelf) => ForPart();
+    /// <summary>An empty index a sub-table of the core holds its groups in, its arrays taken from and given back to <paramref name="account"/>.</summary>
+    internal virtual GroupKeys ForTable(TableArrays account) => ForPart();
 
     /// <summary>
-    /// An empty index of a part of a core that pages its key, its arrays from <paramref name="shelf"/>: the
+    /// An empty index of a part of a core that pages its key, its arrays from <paramref name="account"/>: the
     /// part's pages side by side, <paramref name="pages"/> in their order, each of 2^<paramref name="bits"/>
     /// values from <paramref name="least"/> plus its number shifted by them, <paramref name="slots"/> each
     /// page's place among its part's.
     /// </summary>
-    internal virtual GroupKeys ForPages(long least, int bits, int[] slots, long[] pages, ArrayShelf shelf) =>
+    internal virtual GroupKeys ForPages(long least, int bits, int[] slots, long[] pages, TableArrays account) =>
         throw new NotSupportedException("Only keys numbered by value are paged.");
 
     /// <summary>The groups some row met: <see cref="Count"/>, less the values of a span numbered whole that none did yet.</summary>
     internal virtual int MetGroups => Count;
 
-    /// <summary>Gives the index's arrays back to its shelf, if it has one: a sub-table split, whose groups another holds. The index is empty after.</summary>
+    /// <summary>Gives the index's arrays back to its account, if it has one: a sub-table split, whose groups another holds. The index is empty after.</summary>
     internal virtual void Release()
     {
     }
@@ -266,9 +266,9 @@ internal abstract class GroupKeys
     /// An index of the same kind that looks no key up: each row's key a group of its own, but a row
     /// whose key is the row before's, a run's or a code's; the null group one. What a lane folds its
     /// rows into when its cache finds too few of its keys, the bypass; its arrays from
-    /// <paramref name="shelf"/>. Null for a key that does not travel in batches.
+    /// <paramref name="account"/>. Null for a key that does not travel in batches.
     /// </summary>
-    internal virtual GroupKeys? Appending(ArrayShelf? shelf) => null;
+    internal virtual GroupKeys? Appending(TableArrays? account) => null;
 
     /// <summary>
     /// Copies every group but the null one into an entry of the lane's batch of the part its key falls
@@ -332,8 +332,8 @@ internal abstract class GroupKeys
     /// <summary>Reads as many keys as <paramref name="groups"/> holds, written by <see cref="WriteKeys"/>, each one's group here into it, added when new.</summary>
     internal virtual void ReadKeys(ref SpillReader reader, Span<int> groups) => throw NotSpilled();
 
-    /// <summary>An empty index a part of a spill is read back into: hashed, never by value, its arrays from <paramref name="shelf"/>.</summary>
-    internal virtual GroupKeys ForSpill(ArrayShelf? shelf) => Fresh();
+    /// <summary>An empty index a part of a spill is read back into: hashed, never by value, its arrays from <paramref name="account"/>.</summary>
+    internal virtual GroupKeys ForSpill(TableArrays? account) => Fresh();
 
     /// <summary>
     /// The bytes the index's arrays would take more were <paramref name="more"/> new groups to come: what a
@@ -660,10 +660,10 @@ internal sealed class FixedKeys<TValue> : GroupKeys
     private WideKeyTable<TValue> _wide = new WideKeyTable<TValue>();
     private bool _compact = CompactAlways;
 
-    // The keys, by group: none until the first group, then from the shelf when there is one. Each of a
-    // core's sub-tables made its first array of sixteen at once, outside any shelf: 3 885 arrays a query
+    // The keys, by group: none until the first group, then from the account when there is one. Each of a
+    // core's sub-tables made its first array of sixteen at once, outside any account: 3 885 arrays a query
     // of six keys over 4M rows at fourteen lanes, 4 MB on the small object heap.
-    private TValue[] _keys = [];
+    private Block<TValue> _keys;
     private int _null = -1;
     private ScratchBlock<TValue> _values;
     private ValuesCache<TValue> _entries;
@@ -682,8 +682,9 @@ internal sealed class FixedKeys<TValue> : GroupKeys
     // The group of each value by its number, the value less the statistics' smallest, in pages of
     // 2^PageBits numbers allocated as values meet them, -1 for a value not met yet, every page Unmet
     // until then; a value past the bounds, which exact statistics never leave, goes to the index alone.
-    // A page lies in a slab of pages at its start (Page): the slab of each page, and where it starts.
-    private readonly int[][]? _pages;
+    // A page lies in a slab of pages at its start (Page): the slab of each page, and where it starts. A slab is the bytes
+    // of a block of numbers (Numbers reads them as such), rented its whole class long.
+    private readonly byte[][]? _pages;
     private readonly int[]? _pageStarts;
     private readonly long _directMin;
     private readonly ulong _span;
@@ -691,7 +692,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
 
     // The slab the next pages come from, its pages handed out, the pages of the next slab, and the
     // numbers every slab holds.
-    private int[]? _slab;
+    private byte[]? _slab;
     private int _slabUsed;
     private int _slabPages = 1;
     private long _slabsHeld;
@@ -713,15 +714,15 @@ internal sealed class FixedKeys<TValue> : GroupKeys
     // A paged core's part numbered whole: a bit a number, set once an entry met its value, where a group's
     // number is its group and needs no table; null before NumberWhole, and once the part's unmet values are
     // dropped, when its keys are final.
-    private ulong[]? _metBits;
+    private Block<ulong> _metBits;
 
-    // Every key a group of its own, no table looked up (Appending); the shelf a sub-table's arrays come from (ForTable).
+    // Every key a group of its own, no table looked up (Appending); the account a sub-table's blocks are rented under (ForTable).
     private readonly bool _appending;
-    private readonly ArrayShelf? _shelf;
+    private readonly TableArrays _account;
 
     internal FixedKeys(
         ColumnShape shape, bool sorted, KeyBounds? bounds = null, int probeAhead = AggregationPlan.DefaultProbeAhead, long rows = -1, bool appending = false,
-        ArrayShelf? shelf = null, long aheadBytes = long.MaxValue)
+        TableArrays? account = null, long aheadBytes = long.MaxValue)
     {
         _shape = shape;
         _sorted = sorted;
@@ -731,13 +732,13 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         _aheadFrom = aheadBytes == long.MaxValue ? int.MaxValue : (int)Math.Clamp(aheadBytes / (Unsafe.SizeOf<TValue>() + sizeof(ulong)), 1, int.MaxValue);
         _rows = rows;
         _appending = appending;
-        _shelf = shelf;
-        if (shelf is not null)
+        _account = account ?? TableArrays.Uncounted;
+        if (account is not null)
         {
-            _index = new KeyTable<TValue>(shelf);
+            _index = new KeyTable<TValue>(account);
             if (Wide)
             {
-                _wide = new WideKeyTable<TValue>(shelf);
+                _wide = new WideKeyTable<TValue>(account);
             }
         }
 
@@ -747,7 +748,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
             ulong span = (ulong)(known.Max - known.Min) + 1;
             if (span != 0 && (span <= DirectValues || (rows > 0 && span <= (ulong)(DirectPerRow * rows))))
             {
-                _pages = new int[(int)((span + PageMask) >> PageBits)][];
+                _pages = new byte[(int)((span + PageMask) >> PageBits)][];
                 _pages.AsSpan().Fill(Unmet);
                 _pageStarts = new int[_pages.Length];
                 _directMin = known.Min;
@@ -761,11 +762,11 @@ internal sealed class FixedKeys<TValue> : GroupKeys
     /// side, numbered by value, from <paramref name="least"/>, 2^<paramref name="bits"/> values a page,
     /// <paramref name="slots"/> each page's place among its part's, <paramref name="pages"/> the part's.
     /// </summary>
-    private FixedKeys(ColumnShape shape, long least, int bits, int[] slots, long[] pages, ArrayShelf shelf)
-        : this(shape, sorted: false, shelf: shelf)
+    private FixedKeys(ColumnShape shape, long least, int bits, int[] slots, long[] pages, TableArrays account)
+        : this(shape, sorted: false, account: account)
     {
         ulong span = (ulong)pages.Length << bits;
-        _pages = new int[(int)((span + PageMask) >> PageBits)][];
+        _pages = new byte[(int)((span + PageMask) >> PageBits)][];
         _pages.AsSpan().Fill(Unmet);
         _pageStarts = new int[_pages.Length];
         _directMin = least;
@@ -809,14 +810,22 @@ internal sealed class FixedKeys<TValue> : GroupKeys
     /// The page of the table of groups every number reads until its own is allocated: no value met, -1
     /// throughout, and never written. A first pass reads it as any other, with no branch on the keys.
     /// </summary>
-    private static readonly int[] Unmet = NewUnmet();
+    private static readonly byte[] Unmet = NewUnmet();
 
-    private static int[] NewUnmet()
+    private static byte[] NewUnmet()
     {
-        int[] page = new int[1 << PageBits];
-        page.AsSpan().Fill(-1);
+        byte[] page = new byte[(1 << PageBits) * sizeof(int)];
+        SlabNumbers(page).Fill(-1);
         return page;
     }
+
+    /// <summary>The numbers of a slab, its bytes read as the groups they hold.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static Span<int> SlabNumbers(byte[] slab) => MemoryMarshal.Cast<byte, int>(slab);
+
+    /// <summary>A reference to number <paramref name="at"/> of a slab, unchecked: for a loop that reckons its bounds itself.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static ref int NumberAt(byte[] slab, int at) => ref Unsafe.Add(ref Unsafe.As<byte, int>(ref MemoryMarshal.GetArrayDataReference(slab)), at);
 
     /// <summary>Whether the key is wider than a word, a decimal, a UUID or a short text's word: a constant once compiled.</summary>
     private static bool Wide
@@ -1358,7 +1367,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
     {
         long min = _directMin;
         ulong span = _span;
-        int[][] pages = _pages!;
+        byte[][] pages = _pages!;
         int[] starts = _pageStarts!;
         Span<int> left = stackalloc int[DirectChunk];
         for (int start = 0; start < rows; start += DirectChunk)
@@ -1395,7 +1404,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
             {
                 // A span of one page, a few thousand values: its numbers read from the page itself, taken once
                 // a chunk, where the page and its start read again at every row made a chain of three loads.
-                ref int numbers = ref Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(pages[0]), starts[0]);
+                ref int numbers = ref NumberAt(pages[0], starts[0]);
                 int i = 0;
                 if (Avx2.IsSupported)
                 {
@@ -1420,7 +1429,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
                     bool inside = number < span;
                     ulong at = inside ? number : 0;
                     int page = (int)(at >> PageBits);
-                    int group = Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(pages[page]), starts[page] + ((int)at & PageMask));
+                    int group = NumberAt(pages[page], starts[page] + ((int)at & PageMask));
                     group = inside ? group : -1;
                     groups[i] = group;
                     missed |= group;
@@ -1480,13 +1489,13 @@ internal sealed class FixedKeys<TValue> : GroupKeys
     private int Numbered(TValue value, ulong number)
     {
         int at = (int)(number >> PageBits);
-        int[] slab = _pages![at];
+        byte[] slab = _pages![at];
         if (slab == Unmet)
         {
             slab = Page(at);
         }
 
-        ref int group = ref slab[_pageStarts![at] + ((int)number & PageMask)];
+        ref int group = ref SlabNumbers(slab)[_pageStarts![at] + ((int)number & PageMask)];
         if (group < 0)
         {
             group = _unmet >= 0 ? Meet(number) : Add(value);
@@ -1541,7 +1550,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         if (_mapSlots is not null)
         {
             int words = (span + 63) >> 6;
-            _metBits = _shelf?.Take<ulong>(words, zeroed: true) ?? new ulong[words];
+            _metBits = _account.Rent<ulong>(words, zeroed: true);
         }
 
         Count = span;
@@ -1572,9 +1581,10 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         Block<int> met = Buffers.Blocks.Rent<int>(Count - unmet);
         int kept = 0;
         int span = (int)_span;
-        if (_metBits is { } bits)
+        if (!_metBits.IsDefault)
         {
             // A paged core's part: its bits, a word at a time.
+            Block<ulong> bits = _metBits;
             for (int w = 0; w < bits.Length; w++)
             {
                 for (ulong word = bits[w]; word != 0; word &= word - 1)
@@ -1587,18 +1597,17 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         {
             for (int at = 0; at < _pages!.Length; at++)
             {
-                int[] slab = _pages[at];
+                byte[] slab = _pages[at];
                 if (slab == Unmet)
                 {
                     continue;
                 }
 
-                int start = _pageStarts![at];
                 int first = at << PageBits;
-                int numbers = Math.Min(1 << PageBits, span - first);
-                for (int n = 0; n < numbers; n++)
+                ReadOnlySpan<int> numbers = SlabNumbers(slab).Slice(_pageStarts![at], Math.Min(1 << PageBits, span - first));
+                for (int n = 0; n < numbers.Length; n++)
                 {
-                    if (slab[start + n] >= 0)
+                    if (numbers[n] >= 0)
                     {
                         met[kept++] = first + n;
                     }
@@ -1843,19 +1852,20 @@ internal sealed class FixedKeys<TValue> : GroupKeys
     /// </summary>
     /// <returns>The slab the page lies in, where <see cref="_pageStarts"/> says.</returns>
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private int[] Page(int at)
+    private byte[] Page(int at)
     {
-        if (_slab is null || _slabUsed == _slab.Length >> PageBits)
+        if (_slab is null || _slabUsed == _slab.Length >> (PageBits + 2))
         {
+            // A power of two of pages of a power of two of numbers: the block is its class's whole.
             int length = _slabPages << PageBits;
-            _slab = _shelf is null ? GC.AllocateUninitializedArray<int>(length) : _shelf.Take<int>(length, zeroed: false);
+            _slab = _account.Rent<int>(length, zeroed: false).Bytes!;
             _slabUsed = 0;
             _slabsHeld += length;
             _slabPages = Math.Min(MostSlabPages, _slabPages * 2);
         }
 
         int start = _slabUsed++ << PageBits;
-        _slab.AsSpan(start, 1 << PageBits).Fill(-1);
+        SlabNumbers(_slab).Slice(start, 1 << PageBits).Fill(-1);
         _pageStarts![at] = start;
         return _pages![at] = _slab;
     }
@@ -1940,10 +1950,10 @@ internal sealed class FixedKeys<TValue> : GroupKeys
     internal override long Footprint =>
         _index.Footprint + _wide.Footprint + ((long)(_keys.Length + _values.Length) * Unsafe.SizeOf<TValue>())
         + (_slabsHeld * sizeof(int)) + ((long)(_pages?.Length ?? 0) * (IntPtr.Size + sizeof(int)))
-        + ((long)(_homes.Length + _left.Length) * sizeof(int)) + ((long)(_metBits?.Length ?? 0) * sizeof(ulong));
+        + ((long)(_homes.Length + _left.Length) * sizeof(int)) + ((long)_metBits.Length * sizeof(ulong));
 
     /// <summary>A part of a merge is merged into, never assigned rows: no table of groups.</summary>
-    internal override GroupKeys ForPart(ArrayShelf? shelf = null) => new FixedKeys<TValue>(_shape, _sorted, shelf: shelf);
+    internal override GroupKeys ForPart(TableArrays? account = null) => new FixedKeys<TValue>(_shape, _sorted, account: account);
 
     internal override (long Least, ulong Span)? ValueSpan => _pages is null || _mapSlots is not null ? null : (_directMin, _span);
 
@@ -1964,12 +1974,12 @@ internal sealed class FixedKeys<TValue> : GroupKeys
     /// A part of a merge by value numbers its run of the span whatever its entries: the lanes numbered
     /// all of it, and its pages come as its values meet them.
     /// </summary>
-    internal override GroupKeys ForValuePart(int part, int partBits, ArrayShelf? shelf = null)
+    internal override GroupKeys ForValuePart(int part, int partBits, TableArrays? account = null)
     {
         int shift = ValuePartShift(partBits);
         long least = _directMin + ((long)part << shift);
         long most = Math.Min(_directMin + (long)(_span - 1), least + ((1L << shift) - 1));
-        return new FixedKeys<TValue>(_shape, _sorted, new KeyBounds(least, most), _probeAhead, rows: 1L << shift, shelf: shelf);
+        return new FixedKeys<TValue>(_shape, _sorted, new KeyBounds(least, most), _probeAhead, rows: 1L << shift, account: account);
     }
 
     internal override void Reserve(int groups)
@@ -2017,17 +2027,17 @@ internal sealed class FixedKeys<TValue> : GroupKeys
     // (ReserveAllNew): 10⁶ names at one lane, each once then all again, foretold as 2M, held 2.25M keys.
     private int _doublesUpTo = int.MaxValue;
 
-    /// <summary>The keys' array grown to <paramref name="length"/>: from the shelf of a sub-table, the old one given back.</summary>
+    /// <summary>The keys' array grown to <paramref name="length"/>: from the account of a sub-table, the old one given back.</summary>
     private void Grow(int length)
     {
-        TValue[] grown = _shelf is null ? new TValue[length] : _shelf.Take<TValue>(length, zeroed: false);
+        Block<TValue> grown = _account.Rent<TValue>(length, zeroed: false);
         _keys.AsSpan(0, Count).CopyTo(grown);
-        _shelf?.Give(_keys);
+        _account.Return(_keys);
         _keys = grown;
     }
 
-    /// <summary>A sub-table of the core: the keys hashed, never by value, their arrays from the query's shelf.</summary>
-    internal override GroupKeys ForTable(ArrayShelf shelf) => new FixedKeys<TValue>(_shape, sorted: false, shelf: shelf);
+    /// <summary>A sub-table of the core: the keys hashed, never by value, their arrays from the query's account.</summary>
+    internal override GroupKeys ForTable(TableArrays account) => new FixedKeys<TValue>(_shape, sorted: false, account: account);
 
     internal override void Release()
     {
@@ -2038,16 +2048,13 @@ internal sealed class FixedKeys<TValue> : GroupKeys
             _compact = CompactAlways;
         }
 
-        _shelf?.Give(_keys);
-        _keys = [];
+        _account.Return(_keys);
+        _keys = default;
         Count = 0;
         _null = -1;
         _unmet = -1;
-        if (_metBits is not null)
-        {
-            _shelf?.Give(_metBits);
-            _metBits = null;
-        }
+        _account.Return(_metBits);
+        _metBits = default;
 
         // The scratch of the two passes and of the values widened, from the pool, back to it.
         Scratch.Return(ref _homes);
@@ -2063,7 +2070,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
             {
                 if (_pages[at] != Unmet && _pageStarts![at] == 0)
                 {
-                    _shelf?.Give(_pages[at]);
+                    _account.Return(Block<int>.Over(_pages[at], _pages[at].Length / sizeof(int)));
                 }
 
                 _pages[at] = Unmet;
@@ -2106,7 +2113,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         }
 
         bool wide = Unsafe.SizeOf<TValue>() == sizeof(ulong);
-        TValue[] keys = _keys;
+        Block<TValue> keys = _keys;
         int none = _null;
         for (int i = 0; i < groups.Length; i++)
         {
@@ -2194,7 +2201,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
             int page = (int)(number >> PageBits);
             if (_pages![page] != Unmet)
             {
-                _pages[page][_pageStarts![page] + ((int)number & PageMask)] = -1;
+                SlabNumbers(_pages[page])[_pageStarts![page] + ((int)number & PageMask)] = -1;
             }
         }
 
@@ -2224,7 +2231,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
             if (DirectSlot(_keys[i], out ulong number))
             {
                 int page = (int)(number >> PageBits);
-                _pages![page][_pageStarts![page] + ((int)number & PageMask)] = i;
+                SlabNumbers(_pages![page])[_pageStarts![page] + ((int)number & PageMask)] = i;
             }
             else
             {
@@ -2251,7 +2258,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         _numbered = false;
         int span = (int)_span;
         int rank = 0;
-        if (_metBits is not null)
+        if (!_metBits.IsDefault)
         {
             // A paged core's part: no table of groups to follow the keep, its keys final from now on.
             while (rank < groups.Length && groups[rank] < span)
@@ -2259,20 +2266,20 @@ internal sealed class FixedKeys<TValue> : GroupKeys
                 rank++;
             }
 
-            _shelf?.Give(_metBits);
-            _metBits = null;
+            _account.Return(_metBits);
+            _metBits = default;
         }
 
         for (int at = 0; _mapSlots is null && at < _pages!.Length; at++)
         {
-            int[] slab = _pages[at];
+            byte[] slab = _pages[at];
             if (slab == Unmet)
             {
                 continue;
             }
 
             int first = at << PageBits;
-            Span<int> numbers = slab.AsSpan(_pageStarts![at], Math.Min(1 << PageBits, span - first));
+            Span<int> numbers = SlabNumbers(slab).Slice(_pageStarts![at], Math.Min(1 << PageBits, span - first));
             for (int n = 0; n < numbers.Length; n++)
             {
                 if (numbers[n] >= 0)
@@ -2367,7 +2374,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         }
     }
 
-    internal override GroupKeys ForSpill(ArrayShelf? shelf) => new FixedKeys<TValue>(_shape, sorted: false, probeAhead: _probeAhead, shelf: shelf);
+    internal override GroupKeys ForSpill(TableArrays? account) => new FixedKeys<TValue>(_shape, sorted: false, probeAhead: _probeAhead, account: account);
 
     /// <summary>The keys' array, and the index, or numbered by value the pages of the span still to come, a page a new group at most.</summary>
     internal override long GrowthFor(int more)
@@ -2382,14 +2389,14 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         return bytes + (Math.Min(more, left) << PageBits) * sizeof(int);
     }
 
-    internal override GroupKeys? Appending(ArrayShelf? shelf) => new FixedKeys<TValue>(_shape, sorted: false, appending: true, shelf: shelf);
+    internal override GroupKeys? Appending(TableArrays? account) => new FixedKeys<TValue>(_shape, sorted: false, appending: true, account: account);
 
     internal override void Scatter(ReadOnlySpan<ulong> records, LaneCore lane) => EntryKeys.Scatter<TValue>(_keys.AsSpan(0, Count), _null, records, lane);
 
     internal override void CountParts(Span<int> counts, LaneCore lane) => EntryKeys.CountParts<TValue>(_keys.AsSpan(0, Count), _null, counts, lane);
 
-    internal override GroupKeys ForPages(long least, int bits, int[] slots, long[] pages, ArrayShelf shelf) =>
-        new FixedKeys<TValue>(_shape, least, bits, slots, pages, shelf);
+    internal override GroupKeys ForPages(long least, int bits, int[] slots, long[] pages, TableArrays account) =>
+        new FixedKeys<TValue>(_shape, least, bits, slots, pages, account);
 
     internal override int MetGroups => _unmet >= 0 ? Count - _unmet : Count;
 
@@ -2487,7 +2494,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         int bits = _mapBits;
         long mask = (1L << bits) - 1;
         long[] pages = _mapPages!;
-        ulong[] met = _metBits!;
+        Block<ulong> met = _metBits;
         for (int i = 0; i < entries.Length; i++)
         {
             TValue key = EntryKeys.KeyAt<TValue>(batch, shape, entries[i]);
@@ -2513,7 +2520,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private int MeetBit(ulong number)
     {
-        ref ulong word = ref _metBits![(int)(number >> 6)];
+        ref ulong word = ref _metBits[(int)(number >> 6)];
         _unmet -= (int)((~word >> (int)number) & 1);
         word |= 1UL << (int)number;
         return (int)number;
@@ -2544,7 +2551,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
 
     internal override void Append(int component, ColumnStore store, ReadOnlySpan<int> groups)
     {
-        TValue[] keys = _keys;
+        Block<TValue> keys = _keys;
         int nullGroup = _null;
         StorageKind kind = _shape.Kind;
         if (kind == StorageKind.Primitive && store.Leaf is FixedStore leaf && leaf.Width == Unsafe.SizeOf<TValue>())
@@ -2636,7 +2643,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         {
             if (_mapSlots is not null)
             {
-                return _metBits is not null ? MeetBit(number) : throw FinalPart();
+                return !_metBits.IsDefault ? MeetBit(number) : throw FinalPart();
             }
 
             return Numbered(value, number);
@@ -2714,12 +2721,12 @@ internal sealed class BytesKeys : GroupKeys
 
     /// <param name="shape">The key's column.</param>
     /// <param name="sorted">Whether the statistics say the column is sorted.</param>
-    /// <param name="shelf">The lane's shelf the table grows from, under its query's memory; null for a table nothing counts.</param>
-    internal BytesKeys(ColumnShape shape, bool sorted, ArrayShelf? shelf = null)
+    /// <param name="account">The lane's account the table grows from, under its query's memory; null for a table nothing counts.</param>
+    internal BytesKeys(ColumnShape shape, bool sorted, TableArrays? account = null)
     {
         _shape = shape;
         _sorted = sorted;
-        _table = new ByteKeyTable(shelf);
+        _table = new ByteKeyTable(account);
     }
 
     internal override bool Assign(CanonicalArena arena, ReadOnlySpan<int> nodes, int rows, ReadOnlySpan<ulong> selection, Block<int> rowGroups, GroupRanges ranges)
@@ -2851,11 +2858,11 @@ internal sealed class BytesKeys : GroupKeys
 
     internal override GroupKeys Fresh() => new BytesKeys(_shape, _sorted);
 
-    internal override GroupKeys ForPart(ArrayShelf? shelf = null) => new BytesKeys(_shape, _sorted, shelf);
+    internal override GroupKeys ForPart(TableArrays? account = null) => new BytesKeys(_shape, _sorted, account);
 
     internal override long Footprint => _table.Footprint;
 
-    /// <summary>The table's pages and arrays back to the shelf: left to the collector, every query took a lane's keys new.</summary>
+    /// <summary>The table's pages and arrays back to the account: left to the collector, every query took a lane's keys new.</summary>
     internal override void Release()
     {
         _table.Release();
@@ -2905,7 +2912,7 @@ internal sealed class BytesKeys : GroupKeys
 
     internal override bool Spills => true;
 
-    internal override GroupKeys ForSpill(ArrayShelf? shelf) => new BytesKeys(_shape, sorted: false, shelf);
+    internal override GroupKeys ForSpill(TableArrays? account) => new BytesKeys(_shape, sorted: false, account);
 
     internal override long GrowthFor(int more) => _table.GrowthFor(more);
 

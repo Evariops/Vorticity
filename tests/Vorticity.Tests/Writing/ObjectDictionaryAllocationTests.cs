@@ -1,5 +1,5 @@
-// An object's dictionary of a column's values collects them in working arrays from the process's shelf and gives them back:
-// once the shelf holds them, a dictionary allocates what it is, its values, their offsets and their hashes, and no more.
+// An object's dictionary of a column's values collects them in working arrays from the pool and gives them back: once the
+// pool holds them, a dictionary allocates what it is, its values, their offsets and their hashes, and no more.
 using System;
 using System.Globalization;
 using System.Runtime.InteropServices;
@@ -23,7 +23,7 @@ public sealed class ObjectDictionaryAllocationTests
     /// grown as the values came, came new every time.
     /// </summary>
     [Fact]
-    public void ADictionaryAllocatesWhatItIsOnceTheShelfHoldsItsWorkingArrays()
+    public void ADictionaryAllocatesWhatItIsOnceThePoolHoldsItsWorkingArrays()
     {
         const int Rows = 60_000;
         const int Values = 10_000;

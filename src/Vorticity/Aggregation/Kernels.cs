@@ -824,6 +824,16 @@ internal readonly struct ScratchBlock<T>
         return new ScratchBlock<T>(bytes);
     }
 
+    /// <summary>
+    /// The scratch over <paramref name="block"/>'s bytes, which the block holds whole, its length all they hold: a block of a
+    /// power of two of elements of a power of two of bytes, from the pool's smallest class up.
+    /// </summary>
+    internal static ScratchBlock<T> Whole(Block<T> block)
+    {
+        Debug.Assert(block.IsDefault || block.Length == block.Capacity, "The block holds its bytes whole.");
+        return new ScratchBlock<T>(block.Bytes);
+    }
+
     /// <summary>Every element the bytes hold.</summary>
     public int Length => _bytes is null ? 0 : _bytes.Length / Unsafe.SizeOf<T>();
 

@@ -44,11 +44,11 @@ internal sealed class CompositeKeys : GroupKeys
     private ScratchBlock<int> _cursors;
 
     /// <param name="parts">The key's columns.</param>
-    /// <param name="shelf">The lane's shelf the table grows from, under its query's memory; null for a table nothing counts.</param>
-    internal CompositeKeys(ColumnShape[] parts, ArrayShelf? shelf = null)
+    /// <param name="account">The lane's account the table grows from, under its query's memory; null for a table nothing counts.</param>
+    internal CompositeKeys(ColumnShape[] parts, TableArrays? account = null)
     {
         _parts = parts;
-        _table = new ByteKeyTable(shelf);
+        _table = new ByteKeyTable(account);
         _decimals = new ScratchBlock<Int128>[parts.Length];
         _wides = new ScratchBlock<Int256>[parts.Length];
         _bits = new ScratchBlock<ulong>[parts.Length];
@@ -123,12 +123,12 @@ internal sealed class CompositeKeys : GroupKeys
 
     internal override GroupKeys Fresh() => new CompositeKeys(_parts);
 
-    internal override GroupKeys ForPart(ArrayShelf? shelf = null) => new CompositeKeys(_parts, shelf);
+    internal override GroupKeys ForPart(TableArrays? account = null) => new CompositeKeys(_parts, account);
 
     /// <summary>The table of the encoded tuples, the groups' keys.</summary>
     internal override long Footprint => _table.Footprint;
 
-    /// <summary>The table's pages and arrays back to the shelf, as a key of one text column gives its own, and the scratch back to the pool.</summary>
+    /// <summary>The table's pages and arrays back to the account, as a key of one text column gives its own, and the scratch back to the pool.</summary>
     internal override void Release()
     {
         _table.Release();
@@ -178,7 +178,7 @@ internal sealed class CompositeKeys : GroupKeys
 
     internal override bool Spills => true;
 
-    internal override GroupKeys ForSpill(ArrayShelf? shelf) => new CompositeKeys(_parts, shelf);
+    internal override GroupKeys ForSpill(TableArrays? account) => new CompositeKeys(_parts, account);
 
     internal override long GrowthFor(int more) => _table.GrowthFor(more);
 

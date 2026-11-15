@@ -205,17 +205,17 @@ internal abstract class AggregateSlot
     internal virtual GroupRecords? Bound => null;
 
     /// <summary>
-    /// The shelf the slot's own arrays grow from from now on: a lane's, under its query's memory, or a
+    /// The account the slot's own arrays grow from from now on: a lane's, under its query's memory, or a
     /// core's. Called once, as its partition makes the
     /// slot. Nothing for a slot whose states all lie in records its partition shares.
     /// </summary>
-    internal virtual void Govern(ArrayShelf shelf)
+    internal virtual void Govern(TableArrays account)
     {
     }
 
     /// <summary>
-    /// Gives the slot's own arrays back to the shelf they grew from (<see cref="Govern"/>), which hands
-    /// them to the process's for the next query: the partition's groups delivered, or held by another.
+    /// Gives the slot's own arrays back to the account they grew from (<see cref="Govern"/>), which gives
+    /// them back to the pool for the next query: the partition's groups delivered, or held by another.
     /// The slot is read no more. Nothing for a slot whose states all lie in records its partition shares.
     /// </summary>
     internal virtual void Release()

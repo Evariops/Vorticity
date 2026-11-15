@@ -3,6 +3,7 @@ using System.IO;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
+using Vorticity.Buffers;
 using Vorticity.Writing;
 
 namespace Vorticity.Aggregating;
@@ -28,7 +29,7 @@ internal sealed partial class GroupCore
     // The free space of the scratch's directory, read once a 64th of it is written, not at every page: the pages are appended one at a time.
     private SpaceClaims _claims;
     private byte[]? _page;
-    private ulong[]? _words;
+    private Block<ulong> _words;
     private int _spilledParts;
     private long _spilledBytes;
 
@@ -128,9 +129,9 @@ internal sealed partial class GroupCore
             part.Gate.Exit();
         }
 
-        // From the first spill on, what the core gives back leaves the query's count rather than wait on
-        // the shelf's piles, counted: a spill is there to give memory back.
-        _shelf.Drops = true;
+        // From the first spill on, what the core gives back leaves the query's count rather than stay
+        // reserved as the account's credit: a spill is there to give memory back.
+        _account.Drops = true;
         long start = -1;
         long entries = 0;
         try
@@ -314,14 +315,14 @@ internal sealed partial class GroupCore
 
         // Each part brought back gives its arrays back once delivered: they leave the query's count, the
         // next part under its budget alone.
-        _shelf.Drops = true;
+        _account.Drops = true;
         CoreApplier applier = new CoreApplier(this, lane: null);
         int entryBytes = Shape.Words * sizeof(ulong);
         int perPage = Page().Length / entryBytes;
-        if (_words is null)
+        if (_words.IsDefault)
         {
             _memory?.Force(Page().Length);
-            _words = new ulong[Page().Length / sizeof(ulong)];
+            _words = Blocks.Allocate<ulong>(Page().Length / sizeof(ulong));
         }
 
         // The sub-tables the part made in memory since it first spilled were made in silence: their keys
@@ -357,7 +358,7 @@ internal sealed partial class GroupCore
                         int entries = (int)Math.Min(perPage, left);
                         int bytes = entries * entryBytes;
                         await _scratch!.ReadAsync(offset, Page().AsMemory(0, bytes), cancellationToken).ConfigureAwait(false);
-                        Buffer.BlockCopy(_page!, 0, _words, 0, bytes);
+                        _page.AsSpan(0, bytes).CopyTo(MemoryMarshal.AsBytes(_words.AsSpan()));
                         PartBatch batch = new PartBatch(_words, 0, entries) { Count = entries };
                         Pend(entries);
                         applier.Apply(part, batch, burst: false);
@@ -402,9 +403,9 @@ internal sealed partial class GroupCore
         Emitter is { Overflowing: true } emitter ? emitter.RoomAsync(cancellationToken) : ValueTask.CompletedTask;
 
     /// <summary>
-    /// The part's sub-tables let go once delivered: their arrays on the shelf, where the parts still
-    /// applied take them again; once every part is applied, handed to the process's shelf, for the
-    /// next query, and leaving the query's count; let go, past the first part brought back from the scratch.
+    /// The part's sub-tables let go once delivered: their arrays back to the pool, their bytes kept
+    /// reserved by the account for the parts still applied; once every part is applied, leaving the
+    /// query's count; let go, past the first part brought back from the scratch.
     /// </summary>
     internal void Let(CorePart part)
     {
@@ -417,13 +418,13 @@ internal sealed partial class GroupCore
         part.Tables.Clear();
         part.Restart();
         Volatile.Write(ref part.Groups, 0);
-        if (!_shelf.Drops && Volatile.Read(ref _allApplied))
+        if (!_account.Drops && Volatile.Read(ref _allApplied))
         {
-            _shelf.Clear();
+            _account.Clear();
         }
     }
 
-    /// <summary>The spill's scratch closed and its file gone, the shelf handed to the process's: the query is done with its parts.</summary>
+    /// <summary>The spill's scratch closed and its file gone, the account cleared: the query is done with its parts.</summary>
     internal void CloseSpill()
     {
         if (_scratch is not null)
@@ -436,8 +437,8 @@ internal sealed partial class GroupCore
             _scratch = null;
         }
 
-        _shelf.Drops = false;
-        _shelf.Clear();
+        _account.Drops = false;
+        _account.Clear();
     }
 
     /// <summary>An empty sub-table's keys and slots: the result of a core delivered part by part, before its first part.</summary>
@@ -486,7 +487,7 @@ internal sealed partial class GroupCore
 
     /// <summary>
     /// The parts never spilled let go once their groups are delivered, before the spilled ones come back,
-    /// and what the shelf kept, the slabs of the batches among it, handed to the process's: the parts
+    /// and what the account kept reserved, the slabs of the batches among it, given back to the query: the parts
     /// brought back reserve what they take, under the budget alone.
     /// </summary>
     internal void LetHeld()
@@ -499,7 +500,7 @@ internal sealed partial class GroupCore
             }
         }
 
-        _shelf.Clear();
+        _account.Clear();
     }
 
     /// <summary>Whether <paramref name="directory"/> lies on a file system in memory, <c>tmpfs</c> or <c>ramfs</c>, as Linux's mounts say.</summary>

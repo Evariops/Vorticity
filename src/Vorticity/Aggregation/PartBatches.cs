@@ -144,7 +144,7 @@ internal sealed class PartBuilder
         }
 
         // Past the flag, no store comes back to the pool: the ones on it are the last. The workers are done
-        // building: their columns' scratch goes back to the process's shelf.
+        // building: their columns' scratch goes back to the pool.
         foreach (PartSlate slate in _slates)
         {
             slate.Release();

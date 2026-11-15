@@ -142,21 +142,21 @@ internal sealed class ShortTextKeys : GroupKeys
     private readonly bool _sorted;
     private readonly int _probeAhead;
     private readonly long _aheadBytes;
-    private readonly ArrayShelf? _shelf;
+    private readonly TableArrays? _account;
 
     // The words while every value met is short, then the bytes for good: one of them, never both.
     private FixedKeys<TextWord>? _words;
     private BytesKeys? _bytes;
     private ScratchBlock<TextWord> _block;
 
-    internal ShortTextKeys(ColumnShape shape, bool sorted, int probeAhead = AggregationPlan.DefaultProbeAhead, ArrayShelf? shelf = null, long aheadBytes = long.MaxValue)
+    internal ShortTextKeys(ColumnShape shape, bool sorted, int probeAhead = AggregationPlan.DefaultProbeAhead, TableArrays? account = null, long aheadBytes = long.MaxValue)
     {
         _shape = shape;
         _sorted = sorted;
         _probeAhead = probeAhead;
         _aheadBytes = aheadBytes;
-        _shelf = shelf;
-        _words = new FixedKeys<TextWord>(shape, sorted, probeAhead: probeAhead, shelf: shelf, aheadBytes: aheadBytes);
+        _account = account;
+        _words = new FixedKeys<TextWord>(shape, sorted, probeAhead: probeAhead, account: account, aheadBytes: aheadBytes);
     }
 
     /// <summary>Whether the keys are still words: every value met so far 12 bytes or less.</summary>
@@ -408,13 +408,13 @@ internal sealed class ShortTextKeys : GroupKeys
     /// <summary>
     /// The words turned into a table of bytes, for good: every group's key added again in the order of
     /// the groups, which keeps each its number, the null group's too; the words' arrays given back, and
-    /// their block to the process's shelf: dropped, a lane of a question grouped by a long text, the
+    /// their block to the pool: dropped, a lane of a question grouped by a long text, the
     /// pods of a route, grew a block of up to 32 768 words each time and lost it at its first long value.
     /// </summary>
     private void Demote()
     {
         FixedKeys<TextWord> words = _words!;
-        BytesKeys bytes = new BytesKeys(_shape, _sorted, _shelf);
+        BytesKeys bytes = new BytesKeys(_shape, _sorted, _account);
         Span<byte> buffer = stackalloc byte[16];
         int nullGroup = words.NullNumber;
         for (int g = 0; g < words.Count; g++)
@@ -464,11 +464,11 @@ internal sealed class ShortTextKeys : GroupKeys
 
     internal override GroupKeys Fresh() => new ShortTextKeys(_shape, _sorted, _probeAhead, aheadBytes: _aheadBytes);
 
-    internal override GroupKeys ForPart(ArrayShelf? shelf = null) => new ShortTextKeys(_shape, _sorted, _probeAhead, shelf, _aheadBytes);
+    internal override GroupKeys ForPart(TableArrays? account = null) => new ShortTextKeys(_shape, _sorted, _probeAhead, account, _aheadBytes);
 
-    internal override GroupKeys ForTable(ArrayShelf shelf) => new ShortTextKeys(_shape, sorted: false, _probeAhead, shelf);
+    internal override GroupKeys ForTable(TableArrays account) => new ShortTextKeys(_shape, sorted: false, _probeAhead, account);
 
-    internal override GroupKeys ForSpill(ArrayShelf? shelf) => new ShortTextKeys(_shape, sorted: false, _probeAhead, shelf);
+    internal override GroupKeys ForSpill(TableArrays? account) => new ShortTextKeys(_shape, sorted: false, _probeAhead, account);
 
     internal override long Footprint => (_words?.Footprint ?? _bytes!.Footprint) + ((long)_block.Length * 16);
 

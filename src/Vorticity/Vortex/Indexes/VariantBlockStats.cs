@@ -636,7 +636,7 @@ internal sealed class VariantBlockStats
         /// <summary>
         /// The statistics that can prune among the file's <paramref name="blocks"/> blocks, within
         /// <paramref name="maxBytes"/> bytes, those that narrow their blocks least left out first; null
-        /// when none can. The builder's last use: its streams' bytes go back to the process's shelf.
+        /// when none can. The builder's last use: its streams' bytes go back to the pool.
         /// </summary>
         internal VariantBlockStats? Build(int blocks, long maxBytes)
         {
@@ -646,7 +646,7 @@ internal sealed class VariantBlockStats
             }
             finally
             {
-                // The builder's last use: its streams' bytes back to the shelf, the regions kept copies of them.
+                // The builder's last use: its streams' bytes back to the pool, the regions kept copies of them.
                 foreach (KeyStream stream in _streams)
                 {
                     stream.GiveBack();

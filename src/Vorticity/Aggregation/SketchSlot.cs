@@ -37,7 +37,7 @@ internal abstract class SketchSlot<TSketch, TResult> : AggregateSlot<TResult>
     private TSketch?[] _sketches = [];
     private int _groups;
     private long _bytes;
-    private ArrayShelf? _shelf;
+    private TableArrays _account = TableArrays.Uncounted;
 
     /// <summary>A sketch of no value.</summary>
     private protected abstract TSketch New();
@@ -53,12 +53,12 @@ internal abstract class SketchSlot<TSketch, TResult> : AggregateSlot<TResult>
     {
     }
 
-    /// <summary>The shelf of the slot's query, which its sketches may take their arrays from; null outside a query's memory.</summary>
-    private protected ArrayShelf? Shelf => _shelf;
+    /// <summary>The account of the slot's query, which its sketches may take their blocks under; the uncounted one outside a query's memory.</summary>
+    private protected TableArrays Account => _account;
 
     /// <summary>
     /// A sketch the slot lets go of, its group released or left out: a slot whose sketches took their arrays from its
-    /// shelf gives them back here; one whose answers hold their sketches keeps them.
+    /// account gives them back here; one whose answers hold their sketches keeps them.
     /// </summary>
     private protected virtual void Released(TSketch sketch)
     {
@@ -76,13 +76,14 @@ internal abstract class SketchSlot<TSketch, TResult> : AggregateSlot<TResult>
     /// <summary>The groups the slot holds.</summary>
     private protected int Groups => _groups;
 
-    internal override void Govern(ArrayShelf shelf) => _shelf = shelf;
+    internal override void Govern(TableArrays account) => _account = account;
 
     internal override void EnsureGroups(int groups)
     {
         if (groups > _sketches.Length)
         {
-            ArrayShelf.Resize(_shelf, ref _sketches, Scratch.Capacity(groups, _sketches.Length));
+            // References, which no block holds: the slot's own array, counted as a block would be.
+            TableArrays.ResizeOwned(_account, ref _sketches, Scratch.Capacity(groups, _sketches.Length));
         }
 
         _groups = Math.Max(_groups, groups);
@@ -232,8 +233,7 @@ internal abstract class SketchSlot<TSketch, TResult> : AggregateSlot<TResult>
                 }
             }
 
-            Array.Clear(_sketches);
-            _shelf?.Give(_sketches);
+            _account.Disown(_sketches);
             _sketches = [];
         }
 

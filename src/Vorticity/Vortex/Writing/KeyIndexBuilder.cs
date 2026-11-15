@@ -702,7 +702,7 @@ internal sealed class KeyIndexBuilder : IndexBuilder
         }
         finally
         {
-            // Every sort has ended either way: the buffers go back to the shelf, for the next file's buckets.
+            // Every sort has ended either way: the buffers go back to the pool, for the next file's buckets.
             foreach (BucketBuffers? held in buffers)
             {
                 held?.Release();

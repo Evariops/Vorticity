@@ -232,10 +232,6 @@ internal static partial class DatasetCompactor
         // What the inputs' batches weigh decoded, which the handle keeps for the next job's plan.
         RowMeter meter = new RowMeter();
 
-        // The writer's working arrays, its sheets, its counts, its compressors' trials, go back to the process's shelf between
-        // its chunks and its objects: the shelf keeps as many as the writer holds at once while the job runs, where its own
-        // budget let them go and the next chunk made them again (M7e).
-        ArrayShelf.Retained.Expect(writer);
         Activity? writing = DatasetTelemetry.StartCompactionPass("write");
         try
         {

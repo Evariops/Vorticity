@@ -99,7 +99,7 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
     /// <summary>Counts a null row.</summary>
     internal void AddNull() => Rows++;
 
-    /// <summary>The spans the paths keep given back to the process's shelf, once nothing reads them: the census's spans are none after.</summary>
+    /// <summary>The spans the paths keep given back to the pool, once nothing reads them: the census's spans are none after.</summary>
     internal void Release() => Root.Release();
 
     /// <summary>
@@ -582,7 +582,7 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
         /// <summary>Whether a text that cut to <see cref="MaxText"/> was longer, in which case it bounds nothing from above.</summary>
         internal bool MaxTextCut => _maxTextCut;
 
-        /// <summary>The spans of this path and of every key below given back to the process's shelf, and kept no more.</summary>
+        /// <summary>The spans of this path and of every key below given back to the pool, and kept no more.</summary>
         internal void Release()
         {
             _spans.Release();

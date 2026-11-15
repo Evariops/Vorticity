@@ -670,7 +670,7 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>, IPairedSl
 {
     private readonly StorageKind _kind;
     private DistinctPairs<TValue> _pairs = new DistinctPairs<TValue>();
-    private long[] _counts = [];
+    private Block<long> _counts;
     private int _groups;
     private ValuesCache<TValue> _values;
     private MaskCache _rows;
@@ -695,19 +695,19 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>, IPairedSl
     private List<SpillRun>? _runs;
     private SpillFile? _file;
 
-    // The shelf the pairs and the counts grow from, under the query's memory.
-    private ArrayShelf? _shelf;
+    // The account the pairs and the counts grow under, the query's memory's.
+    private TableArrays _account = TableArrays.Uncounted;
 
     internal FixedDistinctSlot(StorageKind kind) => _kind = kind;
 
-    internal override void Govern(ArrayShelf shelf)
+    internal override void Govern(TableArrays account)
     {
-        _shelf = shelf;
-        _pairs.Govern(shelf);
-        _set?.Govern(shelf);
+        _account = account;
+        _pairs.Govern(account);
+        _set?.Govern(account);
     }
 
-    /// <summary>The pairs, the sets and the counts back to the shelf: every query took a lane's pairs new, 122 MB at a million groups.</summary>
+    /// <summary>The pairs, the sets and the counts back to the account: every query took a lane's pairs new, 122 MB at a million groups.</summary>
     internal override void Release()
     {
         _pairs.Release();
@@ -728,8 +728,8 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>, IPairedSl
         }
 
         _spareCount = 0;
-        _shelf?.Give(_counts);
-        _counts = [];
+        _account.Return(_counts);
+        _counts = default;
         _groups = 0;
         _values.Release();
         _rows.Release();
@@ -739,7 +739,7 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>, IPairedSl
     internal override void Ungrouped()
     {
         _set = new DistinctValues<TValue>();
-        _set.Govern(_shelf);
+        _set.Govern(_account);
     }
 
     /// <summary>
@@ -784,7 +784,7 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>, IPairedSl
     {
         if (groups > _counts.Length)
         {
-            ArrayShelf.Resize(_shelf, ref _counts, Scratch.Capacity(groups, _counts.Length));
+            TableArrays.Resize(_account, ref _counts, Scratch.Capacity(groups, _counts.Length));
         }
 
         if (_sets is not null && groups > _sets.Length)
@@ -810,7 +810,7 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>, IPairedSl
         else
         {
             set = new DistinctValues<TValue>();
-            set.Govern(_shelf);
+            set.Govern(_account);
         }
 
         _sets![group] = set;
@@ -968,7 +968,7 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>, IPairedSl
             if (_sets is { } own && own[into] is null)
             {
                 sets[from] = null;
-                values.MoveTo(_shelf);
+                values.MoveTo(_account);
                 own[into] = values;
                 return values.Count;
             }
@@ -1013,8 +1013,8 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>, IPairedSl
         if (byGroup)
         {
             EnsureGroups(groups);
-            Array.Clear(_counts, 0, groups);
-            long[] owned = _counts;
+            _counts.AsSpan(0, groups).Clear();
+            Block<long> owned = _counts;
             await SideBySide.RunAsync(
                 parts,
                 part =>
@@ -1037,6 +1037,7 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>, IPairedSl
 
                     // The part's table, held until its pairs are counted.
                     long bytes = distinct.Footprint;
+                    distinct.Release();
                     if (memory is not null && !memory.TryGrow(bytes))
                     {
                         throw memory.Exceeded("merge of a distinct count", groups, bytes);
@@ -1076,6 +1077,7 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>, IPairedSl
 
                 // The part's table, held until its pairs are counted.
                 long bytes = distinct.Footprint;
+                distinct.Release();
                 if (memory is not null && !memory.TryGrow(bytes))
                 {
                     throw memory.Exceeded("merge of a distinct count", groups, bytes);
@@ -1089,7 +1091,7 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>, IPairedSl
             cancellationToken).ConfigureAwait(false);
 
         EnsureGroups(groups);
-        Array.Clear(_counts);
+        _counts.Clear();
         foreach (long[] count in counts)
         {
             for (int group = 0; group < groups; group++)
@@ -1106,7 +1108,7 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>, IPairedSl
     {
         _pairs.Release();
         _pairs = new DistinctPairs<TValue>();
-        _pairs.Govern(_shelf);
+        _pairs.Govern(_account);
         _pairs.EnsureGroups(groups);
     }
 
@@ -1168,12 +1170,13 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>, IPairedSl
 
                 // The part's table, held until its values are counted.
                 long bytes = distinct.Footprint;
+                counts[part] = distinct.Count;
+                distinct.Release();
                 if (memory is not null && !memory.TryGrow(bytes))
                 {
                     throw memory.Exceeded("merge of a distinct count", 1, bytes);
                 }
 
-                counts[part] = distinct.Count;
                 memory?.Shrink(bytes);
                 memory?.Discard(bytes);
             },
@@ -1190,7 +1193,7 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>, IPairedSl
         _counts[0] = count;
         _set!.Release();
         _set = new DistinctValues<TValue>();
-        _set.Govern(_shelf);
+        _set.Govern(_account);
     }
 
     /// <summary>A count by group, in pairs; a streaming group by's sets by group never spill, its groups few.</summary>
@@ -1333,7 +1336,7 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>, IPairedSl
         scope.Ran(run.Bytes);
         set.Release();
         _set = new DistinctValues<TValue>();
-        _set.Govern(_shelf);
+        _set.Govern(_account);
     }
 
     /// <summary>
@@ -1412,6 +1415,7 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>, IPairedSl
                     }
 
                     counts[part] = distinct.Count;
+                    distinct.Release();
                 }
                 finally
                 {

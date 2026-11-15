@@ -2,6 +2,7 @@ using System;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using Vorticity.Buffers;
 
 namespace Vorticity.Aggregating;
 
@@ -25,7 +26,7 @@ internal sealed class GroupRecords
     internal const int Line = 64;
 
     private readonly RecordLayout _layout;
-    private ulong[] _words = [];
+    private Block<ulong> _words;
 
     // The words before the first record, which starts at a line; the records the array holds past
     // them, which the words left at its end do not count.
@@ -33,13 +34,16 @@ internal sealed class GroupRecords
     private int _capacity;
     private int _groups;
 
-    // The query's shelf a sub-table of the core takes its words from and gives them back to.
-    private readonly ArrayShelf? _shelf;
+    // The account the records' words are rented under, the query's memory's.
+    private readonly TableArrays _account;
 
-    internal GroupRecords(RecordLayout layout, ArrayShelf? shelf = null)
+    // Whether the words are another's, a batch's the records view (Over): never grown, never given back.
+    private bool _viewed;
+
+    internal GroupRecords(RecordLayout layout, TableArrays? account = null)
     {
         _layout = layout;
-        _shelf = shelf;
+        _account = account ?? TableArrays.Uncounted;
     }
 
     internal RecordLayout Layout => _layout;
@@ -115,23 +119,34 @@ internal sealed class GroupRecords
 
         int stride = _layout.Stride;
         int words = checked((capacity * stride) + (Line / sizeof(ulong)) - 1);
-        ulong[] grown = _shelf is null ? GC.AllocateUninitializedArray<ulong>(words) : _shelf.Take<ulong>(words, zeroed: false);
+        Block<ulong> grown = _account.Rent<ulong>(words, zeroed: false);
         int start = LineStart(grown);
         _words.AsSpan(_base, _groups * stride).CopyTo(grown.AsSpan(start));
-        _shelf?.Give(_words);
+        Release(_words);
         _words = grown;
+        _viewed = false;
         _base = start;
         _capacity = capacity;
     }
 
-    /// <summary>Gives the words back to the shelf: a sub-table split, whose groups another holds.</summary>
+    /// <summary>Gives the words back to the account: a sub-table split, whose groups another holds.</summary>
     internal void Release()
     {
-        _shelf?.Give(_words);
-        _words = [];
+        Release(_words);
+        _words = default;
+        _viewed = false;
         _base = 0;
         _capacity = 0;
         _groups = 0;
+    }
+
+    /// <summary>The records' own words given back; a batch's they viewed are left alone.</summary>
+    private void Release(Block<ulong> words)
+    {
+        if (!_viewed)
+        {
+            _account.Return(words);
+        }
     }
 
     /// <summary>Keeps the records of <paramref name="groups"/> alone, ascending, record <c>groups[i]</c> becoming <c>i</c>.</summary>
@@ -182,18 +197,19 @@ internal sealed class GroupRecords
     /// which the slots that merge them view this way. Records read so are
     /// never grown, seeded nor kept.
     /// </summary>
-    internal void Over(ulong[] words, int start, int groups)
+    internal void Over(Block<ulong> words, int start, int groups)
     {
         _words = words;
+        _viewed = true;
         _base = start;
         _capacity = groups;
         _groups = groups;
     }
 
-    /// <summary>The words of <paramref name="words"/> before the first that starts a line, where the array lies now.</summary>
-    private static unsafe int LineStart(ulong[] words)
+    /// <summary>The words of <paramref name="words"/> before the first that starts a line, where the block lies now.</summary>
+    private static unsafe int LineStart(Block<ulong> words)
     {
-        nint address = (nint)Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(words));
+        nint address = (nint)Unsafe.AsPointer(ref words.GetReference());
         return (int)((-address & (Line - 1)) / sizeof(ulong));
     }
 }
@@ -352,15 +368,15 @@ internal abstract class RecordSlot<TState, TResult> : AggregateSlot<TResult>
     private TState[] _array = [];
     private int _groups;
 
-    // The shelf the slot's array and its records of its own grow from, under its query's memory.
-    private ArrayShelf? _shelf;
+    // The account the slot's array and its records of its own grow under, its query's memory's.
+    private TableArrays _account = TableArrays.Uncounted;
 
     /// <summary>The state a group starts from.</summary>
     internal abstract TState Seed { get; }
 
-    internal override void Govern(ArrayShelf shelf) => _shelf = shelf;
+    internal override void Govern(TableArrays account) => _account = account;
 
-    /// <summary>The array of states with references, and the records of a slot made alone, back to the shelf; records a partition shares are its to give.</summary>
+    /// <summary>The array of states with references, and the records of a slot made alone, back to the account; records a partition shares are its to give.</summary>
     internal sealed override void Release()
     {
         if (_alone)
@@ -370,7 +386,7 @@ internal abstract class RecordSlot<TState, TResult> : AggregateSlot<TResult>
 
         if (_array.Length > 0)
         {
-            _shelf?.Give(_array);
+            _account.Disown(_array);
             _array = [];
             _groups = 0;
         }
@@ -421,7 +437,8 @@ internal abstract class RecordSlot<TState, TResult> : AggregateSlot<TResult>
 
         if (groups > _array.Length)
         {
-            ArrayShelf.Resize(_shelf, ref _array, Scratch.Capacity(groups, _array.Length));
+            // References, which no block holds: the slot's own array, counted as a block would be.
+            TableArrays.ResizeOwned(_account, ref _array, Scratch.Capacity(groups, _array.Length));
         }
 
         for (int g = _groups; g < groups; g++)
@@ -470,7 +487,7 @@ internal abstract class RecordSlot<TState, TResult> : AggregateSlot<TResult>
     private GroupRecords Alone()
     {
         RecordLayout layout = RecordLayout.Of([this])!;
-        _records = new GroupRecords(layout, _shelf);
+        _records = new GroupRecords(layout, _account);
         _offset = layout.Offsets[0];
         _alone = true;
         return _records;

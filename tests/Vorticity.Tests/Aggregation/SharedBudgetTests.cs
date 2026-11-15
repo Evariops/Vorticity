@@ -10,9 +10,8 @@ using Xunit;
 namespace Vorticity.Tests.Aggregation;
 
 /// <summary>
-/// The budgets a host shares among sessions, the process's beneath them, and the pools left after a
-/// query. They reserve against the process's own budget and read its shelf,
-/// which every query of the process shares: they run alone.
+/// The budgets a host shares among sessions, and the process's beneath them. They reserve against the
+/// process's own budget, which every query of the process shares: they run alone.
 /// </summary>
 [Collection(nameof(CorePressureCollection))]
 [Trait("Category", "RunsAlone")]
@@ -121,125 +120,6 @@ public sealed partial class SharedBudgetTests
         {
             System.IO.File.Delete(big);
             System.IO.File.Delete(small);
-        }
-    }
-
-    /// <summary>
-    /// A shelf kept as the process's, a megabyte and a quarter of it for small arrays, its large arrays' megabyte taken:
-    /// a query gives back twice that quarter of them, and half goes; once it ends, the next keeps them all, up to the
-    /// megabyte; idle, the shelf comes back to its quarter. Kept to their quarter, the small arrays of a quantile per
-    /// service and hour over a week at 32 lanes, its lanes' sketches and its parts' at once, were made again at every ask,
-    /// 34 MB of them.
-    /// </summary>
-    [Fact]
-    public void TheProcesssShelfKeepsTheSmallArraysQueriesLatelyGaveBackPastItsQuarter()
-    {
-        const long Budget = 1L << 20;
-        ArrayShelf shelf = ArrayShelf.Governed(Budget);
-        long[] large = new long[Budget / sizeof(long)];
-        shelf.Give(large);
-        const int Arrays = 64;
-        long bytes = Arrays * 1024L * sizeof(long);
-        Assert.Equal(Budget / 2, bytes);
-        foreach (long[] array in Enumerable.Range(0, Arrays).Select(static _ => new long[1024]))
-        {
-            shelf.Give(array);
-        }
-
-        Assert.Equal(Budget + (Budget / 4), shelf.Held);
-
-        // The query ends: the next keeps what this one found no room for.
-        shelf.Expect(0);
-        foreach (long[] array in Enumerable.Range(0, Arrays / 2).Select(static _ => new long[1024]))
-        {
-            shelf.Give(array);
-        }
-
-        Assert.Equal(Budget + bytes, shelf.Held);
-
-        // Idle: the first tick finds the shelf used since the last, the next two find it idle and bring it back.
-        for (int tick = 0; tick < 3; tick++)
-        {
-            shelf.Tick();
-        }
-
-        Assert.Equal(Budget + (Budget / 4), shelf.Held);
-        Assert.Same(large, shelf.Take<long>(large.Length, zeroed: false));
-    }
-
-    /// <summary>
-    /// The process's shelf lends its small arrays the room its large ones leave empty, past their quarter, and a large array
-    /// given back takes that room back first. Kept to their quarter, the small arrays of the warm mix at 32 clients, the
-    /// windows of quantile sketches first, were refused and made again, 84 MB of them in 15 s, while the large arrays held
-    /// 38 MB of their 268.
-    /// </summary>
-    [Fact]
-    public void TheProcesssShelfLendsItsSmallArraysTheRoomItsLargeOnesLeave()
-    {
-        const long Budget = 1L << 20;
-        ArrayShelf shelf = ArrayShelf.Governed(Budget);
-        for (int i = 0; i < 64; i++)
-        {
-            shelf.Give(new long[2048]);
-        }
-
-        Assert.Equal(Budget, shelf.Held);
-
-        long[] large = new long[Budget / sizeof(long)];
-        shelf.Give(large);
-        Assert.Equal(Budget + (Budget / 4), shelf.Held);
-        Assert.Same(large, shelf.Take<long>(large.Length, zeroed: false));
-    }
-
-    /// <summary>
-    /// A shelf kept as the process's, a quarter of a megabyte for small arrays and the megabyte its large ones leave empty,
-    /// given a thousand arrays of a thousand lengths:
-    /// past its budget, each one given lets the oldest go, and the piles it empties leave the order an eviction walks, which
-    /// holds those that keep an array alone. Left in it, every eviction walked past the emptied ones: a quantile within 1 %
-    /// per service and hour (T7), asked after another's sketches filled the shelf, took 2.5 s where it takes 0.25.
-    /// </summary>
-    [Fact]
-    public void AnEvictionWalksOnlyThePilesThatHoldAnArray()
-    {
-        ArrayShelf shelf = ArrayShelf.Governed(1L << 20);
-        for (int length = 1_000; length < 2_000; length++)
-        {
-            shelf.Give(new long[length]);
-        }
-
-        // A quarter of a megabyte their own, and the megabyte the large arrays leave empty.
-        long held = shelf.Held;
-        Assert.InRange(held, 1L << 20, (1L << 20) + (1L << 18));
-        Assert.InRange(shelf.OrderedSmallPiles, 1, (int)(held / (1_000 * sizeof(long))) + 1);
-    }
-
-    [Fact]
-    public async Task AfterABigQueryTheShelfKeepsItsBudgetAndCollectionsSweepIt()
-    {
-        string path = await WriteAsync(200_000, 1_200_000);
-        try
-        {
-            await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = 14);
-            await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
-            Aggregation<long> sums = file.Scan<Row>().GroupBy(r => r.Key).Select(g => g.Sum(x => x.Value));
-            sums.Plan.Core = true;
-            sums.Plan.CoreLanes = 1;
-            Assert.Equal(200_000, (await sums.ToListAsync(Ct)).Count);
-            Assert.NotNull(sums.Plan.LastRun?.Core);
-            Assert.True(ArrayShelf.Retained.Held <= ArrayShelf.Retained.Budget);
-
-            // The first collection finds the shelf used since the last; the next, idle, empties it.
-            for (int collection = 0; collection < 3 && ArrayShelf.Retained.Held > 0; collection++)
-            {
-                GC.Collect();
-                GC.WaitForPendingFinalizers();
-            }
-
-            Assert.Equal(0, ArrayShelf.Retained.Held);
-        }
-        finally
-        {
-            System.IO.File.Delete(path);
         }
     }
 

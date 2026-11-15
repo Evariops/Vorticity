@@ -180,7 +180,7 @@ internal static class Aggregators
     {
         int bits = QuantileSketch.BitsFor(relativeError);
         return new Sym<Distribution?>(new AggregateNode<Distribution?>(
-            AggregateKind.Distribution, shape, Distributed<Distribution?>(shape, bits, static s => s is null ? null : new Distribution(s), shelved: false), null,
+            AggregateKind.Distribution, shape, Distributed<Distribution?>(shape, bits, static s => s is null ? null : new Distribution(s), accounted: false), null,
             parameters: string.Create(System.Globalization.CultureInfo.InvariantCulture, $"{BitsParameter}{bits}")));
     }
 
@@ -218,27 +218,27 @@ internal static class Aggregators
 
         int bits = QuantileSketch.BitsFor(relativeError);
         return new Sym<double?>(new AggregateNode<double?>(
-            AggregateKind.Quantile, shape, Distributed<double?>(shape, bits, s => s?.Quantile(q), shelved: true), null,
+            AggregateKind.Quantile, shape, Distributed<double?>(shape, bits, s => s?.Quantile(q), accounted: true), null,
             parameters: string.Create(System.Globalization.CultureInfo.InvariantCulture, $"q={q:R};{BitsParameter}{bits}")));
     }
 
-    /// <summary>A slot of a distribution per group, whose answers <paramref name="final"/> makes; <paramref name="shelved"/> when they only read the sketches.</summary>
-    private static Func<ScanSource?, AggregateSlot<T>> Distributed<T>(ColumnShape shape, int bits, Func<QuantileSketch?, T> final, bool shelved) =>
+    /// <summary>A slot of a distribution per group, whose answers <paramref name="final"/> makes; <paramref name="accounted"/> when they only read the sketches.</summary>
+    private static Func<ScanSource?, AggregateSlot<T>> Distributed<T>(ColumnShape shape, int bits, Func<QuantileSketch?, T> final, bool accounted) =>
         shape.Kind != StorageKind.Primitive
             ? throw shape.Unsupported("a distribution")
             : shape.PType switch
             {
-                PType.I8 => _ => new DistributionSlot<sbyte, T>(bits, final, shelved),
-                PType.I16 => _ => new DistributionSlot<short, T>(bits, final, shelved),
-                PType.I32 => _ => new DistributionSlot<int, T>(bits, final, shelved),
-                PType.I64 => _ => new DistributionSlot<long, T>(bits, final, shelved),
-                PType.U8 => _ => new DistributionSlot<byte, T>(bits, final, shelved),
-                PType.U16 => _ => new DistributionSlot<ushort, T>(bits, final, shelved),
-                PType.U32 => _ => new DistributionSlot<uint, T>(bits, final, shelved),
-                PType.U64 => _ => new DistributionSlot<ulong, T>(bits, final, shelved),
-                PType.F16 => _ => new DistributionSlot<Half, T>(bits, final, shelved),
-                PType.F32 => _ => new DistributionSlot<float, T>(bits, final, shelved),
-                _ => _ => new DistributionSlot<double, T>(bits, final, shelved),
+                PType.I8 => _ => new DistributionSlot<sbyte, T>(bits, final, accounted),
+                PType.I16 => _ => new DistributionSlot<short, T>(bits, final, accounted),
+                PType.I32 => _ => new DistributionSlot<int, T>(bits, final, accounted),
+                PType.I64 => _ => new DistributionSlot<long, T>(bits, final, accounted),
+                PType.U8 => _ => new DistributionSlot<byte, T>(bits, final, accounted),
+                PType.U16 => _ => new DistributionSlot<ushort, T>(bits, final, accounted),
+                PType.U32 => _ => new DistributionSlot<uint, T>(bits, final, accounted),
+                PType.U64 => _ => new DistributionSlot<ulong, T>(bits, final, accounted),
+                PType.F16 => _ => new DistributionSlot<Half, T>(bits, final, accounted),
+                PType.F32 => _ => new DistributionSlot<float, T>(bits, final, accounted),
+                _ => _ => new DistributionSlot<double, T>(bits, final, accounted),
             };
 
     /// <summary>An approximate count of the distinct non-null values of a column, about 0.81 % off at most typically.</summary>

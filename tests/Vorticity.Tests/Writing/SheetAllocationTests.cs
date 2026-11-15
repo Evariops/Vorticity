@@ -1,5 +1,5 @@
-// A column's sheet takes its working arrays from the process's shelf and gives them back as they grow and when it is done:
-// once the shelf holds them, a sheet of an object's column allocates nothing but itself.
+// A column's sheet takes its working arrays from the pool and gives them back as they grow and when it is done: once the
+// pool holds them, a sheet of an object's column allocates nothing but itself.
 using System;
 using System.Runtime.InteropServices;
 using Vorticity.Arrays;
@@ -21,7 +21,7 @@ public sealed class SheetAllocationTests
     /// nothing does, where its table, grown four times, its numbers, its hashes and its values came new each time, 3.76 MB.
     /// </summary>
     [Fact]
-    public void ASheetLetGoAllocatesNothingButItselfOnceTheShelfHoldsItsArrays()
+    public void ASheetLetGoAllocatesNothingButItselfOnceThePoolHoldsItsArrays()
     {
         DTypeArena types = new DTypeArena();
         DType i64 = types.Primitive(PType.I64, Nullability.Nullable);

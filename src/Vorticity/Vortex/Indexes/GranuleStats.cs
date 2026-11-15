@@ -385,7 +385,7 @@ internal sealed class GranuleStats
 
     /// <summary>
     /// Reads the values each granule lists, their numbers and each one's rows, into lists of their exact lengths: gathered
-    /// first into arrays the process's shelf lends, as long as the bytes they come from at most, a value taking a byte at
+    /// first into blocks the pool lends, as long as the bytes they come from at most, a value taking a byte at
     /// least. Grown a value at a time, then copied, the lists cost three times their length: the statistics of a week of
     /// S2's requests (T2), read at a question's first asking, came to some 700 MB an ask. False for lists the granules'
     /// rows do not account for.

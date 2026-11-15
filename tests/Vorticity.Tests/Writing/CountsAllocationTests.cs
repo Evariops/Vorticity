@@ -1,6 +1,6 @@
-// A column's counts take their working arrays from the process's shelf, their measures' sketches held in tables of its
-// arrays too, and give them back as they grow and when they are let go: once the shelf holds them,
-// the counts of an object's column allocate nothing but themselves.
+// A column's counts take their working arrays from the pool, their measures' sketches held in its blocks too, and give
+// them back as they grow and when they are let go: once the pool holds them, the counts of an object's column allocate
+// nothing but themselves.
 using System;
 using System.Runtime.InteropServices;
 using Vorticity.Arrays;
@@ -23,7 +23,7 @@ public sealed class CountsAllocationTests
     /// grew by doubling (7.3 MB at 65 536 rows), then their records alone (1 MB).
     /// </summary>
     [Fact]
-    public void CountsLetGoAllocateNothingButThemselvesOnceTheShelfHoldsTheirArrays()
+    public void CountsLetGoAllocateNothingButThemselvesOnceThePoolHoldsTheirArrays()
     {
         VortexSchema schema = VortexSchema.Create([
             new VortexField("Key", VortexType.Int64),

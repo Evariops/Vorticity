@@ -1,5 +1,5 @@
-// A column's statistics over its granules take their working arrays from the process's shelf and give them back when they
-// are let go, and read their sheet's values where they lie: the builders of the next objects find the arrays again and
+// A column's statistics over its granules take their working arrays from the pool and give them back when they are let
+// go, and read their sheet's values where they lie: the builders of the next objects find the arrays again and
 // copy no value.
 using System;
 using System.Runtime.InteropServices;
@@ -23,7 +23,7 @@ public sealed class GranuleStatsAllocationTests
     /// histograms, 16 KB a builder.
     /// </summary>
     [Fact]
-    public void GranuleStatisticsFindTheirArraysOnTheShelfAndCopyNoValue()
+    public void GranuleStatisticsFindTheirArraysInThePoolAndCopyNoValue()
     {
         VortexSchema schema = VortexSchema.Create([
             new VortexField("Key", VortexType.Int64),

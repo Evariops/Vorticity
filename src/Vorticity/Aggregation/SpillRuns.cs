@@ -693,7 +693,7 @@ internal ref struct SpillReader(ReadOnlySpan<byte> bytes) : IWordSource
 /// <summary>
 /// The parts of a group by whose lanes wrote their tables to the scratch, read back from the runs: a part
 /// is a stretch of every run's sections, each section's groups made into slots of their own and merged
-/// into the part's table as a lane's table merges into a part's. The table grows from a shelf of its own
+/// into the part's table as a lane's table merges into a part's. The table grows from an account of its own
 /// under the query's memory, each array reserved before it comes: runs that share keys count more
 /// entries than the part holds groups. The files go once the last part is merged.
 /// </summary>
@@ -743,9 +743,9 @@ internal sealed class RunMerge(
 
         // Each array reserved alone, nothing ahead: a quarter of a megabyte ahead a part outweighs the
         // small parts of a small budget.
-        ArrayShelf shelf = new ArrayShelf(memory) { Exact = true };
-        GroupKeys keys = kind.ForSpill(shelf);
-        AggregateSlot[] slots = AggregationPartition.NewSlots(plan, settled, source, out _, shelf);
+        TableArrays account = new TableArrays(memory) { Exact = true };
+        GroupKeys keys = kind.ForSpill(account);
+        AggregateSlot[] slots = AggregationPartition.NewSlots(plan, settled, source, out _, account);
         SpillBuffer? buffer = null;
         long room = 0;
         try
@@ -793,20 +793,20 @@ internal sealed class RunMerge(
             buffer.Release();
             buffer = null;
 
-            // The table as its shelf counts it, and as much again for the batches its builder makes of it.
-            room = shelf.Out;
+            // The table as its account counts it, and as much again for the batches its builder makes of it.
+            room = account.Out;
             if (!memory.TryGrow(room))
             {
                 room = 0;
-                throw memory.Exceeded("merge of a spilled group by", keys.Count, shelf.Out);
+                throw memory.Exceeded("merge of a spilled group by", keys.Count, account.Out);
             }
 
-            return (keys, slots, shelf.Reserved + room, shelf.Out);
+            return (keys, slots, account.Reserved + room, account.Out);
         }
         catch
         {
             buffer?.Release();
-            shelf.LetGo();
+            account.LetGo();
             memory.Shrink(room);
             throw;
         }

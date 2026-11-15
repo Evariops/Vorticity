@@ -1,5 +1,5 @@
-// A column's sheet numbers its rows in an array it takes from the process's shelf, which lends by length: taken at the
-// power of two above a batch's rows, the sheets of the next objects find it there whatever their batches' counts.
+// A column's sheet numbers its rows in a block it takes from the pool, which lends by powers of two: the sheets of the
+// next objects find it there whatever their batches' counts.
 using System;
 using System.Runtime.InteropServices;
 using Vorticity.Arrays;
@@ -17,11 +17,11 @@ public sealed class SheetRowIdsAllocationTests
 {
     /// <summary>
     /// A hundred sheets, each numbering the rows of one batch of 4 098 to 4 197 rows of a key of 1 000 values, then let go:
-    /// past the first, they allocate what sheets fed nothing do, where each batch's count asked of the shelf missed it and
-    /// made an array of its own, as the variant paths of a consolidation of log records did with every chunk.
+    /// past the first, they allocate what sheets fed nothing do, where each batch's count, asked by exact length, missed the
+    /// arrays given back and made an array of its own, as the variant paths of a consolidation of log records did with every chunk.
     /// </summary>
     [Fact]
-    public void SheetsOfBatchesOfEveryCountFindTheirRowNumbersOnTheShelf()
+    public void SheetsOfBatchesOfEveryCountFindTheirRowNumbersInThePool()
     {
         DTypeArena types = new DTypeArena();
         DType i64 = types.Primitive(PType.I64, Nullability.NonNullable);
