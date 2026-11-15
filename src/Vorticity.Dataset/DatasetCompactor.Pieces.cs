@@ -33,26 +33,39 @@ internal static partial class DatasetCompactor
     /// A piece of a consolidation: its job, the inputs it reads and the rows of each, below its cut, and what the merge
     /// took of each.
     /// </summary>
-    private sealed class Piece(CompactionJob job, KeyRanges ranges)
+    private sealed class Piece(CompactionJob job, KeyRanges ranges, long[] starts, bool toTheEnd)
     {
         /// <summary>The piece's job: the inputs of level 0 it reads rows of, and those of level 1 it takes whole.</summary>
         internal CompactionJob Job => job;
 
-        /// <summary>The rows of each input the piece reads, its first range, below the cut; its second, past it, unread.</summary>
+        /// <summary>
+        /// The ranges of the key the piece merges side by side, below its cut, and the rows of each input each reads; with a
+        /// cut, one more past it, unread.
+        /// </summary>
         internal KeyRanges Ranges => ranges;
 
-        /// <summary>The rows the merge took of each input, by its place in the piece's job.</summary>
+        /// <summary>The ranges the piece merges: every one to the partition's end, all but the last below a cut.</summary>
+        internal int Merged => toTheEnd ? ranges.Count : ranges.Count - 1;
+
+        /// <summary>Whether the piece runs to the partition's end, the last of its consolidation.</summary>
+        internal bool ToTheEnd => toTheEnd;
+
+        /// <summary>The first row each input is read from, by its place in the piece's job: past its marked run.</summary>
+        internal long StartOf(int input) => starts[input];
+
+        /// <summary>The rows the merges took of each input, by its place in the piece's job, which its ranges add to side by side.</summary>
         internal long[] Emitted { get; } = new long[job.Inputs.Count];
     }
 
     /// <summary>
-    /// The first piece of <paramref name="job"/>, a consolidation that reads more than an object's size; null when it runs in
-    /// one piece.
+    /// The first piece of <paramref name="job"/>, a consolidation that reads more than a piece; null when it runs in one piece.
     /// </summary>
     private static async ValueTask<Piece?> PieceAsync(VortexDataset dataset, DatasetSchema schema, CompactionJob job, CancellationToken cancellationToken)
     {
-        // An object's size, or less, so that a piece commits within its share of the window and its copies fit the scratch.
-        long pieceBytes = Math.Max(1, Math.Min(job.TargetBytes, JobBytesBound(dataset)));
+        // As many objects' size as the piece's ranges merge side by side, the session's lanes, or less, so that a piece commits
+        // within its share of the window and its copies fit the scratch.
+        int lanes = Math.Max(1, Math.Min(MostRanges, dataset.Session.Options.MaxDegreeOfParallelism));
+        long pieceBytes = Math.Max(1, Math.Min(job.TargetBytes * lanes, JobBytesBound(dataset)));
         if (job.Trigger != CompactionTrigger.Consolidation || job.Moves || !schema.Keyed || job.Bytes <= pieceBytes
             || dataset.ConsolidatesWhole(CompactionPolicy.PartitionOf(dataset, job)))
         {
@@ -114,11 +127,14 @@ internal static partial class DatasetCompactor
                 return null;
             }
 
-            List<CompactionInput> inputs = [];
-            List<RowRange[]> rows = [];
+            // The inputs the piece reads, each from past its marked run to the granule that reaches the cut, or to its end.
+            List<int> taken = [];
+            List<long> starts = [];
+            List<long> ends = [];
             for (int i = 0; i < indexes.Length; i++)
             {
                 CompactionInput input = job.Inputs[i];
+                GranuleKeys keys = indexes[i]!;
                 if (input.Level >= 1)
                 {
                     // An object of level 1 lies below the cut whole, or past it whole; one that ends below what level 0 still
@@ -126,38 +142,62 @@ internal static partial class DatasetCompactor
                     bool below = low is not null && !input.Entry.LastKey.IsEmpty && input.Entry.LastKey.Span.SequenceCompareTo(low) < 0;
                     if ((cut is null || FirstKeyOf(input).SequenceCompareTo(cut) < 0) && !below)
                     {
-                        inputs.Add(input);
-                        rows.Add(Ranges(new RowRange(0, input.Entry.PhysicalRows), cut));
+                        taken.Add(i);
+                        starts.Add(0);
+                        ends.Add(input.Entry.PhysicalRows);
                     }
 
                     continue;
                 }
 
-                // Past the run the earlier pieces marked, to the granule that reaches the cut, or to its end.
-                GranuleKeys keys = indexes[i]!;
                 long start = input.Entry.Deletions.LeadingRun;
-                long end = keys.Rows;
-                if (cut is not null)
-                {
-                    ReadOnlySpan<byte> past = cut.AsSpan(partition.Length);
-                    end = EndBefore(keys, keys.Coding == KeyCoding.Rows ? past : UnpaddedKeys.Narrow(past, Widths(widths, keys)));
-                }
-
+                long end = cut is null ? keys.Rows : EndBefore(keys, Coded(cut, partition, keys, widths));
                 if (end > start)
                 {
-                    inputs.Add(input);
-                    rows.Add(Ranges(new RowRange(start, end), cut));
+                    taken.Add(i);
+                    starts.Add(start);
+                    ends.Add(end);
                 }
             }
 
-            if (inputs.Count == 0)
+            if (taken.Count == 0)
             {
                 return null;
             }
 
+            // The piece's ranges side by side, below its cut, as the session's lanes merge them; with a cut, one more past it.
+            List<byte[]> cuts = SubCuts(job, indexes, decoded, taken, starts, ends, partition, lanes, cut);
+            if (cut is not null)
+            {
+                cuts.Add(cut);
+            }
+
+            RowRange[][] rows = new RowRange[taken.Count][];
+            List<CompactionInput> inputs = new List<CompactionInput>(taken.Count);
+            for (int p = 0; p < taken.Count; p++)
+            {
+                inputs.Add(job.Inputs[taken[p]]);
+                GranuleKeys keys = indexes[taken[p]]!;
+                RowRange[] read = rows[p] = new RowRange[cuts.Count + 1];
+                for (int range = 0; range < read.Length; range++)
+                {
+                    if (cut is not null && range == cuts.Count)
+                    {
+                        read[range] = RowRange.Empty;
+                        continue;
+                    }
+
+                    long from = range == 0 ? starts[p] : Math.Max(starts[p], StartFrom(keys, Coded(cuts[range - 1], partition, keys, widths)));
+                    long to = range == cuts.Count ? ends[p] : Math.Min(ends[p], EndBefore(keys, Coded(cuts[range], partition, keys, widths)));
+                    read[range] = to > from ? new RowRange(from, to) : RowRange.Empty;
+                }
+            }
+
             return new Piece(
                 new CompactionJob(job.FromLevel, job.ToLevel, job.Style, job.Trigger, inputs, job.TargetBytes, job.FirstRow),
-                new KeyRanges(cut is null ? [] : [cut], [.. rows]));
+                new KeyRanges([.. cuts], rows),
+                [.. starts],
+                toTheEnd: cut is null);
         }
         catch (VortexFormatException)
         {
@@ -203,8 +243,64 @@ internal static partial class DatasetCompactor
         return cut;
     }
 
-    /// <summary>The ranges of an input of a piece: <paramref name="read"/> below the cut, and nothing past it; the one range to the end without a cut.</summary>
-    private static RowRange[] Ranges(RowRange read, byte[]? cut) => cut is null ? [read] : [read, RowRange.Empty];
+    /// <summary><paramref name="cut"/>, a key led by <paramref name="partition"/>, in the coding of <paramref name="keys"/>, past the partition its keys leave out.</summary>
+    private static byte[] Coded(byte[] cut, byte[] partition, GranuleKeys keys, int[] widths)
+    {
+        ReadOnlySpan<byte> past = cut.AsSpan(partition.Length);
+        return keys.Coding == KeyCoding.Rows ? past.ToArray() : UnpaddedKeys.Narrow(past, Widths(widths, keys));
+    }
+
+    /// <summary>
+    /// The cuts between the ranges a piece merges side by side, <paramref name="lanes"/> of them at most: the first keys of the
+    /// granules of what the piece reads past equal shares of its bytes, where the key changes, below <paramref name="cut"/>.
+    /// </summary>
+    private static List<byte[]> SubCuts(
+        CompactionJob job, GranuleKeys?[] indexes, GranuleKeys.DecodedKeys[] decoded, List<int> taken, List<long> starts, List<long> ends,
+        byte[] partition, int lanes, byte[]? cut)
+    {
+        List<byte[]> cuts = [];
+        if (lanes < 2)
+        {
+            return cuts;
+        }
+
+        List<long> read = [];
+        long total = 0;
+        for (int p = 0; p < taken.Count; p++)
+        {
+            int i = taken[p];
+            GranuleKeys keys = indexes[i]!;
+            int rows = Math.Max(keys.GranuleRows, 1);
+            for (int granule = (int)(starts[p] / rows); granule < keys.Granules && (long)granule * rows < ends[p]; granule++)
+            {
+                read.Add(((long)i << 32) | (uint)granule);
+                total += WeightOf(job, indexes, i);
+            }
+        }
+
+        read.Sort(new ByGranuleKey(decoded));
+        long before = 0;
+        for (int k = 0; k < read.Count && cuts.Count < lanes - 1; k++)
+        {
+            int input = (int)(read[k] >> 32);
+            ReadOnlySpan<byte> key = decoded[input][(int)read[k]];
+            int reached = (int)Math.Min(lanes - 1, before * lanes / Math.Max(total, 1));
+            if (reached > cuts.Count && k > 0 && key.SequenceCompareTo(decoded[(int)(read[k - 1] >> 32)][(int)read[k - 1]]) > 0)
+            {
+                byte[] led = Led(partition, key);
+                if (cut is not null && led.AsSpan().SequenceCompareTo(cut) >= 0)
+                {
+                    break;
+                }
+
+                cuts.Add(led);
+            }
+
+            before += WeightOf(job, indexes, input);
+        }
+
+        return cuts;
+    }
 
     /// <summary><paramref name="key"/>, a key past the partition, led by <paramref name="partition"/>: a tree key's order.</summary>
     private static byte[] Led(byte[] partition, ReadOnlySpan<byte> key)
@@ -328,7 +424,7 @@ internal static partial class DatasetCompactor
             // The rows it took are its first live rows from where it was read, the key's order its own: marked through the
             // physical row past the last of them.
             DeletionVector deletions = input.Entry.Deletions;
-            long first = piece.Ranges.RowsOf(i, 0).Start;
+            long first = piece.StartOf(i);
             long logical = first - deletions.DeletedBefore(first);
             DeletionVector through = deletions.Through(deletions.Physical(logical + took - 1) + 1);
             consumed.Add((input.Level, input.Key));

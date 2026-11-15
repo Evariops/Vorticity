@@ -715,7 +715,8 @@ public sealed partial class VortexFileWriter
             gathering.Nodes.Clear();
             gathering.Rows = 0;
             gathering.Cut = gathering.Bytes;
-            Interlocked.Add(ref writer._gatheredHeld, -gathering.Bytes);
+            Interlocked.Add(ref writer._gatheredHeld, -gathering.Held);
+            gathering.Held = 0;
             gathering.Bytes = 0;
             gathering.Blocks = 0;
             try

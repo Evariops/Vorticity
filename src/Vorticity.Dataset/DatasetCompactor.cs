@@ -290,6 +290,13 @@ internal static partial class DatasetCompactor
                 (streams, rows, atOnce, batchRows) =
                     await RangesAsync(dataset, schema, job, ranges, writer, meter, memory, doublings => OutputsOf(job, doublings), cancellationToken).ConfigureAwait(false);
             }
+            else if (piece is { Merged: > 1 })
+            {
+                // A piece of several ranges below its cut merges them side by side, and counts what each took of each input.
+                (streams, rows, atOnce, batchRows) = await RangesAsync(
+                    dataset, schema, job, piece.Ranges, writer, meter, memory, doublings => OutputsOf(job, doublings), cancellationToken,
+                    piece.Merged, piece.Emitted).ConfigureAwait(false);
+            }
             else
             {
                 // A job in one piece takes what its blocks hold, never past the jobs' budget: a block refused gives the job up,
@@ -392,7 +399,8 @@ internal static partial class DatasetCompactor
         dataset.LearnJobRate(ran.Bytes, dataset.Options.TimeProvider.GetUtcNow() - started);
         if (merge)
         {
-            int open = ranges is null ? ran.Inputs.Count : Math.Max(1, ranges.MostInputs * atOnce);
+            KeyRanges? sideBySide = ranges ?? (piece is { Merged: > 1 } ? piece.Ranges : null);
+            int open = sideBySide is null ? ran.Inputs.Count : Math.Max(1, sideBySide.MostInputs * atOnce);
             dataset.LearnJobCosts(memory.InputsPeak / open, batchRows, memory.WriterPeak / atOnce);
         }
 
@@ -558,7 +566,7 @@ internal static partial class DatasetCompactor
             RangesAtOnce = atOnce,
             ScratchBytes = scratch,
             Outcome = outcome,
-            Piece = piece is not null && piece.Ranges.Count > 1,
+            Piece = piece is { ToTheEnd: false },
         };
     }
 

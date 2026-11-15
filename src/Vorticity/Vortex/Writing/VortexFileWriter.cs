@@ -2699,15 +2699,19 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             gathering.FirstBlock = _emittedBlocks;
         }
 
-        int owned = _dictionaries?[field] is { } dictionary
-            ? dictionary.CodeInto(arena, node, into, _codesTypes![field])
+        // A column gathered as codes is cut where its values would have been: its target counts the values' bytes, so that
+        // its chunks hold the rows they held, and what it holds, its codes, is what counts toward the writer's ceiling.
+        bool coded = _dictionaries?[field] is not null;
+        int owned = coded
+            ? _dictionaries![field]!.CodeInto(arena, node, into, _codesTypes![field])
             : into.CopyFrom(arena, node);
-        long bytes = into.ByteSize(owned);
+        long held = into.ByteSize(owned);
         gathering.Nodes.Add(owned);
         gathering.Rows += rows;
         gathering.Blocks += blocks;
-        gathering.Bytes += bytes;
-        Interlocked.Add(ref _gatheredHeld, bytes);
+        gathering.Bytes += coded ? arena.ByteSize(node) : held;
+        gathering.Held += held;
+        Interlocked.Add(ref _gatheredHeld, held);
     }
 
     /// <summary>Writes what column <paramref name="field"/> has gathered as one chunk of its own.</summary>
@@ -2727,7 +2731,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         gathering.Nodes.Clear();
         gathering.Rows = 0;
         gathering.Cut = gathering.Bytes;
-        Interlocked.Add(ref _gatheredHeld, -gathering.Bytes);
+        Interlocked.Add(ref _gatheredHeld, -gathering.Held);
+        gathering.Held = 0;
         gathering.Bytes = 0;
         gathering.Blocks = 0;
         try
@@ -2795,6 +2800,9 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         internal long Bytes;
         internal int FirstBlock;
         internal int Blocks;
+
+        /// <summary>The bytes it holds: its values' as <see cref="Bytes"/> counts them, or its codes' for a column gathered as codes.</summary>
+        internal long Held;
 
         /// <summary>Whether the target counts encoded bytes, at <see cref="Rate"/>, rather than canonical ones.</summary>
         internal bool IsEncoded { get; private init; }

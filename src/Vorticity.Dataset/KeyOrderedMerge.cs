@@ -165,7 +165,7 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable, IOrderedKeys
         _count = count;
         if (Emitted is { } emitted && (ulong)chosen.Rank < (ulong)emitted.Length)
         {
-            emitted[chosen.Rank] += count;
+            Interlocked.Add(ref emitted[chosen.Rank], count);
         }
         RecordBatch batch = chosen.Batch;
         if (chosen.Row == 0 && count == batch.RowCount)

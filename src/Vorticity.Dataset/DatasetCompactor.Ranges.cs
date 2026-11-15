@@ -722,16 +722,20 @@ internal static partial class DatasetCompactor
         RowMeter meter,
         JobMemory memory,
         Func<int, ObjectStream> outputsOf,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        int count = -1,
+        long[]? emitted = null)
     {
-        ObjectStream[] streams = new ObjectStream[ranges.Count];
-        long[] rows = new long[ranges.Count];
+        // The ranges merged: every one, or the first count of them, a piece's below its cut.
+        count = count < 0 ? ranges.Count : count;
+        ObjectStream[] streams = new ObjectStream[count];
+        long[] rows = new long[count];
 
         // As many lanes as the room left holds ranges, priced at what the handle's last job measured; a range's batches take
         // what the budget leaves once its writer and its open inputs are counted, so that one range alone fits it.
         int batchRows = InputBatchRows(dataset, schema, job, ranges.MostInputs, JobBudget(dataset), writer);
         long perRange = Math.Max(1, RangeBytes(dataset, schema, job, ranges, writer, batchRows));
-        int lanes = (int)Math.Clamp(JobRoom(dataset) / perRange, 1, ranges.Count);
+        int lanes = (int)Math.Clamp(JobRoom(dataset) / perRange, 1, count);
 
         using CancellationTokenSource stop = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         Exception? failed = null;
@@ -764,7 +768,7 @@ internal static partial class DatasetCompactor
         {
             try
             {
-                for (int range; (range = Interlocked.Increment(ref next)) < ranges.Count;)
+                for (int range; (range = Interlocked.Increment(ref next)) < count;)
                 {
                     (streams[range], rows[range]) = await RangeAsync(range, stop.Token).ConfigureAwait(false);
                 }
@@ -781,11 +785,19 @@ internal static partial class DatasetCompactor
         {
             for (int doublings = 0; ; doublings++)
             {
+                // What the range took of each input, counted apart and added once it is written: a range started again under a
+                // larger bound counts its rows once.
+                long[]? mine = emitted is null ? null : new long[emitted.Length];
                 ObjectStream outputs = outputsOf(doublings);
                 try
                 {
-                    long merged = await MergeAsync(dataset, schema, job, outputs, null, null, batchRows, meter, memory, token, ranges, range).ConfigureAwait(false);
+                    long merged = await MergeAsync(dataset, schema, job, outputs, null, null, batchRows, meter, memory, token, ranges, range, mine).ConfigureAwait(false);
                     await outputs.FinishAsync(token).ConfigureAwait(false);
+                    for (int i = 0; mine is not null && i < mine.Length; i++)
+                    {
+                        Interlocked.Add(ref emitted![i], mine[i]);
+                    }
+
                     return (outputs, merged);
                 }
                 catch (ObjectPastBoundException) when (doublings < ObjectBound.MostDoublings)
