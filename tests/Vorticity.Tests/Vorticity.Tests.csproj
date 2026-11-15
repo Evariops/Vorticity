@@ -8,6 +8,15 @@
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
   </PropertyGroup>
 
+  <!--
+    The tests that measure what anything beside them would move (allocations, peaks, finalizers, a shared pool) carry the
+    trait Category=RunsAlone and are left out of a plain `dotnet test`, the suite run between two changes. They run with
+    -p:Measure=true: tests/runs-alone.sh and bench/gate.sh pass it, and CI runs them on a runner of their own.
+  -->
+  <PropertyGroup Condition="'$(Measure)' != 'true'">
+    <TestingPlatformCommandLineArguments>--filter-not-trait Category=RunsAlone</TestingPlatformCommandLineArguments>
+  </PropertyGroup>
+
   <ItemGroup>
     <PackageReference Include="xunit.v3" />
   </ItemGroup>

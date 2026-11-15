@@ -72,8 +72,9 @@ echo "gate: $(git -C "$root" rev-parse --short HEAD)$(git -C "$root" diff --quie
 # gating.
 filter=()
 for class in "${ratchets[@]}"; do filter+=(--filter-class "*$class"); done
+# -p:Measure=true: half of the ratchets measure allocations, which a plain `dotnet test` leaves out.
 step "ratchets (${#ratchets[@]} classes)" \
-    dotnet test "$root/Vorticity.slnx" -c Release "${filter[@]}"
+    dotnet test "$root/Vorticity.slnx" -c Release -p:Measure=true "${filter[@]}"
 step "--ffi-check" dotnet run -c Release --project "$project" -- --ffi-check
 step "--ratio-check" dotnet run -c Release --project "$project" -- --ratio-check
 [ "$throughput" = 1 ] && step "--throughput --check" \
