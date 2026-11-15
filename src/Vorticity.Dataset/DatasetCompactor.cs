@@ -355,13 +355,23 @@ internal static partial class DatasetCompactor
             writing?.Dispose();
         }
 
-        // A piece that took nothing, its cut where no row lies: the partition is consolidated in one piece, now and after.
-        if (piece is not null && rows == 0)
+        // A piece that took no row of level 0, its cut where none lies: it would rewrite the objects of level 1 below the cut
+        // and leave level 0 as it was, piece after piece, a loop that never ends. The partition is consolidated in one piece,
+        // now and after.
+        if (piece is not null && TookOfLevelZero(piece) == 0)
         {
+            // What it wrote of level 1, which no version names, goes now.
+            List<string> written = [];
             foreach (ObjectStream outputs in streams)
             {
                 await outputs.AbandonAsync().ConfigureAwait(false);
+                foreach (WrittenObject made in outputs.Written)
+                {
+                    written.Add(made.Entry.Key);
+                }
             }
+
+            await dataset.DeleteUnnamedAsync(written, cancellationToken).ConfigureAwait(false);
 
             dataset.ConsolidateWhole(CompactionPolicy.PartitionOf(dataset, whole));
             return await RewriteUnderAsync(dataset, whole, memory, cancellationToken).ConfigureAwait(false);

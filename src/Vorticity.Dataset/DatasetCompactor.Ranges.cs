@@ -168,9 +168,21 @@ internal static partial class DatasetCompactor
     /// </summary>
     internal static int InputBatchRows(int inputs, long rowBytes, long share)
     {
-        long rows = Math.Max(share / ((long)Math.Max(1, inputs) * Math.Max(rowBytes, 1)), 1);
+        // The share bounds the batches by bytes when the budget is tight; a large one gives no more than MergeRows together,
+        // what a merge needs to run long, rather than all it could take.
+        long byCount = MergeRows / Math.Max(1, inputs);
+        long byBytes = share / ((long)Math.Max(1, inputs) * Math.Max(rowBytes, 1));
+        long rows = Math.Max(Math.Min(byCount, byBytes), 1);
         return Math.Clamp(1 << BitOperations.Log2((ulong)Math.Min(rows, int.MaxValue)), LeastBatchRows, FlatLayoutReader.WindowRows);
     }
+
+    /// <summary>
+    /// The rows a merge's inputs hold at once together, at most, however large the budget: each input holds a batch of its
+    /// rows while the others step, so a merge of many inputs reads each in smaller batches than a merge of a few. A million
+    /// rows of a log's columns, their attributes rebuilt, held some 360 MB as eight inputs of a window each; without the
+    /// bound, a budget of half a machine of 48 GB gave each input a window, and a run of the suite held 37 GB.
+    /// </summary>
+    private const int MergeRows = 1 << 20;
 
     /// <summary>
     /// The rows of an input's batch in a merge of <paramref name="inputs"/> of the job's inputs under a budget of

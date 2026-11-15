@@ -262,6 +262,18 @@ internal static partial class DatasetCompactor
         return null;
     }
 
+    /// <summary>The rows <paramref name="piece"/> took of its inputs of level 0: what it moves forward.</summary>
+    private static long TookOfLevelZero(Piece piece)
+    {
+        long took = 0;
+        for (int i = 0; i < piece.Job.Inputs.Count; i++)
+        {
+            took += piece.Job.Inputs[i].Level == 0 ? piece.Emitted[i] : 0;
+        }
+
+        return took;
+    }
+
     /// <summary>The rows <paramref name="emitted"/> counts over its inputs.</summary>
     private static long Sum(long[] emitted)
     {
