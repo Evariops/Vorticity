@@ -326,7 +326,11 @@ internal abstract class GroupKeys
     /// </summary>
     internal virtual void Hashes(Span<ulong> hashes) => throw NotSpilled();
 
-    /// <summary>Writes the keys of <paramref name="groups"/>, in order: what <see cref="ReadKeys"/> reads back.</summary>
+    /// <summary>
+    /// Writes the keys of <paramref name="groups"/>, in order: what <see cref="ReadKeys"/> reads back. Each group once at most:
+    /// an index of one column writes its null group's place once, and a second null would be read as the next key (the engine
+    /// places each group of a section once; a packed key's parts write their distinct values).
+    /// </summary>
     internal virtual void WriteKeys(ReadOnlySpan<int> groups, SpillBuffer buffer) => throw NotSpilled();
 
     /// <summary>Reads as many keys as <paramref name="groups"/> holds, written by <see cref="WriteKeys"/>, each one's group here into it, added when new.</summary>
