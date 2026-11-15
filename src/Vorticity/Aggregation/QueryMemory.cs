@@ -176,7 +176,7 @@ internal sealed class QueryMemory : IDisposable
                 if (seen == reserved)
                 {
                     memory._budget.Root.Release(reserved - need);
-                    memory._budget.Root.Measure(need - reserved);
+                    memory._budget.Root.Returned(reserved - need);
                     return;
                 }
 
@@ -192,7 +192,7 @@ internal sealed class QueryMemory : IDisposable
             if (reserved > 0)
             {
                 memory._budget.Root.Release(reserved);
-                memory._budget.Root.Measure(-reserved);
+                memory._budget.Root.Returned(reserved);
             }
         }
 

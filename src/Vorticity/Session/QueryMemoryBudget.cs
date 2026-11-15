@@ -47,7 +47,17 @@ public sealed class QueryMemoryBudget
     // What the container said of its memory at its last reading; null outside a container.
     private static ContainerMemory? s_reading = ContainerMemory.Read();
 
-    // The process's budget, which this one reserves in too; null for the process's own.
+    // A limit a bench sets, as a container's would be, under the one read; 0 for none.
+    private static long s_limitOverride;
+
+    /// <summary>
+    /// 🧪 The share of the process's limit, one in this many, the jobs' own budget holds by default (<see cref="Jobs"/>): what
+    /// the work got under a limit of 4 GiB, 1 660 MB of 3 584 MiB, when the jobs shared the queries' budget. Provisional,
+    /// calibrated by measurement.
+    /// </summary>
+    internal const int JobsShare = 2;
+
+    // The budget this one reserves in too: the process's, or a parent's of a fixed ceiling; null for the process's own.
     private readonly QueryMemoryBudget? _process;
 
     // The host's ceiling; the process's limit, less a margin, for the process's own. What its queries
@@ -56,6 +66,13 @@ public sealed class QueryMemoryBudget
     private long _reserved;
     private long _peak;
     private int _active;
+
+    // A budget carved out of the process's limit, one in this many of it, read again as the limit moves; 0 for a ceiling of
+    // its own. What it reserves the process counts, and never refuses: its share is the guard.
+    private readonly int _share;
+
+    // Whether a reservation was refused since the budget was made: what tells a job that ran out of its budget.
+    private int _refused;
 
     // The process's own: the bytes the queries' tables hold, as last measured; the rest of the
     // process, read after the last full collection; what the queries let go since, still in the heap;
@@ -90,9 +107,25 @@ public sealed class QueryMemoryBudget
     /// process does, without the process's ceiling, which moves with what the rest of the process holds.
     /// </summary>
     internal QueryMemoryBudget(long ceilingBytes, QueryMemoryBudget? process)
+        : this(ceilingBytes, process, share: 0)
+    {
+    }
+
+    /// <summary>
+    /// The budget of the jobs carved out of the process's limit: <paramref name="share"/>, one in this many of the limit, read
+    /// again as the limit moves. The process counts what it reserves, and refuses none of it: what the rest of the process
+    /// holds does not take a job's room, which its share keeps for it.
+    /// </summary>
+    private QueryMemoryBudget(int share)
+        : this(0, Process, share)
+    {
+    }
+
+    private QueryMemoryBudget(long ceilingBytes, QueryMemoryBudget? process, int share)
     {
         _ceiling = ceilingBytes;
         _process = process;
+        _share = share;
         Account = new BudgetAccount(this, process is null ? "library's own work" : "work");
         if (process is null && Volatile.Read(ref s_reading) is not null)
         {
@@ -116,7 +149,20 @@ public sealed class QueryMemoryBudget
     /// The bytes the queries under the budget may hold at once: the host's ceiling; for the process's
     /// own, what its limit leaves past the rest of its memory, which moves as the process does.
     /// </summary>
-    public long CeilingBytes => _process is null ? Available() : _ceiling;
+    public long CeilingBytes => _process is null ? Available() : OwnCeiling;
+
+    /// <summary>A child's own ceiling: its share of the process's limit as it stands, or the one it was given.</summary>
+    private long OwnCeiling => _share > 0 ? ProcessLimit() / _share : _ceiling;
+
+    /// <summary>
+    /// Whether a block the work under the budget rents may never pass its ceiling: an account under it refuses the block
+    /// rather than count it past (<see cref="QueryMemoryBudget.Force"/>), and the work that asked gives way. What a
+    /// compaction job's budget is, whose blocks are its whole memory.
+    /// </summary>
+    internal bool Hard { get; init; }
+
+    /// <summary>Whether a reservation under the budget was refused since it was made.</summary>
+    internal bool WasRefused => Volatile.Read(ref _refused) != 0;
 
     /// <summary>The bytes they hold now.</summary>
     public long ReservedBytes => Volatile.Read(ref _reserved);
@@ -134,14 +180,31 @@ public sealed class QueryMemoryBudget
     /// </summary>
     internal static QueryMemoryBudget Process { get; } = new QueryMemoryBudget(ProcessLimit(), process: null);
 
+    /// <summary>
+    /// The jobs' budget of every session given none of its own: <see cref="JobsShare"/>, one in this many, of the process's
+    /// limit as it stands, carved out of it. The process counts what the jobs reserve, so that the queries see it, and
+    /// refuses none of it: a job's room does not depend on what the rest of the process holds, which a job that just ended
+    /// leaves counted until the next collection.
+    /// </summary>
+    internal static QueryMemoryBudget Jobs { get; } = new QueryMemoryBudget(JobsShare);
+
     /// <summary>The budget the questions and scans of <paramref name="session"/> reserve in: its own, the process's when it gives none.</summary>
     internal static QueryMemoryBudget Of(VortexSession session) => session.Options.MemoryBudget ?? Process;
 
     /// <summary>The process's budget, which this one reserves in too: itself for the process's own.</summary>
-    internal QueryMemoryBudget Root => _process ?? this;
+    internal QueryMemoryBudget Root => _process?.Root ?? this;
 
-    /// <summary>The budget the jobs and writers of <paramref name="session"/> reserve in: its own, the process's when it gives none.</summary>
-    internal static QueryMemoryBudget JobsOf(VortexSession session) => session.Options.JobMemoryBudget ?? Process;
+    /// <summary>The budget the jobs and writers of <paramref name="session"/> reserve in: its own, the jobs' share of the process's limit when it gives none.</summary>
+    internal static QueryMemoryBudget JobsOf(VortexSession session) => session.Options.JobMemoryBudget ?? Jobs;
+
+    /// <summary>
+    /// A budget under this one that refuses a block past its own ceiling and past this one's (<see cref="Hard"/>): what a
+    /// compaction job's inputs, or its writer, rent under, so that the job learns what each held at most.
+    /// </summary>
+    internal QueryMemoryBudget HardChild(long ceilingBytes = long.MaxValue / 4) => new QueryMemoryBudget(ceilingBytes, this) { Hard = true };
+
+    /// <summary>Holds the process to <paramref name="bytes"/> at most, as a container's limit would: a bench's, never the library's.</summary>
+    internal static void OverrideLimit(long bytes) => Volatile.Write(ref s_limitOverride, Math.Max(0, bytes));
 
     /// <summary>
     /// The rest of the process's memory: what its heap held past the queries' tables at the last full
@@ -160,7 +223,7 @@ public sealed class QueryMemoryBudget
     }
 
     /// <summary>The bytes the work under the budget may hold: the host's ceiling; for the process's own, its limit as last read.</summary>
-    private long Ceiling => _process is null ? ProcessLimit() : _ceiling;
+    private long Ceiling => _process is null ? ProcessLimit() : OwnCeiling;
 
     /// <summary>
     /// Reads the container's memory again, and what it uses past what the registry knows: the reservations, and the memory
@@ -231,18 +294,75 @@ public sealed class QueryMemoryBudget
             return TryAdd(ref _reserved, bytes, Available());
         }
 
-        if (!TryAdd(ref _reserved, bytes, _ceiling))
+        if (!TryAdd(ref _reserved, bytes, OwnCeiling))
         {
+            Refuse();
             return false;
+        }
+
+        if (_share > 0)
+        {
+            // Carved out of the process's limit: counted there, never refused there.
+            _process.Carve(bytes);
+            return true;
         }
 
         if (!_process.TryReserve(bytes))
         {
             Interlocked.Add(ref _reserved, -bytes);
+            Refuse();
             return false;
         }
 
         return true;
+    }
+
+    /// <summary>
+    /// 🧪 What the pool may keep past the room a hard budget's first soft parent leaves before a rent under it has the pool
+    /// let go of the rest: its floors, some 3.5 MiB, and room for the blocks a job gives back between two rents.
+    /// Provisional, calibrated by measurement.
+    /// </summary>
+    private const long PoolSlackBytes = 16L << 20;
+
+    /// <summary>
+    /// Has the pool let go of the blocks it keeps past what the budget the jobs reserve in leaves, the first that is not
+    /// hard: the blocks a job rents and those the pool keeps for it then hold within that budget's ceiling. The pool keeps
+    /// every block given back, of every size it was asked for, and a job that rents other sizes than the one before keeps
+    /// the old ones parked: 762 MiB parked beside 1 347 MiB rented, under a limit of 4 GiB.
+    /// </summary>
+    internal void KeepPoolWithin()
+    {
+        QueryMemoryBudget soft = this;
+        while (soft.Hard && soft._process is { } parent)
+        {
+            soft = parent;
+        }
+
+        BlockPool pool = MemoryAccount.Pool;
+        long over = soft.ReservedBytes + pool.ParkedBytes - soft.CeilingBytes - PoolSlackBytes;
+        if (over > 0)
+        {
+            pool.GiveBack(KeptKind.Blocks, over);
+        }
+    }
+
+    /// <summary>Notes a reservation refused, once: a job reads it to tell its own failure from another's.</summary>
+    private void Refuse()
+    {
+        if (Volatile.Read(ref _refused) == 0)
+        {
+            Volatile.Write(ref _refused, 1);
+        }
+    }
+
+    /// <summary>
+    /// Counts <paramref name="bytes"/> a budget carved out of this one reserved, past its ceiling if need be: what the jobs'
+    /// share holds, which the queries see and which the limit already set aside.
+    /// </summary>
+    private void Carve(long bytes)
+    {
+        Raise(Interlocked.Add(ref _reserved, bytes));
+        _process?.Carve(bytes);
     }
 
     /// <summary>
@@ -283,7 +403,18 @@ public sealed class QueryMemoryBudget
             return true;
         }
 
-        if (!_process.Force(bytes))
+        if (Hard)
+        {
+            // A hard budget is never passed: the work under it gives way.
+            Refuse();
+            return false;
+        }
+
+        if (_share > 0)
+        {
+            _process.Carve(bytes);
+        }
+        else if (!_process.Force(bytes))
         {
             return false;
         }
@@ -302,7 +433,8 @@ public sealed class QueryMemoryBudget
             return ReservedBytes + bytes <= available && Fair(bytes, held, available);
         }
 
-        return ReservedBytes + bytes <= _ceiling && Fair(bytes, held, _ceiling) && _process.CanReserve(bytes, held);
+        long ceiling = OwnCeiling;
+        return ReservedBytes + bytes <= ceiling && Fair(bytes, held, ceiling) && (_share > 0 || _process.CanReserve(bytes, held));
     }
 
     /// <summary>Gives back <paramref name="bytes"/> reserved, to this budget and the process's.</summary>
@@ -318,7 +450,7 @@ public sealed class QueryMemoryBudget
     /// </summary>
     internal void Measure(long delta)
     {
-        QueryMemoryBudget process = _process ?? this;
+        QueryMemoryBudget process = Root;
         Interlocked.Add(ref process._measured, delta);
         if (delta < 0)
         {
@@ -327,7 +459,19 @@ public sealed class QueryMemoryBudget
     }
 
     /// <summary>Arrays of <paramref name="bytes"/> the queries' tables replaced with larger ones: in the heap until a collection takes them.</summary>
-    internal void Discard(long bytes) => Interlocked.Add(ref (_process ?? this)._pending, bytes);
+    internal void Discard(long bytes) => Interlocked.Add(ref Root._pending, bytes);
+
+    /// <summary>
+    /// Blocks of <paramref name="bytes"/> the work under the budget gave back: no longer measured, and not let go either. The
+    /// pool keeps them for the next rent, and what the pool keeps is part of the rest of the process, which the next
+    /// observation reads in the heap; a block the pool lets go reaches the collector apart (<see cref="BlockFreed"/>).
+    /// Counted as let go, each block a job rents and gives back again counted once more: 3.8 GB of rest were reckoned for a
+    /// process of 1.4 GB, after a compaction under a limit of 4 GiB, and the next job was refused a block.
+    /// </summary>
+    internal void Returned(long bytes) => Interlocked.Add(ref Root._measured, -bytes);
+
+    /// <summary>The array of a block of <paramref name="bytes"/> let go to the collector: in the heap until a collection takes it.</summary>
+    internal static void BlockFreed(long bytes) => Interlocked.Add(ref Process._pending, bytes);
 
     /// <summary>
     /// Once the reservations come within <see cref="KeptMarginShare"/> of what the limit leaves, has the memory kept let go
@@ -526,6 +670,12 @@ public sealed class QueryMemoryBudget
         if (Volatile.Read(ref s_reading) is { } container)
         {
             limit = Math.Min(limit, container.Limit - (container.Limit / ContainerMarginShare));
+        }
+
+        // A bench's limit, taken as a container's is, its margin less.
+        if (Volatile.Read(ref s_limitOverride) is > 0 and long set)
+        {
+            limit = Math.Min(limit, set - (set / ContainerMarginShare));
         }
 
         return Math.Max(limit, 64L << 20);

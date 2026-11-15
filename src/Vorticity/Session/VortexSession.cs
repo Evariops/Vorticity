@@ -197,13 +197,14 @@ public sealed class VortexSessionOptions
     /// <summary>
     /// The memory the session's background jobs and writers share with those of every session given the same budget: the
     /// merges of a dataset's levels, its consolidations, the stores of its appends, a file writer's blocks. Null, the
-    /// default, shares the process's budget with the queries, one registry for both; a host that wants the jobs held to a
-    /// share sets one here.
+    /// default, gives them half the process's limit, carved out of it and read again as the limit moves: what the rest of
+    /// the process holds does not take a job's room. A host that wants another share sets one here.
     /// </summary>
     /// <remarks>
-    /// A job holds what it reserves and waits for room rather than failing: a consolidation runs fewer ranges of its keys at
-    /// once, an append writes its largest part sooner. Only what a job cannot do in less fails it, with a
-    /// <see cref="VortexMemoryException"/>. The budget is the host's: disposing the session leaves it to the others.
+    /// A compaction job's blocks never pass the budget: a job that would is given up, its blocks given back, and the next
+    /// plan takes fewer inputs. A consolidation runs fewer ranges of its keys at once, an append writes its largest part
+    /// sooner. Only what a job cannot do in less fails it, with a <see cref="VortexMemoryException"/>. The budget is the
+    /// host's: disposing the session leaves it to the others.
     /// </remarks>
     public QueryMemoryBudget? JobMemoryBudget
     {

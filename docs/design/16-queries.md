@@ -1192,7 +1192,13 @@ container seven eighths of the container's when that is less, read again as the 
 engine's blocks being managed and counted by the heap), minus the rest of the process: what its heap
 held beyond the queries' tables at the last full collection, what the collector kept committed beyond
 its heap, and what the queries released since; in a container, what the container measures beyond the
-reservations and the memory kept, when that is more. A limit of 4 GB is not 4 GB for the queries.
+reservations and the memory kept, when that is more. A limit of 4 GB is not 4 GB for the queries. A block
+given back is not released: the pool keeps it for the next rent, and what the pool keeps is read with the
+rest of the heap at the next collection. Counted as released, each block a job rented and gave back again
+counted once more, until 3.8 GB of rest were reckoned for a process of 1.4 GB and a job was refused its
+next block. The jobs' budget is carved out of the limit rather than reserved under this ceiling: half the
+limit by default, which the queries see reserved and the rest of the process never takes
+([the memory of a job](15-compaction.md#the-memory-of-a-job)).
 
 A query reserves where its memory grows, at the moment it does: each array of a lane's tables before
 it is allocated (a doubling holding the old arrays next to the new ones for the copy, and no more),

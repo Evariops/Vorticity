@@ -157,17 +157,21 @@ internal sealed class BlockOwner : SegmentOwner
             BlockPool.Watch?.Released(this);
         }
 
-        // A parked owner keeps its array for the next rent; any other lets it go to the collector.
+        // A parked owner keeps its array for the next rent; any other lets it go to the collector, which the process's
+        // budget counts as let go until a collection takes it. One the pool lets go later is the registry's to count.
         if (pool is not null && pool.TryPark(this))
         {
             return;
         }
 
-        Drop();
+        if (Drop())
+        {
+            QueryMemoryBudget.BlockFreed(_capacity);
+        }
     }
 
     /// <summary>Lets go of the array of a block that the pool popped out of a bucket during <c>Trim</c>.</summary>
-    internal void FreeParked() => Drop();
+    internal void FreeParked() => _ = Drop();
 
     /// <summary>Re-arms a parked owner for a new rental of <paramref name="length"/> bytes.</summary>
     /// <param name="length">The new segment length, at most <see cref="Capacity"/>.</param>
@@ -184,12 +188,16 @@ internal sealed class BlockOwner : SegmentOwner
     }
 
     /// <summary>Lets the array go, once: whichever of a release and a trim comes first, the other finds nothing to drop.</summary>
-    private void Drop()
+    /// <returns>Whether this call let it go.</returns>
+    private bool Drop()
     {
         if (Interlocked.Exchange(ref _array, null) is not null)
         {
             Interlocked.Add(ref s_liveBytes, -Math.Max(_capacity, 1));
+            return true;
         }
+
+        return false;
     }
 
     /// <summary>The view of <paramref name="length"/> bytes of <paramref name="array"/> from <paramref name="offset"/>, which the pinned heap never moves.</summary>

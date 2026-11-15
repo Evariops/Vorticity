@@ -103,13 +103,18 @@ internal class BudgetAccount : MemoryAccount
         }
 
         Budget.Measure(bytes);
+        if (Budget.Hard)
+        {
+            Budget.KeepPoolWithin();
+        }
+
         return true;
     }
 
     internal override void Give(long bytes)
     {
         Budget.Release(bytes);
-        Budget.Measure(-bytes);
+        Budget.Returned(bytes);
     }
 
     internal override VortexMemoryException Refused(long bytes)

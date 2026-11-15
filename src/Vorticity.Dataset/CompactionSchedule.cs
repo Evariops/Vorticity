@@ -87,6 +87,7 @@ internal static class CompactionLoop
         // Off the caller's thread from the first turn: against a store that answers at once, the jobs
         // due would otherwise all run before the caller got its task back.
         await Task.CompletedTask.ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
+        JobTooWideException? refused = null;
         while (true)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -107,7 +108,24 @@ internal static class CompactionLoop
             }
 
             long started = clock.GetTimestamp();
-            CompactionResult result = await DatasetCompactor.RunAsync(dataset, job, cancellationToken).ConfigureAwait(false);
+            CompactionResult result;
+            try
+            {
+                result = await DatasetCompactor.RunAsync(dataset, job, cancellationToken).ConfigureAwait(false);
+            }
+            catch (JobTooWideException tooWide)
+            {
+                // The jobs' budget refused it: the next plan takes fewer inputs, and one of as many as this one fails the loop.
+                if (refused is not null && refused.Job.Trigger == tooWide.Job.Trigger)
+                {
+                    _ = VortexDataset.Narrower(refused, tooWide.Job);
+                }
+
+                refused = tooWide;
+                continue;
+            }
+
+            refused = null;
             schedule.Progress?.Report(result);
             TimeSpan pause = schedule.PauseAfter(result.BytesOut, clock.GetElapsedTime(started));
             if (pause > TimeSpan.Zero)

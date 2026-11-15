@@ -165,6 +165,11 @@ Dictionary<string, (string Help, Func<Task<int>> Run)> micros = new Dictionary<s
         PeerCacheMicro.Run(Text(args, "--store") ?? BenchStores.Of("peercache"), (int)Option(args, "--objects", 16), (int)Option(args, "--rows", 200_000), rounds)),
     ["needles"] = ("what a needle's index weighs and what a probe costs, sorted run against a hashed index (NeedleMicro.cs)", () =>
         NeedleMicro.Run((int)Option(args, "--rows", 4_000_000), rounds)),
+    ["backlog"] = ("a maintainer back to a backlog of metric records, every append spanning every series, compacted job by job under --block-limit BYTES (BacklogBench.cs)", () =>
+        BacklogBench.RunAsync(
+            Text(args, "--store") ?? BenchStores.Of("backlog"), (int)Option(args, "--appends", 300), (int)Option(args, "--rows", 30_000),
+            (int)Option(args, "--series", 20_000), Text(args, "--block-limit") is { } limit ? long.Parse(limit, CultureInfo.InvariantCulture) : 0,
+            args.Contains("--compact-only"), (int)Option(args, "--latency", 0))),
     ["inputs"] = ("--store DIR: what the inputs of a merge hold while it reads them, 1 to 8 of a dataset's largest objects in lockstep (InputMemoryMicro.cs)", () =>
         InputMemoryMicro.Run(Text(args, "--store") ?? throw new ArgumentException("--micro inputs needs --store DIR, a dataset's directory."), (int)Option(args, "--objects", 8))),
     ["consolidation"] = ("--store DIR: what a consolidation holds apart from any other work, hours of log records left in level 0 consolidated on 1 lane and on 8 (ConsolidationMemoryMicro.cs)", () =>

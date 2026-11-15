@@ -58,8 +58,9 @@ public sealed record CompactionResult
     public long BytesOut { get; init; }
 
     /// <summary>
-    /// The most bytes it held at once of the session's jobs' budget (<see cref="VortexSessionOptions.JobMemoryBudget"/>):
-    /// what the ranges of a consolidation reserved side by side; none for a job that reserved nothing.
+    /// The most bytes its blocks held at once, its inputs' and its writer's, under the session's jobs' budget
+    /// (<see cref="VortexSessionOptions.JobMemoryBudget"/>), which they never pass: the ranges of a consolidation side by side
+    /// together; none for a job that moved its objects whole.
     /// </summary>
     public long MemoryReserved { get; init; }
 
@@ -123,9 +124,33 @@ internal static partial class DatasetCompactor
         return result;
     }
 
-    /// <summary>The job's rows read, merged or concatenated, written, and its replacement committed.</summary>
+    /// <summary>
+    /// The job's rows read, merged or concatenated, written, and its replacement committed, every block it rents under its
+    /// own memory (<see cref="JobMemory"/>). A job whose memory was refused a block throws <see cref="JobTooWideException"/>
+    /// once its outputs are given up and its blocks given back: the handle's next plan takes fewer inputs.
+    /// </summary>
     private static async ValueTask<CompactionResult> RewriteAsync(
         VortexDataset dataset, CompactionJob job, CancellationToken cancellationToken)
+    {
+        JobMemory memory = new JobMemory(dataset);
+        try
+        {
+            return await RewriteUnderAsync(dataset, job, memory, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception failure) when (memory.Refused && failure is not JobTooWideException && !cancellationToken.IsCancellationRequested)
+        {
+            dataset.NarrowJobs(job.Inputs.Count, memory.InputsPeak, memory.WriterPeak);
+            throw new JobTooWideException(job, memory.Peak, memory.Jobs.CeilingBytes, failure);
+        }
+        finally
+        {
+            memory.Dispose();
+        }
+    }
+
+    /// <summary>The job's rows read, merged or concatenated, written, and its replacement committed, under <paramref name="memory"/>.</summary>
+    private static async ValueTask<CompactionResult> RewriteUnderAsync(
+        VortexDataset dataset, CompactionJob job, JobMemory memory, CancellationToken cancellationToken)
     {
         DateTimeOffset started = dataset.Options.TimeProvider.GetUtcNow();
         if (job.Moves && await MoveAsync(dataset, job, cancellationToken).ConfigureAwait(false) is { } moved)
@@ -144,7 +169,7 @@ internal static partial class DatasetCompactor
             Check(schema);
 
             // A handle that has not measured a row of the dataset decoded measures one before it sizes the job's batches.
-            await LearnRowBytesAsync(dataset, schema, job, cancellationToken).ConfigureAwait(false);
+            await LearnRowBytesAsync(dataset, schema, job, memory, cancellationToken).ConfigureAwait(false);
         }
 
         // Every input open before the passes, side by side, and held until the job ends.
@@ -166,7 +191,7 @@ internal static partial class DatasetCompactor
         if (indexed && VariantColumns(schema.DType).Length > 0)
         {
             using Activity? planning = DatasetTelemetry.StartCompactionPass("plan");
-            shreddings = await PlanValuesAsync(dataset, schema, job, cancellationToken).ConfigureAwait(false);
+            shreddings = await PlanValuesAsync(dataset, schema, job, memory, cancellationToken).ConfigureAwait(false);
         }
 
         // A merge writes each column every input writes against an object dictionary against their union, sorted, when the
@@ -175,7 +200,7 @@ internal static partial class DatasetCompactor
         if (merge)
         {
             using Activity? uniting = DatasetTelemetry.StartCompactionPass("unions");
-            unions = await UnionsAsync(dataset, schema, job, cancellationToken).ConfigureAwait(false);
+            unions = await UnionsAsync(dataset, schema, job, memory, cancellationToken).ConfigureAwait(false);
         }
 
         // A leveled exit of level 0 keeps the rows that came late apart, in an object of level 0, while they weigh little
@@ -198,6 +223,7 @@ internal static partial class DatasetCompactor
             dataset, schema, ran.TargetBytes, ran.FirstRow, inKeyOrder: merge, rowBound: ran.Rows,
             ran.ToLevel, ObjectBound.Of(ran.Bytes, doublings, dataset.Options.BoundOutPerIn))
         {
+            Budget = memory.Writer,
             Keys = indexed ? schema.Tree : null,
             Prefix = Math.Min(schema.Layout?.Layout.Prefix ?? 0, schema.Layout?.Components.Count ?? 0),
             Skip = schema.Partitioned ? 1 : 0,
@@ -224,10 +250,9 @@ internal static partial class DatasetCompactor
         ObjectStream[] streams;
         ObjectStream? lateOutputs = null;
         long rows;
-        long reserved = 0;
         int atOnce = 1;
-        int batchRows;
-        long writer = WriterBytes(dataset, schema, job, shreddings);
+        int batchRows = 0;
+        long writer = WriterCost(dataset, schema, job, shreddings);
 
         // What the inputs' batches weigh decoded, which the handle keeps for the next job's plan.
         RowMeter meter = new RowMeter();
@@ -237,17 +262,16 @@ internal static partial class DatasetCompactor
         {
             if (ranges is not null)
             {
-                (streams, rows, reserved, atOnce) =
-                    await RangesAsync(dataset, schema, job, ranges, writer, meter, doublings => OutputsOf(job, doublings), cancellationToken).ConfigureAwait(false);
+                (streams, rows, atOnce, batchRows) =
+                    await RangesAsync(dataset, schema, job, ranges, writer, meter, memory, doublings => OutputsOf(job, doublings), cancellationToken).ConfigureAwait(false);
             }
             else
             {
-                // A job in one piece runs whether the budget holds it or not; what it reserves tells the other jobs it holds it.
-                // Its inputs' batches take what the budget leaves of it once its writer and its open inputs are counted.
-                using QueryMemory memory = new QueryMemory(QueryMemoryBudget.JobsOf(dataset.Session));
+                // A job in one piece takes what its blocks hold, never past the jobs' budget: a block refused gives the job up,
+                // and the handle's next plan takes fewer inputs. Its inputs' batches take what the budget leaves of it once its
+                // writer and its open inputs are counted.
                 int open = merge ? ran.Inputs.Count : 1;
                 batchRows = InputBatchRows(dataset, schema, ran, open, JobBudget(dataset), writer);
-                memory.TryGrow(InputsBytes(dataset, schema, ran, open, batchRows) + writer);
                 for (int doublings = 0; ; doublings++)
                 {
                     lateOutputs = late is null ? null : new ObjectStream(
@@ -255,13 +279,14 @@ internal static partial class DatasetCompactor
                         0, ObjectBound.Of(ran.Bytes, doublings, dataset.Options.BoundOutPerIn))
                     {
                         Arrival = Latest(ran),
+                        Budget = memory.Writer,
                     };
                     ObjectStream outputs = OutputsOf(ran, doublings);
                     try
                     {
                         rows = merge
-                            ? await MergeAsync(dataset, schema, ran, outputs, late, lateOutputs, batchRows, meter, cancellationToken).ConfigureAwait(false)
-                            : await ConcatenateAsync(dataset, schema, ran, outputs, cancellationToken).ConfigureAwait(false);
+                            ? await MergeAsync(dataset, schema, ran, outputs, late, lateOutputs, batchRows, meter, memory, cancellationToken).ConfigureAwait(false)
+                            : await ConcatenateAsync(dataset, schema, ran, outputs, memory, cancellationToken).ConfigureAwait(false);
                         await outputs.FinishAsync(cancellationToken).ConfigureAwait(false);
                         if (lateOutputs is not null)
                         {
@@ -290,8 +315,6 @@ internal static partial class DatasetCompactor
                         throw;
                     }
                 }
-
-                reserved = memory.Peak;
             }
         }
         finally
@@ -306,7 +329,14 @@ internal static partial class DatasetCompactor
                 $"{rows}: a rewrite that loses rows is the one failure it must not have.");
         }
 
+        // What the job measured, which the handle's next plan sizes a job by: what an input and the writer held at most.
+        long reserved = memory.Peak;
         dataset.LearnDecodedRowBytes(meter.BytesPerRow);
+        if (merge)
+        {
+            int open = ranges is null ? ran.Inputs.Count : Math.Max(1, ranges.MostInputs * atOnce);
+            dataset.LearnJobCosts(memory.InputsPeak / open, batchRows, memory.WriterPeak / atOnce);
+        }
 
         List<(int Level, ReadOnlyMemory<byte> Key)> consumed = [];
         foreach (CompactionInput input in ran.Inputs)
@@ -569,7 +599,7 @@ internal static partial class DatasetCompactor
     /// open of it, from its table of contents.
     /// </summary>
     private static async ValueTask<IReadOnlyList<(int Field, ObjectDictionary Dictionary, long RowBytes)>> UnionsAsync(
-        VortexDataset dataset, DatasetSchema schema, CompactionJob job, CancellationToken cancellationToken)
+        VortexDataset dataset, DatasetSchema schema, CompactionJob job, JobMemory memory, CancellationToken cancellationToken)
     {
         int fields = schema.DType.FieldCount;
         List<ObjectDictionary>?[] held = new List<ObjectDictionary>?[fields];
@@ -617,8 +647,8 @@ internal static partial class DatasetCompactor
                 continue;
             }
 
-            // Reset in the finally below whatever happens: the process's account.
-            CanonicalArena arena = new CanonicalArena(64, QueryMemoryBudget.Process.Account);
+            // Reset in the finally below whatever happens: the job's inputs' account.
+            CanonicalArena arena = new CanonicalArena(64, memory.InputsAccount);
             try
             {
                 DType type = schema.DType.GetField(field);
@@ -716,18 +746,20 @@ internal static partial class DatasetCompactor
     /// </summary>
     private static IAsyncEnumerable<RecordBatch> RowsOfAsync(
         ObjectLease lease, ObjectEntry entry, DatasetSchema schema, CancellationToken cancellationToken, int[]? fields = null, RowRange? rows = null,
-        int batchRows = 0)
+        int batchRows = 0, Buffers.MemoryAccount? account = null)
     {
+        // A job's input reads and decodes under the job's inputs' account (JobMemory), which never passes the jobs' budget.
         VortexFile file = lease.File;
         FieldMask projection = fields is null ? FieldMask.All : Layouts.FieldMasks.Of(fields);
         if (schema.ColumnsOf(file.DType, entry.Key) is not { } columns)
         {
-            return LiveRowsAsync(Ranged(Batched(fields is null ? file.ScanBuilder() : file.ScanBuilder().ProjectMask(projection), batchRows), rows), entry, cancellationToken);
+            ScanBuilder whole = file.ScanBuilder().WithAccount(account);
+            return LiveRowsAsync(Ranged(Batched(fields is null ? whole : whole.ProjectMask(projection), batchRows), rows), entry, cancellationToken);
         }
 
         ObjectReadPlan read = columns.Read(null, projection);
         return ObjectColumns.ReshapeAsync(
-            LiveRowsAsync(Ranged(Batched(file.ScanBuilder().ProjectMask(read.Shape.Source).WithEncodings(false, false), batchRows), rows), entry, cancellationToken),
+            LiveRowsAsync(Ranged(Batched(file.ScanBuilder().WithAccount(account).ProjectMask(read.Shape.Source).WithEncodings(false, false), batchRows), rows), entry, cancellationToken),
             read.Shape,
             null,
             0,
@@ -841,7 +873,7 @@ internal static partial class DatasetCompactor
 
     /// <summary>Each input's rows, in its own order, one after another.</summary>
     private static async ValueTask<long> ConcatenateAsync(
-        VortexDataset dataset, DatasetSchema schema, CompactionJob job, ObjectStream outputs, CancellationToken cancellationToken)
+        VortexDataset dataset, DatasetSchema schema, CompactionJob job, ObjectStream outputs, JobMemory memory, CancellationToken cancellationToken)
     {
         long rows = 0;
         foreach (CompactionInput input in job.Inputs)
@@ -862,7 +894,7 @@ internal static partial class DatasetCompactor
             ObjectLease lease = await dataset.RentAsync(input.Entry, cancellationToken).ConfigureAwait(false);
             await using (lease.ConfigureAwait(false))
             {
-                await foreach (RecordBatch batch in RowsOfAsync(lease, input.Entry, schema, cancellationToken)
+                await foreach (RecordBatch batch in RowsOfAsync(lease, input.Entry, schema, cancellationToken, account: memory.InputsAccount)
                     .WithCancellation(cancellationToken).ConfigureAwait(false))
                 {
                     await outputs.RollIfFullAsync(cancellationToken).ConfigureAwait(false);
@@ -888,11 +920,12 @@ internal static partial class DatasetCompactor
         ObjectStream? lateOutputs,
         int batchRows,
         RowMeter meter,
+        JobMemory memory,
         CancellationToken cancellationToken,
         KeyRanges? ranges = null,
         int range = 0)
     {
-        KeyOrderedMerge merge = InputsMerged(dataset, schema, job, batchRows, cancellationToken, ranges: ranges, range: range, meter: meter);
+        KeyOrderedMerge merge = InputsMerged(dataset, schema, job, batchRows, cancellationToken, ranges: ranges, range: range, meter: meter, account: memory.InputsAccount);
         ValueCut? values = schema.Cut;
         long rows = 0;
         await using (merge.ConfigureAwait(false))
@@ -1007,7 +1040,8 @@ internal static partial class DatasetCompactor
         KeyRanges? ranges = null,
         int range = 0,
         int only = -1,
-        RowMeter? meter = null)
+        RowMeter? meter = null,
+        Buffers.MemoryAccount? account = null)
     {
         List<(ReadOnlyMemory<byte> Key, MergeObject Object)> inputs = new(job.Inputs.Count);
         Dictionary<string, RowRange>? rows = ranges is null ? null : new Dictionary<string, RowRange>(StringComparer.Ordinal);
@@ -1040,14 +1074,14 @@ internal static partial class DatasetCompactor
             schema.Tree!,
             rankedTies: false,
             (lease, entry) => meter is null
-                ? RowsOfAsync(lease, entry, schema, cancellationToken, fields, rows?[entry.Key], batchRows)
-                : MeteredAsync(RowsOfAsync(lease, entry, schema, cancellationToken, fields, rows?[entry.Key], batchRows), meter, cancellationToken),
+                ? RowsOfAsync(lease, entry, schema, cancellationToken, fields, rows?[entry.Key], batchRows, account)
+                : MeteredAsync(RowsOfAsync(lease, entry, schema, cancellationToken, fields, rows?[entry.Key], batchRows, account), meter, cancellationToken),
             opened: null,
             cancellationToken,
             ranges?.Low(range) ?? default,
             ranges?.High(range) ?? default)
         {
-            Account = QueryMemoryBudget.JobsOf(dataset.Session).Account,
+            Account = account ?? QueryMemoryBudget.JobsOf(dataset.Session).Account,
         };
     }
 
@@ -1066,7 +1100,7 @@ internal static partial class DatasetCompactor
     /// where every input's census, kept to the end, made the job's keys as many times over as it has inputs.
     /// </remarks>
     private static async ValueTask<IReadOnlyList<ValueShredding>> PlanValuesAsync(
-        VortexDataset dataset, DatasetSchema schema, CompactionJob job, CancellationToken cancellationToken)
+        VortexDataset dataset, DatasetSchema schema, CompactionJob job, JobMemory memory, CancellationToken cancellationToken)
     {
         int[] variants = VariantColumns(schema.DType);
         ValueCut? values = schema.Cut;
@@ -1076,24 +1110,17 @@ internal static partial class DatasetCompactor
         int next = 0;
         Lock gate = new Lock();
 
-        // Each lane reserves what it holds as it counts an input, the first whether the budget grants it or not: a batch of
-        // the input's rows decoded, its own rows when it holds fewer, and a slice of a wide shredding.
-        using QueryMemory memory = new QueryMemory(QueryMemoryBudget.JobsOf(dataset.Session));
-        long mostRows = 0;
+        // As many lanes as the room the jobs' budget leaves holds what a lane holds as it counts an input: the input open,
+        // its batch at what the handle's last job measured, and a slice of a wide shredding. Their blocks are the job's.
+        int censusRows = CensusRows(dataset, job);
+        long perLane = File.VortexReadOptions.DefaultVariantSliceBytes;
         foreach (CompactionInput input in job.Inputs)
         {
-            mostRows = Math.Max(mostRows, input.Entry.PhysicalRows);
+            perLane = Math.Max(perLane, InputCost(dataset, schema, input.Entry, censusRows) + File.VortexReadOptions.DefaultVariantSliceBytes);
         }
 
-        long perLane = (Math.Min(mostRows, CensusRows(dataset, job)) * HeldPerBatchByte * RowBytes(dataset, job))
-            + File.VortexReadOptions.DefaultVariantSliceBytes;
-        memory.TryGrow(perLane);
         int most = Math.Min(Math.Max(1, dataset.Session.Options.MaxDegreeOfParallelism), job.Inputs.Count);
-        int admitted = 1;
-        while (admitted < most && memory.TryGrow(perLane))
-        {
-            admitted++;
-        }
+        int admitted = (int)Math.Clamp(JobRoom(dataset) / perLane, 1, most);
 
         ParallelOptions lanes = new ParallelOptions
         {
@@ -1102,7 +1129,7 @@ internal static partial class DatasetCompactor
         };
         await Parallel.ForAsync(0, job.Inputs.Count, lanes, async (input, token) =>
         {
-            List<ValueCount> counted = await CountAsync(dataset, schema, job, input, variants, token).ConfigureAwait(false);
+            List<ValueCount> counted = await CountAsync(dataset, schema, job, input, variants, memory, token).ConfigureAwait(false);
             lock (gate)
             {
                 counts[input] = counted;
@@ -1225,7 +1252,7 @@ internal static partial class DatasetCompactor
     /// one that holds several, the key's columns too, the input merged alone so that its keys tell its values apart.
     /// </summary>
     private static async ValueTask<List<ValueCount>> CountAsync(
-        VortexDataset dataset, DatasetSchema schema, CompactionJob job, int input, int[] variants, CancellationToken cancellationToken)
+        VortexDataset dataset, DatasetSchema schema, CompactionJob job, int input, int[] variants, JobMemory memory, CancellationToken cancellationToken)
     {
         int textBound = dataset.Options.Write.StringBoundBytes;
         CompactionInput held = job.Inputs[input];
@@ -1237,7 +1264,7 @@ internal static partial class DatasetCompactor
             ObjectLease lease = await dataset.RentAsync(held.Entry, cancellationToken).ConfigureAwait(false);
             await using (lease.ConfigureAwait(false))
             {
-                await foreach (RecordBatch batch in RowsOfAsync(lease, held.Entry, schema, cancellationToken, variants)
+                await foreach (RecordBatch batch in RowsOfAsync(lease, held.Entry, schema, cancellationToken, variants, account: memory.InputsAccount)
                     .WithCancellation(cancellationToken).ConfigureAwait(false))
                 {
                     for (int v = 0; v < variants.Length; v++)
@@ -1262,7 +1289,7 @@ internal static partial class DatasetCompactor
         int[] counted = Counted(schema);
         int[] read = [.. variants.Select(field => Array.BinarySearch(counted, field))];
         byte[]? last = null;
-        KeyOrderedMerge merge = InputsMerged(dataset, schema, job, CensusRows(dataset, job), cancellationToken, counted, only: input);
+        KeyOrderedMerge merge = InputsMerged(dataset, schema, job, CensusRows(dataset, job), cancellationToken, counted, only: input, account: memory.InputsAccount);
         await using (merge.ConfigureAwait(false))
         {
             while (await merge.MoveNextAsync().ConfigureAwait(false))
@@ -1482,6 +1509,12 @@ internal static partial class DatasetCompactor
         internal PartitionPostings? Postings { get; init; }
 
         /// <summary>
+        /// The budget each object's writer and sink rent under: the job's writer's (<see cref="JobMemory.Writer"/>), which never
+        /// passes the jobs' budget; null for the jobs' budget itself.
+        /// </summary>
+        internal QueryMemoryBudget? Budget { get; init; }
+
+        /// <summary>
         /// Writes rows <paramref name="from"/> to <paramref name="to"/> of the merge's run, which the object takes next in the
         /// key's order: the first starts the next partition value's shredding when they start an object of another value,
         /// and the object's sparse index and blocks take them.
@@ -1569,7 +1602,7 @@ internal static partial class DatasetCompactor
             ValueShredding? shredding = Shreddings is { } shreddings ? shreddings[Math.Clamp(_value, 0, shreddings.Count - 1)] : null;
             output = _dataset.StartObjectUnder(
                 _schema, _inKeyOrder, _rowBound, contents: Keys is not null, synopses: Keys is not null, shredded: shredding?.Shredded,
-                variantChunks: shredding?.VariantChunks, byteBound: _byteBound, postings: Postings);
+                variantChunks: shredding?.VariantChunks, byteBound: _byteBound, postings: Postings, budget: Budget);
             _output = output;
             Postings?.BlocksOf(VortexDataset.Uid(output.Identity), output.Writer.BlockRows);
             _census = shredding is null ? null : Census(output.Writer.BlockRows);
