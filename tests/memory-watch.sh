@@ -43,8 +43,12 @@ mkdir -p "$out"
 out="$(cd "$out" && pwd)"
 dotnet build "$root/tests/Vorticity.Tests" -c Release -v quiet -nologo >/dev/null
 
-VORTICITY_MEMORY_WATCH="$blocks" VORTICITY_MEMORY_WATCH_DIR="$out" \
-  dotnet "$root/tests/Vorticity.Tests/bin/Release/net11.0/Vorticity.Tests.dll" "$@" > "$out/run.log" 2>&1 &
+# --blocks 0 counts no block: the run keeps its speed, and only the resident memory and the dumps watch it.
+if (( blocks > 0 )); then
+  export VORTICITY_MEMORY_WATCH="$blocks" VORTICITY_MEMORY_WATCH_DIR="$out"
+fi
+
+dotnet "$root/tests/Vorticity.Tests/bin/Release/net11.0/Vorticity.Tests.dll" "$@" > "$out/run.log" 2>&1 &
 pid=$!
 
 next=$dump

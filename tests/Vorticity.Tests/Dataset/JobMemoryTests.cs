@@ -20,13 +20,15 @@ public sealed partial class JobMemoryTests
 
     /// <summary>
     /// The rows of an input's batch: a share that holds a window of rows for each input gives a window, a smaller one fewer
-    /// rows, a power of two, never fewer than a block of 8 192, and never more than a window however large the share.
+    /// rows, a power of two, never fewer than 1 024 however tight the budget, and never more than a window however large
+    /// the share, nor than a million rows over the inputs together.
     /// </summary>
     [Theory]
     [InlineData(8, 1_000, 8L << 30, 1 << 17)]
     [InlineData(8, 1_000, 256L << 20, 1 << 15)]
-    [InlineData(8, 1_000, 1L << 20, 8_192)]
-    [InlineData(8, 1_000, -1, 8_192)]
+    [InlineData(8, 1_000, 1L << 20, DatasetCompactor.LeastBatchRows)]
+    [InlineData(8, 1_000, 32L << 20, 4_096)]
+    [InlineData(8, 1_000, -1, DatasetCompactor.LeastBatchRows)]
     [InlineData(1, 100, 8L << 30, 1 << 17)]
     [InlineData(64, 100, 8L << 30, 1 << 14)]
     public void AnInputsBatchHoldsItsShareOfTheBudget(int inputs, long rowBytes, long share, int expected) =>
