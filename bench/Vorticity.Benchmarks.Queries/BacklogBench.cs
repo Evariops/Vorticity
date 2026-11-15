@@ -67,7 +67,7 @@ internal static class BacklogBench
         return listener;
     }
 
-    internal static async Task<int> RunAsync(string root, int appends, int rows, int series, long memoryLimit, bool compactOnly, int latency)
+    internal static async Task<int> RunAsync(string root, int appends, int rows, int series, long memoryLimit, bool compactOnly, int latency, int scans = 0, bool buildOnly = false)
     {
         if (memoryLimit > 0)
         {
@@ -84,8 +84,14 @@ internal static class BacklogBench
         if (!compactOnly)
         {
             Fresh(backlog);
-            await BuildAsync(session, backlog, appends, rows, series);
-            Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"backlog of {appends} appends of {rows} rows built in {clock.Elapsed.TotalSeconds:F0} s; {sampler.Peaks()}"));
+            long read = await BuildAsync(session, backlog, appends, rows, series, scans);
+            Console.WriteLine(string.Create(
+                CultureInfo.InvariantCulture,
+                $"backlog of {appends} appends of {rows} rows built in {clock.Elapsed.TotalSeconds:F0} s, {scans} scans reading {read:N0} rows meanwhile; {sampler.Peaks()}; {Sampler.Now()}"));
+            if (buildOnly)
+            {
+                return 0;
+            }
         }
 
         // The backlog stays whole: the maintainer compacts a copy of it.
@@ -158,11 +164,15 @@ internal static class BacklogBench
         return 0;
     }
 
-    /// <summary>The backlog: appends of metric records each spanning every series' keys, none compacted.</summary>
-    private static async Task BuildAsync(VortexSession session, string root, int appends, int rows, int series)
+    /// <summary>
+    /// The backlog: appends of metric records each spanning every series' keys, none compacted; while <paramref name="scans"/>
+    /// readers scan the dataset in batches, each again and again from its latest version, as the readers of a pipeline's
+    /// source would. The rows they read.
+    /// </summary>
+    private static async Task<long> BuildAsync(VortexSession session, string root, int appends, int rows, int series, int scans)
     {
         IObjectStore store = new FileObjectStore(root);
-        await using VortexDataset writer = await VortexDataset.CreateAsync(store, MetricRow.Schema, new DatasetOptions
+        DatasetOptions options = new DatasetOptions
         {
             Session = session,
             Encrypted = true,
@@ -175,7 +185,30 @@ internal static class BacklogBench
                     LayoutValue.Column(nameof(MetricRow.AttributesHash)), LayoutValue.Column(nameof(MetricRow.TimeUnix)),
                 ],
             },
-        });
+        };
+        await using VortexDataset writer = await VortexDataset.CreateAsync(store, MetricRow.Schema, options);
+
+        using CancellationTokenSource built = new CancellationTokenSource();
+        long read = 0;
+        Task[] readers = [.. Enumerable.Range(0, scans).Select(_ => Task.Run(async () =>
+        {
+            await using VortexDataset reader = await VortexDataset.OpenAsync(store, options);
+            try
+            {
+                while (true)
+                {
+                    await reader.RefreshAsync(built.Token);
+                    await foreach (RecordBatch batch in reader.Scan<MetricRow>().ToBatchesAsync().WithCancellation(built.Token))
+                    {
+                        Interlocked.Add(ref read, batch.RowCount);
+                        batch.Dispose();
+                    }
+                }
+            }
+            catch (OperationCanceledException) when (built.IsCancellationRequested)
+            {
+            }
+        }))];
 
         MetricGenerator generator = new MetricGenerator(series, 31);
         MetricRow[] batch = new MetricRow[rows];
@@ -192,6 +225,10 @@ internal static class BacklogBench
             await draft.Writer.WriteAsync<MetricRow>(batch);
             await writer.AppendAsync(draft);
         }
+
+        await built.CancelAsync();
+        await Task.WhenAll(readers);
+        return Interlocked.Read(ref read);
     }
 
     private static void Fresh(string root)
