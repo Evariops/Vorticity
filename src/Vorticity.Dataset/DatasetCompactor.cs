@@ -143,7 +143,7 @@ internal static partial class DatasetCompactor
         }
         catch (Exception failure) when (memory.Refused && failure is not JobTooWideException && !cancellationToken.IsCancellationRequested)
         {
-            dataset.NarrowJobs(job.Inputs.Count, memory.InputsPeak, memory.WriterPeak);
+            dataset.NarrowJobs(job.Inputs.Count, memory.InputsPeak, memory.Sizing, memory.WriterPeak);
             throw new JobTooWideException(job, memory.Peak, memory.Jobs.CeilingBytes, failure);
         }
         finally
@@ -304,6 +304,7 @@ internal static partial class DatasetCompactor
                 // writer and its open inputs are counted.
                 int open = merge ? ran.Inputs.Count : 1;
                 batchRows = InputBatchRows(dataset, schema, ran, open, JobBudget(dataset), writer);
+                memory.Sizing = (batchRows, open);
                 for (int doublings = 0; ; doublings++)
                 {
                     lateOutputs = late is null ? null : new ObjectStream(

@@ -63,6 +63,12 @@ internal sealed class JobMemory : IAsyncDisposable
     /// <summary>The most bytes its writer's blocks held at once.</summary>
     internal long WriterPeak => Writer.PeakBytes;
 
+    /// <summary>
+    /// The rows of an input's batch and the inputs open at once, once the job sized them; 0 before: what a job refused a
+    /// block tells the next plan of what an input holds (<see cref="VortexDataset.NarrowJobs"/>).
+    /// </summary>
+    internal (int BatchRows, int Open) Sizing { get; set; }
+
     /// <summary>The bytes of its inputs it copied to the scratch; none for a job that reads them from the store.</summary>
     internal long CopiedBytes => _copies?.CopiedBytes ?? 0;
 

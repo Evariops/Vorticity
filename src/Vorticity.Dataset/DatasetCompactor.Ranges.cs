@@ -736,6 +736,7 @@ internal static partial class DatasetCompactor
         int batchRows = InputBatchRows(dataset, schema, job, ranges.MostInputs, JobBudget(dataset), writer);
         long perRange = Math.Max(1, RangeBytes(dataset, schema, job, ranges, writer, batchRows));
         int lanes = (int)Math.Clamp(JobRoom(dataset) / perRange, 1, count);
+        memory.Sizing = (batchRows, ranges.MostInputs * lanes);
 
         using CancellationTokenSource stop = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         Exception? failed = null;

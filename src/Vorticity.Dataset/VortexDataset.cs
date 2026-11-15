@@ -342,14 +342,24 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
     /// <summary>
     /// A job of <paramref name="inputs"/> inputs was refused its blocks: the next takes half as many, until one runs to its end.
     /// What its inputs and its writer held when refused, <paramref name="inputBytes"/> and <paramref name="writerBytes"/>, is
-    /// less than they needed, and is kept as what they need at least.
+    /// less than they needed, and is kept as what they need at least: an input's share of it, at the rows of its batch, when
+    /// it holds more a row than the handle knew (<paramref name="sizing"/>, the batches' rows and the inputs open at once).
+    /// Kept without the rows of its batch, it was read as held by a batch of one row: 4.3 MB a row for a job of 300 inputs
+    /// refused under 1 344 MiB, and the next took the fan-out, 8, where half, 150, held (2026-11-15).
     /// </summary>
-    internal void NarrowJobs(int inputs, long inputBytes, long writerBytes)
+    internal void NarrowJobs(int inputs, long inputBytes, (int BatchRows, int Open) sizing, long writerBytes)
     {
         Volatile.Write(ref _jobWidthCap, Math.Max(1, inputs / 2));
-        if (inputs > 0 && inputBytes / inputs > InputJobBytes)
+        if (sizing is { BatchRows: > 0, Open: > 0 })
         {
-            Volatile.Write(ref _inputJobBytes, inputBytes / inputs);
+            long perInput = inputBytes / sizing.Open;
+            long perRow = (perInput - DatasetCompactor.InputFloorBytes) / sizing.BatchRows;
+            long known = InputJobBytes > 0 ? (InputJobBytes - DatasetCompactor.InputFloorBytes) / Math.Max(JobBatchRows, 1) : 0;
+            if (perRow > known)
+            {
+                Volatile.Write(ref _inputJobBytes, perInput);
+                Volatile.Write(ref _jobBatchRows, sizing.BatchRows);
+            }
         }
 
         if (writerBytes > WriterJobBytes)

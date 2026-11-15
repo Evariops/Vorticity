@@ -108,6 +108,32 @@ public sealed partial class JobMemoryTests
         Assert.Equal(all.OrderBy(r => r.Sequence), (await dataset.Scan<Row>().ToRecordsAsync(Ct).ToListAsync(Ct)).OrderBy(r => r.Sequence));
     }
 
+    /// <summary>
+    /// A job of 300 inputs refused once they held 4 MiB each at batches of 8 192 rows: the handle keeps what an input held at
+    /// the rows of its batch, which prices the next job, and takes half as many inputs; a refusal before the batches were
+    /// sized narrows the jobs and keeps what the handle knew; a refusal that held less a row than the handle knew keeps
+    /// what it knew.
+    /// </summary>
+    [Fact]
+    public async Task AJobRefusedKeepsWhatAnInputHeldAtTheRowsOfItsBatch()
+    {
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Row.Schema, Options(VortexSession.Default, fanout: 4), Ct);
+
+        dataset.NarrowJobs(300, 300L * (4L << 20), (0, 0), writerBytes: 0);
+        Assert.Equal(150, dataset.JobWidthCap);
+        Assert.Equal(0, dataset.InputJobBytes);
+
+        dataset.NarrowJobs(300, 300L * (4L << 20), (8_192, 300), writerBytes: 0);
+        Assert.Equal(150, dataset.JobWidthCap);
+        Assert.Equal(4L << 20, dataset.InputJobBytes);
+        Assert.Equal(8_192, dataset.JobBatchRows);
+
+        dataset.NarrowJobs(150, 150L * (1L << 20), (8_192, 150), writerBytes: 0);
+        Assert.Equal(75, dataset.JobWidthCap);
+        Assert.Equal(4L << 20, dataset.InputJobBytes);
+    }
+
     /// <summary>The same partition under the default budget, which holds it at once: one consolidation, no pass.</summary>
     [Fact]
     public async Task APartitionWithinItsBudgetIsConsolidatedAtOnce()
