@@ -1219,10 +1219,9 @@ internal sealed class ScanContext : IDisposable
     /// </summary>
     /// <param name="key">From <see cref="NodeCheckKey"/>.</param>
     /// <param name="tag">What the table was built against, which must match: the decoder's own check.</param>
-    /// <param name="table">The table's array, the context's.</param>
-    /// <param name="length">Its entries.</param>
+    /// <param name="table">The table's block, the context's.</param>
     /// <param name="facts">What the decoder kept with it.</param>
-    internal bool TryNodeTable(long key, long tag, out long[] table, out int length, out long facts)
+    internal bool TryNodeTable(long key, long tag, out Block<long> table, out long facts)
     {
         if (_memory?.Tables is { } tables)
         {
@@ -1230,42 +1229,37 @@ internal sealed class ScanContext : IDisposable
             {
                 if (kept.Key == key + 1 && kept.Tag == tag)
                 {
-                    (table, length, facts) = (kept.Array!, kept.Length, kept.Facts);
+                    (table, facts) = (kept.Table, kept.Facts);
                     return true;
                 }
             }
         }
 
-        (table, length, facts) = ([], 0, 0);
+        (table, facts) = (default, 0);
         return false;
     }
 
     /// <summary>
-    /// Keeps <paramref name="table"/>, rented from <see cref="ArrayPool{T}.Shared"/> and built from the node named by
-    /// <paramref name="key"/>, for the next ranges of that node this context reads, until the context is recycled.
+    /// Keeps <paramref name="table"/>, a block of the pool built from the node named by <paramref name="key"/>, for the next
+    /// ranges of that node this context reads, until the context is recycled.
     /// </summary>
     /// <param name="key">From <see cref="NodeCheckKey"/>.</param>
     /// <param name="tag">What the table was built against.</param>
     /// <param name="facts">What the decoder keeps with it.</param>
     /// <param name="table">The table, which the context then owns and gives back to the pool.</param>
-    /// <param name="length">Its entries.</param>
     /// <remarks>
     /// Like a passed check, a table is a fact of the file's bytes, not of the batch, and the reader only names a node
     /// within a scan: <see cref="Recycle"/> gives every table back, so none outlives the scan that read its node. A
     /// kernel that reads through a kept table still bounds what it reads by the table, never by the bytes again.
     /// </remarks>
-    internal void KeepNodeTable(long key, long tag, long facts, long[] table, int length)
+    internal void KeepNodeTable(long key, long tag, long facts, Block<long> table)
     {
         BatchMemory memory = _memory ??= new BatchMemory();
         NodeTable[] tables = memory.Tables ??= new NodeTable[NodeTableSlots];
         ref NodeTable slot = ref tables[memory.NextTable];
         memory.NextTable = (memory.NextTable + 1) % NodeTableSlots;
-        if (slot.Array is { } evicted)
-        {
-            ArrayPool<long>.Shared.Return(evicted);
-        }
-
-        slot = new NodeTable(key + 1, tag, facts, table, length);
+        Blocks.Return(slot.Table);
+        slot = new NodeTable(key + 1, tag, facts, table);
     }
 
     /// <summary>Gives every kept table back to the pool.</summary>
@@ -1275,11 +1269,7 @@ internal sealed class ScanContext : IDisposable
         {
             foreach (ref NodeTable kept in tables.AsSpan())
             {
-                if (kept.Array is { } array)
-                {
-                    ArrayPool<long>.Shared.Return(array);
-                }
-
+                Blocks.Return(kept.Table);
                 kept = default;
             }
 
@@ -1288,7 +1278,7 @@ internal sealed class ScanContext : IDisposable
     }
 
     /// <summary>A table a decoder built from a node: its key plus one (0: empty), its tag, its facts and its entries.</summary>
-    private readonly record struct NodeTable(long Key, long Tag, long Facts, long[]? Array, int Length);
+    private readonly record struct NodeTable(long Key, long Tag, long Facts, Block<long> Table);
 
     /// <summary>See <see cref="_memory"/>.</summary>
     private sealed class BatchMemory

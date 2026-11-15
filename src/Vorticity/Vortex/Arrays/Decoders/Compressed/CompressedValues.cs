@@ -1,5 +1,4 @@
 using System;
-using System.Buffers;
 using System.Buffers.Binary;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
@@ -715,17 +714,15 @@ internal readonly ref struct ValidityReader
 
 /// <summary>
 /// The VarBinView data buffers an expanded node must carry, optionally with one buffer of the
-/// caller's own in front. Rented from <see cref="ArrayPool{T}"/> and returned by
-/// <see cref="Dispose"/>, so nothing is allocated per batch.
+/// caller's own in front. A block of the pool, given back by <see cref="Dispose"/>, so nothing is
+/// allocated per batch.
 /// </summary>
 internal ref struct DataBufferSet
 {
-    private VortexBuffer[]? _rented;
-    private int _count;
+    private Block<VortexBuffer> _rented;
 
     /// <summary>The buffers, in the order the written views index them.</summary>
-    public readonly ReadOnlySpan<VortexBuffer> Buffers =>
-        _rented is null ? default : _rented.AsSpan(0, _count);
+    public readonly ReadOnlySpan<VortexBuffer> Buffers => _rented;
 
     /// <summary>How many buffers were prepended; the shift a copied view's index needs.</summary>
     public int LeadingCount { get; private set; }
@@ -748,8 +745,7 @@ internal ref struct DataBufferSet
 
         int leadingCount = hasLeading ? 1 : 0;
         int total = source.DataBufferCount + leadingCount;
-        set._rented = ArrayPool<VortexBuffer>.Shared.Rent(Math.Max(total, 1));
-        set._count = total;
+        set._rented = Blocks.Rent<VortexBuffer>(total);
         set.LeadingCount = leadingCount;
 
         CanonicalNode node = arena.GetNode(source.NodeIndex);
@@ -766,16 +762,11 @@ internal ref struct DataBufferSet
         return set;
     }
 
-    /// <summary>Returns the rented array.</summary>
+    /// <summary>Gives the block back. Safe to call more than once.</summary>
     public void Dispose()
     {
-        VortexBuffer[]? rented = _rented;
-        _rented = null;
-        _count = 0;
-        if (rented is not null)
-        {
-            ArrayPool<VortexBuffer>.Shared.Return(rented);
-        }
+        Blocks.Return(_rented);
+        _rented = default;
     }
 }
 

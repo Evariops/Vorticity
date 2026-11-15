@@ -55,10 +55,10 @@ internal sealed class FsstDecoder : ArrayDecoder
             return false;
         }
 
-        byte[] rented = System.Buffers.ArrayPool<byte>.Shared.Rent(Math.Max(length, 1));
+        Block<byte> rented = Blocks.Rent<byte>(length);
         try
         {
-            Span<byte> states = rented.AsSpan(0, length);
+            Span<byte> states = rented;
             bool answered = predicate.Kind switch
             {
                 Compute.EncodedPredicateKind.Prefix => PrefixStates(context, in node, dtype, length, predicate.Literal, states),
@@ -74,7 +74,7 @@ internal sealed class FsstDecoder : ArrayDecoder
         }
         finally
         {
-            System.Buffers.ArrayPool<byte>.Shared.Return(rented);
+            Blocks.Return(rented);
         }
     }
 
@@ -92,10 +92,10 @@ internal sealed class FsstDecoder : ArrayDecoder
             return false;
         }
 
-        byte[] rented = System.Buffers.ArrayPool<byte>.Shared.Rent(Math.Max(count, 1));
+        Block<byte> rented = Blocks.Rent<byte>(count);
         try
         {
-            Span<byte> states = rented.AsSpan(0, count);
+            Span<byte> states = rented;
             if (!CompareStates(context, in node, dtype, length, predicate.Op, predicate.Literal, states, start, count))
             {
                 return false;
@@ -106,7 +106,7 @@ internal sealed class FsstDecoder : ArrayDecoder
         }
         finally
         {
-            System.Buffers.ArrayPool<byte>.Shared.Return(rented);
+            Blocks.Return(rented);
         }
     }
 
@@ -156,8 +156,7 @@ internal sealed class FsstDecoder : ArrayDecoder
             node.GetBuffer(0).Span, node.GetBuffer(1).Span, Id);
 
         ReadOnlySpan<byte> needle = literal.BytesValue;
-        byte[] rented = System.Buffers.ArrayPool<byte>.Shared.Rent(
-            FsstSymbolTable.MaxCompressedLength(needle.Length) + 1);
+        Block<byte> rented = Blocks.Rent<byte>(FsstSymbolTable.MaxCompressedLength(needle.Length) + 1);
         try
         {
             if (!table.TryCompress(needle, rented, out int needleLength))
@@ -207,7 +206,7 @@ internal sealed class FsstDecoder : ArrayDecoder
         }
         finally
         {
-            System.Buffers.ArrayPool<byte>.Shared.Return(rented);
+            Blocks.Return(rented);
         }
     }
 
@@ -247,8 +246,7 @@ internal sealed class FsstDecoder : ArrayDecoder
             node.GetBuffer(0).Span, node.GetBuffer(1).Span, Id);
 
         ReadOnlySpan<byte> prefix = literal.BytesValue;
-        byte[] rented = System.Buffers.ArrayPool<byte>.Shared.Rent(
-            FsstSymbolTable.MaxCompressedLength(prefix.Length) + 1);
+        Block<byte> rented = Blocks.Rent<byte>(FsstSymbolTable.MaxCompressedLength(prefix.Length) + 1);
         try
         {
             if (!FsstPrefix.TryCreate(table, prefix, rented, out FsstPrefix starts))
@@ -275,7 +273,7 @@ internal sealed class FsstDecoder : ArrayDecoder
         }
         finally
         {
-            System.Buffers.ArrayPool<byte>.Shared.Return(rented);
+            Blocks.Return(rented);
         }
     }
 

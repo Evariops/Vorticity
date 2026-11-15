@@ -5,6 +5,7 @@ using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Arrays.Metadata;
+using Vorticity.Buffers;
 using Vorticity.Types;
 
 namespace Vorticity.Arrays.Decoders.Compressed;
@@ -88,7 +89,7 @@ internal sealed class RunEndDecoder : ArrayDecoder
         }
 
         int words = Compute.PredicateBits.WordsOf(runCount);
-        ulong[] answers = System.Buffers.ArrayPool<ulong>.Shared.Rent(2 * words);
+        Block<ulong> answers = Blocks.Rent<ulong>(2 * words);
         try
         {
             // A verdict a run, as bits: the values' encoding asked first, a dictionary answering on its own values, else the
@@ -104,7 +105,7 @@ internal sealed class RunEndDecoder : ArrayDecoder
         }
         finally
         {
-            System.Buffers.ArrayPool<ulong>.Shared.Return(answers);
+            Blocks.Return(answers);
         }
     }
 
@@ -122,7 +123,7 @@ internal sealed class RunEndDecoder : ArrayDecoder
             CompressedThrow.ChildLength(Id, "values", values.Length, runCount);
         }
 
-        byte[] rented = System.Buffers.ArrayPool<byte>.Shared.Rent(2 * runCount);
+        Block<byte> rented = Blocks.Rent<byte>(2 * runCount);
         try
         {
             Span<byte> states = rented.AsSpan(0, runCount);
@@ -136,7 +137,7 @@ internal sealed class RunEndDecoder : ArrayDecoder
         }
         finally
         {
-            System.Buffers.ArrayPool<byte>.Shared.Return(rented);
+            Blocks.Return(rented);
         }
     }
 

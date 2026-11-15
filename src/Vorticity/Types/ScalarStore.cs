@@ -194,12 +194,47 @@ internal sealed class ScalarStore
             _children[start + i] = elements[i].NodeIndexOrAbsent;
         }
 
-        _childCount += elements.Length;
+        return AddList(start, elements.Length, depth);
+    }
+
+    /// <summary>
+    /// <see cref="List(ReadOnlySpan{ScalarValue})"/> over elements given as nodes of this store, each an element's
+    /// <see cref="ScalarValue.NodeIndexOrAbsent"/>, -1 for <see cref="Absent"/>: for a reader that gathers a list's
+    /// elements as integers, which a block of the pool holds, rather than as values, which hold a reference to the store.
+    /// </summary>
+    /// <exception cref="ArgumentOutOfRangeException">An element is neither a node of this store nor -1.</exception>
+    /// <exception cref="VortexFormatException">The resulting nesting depth exceeds <see cref="VortexLimits.MaxDTypeDepth"/>.</exception>
+    internal ScalarValue ListOfNodes(ReadOnlySpan<int> nodes)
+    {
+        int depth = 0;
+        for (int i = 0; i < nodes.Length; i++)
+        {
+            int node = nodes[i];
+            if (node != -1)
+            {
+                ArgumentOutOfRangeException.ThrowIfGreaterThanOrEqual((uint)node, (uint)_nodeCount, nameof(nodes));
+                depth = Math.Max(depth, _nodes[node].Depth);
+            }
+        }
+
+        depth++;
+        VortexLimits.CheckDepth(depth, VortexLimits.MaxDTypeDepth, "Scalar");
+
+        Ensure(ref _children, _childCount, nodes.Length, _nodes.Length);
+        int start = _childCount;
+        nodes.CopyTo(_children.AsSpan(start));
+        return AddList(start, nodes.Length, depth);
+    }
+
+    /// <summary>The list whose <paramref name="length"/> elements were just appended to the children from <paramref name="start"/>.</summary>
+    private ScalarValue AddList(int start, int length, int depth)
+    {
+        _childCount += length;
 
         ScalarNode n = default;
         n.Kind = ScalarValueKind.List;
         n.Start = start;
-        n.Length = elements.Length;
+        n.Length = length;
         n.Child = -1;
         n.Depth = depth;
         return Add(ref n);

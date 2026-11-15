@@ -243,7 +243,7 @@ internal static class ScalarProtobuf
         int depth)
     {
         ProtoReader reader = new ProtoReader(body);
-        ProtoScratchList<ScalarValue> values = default;
+        ProtoScratchList<int> values = default;
         try
         {
             while (reader.TryReadTag(out int field, out ProtoWireType wire))
@@ -254,14 +254,14 @@ internal static class ScalarProtobuf
 
                     // An empty element message is a legal Absent element, and it must keep its
                     // slot: dropping it would renumber every element after it.
-                    values.Add(ReadValueBody(reader.ReadLengthDelimited(), store, dtypes, depth + 1));
+                    values.Add(ReadValueBody(reader.ReadLengthDelimited(), store, dtypes, depth + 1).NodeIndexOrAbsent);
                     continue;
                 }
 
                 reader.SkipField(wire);
             }
 
-            return store.List(values.Span);
+            return store.ListOfNodes(values.Span);
         }
         finally
         {

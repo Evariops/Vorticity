@@ -1,10 +1,10 @@
 using System;
-using System.Buffers;
 using System.Buffers.Binary;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
+using Vorticity.Buffers;
 
 namespace Vorticity.Serialization.Protobuf;
 
@@ -23,7 +23,7 @@ namespace Vorticity.Serialization.Protobuf;
 /// <c>ScalarValue.kind</c> is a <c>oneof</c> member.
 /// </para>
 /// <para>
-/// <b>Ownership.</b> The backing array is rented from <see cref="ArrayPool{T}"/> and returned by
+/// <b>Ownership.</b> The backing array is a block of the pool (<see cref="Blocks"/>), given back by
 /// <see cref="Dispose"/>. <see cref="WrittenSpan"/> is only valid until the next mutation or
 /// <see cref="Dispose"/>. A <c>default(ProtoWriter)</c> is usable: the array is rented lazily on
 /// first write.
@@ -83,7 +83,7 @@ internal struct ProtoWriter : IDisposable
         _openScopes = 0;
         if (initialCapacity > 0)
         {
-            Open(ArrayPool<byte>.Shared.Rent(initialCapacity));
+            Open(Blocks.Rent<byte>(initialCapacity).Array());
         }
     }
 
@@ -115,10 +115,7 @@ internal struct ProtoWriter : IDisposable
         _buffer = null;
         _position = 0;
         _openScopes = 0;
-        if (buffer is not null)
-        {
-            ArrayPool<byte>.Shared.Return(buffer);
-        }
+        Blocks.ReturnBytes(buffer);
     }
 
     // ---------------------------------------------------------------------------------------
@@ -690,7 +687,7 @@ internal struct ProtoWriter : IDisposable
             size = size >= Array.MaxLength / 2 ? Array.MaxLength : size * 2;
         }
 
-        byte[] next = ArrayPool<byte>.Shared.Rent(size);
+        byte[] next = Blocks.Rent<byte>(size).Array();
         if (previous is null)
         {
             Open(next);
@@ -706,7 +703,7 @@ internal struct ProtoWriter : IDisposable
             new ReadOnlySpan<byte>(previous, End(previous) - records, records).CopyTo(new Span<byte>(next, limit, records));
         }
 
-        ArrayPool<byte>.Shared.Return(previous);
+        Blocks.ReturnBytes(previous);
         _buffer = next;
     }
 

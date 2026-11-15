@@ -1,5 +1,4 @@
 using System;
-using System.Buffers;
 using System.Diagnostics.CodeAnalysis;
 using System.Numerics;
 using System.Runtime.CompilerServices;
@@ -160,7 +159,8 @@ internal sealed class OnPairDecoder : ArrayDecoder
         // its recycling forgets; the tag, the tokens and the dictionary's length, only checks the shape is the same.
         long tag = ((long)tokenCount << 32) | (uint)dictionary.Length;
         ReadOnlySpan<long> tokens = default;
-        long[]? built = null;
+        Block<long> built = default;
+        bool made = false;
         bool ascii = false;
         if (!fewCodes && context.TryKeptTable(in node, tag, out tokens, out long facts))
         {
@@ -174,9 +174,10 @@ internal sealed class OnPairDecoder : ArrayDecoder
             context.MarkNodeChecked(in node);
             if (!fewCodes)
             {
-                built = ArrayPool<long>.Shared.Rent(tokenCount);
-                BuildTokenTable(dictOffsets.Values.Span, metadata.DictionaryOffsetsPType, tokenCount, built.AsSpan(0, tokenCount), dictionary.Length);
-                tokens = built.AsSpan(0, tokenCount);
+                built = Buffers.Blocks.Rent<long>(tokenCount);
+                made = true;
+                BuildTokenTable(dictOffsets.Values.Span, metadata.DictionaryOffsetsPType, tokenCount, built, dictionary.Length);
+                tokens = built;
                 ascii = dtype.Kind == DTypeKind.Utf8
                     && Ascii.IsValid(dictionary.Span[..Math.Min(dictionaryBytes, dictionary.Length)]);
             }
@@ -279,9 +280,9 @@ internal sealed class OnPairDecoder : ArrayDecoder
         }
 
         // The table built, kept for the node's next ranges when a reader names the node; a table not kept goes back.
-        if (built is not null && !context.KeepTable(in node, tag, (uint)dictionaryBytes | (ascii ? AsciiFact : 0), built, tokenCount))
+        if (made && !context.KeepTable(in node, tag, (uint)dictionaryBytes | (ascii ? AsciiFact : 0), built))
         {
-            ArrayPool<long>.Shared.Return(built);
+            Buffers.Blocks.Return(built);
         }
 
         int viewBytes = ArrayDecodeContext.CheckedMultiply(
@@ -422,7 +423,7 @@ internal sealed class OnPairDecoder : ArrayDecoder
         Span<byte> destination)
     {
         int rows = wanted.Length;
-        long[] rented = ArrayPool<long>.Shared.Rent(Math.Max(3 * rows, 1));
+        Block<long> rented = Buffers.Blocks.Rent<long>(3 * rows);
         try
         {
             Span<long> starts = rented.AsSpan(0, rows);
@@ -460,7 +461,7 @@ internal sealed class OnPairDecoder : ArrayDecoder
         }
         finally
         {
-            ArrayPool<long>.Shared.Return(rented);
+            Buffers.Blocks.Return(rented);
         }
     }
 
@@ -479,14 +480,14 @@ internal sealed class OnPairDecoder : ArrayDecoder
         ReadOnlySpan<int> wanted,
         Span<byte> destination)
     {
-        long[] rentedFrom = ArrayPool<long>.Shared.Rent(Math.Max(named, 1));
-        long[] rentedTo = ArrayPool<long>.Shared.Rent(Math.Max(named, 1));
-        int[] rentedTokens = ArrayPool<int>.Shared.Rent(Math.Max(named, 1));
+        Block<long> rentedFrom = Buffers.Blocks.Rent<long>(named);
+        Block<long> rentedTo = Buffers.Blocks.Rent<long>(named);
+        Block<int> rentedTokens = Buffers.Blocks.Rent<int>(named);
         try
         {
-            Span<long> from = rentedFrom.AsSpan(0, named);
-            Span<long> to = rentedTo.AsSpan(0, named);
-            Span<int> tokens = rentedTokens.AsSpan(0, named);
+            Span<long> from = rentedFrom;
+            Span<long> to = rentedTo;
+            Span<int> tokens = rentedTokens;
 
             // The codes land where their tokens' starts will, each checked against the dictionary
             // before an offset is read at it.
@@ -538,9 +539,9 @@ internal sealed class OnPairDecoder : ArrayDecoder
         }
         finally
         {
-            ArrayPool<int>.Shared.Return(rentedTokens);
-            ArrayPool<long>.Shared.Return(rentedTo);
-            ArrayPool<long>.Shared.Return(rentedFrom);
+            Buffers.Blocks.Return(rentedTokens);
+            Buffers.Blocks.Return(rentedTo);
+            Buffers.Blocks.Return(rentedFrom);
         }
     }
 

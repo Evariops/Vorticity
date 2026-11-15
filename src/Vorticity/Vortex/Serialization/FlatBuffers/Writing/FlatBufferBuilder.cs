@@ -1,11 +1,11 @@
 using System;
-using System.Buffers;
 using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
+using Vorticity.Buffers;
 
 namespace Vorticity.Serialization.FlatBuffers;
 
@@ -57,7 +57,7 @@ namespace Vorticity.Serialization.FlatBuffers;
 /// written with the <c>…Always</c> variants.
 /// </para>
 /// <para>
-/// <b>Ownership.</b> The scratch array is rented from <see cref="ArrayPool{T}"/> and returned by
+/// <b>Ownership.</b> The scratch array is a block of the pool (<see cref="Blocks"/>), given back by
 /// <see cref="Dispose"/>. The span returned by <see cref="Finish"/> points into it and is valid
 /// only until <see cref="Clear"/> or <see cref="Dispose"/>.
 /// </para>
@@ -117,8 +117,7 @@ internal sealed class FlatBufferBuilder : IDisposable
         ArgumentOutOfRangeException.ThrowIfNegative(initialCapacity);
         ArgumentOutOfRangeException.ThrowIfGreaterThan(initialCapacity, MaxBufferSize);
 
-        _buffer = ArrayPool<byte>.Shared.Rent(
-            initialCapacity < MinimumCapacity ? MinimumCapacity : initialCapacity);
+        _buffer = Blocks.Rent<byte>(initialCapacity < MinimumCapacity ? MinimumCapacity : initialCapacity).Array();
         _space = _buffer.Length;
         _minAlign = 1;
         _vtable = new int[16];
@@ -178,7 +177,7 @@ internal sealed class FlatBufferBuilder : IDisposable
         _buffer = [];
         _space = 0;
         _vtableSize = -1;
-        ArrayPool<byte>.Shared.Return(buffer);
+        Blocks.ReturnBytes(buffer);
     }
 
     // ---------------------------------------------------------------------------------------
@@ -747,7 +746,7 @@ internal sealed class FlatBufferBuilder : IDisposable
             next = MaxBufferSize;
         }
 
-        byte[] grown = ArrayPool<byte>.Shared.Rent((int)next);
+        byte[] grown = Blocks.Rent<byte>((int)next).Array();
 
         // Positions are counted from the end, so the written region is copied to the end of the
         // new array and every offset this builder has already handed out stays valid.
@@ -755,7 +754,7 @@ internal sealed class FlatBufferBuilder : IDisposable
         byte[] old = _buffer;
         _buffer = grown;
         _space = grown.Length - written;
-        ArrayPool<byte>.Shared.Return(old);
+        Blocks.ReturnBytes(old);
     }
 
     /// <summary>

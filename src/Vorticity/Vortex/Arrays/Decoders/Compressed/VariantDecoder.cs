@@ -1,5 +1,4 @@
 using System;
-using System.Buffers;
 using System.Numerics;
 using System.Runtime.InteropServices;
 
@@ -459,22 +458,23 @@ internal static class ShreddedTree
                 Span<int> nameStack = stackalloc int[StackFields];
                 using Scratch<int> fields = new(count, fieldStack);
                 using Scratch<int> names = new(count, nameStack);
-                // The groups' types rented: the arena copies them, and an array of them a batch was 7 MB of a read of
-                // 65,536 rows of 200 shredded keys.
-                DType[] groups = ArrayPool<DType>.Shared.Rent(count);
+                // The groups' types as their nodes in the arena, which copies them, in a block: an array of them a
+                // batch was 7 MB of a read of 65,536 rows of 200 shredded keys.
+                Block<int> groups = Blocks.Rent<int>(count);
                 try
                 {
                     for (int i = 0; i < count; i++)
                     {
-                        fields.Span[i] = Group(arena, types, n.GetFieldIndex(i), depth + 1, out groups[i]);
+                        fields.Span[i] = Group(arena, types, n.GetFieldIndex(i), depth + 1, out DType group);
+                        groups[i] = group.NodeIndex;
                         names.Span[i] = types.InternName(n.DType.GetFieldNameUtf8(i));
                     }
 
-                    typed = types.Struct(names.Span, groups.AsSpan(0, count), n.DType.Nullability);
+                    typed = types.StructOfNodes(names.Span, groups, n.DType.Nullability);
                 }
                 finally
                 {
-                    ArrayPool<DType>.Shared.Return(groups, clearArray: true);
+                    Blocks.Return(groups);
                 }
 
                 return arena.AddStruct(typed, n.Length, n.Validity, fields.Span);

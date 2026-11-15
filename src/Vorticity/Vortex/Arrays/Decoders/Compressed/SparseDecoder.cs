@@ -1,5 +1,4 @@
 using System;
-using System.Buffers;
 using System.Buffers.Binary;
 using Vorticity.Arrays.Metadata;
 using Vorticity.Buffers;
@@ -89,7 +88,7 @@ internal sealed class SparseDecoder : ArrayDecoder
         // The patch values judged in their encoding where it answers, a packing, a frame or a dictionary, which decodes none
         // of them; else decoded and judged one by one.
         int words = Compute.PredicateBits.WordsOf(Math.Max(patchCount, 1));
-        ulong[] answers = ArrayPool<ulong>.Shared.Rent(2 * words);
+        Block<ulong> answers = Blocks.Rent<ulong>(2 * words);
         Compute.PredicateBits judged = new Compute.PredicateBits(answers.AsSpan(0, words), answers.AsSpan(words, words), patchCount);
         bool inEncoding = patchCount > 0 && context.TryEvaluateChild(in node, 1, dtype, patchCount, predicate, ref judged);
         int valuesIndex = inEncoding ? -1 : context.DecodeChild(in node, 1, dtype, patchCount);
@@ -102,7 +101,7 @@ internal sealed class SparseDecoder : ArrayDecoder
 
         TypedScalar fill = TypedScalarReader.Read(node.GetBuffer(0).Span, dtype, context.Scalars, context.Types);
         int fillIndex = Canonical.ConstantCanonicalizer.Build(context, dtype, 1, in fill);
-        byte[] rented = ArrayPool<byte>.Shared.Rent(Math.Max(2 * patchCount, 2));
+        Block<byte> rented = Blocks.Rent<byte>(Math.Max(2 * patchCount, 2));
         try
         {
             Span<byte> verdict = rented.AsSpan(0, 1);
@@ -147,8 +146,8 @@ internal sealed class SparseDecoder : ArrayDecoder
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(rented);
-            ArrayPool<ulong>.Shared.Return(answers);
+            Blocks.Return(rented);
+            Blocks.Return(answers);
         }
     }
 

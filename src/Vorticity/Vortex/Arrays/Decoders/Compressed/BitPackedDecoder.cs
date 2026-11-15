@@ -1,5 +1,4 @@
 using System;
-using System.Buffers;
 using System.Buffers.Binary;
 using System.Numerics;
 using System.Runtime.CompilerServices;
@@ -242,11 +241,10 @@ internal sealed class BitPackedDecoder : ArrayDecoder
         }
 
         int words = Math.Max(1, (1 << bitWidth) >> 6);
-        ulong[] set = ArrayPool<ulong>.Shared.Rent(words);
+        Block<ulong> set = Buffers.Blocks.RentCleared<ulong>(words);
         try
         {
-            Span<ulong> held = set.AsSpan(0, words);
-            held.Clear();
+            Span<ulong> held = set;
             for (int m = 0; m < members.Length; m++)
             {
                 if (question.TryPattern(members[m], out ulong pattern) && pattern <= packedMask)
@@ -261,7 +259,7 @@ internal sealed class BitPackedDecoder : ArrayDecoder
         }
         finally
         {
-            ArrayPool<ulong>.Shared.Return(set);
+            Buffers.Blocks.Return(set);
         }
     }
 
@@ -314,16 +312,16 @@ internal sealed class BitPackedDecoder : ArrayDecoder
         }
 
         int blocks = ((within + length - 1) / FastLanes.BlockSize) + 1;
-        ulong[] rented = ArrayPool<ulong>.Shared.Rent(blocks * FastLanes.BlockWords);
+        Block<ulong> rented = Buffers.Blocks.Rent<ulong>(blocks * FastLanes.BlockWords);
         try
         {
-            Span<ulong> answers = rented.AsSpan(0, blocks * FastLanes.BlockWords);
+            Span<ulong> answers = rented;
             Run(packed.Slice(firstBlock * wordsPerBlock, blocks * wordsPerBlock), bitWidth, kernel, low, span, members, set, answers, blocks);
             BitmapKernels.CopyRange(MemoryMarshal.AsBytes(answers), within, MemoryMarshal.AsBytes(truth), 0, length);
         }
         finally
         {
-            ArrayPool<ulong>.Shared.Return(rented);
+            Buffers.Blocks.Return(rented);
         }
     }
 
@@ -572,6 +570,12 @@ internal sealed class BitPackedDecoder : ArrayDecoder
         }
     }
 
+    /// <remarks>
+    /// A partial block unpacks whole into a block of scratch on the stack, as <see cref="FastLanes.GatherRows{T}"/> does: a
+    /// range read at every batch, or a take's at every range, rents nothing. The scratch is written whole before it is read,
+    /// so it is not zeroed.
+    /// </remarks>
+    [SkipLocalsInit]
     private static void Unpack<T>(
         ReadOnlySpan<byte> packedBytes, int bitWidth, int offset, int length, Span<byte> destinationBytes, T reference)
         where T : unmanaged, IBinaryInteger<T>, IUnsignedNumber<T>
@@ -608,25 +612,17 @@ internal sealed class BitPackedDecoder : ArrayDecoder
 
         if (headPartial || tailPartial)
         {
-            T[] scratchArray = ArrayPool<T>.Shared.Rent(FastLanes.BlockSize);
-            try
+            Span<T> scratch = stackalloc T[FastLanes.BlockSize];
+            if (headPartial)
             {
-                Span<T> scratch = scratchArray.AsSpan(0, FastLanes.BlockSize);
-                if (headPartial)
-                {
-                    CopyPartial(packed, bitWidth, elementsPerBlock, firstBlock, offset, end, scratch, destination, reference);
-                }
-
-                // A window partial at both ends of one and the same block was already copied whole
-                // by the head: its clamp is [offset, end), which is all of it.
-                if (tailPartial && !(headPartial && lastBlock == firstBlock))
-                {
-                    CopyPartial(packed, bitWidth, elementsPerBlock, lastBlock, offset, end, scratch, destination, reference);
-                }
+                CopyPartial(packed, bitWidth, elementsPerBlock, firstBlock, offset, end, scratch, destination, reference);
             }
-            finally
+
+            // A window partial at both ends of one and the same block was already copied whole
+            // by the head: its clamp is [offset, end), which is all of it.
+            if (tailPartial && !(headPartial && lastBlock == firstBlock))
             {
-                ArrayPool<T>.Shared.Return(scratchArray);
+                CopyPartial(packed, bitWidth, elementsPerBlock, lastBlock, offset, end, scratch, destination, reference);
             }
         }
 
@@ -705,14 +701,14 @@ internal sealed class BitPackedDecoder : ArrayDecoder
         // A range reads the whole patch set, decoded once for every range of the node.
         bool whole = start == 0 && count == length;
         ReadOnlySpan<byte> source = Patches.Read(context, in node, 0, dtype, metadata.Patches, length, retained: !whole, Id, out Patches patches);
-        byte[]? added = null;
+        Block<byte> added = default;
         if (reference != 0)
         {
             // A patch is an encoded value as much as a packed one: under a frame of reference, its
             // value is the patch plus the reference. Patches are few, so they are added on a copy.
-            added = ArrayPool<byte>.Shared.Rent(source.Length);
-            IntegerKernels.AddWrapping(source, added.AsSpan(0, source.Length), width, reference);
-            source = added.AsSpan(0, source.Length);
+            added = Buffers.Blocks.Rent<byte>(source.Length);
+            IntegerKernels.AddWrapping(source, added, width, reference);
+            source = added;
         }
 
         try
@@ -727,10 +723,7 @@ internal sealed class BitPackedDecoder : ArrayDecoder
         }
         finally
         {
-            if (added is not null)
-            {
-                ArrayPool<byte>.Shared.Return(added);
-            }
+            Buffers.Blocks.Return(added);
         }
     }
 }

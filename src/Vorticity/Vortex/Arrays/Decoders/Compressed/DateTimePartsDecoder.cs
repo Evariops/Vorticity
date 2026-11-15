@@ -1,5 +1,4 @@
 using System;
-using System.Buffers;
 using System.Numerics;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Arrays.Metadata;
@@ -142,10 +141,10 @@ internal sealed class DateTimePartsDecoder : ArrayDecoder
 
         long day = SecondsPerDay * divisor;
         int words = Compute.PredicateBits.WordsOf(length);
-        ulong[] rented = ArrayPool<ulong>.Shared.Rent(Math.Max(1, words * Scratches));
+        Block<ulong> rented = Blocks.Rent<ulong>(words * Scratches);
         try
         {
-            Span<ulong> scratch = rented.AsSpan(0, words * Scratches);
+            Span<ulong> scratch = rented;
             Span<ulong> known = scratch.Slice(0, words);
             Span<ulong> part = scratch.Slice(words, words);
             Span<ulong> answer = scratch.Slice(2 * words, words);
@@ -216,7 +215,7 @@ internal sealed class DateTimePartsDecoder : ArrayDecoder
         }
         finally
         {
-            ArrayPool<ulong>.Shared.Return(rented);
+            Blocks.Return(rented);
         }
     }
 
@@ -253,10 +252,10 @@ internal sealed class DateTimePartsDecoder : ArrayDecoder
         if (!whole)
         {
             Span<ulong> same = part;
-            ulong[] rented = ArrayPool<ulong>.Shared.Rent(Math.Max(1, part.Length));
+            Block<ulong> rented = Blocks.Rent<ulong>(part.Length);
             try
             {
-                Span<ulong> ofSecond = rented.AsSpan(0, part.Length);
+                Span<ulong> ofSecond = rented;
                 if (!(from
                         ? Ask(context, in node, 2, subseconds, length, subsecond, divisor - 1, ofSecond, known, out _)
                         : Ask(context, in node, 2, subseconds, length, 0, subsecond, ofSecond, known, out _)))
@@ -268,7 +267,7 @@ internal sealed class DateTimePartsDecoder : ArrayDecoder
             }
             finally
             {
-                ArrayPool<ulong>.Shared.Return(rented);
+                Blocks.Return(rented);
             }
         }
 
