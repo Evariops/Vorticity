@@ -10,7 +10,8 @@
 # blown allocation ceiling costs four seconds rather than forty.
 #
 #   1. the eleven ratchet tests  counts and ceilings, deterministic, ~12 s; the ninth is the
-#                                dataset's read budget, asserted through a counting store, the
+#                                dataset's read budget, asserted through a counting store, its
+#                                million objects in a class of their own, the
 #                                tenth the work of a group by, counted at one lane, the eleventh
 #                                the requests, bytes and allocations of each query path of a
 #                                dataset of periods
@@ -46,7 +47,7 @@ done
 
 ratchets=(PathAllocationTests ScanAllocationTests WriteAllocationTests WrittenSizeTests
           FlatLayoutDecodeCountTests RoundTripCountTests LiveMemoryTests CorpusCoverageTests
-          DatasetBudgetTests WorkCounterTests QueryPathBudgetTests)
+          DatasetBudgetTests DatasetScaleBudgetTests WorkCounterTests QueryPathBudgetTests)
 
 failed=()
 step() {

@@ -3,7 +3,8 @@
 // WHAT THE DESIGN CLAIMS is about CONSTANTS, not about speed: a clustering-key point
 // lookup costs at most R requests and B bytes, constants of the design, asserted equal across data
 // objects of 1 GiB, 10 GiB and 100 GiB (sparse, only the bytes read matter) and across datasets of
-// 1, 10³ and 10⁶ objects (synthetic leaves). Two axes, and they fail differently: the SIZE axis
+// 1, 10³, 10⁵ and 10⁶ objects (synthetic leaves, the million with the measurements in
+// DatasetScaleBudgetTests). Two axes, and they fail differently: the SIZE axis
 // catches anything on the read path that scales with an object's length, which ReadBudgetTests
 // holds for one file and which a dataset must not reintroduce; the COUNT axis catches a descent
 // that walks a level instead of descending it, which no single-file test can see at all.
@@ -80,12 +81,19 @@ public sealed class DatasetBudgetTests
         new ObjectEntry(
             CommitKey.ForData($"{i:x8}"), (UInt128)(uint)i + 1, 1_000, 1 << 20, (UInt128)(uint)i, Summaries(i)));
 
+    /// <remarks>
+    /// A million objects, two pages below what the header inlines, is the design's scale and three seconds of commits: it
+    /// runs with the measurements (<see cref="DatasetScaleBudgetTests"/>). A hundred thousand already read a page below
+    /// the header, where a descent that walked a level would blow past the bound.
+    /// </remarks>
     [Theory]
     [InlineData(1)]
     [InlineData(1_000)]
     [InlineData(100_000)]
-    [InlineData(1_000_000)]
-    public async Task APointLookupCostsTheSameWhateverTheObjectCount(int objects)
+    public Task APointLookupCostsTheSameWhateverTheObjectCount(int objects) => PointLookupAsync(objects);
+
+    /// <summary>A cold point lookup over a dataset of <paramref name="objects"/> objects, held to the design's constant, then warm.</summary>
+    internal static async Task PointLookupAsync(int objects)
     {
         // The point-lookup constant, on the axis a single-file test cannot see. The numbers are
         // printed rather than pinned one by one: what the assertion holds is that they do not
@@ -649,4 +657,23 @@ public sealed class DatasetBudgetTests
         MemoryMarshal.Cast<long, byte>(values).CopyTo(bytes);
         return buffer;
     }
+}
+
+/// <summary>
+/// The budgets the design states at its own scale, a million objects and more: they hold the constant where the design
+/// says it holds, which takes seconds a unit test should not pay, so they run with the measurements, in CI's runner of
+/// its own, in tests/runs-alone.sh and in bench/gate.sh.
+/// </summary>
+[CollectionDefinition(nameof(DesignScaleCollection), DisableParallelization = true)]
+public sealed class DesignScaleCollection
+{
+}
+
+/// <summary>The point lookup's constant over a million objects: two pages below what the header inlines, four requests at most.</summary>
+[Collection(nameof(DesignScaleCollection))]
+[Trait("Category", "RunsAlone")]
+public sealed class DatasetScaleBudgetTests
+{
+    [Fact]
+    public Task APointLookupOverAMillionObjectsCostsWhatItDoesOverOne() => DatasetBudgetTests.PointLookupAsync(1_000_000);
 }
