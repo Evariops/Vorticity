@@ -41,6 +41,28 @@ public sealed class SlabsTests
         Assert.Equal(-1, slab.TryTake(12));
     }
 
+    /// <summary>A slab says in one test whether a piece of a size is left, and counts the pages it handed out.</summary>
+    [Fact]
+    public void ASlabSaysWhetherAPieceOfASizeIsLeft()
+    {
+        Slabs.Slab slab = new Slabs.Slab();
+        Assert.True(slab.Holds(12));
+        int half = slab.TryTake(12);
+
+        // The other half lacks its last page: pieces of half its size at most.
+        Assert.False(slab.Holds(12));
+        Assert.True(slab.Holds(11));
+        while (slab.TryTake(0) >= 0)
+        {
+        }
+
+        Assert.False(slab.Holds(0));
+        Assert.Equal(Pages - 1, slab.TakenPages);
+        slab.Give(half, 12);
+        Assert.True(slab.Holds(12));
+        Assert.Equal(Pages - 1 - 4096, slab.TakenPages);
+    }
+
     [Fact]
     public unsafe void APieceIsAlignedAndInsideTheArray()
     {

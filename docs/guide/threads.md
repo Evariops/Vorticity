@@ -141,6 +141,18 @@ whole for the next one. Blocks of every size, each a pinned array of its own, le
 pinned heap that no other allocation could use, which the heap's limit counts: under 2 GiB, a
 compaction failed with 452 MB of them free.
 
+A slab goes back to the collector with its last piece, so the pool lets go of its blocks slab by slab. Before each letting go it counts what each slab holds, and orders each class's blocks so that a rent takes those of the slab most in use and a letting go those of the slab least in use: the slabs the work no longer needs empty, and go. Asked for room, it gives back first the blocks of an array of their own, then every slab whose pieces it keeps all, then the blocks of the slabs least in use. A class's floor stays only on a slab that rented blocks keep alive anyway, or on one slab: 256 KiB of floor left alone on a slab would keep 32 MiB. What the slabs hold free between their pieces is the pool's, counted under `pool` in the memory kept: the next blocks are cut from it without the heap growing. The budget still counts it with the rest of the process, since the arrays a query's tables grow cannot use it.
+
+Measured with the same bench, after the jobs, two turns of the slow timer and a full collection that gives the collector's free regions back, with the pool letting go class by class (before) and slab by slab (now):
+
+| Limit | Slabs left, before | Now | Resident, before | Now | What the questions get, before | Now |
+|---|---|---|---|---|---|---|
+| 2 GiB | 608 MiB for 5 MiB of blocks | 32 MiB | 782 MiB | 215 MiB | 663 MiB of 1 344 | 1 036 MiB |
+| 4 GiB | 1 088 MiB for 2 MiB of blocks | 32 MiB | 1 246 MiB | 237 MiB | 1 483 MiB of 2 688 | 2 312 MiB |
+| 8 GiB | 672 MiB for 2 MiB of blocks | 32 MiB | 895 MiB | 174 MiB | 4 474 MiB of 5 376 | 5 307 MiB |
+
+The jobs take as long as before, within what two runs of the same code differ by: 56 s against 56 under 2 GiB, 44 against 46 under 4 GiB, 37 against 35 under 8 GiB.
+
 Set the limit when the process starts, before it holds data: `SetLimit` refuses a limit whose heap
 the collector already passes after a full collection, and the limit set before stays.
 `VortexMemory.LimitBytes` says the limit set, and `VortexDiagnostics.GetMemoryReport().LimitBytes`

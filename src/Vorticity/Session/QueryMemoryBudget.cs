@@ -559,7 +559,9 @@ public sealed class QueryMemoryBudget
     /// caller still holds of a result. What the collector kept committed past its heap: the regions
     /// it freed and keeps for what comes next, which a collection that gives them back returns
     /// (300 MiB of them after eight queries at once under 512 MiB, 85 MiB live). What the queries let go before the collection, it took; what they let go since counts
-    /// with the rest until the next.
+    /// with the rest until the next. What the slabs hold free between their pieces counts with it too: it is room for the
+    /// pool's next blocks only, never for the arrays a query's tables grow, and counted as room, eight queries under a heap
+    /// held to 512 MiB ran it out of memory (2026-11-16).
     /// </summary>
     /// <remarks>
     /// Between two collections, a counter read; once a collection, the collector's state, read from

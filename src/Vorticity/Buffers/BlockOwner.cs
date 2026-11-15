@@ -143,6 +143,9 @@ internal sealed class BlockOwner : SegmentOwner
     /// <summary>The pool bucket this block belongs to, or -1 when it is not poolable.</summary>
     internal int BucketIndex => _bucketIndex;
 
+    /// <summary>The slab the block is a piece of; null for an array of its own.</summary>
+    internal Slabs.Slab? Slab => _slab;
+
     /// <summary><see langword="true"/> when this owner was rented from <paramref name="pool"/>.</summary>
     /// <param name="pool">The candidate pool.</param>
     internal bool BelongsTo(BlockPool pool) => ReferenceEquals(_pool, pool);
@@ -185,7 +188,7 @@ internal sealed class BlockOwner : SegmentOwner
         }
     }
 
-    /// <summary>Lets go of the array of a block that the pool popped out of a bucket during <c>Trim</c>.</summary>
+    /// <summary>Lets go of the array of a block that the pool took out of a bucket.</summary>
     internal void FreeParked() => _ = Drop();
 
     /// <summary>Re-arms a parked owner for a new rental of <paramref name="length"/> bytes.</summary>

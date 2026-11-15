@@ -168,18 +168,22 @@ internal static class HeldMemory
 
     /// <summary>The bytes the holders of type <typeparamref name="T"/> hold now.</summary>
     internal static long BytesOf<T>()
+        where T : IHeldMemory => BytesOf<T>(static holder => holder.HeldBytes);
+
+    /// <summary>The sum of <paramref name="bytes"/> over the holders of type <typeparamref name="T"/>.</summary>
+    internal static long BytesOf<T>(Func<T, long> bytes)
         where T : IHeldMemory
     {
-        long bytes = 0;
+        long sum = 0;
         foreach (KeyValuePair<IHeldMemory, object?> pair in Holders)
         {
             if (pair.Key is T holder)
             {
-                bytes += holder.HeldBytes;
+                sum += bytes(holder);
             }
         }
 
-        return bytes;
+        return sum;
     }
 
     /// <summary>

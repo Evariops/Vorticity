@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
@@ -506,29 +507,30 @@ public sealed class BlockPoolTests
     }
 
     /// <summary>
-    /// Asked by the registry, a pool that keeps all gives back what it parks above its floors, the largest classes first,
-    /// up to the bytes asked; of another kind, nothing. A pool made with a count per class keeps it.
+    /// Asked by the registry, a pool that keeps all gives back what it parks above its floors, the blocks of an array of
+    /// their own first, whose bytes reach the collector at once, up to the bytes asked; of another kind, nothing. A pool made
+    /// with a count per class keeps it.
     /// </summary>
     [Fact]
-    public void Giving_back_frees_the_largest_classes_first_above_the_floors()
+    public void Giving_back_frees_the_blocks_of_an_array_of_their_own_first_above_the_floors()
     {
         const int megabyte = 1024 * 1024;
-        BlockPool pool = BlockPool.KeepingAll(8 * megabyte);
+        BlockPool pool = BlockPool.KeepingAll(32 * megabyte);
         BlockPool counted = new BlockPool(maxPerBucket: 4);
         try
         {
-            ReturnAll(pool, RentAll(pool, megabyte, 2));
+            // Past the slabs' largest piece, 16 MiB: an array of its own, of the class of 32 MiB.
+            ReturnAll(pool, RentAll(pool, 20 * megabyte, 1));
             ReturnAll(pool, RentAll(pool, 4096, 100));
             ReturnAll(counted, RentAll(counted, megabyte, 4));
 
             Assert.Equal(0, pool.GiveBack(KeptKind.Segments, long.MaxValue));
-            Assert.Equal(megabyte, pool.GiveBack(KeptKind.Blocks, megabyte));
-            Assert.Equal(1, pool.ParkedCount(megabyte));
+            Assert.Equal(32 * megabyte, pool.GiveBack(KeptKind.Blocks, 1));
+            Assert.Equal(0, pool.ParkedCount(20 * megabyte));
             Assert.Equal(100, pool.ParkedCount(4096));
 
             int floor = BlockPool.FloorBytesPerClass / 4096;
-            Assert.Equal(megabyte + ((100 - floor) * 4096L), pool.GiveBack(KeptKind.Blocks, long.MaxValue));
-            Assert.Equal(0, pool.ParkedCount(megabyte));
+            Assert.Equal((100 - floor) * 4096L, pool.GiveBack(KeptKind.Blocks, long.MaxValue));
             Assert.Equal(floor, pool.ParkedCount(4096));
 
             Assert.Equal(0, counted.GiveBack(KeptKind.Blocks, long.MaxValue));
@@ -771,6 +773,42 @@ public sealed class SharedPoolTests
         Assert.Equal(2L * large, MemoryAccount.Pool.GiveBack(KeptKind.Blocks, 2L * large));
         Assert.Equal(0, MemoryAccount.Pool.ParkedCount(large));
     }
+
+    /// <summary>
+    /// Asked for a byte, the pool gives back a whole slab, every block it keeps there, rather than one block wherever it lies:
+    /// a slab's blocks let go while another of its pieces stays give nothing to the collector. Pieces of 8 MiB, three a slab:
+    /// rented until one is cut from a slab made for it, no older slab holding one, then two more, which fill it.
+    /// </summary>
+    [Fact]
+    public void The_shared_pool_gives_a_slab_back_whole()
+    {
+        const int piece = 8 * 1024 * 1024;
+        long made = Slabs.Slab.Made;
+        List<BlockOwner> taken = [];
+        while (taken.Count < 256 && (taken.Count == 0 || taken[^1].Slab!.Id <= made))
+        {
+            taken.Add(MemoryAccount.Pool.Rent(TestAccount.Shared, piece, 64));
+        }
+
+        taken.Add(MemoryAccount.Pool.Rent(TestAccount.Shared, piece, 64));
+        taken.Add(MemoryAccount.Pool.Rent(TestAccount.Shared, piece, 64));
+        BlockOwner[] rented = [.. taken];
+        Slabs.Slab[] alone = [.. rented.Select(owner => owner.Slab!).Distinct().Where(slab => slab.TakenPages == OnSlab(rented, slab) * (piece >> Slabs.PageShift))];
+        foreach (BlockOwner owner in rented)
+        {
+            MemoryAccount.Pool.Return(owner);
+        }
+
+        Assert.NotEmpty(alone);
+        long given = MemoryAccount.Pool.GiveBack(KeptKind.Blocks, 1);
+
+        Slabs.Slab gone = Assert.Single(alone, slab => !Slabs.IsAlive(slab));
+        Assert.Equal(OnSlab(rented, gone) * (long)piece, given);
+        Assert.Equal(rented.Length - OnSlab(rented, gone), MemoryAccount.Pool.ParkedCount(piece));
+        MemoryAccount.Pool.Trim();
+    }
+
+    private static int OnSlab(BlockOwner[] owners, Slabs.Slab slab) => owners.Count(owner => owner.Slab == slab);
 
     /// <summary>
     /// A reservation a process's budget refuses first has the registry take back the memory kept above its floors, the

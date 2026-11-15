@@ -136,7 +136,7 @@ The memory the library holds is on the same meter as gauges, read when a listene
 | `vortex.memory.ceiling` | what the reservations of questions and jobs may reach now: the limit, less the rest of the process |
 | `vortex.memory.reserved` | what the questions and the jobs reserved, every budget's together |
 | `vortex.memory.rented` | the bytes of the blocks in use |
-| `vortex.memory.retained`, tagged by `holder` | the bytes kept for the next operations: the pool's (`pool`), the segment caches' (`segments`), the dataset handles' caches (`datasets`) |
+| `vortex.memory.retained`, tagged by `holder` | the bytes kept for the next operations: the pool's (`pool`), its blocks and what its slabs hold free between their pieces, the segment caches' (`segments`), the dataset handles' caches (`datasets`) |
 | `vortex.memory.rest` | the rest of the process, as the library measures it |
 | `vortex.dataset.handles` | the dataset handles open |
 

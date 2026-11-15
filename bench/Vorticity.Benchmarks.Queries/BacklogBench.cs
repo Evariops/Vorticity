@@ -117,6 +117,8 @@ internal static class BacklogBench
             sampler.Reset();
             Interlocked.Exchange(ref s_refused, 0);
             Stopwatch job = Stopwatch.StartNew();
+            long slabsMade = Slabs.Slab.Made;
+            int fullCollections = GC.CollectionCount(2);
             await maintainer.RefreshAsync();
             CompactionResult? result = await maintainer.CompactAsync();
             if (result is null)
@@ -128,12 +130,31 @@ internal static class BacklogBench
             mostHeld = Math.Max(mostHeld, result.MemoryReserved);
             Console.WriteLine(string.Create(
                 CultureInfo.InvariantCulture,
-                $"job {jobs}: {result.Trigger} L{result.FromLevel}->L{result.ToLevel}, {result.ObjectsIn} -> {result.ObjectsOut} objects ({result.ObjectsMoved} moved), {result.Rows:N0} rows, {result.BytesIn / 1e6:F1} -> {result.BytesOut / 1e6:F1} MB, blocks held {Mib(result.MemoryReserved)} MiB, {result.RangesAtOnce} at once, {Interlocked.Read(ref s_refused)} refused before, scratch {Mib(result.ScratchBytes)} MiB, {job.Elapsed.TotalSeconds:F1} s; {sampler.Peaks()}"));
+                $"job {jobs}: {result.Trigger} L{result.FromLevel}->L{result.ToLevel}, {result.ObjectsIn} -> {result.ObjectsOut} objects ({result.ObjectsMoved} moved), {result.Rows:N0} rows, {result.BytesIn / 1e6:F1} -> {result.BytesOut / 1e6:F1} MB, blocks held {Mib(result.MemoryReserved)} MiB, {result.RangesAtOnce} at once, {Interlocked.Read(ref s_refused)} refused before, scratch {Mib(result.ScratchBytes)} MiB, {job.Elapsed.TotalSeconds:F1} s, {GC.CollectionCount(2) - fullCollections} full collections, {Slabs.Slab.Made - slabsMade} slabs made; {sampler.Peaks()}"));
         }
 
         Console.WriteLine(string.Create(
             CultureInfo.InvariantCulture,
             $"done: {jobs} jobs in {clock.Elapsed.TotalSeconds:F0} s, {maintainer.ObjectCount} objects left, the most a job's blocks held {Mib(mostHeld)} MiB; {Sampler.Now()}"));
+
+        // At rest: two turns of the slow timer, which an idle process gets within a minute, then a full collection. What the
+        // library keeps then, what the questions are left, and the holes of the pinned heap, which a hard limit counts.
+        HeldMemory.LetGoUnused(collection: false);
+        GC.Collect();
+        HeldMemory.LetGoUnused(collection: false);
+        GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true, compacting: true);
+        GC.WaitForPendingFinalizers();
+
+        // Aggressive, as the budget's own collection is when a question needs the room: the collector gives back the regions
+        // it keeps committed past its heap.
+        GC.Collect(GC.MaxGeneration, GCCollectionMode.Aggressive, blocking: true, compacting: true);
+
+        // The budget reads the collection as a question's first reservation would, before the report.
+        _ = QueryMemoryBudget.Process.CanReserve(0);
+        GCGenerationInfo pinned = GC.GetGCMemoryInfo(GCKind.FullBlocking).GenerationInfo[4];
+        Console.WriteLine(string.Create(
+            CultureInfo.InvariantCulture,
+            $"rest: {Sampler.Now()}; pinned heap {Mib(pinned.SizeAfterBytes)} MiB, {Mib(pinned.FragmentationAfterBytes)} of it free"));
         return 0;
     }
 
@@ -192,13 +213,24 @@ internal static class BacklogBench
     private sealed class Sampler : IDisposable
     {
         private readonly Timer _timer;
+        private readonly LargeBlocks? _large;
         private long _resident;
         private long _blocks;
         private long _parked;
         private long _slabs;
+        private long _free;
         private long _beside;
 
-        internal Sampler() => _timer = new Timer(_ => Sample(), null, 0, 50);
+        internal Sampler()
+        {
+            if (BlockPool.Watch is null)
+            {
+                _large = new LargeBlocks();
+                BlockPool.Watch = _large;
+            }
+
+            _timer = new Timer(_ => Sample(), null, 0, 50);
+        }
 
         internal void Reset()
         {
@@ -206,12 +238,14 @@ internal static class BacklogBench
             Interlocked.Exchange(ref _blocks, 0);
             Interlocked.Exchange(ref _parked, 0);
             Interlocked.Exchange(ref _slabs, 0);
+            Interlocked.Exchange(ref _free, 0);
             Interlocked.Exchange(ref _beside, 0);
+            _large?.Reset();
         }
 
         internal string Peaks() => string.Create(
             CultureInfo.InvariantCulture,
-            $"peaks: resident {Mib(Interlocked.Read(ref _resident))} MiB, blocks {Mib(Interlocked.Read(ref _blocks))}, of which the pool keeps {Mib(Interlocked.Read(ref _parked))}, slabs {Mib(Interlocked.Read(ref _slabs))}, heap beside the blocks and slabs {Mib(Interlocked.Read(ref _beside))}");
+            $"peaks: resident {Mib(Interlocked.Read(ref _resident))} MiB, blocks {Mib(Interlocked.Read(ref _blocks))}, of which the pool keeps {Mib(Interlocked.Read(ref _parked))} and past 16 MiB are rented {Mib(_large?.Peak ?? 0)}, slabs {Mib(Interlocked.Read(ref _slabs))} of which free {Mib(Interlocked.Read(ref _free))}, heap beside the blocks and slabs {Mib(Interlocked.Read(ref _beside))}");
 
         /// <summary>The pinned bytes of the blocks: the slabs whole, and the blocks of an array of their own.</summary>
         private static long Pinned() => Slabs.HeldBytes + BlockOwner.LiveBytes - Slabs.PieceBytes;
@@ -224,10 +258,47 @@ internal static class BacklogBench
             string kept = string.Join(" ", report.RetainedByHolder.Where(h => h.Value > 0).OrderBy(h => h.Key, StringComparer.Ordinal).Select(h => $"{h.Key} {Mib(h.Value)}"));
             return string.Create(
                 CultureInfo.InvariantCulture,
-                $"now: resident {Mib(MemoryPeaks.Read().Working)} MiB, blocks {Mib(blocks)}, slabs {Mib(Slabs.HeldBytes)}, heap beside them {Mib(GC.GetTotalMemory(false) - Pinned())}; reserved {Mib(report.ReservedBytes)}, rented {Mib(report.RentedBytes)}, kept {Mib(report.RetainedBytes)} [{kept}], rest {Mib(report.RestBytes)}, ceiling {Mib(report.CeilingBytes)} of {Mib(report.LimitBytes)}");
+                $"now: resident {Mib(MemoryPeaks.Read().Working)} MiB, blocks {Mib(blocks)}, slabs {Mib(Slabs.HeldBytes)} of which free {Mib(Slabs.FreeBytes)}, heap beside them {Mib(GC.GetTotalMemory(false) - Pinned())}; reserved {Mib(report.ReservedBytes)}, rented {Mib(report.RentedBytes)}, kept {Mib(report.RetainedBytes)} [{kept}], rest {Mib(report.RestBytes)}, ceiling {Mib(report.CeilingBytes)} of {Mib(report.LimitBytes)}");
         }
 
-        public void Dispose() => _timer.Dispose();
+        public void Dispose()
+        {
+            _timer.Dispose();
+            if (_large is not null && ReferenceEquals(BlockPool.Watch, _large))
+            {
+                BlockPool.Watch = null;
+            }
+        }
+
+        /// <summary>
+        /// The bytes of the blocks past the slabs' largest piece rented and not given back, each a pinned array of its own,
+        /// and their peak since the last reset: what decides whether they go into slabs too.
+        /// </summary>
+        private sealed class LargeBlocks : BlockPool.IBlockWatch
+        {
+            private long _live;
+            private long _peak;
+
+            internal long Peak => Interlocked.Read(ref _peak);
+
+            internal void Reset() => Interlocked.Exchange(ref _peak, Interlocked.Read(ref _live));
+
+            public void Rented(BlockOwner owner)
+            {
+                if (owner.Capacity > Slabs.LargestBytes)
+                {
+                    Raise(ref _peak, Interlocked.Add(ref _live, owner.Capacity));
+                }
+            }
+
+            public void Released(BlockOwner owner)
+            {
+                if (owner.Capacity > Slabs.LargestBytes)
+                {
+                    Interlocked.Add(ref _live, -owner.Capacity);
+                }
+            }
+        }
 
         private void Sample()
         {
@@ -236,6 +307,7 @@ internal static class BacklogBench
             Raise(ref _blocks, blocks);
             Raise(ref _parked, MemoryAccount.Pool.ParkedBytes);
             Raise(ref _slabs, Slabs.HeldBytes);
+            Raise(ref _free, Slabs.FreeBytes);
             Raise(ref _beside, GC.GetTotalMemory(false) - Pinned());
         }
 

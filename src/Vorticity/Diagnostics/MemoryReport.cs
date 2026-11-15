@@ -70,5 +70,5 @@ public sealed record MemoryReport
     /// The bytes of the blocks in use: every block alive, less those the pools keep for the next rents. A block its holder
     /// drops without giving it back is taken by the collector, and stays counted.
     /// </summary>
-    internal static long RentedNow() => System.Math.Max(0, BlockOwner.LiveBytes - HeldMemory.BytesOf<BlockPool>());
+    internal static long RentedNow() => System.Math.Max(0, BlockOwner.LiveBytes - HeldMemory.BytesOf<BlockPool>(static pool => pool.KeptBlockBytes));
 }

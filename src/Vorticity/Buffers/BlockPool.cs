@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using System.Numerics;
@@ -71,10 +72,24 @@ internal sealed class BlockPool : IHeldMemory
     /// <summary>The bucket index of a block of the outsized slot, which <see cref="TryPark"/> parks there rather than in a class.</summary>
     private const int OutsizedBucket = -2;
 
+    // One census of the slabs at a time, whatever the pool: a census writes the slabs' own fields. What it reads and orders
+    // with, kept from one census to the next.
+    private static readonly Lock s_census = new Lock();
+    private static readonly List<Slabs.Slab> s_slabs = [];
+    private static readonly List<BlockOwner> s_letting = [];
+    private static BlockOwner?[] s_ordered = [];
+    private static int[] s_ranks = [];
+
     private readonly Bucket[] _buckets;
 
-    /// <summary>Whether blocks past <see cref="MaxPooledLength"/> are kept, one at a time: the process's pool's policy.</summary>
+    /// <summary>
+    /// Whether blocks past <see cref="MaxPooledLength"/> are kept, one at a time, and every block given back above the floors,
+    /// let go slab by slab: the process's pool's policy.
+    /// </summary>
     private readonly bool _keepsOutsized;
+
+    /// <summary>Whether the pool counts what the slabs hold free between their pieces as its own: the process's pool, the one that cuts most of them.</summary>
+    private bool _holdsSlabs;
 
     /// <summary>The block past <see cref="MaxPooledLength"/> kept parked, or null.</summary>
     private BlockOwner? _outsized;
@@ -121,9 +136,10 @@ internal sealed class BlockPool : IHeldMemory
         Bucket[] buckets = new Bucket[bucketCount];
         for (int i = 0; i < buckets.Length; i++)
         {
+            int pages = (MinBlockSize << i) >> Slabs.PageShift;
             buckets[i] = keepsAll
-                ? new Bucket(FloorBytesPerClass / (MinBlockSize << i), int.MaxValue)
-                : new Bucket(maxPerBucket, maxPerBucket);
+                ? new Bucket(FloorBytesPerClass / (MinBlockSize << i), int.MaxValue, pages)
+                : new Bucket(maxPerBucket, maxPerBucket, pages);
         }
 
         _buckets = buckets;
@@ -133,14 +149,26 @@ internal sealed class BlockPool : IHeldMemory
     /// <inheritdoc/>
     public string Holder => "pool";
 
-    /// <summary>The bytes the pool keeps for the next rents: its classes' and the block its outsized slot keeps.</summary>
-    public long HeldBytes => ParkedBytes + (Volatile.Read(ref _outsized)?.Capacity ?? 0);
+    /// <summary>
+    /// The bytes the pool keeps for the next rents: its classes' blocks and the block its outsized slot keeps; and for the
+    /// process's pool, what the slabs hold free between their pieces, which the next rents take without a new slab.
+    /// </summary>
+    public long HeldBytes => KeptBlockBytes + (_holdsSlabs ? Slabs.FreeBytes : 0);
+
+    /// <summary>The bytes of the blocks the pool keeps: its classes' and the one its outsized slot keeps.</summary>
+    internal long KeptBlockBytes => ParkedBytes + (Volatile.Read(ref _outsized)?.Capacity ?? 0);
 
     /// <summary>
-    /// The process's pool, keeping every block given back above its floors, blocks up to 32 MiB pooled: built once, by
-    /// <see cref="MemoryAccount.Pool"/>, the only way to it, so that no block leaves it without an account.
+    /// The process's pool, keeping every block given back above its floors, blocks up to 32 MiB pooled, and counting what
+    /// the slabs hold free as kept: built once, by <see cref="MemoryAccount.Pool"/>, the only way to it, so that no block
+    /// leaves it without an account.
     /// </summary>
-    internal static BlockPool ForProcess() => KeepingAll(32 * 1024 * 1024);
+    internal static BlockPool ForProcess()
+    {
+        BlockPool pool = KeepingAll(32 * 1024 * 1024);
+        pool._holdsSlabs = true;
+        return pool;
+    }
 
     /// <summary>A pool that keeps, as the process's does, every block given back above its floors, pooling blocks up to <paramref name="maxPooledLength"/>.</summary>
     /// <param name="maxPooledLength">Requests above this length bypass the classes.</param>
@@ -306,6 +334,15 @@ internal sealed class BlockPool : IHeldMemory
     /// Lets go of up to <paramref name="bytes"/> of the blocks the pool keeps above its floors: the outsized slot's
     /// first, then the classes' from the largest down, whose blocks cost the least to make again for what they hold.
     /// </summary>
+    /// <remarks>
+    /// A piece of a slab let go reaches the collector only with the slab's last: until then, it is what the slab holds free,
+    /// which the next rents cut again without a new slab (<see cref="Slabs.FreeBytes"/>). So the process's pool lets go of
+    /// the blocks of an array of their own first, then of every block it keeps on a slab that holds nothing else, the slab
+    /// given back whole, then of the blocks of the slabs the fewest rented blocks hold: 2 MiB of blocks kept 960 MiB of slabs
+    /// alive after three jobs under 4 GiB, the blocks let go class by class wherever they lay (2026-11-15). Each block counts
+    /// its bytes as let go, as it did: counted only when its slab went, the bytes a budget asked back near its ceiling came
+    /// to nothing, and it asked again at each collection, 72 s for a backlog that took 52 under 2 GiB.
+    /// </remarks>
     /// <returns>The bytes let go.</returns>
     public long GiveBack(KeptKind kind, long bytes)
     {
@@ -321,10 +358,37 @@ internal sealed class BlockPool : IHeldMemory
             kept.FreeParked();
         }
 
-        for (int i = _buckets.Length - 1; i >= 0 && given < bytes; i--)
+        if (!_keepsOutsized)
         {
-            int size = MinBlockSize << i;
-            given += (long)Free(i, BlocksFor(bytes - given, size), aboveFloor: true) * size;
+            for (int i = _buckets.Length - 1; i >= 0 && given < bytes; i--)
+            {
+                int size = MinBlockSize << i;
+                given += (long)Free(i, BlocksFor(bytes - given, size), aboveFloor: true) * size;
+            }
+
+            return given;
+        }
+
+        lock (s_census)
+        {
+            Arrange();
+            for (int i = _buckets.Length - 1; i >= 0 && given < bytes; i--)
+            {
+                given += LetGo(i, _buckets[i].TakeOwn(BlocksFor(bytes - given, MinBlockSize << i), s_letting));
+            }
+
+            if (given < bytes)
+            {
+                given += LetGoSlabs(bytes - given);
+            }
+
+            for (int i = _buckets.Length - 1; i >= 0 && given < bytes; i--)
+            {
+                given += LetGo(i, _buckets[i].TakeFirst(BlocksFor(bytes - given, MinBlockSize << i), s_letting));
+            }
+
+            // Held no longer than the census: a slab given back goes with its array.
+            s_slabs.Clear();
         }
 
         return given;
@@ -334,11 +398,31 @@ internal sealed class BlockPool : IHeldMemory
     /// Lets go of the blocks that sat parked since the pool was last asked, above its floors: in each class, as many as
     /// the fewest it held parked in between, which no rent took; and the outsized slot's block when no read asked for one.
     /// </summary>
+    /// <remarks>
+    /// The process's pool lets go, in each class, of the blocks of the slabs it would give back first: those the fewest
+    /// rented blocks hold, which come back empty once the blocks it keeps there go (<see cref="Arrange"/>).
+    /// </remarks>
     public void LetGoUnused(bool collection)
     {
-        for (int i = 0; i < _buckets.Length; i++)
+        if (_keepsOutsized)
         {
-            Free(i, _buckets[i].Unused(), aboveFloor: true);
+            lock (s_census)
+            {
+                Arrange();
+                for (int i = 0; i < _buckets.Length; i++)
+                {
+                    LetGo(i, _buckets[i].TakeFirst(_buckets[i].Unused(), s_letting));
+                }
+
+                s_slabs.Clear();
+            }
+        }
+        else
+        {
+            for (int i = 0; i < _buckets.Length; i++)
+            {
+                Free(i, _buckets[i].Unused(), aboveFloor: true);
+            }
         }
 
         if (!Volatile.Read(ref _outsizedAsked))
@@ -347,6 +431,99 @@ internal sealed class BlockPool : IHeldMemory
         }
 
         Volatile.Write(ref _outsizedAsked, false);
+    }
+
+    /// <summary>
+    /// Under <see cref="s_census"/>: reads the slabs, counts the pages of each the pool keeps parked, and orders each class's
+    /// parked blocks from the first to let go to the last. First the blocks of an array of their own, whose bytes reach the
+    /// collector at once; then those of the slabs that hold the fewest pages rented, then the fewest taken, the newest first.
+    /// A rent takes the last, from the slab most in use: the blocks pack into the fewest slabs, and the others empty. The
+    /// slabs that hold a block within a class's floor are marked kept.
+    /// </summary>
+    private void Arrange()
+    {
+        List<Slabs.Slab> slabs = s_slabs;
+        Slabs.Census(slabs);
+        foreach (Bucket bucket in _buckets)
+        {
+            bucket.CountParked();
+        }
+
+        slabs.Sort(static (a, b) =>
+        {
+            int order = (a.CensusTaken - a.CensusParked).CompareTo(b.CensusTaken - b.CensusParked);
+            if (order == 0)
+            {
+                order = a.CensusTaken.CompareTo(b.CensusTaken);
+            }
+
+            return order != 0 ? order : b.Id.CompareTo(a.Id);
+        });
+
+        for (int i = 0; i < slabs.Count; i++)
+        {
+            slabs[i].CensusRank = i + 1;
+        }
+
+        if (s_ranks.Length < slabs.Count + 1)
+        {
+            s_ranks = new int[slabs.Count + 1];
+        }
+
+        foreach (Bucket bucket in _buckets)
+        {
+            bucket.Arrange(ref s_ordered, s_ranks, slabs.Count, sparing: _holdsSlabs);
+        }
+    }
+
+    /// <summary>Lets go of the <paramref name="count"/> blocks of class <paramref name="index"/> taken out into <see cref="s_letting"/>: their bytes.</summary>
+    private long LetGo(int index, int count)
+    {
+        long bytes = (long)count * (MinBlockSize << index);
+        Interlocked.Add(ref _parkedBytes, -bytes);
+        foreach (BlockOwner owner in s_letting)
+        {
+            owner.FreeParked();
+        }
+
+        s_letting.Clear();
+        return bytes;
+    }
+
+    /// <summary>
+    /// Under <see cref="s_census"/>, after <see cref="Arrange"/>: gives back whole the slabs whose pieces the pool keeps
+    /// parked, all above the floors, those it keeps the fewest pages of first, until <paramref name="bytes"/> are given.
+    /// </summary>
+    /// <returns>The bytes of the blocks let go.</returns>
+    private long LetGoSlabs(long bytes)
+    {
+        List<Slabs.Slab> slabs = s_slabs;
+        slabs.Sort(static (a, b) => a.CensusParked.CompareTo(b.CensusParked));
+        long expected = 0;
+        foreach (Slabs.Slab slab in slabs)
+        {
+            if (expected >= bytes)
+            {
+                break;
+            }
+
+            if (slab.CensusParked > 0 && slab.CensusParked == slab.CensusTaken && !slab.CensusKept)
+            {
+                slab.CensusFreeing = true;
+                expected += (long)slab.CensusParked << Slabs.PageShift;
+            }
+        }
+
+        long given = 0;
+        if (expected > 0)
+        {
+            for (int i = 0; i < _buckets.Length; i++)
+            {
+                given += LetGo(i, _buckets[i].TakeFreeing(s_letting));
+            }
+        }
+
+        return given;
     }
 
     /// <summary>Retains a released block, or refuses it when its bucket is full.</summary>
@@ -454,8 +631,13 @@ internal sealed class BlockPool : IHeldMemory
         private readonly Lock _gate = new Lock();
         private readonly int _floor;
         private readonly int _ceiling;
+        private readonly int _pages;
         private BlockOwner?[] _items;
         private int _count;
+
+        // The blocks the last arrangement keeps whatever is asked, the last ones: the floor, or the part of it that keeps no
+        // slab alive by itself.
+        private int _kept;
 
         /// <summary>The fewest blocks the class held parked since it was last asked what it did not use: none of them was taken.</summary>
         private int _fewest;
@@ -463,12 +645,185 @@ internal sealed class BlockPool : IHeldMemory
         /// <summary>A class keeping up to <paramref name="ceiling"/> blocks, and <paramref name="floor"/> whatever the registry asks.</summary>
         /// <param name="floor">Blocks kept whatever the registry asks.</param>
         /// <param name="ceiling">Blocks kept at most.</param>
-        internal Bucket(int floor, int ceiling)
+        /// <param name="pages">The pages of a slab a block of the class takes, when a slab cuts it.</param>
+        internal Bucket(int floor, int ceiling, int pages)
         {
             _floor = floor;
             _ceiling = Math.Max(floor, ceiling);
+            _pages = pages;
             _items = new BlockOwner?[Math.Min(floor, 64)];
         }
+
+        /// <summary>Under the census lock: adds the pages of each block parked here to its slab's census.</summary>
+        internal void CountParked()
+        {
+            lock (_gate)
+            {
+                for (int k = 0; k < _count; k++)
+                {
+                    if (_items[k]!.Slab is { } slab)
+                    {
+                        slab.CensusParked += _pages;
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// Under the census lock, the slabs ranked: orders the blocks parked here by their slab's rank, the blocks of an array
+        /// of their own first, by a count of each rank, in one pass and keeping the order within a rank; then keeps the floor,
+        /// the last blocks, which a rent takes first, and marks their slabs as kept.
+        /// </summary>
+        /// <param name="ordered">Where the blocks are ordered before they come back, grown as needed and left cleared.</param>
+        /// <param name="counts">The count of each rank, then where each rank starts: <paramref name="ranks"/> + 1 at least.</param>
+        /// <param name="ranks">The highest rank.</param>
+        /// <param name="sparing">
+        /// Whether a floor's block is kept only where it keeps no slab alive by itself: on the slab ranked last, or on one that
+        /// holds a rented piece. The process's pool spares its slabs so: its floors, 256 KiB a class, lay on seven slabs at
+        /// rest, 224 MiB.
+        /// </param>
+        internal void Arrange(ref BlockOwner?[] ordered, int[] counts, int ranks, bool sparing)
+        {
+            lock (_gate)
+            {
+                int n = _count;
+                _kept = Math.Min(_floor, n);
+                if (n == 0)
+                {
+                    return;
+                }
+
+                if (ordered.Length < n)
+                {
+                    ordered = new BlockOwner?[Math.Max(n, ordered.Length * 2)];
+                }
+
+                Span<int> starts = counts.AsSpan(0, ranks + 1);
+                starts.Clear();
+                for (int k = 0; k < n; k++)
+                {
+                    starts[RankOf(_items[k]!)]++;
+                }
+
+                int at = 0;
+                for (int r = 0; r < starts.Length; r++)
+                {
+                    int count = starts[r];
+                    starts[r] = at;
+                    at += count;
+                }
+
+                for (int k = 0; k < n; k++)
+                {
+                    BlockOwner owner = _items[k]!;
+                    ordered[starts[RankOf(owner)]++] = owner;
+                }
+
+                Array.Copy(ordered, _items, n);
+                Array.Clear(ordered, 0, n);
+
+                // The slabs a rented piece keeps alive, and the one ranked last, rank above every other: the blocks a floor
+                // keeps on them are the last ones, and the first that is not ends the floor.
+                int kept = 0;
+                for (int k = n - 1; k >= n - _kept; k--)
+                {
+                    Slabs.Slab? slab = _items[k]!.Slab;
+                    if (sparing && slab is not null && slab.CensusRank != ranks && slab.CensusTaken == slab.CensusParked)
+                    {
+                        break;
+                    }
+
+                    if (slab is not null)
+                    {
+                        slab.CensusKept = true;
+                    }
+
+                    kept++;
+                }
+
+                _kept = kept;
+            }
+        }
+
+        /// <summary>
+        /// Takes out into <paramref name="into"/> up to <paramref name="count"/> of the blocks parked first in the order,
+        /// below those the last arrangement keeps: how many.
+        /// </summary>
+        internal int TakeFirst(int count, List<BlockOwner> into)
+        {
+            lock (_gate)
+            {
+                int taken = Math.Min(count, _count - _kept);
+                for (int k = 0; k < taken; k++)
+                {
+                    into.Add(_items[k]!);
+                }
+
+                return Close(taken);
+            }
+        }
+
+        /// <summary>
+        /// Takes out into <paramref name="into"/> up to <paramref name="count"/> of the blocks of an array of their own parked
+        /// first in the order, below those the last arrangement keeps: how many.
+        /// </summary>
+        internal int TakeOwn(int count, List<BlockOwner> into)
+        {
+            lock (_gate)
+            {
+                int most = Math.Min(count, _count - _kept);
+                int taken = 0;
+                while (taken < most && _items[taken]!.Slab is null)
+                {
+                    into.Add(_items[taken++]!);
+                }
+
+                return Close(taken);
+            }
+        }
+
+        /// <summary>Takes out into <paramref name="into"/> every block parked here whose slab the pool is giving back whole: how many.</summary>
+        internal int TakeFreeing(List<BlockOwner> into)
+        {
+            lock (_gate)
+            {
+                int kept = 0;
+                for (int k = 0; k < _count; k++)
+                {
+                    BlockOwner owner = _items[k]!;
+                    if (owner.Slab is { CensusFreeing: true })
+                    {
+                        into.Add(owner);
+                    }
+                    else
+                    {
+                        _items[kept++] = owner;
+                    }
+                }
+
+                int taken = _count - kept;
+                Array.Clear(_items, kept, taken);
+                _count = kept;
+                _fewest = Math.Min(_fewest, _count);
+                return taken;
+            }
+        }
+
+        /// <summary>Under the gate: closes the gap the first <paramref name="taken"/> blocks left: <paramref name="taken"/>.</summary>
+        private int Close(int taken)
+        {
+            if (taken > 0)
+            {
+                Array.Copy(_items, taken, _items, 0, _count - taken);
+                Array.Clear(_items, _count - taken, taken);
+                _count -= taken;
+            }
+
+            _fewest = Math.Min(_fewest, _count);
+            return Math.Max(taken, 0);
+        }
+
+        private static int RankOf(BlockOwner owner) => owner.Slab?.CensusRank ?? 0;
 
         /// <summary>
         /// How many blocks the bucket holds, read without taking the gate.

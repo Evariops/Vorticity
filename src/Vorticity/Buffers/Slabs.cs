@@ -41,7 +41,7 @@ internal static class Slabs
     private const int SpanShift = 25;
 
     /// <summary>The least piece: a page, the pools' least block.</summary>
-    private const int PageShift = 12;
+    internal const int PageShift = 12;
 
     /// <summary>The sizes of piece, a page to half a slab: the span itself is never whole.</summary>
     private const int Orders = SpanShift - PageShift;
@@ -70,6 +70,42 @@ internal static class Slabs
     /// <summary>The bytes of the pieces cut from the slabs and not given back: the blocks they are.</summary>
     internal static long PieceBytes => Interlocked.Read(ref s_pieceBytes);
 
+    /// <summary>
+    /// The bytes the slabs alive hold free between their pieces: what the next blocks are cut from without a new slab, and
+    /// what the process's pool counts as kept (<see cref="BlockPool.HeldBytes"/>).
+    /// </summary>
+    internal static long FreeBytes => Math.Max(0, HeldBytes - PieceBytes);
+
+    /// <summary>
+    /// Fills <paramref name="into"/> with the slabs alive, each with its pages taken as they are now and the rest of its census
+    /// cleared (<see cref="Slab.CensusTaken"/>): what a pool orders its parked blocks by. Under the caller's census lock.
+    /// </summary>
+    internal static void Census(List<Slab> into)
+    {
+        into.Clear();
+        lock (Gate)
+        {
+            foreach (Slab slab in s_slabs)
+            {
+                slab.CensusTaken = slab.TakenPages;
+                slab.CensusParked = 0;
+                slab.CensusRank = 0;
+                slab.CensusKept = false;
+                slab.CensusFreeing = false;
+                into.Add(slab);
+            }
+        }
+    }
+
+    /// <summary>Whether <paramref name="slab"/> is alive: some of its pieces are not back.</summary>
+    internal static bool IsAlive(Slab slab)
+    {
+        lock (Gate)
+        {
+            return s_slabs.Contains(slab);
+        }
+    }
+
     /// <summary>Whether a block of <paramref name="capacity"/> bytes is cut from a slab: a power of two from a page to half a slab.</summary>
     internal static bool Cuts(int capacity) => capacity is >= LeastBytes and <= LargestBytes && BitOperations.IsPow2(capacity);
 
@@ -88,10 +124,13 @@ internal static class Slabs
         int order = BitOperations.Log2((uint)bytes) - PageShift;
         lock (Gate)
         {
+            // The oldest slab that holds one: the fullest instead was 6 to 10 % slower on a backlog's jobs, and left more
+            // slabs at rest under 4 and 8 GiB (2026-11-16).
             foreach (Slab slab in s_slabs)
             {
-                if (slab.TryTake(order) is >= 0 and int page)
+                if (slab.Holds(order))
                 {
+                    int page = slab.TryTake(order);
                     Interlocked.Add(ref s_pieceBytes, bytes);
                     return (slab, slab.Array, slab.Base + (page << PageShift));
                 }
@@ -145,6 +184,8 @@ internal static class Slabs
     /// </summary>
     internal sealed class Slab
     {
+        private static long s_made;
+
         // For the first page of a free piece, the piece's order plus one; 0 for any other page.
         private readonly sbyte[] _free = new sbyte[Pages];
 
@@ -157,8 +198,12 @@ internal static class Slabs
         private int _taken;
         private readonly int _past;
 
+        // The orders whose list holds a free piece, a bit each: whether a piece fits is one test.
+        private int _orders;
+
         internal unsafe Slab()
         {
+            Id = Interlocked.Increment(ref s_made);
             Array = GC.AllocateUninitializedArray<byte>(SlabBytes, pinned: true);
             nint address = (nint)Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(Array));
             Base = (int)(Alignment.AlignUp(address, VortexLimits.MaxAlignment) - address);
@@ -190,20 +235,46 @@ internal static class Slabs
         /// <summary>Whether every piece came back.</summary>
         internal bool IsEmpty => _taken == _past;
 
+        /// <summary>The slab's number, in the order the slabs were made: the older, the lower.</summary>
+        internal long Id { get; }
+
+        /// <summary>The slabs made since the process started: what a bench tells the churn of slabs by.</summary>
+        internal static long Made => Interlocked.Read(ref s_made);
+
+        /// <summary>The pages of the pieces handed out and not back, rented or parked.</summary>
+        internal int TakenPages => _taken - _past;
+
+        /// <summary>Whether a free piece of <paramref name="order"/>, or of a larger one to cut it from, is left.</summary>
+        internal bool Holds(int order) => (_orders >> order) != 0;
+
+        /// <summary>
+        /// A census's pages taken, read when the census began (<see cref="Census"/>): with the fields below, written and read
+        /// under a pool's census lock only.
+        /// </summary>
+        internal int CensusTaken;
+
+        /// <summary>The census's pages of the slab that the pool it is of keeps parked.</summary>
+        internal int CensusParked;
+
+        /// <summary>The slab's rank in the census, from 1 for the first to let go; 0 for none yet.</summary>
+        internal int CensusRank;
+
+        /// <summary>Whether a block the pool keeps whatever it is asked, within a class's floor, lies on the slab.</summary>
+        internal bool CensusKept;
+
+        /// <summary>Whether the pool is letting go of every block it keeps parked on the slab, to give the slab back whole.</summary>
+        internal bool CensusFreeing;
+
         /// <summary>The first page of a free piece of <paramref name="order"/>, cut from a larger one when need be; -1 when the slab holds none.</summary>
         internal int TryTake(int order)
         {
-            int from = order;
-            while (from < Orders && _heads[from] < 0)
-            {
-                from++;
-            }
-
-            if (from == Orders)
+            int above = _orders >> order;
+            if (above == 0)
             {
                 return -1;
             }
 
+            int from = order + BitOperations.TrailingZeroCount(above);
             int page = _heads[from];
             Remove(from, page);
 
@@ -250,6 +321,7 @@ internal static class Slabs
 
             _heads[order] = page;
             _free[page] = (sbyte)(order + 1);
+            _orders |= 1 << order;
         }
 
         private void Remove(int order, int page)
@@ -263,6 +335,10 @@ internal static class Slabs
             else
             {
                 _heads[order] = next;
+                if (next < 0)
+                {
+                    _orders &= ~(1 << order);
+                }
             }
 
             if (next >= 0)
