@@ -131,6 +131,16 @@ not hold: the runtime, the threads' stacks, the native allocator.
 | 4 GiB | 3 072 MiB | 2 688 MiB | 1 344 MiB |
 | 8 GiB | 6 144 MiB | 5 376 MiB | 2 688 MiB |
 
+Measured with the backlog bench (`--micro backlog --memory-limit`), a maintainer compacting 300
+appends of metric records, 9 million rows: under each limit the backlog compacts to its end at some
+240 000 rows a second, in 6 jobs under 2 GiB, 3 under 4 GiB and 1 under 8 GiB, the process at most
+1 442, 2 277 and 1 684 MiB resident. A tighter limit makes the jobs narrower, not slower.
+
+The blocks the library rents are pieces of pinned slabs of one size, which a slab given back leaves
+whole for the next one. Blocks of every size, each a pinned array of its own, left holes in the
+pinned heap that no other allocation could use, which the heap's limit counts: under 2 GiB, a
+compaction failed with 452 MB of them free.
+
 Set the limit when the process starts, before it holds data: `SetLimit` refuses a limit whose heap
 the collector already passes after a full collection, and the limit set before stays.
 `VortexMemory.LimitBytes` says the limit set, and `VortexDiagnostics.GetMemoryReport().LimitBytes`
