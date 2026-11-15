@@ -97,6 +97,12 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable, IOrderedKeys
     /// </summary>
     internal required Vorticity.Buffers.MemoryAccount Account { get; init; }
 
+    /// <summary>
+    /// Where an input is opened from: a compaction's copies in its scratch (<see cref="JobMemory.RentAsync"/>); null for the
+    /// version's own objects.
+    /// </summary>
+    internal Func<ObjectEntry, CancellationToken, ValueTask<ObjectLease>>? Rent { get; init; }
+
     /// <summary>The run the merge is on: an input's batch, or a window of it.</summary>
     /// <exception cref="InvalidOperationException">The merge is not on a run.</exception>
     internal RecordBatch Current => _current ?? throw new InvalidOperationException("The merge is not on a run.");
@@ -293,7 +299,9 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable, IOrderedKeys
 
     private async ValueTask OpenAsync(MergeObject next)
     {
-        ObjectLease lease = await _version.RentAsync(next.Entry, _cancellationToken).ConfigureAwait(false);
+        ObjectLease lease = Rent is { } rent
+            ? await rent(next.Entry, _cancellationToken).ConfigureAwait(false)
+            : await _version.RentAsync(next.Entry, _cancellationToken).ConfigureAwait(false);
         _opened?.Invoke(lease);
         MergeInput input = new MergeInput(this, lease, next.Entry.Key, next.Rank, next.FirstRow, _key, _low, _high);
         try

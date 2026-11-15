@@ -109,6 +109,18 @@ internal sealed class SealedObjectStore : IObjectStore
     /// <summary>The store under this one.</summary>
     internal IObjectStore Inner => _inner;
 
+    /// <summary>
+    /// This dataset's objects read from <paramref name="copy"/>, a store that holds copies of them as this one's inner store
+    /// holds them: sealed as this one knows them to be, opened with its keys. What a compaction reads its inputs through
+    /// once it copied them to its scratch.
+    /// </summary>
+    internal SealedObjectStore ReadingFrom(IObjectStore copy)
+    {
+        SealedObjectStore over = new SealedObjectStore(copy, _keys);
+        Volatile.Write(ref over._kind, Volatile.Read(ref _kind));
+        return over;
+    }
+
     /// <summary>Whether the dataset is encrypted, which the first commit object read, or the creation, decides.</summary>
     internal bool Seals => Volatile.Read(ref _kind) == Sealed;
 

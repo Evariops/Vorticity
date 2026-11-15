@@ -68,8 +68,9 @@ public sealed record CompactionResult
     public int RangesAtOnce { get; init; } = 1;
 
     /// <summary>
-    /// The bytes it spilled to disk, past what memory held of them: the runs of its objects' indexes, and of its
-    /// partition's postings for a consolidation; none for a job whose runs all fit.
+    /// The bytes it put on the local disk rather than hold: the copies of its inputs it read from there, and the runs of its
+    /// objects' indexes and of its partition's postings for a consolidation past what memory held of them; none for a job
+    /// of small inputs whose runs all fit.
     /// </summary>
     public long ScratchBytes { get; init; }
 
@@ -144,7 +145,7 @@ internal static partial class DatasetCompactor
         }
         finally
         {
-            memory.Dispose();
+            await memory.DisposeAsync().ConfigureAwait(false);
         }
     }
 
@@ -164,6 +165,9 @@ internal static partial class DatasetCompactor
         // consolidations; a tiered one of a dataset without concatenates.
         DatasetSchema schema = dataset.Snapshot.Schema;
         bool merge = job.Style is CompactionStyle.Leveled || (job.Style is CompactionStyle.Tiered && schema.Keyed);
+
+        // Inputs large enough are read through the local scratch, each copied once as the first pass asks for it.
+        memory.ReadThroughScratch(job);
         if (merge)
         {
             Check(schema);
@@ -173,7 +177,7 @@ internal static partial class DatasetCompactor
         }
 
         // Every input open before the passes, side by side, and held until the job ends.
-        InputLeases opened = await InputLeases.OpenAsync(dataset, job, cancellationToken).ConfigureAwait(false);
+        InputLeases opened = await InputLeases.OpenAsync(dataset, job, memory, cancellationToken).ConfigureAwait(false);
         await using System.Runtime.CompilerServices.ConfiguredAsyncDisposable openedScope = opened.ConfigureAwait(false);
 
         // The key the reads seek by, whose first column's summaries bound a level's ranges and the late rows.
@@ -436,7 +440,7 @@ internal static partial class DatasetCompactor
 
         int objectsOut = lateOutputs?.Written.Count ?? 0;
         long bytesOut = lateOutputs?.Bytes ?? 0;
-        long scratch = (lateOutputs?.ScratchBytes ?? 0) + (postings?.ScratchBytes ?? 0);
+        long scratch = (lateOutputs?.ScratchBytes ?? 0) + (postings?.ScratchBytes ?? 0) + memory.CopiedBytes;
         foreach (ObjectStream outputs in streams)
         {
             objectsOut += outputs.Written.Count;
@@ -824,7 +828,7 @@ internal static partial class DatasetCompactor
         private InputLeases(ObjectLease?[] leases) => _leases = leases;
 
         /// <summary>Opens every input of <paramref name="job"/> of two inputs or more; none of a job of one.</summary>
-        internal static async ValueTask<InputLeases> OpenAsync(VortexDataset dataset, CompactionJob job, CancellationToken cancellationToken)
+        internal static async ValueTask<InputLeases> OpenAsync(VortexDataset dataset, CompactionJob job, JobMemory memory, CancellationToken cancellationToken)
         {
             InputLeases opened = new InputLeases(new ObjectLease?[job.Inputs.Count < 2 ? 0 : job.Inputs.Count]);
             try
@@ -835,7 +839,7 @@ internal static partial class DatasetCompactor
                     CancellationToken = cancellationToken,
                 };
                 await Parallel.ForAsync(0, opened._leases.Length, lanes, async (i, token) =>
-                    opened._leases[i] = await dataset.RentAsync(job.Inputs[i].Entry, token).ConfigureAwait(false)).ConfigureAwait(false);
+                    opened._leases[i] = await memory.RentAsync(job.Inputs[i].Entry, token).ConfigureAwait(false)).ConfigureAwait(false);
                 return opened;
             }
             catch
@@ -922,7 +926,7 @@ internal static partial class DatasetCompactor
                 outputs.Partition = partition;
             }
 
-            ObjectLease lease = await dataset.RentAsync(input.Entry, cancellationToken).ConfigureAwait(false);
+            ObjectLease lease = await memory.RentAsync(input.Entry, cancellationToken).ConfigureAwait(false);
             await using (lease.ConfigureAwait(false))
             {
                 await foreach (RecordBatch batch in RowsOfAsync(lease, input.Entry, schema, cancellationToken, account: memory.InputsAccount)
@@ -956,7 +960,7 @@ internal static partial class DatasetCompactor
         KeyRanges? ranges = null,
         int range = 0)
     {
-        KeyOrderedMerge merge = InputsMerged(dataset, schema, job, batchRows, cancellationToken, ranges: ranges, range: range, meter: meter, account: memory.InputsAccount);
+        KeyOrderedMerge merge = InputsMerged(dataset, schema, job, batchRows, cancellationToken, ranges: ranges, range: range, meter: meter, memory: memory);
         ValueCut? values = schema.Cut;
         long rows = 0;
         await using (merge.ConfigureAwait(false))
@@ -1072,8 +1076,9 @@ internal static partial class DatasetCompactor
         int range = 0,
         int only = -1,
         RowMeter? meter = null,
-        Buffers.MemoryAccount? account = null)
+        JobMemory? memory = null)
     {
+        Buffers.MemoryAccount? account = memory?.InputsAccount;
         List<(ReadOnlyMemory<byte> Key, MergeObject Object)> inputs = new(job.Inputs.Count);
         Dictionary<string, RowRange>? rows = ranges is null ? null : new Dictionary<string, RowRange>(StringComparer.Ordinal);
         for (int i = 0; i < job.Inputs.Count; i++)
@@ -1113,6 +1118,7 @@ internal static partial class DatasetCompactor
             ranges?.High(range) ?? default)
         {
             Account = account ?? QueryMemoryBudget.JobsOf(dataset.Session).Account,
+            Rent = memory is null ? null : memory.RentAsync,
         };
     }
 
@@ -1292,7 +1298,7 @@ internal static partial class DatasetCompactor
         if (values is null || values.HoldsOne(held))
         {
             PathCensus[] paths = Censuses.Rent(variants.Length, textBound);
-            ObjectLease lease = await dataset.RentAsync(held.Entry, cancellationToken).ConfigureAwait(false);
+            ObjectLease lease = await memory.RentAsync(held.Entry, cancellationToken).ConfigureAwait(false);
             await using (lease.ConfigureAwait(false))
             {
                 await foreach (RecordBatch batch in RowsOfAsync(lease, held.Entry, schema, cancellationToken, variants, account: memory.InputsAccount)
@@ -1320,7 +1326,7 @@ internal static partial class DatasetCompactor
         int[] counted = Counted(schema);
         int[] read = [.. variants.Select(field => Array.BinarySearch(counted, field))];
         byte[]? last = null;
-        KeyOrderedMerge merge = InputsMerged(dataset, schema, job, CensusRows(dataset, job), cancellationToken, counted, only: input, account: memory.InputsAccount);
+        KeyOrderedMerge merge = InputsMerged(dataset, schema, job, CensusRows(dataset, job), cancellationToken, counted, only: input, memory: memory);
         await using (merge.ConfigureAwait(false))
         {
             while (await merge.MoveNextAsync().ConfigureAwait(false))

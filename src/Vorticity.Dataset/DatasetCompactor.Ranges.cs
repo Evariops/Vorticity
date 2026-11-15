@@ -131,7 +131,7 @@ internal static partial class DatasetCompactor
         }
 
         RowMeter meter = new RowMeter();
-        ObjectLease lease = await dataset.RentAsync(largest.Entry, cancellationToken).ConfigureAwait(false);
+        ObjectLease lease = await memory.RentAsync(largest.Entry, cancellationToken).ConfigureAwait(false);
         await using (lease.ConfigureAwait(false))
         {
             await foreach (RecordBatch batch in RowsOfAsync(lease, largest.Entry, schema, cancellationToken, batchRows: 8_192, account: memory.InputsAccount).ConfigureAwait(false))
