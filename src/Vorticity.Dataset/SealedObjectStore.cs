@@ -7,6 +7,7 @@ using System.IO.Pipelines;
 using System.Security.Cryptography;
 using System.Threading;
 using System.Threading.Tasks;
+using Vorticity.Buffers;
 using Vorticity.IO;
 using Vorticity.Sealing;
 
@@ -1227,7 +1228,7 @@ internal sealed class SealedObjectStore : IObjectStore
         }
     }
 
-    /// <summary>An array from the shared pool, wiped as it goes back: a commit object's plaintext does not outlive its lease there.</summary>
+    /// <summary>The array of a block of the pool, wiped as it goes back: a commit object's plaintext does not outlive its lease there.</summary>
     private sealed class WipedBuffer : IDisposable
     {
         private byte[]? _array;
@@ -1236,13 +1237,14 @@ internal sealed class SealedObjectStore : IObjectStore
 
         internal byte[] Array => _array ?? throw new ObjectDisposedException(nameof(WipedBuffer));
 
-        internal static WipedBuffer Rent(int length) => new WipedBuffer(ArrayPool<byte>.Shared.Rent(Math.Max(length, 1)));
+        internal static WipedBuffer Rent(int length) => new WipedBuffer(Blocks.Rent<byte>(Math.Max(length, 1)).Array());
 
         public void Dispose()
         {
             if (Interlocked.Exchange(ref _array, null) is { } array)
             {
-                ArrayPool<byte>.Shared.Return(array, clearArray: true);
+                CryptographicOperations.ZeroMemory(array);
+                Blocks.ReturnBytes(array);
             }
         }
     }

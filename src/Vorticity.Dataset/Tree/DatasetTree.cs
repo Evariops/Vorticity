@@ -1,5 +1,4 @@
 using System;
-using System.Buffers;
 using System.Collections.Generic;
 using System.IO.Hashing;
 using System.Threading;
@@ -431,9 +430,11 @@ internal sealed record DatasetTree(PageReference Root, int Depth, long Entries, 
         // ahead: one dependent round trip per window rather than one per page. The window is
         // bounded so that a walk which stops early has read at most a window more than it used.
         // A page the source holds in hand is taken as it lies, where a read was a task a page.
-        // The stack is a rented array and an internal page is read where it lies: a walk grew a
-        // list of 88-byte steps to its widest page's width, and made a list of each internal page.
-        Step[] stack = ArrayPool<Step>.Shared.Rent(StackStart);
+        // The stack is the one the source keeps between its walks and an internal page is read where
+        // it lies: a walk grew a list of 88-byte steps to its widest page's width, and made a list of
+        // each internal page.
+        WalkStack walks = source.Walks;
+        Step[] stack = walks.Take(StackStart);
         int count = 0;
         stack[count++] = new Step(Root, Depth, 0);
         try
@@ -497,28 +498,75 @@ internal sealed record DatasetTree(PageReference Root, int Depth, long Entries, 
 
             // Every step past the count was cleared as it was taken.
             Array.Clear(stack, 0, count);
-            ArrayPool<Step>.Shared.Return(stack);
+            walks.Give(stack);
         }
     }
 
-    /// <summary>The steps a walk's stack is rented with: a few pages' children, most walks' widest.</summary>
+    /// <summary>The steps a walk's stack is made with: a few pages' children, most walks' widest.</summary>
     private const int StackStart = 64;
 
-    /// <summary>A stack twice as long holding the first <paramref name="count"/> steps of <paramref name="stack"/>, which goes back to the pool cleared.</summary>
+    /// <summary>A stack twice as long holding the first <paramref name="count"/> steps of <paramref name="stack"/>.</summary>
     private static Step[] Grown(Step[] stack, int count)
     {
-        Step[] grown = ArrayPool<Step>.Shared.Rent(stack.Length * 2);
+        Step[] grown = new Step[stack.Length * 2];
         Array.Copy(stack, grown, count);
-        Array.Clear(stack, 0, count);
-        ArrayPool<Step>.Shared.Return(stack);
         return grown;
+    }
+
+    /// <summary>
+    /// The stacks the walks over a source's pages keep their steps in, which the source keeps between its walks
+    /// (<see cref="IPageSource.Walks"/>): the steps hold their reads, references no block of the pool holds, and a walk
+    /// grew a list of them, 88 bytes a step, to its widest page's width. As many as the walks that ran at once, the lanes of
+    /// a question each walking: taken and given back under a lock, once a walk.
+    /// </summary>
+    internal sealed class WalkStack
+    {
+        /// <summary>The most steps a source keeps a stack of: a wider walk's goes to the collector with it.</summary>
+        private const int MostSteps = 1 << 14;
+
+        /// <summary>The most stacks a source keeps: walks past them at once make theirs, and let them go.</summary>
+        private const int MostStacks = 64;
+
+        private readonly Lock _gate = new Lock();
+        private readonly Stack<Step[]> _kept = new Stack<Step[]>();
+
+        /// <summary>A stack a walk before gave back, cleared, or a new one of <paramref name="steps"/> steps.</summary>
+        internal Step[] Take(int steps)
+        {
+            lock (_gate)
+            {
+                if (_kept.TryPop(out Step[]? kept))
+                {
+                    return kept;
+                }
+            }
+
+            return new Step[steps];
+        }
+
+        /// <summary>Keeps <paramref name="stack"/>, cleared, for the next walk, unless it is too wide or enough are kept.</summary>
+        internal void Give(Step[] stack)
+        {
+            if (stack.Length > MostSteps)
+            {
+                return;
+            }
+
+            lock (_gate)
+            {
+                if (_kept.Count < MostStacks)
+                {
+                    _kept.Push(stack);
+                }
+            }
+        }
     }
 
     /// <summary>
     /// A page a walk has yet to read: where it lies, its level above the leaves and the first row under it; once fetched,
     /// its bytes in hand or the read of them.
     /// </summary>
-    private readonly record struct Step(PageReference Reference, int Level, long Row)
+    internal readonly record struct Step(PageReference Reference, int Level, long Row)
     {
         internal bool Fetched { get; init; }
 

@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.IO.Pipelines;
 using System.Threading;
 using System.Threading.Tasks;
+using Vorticity.Buffers;
 using Vorticity.IO;
 using Vorticity.Writing;
 
@@ -322,7 +323,7 @@ internal sealed class ObjectSegmentSink : ISegmentSink, IAsyncDisposable
 
         if (_tail is null || _tailUsed + data.Length > _tail.Length)
         {
-            byte[] grown = ArrayPool<byte>.Shared.Rent(Math.Max(_tailUsed + data.Length, Math.Max((_tail?.Length ?? 0) * 2, 64 << 10)));
+            byte[] grown = Blocks.Rent<byte>(Math.Max(_tailUsed + data.Length, Math.Max((_tail?.Length ?? 0) * 2, 64 << 10))).Array();
             _tail?.AsSpan(0, _tailUsed).CopyTo(grown);
             ReleaseTail();
             _tail = grown;
@@ -336,7 +337,7 @@ internal sealed class ObjectSegmentSink : ISegmentSink, IAsyncDisposable
     {
         if (_tail is not null)
         {
-            ArrayPool<byte>.Shared.Return(_tail);
+            Blocks.ReturnBytes(_tail);
             _tail = null;
         }
     }

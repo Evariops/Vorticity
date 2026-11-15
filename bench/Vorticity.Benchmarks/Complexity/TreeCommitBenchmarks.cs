@@ -117,6 +117,8 @@ public class TreeCommitBenchmarks
             page = default;
             return false;
         }
+
+        public DatasetTree.WalkStack Walks { get; } = new DatasetTree.WalkStack();
     }
 
     /// <summary>Names the pages a commit writes, and keeps none of them.</summary>

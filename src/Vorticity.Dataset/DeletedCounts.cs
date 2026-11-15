@@ -518,6 +518,9 @@ internal sealed class DeletedCounts
             private readonly Dictionary<byte[], long[]> _entries = new Dictionary<byte[], long[]>(ByteKeys.Instance);
             private long[]? _nulls;
 
+            /// <summary>The entries of a tranche of the rows taken (<see cref="Add"/>); made at the first batch.</summary>
+            private long[][]? _tranche;
+
             internal int Field { get; } = field;
 
             /// <summary>
@@ -530,8 +533,9 @@ internal sealed class DeletedCounts
             [SkipLocalsInit]
             internal void Add(CanonicalArena arena, CanonicalNode root, int count, ReadOnlySpan<ulong> selection)
             {
-                // The entries of the rows taken and the rows, a tranche at a time: the measures folded over each.
-                long[][] entries = System.Buffers.ArrayPool<long[]>.Shared.Rent(Tranche);
+                // The entries of the rows taken and the rows, a tranche at a time: the measures folded over each. The entries
+                // are arrays, references no block holds: an array the column keeps for its batches, cleared after each.
+                long[][] entries = _tranche ??= new long[Tranche][];
                 Span<int> rows = stackalloc int[Tranche];
                 try
                 {
@@ -539,8 +543,7 @@ internal sealed class DeletedCounts
                 }
                 finally
                 {
-                    Array.Clear(entries, 0, Tranche);
-                    System.Buffers.ArrayPool<long[]>.Shared.Return(entries);
+                    Array.Clear(entries);
                 }
             }
 

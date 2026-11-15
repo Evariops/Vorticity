@@ -1,5 +1,4 @@
 using System;
-using System.Buffers;
 using System.Collections.Generic;
 using System.Threading;
 using Vorticity.Buffers;
@@ -387,13 +386,13 @@ internal sealed class KeyPruning
                 }
             }
 
-            // A range's keys decoded once, one record each, and its boxes judged over them, in rented buffers: the search reads
-            // them in any order, each from its run's whole key otherwise.
+            // A range's keys decoded once, one record each, and its boxes judged over them, in blocks of the pool: the search
+            // reads them in any order, each from its run's whole key otherwise.
             foreach ((int from, int to) in Merge(within))
             {
                 int last = Math.Min(to + 1, keys.Granules);
-                byte[] rangeKeys = ArrayPool<byte>.Shared.Rent((last - from) * Math.Max(keys.Longest(from, last), 1));
-                int[] ends = ArrayPool<int>.Shared.Rent(last - from);
+                Block<byte> rangeKeys = Blocks.Rent<byte>((last - from) * Math.Max(keys.Longest(from, last), 1));
+                Block<int> ends = Blocks.Rent<int>(last - from);
                 try
                 {
                     keys.Decode(from, last, rangeKeys, ends);
@@ -401,8 +400,8 @@ internal sealed class KeyPruning
                 }
                 finally
                 {
-                    ArrayPool<byte>.Shared.Return(rangeKeys);
-                    ArrayPool<int>.Shared.Return(ends);
+                    Blocks.Return(rangeKeys);
+                    Blocks.Return(ends);
                 }
             }
 
@@ -511,7 +510,7 @@ internal sealed class KeyPruning
     }
 
     /// <summary>The keys of a range of granules from <paramref name="from"/>, decoded end to end, with where each ends.</summary>
-    private readonly struct RangeKeys(int from, byte[] keys, int[] ends)
+    private readonly struct RangeKeys(int from, Block<byte> keys, Block<int> ends)
     {
         internal ReadOnlySpan<byte> this[int granule]
         {

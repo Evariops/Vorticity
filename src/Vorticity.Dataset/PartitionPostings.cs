@@ -6,6 +6,7 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
+using Vorticity.Buffers;
 using Vorticity.IO;
 using Vorticity.Writing;
 
@@ -110,7 +111,7 @@ internal sealed class PartitionPostings : IDisposable
         }
 
         int pairBytes = Unsafe.SizeOf<Pair>();
-        byte[] run = ArrayPool<byte>.Shared.Rent(Math.Max(pairs, 1) * pairBytes);
+        byte[] run = Blocks.Rent<byte>(Math.Max(pairs, 1) * pairBytes).Array();
         try
         {
             Span<Pair> laid = MemoryMarshal.Cast<byte, Pair>(run.AsSpan(0, pairs * pairBytes));
@@ -142,7 +143,7 @@ internal sealed class PartitionPostings : IDisposable
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(run);
+            Blocks.ReturnBytes(run);
         }
     }
 
@@ -699,7 +700,7 @@ internal sealed class PartitionPostings : IDisposable
             {
                 _bytes = null;
                 _count = 0;
-                ArrayPool<byte>.Shared.Return(bytes);
+                Blocks.ReturnBytes(bytes);
             }
         }
 
@@ -721,11 +722,11 @@ internal sealed class PartitionPostings : IDisposable
 
         private void Grow()
         {
-            byte[] grown = ArrayPool<byte>.Shared.Rent(Math.Max(64 << 10, (_bytes?.Length ?? 0) * 2));
+            byte[] grown = Blocks.Rent<byte>(Math.Max(64 << 10, (_bytes?.Length ?? 0) * 2)).Array();
             if (_bytes is { } held)
             {
                 held.AsSpan(0, _count * PairBytes).CopyTo(grown);
-                ArrayPool<byte>.Shared.Return(held);
+                Blocks.ReturnBytes(held);
             }
 
             _bytes = grown;

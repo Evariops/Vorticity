@@ -118,6 +118,9 @@ internal sealed class CommitPageSource : IPageSource
     public bool TryGetInHand(PageReference reference, out ReadOnlyMemory<byte> page) =>
         TryGetKnown(reference, out page) || TryGetKept(reference, out page);
 
+    /// <inheritdoc/>
+    public DatasetTree.WalkStack Walks { get; } = new DatasetTree.WalkStack();
+
     /// <summary>
     /// Takes what the open read of a version's commit object holds, which costs no further request:
     /// the pages its header inlines, where its pages region starts and where those of the earlier

@@ -18,6 +18,9 @@ internal interface IPageSource
 
     /// <summary>The bytes of a page the source holds in hand, taken with no read and no wait: false when a read is needed.</summary>
     bool TryGetInHand(PageReference reference, out ReadOnlyMemory<byte> page);
+
+    /// <summary>The stack the walks over the source's pages keep their steps in between them: the source outlives its walks.</summary>
+    DatasetTree.WalkStack Walks { get; }
 }
 
 /// <summary>
@@ -88,6 +91,9 @@ internal sealed class MemoryPageStore : IPageSource, IPageSink
         page = default;
         return false;
     }
+
+    /// <inheritdoc/>
+    public DatasetTree.WalkStack Walks { get; } = new DatasetTree.WalkStack();
 
     /// <inheritdoc/>
     public ValueTask<ReadOnlyMemory<byte>> ReadPageAsync(
