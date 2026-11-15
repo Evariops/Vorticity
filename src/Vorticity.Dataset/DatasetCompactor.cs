@@ -107,6 +107,14 @@ internal static partial class DatasetCompactor
             throw new ArgumentException("A compaction reads at least one object.", nameof(job));
         }
 
+        // A handle that has measured no input yet measures one before its first merge, an input and a row; a tier merge
+        // wider than the measure lets the budget hold is given up before it starts, counted as no compaction, and the next
+        // plan prices its inputs by the measure, where the guess before it took them all and was refused twice.
+        if (job.Trigger != CompactionTrigger.Fragments)
+        {
+            await PriceAsync(dataset, job, cancellationToken).ConfigureAwait(false);
+        }
+
         // One activity over the job, its commit's as a child; a job counted however it ends. Its reads keep nothing in the
         // session's segment cache: each object once, which questions would not find there again.
         using SegmentCache.PassingScope passing = SegmentCache.Pass();
@@ -133,6 +141,23 @@ internal static partial class DatasetCompactor
     /// own memory (<see cref="JobMemory"/>). A job whose memory was refused a block throws <see cref="JobTooWideException"/>
     /// once its outputs are given up and its blocks given back: the handle's next plan takes fewer inputs.
     /// </summary>
+    /// <summary>
+    /// Measures an input before the handle's first merge (<see cref="MeasureInputAsync"/>), and gives up a tier merge wider
+    /// than the measure lets the jobs' budget hold: <see cref="JobTooWideException"/>, before the job starts.
+    /// </summary>
+    private static async ValueTask PriceAsync(VortexDataset dataset, CompactionJob job, CancellationToken cancellationToken)
+    {
+        bool merge = job.Style is CompactionStyle.Leveled || (job.Style is CompactionStyle.Tiered && dataset.Snapshot.Schema.Keyed);
+        if (merge && (dataset.InputJobBytes == 0 || dataset.DecodedRowBytes == 0)
+            && await MeasureInputAsync(dataset, job, cancellationToken).ConfigureAwait(false)
+            && job.Trigger == CompactionTrigger.Tier
+            && MemoryWidth(dataset, job.Inputs) is int fits && fits < job.Inputs.Count)
+        {
+            dataset.CapJobWidth(fits);
+            throw new JobTooWideException(job, fits, JobBudget(dataset));
+        }
+    }
+
     private static async ValueTask<CompactionResult> RewriteAsync(
         VortexDataset dataset, CompactionJob job, CancellationToken cancellationToken)
     {
@@ -144,7 +169,7 @@ internal static partial class DatasetCompactor
         catch (Exception failure) when (memory.Refused && failure is not JobTooWideException && !cancellationToken.IsCancellationRequested)
         {
             dataset.NarrowJobs(job.Inputs.Count, memory.InputsPeak, memory.Sizing, memory.WriterPeak);
-            throw new JobTooWideException(job, memory.Peak, memory.Jobs.CeilingBytes, failure);
+            throw new JobTooWideException(job, memory.Peak, memory.Jobs.CeilingBytes, failure) { Sizing = memory.Sizing };
         }
         finally
         {
@@ -192,9 +217,6 @@ internal static partial class DatasetCompactor
         if (merge)
         {
             Check(schema);
-
-            // A handle that has not measured a row of the dataset decoded measures one before it sizes the job's batches.
-            await LearnRowBytesAsync(dataset, schema, job, memory, cancellationToken).ConfigureAwait(false);
         }
 
         // Every input open before the passes, side by side, and held until the job ends.
@@ -888,6 +910,9 @@ internal static partial class DatasetCompactor
         int batchRows = 0, Buffers.MemoryAccount? account = null)
     {
         // A job's input reads and decodes under the job's inputs' account (JobMemory), which never passes the jobs' budget.
+        // Its batches hold its rows at most: an input of 1 924 rows in a merge of batches of 16 384 held 566 KB, a batch's
+        // worth of each column, where its job priced it at its rows.
+        batchRows = batchRows > 0 ? (int)Math.Clamp(rows?.Length ?? entry.PhysicalRows, 1, batchRows) : batchRows;
         VortexFile file = lease.File;
         FieldMask projection = fields is null ? FieldMask.All : Layouts.FieldMasks.Of(fields);
         if (schema.ColumnsOf(file.DType, entry.Key) is not { } columns)

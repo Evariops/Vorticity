@@ -230,10 +230,19 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
     /// </summary>
     internal int JobWidthCap => Volatile.Read(ref _jobWidthCap);
 
+    /// <summary>
+    /// The most rows an input's batch holds in a job of the handle after one was refused its blocks, and the most inputs it
+    /// holds open at once: half the rows and as many inputs as the refused one, until a job runs to its end; 0 for none.
+    /// Each refusal narrows the next job, by its inputs, its batches or both, until one fits or none can be narrower.
+    /// </summary>
+    internal (int BatchRows, int Open) JobSizingCap => (Volatile.Read(ref _jobBatchCap), Volatile.Read(ref _jobOpenCap));
+
     private long _inputJobBytes;
     private long _writerJobBytes;
     private int _jobBatchRows;
     private int _jobWidthCap;
+    private int _jobBatchCap;
+    private int _jobOpenCap;
 
     /// <summary>
     /// The bytes a second the last job of this handle that ran to its end read and wrote, its inputs' bytes over its time:
@@ -337,7 +346,28 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
         }
 
         Volatile.Write(ref _jobWidthCap, 0);
+        Volatile.Write(ref _jobBatchCap, 0);
+        Volatile.Write(ref _jobOpenCap, 0);
     }
+
+    /// <summary>
+    /// Keeps what an input measured before the handle's first job held, <paramref name="inputBytes"/> at batches of
+    /// <paramref name="batchRows"/> rows, as a job's would be kept; the caps a refusal set stay, no job having run since.
+    /// </summary>
+    internal void LearnInputCost(long inputBytes, int batchRows)
+    {
+        if (inputBytes > 0)
+        {
+            Volatile.Write(ref _inputJobBytes, inputBytes);
+            Volatile.Write(ref _jobBatchRows, Math.Max(batchRows, 1));
+        }
+    }
+
+    /// <summary>
+    /// A job was given up before it read anything, its first input's measure fitting <paramref name="inputs"/> of them in
+    /// the jobs' budget: the next takes that many at most, below the fan-out if need be, as one refused would.
+    /// </summary>
+    internal void CapJobWidth(int inputs) => Volatile.Write(ref _jobWidthCap, Math.Max(1, inputs));
 
     /// <summary>
     /// A job of <paramref name="inputs"/> inputs was refused its blocks: the next takes half as many, until one runs to its end.
@@ -352,6 +382,11 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
         Volatile.Write(ref _jobWidthCap, Math.Max(1, inputs / 2));
         if (sizing is { BatchRows: > 0, Open: > 0 })
         {
+            // The next job's batches half as long, and no more of its inputs open at once: what a job of as many inputs, a
+            // consolidation with no merge due before it, narrows by.
+            Volatile.Write(ref _jobBatchCap, Math.Max(DatasetCompactor.LeastBatchRows, sizing.BatchRows / 2));
+            Volatile.Write(ref _jobOpenCap, sizing.Open);
+
             long perInput = inputBytes / sizing.Open;
             long perRow = (perInput - DatasetCompactor.InputFloorBytes) / sizing.BatchRows;
             long known = InputJobBytes > 0 ? (InputJobBytes - DatasetCompactor.InputFloorBytes) / Math.Max(JobBatchRows, 1) : 0;
@@ -2238,13 +2273,14 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
 
     /// <summary>
     /// Runs <paramref name="job"/>; when the jobs' budget refuses its blocks, plans again by <paramref name="replan"/>, which
-    /// takes fewer inputs since (<see cref="NarrowJobs"/>), and runs that job: never the same job twice. Null when the plan
-    /// after a refusal has nothing due.
+    /// narrows the next job since (<see cref="NarrowJobs"/>), and runs that job, until one runs to its end or a refusal
+    /// narrowed nothing (<see cref="Narrowed"/>). Null when the plan after a refusal has nothing due.
     /// </summary>
-    /// <exception cref="VortexMemoryException">The plan after a refusal takes as many inputs as the job refused: it needs more than the budget holds.</exception>
+    /// <exception cref="VortexMemoryException">A job refused narrowed nothing of the one refused before it: it needs more than the budget holds.</exception>
     internal async ValueTask<CompactionResult?> RunWithinBudgetAsync(
         CompactionJob job, Func<CancellationToken, ValueTask<CompactionJob?>> replan, CancellationToken cancellationToken)
     {
+        JobTooWideException? refused = null;
         while (true)
         {
             try
@@ -2253,29 +2289,43 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
             }
             catch (JobTooWideException tooWide)
             {
+                Narrowed(refused, tooWide);
+                refused = tooWide;
                 if (await replan(cancellationToken).ConfigureAwait(false) is not { } next)
                 {
                     return null;
                 }
 
-                job = Narrower(tooWide, next);
+                job = next;
             }
         }
     }
 
     /// <summary>
-    /// <paramref name="next"/>, the job planned after <paramref name="tooWide"/> was refused, when it takes fewer inputs; a
-    /// throw otherwise, which says what the job held and what the budget holds.
+    /// Whether the job refused, <paramref name="now"/>, narrowed something of the one of its kind refused <paramref name="before"/>
+    /// it: fewer inputs, shorter batches, or fewer inputs open at once; or <paramref name="before"/> was given up on a price
+    /// alone, before it read anything. A throw otherwise, which says what the job held and what the budget holds: every
+    /// refusal narrows the next job (<see cref="NarrowJobs"/>), so one that narrowed nothing has nothing left to narrow. The
+    /// rule was fewer inputs alone, and a consolidation refused with no merge due before it, as many inputs again however
+    /// short its batches, failed at its second refusal (2026-11-15).
     /// </summary>
-    /// <exception cref="VortexMemoryException">The next job takes as many inputs as the one refused.</exception>
-    internal static CompactionJob Narrower(JobTooWideException tooWide, CompactionJob next) =>
-        next.Inputs.Count < tooWide.Job.Inputs.Count
-            ? next
-            : throw new VortexMemoryException(
-                string.Create(
-                    CultureInfo.InvariantCulture,
-                    $"A compaction of {next.Inputs.Count} objects, the fewest it may take, needs more than the jobs' budget of {tooWide.Budget:N0} bytes: its blocks held {tooWide.Held:N0} when one was refused. Give the process more memory, or the session a larger JobMemoryBudget."),
-                tooWide);
+    /// <exception cref="VortexMemoryException">The job narrowed nothing of the one before it.</exception>
+    internal static void Narrowed(JobTooWideException? before, JobTooWideException now)
+    {
+        if (before is null || before.Job.Trigger != now.Job.Trigger || before.Priced
+            || now.Job.Inputs.Count < before.Job.Inputs.Count
+            || (now.Sizing.BatchRows > 0 && now.Sizing.BatchRows < before.Sizing.BatchRows)
+            || (now.Sizing.Open > 0 && now.Sizing.Open < before.Sizing.Open))
+        {
+            return;
+        }
+
+        throw new VortexMemoryException(
+            string.Create(
+                CultureInfo.InvariantCulture,
+                $"A compaction of {now.Job.Inputs.Count} objects, at its fewest inputs and shortest batches, needs more than the jobs' budget of {now.Budget:N0} bytes: its blocks held {now.Held:N0} when one was refused. Give the process more memory, or the session a larger JobMemoryBudget."),
+            now);
+    }
 
     /// <summary>
     /// Consolidates every partition whose level 0 holds an object, calm or not, whatever its share of what it meets: its
@@ -2351,12 +2401,8 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
             }
             catch (JobTooWideException tooWide)
             {
-                // Refused again with no fewer inputs: the budget does not hold the least this job takes.
-                if (refused is not null && refused.Job.Trigger == tooWide.Job.Trigger)
-                {
-                    _ = Narrower(refused, tooWide.Job);
-                }
-
+                // Refused again with nothing narrower: the budget does not hold the least this job takes.
+                Narrowed(refused, tooWide);
                 refused = tooWide;
             }
         }
@@ -2674,6 +2720,10 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             // Cancelled by the caller, whose commit stands.
+        }
+        catch (JobTooWideException)
+        {
+            // Too wide for the jobs' budget: not a failure, the next commit plans a narrower merge by what this one learned.
         }
         catch (Exception failed) when (failed is not OutOfMemoryException)
         {

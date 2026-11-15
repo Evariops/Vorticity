@@ -134,6 +134,67 @@ public sealed partial class JobMemoryTests
         Assert.Equal(4L << 20, dataset.InputJobBytes);
     }
 
+    /// <summary>
+    /// A handle that has run no job measures one input before its first merge, through a merge of that input alone: what an
+    /// input holds at a batch of a block and what a row weighs, read from one object, which the next plan prices its inputs
+    /// by; nothing of the dataset is written.
+    /// </summary>
+    [Fact]
+    public async Task AHandlesFirstMergeMeasuresAnInputOfItsOwnFirst()
+    {
+        await using MemoryObjectStore inner = new MemoryObjectStore();
+        CountingObjectStore store = new CountingObjectStore(inner);
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Row.Schema, Options(VortexSession.Default, fanout: 4), Ct);
+        Random random = new Random(3);
+        List<Row> all = [];
+        for (int a = 0; a < 8; a++)
+        {
+            await AppendAsync(dataset, all, Rows(random, 2_000, all.Count));
+        }
+
+        CompactionPlan plan = await dataset.PlanCompactionAsync(cancellationToken: Ct);
+        Assert.NotNull(plan.Job);
+        Assert.Equal(0, dataset.InputJobBytes);
+        Assert.Equal(0, dataset.DecodedRowBytes);
+        ulong version = dataset.Version;
+        store.Reset();
+
+        Assert.True(await DatasetCompactor.MeasureInputAsync(dataset, plan.Job, Ct));
+        Assert.InRange(dataset.InputJobBytes, 1, 64L << 20);
+        Assert.InRange(dataset.DecodedRowBytes, 1, 64L << 10);
+        Assert.InRange(store.CountOf(ObjectOperation.Read), 1, 2);
+        Assert.Equal(0, store.CountOf(ObjectOperation.Put));
+        Assert.Equal(version, dataset.Version);
+    }
+
+    /// <summary>
+    /// A job refused its blocks narrows the next: half its inputs for a merge by size class, and for any job half the rows of
+    /// its batches, as many inputs open at once at most. A refusal that narrowed nothing of the one before it fails, one
+    /// given up on its price alone excepted, and a job that ran to its end lifts the caps.
+    /// </summary>
+    [Fact]
+    public async Task AJobRefusedNarrowsTheNextUntilNothingIsLeftToNarrow()
+    {
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Row.Schema, Options(VortexSession.Default, fanout: 4), Ct);
+        dataset.NarrowJobs(8, 8L << 20, (16_384, 8), writerBytes: 0);
+        Assert.Equal(4, dataset.JobWidthCap);
+        Assert.Equal((8_192, 8), dataset.JobSizingCap);
+
+        CompactionJob job = new CompactionJob(0, 1, CompactionStyle.Leveled, CompactionTrigger.Consolidation, [], 0, 0);
+        JobTooWideException first = new JobTooWideException(job, 8L << 20, 8L << 20, new VortexMemoryException("refused")) { Sizing = (16_384, 8) };
+        JobTooWideException shorter = new JobTooWideException(job, 8L << 20, 8L << 20, new VortexMemoryException("refused")) { Sizing = (8_192, 8) };
+        JobTooWideException same = new JobTooWideException(job, 8L << 20, 8L << 20, new VortexMemoryException("refused")) { Sizing = (8_192, 8) };
+        VortexDataset.Narrowed(null, first);
+        VortexDataset.Narrowed(first, shorter);
+        Assert.Throws<VortexMemoryException>(() => VortexDataset.Narrowed(shorter, same));
+        VortexDataset.Narrowed(new JobTooWideException(job, 1, 8L << 20), same);
+
+        dataset.LearnJobCosts(1L << 20, 8_192, writerBytes: 0);
+        Assert.Equal(0, dataset.JobWidthCap);
+        Assert.Equal((0, 0), dataset.JobSizingCap);
+    }
+
     /// <summary>The same partition under the default budget, which holds it at once: one consolidation, no pass.</summary>
     [Fact]
     public async Task APartitionWithinItsBudgetIsConsolidatedAtOnce()

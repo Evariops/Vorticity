@@ -23,8 +23,29 @@ internal sealed class JobTooWideException : Exception
         Budget = budget;
     }
 
+    /// <summary>
+    /// A job of <paramref name="job"/>'s inputs given up before it read anything: the measure of an input, the handle's first,
+    /// lets the jobs' budget of <paramref name="budget"/> hold <paramref name="fits"/> of them.
+    /// </summary>
+    internal JobTooWideException(CompactionJob job, int fits, long budget)
+        : base(
+            string.Create(
+                CultureInfo.InvariantCulture,
+                $"A compaction of {job.Inputs.Count} objects, priced by the measure of one, fits {fits} of them under a jobs' budget of {budget:N0}."))
+    {
+        Job = job;
+        Budget = budget;
+        Priced = true;
+    }
+
     /// <summary>The job refused.</summary>
     internal CompactionJob Job { get; }
+
+    /// <summary>The rows of an input's batch and the inputs it held open at once when refused; 0 before it sized them.</summary>
+    internal (int BatchRows, int Open) Sizing { get; init; }
+
+    /// <summary>Whether it was given up before it read anything, priced by its first input's measure.</summary>
+    internal bool Priced { get; }
 
     /// <summary>What its blocks held when one was refused.</summary>
     internal long Held { get; }

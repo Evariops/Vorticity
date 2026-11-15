@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Diagnostics.Metrics;
 using System.Globalization;
 using System.IO;
 using System.Linq;
@@ -33,6 +34,38 @@ namespace Vorticity.Benchmarks.Queries;
 internal static class BacklogBench
 {
     private static readonly DateTimeOffset Start = new DateTimeOffset(2026, 11, 15, 0, 0, 0, TimeSpan.Zero);
+
+    // The jobs given up since the last job ran to its end, the budget refusing them or their price: the library's own count
+    // of compactions that failed, read on its meter.
+    private static long s_refused;
+
+    private static readonly MeterListener Refusals = Listen();
+
+    private static MeterListener Listen()
+    {
+        MeterListener listener = new MeterListener
+        {
+            InstrumentPublished = static (instrument, listening) =>
+            {
+                if (instrument.Meter.Name == VortexDiagnostics.MeterName && instrument.Name == "vortex.dataset.compactions")
+                {
+                    listening.EnableMeasurementEvents(instrument);
+                }
+            },
+        };
+        listener.SetMeasurementEventCallback<long>(static (_, value, tags, _) =>
+        {
+            foreach (KeyValuePair<string, object?> tag in tags)
+            {
+                if (tag.Key == "vortex.outcome" && tag.Value is "failed")
+                {
+                    Interlocked.Add(ref s_refused, value);
+                }
+            }
+        });
+        listener.Start();
+        return listener;
+    }
 
     internal static async Task<int> RunAsync(string root, int appends, int rows, int series, long memoryLimit, bool compactOnly, int latency)
     {
@@ -82,6 +115,7 @@ internal static class BacklogBench
         while (true)
         {
             sampler.Reset();
+            Interlocked.Exchange(ref s_refused, 0);
             Stopwatch job = Stopwatch.StartNew();
             await maintainer.RefreshAsync();
             CompactionResult? result = await maintainer.CompactAsync();
@@ -94,7 +128,7 @@ internal static class BacklogBench
             mostHeld = Math.Max(mostHeld, result.MemoryReserved);
             Console.WriteLine(string.Create(
                 CultureInfo.InvariantCulture,
-                $"job {jobs}: {result.Trigger} L{result.FromLevel}->L{result.ToLevel}, {result.ObjectsIn} -> {result.ObjectsOut} objects ({result.ObjectsMoved} moved), {result.Rows:N0} rows, {result.BytesIn / 1e6:F1} -> {result.BytesOut / 1e6:F1} MB, blocks held {Mib(result.MemoryReserved)} MiB, {result.RangesAtOnce} at once, scratch {Mib(result.ScratchBytes)} MiB, {job.Elapsed.TotalSeconds:F1} s; {sampler.Peaks()}"));
+                $"job {jobs}: {result.Trigger} L{result.FromLevel}->L{result.ToLevel}, {result.ObjectsIn} -> {result.ObjectsOut} objects ({result.ObjectsMoved} moved), {result.Rows:N0} rows, {result.BytesIn / 1e6:F1} -> {result.BytesOut / 1e6:F1} MB, blocks held {Mib(result.MemoryReserved)} MiB, {result.RangesAtOnce} at once, {Interlocked.Read(ref s_refused)} refused before, scratch {Mib(result.ScratchBytes)} MiB, {job.Elapsed.TotalSeconds:F1} s; {sampler.Peaks()}"));
         }
 
         Console.WriteLine(string.Create(
