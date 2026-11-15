@@ -194,7 +194,7 @@ internal static class ChunkReads
             bytes += file.ChunkRange(file.Footer.Chunk(group, leaf)).Length;
         }
 
-        return bytes > WindowedBytes;
+        return bytes > file.Options.WindowedBytes;
     }
 
     /// <summary>
@@ -247,7 +247,7 @@ internal static class ChunkReads
             }
         }
 
-        if (bytes <= WindowedBytes)
+        if (bytes <= file.Options.WindowedBytes)
         {
             return false;
         }
@@ -293,7 +293,7 @@ internal static class ChunkReads
             }
 
             from += size;
-            if (window.Bytes * 2 <= MaxWindowBytes)
+            if (window.Bytes * 2 <= file.Options.MaxWindowBytes)
             {
                 size = Math.Min(size * 2, endBatch);
             }

@@ -56,4 +56,16 @@ public sealed record ParquetOpenOptions
     /// to; null to read a plaintext file, or a file's plaintext footer and columns.
     /// </summary>
     public ParquetDecryption? Decryption { get; init; }
+
+    /// <summary>
+    /// The bytes of a group's pages past which a read that does not read in place is cut into windows
+    /// (<see cref="Reading.ChunkReads.WindowedBytes"/>); smaller only where a test cuts a small group.
+    /// </summary>
+    internal long WindowedBytes { get; init; } = Reading.ChunkReads.WindowedBytes;
+
+    /// <summary>
+    /// The bytes past which a window's batches stop doubling (<see cref="Reading.ChunkReads.MaxWindowBytes"/>);
+    /// smaller only where a test cuts a small group.
+    /// </summary>
+    internal long MaxWindowBytes { get; init; } = Reading.ChunkReads.MaxWindowBytes;
 }
