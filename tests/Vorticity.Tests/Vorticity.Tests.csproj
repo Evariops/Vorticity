@@ -12,9 +12,15 @@
     The tests that measure what anything beside them would move (allocations, peaks, finalizers, a shared pool) carry the
     trait Category=RunsAlone and are left out of a plain `dotnet test`, the suite run between two changes. They run with
     -p:Measure=true: tests/runs-alone.sh and bench/gate.sh pass it, and CI runs them on a runner of their own.
+
+    The suite run between two changes also compiles each method once, optimized, without tiers. A test run jits new
+    methods all along, which keeps the runtime from moving a hot method past its first tier, so a test's loops run as
+    tier-0 code from start to end: on the M4 Pro the suite takes 124 s with tiers, 99 s with no delay before a method is
+    promoted, and 95 s without tiers. The tests that measure keep the tiers, under which their ceilings were set.
   -->
   <PropertyGroup Condition="'$(Measure)' != 'true'">
     <TestingPlatformCommandLineArguments>--filter-not-trait Category=RunsAlone</TestingPlatformCommandLineArguments>
+    <TieredCompilation>false</TieredCompilation>
   </PropertyGroup>
 
   <ItemGroup>
