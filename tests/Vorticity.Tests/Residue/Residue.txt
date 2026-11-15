@@ -2,7 +2,4 @@
 # src, tests, bench (with samples and tools) and docs, separated by tabs. Lowered in the commit that takes some out,
 # removed at zero, never raised.
 MemoryAccount\.Unassigned	11	0	0	0
-\bPartitionIndexBytes\b	2	0	0	0
-\bPartitionIndexEntriesBytes\b	2	0	0	0
-\bDefaultBudget\b	3	0	0	0
 \bs_container\b	2	0	0	0

@@ -387,18 +387,19 @@ public sealed class DatasetPageCacheTests
     }
 
     [Fact]
-    public async Task AHandleThatKeepsNoPageReadsTheTreeAgainAfterACommit()
+    public async Task AHandleWhosePagesWereAskedBackReadsTheTreeAgainAfterACommit()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
         await using MemoryObjectStore inner = new MemoryObjectStore();
         await using CountingObjectStore store = new CountingObjectStore(inner);
-        await using VortexDataset dataset = await CreateAsync(store, new DatasetOptions { PageCacheBytes = 0 }, ct);
+        await using VortexDataset dataset = await CreateAsync(store, new DatasetOptions { PageFloorBytes = 0 }, ct);
 
         store.Reset();
         Assert.Equal(Objects, await CountAsync(dataset, ct));
         long first = store.Requests;
         await AddAsync(store, Objects / 2, ct);
         await dataset.RefreshAsync(ct);
+        ((Vorticity.Buffers.IHeldMemory)dataset).GiveBack(Vorticity.Buffers.KeptKind.Pages, long.MaxValue);
         store.Reset();
         Assert.Equal(Objects + 1, await CountAsync(dataset, ct));
 
@@ -444,19 +445,23 @@ public sealed class DatasetPageCacheTests
     }
 
     [Fact]
-    public async Task AVersionKeepsWhatItReadWithinTheHandlesBudgetAndNoMore()
+    public async Task AVersionKeepsWhatItReadAboveTheHandlesFloorUntilAskedBack()
     {
-        // The pages a walk reads go to the handle's cache, which lets the least recently used go;
-        // the version does not hold them besides, so a second walk of a tree larger than the budget
-        // reads again what the budget let go.
+        // The pages a walk reads go to the handle's cache, which keeps them all, and lets the least recently used past its
+        // floor go when the process asks; the version does not hold them besides, so a second walk of a tree larger than
+        // the floor reads again what the handle let go, and nothing while it kept everything.
         CancellationToken ct = TestContext.Current.CancellationToken;
         await using MemoryObjectStore inner = new MemoryObjectStore();
         await using CountingObjectStore store = new CountingObjectStore(inner);
-        await using VortexDataset dataset = await CreateAsync(store, new DatasetOptions { PageCacheBytes = 256 << 10 }, ct);
+        await using VortexDataset dataset = await CreateAsync(store, new DatasetOptions { PageFloorBytes = 256 << 10 }, ct);
 
         store.Reset();
         Assert.Equal(Objects, await CountAsync(dataset, ct));
         long first = store.Requests;
+        store.Reset();
+        Assert.Equal(Objects, await CountAsync(dataset, ct));
+        Assert.Equal(0, store.Requests);
+        ((Vorticity.Buffers.IHeldMemory)dataset).GiveBack(Vorticity.Buffers.KeptKind.Pages, long.MaxValue);
         store.Reset();
         Assert.Equal(Objects, await CountAsync(dataset, ct));
         Assert.InRange(store.Requests, 1, first);

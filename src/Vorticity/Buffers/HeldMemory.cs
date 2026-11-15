@@ -22,6 +22,9 @@ internal enum KeptKind
 
     /// <summary>The tree pages a dataset handle keeps for its next walks.</summary>
     Pages,
+
+    /// <summary>What a dataset handle keeps parsed for its next questions: synopses, partitions' indexes, filters' pages, index entries.</summary>
+    Memos,
 }
 
 /// <summary>
@@ -102,7 +105,7 @@ internal static class HeldMemory
     {
         long given = 0;
         bool cachesGave = false;
-        for (KeptKind kind = KeptKind.Blocks; kind <= KeptKind.Pages && given < bytes; kind++)
+        for (KeptKind kind = KeptKind.Blocks; kind <= KeptKind.Memos && given < bytes; kind++)
         {
             long before = given;
             foreach (KeyValuePair<IHeldMemory, object?> pair in Holders)

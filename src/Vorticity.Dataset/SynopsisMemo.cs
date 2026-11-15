@@ -4,8 +4,9 @@ namespace Vorticity.Dataset;
 
 /// <summary>
 /// The synopses a handle read and parsed, the column sheets, counts and sketches of its objects, by object and region,
-/// so that the ranges of one question and the questions after it read and parse each once, within <see cref="Bytes"/>:
-/// past it the oldest go first, unless a question asked for them since (<see cref="ClockMemo{TKey, TValue}"/>).
+/// so that the ranges of one question and the questions after it read and parse each once. It has no budget of its own:
+/// the registry of kept memory takes back what it holds above <see cref="FloorBytes"/>, the oldest first unless a
+/// question asked for them since (<see cref="ClockMemo{TKey, TValue}"/>).
 /// </summary>
 /// <remarks>
 /// An object never changes, so a synopsis never goes stale, and no two regions of an object start at the same offset. The
@@ -13,13 +14,19 @@ namespace Vorticity.Dataset;
 /// </remarks>
 internal sealed class SynopsisMemo
 {
-    /// <summary>The bytes the memo holds at most: 64 MiB, the sheets of thousands of objects.</summary>
-    internal const long Bytes = 64L << 20;
+    /// <summary>🧪 The bytes the memo keeps whatever the registry asks: provisional, calibrated by measurement with the other floors.</summary>
+    internal const long FloorBytes = 4L << 20;
 
-    private readonly ClockMemo<(UInt128 Object, ulong Offset), object> _synopses = new ClockMemo<(UInt128 Object, ulong Offset), object>(Bytes);
+    /// <summary>The largest synopsis the memo keeps, 16 MiB: one past it is parsed again at each asking rather than held.</summary>
+    private const long LargestKept = 16L << 20;
+
+    private readonly ClockMemo<(UInt128 Object, ulong Offset), object> _synopses = ClockMemo<(UInt128 Object, ulong Offset), object>.Kept(FloorBytes);
 
     /// <summary>The bytes the memo holds now.</summary>
     internal long Held => _synopses.Held;
+
+    /// <summary>Lets go of up to <paramref name="bytes"/> above the floor, only what no question read since the timer's turn before when <paramref name="stale"/>.</summary>
+    internal long LetGo(long bytes, bool stale) => _synopses.LetGo(bytes, stale);
 
     /// <summary>Whether the memo holds the region at <paramref name="offset"/> of object <paramref name="uid"/>, whatever it holds it as.</summary>
     internal bool Holds(UInt128 uid, ulong offset) => _synopses.TryGet((uid, offset), out _);
@@ -38,7 +45,7 @@ internal sealed class SynopsisMemo
     /// </summary>
     internal void Keep(UInt128 uid, ulong offset, object synopsis, long bytes)
     {
-        if (uid == UInt128.Zero || bytes > Bytes / 4)
+        if (uid == UInt128.Zero || bytes > LargestKept)
         {
             return;
         }

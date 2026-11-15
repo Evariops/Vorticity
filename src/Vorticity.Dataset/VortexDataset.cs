@@ -64,10 +64,10 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
         _store = store;
         _options = options;
         _objects = new ObjectCache(
-            store, options.MaxOpenObjects, options.Session, options.MaxOpenObjectBytes,
+            store, options.MaxOpenObjects, options.Session, options.OpenObjectFloorBytes,
             ObjectCache.WholeBytesUnder(options.CostProfile ?? store.CostProfile));
-        _pageCache = new PageCache(options.PageCacheBytes);
-        Predicates = new PredicatePages(options.PredicatePageBytes);
+        _pageCache = PageCache.Kept(options.PageFloorBytes);
+        Predicates = options.KeepsPredicatePages ? PredicatePages.Kept() : new PredicatePages(0);
         _snapshot = new DatasetSnapshot(commit, PagesOf(version, commit), _objects, knownAt, Costs);
         Buffers.HeldMemory.Register(this);
     }
@@ -83,22 +83,41 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
         _objects.HeldBytes + _pageCache.Size + _synopses.Held + PartitionIndexes.Bytes + Snapshot.HeldBytes + Predicates.Held
         + _subtreeEnds.Held + _indexEntries.Held + (_store is SealedObjectStore sealedStore ? sealedStore.HeldBytes : 0);
 
-    /// <summary>Lets go of up to <paramref name="bytes"/> of its idle open objects or of its pages, above their floors.</summary>
-    long Buffers.IHeldMemory.GiveBack(Buffers.KeptKind kind, long bytes) => kind switch
+    /// <summary>Lets go of up to <paramref name="bytes"/> of its idle open objects, of its pages or of its memos, above their floors.</summary>
+    long Buffers.IHeldMemory.GiveBack(Buffers.KeptKind kind, long bytes) => bytes <= 0 ? 0 : kind switch
     {
-        Buffers.KeptKind.Objects when bytes > 0 => _objects.LetGo(bytes, stale: false),
-        Buffers.KeptKind.Pages when bytes > 0 => _pageCache.LetGo(bytes, stale: false),
+        Buffers.KeptKind.Objects => _objects.LetGo(bytes, stale: false),
+        Buffers.KeptKind.Pages => _pageCache.LetGo(bytes, stale: false),
+        Buffers.KeptKind.Memos => LetGoMemos(bytes, stale: false),
         _ => 0,
     };
 
-    /// <summary>At a turn of the registry's slow timer, lets go of the objects idle and the pages unread since the turn before, above their floors.</summary>
+    /// <summary>At a turn of the registry's slow timer, lets go of what no question used since the turn before, above the floors.</summary>
     void Buffers.IHeldMemory.LetGoUnused(bool collection)
     {
         if (!collection)
         {
             _objects.LetGo(long.MaxValue, stale: true);
             _pageCache.LetGo(long.MaxValue, stale: true);
+            LetGoMemos(long.MaxValue, stale: true);
         }
+    }
+
+    /// <summary>
+    /// Lets go of up to <paramref name="bytes"/> of what the handle's memos hold above their floors, those its questions
+    /// reach first last: its filters' pages, its index entries, its subtrees' ends, its partitions' entries and indexes,
+    /// its sealed store's trailers, then its synopses. Only what no question used since the timer's turn before when
+    /// <paramref name="stale"/>.
+    /// </summary>
+    private long LetGoMemos(long bytes, bool stale)
+    {
+        long given = Predicates.LetGo(bytes, stale);
+        given += _indexEntries.LetGo(Math.Max(0, bytes - given), stale);
+        given += _subtreeEnds.LetGo(Math.Max(0, bytes - given), stale);
+        given += Snapshot.LetGo(Math.Max(0, bytes - given), stale);
+        given += PartitionIndexes.LetGo(Math.Max(0, bytes - given), stale);
+        given += _store is SealedObjectStore sealedStore ? sealedStore.LetGo(Math.Max(0, bytes - given), stale) : 0;
+        return given + _synopses.LetGo(Math.Max(0, bytes - given), stale);
     }
 
     /// <summary>The version this handle reads; it moves only when this handle commits or refreshes.</summary>
@@ -173,7 +192,7 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
     /// <summary>How many of its open objects a read holds: none once every read has given its objects back.</summary>
     internal int LeasedObjects => _objects.Leased;
 
-    /// <summary>What the objects open between scans weigh, as <see cref="DatasetOptions.MaxOpenObjectBytes"/> bounds them.</summary>
+    /// <summary>What the objects open between scans weigh, given back above <see cref="DatasetOptions.OpenObjectFloorBytes"/> when the process asks.</summary>
     internal long OpenObjectBytes => _objects.HeldBytes;
 
     /// <summary>
@@ -3272,11 +3291,14 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
     /// <summary>The synopses this handle read, its objects' column sheets, counts and sketches, by object and region (<see cref="ReadSynopsesAsync"/>).</summary>
     private readonly SynopsisMemo _synopses = new SynopsisMemo();
 
-    /// <summary>The bytes the indexes of the partitions this handle read may hold, their directories, last bytes and pages (<see cref="PartitionIndexes"/>).</summary>
-    internal const long PartitionIndexBytes = 64L << 20;
+    /// <summary>
+    /// 🧪 The bytes of the indexes of the partitions this handle read, their directories, last bytes and pages, that it keeps
+    /// whatever the registry of kept memory asks (<see cref="PartitionIndexes"/>): provisional, calibrated by measurement.
+    /// </summary>
+    internal const long PartitionIndexFloorBytes = 4L << 20;
 
     /// <summary>The indexes of the partitions this handle read, kept for the questions after (<see cref="PartitionIndexCache"/>).</summary>
-    internal PartitionIndexCache PartitionIndexes { get; } = new PartitionIndexCache(PartitionIndexBytes);
+    internal PartitionIndexCache PartitionIndexes { get; } = PartitionIndexCache.Kept(PartitionIndexFloorBytes);
 
     /// <summary>The granules where the filters this handle evaluated on its objects' rows kept a row (<see cref="PredicatePages"/>).</summary>
     internal PredicatePages Predicates { get; }
@@ -4493,16 +4515,18 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
     /// <summary>The bytes a subtree's end is counted at in <see cref="_subtreeEnds"/>: its page's reference, its value and a slot.</summary>
     private const int SubtreeEndBytes = 96;
 
-    // The end of each subtree a keyless partitioned dataset's appends found (SubtreeEndAsync), by its page: a megabyte's worth.
-    private readonly ClockMemo<PageReference, long> _subtreeEnds = new ClockMemo<PageReference, long>(1L << 20);
+    // The end of each subtree a keyless partitioned dataset's appends found (SubtreeEndAsync), by its page; 🧪 256 KiB kept
+    // whatever the registry of kept memory asks, provisional.
+    private readonly ClockMemo<PageReference, long> _subtreeEnds = ClockMemo<PageReference, long>.Kept(256L << 10);
 
     /// <summary>
     /// The entries of objects' index directories a lookup read, parsed, by object and region, which do not change: each
     /// locating index's entry of every object a lookup reached was read and parsed at every question, 15 % of what a search
-    /// of one identifier allocated. Within 4 MiB, an entry weighed twice its bytes.
+    /// of one identifier allocated. An entry weighs twice its bytes; 🧪 1 MiB of them kept whatever the registry of kept
+    /// memory asks, provisional.
     /// </summary>
     private readonly ClockMemo<(UInt128 Uid, ulong Offset), Indexes.IndexEntry> _indexEntries =
-        new ClockMemo<(UInt128 Uid, ulong Offset), Indexes.IndexEntry>(4L << 20);
+        ClockMemo<(UInt128 Uid, ulong Offset), Indexes.IndexEntry>.Kept(1L << 20);
 
     /// <summary>What an entry kept weighs besides its bytes: the record, its lists and the memo's slot.</summary>
     private const long IndexEntryBytes = 256;

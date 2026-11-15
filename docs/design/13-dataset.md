@@ -100,12 +100,21 @@ identical trees identical page for page. There is no separate page object, no or
 crash, and one conditional creation per commit.
 
 A reference names its page in every version that shares it, so a handle keeps what it has from one
-version to the next: the pages it read from the store, evicted least recently used first within
-`DatasetOptions.PageCacheBytes` (32 MiB by default), what the reads that opened its last sixteen
-versions brought back of their pages regions, and where each version's pages start. A refresh or a
-commit only asks the store again for the pages that changed. Pages are kept page by page only when
-read from the store, and kept by version when a read brought them back with their commit, since most
-of what a version wrote the next one rewrites, and a budget in bytes would fill up with those. With a
+version to the next: the pages it read from the store, with no budget of their own, given back least
+recently used first above `DatasetOptions.PageFloorBytes` (4 MiB by default) when the process's work
+needs the room or no walk read them of late; what the reads that opened its last sixteen versions
+brought back of their pages regions; and where each version's pages start. A refresh or a commit only
+asks the store again for the pages that changed. Pages are kept page by page only when read from the
+store, and kept by version when a read brought them back with their commit, since most of what a
+version wrote the next one rewrites, and the pages kept would fill up with those.
+
+The handle's other caches follow the same rule: the objects it keeps open (above
+`DatasetOptions.OpenObjectFloorBytes`, 8 MiB by default), the synopses it parsed, its partitions'
+indexes and the entries found in them, its filters' pages, its index entries and its sealed store's
+trailers each keep what questions read, with a small floor of their own. None has a ceiling: what a
+handle keeps grows with what its questions read, not with the number of handles, and the process
+takes back what they hold above their floors, the open objects before the pages and the pages before
+what is parsed, when its work needs the room, or once nothing read it for a turn of a slow timer. With a
 synopsis cache on the session ([the synopsis cache](19-object-storage.md#105-the-synopsis-cache-on-the-local-disk)),
 a page read from the store is also kept on the local disk under its XXH3-128, which names those bytes
 in every version and dataset: a handle opened later, after a restart or in another process, whose

@@ -39,14 +39,33 @@ internal sealed class ClockMemo<TKey, TValue>
     /// <param name="budget">The bytes it holds at most; a value larger than it is never kept.</param>
     /// <param name="comparer">How keys compare; the default comparer for null.</param>
     internal ClockMemo(long budget, IEqualityComparer<TKey>? comparer = null)
+        : this(budget, 0, comparer)
+    {
+    }
+
+    private ClockMemo(long budget, long floor, IEqualityComparer<TKey>? comparer)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(budget);
+        ArgumentOutOfRangeException.ThrowIfNegative(floor);
         Budget = budget;
+        Floor = floor;
         _slots = new ConcurrentDictionary<TKey, Slot>(comparer);
     }
 
+    /// <summary>
+    /// A memo with no budget of its own, as a dataset handle keeps them: it holds what questions read, and the registry of
+    /// kept memory takes back what it holds above <paramref name="floor"/> (<see cref="LetGo"/>).
+    /// </summary>
+    /// <param name="floor">The bytes it keeps whatever the registry asks.</param>
+    /// <param name="comparer">How keys compare; the default comparer for null.</param>
+    internal static ClockMemo<TKey, TValue> Kept(long floor, IEqualityComparer<TKey>? comparer = null) =>
+        new ClockMemo<TKey, TValue>(long.MaxValue, floor, comparer);
+
     /// <summary>The bytes it holds at most.</summary>
     internal long Budget { get; }
+
+    /// <summary>The bytes it keeps whatever the registry of kept memory asks.</summary>
+    internal long Floor { get; }
 
     /// <summary>The bytes it holds now.</summary>
     internal long Held => Interlocked.Read(ref _held);
@@ -120,20 +139,23 @@ internal sealed class ClockMemo<TKey, TValue>
     }
 
     /// <summary>
-    /// Lets go of up to <paramref name="bytes"/> of the values held above <paramref name="floor"/>, the oldest kept first;
-    /// only those no lookup read since the timer's turn before when <paramref name="stale"/>, which then starts a turn: the
-    /// bytes let go. A lookup that holds a value let go keeps it valid, as an eviction leaves it.
+    /// Lets go of up to <paramref name="bytes"/> of the values held above <see cref="Floor"/>, the oldest kept first unless
+    /// a lookup used it since an eviction last passed it, as an eviction does; only those no lookup read since the
+    /// timer's turn before when <paramref name="stale"/>, which then starts a turn: the bytes let go. A lookup that holds
+    /// a value let go keeps it valid, as an eviction leaves it.
     /// </summary>
-    internal long LetGo(long bytes, long floor, bool stale)
+    internal long LetGo(long bytes, bool stale)
     {
         long given = 0;
         lock (_gate)
         {
             long held = _held;
-            for (int left = _order.Count; left > 0 && given < bytes && held > floor && _order.TryDequeue(out Slot? oldest); left--)
+            int chances = _order.Count;
+            for (int left = 2 * _order.Count; left > 0 && given < bytes && held > Floor && _order.TryDequeue(out Slot? oldest); left--)
             {
-                if (stale && oldest.Turn == _turn)
+                if (stale ? oldest.Turn == _turn : oldest.Used && chances-- > 0)
                 {
+                    oldest.Used &= stale;
                     _order.Enqueue(oldest);
                     continue;
                 }

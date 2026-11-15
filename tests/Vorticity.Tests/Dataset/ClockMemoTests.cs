@@ -42,6 +42,39 @@ public sealed class ClockMemoTests
         Assert.Equal((100, 1), (memo.Held, memo.Count));
     }
 
+    /// <summary>
+    /// A handle's memo has no budget: it keeps everything, and gives back above its floor when the registry asks, the
+    /// oldest first unless a lookup read it since; at a turn of the timer, what no lookup read since the turn before.
+    /// </summary>
+    [Fact]
+    public void AKeptMemoGivesBackAboveItsFloorAndLetsGoWhatNoLookupReadOfLate()
+    {
+        ClockMemo<int, string> memo = ClockMemo<int, string>.Kept(floor: 40);
+        for (int i = 0; i < 5; i++)
+        {
+            Assert.True(memo.Keep(i, $"{i}", 20, out _));
+        }
+
+        Assert.Equal(100, memo.Held);
+
+        // Asked back: the oldest, read since, gets its second chance, and the two after it go.
+        Assert.True(memo.TryGet(0, out _));
+        Assert.Equal(40, memo.LetGo(40, stale: false));
+        Assert.False(memo.TryGet(1, out _));
+        Assert.False(memo.TryGet(2, out _));
+        Assert.True(memo.TryGet(0, out _));
+        Assert.Equal(60, memo.Held);
+
+        // The first turn finds everything read in it; at the next, what no lookup read in between goes, down to the floor.
+        Assert.Equal(0, memo.LetGo(long.MaxValue, stale: true));
+        Assert.True(memo.TryGet(3, out _));
+        Assert.Equal(20, memo.LetGo(long.MaxValue, stale: true));
+        Assert.False(memo.TryGet(4, out _));
+        Assert.True(memo.TryGet(3, out _));
+        Assert.True(memo.TryGet(0, out _));
+        Assert.Equal(40, memo.Held);
+    }
+
     [Fact]
     public void WhatQuestionsAskStaysWhileAStreamReadOnceGoesThrough()
     {

@@ -185,13 +185,13 @@ public sealed class MergeFanInTests
         Assert.Equal(options.MaxOpenObjects, metrics.CacheHits);
     }
 
-    // The objects kept open between scans are bounded in bytes too: what they keep, their tails and parsed footers. Under a
-    // budget of a quarter of what all of them weigh, a walk again finds a quarter of them open or fewer, and the cache weighs
-    // no more than its budget once the walk gave them back; under a budget of nothing, none.
+    // The objects kept open between scans have a floor in bytes: what they keep, their tails and parsed footers. Asked back
+    // by the process, a handle whose floor is a quarter of what all of them weigh keeps no more than its floor, and a walk
+    // again finds a quarter of them open or fewer; under a floor of nothing, none.
     [Theory]
     [InlineData(4)]
     [InlineData(0)]
-    public async Task TheObjectsKeptOpenWeighNoMoreThanTheirBudget(int quarters)
+    public async Task TheObjectsKeptOpenWeighNoMoreThanTheirFloorOnceAskedBack(int quarters)
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
         DTypeArena types = new DTypeArena();
@@ -212,16 +212,18 @@ public sealed class MergeFanInTests
             Assert.True(whole > 0);
         }
 
-        long budget = whole * quarters / 16;
+        long floor = whole * quarters / 16;
         await using MemoryObjectStore store = new MemoryObjectStore();
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered() with { MaxOpenObjectBytes = budget }, ct);
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered() with { OpenObjectFloorBytes = floor }, ct);
         for (int residue = 0; residue < Objects; residue++)
         {
             await dataset.AppendAsync(Batches(types, schema, residue), ct);
         }
 
         Assert.Equal(Objects * PerObject, await WalkAsync(dataset.ScanBuilder(), ct));
-        Assert.True(dataset.OpenObjectBytes <= budget, $"{dataset.OpenObjectBytes} bytes held open over a budget of {budget}");
+        Assert.True(dataset.OpenObjectBytes > floor, $"{dataset.OpenObjectBytes} bytes held open before the asking, over a floor of {floor}");
+        ((IHeldMemory)dataset).GiveBack(KeptKind.Objects, long.MaxValue);
+        Assert.True(dataset.OpenObjectBytes <= floor, $"{dataset.OpenObjectBytes} bytes held open over a floor of {floor}");
 
         DatasetScanCounters metrics = new DatasetScanCounters();
         Assert.Equal(Objects * PerObject, await WalkAsync(dataset.ScanBuilder().WithMetrics(metrics), ct));

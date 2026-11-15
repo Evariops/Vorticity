@@ -453,17 +453,21 @@ library's meter, under `vortex.synopsis_cache.*`.
 ### What a handle keeps in memory
 
 A handle keeps the data objects its questions opened, so that the next question over them parses no
-footer again, and the tree pages it read, so that a refresh asks the store only for the pages that
-changed. Both are bounded per handle, least recently used first out:
+footer again, the tree pages it read, so that a refresh asks the store only for the pages that
+changed, and what it parsed: synopses, partitions' indexes, filters' pages, index entries. None of
+these has a budget of its own. They hold what the handle's questions read, and the process takes back
+what they hold above a floor, least recently used first, when its work needs the room or once nothing
+read it for a while: what many handles keep follows what their questions read, not how many handles
+are open. Two floors are options:
 
-| Option | Default | What it bounds |
+| Option | Default | What it keeps whatever the process asks |
 |---|---|---|
-| `MaxOpenObjectBytes` | 64 MiB | the objects kept open: the tail each open read, and its footer as questions parse it, counted at six bytes a byte of footer (measured at five to seven) |
-| `MaxOpenObjects` | 4 096 | the same objects, by count |
-| `PageCacheBytes` | 32 MiB | the tree pages kept from one version to the next |
+| `OpenObjectFloorBytes` | 8 MiB | the objects kept open: the tail each open read, and its footer as questions parse it, counted at six bytes a byte of footer (measured at five to seven) |
+| `PageFloorBytes` | 4 MiB | the tree pages kept from one version to the next |
 
-Up to version 0.11 a handle kept 32 objects open, a few hundred kilobytes: a process that holds many
-handles open at once now keeps up to 96 MiB for each, and sets lower bounds where that is too much.
+`MaxOpenObjects`, 4 096 by default, still bounds the objects kept open by count. The floors' defaults
+are provisional, to be calibrated by measurement. Up to version 0.12 the two options were ceilings,
+`MaxOpenObjectBytes` and `PageCacheBytes`, which a process holding many handles had to lower.
 
 ## Versions
 

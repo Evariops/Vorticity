@@ -79,12 +79,16 @@ internal sealed class SealedObjectStore : IObjectStore
     private readonly LinkedList<CommitLayout> _clock = new LinkedList<CommitLayout>();
 
     // The trailers of the data objects read with no open of them, by key, which the next such read opens from with no read
-    // of the envelope's end: a few hundred bytes each, what the object's envelope says, no plaintext; the most bytes kept.
-    private readonly ClockMemo<string, byte[]> _trailers = new ClockMemo<string, byte[]>(TrailerBytes, StringComparer.Ordinal);
-    private const long TrailerBytes = 4L << 20;
+    // of the envelope's end: a few hundred bytes each, what the object's envelope says, no plaintext; 🧪 the bytes kept
+    // whatever the registry of kept memory asks, provisional.
+    private readonly ClockMemo<string, byte[]> _trailers = ClockMemo<string, byte[]>.Kept(TrailerFloorBytes, StringComparer.Ordinal);
+    private const long TrailerFloorBytes = 1L << 20;
 
     /// <summary>The bytes of the trailers the store keeps now.</summary>
     internal long HeldBytes => _trailers.Held;
+
+    /// <summary>Lets go of up to <paramref name="bytes"/> of the trailers above the floor, only what no read took since the timer's turn before when <paramref name="stale"/>.</summary>
+    internal long LetGo(long bytes, bool stale) => _trailers.LetGo(bytes, stale);
 
     // What a trailer kept costs beyond its bytes: its array, its key and its slot.
     private const int TrailerOverhead = 128;

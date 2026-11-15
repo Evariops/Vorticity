@@ -55,7 +55,7 @@ internal static class MemoryScenarios
                 Encrypted = true,
                 Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(LogRow.At)).Truncate(CalendarUnit.Day), SortKey = [LayoutValue.Column(nameof(LogRow.ServiceName)), LayoutValue.Column(nameof(LogRow.At))] },
             }));
-            maintainers.Add(await VortexDataset.OpenAsync(store, new DatasetOptions { Session = session, PageCacheBytes = 32L << 20, MaxOpenObjectBytes = 16L << 20 }));
+            maintainers.Add(await VortexDataset.OpenAsync(store, new DatasetOptions { Session = session }));
         }
 
         LogGenerator generator = new LogGenerator(23);

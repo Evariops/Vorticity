@@ -215,7 +215,7 @@ public sealed class PathAllocationTests
         // scan whose reads waited on 2 MiB opens.
         //
         // A file keeps how many bytes of its structures the open parsed, which a dataset weighs the
-        // objects it keeps open by (ObjectCache, MaxOpenObjectBytes): an int, 8 bytes an open on the
+        // objects it keeps open by (ObjectCache, OpenObjectFloorBytes): an int, 8 bytes an open on the
         // axes whose file had no spare room for it (2026-11-10). A question over many small objects
         // opens each again no more, some 18 KB and 11 µs an object.
         ("open, footer only", File, 3_960, FooterOnly),

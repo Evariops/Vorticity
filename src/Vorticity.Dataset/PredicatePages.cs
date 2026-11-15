@@ -9,8 +9,9 @@ namespace Vorticity.Dataset;
 
 /// <summary>
 /// The granules of an object where a filter evaluated on its rows kept one, a filter's pages (spec D, 5): a bit a granule of
-/// the object's scan, kept by the session's synopsis cache when it has one, by the handle within a budget otherwise (no
-/// table that grows for the handle's life), so that the filter asked again starts its scan's
+/// the object's scan, kept by the session's synopsis cache when it has one, by the handle otherwise, what it holds above a
+/// floor taken back by the registry of kept memory (no table that grows for the handle's life), so that the filter asked
+/// again starts its scan's
 /// pruning from them, a source of the granules' algebra (spec D, 4.1), the granules between never read. An object never
 /// changes, so its pages stay exact as long as it lives, under the identity its postscript carries.
 /// </summary>
@@ -27,7 +28,7 @@ internal sealed class PredicatePages
     /// <summary>The bytes a note that a filter is wide in an object is counted at.</summary>
     private const int WideBytes = 64;
 
-    // The pages the handle keeps, least used first out within the budget: a filter whose literals change at every question,
+    // The pages the handle keeps, least used first out when the registry asks: a filter whose literals change at every question,
     // a sliding window of time, made a table that grew for the handle's life, objects compacted away included.
     private readonly ClockMemo<(UInt128 Object, UInt128 Filter), ulong[]> _held;
 
@@ -38,14 +39,33 @@ internal sealed class PredicatePages
     internal long Held => _held.Held + _wide.Held;
 
     /// <summary>Pages kept in <paramref name="budget"/> bytes at most, an eighth more for the wide notes; none for 0, the session's cache then alone.</summary>
-    internal PredicatePages(long budget = DefaultBudget)
+    internal PredicatePages(long budget)
+        : this(new ClockMemo<(UInt128, UInt128), ulong[]>(budget), new ClockMemo<(UInt128, UInt128), bool>(budget / 8))
     {
-        _held = new ClockMemo<(UInt128, UInt128), ulong[]>(budget);
-        _wide = new ClockMemo<(UInt128, UInt128), bool>(budget / 8);
     }
 
-    /// <summary>The bytes a handle keeps of its filters' pages by default.</summary>
-    internal const long DefaultBudget = 16L << 20;
+    private PredicatePages(ClockMemo<(UInt128, UInt128), ulong[]> held, ClockMemo<(UInt128, UInt128), bool> wide)
+    {
+        _held = held;
+        _wide = wide;
+    }
+
+    /// <summary>🧪 The bytes a handle keeps of its filters' pages whatever the registry of kept memory asks, an eighth more for the wide notes: provisional.</summary>
+    internal const long FloorBytes = 2L << 20;
+
+    /// <summary>
+    /// A handle's pages: with no budget of their own, they keep what its filters found, and the registry of kept memory
+    /// takes back what they hold above <see cref="FloorBytes"/>.
+    /// </summary>
+    internal static PredicatePages Kept() =>
+        new PredicatePages(ClockMemo<(UInt128, UInt128), ulong[]>.Kept(FloorBytes), ClockMemo<(UInt128, UInt128), bool>.Kept(FloorBytes / 8));
+
+    /// <summary>Lets go of up to <paramref name="bytes"/> of the pages and notes above their floors, only what no question read since the timer's turn before when <paramref name="stale"/>.</summary>
+    internal long LetGo(long bytes, bool stale)
+    {
+        long given = _held.LetGo(bytes, stale);
+        return given + _wide.LetGo(Math.Max(0, bytes - given), stale);
+    }
 
     /// <summary>Whether filter <paramref name="filter"/> kept rows in too much of the object <paramref name="uid"/> for its pages to spare a read.</summary>
     internal bool Wide(UInt128 uid, UInt128 filter) => _wide.TryGet((uid, filter), out _);

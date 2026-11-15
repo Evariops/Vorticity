@@ -36,4 +36,23 @@ public sealed class PartitionIndexCacheTests
         Assert.Null(cache.Of("d", 4));
         Assert.Equal(1_000, cache.Of("a", 1)!.Tail.Length);
     }
+
+    /// <summary>A handle's cache has no budget: it keeps every index, and gives back the least recently asked above its floor when the registry asks.</summary>
+    [Fact]
+    public void AKeptCacheGivesBackTheIndexesLeastRecentlyAskedAboveItsFloor()
+    {
+        PartitionIndex directory = null!;
+        PartitionIndexCache cache = PartitionIndexCache.Kept(floorBytes: 3_000);
+        PartitionIndexCache.Held first = cache.Keep("a", 1, directory, 2_000, new byte[1_000], 0)!;
+        PartitionIndexCache.Held second = cache.Keep("b", 2, directory, 2_000, new byte[1_000], 0)!;
+        Assert.NotNull(cache.Keep("c", 3, directory, 2_000, new byte[1_000], 0));
+        Assert.Equal(9_000, cache.Bytes);
+
+        Assert.Same(first, cache.Of("a", 1));
+        Assert.Equal(6_000, cache.LetGo(long.MaxValue, stale: false));
+        Assert.True(second.Gone);
+        Assert.Null(cache.Of("c", 3));
+        Assert.Same(first, cache.Of("a", 1));
+        Assert.Equal(3_000, cache.Bytes);
+    }
 }

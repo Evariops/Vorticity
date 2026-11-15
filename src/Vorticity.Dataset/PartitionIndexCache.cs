@@ -7,20 +7,63 @@ namespace Vorticity.Dataset;
 
 /// <summary>
 /// The indexes of a dataset's partitions a handle has read, kept for the questions after it: each one's directory parsed,
-/// its last bytes, and the pages its questions loaded, the least recently asked let go past <paramref name="budget"/> bytes.
-/// An index object is never written again, a new one taking its place under a new uid, so what it holds stays true.
+/// its last bytes, and the pages its questions loaded, the least recently asked let go past <paramref name="budget"/> bytes,
+/// and, asked by the registry of kept memory, above <paramref name="floor"/> (<see cref="LetGo"/>). An index object is never
+/// written again, a new one taking its place under a new uid, so what it holds stays true.
 /// </summary>
 /// <remarks>
 /// A question on a partition's values read the index's last bytes, then its directory, parsed, then each page it sought,
 /// at every asking: S1's two of a pod's values, asked warm, read 1 MB and made 1.5 MB of pages each time, in three or four
 /// requests of the store.
 /// </remarks>
-internal sealed class PartitionIndexCache(long budget)
+internal sealed class PartitionIndexCache(long budget, long floor = 0)
 {
     private readonly Lock _gate = new Lock();
     private readonly Dictionary<(string Key, UInt128 Uid), LinkedListNode<Held>> _held = [];
     private readonly LinkedList<Held> _order = [];
     private long _bytes;
+
+    // The turn of the registry's slow timer under way: an index asked or kept in it carries it.
+    private int _turn;
+
+    /// <summary>
+    /// A handle's cache: with no budget of its own, it keeps the indexes its questions read, and the registry of kept memory
+    /// takes back what it holds above <paramref name="floorBytes"/>.
+    /// </summary>
+    internal static PartitionIndexCache Kept(long floorBytes) => new PartitionIndexCache(long.MaxValue, floorBytes);
+
+    /// <summary>
+    /// Lets go of up to <paramref name="bytes"/> of the indexes above the floor, the least recently asked first; only those
+    /// no question asked since the timer's turn before when <paramref name="stale"/>, which then starts a turn: the bytes let go.
+    /// </summary>
+    internal long LetGo(long bytes, bool stale)
+    {
+        long given = 0;
+        lock (_gate)
+        {
+            for (LinkedListNode<Held>? node = _order.Last; node is not null && given < bytes && _bytes > floor;)
+            {
+                LinkedListNode<Held>? newer = node.Previous;
+                if (!stale || node.Value.Turn != _turn)
+                {
+                    _order.Remove(node);
+                    _held.Remove(node.Value.Key);
+                    _bytes -= node.Value.Bytes;
+                    given += node.Value.Bytes;
+                    node.Value.Gone = true;
+                }
+
+                node = newer;
+            }
+
+            if (stale)
+            {
+                _turn++;
+            }
+        }
+
+        return given;
+    }
 
     /// <summary>The bytes the cache holds, its directories reckoned at their encoded size.</summary>
     internal long Bytes
@@ -46,6 +89,7 @@ internal sealed class PartitionIndexCache(long budget)
 
             _order.Remove(node);
             _order.AddFirst(node);
+            node.Value.Turn = _turn;
             return node.Value;
         }
     }
@@ -72,6 +116,7 @@ internal sealed class PartitionIndexCache(long budget)
 
             _held[(key, uid)] = _order.AddFirst(held);
             held.Key = (key, uid);
+            held.Turn = _turn;
             Grow(held.Bytes);
             return held;
         }
@@ -131,6 +176,9 @@ internal sealed class PartitionIndexCache(long budget)
 
         /// <summary>Whether the cache let it go: a page loaded after is kept no more.</summary>
         internal bool Gone { get; set; }
+
+        /// <summary>The timer's turn it was last asked or kept in; under the cache's lock.</summary>
+        internal int Turn { get; set; }
 
         /// <summary>The page at <paramref name="offset"/>, loaded and checked before; null for none.</summary>
         internal KnownPage? Page(long offset)

@@ -32,15 +32,11 @@ internal sealed class ObjectCache : IAsyncDisposable
     /// </summary>
     internal const int ParsedPerFooterByte = 6;
 
-    /// <summary>
-    /// 🧪 What a handle's open objects weigh that it keeps whatever the registry of kept memory asks: provisional,
-    /// calibrated by measurement with the other floors. Opening an object again costs a request for its tail.
-    /// </summary>
-    internal const long FloorBytes = 8L << 20;
-
     private readonly IObjectStore _store;
     private readonly int _capacity;
-    private readonly long _byteCapacity;
+
+    // What the open objects may weigh that the cache keeps whatever the registry of kept memory asks.
+    private readonly long _floorBytes;
     private readonly VortexSession _session;
     private readonly Lock _gate = new Lock();
     private readonly Dictionary<string, Held> _open = new Dictionary<string, Held>(StringComparer.Ordinal);
@@ -59,12 +55,13 @@ internal sealed class ObjectCache : IAsyncDisposable
     // The bytes of an object up to which a read of its rows opens it whole (WholeBytesUnder).
     private readonly long _wholeBytes;
 
+    /// <summary>A cache of <paramref name="capacity"/> open objects at most, which keeps <paramref name="floorBytes"/> of them whatever the registry asks.</summary>
     internal ObjectCache(
-        IObjectStore store, int capacity, VortexSession? session = null, long byteCapacity = long.MaxValue, long wholeBytes = 0)
+        IObjectStore store, int capacity, VortexSession? session = null, long floorBytes = 0, long wholeBytes = 0)
     {
         _store = store;
         _capacity = Math.Max(1, capacity);
-        _byteCapacity = Math.Max(0, byteCapacity);
+        _floorBytes = Math.Max(0, floorBytes);
         _session = session ?? VortexSession.Default;
         _wholeBytes = wholeBytes;
     }
@@ -476,15 +473,15 @@ internal sealed class ObjectCache : IAsyncDisposable
     }
 
     /// <summary>
-    /// Takes idle objects out, oldest first, until the cache is within its capacity, in objects and in bytes, under the
-    /// gate: those to close, which the caller closes once it has let the gate go; null for none. A cache full of leased
+    /// Takes idle objects out, oldest first, until the cache is within its capacity in objects, under the gate, what they
+    /// weigh being the registry's to take back (<see cref="LetGo"/>): those to close, which the caller closes once it has let the gate go; null for none. A cache full of leased
     /// objects stays over capacity rather than close a file someone is reading: the capacity is a target, and making it a
     /// hard limit would trade bounded memory for unbounded latency.
     /// </summary>
     private List<Held>? Evict()
     {
         List<Held>? closing = null;
-        while ((_open.Count > _capacity || _heldBytes > _byteCapacity) && _idleOldest is { } oldest)
+        while (_open.Count > _capacity && _idleOldest is { } oldest)
         {
             Unidle(oldest);
             _open.Remove(oldest.Handle);
@@ -507,7 +504,7 @@ internal sealed class ObjectCache : IAsyncDisposable
         List<Held>? closing = null;
         lock (_gate)
         {
-            while (given < bytes && _heldBytes > FloorBytes && _idleOldest is { } oldest && (!stale || oldest.IdleTurn != _turn))
+            while (given < bytes && _heldBytes > _floorBytes && _idleOldest is { } oldest && (!stale || oldest.IdleTurn != _turn))
             {
                 Unidle(oldest);
                 _open.Remove(oldest.Handle);

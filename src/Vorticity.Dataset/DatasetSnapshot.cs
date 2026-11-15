@@ -280,10 +280,11 @@ internal sealed class DatasetSnapshot
             return null;
         }
 
-        // Found once a version, within a budget: each asking decoded the entry again, its object's key and every uid it
-        // covers, ten kilobytes a lookup over a month's days. A partition given in an array of its own is kept under it.
+        // Found once a version, above a floor the registry of kept memory leaves: each asking decoded the entry again, its
+        // object's key and every uid it covers, ten kilobytes a lookup over a month's days. A partition given in an array
+        // of its own is kept under it.
         ClockMemo<byte[], PartitionIndexEntry?> found = Volatile.Read(ref _partitionIndexes)
-            ?? Interlocked.CompareExchange(ref _partitionIndexes, new ClockMemo<byte[], PartitionIndexEntry?>(PartitionIndexEntriesBytes, Buffers.ByteKeys.Instance), null)
+            ?? Interlocked.CompareExchange(ref _partitionIndexes, ClockMemo<byte[], PartitionIndexEntry?>.Kept(PartitionIndexEntriesFloorBytes, Buffers.ByteKeys.Instance), null)
             ?? _partitionIndexes!;
         byte[] named = System.Runtime.InteropServices.MemoryMarshal.TryGetArray(partition, out ArraySegment<byte> whole)
             && whole.Offset == 0 && whole.Count == whole.Array!.Length ? whole.Array : partition.ToArray();
@@ -322,14 +323,18 @@ internal sealed class DatasetSnapshot
         }
     }
 
-    // The bytes of the partition index entries a version keeps found (PartitionIndexAsync).
-    private const long PartitionIndexEntriesBytes = 4L << 20;
+    // 🧪 The bytes of the partition index entries a version keeps found whatever the registry asks (PartitionIndexAsync):
+    // provisional, calibrated by measurement with the other floors.
+    private const long PartitionIndexEntriesFloorBytes = 1L << 20;
 
     // The partition index entries the version's questions found, by partition (PartitionIndexAsync).
     private ClockMemo<byte[], PartitionIndexEntry?>? _partitionIndexes;
 
     /// <summary>The bytes the version's memo of partition index entries holds now.</summary>
     internal long HeldBytes => Volatile.Read(ref _partitionIndexes)?.Held ?? 0;
+
+    /// <summary>Lets go of up to <paramref name="bytes"/> of the entries found above the floor, only what no question found since the timer's turn before when <paramref name="stale"/>.</summary>
+    internal long LetGo(long bytes, bool stale) => Volatile.Read(ref _partitionIndexes)?.LetGo(bytes, stale) ?? 0;
 
     /// <summary>
     /// The root of <paramref name="level"/>'s tree as the key walks of the version share it, read the
