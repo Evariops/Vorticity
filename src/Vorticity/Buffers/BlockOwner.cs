@@ -15,22 +15,29 @@ namespace Vorticity.Buffers;
 /// <remarks>
 /// <para>
 /// The array is allocated on the pinned object heap, which never moves an object, so a pointer into it stays valid for as
-/// long as the owner is reachable. The collector counts its bytes, takes them back once nothing references the owner, and
-/// is the only allocator of the library's blocks: there is nothing to free by hand and no finalizer.
+/// long as the owner is reachable. The collector counts its bytes, and takes back an array of its own once nothing
+/// references the owner. A piece of a slab its holder drops without giving it back goes back to its slab when the
+/// collector finalizes the owner: the only blocks with a finalizer, which a block given back suppresses.
 /// </para>
 /// <para>
 /// An instance handed out by <see cref="BlockPool"/> returns itself to that pool when its reference count reaches
-/// zero, instead of letting its array go.
+/// zero, instead of letting its array go. Its bytes are a piece of a slab (<see cref="Slabs"/>) when its capacity is a
+/// class of a page to half a slab, given back to the slab when the block lets them go; a larger one, or one allocated
+/// apart, is an array of its own.
 /// </para>
 /// </remarks>
 internal sealed class BlockOwner : SegmentOwner
 {
-    // Null once the block let its array go: one exchange takes it, so that two releases cannot both drop it.
+    // Null once the block let its array go: one exchange takes it, so that two releases cannot both drop it. The slab's
+    // array, for a piece of a slab.
     private byte[]? _array;
 
     // Where the aligned block starts in the array: the array is allocated a cap's worth longer, and the block starts at the
-    // first byte aligned to it.
+    // first byte aligned to it; for a piece of a slab, where the piece starts.
     private readonly int _offset;
+
+    // The slab the block is a piece of; null for an array of its own.
+    private readonly Slabs.Slab? _slab;
 
     private readonly BlockPool? _pool;
     private readonly int _bucketIndex;
@@ -55,10 +62,16 @@ internal sealed class BlockOwner : SegmentOwner
     /// </summary>
     internal bool Idle;
 
-    private BlockOwner(byte[] array, int offset, int capacity, int length, int alignmentExponent, BlockPool? pool, int bucketIndex)
+    private BlockOwner(byte[] array, int offset, int capacity, int length, int alignmentExponent, BlockPool? pool, int bucketIndex, Slabs.Slab? slab = null)
     {
         _array = array;
         _offset = offset;
+        _slab = slab;
+        if (slab is null)
+        {
+            GC.SuppressFinalize(this);
+        }
+
         _capacity = capacity;
         _alignmentExponent = (byte)alignmentExponent;
         _pool = pool;
@@ -69,7 +82,8 @@ internal sealed class BlockOwner : SegmentOwner
 
     /// <summary>
     /// The bytes of the blocks alive, rented or kept by a pool, from their allocation to the moment they let their array go.
-    /// A block its holder drops without giving it back is taken by the collector, and stays counted here.
+    /// A block of an array of its own its holder drops without giving it back is taken by the collector, and stays counted
+    /// here; a piece of a slab leaves the count when the collector finalizes it.
     /// </summary>
     internal static long LiveBytes => Interlocked.Read(ref s_liveBytes);
 
@@ -157,14 +171,15 @@ internal sealed class BlockOwner : SegmentOwner
             BlockPool.Watch?.Released(this);
         }
 
-        // A parked owner keeps its array for the next rent; any other lets it go to the collector, which the process's
-        // budget counts as let go until a collection takes it. One the pool lets go later is the registry's to count.
+        // A parked owner keeps its array for the next rent; any other lets it go: an array of its own to the collector, which
+        // the process's budget counts as let go until a collection takes it, a piece back to its slab. One the pool lets go
+        // later is the registry's to count.
         if (pool is not null && pool.TryPark(this))
         {
             return;
         }
 
-        if (Drop())
+        if (Drop() && _slab is null)
         {
             QueryMemoryBudget.BlockFreed(_capacity);
         }
@@ -187,18 +202,30 @@ internal sealed class BlockOwner : SegmentOwner
         ResetRefCount();
     }
 
-    /// <summary>Lets the array go, once: whichever of a release and a trim comes first, the other finds nothing to drop.</summary>
+    /// <summary>
+    /// Lets the array go, once, or gives the piece back to its slab: whichever of a release and a trim comes first, the
+    /// other finds nothing to drop.
+    /// </summary>
     /// <returns>Whether this call let it go.</returns>
     private bool Drop()
     {
         if (Interlocked.Exchange(ref _array, null) is not null)
         {
             Interlocked.Add(ref s_liveBytes, -Math.Max(_capacity, 1));
+            if (_slab is { } slab)
+            {
+                Slabs.Give(slab, _offset, _capacity);
+                GC.SuppressFinalize(this);
+            }
+
             return true;
         }
 
         return false;
     }
+
+    /// <summary>A piece of a slab its holder dropped without giving it back: back to its slab, which nothing else would give it.</summary>
+    ~BlockOwner() => Drop();
 
     /// <summary>The view of <paramref name="length"/> bytes of <paramref name="array"/> from <paramref name="offset"/>, which the pinned heap never moves.</summary>
     private static unsafe VortexBuffer BufferOf(byte[] array, int offset, int length, int alignmentExponent) =>
@@ -231,7 +258,14 @@ internal sealed class BlockOwner : SegmentOwner
     {
         // The pool always allocates at the 64-byte cap, whatever the caller asked for: a block
         // aligned to 64 satisfies every legal segment alignment, so buckets stay
-        // alignment-agnostic and blocks are genuinely interchangeable.
+        // alignment-agnostic and blocks are genuinely interchangeable. A class a slab cuts is a
+        // piece of one, aligned to 64 as well.
+        if (Slabs.Cuts(capacity))
+        {
+            (Slabs.Slab slab, byte[] slabArray, int start) = Slabs.Take(capacity);
+            return new BlockOwner(slabArray, start, capacity, length, VortexLimits.MaxAlignmentExponent, pool, bucketIndex, slab);
+        }
+
         (byte[] array, int offset) = AllocRaw(capacity, VortexLimits.MaxAlignment);
         return new BlockOwner(array, offset, capacity, length, VortexLimits.MaxAlignmentExponent, pool, bucketIndex);
     }
