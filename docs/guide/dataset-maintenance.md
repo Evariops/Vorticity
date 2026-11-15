@@ -322,8 +322,12 @@ one. On a store where a request costs 30 ms, it is what a job takes. See
 
 ## Watch out
 
-* Compaction and vacuum are separate. Compaction leaves the replaced objects in place for the
-  versions that still name them, and vacuum removes them once those versions are past the window.
+* A compaction deletes what it replaced, once its commit is made and the version before it is past
+  the window, as a vacuum would judge it: the handle notes the objects its jobs took out, and deletes
+  them at the end of a later job, or when `CompactAsync` finds nothing due. The outputs of a job whose
+  commit applied nothing go at once, since no version names them. What a handle closed or a process
+  ended leaves noted, and what a crash leaves behind, the vacuum still removes: run it for those, at
+  a low pace.
 * A reader that outlives the window loses its objects. Vacuum works from the store's latest version,
   not from yours, so a handle still on an old version may find an object missing.
   `ObjectNotFoundException` then tells it to refresh.

@@ -403,6 +403,37 @@ internal static partial class DatasetCompactor
         CommitResult commit = await dataset
             .CommitJobAsync([replacement], dataset.Options.TimeProvider.GetUtcNow() - started, cancellationToken).ConfigureAwait(false);
 
+        // Once the commit is made, and never before: the inputs it took out go when no retained version reads them, and
+        // the outputs of a replacement it did not apply, which no version names, go now.
+        OperationOutcome outcome = commit.Outcomes.Count > 0 ? commit.Outcomes[0] : OperationOutcome.Applied;
+        if (outcome == OperationOutcome.Applied)
+        {
+            List<string> replaced = new List<string>(ran.Inputs.Count + 1);
+            foreach (CompactionInput input in ran.Inputs)
+            {
+                replaced.Add(input.Entry.Key);
+            }
+
+            if (partitionIndex?.Previous is { } previousIndex)
+            {
+                replaced.Add(previousIndex);
+            }
+
+            dataset.NoteRetired(commit.Version, commit.KnownAt, [.. replaced]);
+        }
+        else
+        {
+            List<string> unnamed = [];
+            foreach ((int _, ReadOnlyMemory<byte> _, ObjectEntry entry) in produced)
+            {
+                unnamed.Add(entry.Key);
+            }
+
+            await dataset.DeleteUnnamedAsync(unnamed, cancellationToken).ConfigureAwait(false);
+        }
+
+        await dataset.DeleteRetiredAsync(cancellationToken).ConfigureAwait(false);
+
         int objectsOut = lateOutputs?.Written.Count ?? 0;
         long bytesOut = lateOutputs?.Bytes ?? 0;
         long scratch = (lateOutputs?.ScratchBytes ?? 0) + (postings?.ScratchBytes ?? 0);
@@ -428,7 +459,7 @@ internal static partial class DatasetCompactor
             MemoryReserved = reserved,
             RangesAtOnce = atOnce,
             ScratchBytes = scratch,
-            Outcome = commit.Outcomes.Count > 0 ? commit.Outcomes[0] : OperationOutcome.Applied,
+            Outcome = outcome,
         };
     }
 

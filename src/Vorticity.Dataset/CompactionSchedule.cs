@@ -103,6 +103,8 @@ internal static class CompactionLoop
                     continue;
                 }
 
+                // What the loop's jobs replaced, once no retained version reads it.
+                await dataset.DeleteRetiredAsync(cancellationToken).ConfigureAwait(false);
                 await Task.Delay(schedule.Idle, clock, cancellationToken).ConfigureAwait(false);
                 continue;
             }

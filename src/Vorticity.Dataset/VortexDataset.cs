@@ -235,6 +235,51 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
     private int _jobBatchRows;
     private int _jobWidthCap;
 
+    /// <summary>The data objects this handle's compactions replaced, which it deletes once no retained version reads them.</summary>
+    internal RetiredObjects Retired { get; } = new RetiredObjects();
+
+    /// <summary>
+    /// Notes the objects <paramref name="keys"/>, which the commit of <paramref name="version"/>, known at
+    /// <paramref name="at"/>, took out of the dataset; nothing on a store under a retention lock, whose deletes the vacuum
+    /// waits for.
+    /// </summary>
+    internal void NoteRetired(ulong version, DateTimeOffset at, string[] keys)
+    {
+        if (!_options.LockedStore)
+        {
+            Retired.Note(version, at, keys);
+        }
+    }
+
+    /// <summary>
+    /// Deletes the objects this handle's compactions replaced that no retained version reads any more
+    /// (<see cref="RetiredObjects"/>): what a vacuum would delete of them, without listing the store or walking a tree.
+    /// </summary>
+    /// <returns>How many objects were deleted.</returns>
+    internal ValueTask<int> DeleteRetiredAsync(CancellationToken cancellationToken) =>
+        Retired.DeleteDueAsync(_store, Version, Snapshot.Header.Retention, _options.TimeProvider.GetUtcNow(), cancellationToken);
+
+    /// <summary>
+    /// Deletes objects a job wrote that no version names: its outputs, when its commit applied nothing. Best effort: one
+    /// left is the vacuum's.
+    /// </summary>
+    internal async ValueTask DeleteUnnamedAsync(IReadOnlyList<string> keys, CancellationToken cancellationToken)
+    {
+        if (keys.Count == 0 || _options.LockedStore)
+        {
+            return;
+        }
+
+        try
+        {
+            await _store.DeleteAsync(keys, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception failure) when (failure is not OperationCanceledException)
+        {
+            // The vacuum takes them, as it took every output of a job lost before.
+        }
+    }
+
     /// <summary>
     /// Keeps what a job that ran to its end measured: <paramref name="inputBytes"/> an input held at most, at batches of
     /// <paramref name="batchRows"/> rows, and <paramref name="writerBytes"/> its writer; a job's width is no longer capped.
@@ -2129,9 +2174,14 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
         CompactionOptions? options = null, CancellationToken cancellationToken = default)
     {
         CompactionPlan plan = await PlanCompactionAsync(options, cancellationToken).ConfigureAwait(false);
-        return plan.Job is { } job
-            ? await RunWithinBudgetAsync(job, async token => (await PlanCompactionAsync(options, token).ConfigureAwait(false)).Job, cancellationToken).ConfigureAwait(false)
-            : null;
+        if (plan.Job is { } job)
+        {
+            return await RunWithinBudgetAsync(job, async token => (await PlanCompactionAsync(options, token).ConfigureAwait(false)).Job, cancellationToken).ConfigureAwait(false);
+        }
+
+        // Nothing due: what the handle's jobs replaced and no retained version reads any more goes now.
+        await DeleteRetiredAsync(cancellationToken).ConfigureAwait(false);
+        return null;
     }
 
     /// <summary>

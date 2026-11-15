@@ -398,9 +398,27 @@ to lose less were weighed, none built:
 The third is there today: a dataset whose failed jobs cost too much declares a smaller size, and each
 job at risk is that much smaller. The second is the shape of a job that resumes, at the price of a
 format change, and waits for a measure of how often jobs fail. A delete that marks an input while the
-job runs is the common reason a job starts again: its commit abandons the job and leaves its outputs
-to vacuum. Carrying the delete's marks over to the outputs would answer it without either, and is not
-done.
+job runs is the common reason a job starts again: its commit abandons the job, whose outputs no version
+names and which the job deletes at once. Carrying the delete's marks over to the outputs would answer it
+without either, and is not done.
+
+### Cleaning up after itself
+
+A job deletes what it replaced, after its commit and never before. The handle notes the objects the
+commit took out, with the version that took them out and when it knew that version to be the latest. A
+version stays retained while the commit that superseded it is younger than the retention window, or
+while it is among the versions the dataset keeps whatever their age, as the vacuum judges it: an object
+taken out by version `R` is read by version `R - 1` last, and goes once that version is no longer
+retained. The handle deletes what is due at the end of each job, and when a step finds nothing to
+compact, in batches of a thousand keys, without listing the store or walking a tree. Its clock reads the
+time a little after the store dated the commit, so it deletes a little later than a vacuum would, never
+sooner. A job whose commit applied nothing deletes its own outputs at once.
+
+The notes live in the handle. What a handle closed or a process ended leaves noted, the objects of a job
+that crashed before its commit, and every commit object, stay the vacuum's: a commit object is shared by
+the trees of the versions after it, and only a walk of the retained versions tells which ones nothing
+reads. A store under a retention lock deletes nothing before its lock lets go, which the vacuum waits
+for: there, the handle notes nothing.
 
 ## 4. Folding marks where no merge goes
 
