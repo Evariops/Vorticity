@@ -107,6 +107,10 @@ internal static partial class DatasetCompactor
             throw new ArgumentException("A compaction reads at least one object.", nameof(job));
         }
 
+        // Its reads keep nothing in the session's segment cache, its measure's included: each object once, which questions
+        // would not find there again.
+        using SegmentCache.PassingScope passing = SegmentCache.Pass();
+
         // A handle that has measured no input yet measures one before its first merge, an input and a row; a tier merge
         // wider than the measure lets the budget hold is given up before it starts, counted as no compaction, and the next
         // plan prices its inputs by the measure, where the guess before it took them all and was refused twice.
@@ -115,9 +119,7 @@ internal static partial class DatasetCompactor
             await PriceAsync(dataset, job, cancellationToken).ConfigureAwait(false);
         }
 
-        // One activity over the job, its commit's as a child; a job counted however it ends. Its reads keep nothing in the
-        // session's segment cache: each object once, which questions would not find there again.
-        using SegmentCache.PassingScope passing = SegmentCache.Pass();
+        // One activity over the job, its commit's as a child; a job counted however it ends.
         Activity? activity = DatasetTelemetry.StartCompaction(job, dataset.Location);
         CompactionResult result;
         try
