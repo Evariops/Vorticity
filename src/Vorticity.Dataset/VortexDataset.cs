@@ -131,6 +131,12 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
     /// </summary>
     public Exception? LastInlineCompactionFailure => Volatile.Read(ref _inlineFailure);
 
+    /// <summary>
+    /// The arrays the last lookup of an identifier kept its objects in (<see cref="DatasetScanBuilder.LookupArrays"/>), for
+    /// the next; null while a lookup holds them, when one beside it makes its own. The handle outlives its lookups.
+    /// </summary>
+    internal DatasetScanBuilder.LookupArrays? KeptLookupArrays;
+
     /// <summary>The dataset's schema as the engine holds it.</summary>
     internal DType DType => Snapshot.Schema.DType;
 

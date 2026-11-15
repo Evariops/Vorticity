@@ -1,5 +1,4 @@
 using System;
-using System.Buffers;
 using System.Collections.Generic;
 using System.Numerics;
 using System.Runtime.CompilerServices;
@@ -535,7 +534,7 @@ internal static class DatasetRowChanges
         DeletionVector deletions = held.Entry.Deletions;
         List<long> starts = [];
         List<long> ends = [];
-        ulong[] live = [];
+        Block<ulong> live = default;
 
         // Read whole for a sink, else the columns the counts of the rows marked count by and sum.
         int[]? read = changed is null && counted is not null ? DeletedCounts.Builder.ColumnsRead(counted) : null;
@@ -553,7 +552,7 @@ internal static class DatasetRowChanges
 
                 // The rows the filter kept that no earlier delete took.
                 int words = (count + 63) >> 6;
-                Pooled.Grow(ref live, words);
+                Blocks.Ensure(ref live, words);
                 Span<ulong> taken = live.AsSpan(0, words);
                 deletions.Live(batch.StartRow, count, taken);
                 ReadOnlySpan<ulong> selection = batch.SelectionWords;
@@ -586,7 +585,7 @@ internal static class DatasetRowChanges
         }
         finally
         {
-            Pooled.Return(live);
+            Blocks.Return(live);
         }
 
         return (deletions.WithRuns(CollectionsMarshal.AsSpan(starts), CollectionsMarshal.AsSpan(ends)), negatives?.Finish());
@@ -698,7 +697,7 @@ internal static class DatasetRowChanges
         CancellationToken cancellationToken)
     {
         FilterEvaluator? evaluator = filter is null ? null : new FilterEvaluator(filter);
-        byte[] states = [];
+        Block<byte> states = default;
         long kept = 0;
         try
         {
@@ -717,7 +716,7 @@ internal static class DatasetRowChanges
                     continue;
                 }
 
-                Pooled.Grow(ref states, rows);
+                Blocks.Ensure(ref states, rows);
 
                 evaluator.Evaluate(batch.Arena, batch.RootIndex, rows, states.AsSpan(0, rows));
                 (VortexBuffer keptWords, int keeping) = Words(batch.Arena, states.AsSpan(0, rows), matching: false);
@@ -747,7 +746,7 @@ internal static class DatasetRowChanges
         }
         finally
         {
-            Pooled.Return(states);
+            Blocks.Return(states);
         }
 
         return kept;
@@ -953,8 +952,9 @@ internal sealed class ChangedRecords<TRecord> : ChangedRows
         int count = batch.RowCount;
         if (_rows.Length < count)
         {
-            Release();
-            _rows = ArrayPool<TRecord>.Shared.Rent(count);
+            // An array of the update's own, made at its first batch and again for a longer one: a record may hold
+            // references, which no block of the pool holds.
+            _rows = new TRecord[count];
         }
 
         Columns<TRecord> columns = new Columns<TRecord>(
@@ -974,12 +974,6 @@ internal sealed class ChangedRecords<TRecord> : ChangedRows
         return kept;
     }
 
-    private void Release()
-    {
-        if (_rows.Length > 0)
-        {
-            ArrayPool<TRecord>.Shared.Return(_rows, clearArray: RuntimeHelpers.IsReferenceOrContainsReferences<TRecord>());
-            _rows = [];
-        }
-    }
+    /// <summary>Lets the records go to the collector, with the array they lie in.</summary>
+    private void Release() => _rows = [];
 }

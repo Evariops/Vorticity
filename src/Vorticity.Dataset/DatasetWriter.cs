@@ -1,5 +1,4 @@
 using System;
-using System.Buffers;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using System.Threading;
@@ -206,28 +205,80 @@ public sealed class DatasetWriter
 
         ThrowIfDone();
         int block = _dataset.Options.Write.BlockRows;
-        TRecord[] buffer = ArrayPool<TRecord>.Shared.Rent(block);
+        ColumnsBuilder<TRecord> builder = Builder<TRecord>();
+
+        // The rows go to the builder a few hundred at a time and are taken a block at a time, as a block's worth of rows
+        // written at once would be, as the file writer's stream does. The stream's own staging array is small: a record
+        // may hold references, which no block of bytes can.
+        TRecord[] staged = new TRecord[Math.Min(block, StreamedRows)];
+        int count = 0;
+        int appended = 0;
+        int start = builder.Store.Rows;
         try
         {
-            int count = 0;
             await foreach (TRecord row in rows.WithCancellation(cancellationToken).ConfigureAwait(false))
             {
-                buffer[count++] = row;
-                if (count == block)
+                staged[count++] = row;
+                if (count < staged.Length && appended + count < block)
                 {
-                    await WriteAsync<TRecord>(buffer.AsSpan(0, count), cancellationToken).ConfigureAwait(false);
-                    count = 0;
+                    continue;
                 }
+
+                Append(builder, staged.AsSpan(0, count));
+                appended += count;
+                count = 0;
+                if (appended < block)
+                {
+                    continue;
+                }
+
+                cancellationToken.ThrowIfCancellationRequested();
+                appended = 0;
+                await AcceptAsync(cancellationToken).ConfigureAwait(false);
+                start = builder.Store.Rows;
             }
 
             if (count > 0)
             {
-                await WriteAsync<TRecord>(buffer.AsSpan(0, count), cancellationToken).ConfigureAwait(false);
+                Append(builder, staged.AsSpan(0, count));
+                appended += count;
+            }
+
+            if (appended > 0)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                appended = 0;
+                await AcceptAsync(cancellationToken).ConfigureAwait(false);
             }
         }
-        finally
+        catch
         {
-            ArrayPool<TRecord>.Shared.Return(buffer, RuntimeHelpers.IsReferenceOrContainsReferences<TRecord>());
+            // The rows of a block not taken leave the builder, as a block never written would have.
+            if (appended > 0)
+            {
+                builder.Store.Truncate(start);
+            }
+
+            throw;
+        }
+    }
+
+    /// <summary>The rows a stream gathers before it appends them to the builder, a column at a time.</summary>
+    private const int StreamedRows = 256;
+
+    /// <summary>Appends <paramref name="rows"/> to <paramref name="builder"/>, whose rows are as they were when it throws.</summary>
+    private static void Append<TRecord>(ColumnsBuilder<TRecord> builder, ReadOnlySpan<TRecord> rows)
+        where TRecord : IVortexRecord<TRecord>
+    {
+        int before = builder.Store.Rows;
+        try
+        {
+            TRecord.WriteRows(builder, rows);
+        }
+        catch
+        {
+            builder.Store.Truncate(before);
+            throw;
         }
     }
 

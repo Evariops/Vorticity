@@ -1,5 +1,4 @@
 using System;
-using System.Buffers;
 using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
@@ -99,7 +98,7 @@ internal sealed class SessionReader : ISegmentReader, Indexes.IIndexRegionReader
         // Only what the source reads goes into the cache: a slot filled before the read comes from
         // memory the caller holds, a segment its scan kept or the tail its file read, and a slot
         // the cache fills is in it already.
-        bool[]? held = null;
+        Block<bool> held = default;
         try
         {
             if (_cache is not null)
@@ -117,7 +116,13 @@ internal sealed class SessionReader : ISegmentReader, Indexes.IIndexRegionReader
                 {
                     if (requests.IsFilled(slot))
                     {
-                        (held ??= Marks(requests.Count))[slot] = true;
+                        if (held.IsDefault)
+                        {
+                            // One mark per slot, all clear.
+                            held = Blocks.RentCleared<bool>(requests.Count);
+                        }
+
+                        held[slot] = true;
                     }
                 }
             }
@@ -143,7 +148,7 @@ internal sealed class SessionReader : ISegmentReader, Indexes.IIndexRegionReader
             {
                 for (int slot = 0; slot < requests.Count; slot++)
                 {
-                    if (held is null || !held[slot])
+                    if (held.IsDefault || !held[slot])
                     {
                         _cache.Add(_key, (long)requests.GetSpec(slot).Offset, requests.GetOwner(slot), requests.GetBuffer(slot));
                     }
@@ -152,19 +157,8 @@ internal sealed class SessionReader : ISegmentReader, Indexes.IIndexRegionReader
         }
         finally
         {
-            if (held is not null)
-            {
-                ArrayPool<bool>.Shared.Return(held);
-            }
+            Blocks.Return(held);
         }
-    }
-
-    /// <summary>One mark per slot, all clear.</summary>
-    private static bool[] Marks(int count)
-    {
-        bool[] marks = ArrayPool<bool>.Shared.Rent(count);
-        Array.Clear(marks, 0, count);
-        return marks;
     }
 
     [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder<>))]

@@ -1,7 +1,7 @@
 using System;
-using System.Buffers;
 using System.Globalization;
 using System.Text.Unicode;
+using Vorticity.Buffers;
 
 namespace Vorticity.Types;
 
@@ -184,12 +184,12 @@ internal static class DTypeFormatter
 
 /// <summary>
 /// A growable char writer with a hard length budget. Starts on a caller-supplied stack buffer and
-/// escalates to <see cref="ArrayPool{T}"/>; nothing but the final <see cref="Build"/> allocates.
+/// escalates to a block of the pool (<see cref="Blocks"/>); nothing but the final <see cref="Build"/> allocates.
 /// </summary>
 internal ref struct ValueStringWriter
 {
     private Span<char> _buffer;
-    private char[]? _rented;
+    private Block<char> _rented;
     private int _length;
     private readonly int _budget;
     private bool _truncated;
@@ -197,7 +197,7 @@ internal ref struct ValueStringWriter
     internal ValueStringWriter(Span<char> initial, int budget)
     {
         _buffer = initial;
-        _rented = null;
+        _rented = default;
         _length = 0;
         _budget = budget;
         _truncated = false;
@@ -343,13 +343,10 @@ internal ref struct ValueStringWriter
 
     internal void Dispose()
     {
-        char[]? rented = _rented;
-        _rented = null;
+        Block<char> rented = _rented;
+        _rented = default;
         _buffer = default;
-        if (rented is not null)
-        {
-            ArrayPool<char>.Shared.Return(rented);
-        }
+        Blocks.Return(rented);
     }
 
     private void Grow(int extra)
@@ -360,14 +357,11 @@ internal ref struct ValueStringWriter
         }
 
         int size = Math.Max(_buffer.Length * 2, _length + extra);
-        char[] next = ArrayPool<char>.Shared.Rent(size);
+        Block<char> next = Blocks.Rent<char>(size);
         _buffer[.._length].CopyTo(next);
-        char[]? old = _rented;
+        Block<char> old = _rented;
         _rented = next;
         _buffer = next;
-        if (old is not null)
-        {
-            ArrayPool<char>.Shared.Return(old);
-        }
+        Blocks.Return(old);
     }
 }

@@ -39,8 +39,8 @@ internal static class LiveRows
         long baseRow,
         [EnumeratorCancellation] CancellationToken cancellationToken)
     {
-        int[] indices = [];
-        ulong[] mask = [];
+        Block<int> indices = default;
+        Block<ulong> mask = default;
         RecordBatch? view = null;
         try
         {
@@ -60,8 +60,8 @@ internal static class LiveRows
                 }
 
                 int words = (rows + 63) >> 6;
-                Pooled.Grow(ref mask, words);
-                Pooled.Grow(ref indices, rows);
+                Blocks.Ensure(ref mask, words);
+                Blocks.Ensure(ref indices, rows);
 
                 // The rows kept: the live ones, and of those the selected ones when compacting.
                 Span<ulong> kept = mask.AsSpan(0, words);
@@ -108,8 +108,8 @@ internal static class LiveRows
         finally
         {
             view?.Dispose();
-            Pooled.Return(indices);
-            Pooled.Return(mask);
+            Blocks.Return(indices);
+            Blocks.Return(mask);
         }
     }
 
@@ -209,14 +209,14 @@ internal static class LiveRows
         IAsyncEnumerable<RecordBatch> source,
         [EnumeratorCancellation] CancellationToken cancellationToken)
     {
-        int[] order = [];
+        Block<int> order = default;
         RecordBatch? view = null;
         try
         {
             await foreach (RecordBatch batch in source.WithCancellation(cancellationToken).ConfigureAwait(false))
             {
                 int rows = batch.RowCount;
-                Pooled.Grow(ref order, rows);
+                Blocks.Ensure(ref order, rows);
 
                 for (int row = 0; row < rows; row++)
                 {
@@ -233,7 +233,7 @@ internal static class LiveRows
         finally
         {
             view?.Dispose();
-            Pooled.Return(order);
+            Blocks.Return(order);
         }
     }
 

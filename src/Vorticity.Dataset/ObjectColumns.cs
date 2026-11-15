@@ -1,5 +1,4 @@
 using System;
-using System.Buffers;
 using System.Collections.Generic;
 using System.Numerics;
 using System.Runtime.CompilerServices;
@@ -285,8 +284,8 @@ internal sealed class ObjectColumns
         [EnumeratorCancellation] CancellationToken cancellationToken)
     {
         FilterEvaluator? evaluator = evaluated is null ? null : new FilterEvaluator(evaluated);
-        byte[] states = [];
-        int[] indices = [];
+        Block<byte> states = default;
+        Block<int> indices = default;
         RecordBatch? view = null;
         try
         {
@@ -299,7 +298,7 @@ internal sealed class ObjectColumns
                 int selected = -1;
                 if (evaluator is not null)
                 {
-                    Pooled.Grow(ref states, rows);
+                    Blocks.Ensure(ref states, rows);
 
                     Span<byte> truths = states.AsSpan(0, rows);
                     evaluator.Evaluate(arena, root, rows, truths);
@@ -313,7 +312,7 @@ internal sealed class ObjectColumns
                     root = shape.Final(arena, root);
                     if (count < rows && compact)
                     {
-                        Pooled.Grow(ref indices, rows);
+                        Blocks.Ensure(ref indices, rows);
                         CanonicalFilter.Select(truths, indices);
                         root = CanonicalFilter.Apply(arena, root, indices.AsSpan(0, count));
                     }
@@ -339,8 +338,8 @@ internal sealed class ObjectColumns
         finally
         {
             view?.Dispose();
-            Pooled.Return(states);
-            Pooled.Return(indices);
+            Blocks.Return(states);
+            Blocks.Return(indices);
         }
     }
 
@@ -796,10 +795,11 @@ internal sealed class ObjectShape
         CanonicalArena arena = batch.Arena;
         int rows = batch.RowCount;
         int count = _positions.Length;
-        int[]? rented = null;
-        Span<int> children = count <= 32 ? stackalloc int[32] : (rented = ArrayPool<int>.Shared.Rent(count));
+        Span<int> stack = stackalloc int[32];
+        Scratch<int> scratch = new Scratch<int>(count, stack);
         try
         {
+            Span<int> children = scratch.Span;
             for (int p = 0; p < count; p++)
             {
                 DType type = _shape.GetField(p);
@@ -820,14 +820,11 @@ internal sealed class ObjectShape
                 };
             }
 
-            return arena.AddStruct(_shape, rows, arena.GetNode(batch.RootIndex).Validity, children[..count]);
+            return arena.AddStruct(_shape, rows, arena.GetNode(batch.RootIndex).Validity, children);
         }
         finally
         {
-            if (rented is not null)
-            {
-                ArrayPool<int>.Shared.Return(rented);
-            }
+            scratch.Dispose();
         }
     }
 
@@ -839,10 +836,11 @@ internal sealed class ObjectShape
             return root;
         }
 
-        int[]? rented = null;
-        Span<int> children = _kept.Length <= 32 ? stackalloc int[32] : (rented = ArrayPool<int>.Shared.Rent(_kept.Length));
+        Span<int> stack = stackalloc int[32];
+        Scratch<int> scratch = new Scratch<int>(_kept.Length, stack);
         try
         {
+            Span<int> children = scratch.Span;
             for (int k = 0; k < _kept.Length; k++)
             {
                 int child = arena.GetNode(root).GetFieldIndex(_kept[k]);
@@ -852,14 +850,11 @@ internal sealed class ObjectShape
             }
 
             CanonicalNode node = arena.GetNode(root);
-            return arena.AddStruct(_final, node.Length, node.Validity, children[.._kept.Length]);
+            return arena.AddStruct(_final, node.Length, node.Validity, children);
         }
         finally
         {
-            if (rented is not null)
-            {
-                ArrayPool<int>.Shared.Return(rented);
-            }
+            scratch.Dispose();
         }
     }
 

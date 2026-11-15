@@ -1,5 +1,4 @@
 using System;
-using System.Buffers;
 using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.Numerics;
@@ -7,6 +6,7 @@ using System.Runtime.ExceptionServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Aggregating;
+using Vorticity.Buffers;
 using Vorticity.Indexes;
 using Vorticity.Layouts;
 using Vorticity.RowEncoding;
@@ -450,7 +450,7 @@ internal static partial class DatasetCompactor
     private static KeyRanges? Cut(CompactionJob job, GranuleKeys?[] indexes, int granules, int most, byte[] partition, int[] widths)
     {
         // Every granule, an input's place and the granule's packed in a long, sorted by key.
-        long[] order = ArrayPool<long>.Shared.Rent(granules);
+        Block<long> order = Blocks.Rent<long>(granules);
 
         // Each index's keys decoded once for the sort, which compares them in any order, row-encoded whatever their coding.
         GranuleKeys.DecodedKeys?[] decoded = new GranuleKeys.DecodedKeys?[indexes.Length];
@@ -479,7 +479,7 @@ internal static partial class DatasetCompactor
                 total += WeightOf(job, indexes, i) * keys.Granules;
             }
 
-            Array.Sort(order, 0, granules, new ByGranuleKey(decoded));
+            order.AsSpan(0, granules).Sort(new ByGranuleKey(decoded));
 
             // A cut goes before the first granule whose key follows the one before, once the granules before weigh another
             // share of the whole: shares passed at once over a run of one key make one cut, and one range fewer.
@@ -507,7 +507,7 @@ internal static partial class DatasetCompactor
         }
         finally
         {
-            ArrayPool<long>.Shared.Return(order);
+            Blocks.Return(order);
         }
 
         if (cuts.Count == 0)

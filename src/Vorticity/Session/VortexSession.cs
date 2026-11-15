@@ -540,7 +540,7 @@ public sealed class VortexSession : IAsyncDisposable
         await using (reader.ConfigureAwait(false))
         {
             long length = await reader.GetLengthAsync(cancellationToken).ConfigureAwait(false);
-            byte[] buffer = ArrayPool<byte>.Shared.Rent((int)Math.Min(Chunk, Math.Max(length, 1)));
+            Block<byte> buffer = Blocks.Rent<byte>((int)Math.Min(Chunk, Math.Max(length, 1)));
             try
             {
                 for (long at = 0; at < length; at += Chunk)
@@ -562,7 +562,7 @@ public sealed class VortexSession : IAsyncDisposable
             finally
             {
                 System.Security.Cryptography.CryptographicOperations.ZeroMemory(buffer);
-                ArrayPool<byte>.Shared.Return(buffer);
+                Blocks.Return(buffer);
             }
         }
     }

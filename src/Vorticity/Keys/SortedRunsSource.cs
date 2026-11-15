@@ -1,5 +1,4 @@
 using System;
-using System.Buffers;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
@@ -581,7 +580,7 @@ internal sealed partial class SortedRunsSource : KeySource
     private async ValueTask<long> SumAsync<TKey>(TKey key, long row, CancellationToken cancellationToken)
         where TKey : struct, IKeyOrder
     {
-        long[] at = ArrayPool<long>.Shared.Rent(_runs.Length);
+        Block<long> at = Blocks.Rent<long>(_runs.Length);
         try
         {
             await ProbeAllAsync(key, row, at, cancellationToken).ConfigureAwait(false);
@@ -595,7 +594,7 @@ internal sealed partial class SortedRunsSource : KeySource
         }
         finally
         {
-            ArrayPool<long>.Shared.Return(at);
+            Blocks.Return(at);
         }
     }
 
@@ -605,17 +604,19 @@ internal sealed partial class SortedRunsSource : KeySource
     /// where probed one after another, <c>r</c> runs waited up to <c>2r</c> round trips in turn. A run's probe moves its own
     /// state alone.
     /// </summary>
-    private async ValueTask ProbeAllAsync<TKey>(TKey key, long row, long[] at, CancellationToken cancellationToken)
+    private async ValueTask ProbeAllAsync<TKey>(TKey key, long row, Block<long> at, CancellationToken cancellationToken)
         where TKey : struct, IKeyOrder
     {
         Run[] runs = _runs;
         if (runs.Length == 1)
         {
-            at[0] = await FirstAtOrAfterAsync(runs[0], key, row, cancellationToken).ConfigureAwait(false);
+            long only = await FirstAtOrAfterAsync(runs[0], key, row, cancellationToken).ConfigureAwait(false);
+            at[0] = only;
             return;
         }
 
-        // A probe its run's caches answer is done at once, no task made for it; one that reads waits as a task.
+        // A probe its run's caches answer is done at once, no task made for it; one that reads waits as a task, in an
+        // array the source keeps for its probes, one at a time as a cursor's are: tasks are references no block holds.
         Task<long>?[]? waiting = null;
         try
         {
@@ -624,11 +625,12 @@ internal sealed partial class SortedRunsSource : KeySource
                 ValueTask<long> probe = FirstAtOrAfterAsync(runs[r], key, row, cancellationToken);
                 if (probe.IsCompletedSuccessfully)
                 {
-                    at[r] = await probe.ConfigureAwait(false);
+                    long first = await probe.ConfigureAwait(false);
+                    at[r] = first;
                     continue;
                 }
 
-                waiting ??= ArrayPool<Task<long>?>.Shared.Rent(runs.Length);
+                waiting ??= _waiting ??= new Task<long>?[runs.Length];
                 waiting[r] = probe.AsTask();
             }
 
@@ -648,7 +650,8 @@ internal sealed partial class SortedRunsSource : KeySource
 
                 try
                 {
-                    at[r] = await task.ConfigureAwait(false);
+                    long first = await task.ConfigureAwait(false);
+                    at[r] = first;
                 }
                 catch (Exception caught)
                 {
@@ -665,11 +668,13 @@ internal sealed partial class SortedRunsSource : KeySource
         {
             if (waiting is not null)
             {
-                Array.Clear(waiting, 0, runs.Length);
-                ArrayPool<Task<long>?>.Shared.Return(waiting);
+                Array.Clear(waiting);
             }
         }
     }
+
+    /// <summary>The probes of <see cref="ProbeAllAsync"/> that read, a run each; made at the first that does.</summary>
+    private Task<long>?[]? _waiting;
 
     /// <remarks>
     /// A selection over every run at once, each run keeping the positions still candidates. A
@@ -849,8 +854,8 @@ internal sealed partial class SortedRunsSource : KeySource
     internal override async ValueTask<long> CountAtKeyAsync(CancellationToken cancellationToken)
     {
         LiteralKey key = new LiteralKey(this, Key);
-        long[] high = ArrayPool<long>.Shared.Rent(_runs.Length);
-        long[] low = ArrayPool<long>.Shared.Rent(_runs.Length);
+        Block<long> high = Blocks.Rent<long>(_runs.Length);
+        Block<long> low = Blocks.Rent<long>(_runs.Length);
         try
         {
             await ProbeAllAsync(key, long.MaxValue, high, cancellationToken).ConfigureAwait(false);
@@ -865,8 +870,8 @@ internal sealed partial class SortedRunsSource : KeySource
         }
         finally
         {
-            ArrayPool<long>.Shared.Return(low);
-            ArrayPool<long>.Shared.Return(high);
+            Blocks.Return(low);
+            Blocks.Return(high);
         }
     }
 
@@ -931,7 +936,7 @@ internal sealed partial class SortedRunsSource : KeySource
     private async ValueTask<bool> ForwardAsync(FilterLiteral key, long row, CancellationToken cancellationToken)
     {
         Reset(1);
-        long[] found = ArrayPool<long>.Shared.Rent(_runs.Length);
+        Block<long> found = Blocks.Rent<long>(_runs.Length);
         try
         {
             await ProbeAllAsync(new LiteralKey(this, key), row, found, cancellationToken).ConfigureAwait(false);
@@ -945,7 +950,7 @@ internal sealed partial class SortedRunsSource : KeySource
         }
         finally
         {
-            ArrayPool<long>.Shared.Return(found);
+            Blocks.Return(found);
         }
 
         return IsValid;
@@ -955,7 +960,7 @@ internal sealed partial class SortedRunsSource : KeySource
     private async ValueTask<bool> BackwardAsync(FilterLiteral key, long row, CancellationToken cancellationToken)
     {
         Reset(-1);
-        long[] found = ArrayPool<long>.Shared.Rent(_runs.Length);
+        Block<long> found = Blocks.Rent<long>(_runs.Length);
         try
         {
             await ProbeAllAsync(new LiteralKey(this, key), row, found, cancellationToken).ConfigureAwait(false);
@@ -970,7 +975,7 @@ internal sealed partial class SortedRunsSource : KeySource
         }
         finally
         {
-            ArrayPool<long>.Shared.Return(found);
+            Blocks.Return(found);
         }
 
         return IsValid;

@@ -570,26 +570,20 @@ internal static class ColumnData
         ViewValues texts = new ViewValues(record);
         ReadOnlySpan<ulong> valid = ArenaWords.Validity(arena, node);
         Span<TText> into = Destination(destination, arena.RecordRef(node).Length);
-        string?[] made = System.Buffers.ArrayPool<string?>.Shared.Rent(Math.Max(1, record.Length));
-        try
+        // Each entry's string, made at its first row: strings are references no block holds, and the array is allocated
+        // as they are, an entry each.
+        string?[] made = new string?[record.Length];
+        for (int i = 0; i < into.Length; i++)
         {
-            Array.Clear(made, 0, record.Length);
-            for (int i = 0; i < into.Length; i++)
+            // The rows' validity alone, as the dictionary's rows materialized take it: an entry's own is not read.
+            string? text = null;
+            if (IsValid(valid, i))
             {
-                // The rows' validity alone, as the dictionary's rows materialized take it: an entry's own is not read.
-                string? text = null;
-                if (IsValid(valid, i))
-                {
-                    int code = (int)codes[i];
-                    text = made[code] ??= Encoding.UTF8.GetString(texts.At(code));
-                }
-
-                into[i] = Unsafe.As<string?, TText>(ref text);
+                int code = (int)codes[i];
+                text = made[code] ??= Encoding.UTF8.GetString(texts.At(code));
             }
-        }
-        finally
-        {
-            System.Buffers.ArrayPool<string?>.Shared.Return(made, clearArray: true);
+
+            into[i] = Unsafe.As<string?, TText>(ref text);
         }
     }
 
