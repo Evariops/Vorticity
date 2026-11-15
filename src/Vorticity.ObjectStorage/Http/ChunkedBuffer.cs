@@ -114,7 +114,7 @@ internal sealed class ChunkedBuffer : IDisposable
     {
         foreach (byte[] chunk in _chunks)
         {
-            ArrayPool<byte>.Shared.Return(chunk);
+            VortexBytePool.Instance.Return(chunk);
         }
 
         _chunks.Clear();
@@ -131,7 +131,7 @@ internal sealed class ChunkedBuffer : IDisposable
                 int used = (int)(_length % ChunkBytes);
                 if (used == 0 && _length / ChunkBytes == _chunks.Count)
                 {
-                    _chunks.Add(ArrayPool<byte>.Shared.Rent(ChunkBytes));
+                    _chunks.Add(VortexBytePool.Instance.Rent(ChunkBytes));
                 }
 
                 int take = Math.Min(span.Length, ChunkBytes - used);

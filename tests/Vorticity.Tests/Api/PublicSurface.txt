@@ -2568,6 +2568,10 @@ Vorticity:     property Sym<Nullable<Variant>> Item[int] { get; }
 Vorticity:     property Sym<Nullable<Variant>> Item[string] { get; }
 Vorticity: static class Vorticity.VariantSymbols.<G>$605D60C85C1CCE73E1B2B617B441846F.<M>$A8D32CB066FF2849E1A4BAB217D6AA8C
 Vorticity:     method void <Extension>$(Sym<Variant>)
+Vorticity: sealed class Vorticity.VortexBytePool : ArrayPool<byte>
+Vorticity:     method byte[] Rent(int)
+Vorticity:     method void Return(byte[], bool = default)
+Vorticity:     property VortexBytePool Instance { get; }
 Vorticity: sealed class Vorticity.VortexColumnAttribute : Attribute
 Vorticity:     ctor VortexColumnAttribute()
 Vorticity:     ctor VortexColumnAttribute(string)

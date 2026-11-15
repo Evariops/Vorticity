@@ -31,7 +31,7 @@ internal static class UriEncoding
             return value;
         }
 
-        byte[] bytes = ArrayPool<byte>.Shared.Rent(Encoding.UTF8.GetMaxByteCount(value.Length));
+        byte[] bytes = VortexBytePool.Instance.Rent(Encoding.UTF8.GetMaxByteCount(value.Length));
         try
         {
             int written = 0;
@@ -62,14 +62,14 @@ internal static class UriEncoding
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(bytes);
+            VortexBytePool.Instance.Return(bytes);
         }
     }
 
     private static string Encode(string value, bool keepSlash)
     {
         int maxBytes = Encoding.UTF8.GetMaxByteCount(value.Length);
-        byte[] utf8 = ArrayPool<byte>.Shared.Rent(maxBytes);
+        byte[] utf8 = VortexBytePool.Instance.Rent(maxBytes);
         try
         {
             int length = Encoding.UTF8.GetBytes(value, utf8);
@@ -105,7 +105,7 @@ internal static class UriEncoding
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(utf8);
+            VortexBytePool.Instance.Return(utf8);
         }
     }
 

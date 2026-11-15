@@ -1,5 +1,4 @@
 using System;
-using System.Buffers;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
@@ -431,7 +430,7 @@ public sealed partial class S3ObjectStore : IObjectStore, IUploadService
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(bytes);
+            VortexBytePool.Instance.Return(bytes);
         }
     }
 
@@ -512,7 +511,7 @@ public sealed partial class S3ObjectStore : IObjectStore, IUploadService
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(bytes);
+            VortexBytePool.Instance.Return(bytes);
         }
     }
 

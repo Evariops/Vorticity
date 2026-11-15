@@ -1,5 +1,4 @@
 using System;
-using System.Buffers;
 using System.Diagnostics;
 using System.IO;
 using System.Net;
@@ -363,7 +362,7 @@ internal sealed class HttpTransport : IDisposable
             throw new ObjectStoreException($"An answer of {announced} bytes is past the {limit} this store reads.");
         }
 
-        byte[] bytes = ArrayPool<byte>.Shared.Rent((int)Math.Min(announced ?? 16_384, limit) + 1);
+        byte[] bytes = VortexBytePool.Instance.Rent((int)Math.Min(announced ?? 16_384, limit) + 1);
         int length = 0;
         try
         {
@@ -381,15 +380,15 @@ internal sealed class HttpTransport : IDisposable
                     throw new ObjectStoreException($"An answer past {limit} bytes is longer than this store reads.");
                 }
 
-                byte[] larger = ArrayPool<byte>.Shared.Rent(Math.Min(bytes.Length * 2, limit + 1));
+                byte[] larger = VortexBytePool.Instance.Rent(Math.Min(bytes.Length * 2, limit + 1));
                 bytes.AsSpan(0, length).CopyTo(larger);
-                ArrayPool<byte>.Shared.Return(bytes);
+                VortexBytePool.Instance.Return(bytes);
                 bytes = larger;
             }
         }
         catch
         {
-            ArrayPool<byte>.Shared.Return(bytes);
+            VortexBytePool.Instance.Return(bytes);
             throw;
         }
     }

@@ -314,7 +314,7 @@ public sealed partial class S3ObjectStore
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(bytes);
+            VortexBytePool.Instance.Return(bytes);
         }
     }
 
@@ -378,7 +378,7 @@ public sealed partial class S3ObjectStore
                 }
                 finally
                 {
-                    ArrayPool<byte>.Shared.Return(bytes);
+                    VortexBytePool.Instance.Return(bytes);
                 }
 
                 return PutOutcome.Created;
@@ -445,7 +445,7 @@ public sealed partial class S3ObjectStore
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(bytes);
+            VortexBytePool.Instance.Return(bytes);
         }
     }
 

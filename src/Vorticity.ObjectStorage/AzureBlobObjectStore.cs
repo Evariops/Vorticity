@@ -1,5 +1,4 @@
 using System;
-using System.Buffers;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Net;
@@ -354,7 +353,7 @@ public sealed partial class AzureBlobObjectStore : IObjectStore, IUploadService
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(bytes);
+            VortexBytePool.Instance.Return(bytes);
         }
     }
 
@@ -468,7 +467,7 @@ public sealed partial class AzureBlobObjectStore : IObjectStore, IUploadService
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(bytes);
+            VortexBytePool.Instance.Return(bytes);
         }
     }
 
