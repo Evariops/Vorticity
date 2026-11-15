@@ -1,7 +1,6 @@
 # What the memory refactoring still has to take out (PLAN-MEMORY, section 7): a pattern, then its occurrences in
 # src, tests, bench (with samples and tools) and docs, separated by tabs. Lowered in the commit that takes some out,
 # removed at zero, never raised.
-ArrayPool<[^;()=]+?>\.Shared	0	20	2	0
 \bEnginePool\b	58	5	0	0
 \bAlignedMemoryPool\b	17	6	1	8
 \bMemoryPool\b	17	4	1	4

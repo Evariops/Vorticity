@@ -18,6 +18,7 @@ using System.Globalization;
 using System.IO.Hashing;
 using System.Text;
 using Vorticity.Arrays;
+using Vorticity.Buffers;
 using Vorticity.Columns;
 using Vorticity.Types;
 
@@ -313,14 +314,11 @@ internal static class Values
     {
         into.Append('b');
         int length = ((bytes.Length + 2) / 3) * 4;
-        char[]? rented = length > 512 ? ArrayPool<char>.Shared.Rent(length) : null;
-        Span<char> chars = rented is not null ? rented : stackalloc char[512];
+        Block<char> rented = length > 512 ? Blocks.Rent<char>(length) : default;
+        Span<char> chars = rented.IsDefault ? stackalloc char[512] : rented.AsSpan();
         Convert.TryToBase64Chars(bytes, chars, out int written);
         into.Append(chars[..written]);
-        if (rented is not null)
-        {
-            ArrayPool<char>.Shared.Return(rented);
-        }
+        Blocks.Return(rented);
     }
 
     private static void RenderList(VortexColumn column, int row, int depth, StringBuilder into)

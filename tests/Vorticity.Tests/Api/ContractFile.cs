@@ -1,7 +1,5 @@
 using System;
-using System.Buffers;
 using System.IO;
-using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -118,23 +116,17 @@ internal static class ContractFile
         AppDomain.CurrentDomain.ProcessExit += (_, _) => System.IO.File.Delete(path);
 
         await using VortexFileWriter writer = VortexSession.Default.CreateWriter<Reading>(path, options);
-        Reading[] block = ArrayPool<Reading>.Shared.Rent(writer.BlockRows);
-        try
+        // A reading holds its city, a reference no pool block holds: one array for the file, made once.
+        Reading[] block = new Reading[writer.BlockRows];
+        for (int start = 0; start < Rows; start += writer.BlockRows)
         {
-            for (int start = 0; start < Rows; start += writer.BlockRows)
+            int count = Math.Min(writer.BlockRows, Rows - start);
+            for (int i = 0; i < count; i++)
             {
-                int count = Math.Min(writer.BlockRows, Rows - start);
-                for (int i = 0; i < count; i++)
-                {
-                    block[i] = Row(start + i);
-                }
-
-                await writer.WriteAsync<Reading>(block.AsSpan(0, count), CancellationToken.None);
+                block[i] = Row(start + i);
             }
-        }
-        finally
-        {
-            ArrayPool<Reading>.Shared.Return(block, RuntimeHelpers.IsReferenceOrContainsReferences<Reading>());
+
+            await writer.WriteAsync<Reading>(block.AsSpan(0, count), CancellationToken.None);
         }
 
         await writer.CompleteAsync(CancellationToken.None);

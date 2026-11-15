@@ -36,7 +36,7 @@ namespace Vorticity.Tests.Writing;
 /// <summary>What the write path allocates, held against a ratchet.</summary>
 /// <remarks>
 /// Shares <see cref="Vorticity.Tests.Scan.AllocationCollection"/> for the reason that class
-/// records: <c>ArrayPool&lt;T&gt;.Shared</c> is process-global, so a neighbouring test class
+/// records: the library's pool is process-global, so a neighbouring test class
 /// draining it turns a rent that would have been free into an allocation charged here.
 /// </remarks>
 [Collection(nameof(AllocationCollection))]

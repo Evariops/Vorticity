@@ -42,11 +42,11 @@ public class RowEncodingBenchmarks
     /// <remarks>
     /// A struct root is required - row encoding is about ordering tuples. The first two differ in
     /// width and nullability; neither has a decimal column or a nested field, so `EncodeDecimal` and
-    /// the per-nested-field `ArrayPool.Rent` made ZERO calls and nothing measured them.
+    /// the per-nested-field rent made ZERO calls and nothing measured them.
     /// <para>
     /// `chunked_decimal_r1025` is the third case, and ONE file covers both missing sites: four
     /// Decimal(18,4) chunks carried as a struct field, so `EncodeDecimal` runs 368 108 times and the
-    /// per-nested-field `ArrayPool.Rent` runs twice, where both were at zero.
+    /// per-nested-field rent runs twice, where both were at zero.
     /// </para>
     /// <para>
     /// THREE OTHER CANDIDATES WERE TRIED AND ARE OUT OF REACH, which is worth writing down so the

@@ -3,7 +3,6 @@ using System.Diagnostics;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
-using System.Buffers;
 using System.Collections.Generic;
 using Vorticity.Buffers;
 using Vorticity.Compute;
@@ -79,9 +78,9 @@ internal sealed class FsstSymbols
 
         /// <summary>
         /// Room for the drawn sample: at most <see cref="SampleTarget"/> lines, since either way of
-        /// building the sample draws at least one byte per line. It lives here rather than in an
-        /// <see cref="ArrayPool{T}"/> because a pool of <see cref="Line"/> would be a whole new
-        /// shared pool with its own Gen2 trimming callback.
+        /// building the sample draws at least one byte per line. It lives here, made once with the
+        /// set of tables that <see cref="SpareSlots{T}"/> keeps from one column-chunk to the next,
+        /// rather than rented at every training.
         /// </summary>
         internal Line[] Sample => _sample ??= new Line[SampleTarget];
 

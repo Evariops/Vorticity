@@ -5,7 +5,6 @@
 // both sides over every row whatever the left side said; `Library` is the evaluator itself. The
 // disjunction case is the mirror: `k >= 0 OR s LIKE ...`, whose left side is true everywhere.
 using System;
-using System.Buffers;
 using System.Buffers.Binary;
 using System.Runtime.InteropServices;
 
@@ -205,7 +204,9 @@ public class FilterShortCircuitBenchmarks
                 LogicalExpr logical = (LogicalExpr)filter;
                 OriginalEvaluate(logical.Left, arena, rootIndex, rows, destination, depth + 1);
 
-                byte[] right = ArrayPool<byte>.Shared.Rent(rows);
+                // From the pool the library's evaluator rents its own from, so that the two sides differ by
+                // the short-circuit alone.
+                Block<byte> right = Blocks.Rent<byte>(rows);
                 try
                 {
                     Span<byte> other = right.AsSpan(0, rows);
@@ -221,7 +222,7 @@ public class FilterShortCircuitBenchmarks
                 }
                 finally
                 {
-                    ArrayPool<byte>.Shared.Return(right);
+                    Blocks.Return(right);
                 }
 
                 return;

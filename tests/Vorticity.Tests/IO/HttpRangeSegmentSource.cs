@@ -1,5 +1,4 @@
 using System;
-using System.Buffers;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Buffers;
@@ -20,7 +19,8 @@ namespace Vorticity.Tests.IO;
 /// <para>
 /// The object-storage shape, and it differs from the local ones on purpose. A response body is a
 /// stream, so segmentation happens during the copy off the socket: this source stages a coalesced
-/// run in a pooled managed array and copies each segment into its own aligned buffer. That is the
+/// run in an array of <see cref="VortexBytePool"/>, as a transport written against the public
+/// surface would, and copies each segment into its own aligned buffer. That is the
 /// one copy a streamed body cannot avoid, accepted as such, and it exercises
 /// <see cref="SegmentRequestSet.SetResult"/> — the owner-per-slot half of the API that the
 /// zero-copy local sources never touch.
@@ -110,10 +110,10 @@ internal sealed class HttpRangeSegmentSource : ISegmentReader
             return;
         }
 
-        int[] order = ArrayPool<int>.Shared.Rent(registered);
-        ulong[] keys = ArrayPool<ulong>.Shared.Rent(registered);
-        SegmentSpec[] sorted = ArrayPool<SegmentSpec>.Shared.Rent(registered);
-        CoalescedRun[] runs = ArrayPool<CoalescedRun>.Shared.Rent(registered);
+        Block<int> order = Blocks.Rent<int>(registered);
+        Block<ulong> keys = Blocks.Rent<ulong>(registered);
+        Block<SegmentSpec> sorted = Blocks.Rent<SegmentSpec>(registered);
+        Block<CoalescedRun> runs = Blocks.Rent<CoalescedRun>(registered);
 
         try
         {
@@ -166,10 +166,10 @@ internal sealed class HttpRangeSegmentSource : ISegmentReader
         }
         finally
         {
-            ArrayPool<CoalescedRun>.Shared.Return(runs);
-            ArrayPool<SegmentSpec>.Shared.Return(sorted);
-            ArrayPool<ulong>.Shared.Return(keys);
-            ArrayPool<int>.Shared.Return(order);
+            Blocks.Return(runs);
+            Blocks.Return(sorted);
+            Blocks.Return(keys);
+            Blocks.Return(order);
         }
     }
 
@@ -226,11 +226,11 @@ internal sealed class HttpRangeSegmentSource : ISegmentReader
     private async ValueTask FetchRunAsync(
         SegmentRequestSet requests,
         CoalescedRun run,
-        SegmentSpec[] sorted,
-        int[] order,
+        Block<SegmentSpec> sorted,
+        Block<int> order,
         CancellationToken cancellationToken)
     {
-        byte[] staging = ArrayPool<byte>.Shared.Rent(run.Length);
+        byte[] staging = VortexBytePool.Instance.Rent(run.Length);
 
         try
         {
@@ -257,14 +257,14 @@ internal sealed class HttpRangeSegmentSource : ISegmentReader
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(staging);
+            VortexBytePool.Instance.Return(staging);
         }
     }
 
     private async ValueTask FetchAsync(
         long offset, int length, BlockOwner destination, CancellationToken cancellationToken)
     {
-        byte[] staging = ArrayPool<byte>.Shared.Rent(length);
+        byte[] staging = VortexBytePool.Instance.Rent(length);
 
         try
         {
@@ -279,7 +279,7 @@ internal sealed class HttpRangeSegmentSource : ISegmentReader
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(staging);
+            VortexBytePool.Instance.Return(staging);
         }
     }
 

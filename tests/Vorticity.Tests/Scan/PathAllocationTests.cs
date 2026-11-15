@@ -15,7 +15,7 @@
 // quantity that is deterministic: the same build allocates the same bytes on any machine, so it can
 // be a hard barrier rather than a barrier with margin. (With one clause, recorded on
 // AllocationCollection below: deterministic for a process that is not contending on
-// ArrayPool<T>.Shared.) A hard barrier is only worth having where it runs, and what CI runs is
+// its shared pools.) A hard barrier is only worth having where it runs, and what CI runs is
 // `dotnet test`, not BenchmarkDotNet. So the ceilings live here, next to WrittenSizeTests, whose
 // shape this copies deliberately:
 //
@@ -59,9 +59,9 @@ namespace Vorticity.Tests.Scan;
 /// `take 64 rows from 64 splits` gains 576 B.
 ///
 /// The ones that move are the ones that decode the most, and the decode path takes its transients
-/// from <c>ArrayPool&lt;T&gt;.Shared</c> (see <c>Arrays/Kernels/Scratch.cs</c>). That pool
-/// is process-global: when neighbouring test classes have drained its per-core stacks, a Rent that
-/// would have been free allocates a fresh array instead, and the bytes are charged to whoever
+/// from the library's pool (see <c>Buffers/Blocks.cs</c>). That pool is process-global, one
+/// stack a size class: when neighbouring test classes have drained a class, a Rent that would
+/// have been free allocates a fresh array instead, and the bytes are charged to whoever
 /// rented. Nothing regressed and nothing is non-deterministic about the library - the process is
 /// simply a shared resource, the same reason <c>SegmentOwnerTests</c> runs alone.
 ///

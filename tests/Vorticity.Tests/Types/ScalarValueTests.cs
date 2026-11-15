@@ -511,8 +511,8 @@ public sealed class ScalarValueTests
     public void AHugeStringScalarIsRenderedWithoutAllocatingItsLength()
     {
         // A different size class from DTypeFormatTests' huge-name case on purpose: both would
-        // otherwise share an ArrayPool<char> bucket, and whichever ran first would leave a rented
-        // array behind that hides the other's allocation.
+        // otherwise share a size class of the pool, and whichever ran first would leave a block
+        // behind that hides the other's allocation.
         const int Bytes = 1024 * 1024;
 
         byte[] blob = new byte[Bytes];
