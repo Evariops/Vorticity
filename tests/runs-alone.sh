@@ -44,7 +44,9 @@ done
 
 # The three start at once and would each build the same project: the build comes first, once.
 if $build; then
-  dotnet build "$root/tests/Vorticity.Tests" -c Release
+  # -p:Measure=true at the build too: it keeps the runtime's tiers, under which the ceilings were set,
+  # which the build of a plain run turns off.
+  dotnet build "$root/tests/Vorticity.Tests" -c Release -p:Measure=true
   set -- --no-build "$@"
 fi
 
