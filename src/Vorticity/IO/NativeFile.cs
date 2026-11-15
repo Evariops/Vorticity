@@ -1,11 +1,11 @@
 using System;
-using System.Buffers;
 using System.Diagnostics.CodeAnalysis;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using Microsoft.Win32.SafeHandles;
+using Vorticity.Buffers;
 
 namespace Vorticity.IO;
 
@@ -387,8 +387,8 @@ internal static unsafe class NativeFile
                 ? path
                 : Path.GetFullPath(path);
         int most = Encoding.UTF8.GetMaxByteCount(full.Length) + 1;
-        byte[]? rented = most > StackName ? ArrayPool<byte>.Shared.Rent(most) : null;
-        Span<byte> name = rented is null ? stackalloc byte[StackName] : rented;
+        Block<byte> rented = most > StackName ? Blocks.Rent<byte>(most) : default;
+        Span<byte> name = rented.IsDefault ? stackalloc byte[StackName] : rented;
         int descriptor;
         try
         {
@@ -400,10 +400,7 @@ internal static unsafe class NativeFile
         }
         finally
         {
-            if (rented is not null)
-            {
-                ArrayPool<byte>.Shared.Return(rented);
-            }
+            Blocks.Return(rented);
         }
 
         // A missing file, an interrupted call: the framework's open tries again, and throws what it

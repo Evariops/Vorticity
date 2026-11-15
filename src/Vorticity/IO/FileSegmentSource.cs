@@ -1,5 +1,4 @@
 using System;
-using System.Buffers;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
@@ -186,33 +185,30 @@ public sealed class FileSegmentSource : ISegmentSource, ISegmentReader
             return;
         }
 
-        int[] order = ArrayPool<int>.Shared.Rent(registered);
-        ulong[] keys = ArrayPool<ulong>.Shared.Rent(registered);
-        SegmentSpec[] sorted = ArrayPool<SegmentSpec>.Shared.Rent(registered);
-        CoalescedRun[] runs = ArrayPool<CoalescedRun>.Shared.Rent(registered);
+        ReadScratch scratch = ReadScratch.Rent(registered);
         try
         {
-            int pending = CoalescedReads.CollectPending(requests, order, keys);
+            int pending = CoalescedReads.CollectPending(requests, scratch.Order, scratch.Keys);
             if (pending == 0)
             {
                 requests.Complete();
                 return;
             }
 
-            int runCount = CoalescedReads.PlanRuns(requests, order, keys, sorted, runs, pending, Length, _options);
+            int runCount = CoalescedReads.PlanRuns(requests, scratch.Order, scratch.Keys, scratch.Sorted, scratch.Runs, pending, Length, _options);
 
             for (int r = 0; r < runCount; r++)
             {
                 cancellationToken.ThrowIfCancellationRequested();
 
-                CoalescedRun run = runs[r];
+                CoalescedRun run = scratch.Runs[r];
                 BlockOwner block = CoalescedReads.RentBlock(run.Length, _options);
 
                 try
                 {
                     await ReadExactAsync(block, run.Length, run.Start, cancellationToken).ConfigureAwait(false);
 
-                    if (CoalescedReads.Publish(requests, block, in run, sorted, order, _options))
+                    if (CoalescedReads.Publish(requests, block, in run, scratch.Sorted, scratch.Order, _options))
                     {
                         Interlocked.Increment(ref _slicedRuns);
                     }
@@ -238,10 +234,7 @@ public sealed class FileSegmentSource : ISegmentSource, ISegmentReader
         }
         finally
         {
-            ArrayPool<CoalescedRun>.Shared.Return(runs);
-            ArrayPool<SegmentSpec>.Shared.Return(sorted);
-            ArrayPool<ulong>.Shared.Return(keys);
-            ArrayPool<int>.Shared.Return(order);
+            scratch.Return();
         }
     }
 

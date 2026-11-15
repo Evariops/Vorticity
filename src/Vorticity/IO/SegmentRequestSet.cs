@@ -79,6 +79,14 @@ internal sealed class SegmentRequestSet : IDisposable
     /// <summary>How many distinct segments are registered.</summary>
     public int Count => _count;
 
+    /// <summary>
+    /// What the set keeps between its batches for the readers and the scans that go through it: made at the first read or
+    /// claim that needs it, one field of the set for both, so that a set made for one read is no larger for them.
+    /// </summary>
+    internal SegmentReadArrays ReadArrays => _readArrays ??= new SegmentReadArrays();
+
+    private SegmentReadArrays? _readArrays;
+
     /// <summary>True once a <see cref="ISegmentReader.ReadManyAsync"/> over this set completed.</summary>
     public bool IsPopulated => _populated;
 

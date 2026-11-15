@@ -1,5 +1,4 @@
 using System;
-using System.Buffers;
 using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
@@ -228,33 +227,26 @@ internal sealed class ObjectStoreSource : ISegmentReader
         }
 
         int registered = requests.Count;
-        int[] order = ArrayPool<int>.Shared.Rent(Math.Max(registered, 1));
-        ulong[] keys = ArrayPool<ulong>.Shared.Rent(Math.Max(registered, 1));
-        SegmentSpec[] sorted = ArrayPool<SegmentSpec>.Shared.Rent(Math.Max(registered, 1));
-        CoalescedRun[] runs = ArrayPool<CoalescedRun>.Shared.Rent(Math.Max(registered, 1));
-        ValueTask<ObjectRead>[] reads = ArrayPool<ValueTask<ObjectRead>>.Shared.Rent(Math.Max(registered, 1));
-        BlockOwner?[] blocks = ArrayPool<BlockOwner?>.Shared.Rent(Math.Max(registered, 1));
+        ReadScratch scratch = ReadScratch.Rent(registered);
+        Block<int> order = scratch.Order;
+        Block<SegmentSpec> sorted = scratch.Sorted;
+        Block<CoalescedRun> runs = scratch.Runs;
+
+        // The reads and their blocks hold references: arrays the set keeps, cleared below once read.
+        SegmentReadArrays arrays = requests.ReadArrays;
+        ValueTask<ObjectRead>[] reads = SegmentReadArrays.Ensure(ref arrays.Reads, registered);
+        BlockOwner?[] blocks = SegmentReadArrays.Ensure(ref arrays.Owners, registered);
         int started = 0;
         try
         {
-            int pending = 0;
-            for (int slot = 0; slot < registered; slot++)
-            {
-                if (!requests.IsFilled(slot))
-                {
-                    order[pending] = slot;
-                    keys[pending] = requests.GetSpec(slot).Offset;
-                    pending++;
-                }
-            }
-
+            int pending = CoalescedReads.CollectPending(requests, order, scratch.Keys);
             if (pending == 0)
             {
                 requests.Complete();
                 return;
             }
 
-            keys.AsSpan(0, pending).Sort(order.AsSpan(0, pending));
+            scratch.Keys.AsSpan(0, pending).Sort(order.AsSpan(0, pending));
             for (int i = 0; i < pending; i++)
             {
                 sorted[i] = requests.GetSpec(order[i]);
@@ -351,12 +343,9 @@ internal sealed class ObjectStoreSource : ISegmentReader
                 blocks[r] = null;
             }
 
-            ArrayPool<BlockOwner?>.Shared.Return(blocks, clearArray: true);
-            ArrayPool<ValueTask<ObjectRead>>.Shared.Return(reads, clearArray: true);
-            ArrayPool<CoalescedRun>.Shared.Return(runs);
-            ArrayPool<SegmentSpec>.Shared.Return(sorted);
-            ArrayPool<ulong>.Shared.Return(keys);
-            ArrayPool<int>.Shared.Return(order);
+            // The set keeps the arrays for its next batch, and none of the references they held.
+            Array.Clear(reads);
+            scratch.Return();
         }
     }
 

@@ -68,9 +68,11 @@ internal sealed class SourceReader : ISegmentReader
             pending += requests.IsFilled(slot) || requests.GetSpec(slot).Length == 0 ? 0 : 1;
         }
 
-        int[] slots = ArrayPool<int>.Shared.Rent(Math.Max(pending, 1));
-        SegmentRange[] ranges = ArrayPool<SegmentRange>.Shared.Rent(Math.Max(pending, 1));
-        SegmentLease[] leases = ArrayPool<SegmentLease>.Shared.Rent(Math.Max(pending, 1));
+        // The ranges and the leases go to the source as memory, the leases holding references: arrays the set keeps.
+        Block<int> slots = Blocks.Rent<int>(pending);
+        SegmentReadArrays arrays = requests.ReadArrays;
+        SegmentRange[] ranges = SegmentReadArrays.Ensure(ref arrays.Ranges, pending);
+        SegmentLease[] leases = SegmentReadArrays.Ensure(ref arrays.Leases, pending);
         int adopted = 0;
         try
         {
@@ -121,10 +123,8 @@ internal sealed class SourceReader : ISegmentReader
         }
         finally
         {
-            Array.Clear(leases, 0, Math.Max(pending, 1));
-            ArrayPool<SegmentLease>.Shared.Return(leases);
-            ArrayPool<SegmentRange>.Shared.Return(ranges);
-            ArrayPool<int>.Shared.Return(slots);
+            Array.Clear(leases, 0, pending);
+            Blocks.Return(slots);
         }
     }
 

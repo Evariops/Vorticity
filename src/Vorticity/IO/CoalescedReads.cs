@@ -61,22 +61,19 @@ internal static class CoalescedReads
             return;
         }
 
-        int[] order = ArrayPool<int>.Shared.Rent(registered);
-        ulong[] keys = ArrayPool<ulong>.Shared.Rent(registered);
-        SegmentSpec[] sorted = ArrayPool<SegmentSpec>.Shared.Rent(registered);
-        CoalescedRun[] runs = ArrayPool<CoalescedRun>.Shared.Rent(registered);
+        ReadScratch scratch = ReadScratch.Rent(registered);
         try
         {
-            int pending = CollectPending(requests, order, keys);
-            int runCount = pending == 0 ? 0 : PlanRuns(requests, order, keys, sorted, runs, pending, fileLength, options);
+            int pending = CollectPending(requests, scratch.Order, scratch.Keys);
+            int runCount = pending == 0 ? 0 : PlanRuns(requests, scratch.Order, scratch.Keys, scratch.Sorted, scratch.Runs, pending, fileLength, options);
             for (int r = 0; r < runCount; r++)
             {
-                CoalescedRun run = runs[r];
+                CoalescedRun run = scratch.Runs[r];
                 BlockOwner block = RentBlock(run.Length, options);
                 try
                 {
                     ReadExact(reader, block.WritableSpan[..run.Length], run.Start);
-                    Publish(requests, block, in run, sorted, order, options);
+                    Publish(requests, block, in run, scratch.Sorted, scratch.Order, options);
                 }
                 finally
                 {
@@ -87,15 +84,12 @@ internal static class CoalescedReads
         }
         finally
         {
-            ArrayPool<CoalescedRun>.Shared.Return(runs);
-            ArrayPool<SegmentSpec>.Shared.Return(sorted);
-            ArrayPool<ulong>.Shared.Return(keys);
-            ArrayPool<int>.Shared.Return(order);
+            scratch.Return();
         }
     }
 
     /// <summary>Collects the slots that still need bytes, keyed by offset for the sort.</summary>
-    internal static int CollectPending(SegmentRequestSet requests, int[] order, ulong[] keys)
+    internal static int CollectPending(SegmentRequestSet requests, Span<int> order, Span<ulong> keys)
     {
         int pending = 0;
 
@@ -117,17 +111,17 @@ internal static class CoalescedReads
     /// <summary>Sorts the pending specs by offset and plans the coalesced reads.</summary>
     internal static int PlanRuns(
         SegmentRequestSet requests,
-        int[] order,
-        ulong[] keys,
-        SegmentSpec[] sorted,
-        CoalescedRun[] runs,
+        Span<int> order,
+        Span<ulong> keys,
+        Span<SegmentSpec> sorted,
+        Span<CoalescedRun> runs,
         int pending,
         long fileLength,
         SegmentReadOptions options)
     {
         // In-place introsort over the (offset, slot) pairs: no allocation, and it is what lets the
         // coalescer assume a sorted list.
-        keys.AsSpan(0, pending).Sort(order.AsSpan(0, pending));
+        keys[..pending].Sort(order[..pending]);
 
         for (int i = 0; i < pending; i++)
         {
@@ -139,7 +133,7 @@ internal static class CoalescedReads
             SegmentIo.CheckInFile(offset, length, fileLength);
         }
 
-        return SegmentCoalescer.Plan(sorted.AsSpan(0, pending), runs.AsSpan(0, pending), options);
+        return SegmentCoalescer.Plan(sorted[..pending], runs[..pending], options);
     }
 
     /// <summary>
@@ -151,8 +145,8 @@ internal static class CoalescedReads
         SegmentRequestSet requests,
         BlockOwner block,
         in CoalescedRun run,
-        SegmentSpec[] sorted,
-        int[] order,
+        ReadOnlySpan<SegmentSpec> sorted,
+        ReadOnlySpan<int> order,
         SegmentReadOptions options)
     {
         if (ShouldSlice(in run, sorted))
@@ -187,7 +181,7 @@ internal static class CoalescedReads
     /// buffer goes straight back: the same outcome a vectored scatter would give, reached with
     /// one memcpy instead of a scatter list.
     /// </remarks>
-    private static bool ShouldSlice(in CoalescedRun run, SegmentSpec[] sorted)
+    private static bool ShouldSlice(in CoalescedRun run, ReadOnlySpan<SegmentSpec> sorted)
     {
         if (run.Length <= AlwaysSliceRunBytes)
         {
@@ -208,8 +202,8 @@ internal static class CoalescedReads
         SegmentRequestSet requests,
         BlockOwner block,
         in CoalescedRun run,
-        SegmentSpec[] sorted,
-        int[] order,
+        ReadOnlySpan<SegmentSpec> sorted,
+        ReadOnlySpan<int> order,
         SegmentReadOptions options)
     {
         ReadOnlySpan<byte> bytes = block.Buffer.Span;
@@ -252,8 +246,8 @@ internal static class CoalescedReads
         SegmentRequestSet requests,
         BlockOwner block,
         in CoalescedRun run,
-        SegmentSpec[] sorted,
-        int[] order)
+        ReadOnlySpan<SegmentSpec> sorted,
+        ReadOnlySpan<int> order)
     {
         ReadOnlySpan<byte> bytes = block.Buffer.Span;
 
