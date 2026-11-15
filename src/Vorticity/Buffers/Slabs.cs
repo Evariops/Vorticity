@@ -75,25 +75,41 @@ internal static class Slabs
 
     /// <summary>
     /// A piece of <paramref name="bytes"/> (<see cref="Cuts"/>): the slab it is cut from, its array, and where the piece
-    /// starts in it, aligned to 64 bytes. A new slab when none holds one.
+    /// starts in it, aligned to 64 bytes. A new slab when none holds one; null when the heap has no room for a new slab,
+    /// and the block takes an array of its own, of its size.
     /// </summary>
-    internal static (Slab Slab, byte[] Array, int Offset) Take(int bytes)
+    /// <remarks>
+    /// A slab is 32 MiB where the block may be a page: a heap held to 384 MiB and full of what the host held refused a
+    /// slab to a block of a few kilobytes that an array of its own would have fitted (2026-11-15). An allocation the
+    /// collector refuses leaves the process whole: the block falls back to what it was before the slabs.
+    /// </remarks>
+    internal static (Slab Slab, byte[] Array, int Offset)? TryTake(int bytes)
     {
         int order = BitOperations.Log2((uint)bytes) - PageShift;
         lock (Gate)
         {
-            Interlocked.Add(ref s_pieceBytes, bytes);
             foreach (Slab slab in s_slabs)
             {
                 if (slab.TryTake(order) is >= 0 and int page)
                 {
+                    Interlocked.Add(ref s_pieceBytes, bytes);
                     return (slab, slab.Array, slab.Base + (page << PageShift));
                 }
             }
 
-            Slab made = new Slab();
+            Slab made;
+            try
+            {
+                made = new Slab();
+            }
+            catch (OutOfMemoryException)
+            {
+                return null;
+            }
+
             s_slabs.Add(made);
             Interlocked.Add(ref s_heldBytes, SlabBytes);
+            Interlocked.Add(ref s_pieceBytes, bytes);
             return (made, made.Array, made.Base + (made.TryTake(order) << PageShift));
         }
     }

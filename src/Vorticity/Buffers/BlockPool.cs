@@ -1,5 +1,6 @@
 using System;
 using System.Diagnostics.CodeAnalysis;
+using System.Globalization;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Threading;
@@ -167,10 +168,26 @@ internal sealed class BlockPool : IHeldMemory
     /// <exception cref="VortexFormatException">
     /// <paramref name="length"/> is negative or <paramref name="alignment"/> is out of range.
     /// </exception>
-    /// <exception cref="VortexMemoryException">The account refuses the block's capacity: the block goes back to the pool.</exception>
+    /// <exception cref="VortexMemoryException">
+    /// The account refuses the block's capacity: the block goes back to the pool. Or the heap, held to its limit, has no room
+    /// for a block it would have to allocate.
+    /// </exception>
     public BlockOwner Rent(MemoryAccount account, int length, int alignment)
     {
-        BlockOwner owner = RentCore(length, alignment);
+        BlockOwner owner;
+        try
+        {
+            owner = RentCore(length, alignment);
+        }
+        catch (OutOfMemoryException full)
+        {
+            // The heap held to its limit has no room for the block, which the account would have counted: what the
+            // library does not count filled it. The work gives way as it does to its budget, the process stays whole.
+            throw new VortexMemoryException(
+                string.Create(CultureInfo.InvariantCulture, $"The heap has no room for a block of {length:N0} bytes: what the process holds besides the library's blocks fills its limit."),
+                full);
+        }
+
         if (!account.TryTake(owner.Capacity))
         {
             // Counted nowhere yet: the release parks it, or lets it go, as any block given back.

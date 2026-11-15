@@ -260,9 +260,8 @@ internal sealed class BlockOwner : SegmentOwner
         // aligned to 64 satisfies every legal segment alignment, so buckets stay
         // alignment-agnostic and blocks are genuinely interchangeable. A class a slab cuts is a
         // piece of one, aligned to 64 as well.
-        if (Slabs.Cuts(capacity))
+        if (Slabs.Cuts(capacity) && Slabs.TryTake(capacity) is (Slabs.Slab slab, byte[] slabArray, int start))
         {
-            (Slabs.Slab slab, byte[] slabArray, int start) = Slabs.Take(capacity);
             return new BlockOwner(slabArray, start, capacity, length, VortexLimits.MaxAlignmentExponent, pool, bucketIndex, slab);
         }
 
