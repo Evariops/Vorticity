@@ -87,7 +87,7 @@ internal sealed class JobMemory : IAsyncDisposable
         }
 
         _partly = partly;
-        _copies ??= JobInputs.For(_dataset, job, whole, _inputs);
+        _copies ??= JobInputs.For(_dataset, job, whole);
     }
 
     // The inputs the job reads a part of, from the store rather than from a copy; null for none.

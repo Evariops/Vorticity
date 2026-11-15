@@ -1,5 +1,6 @@
-// A job of large inputs reads them through the local scratch: each copied once, read from the disk, the job's directory
-// gone with it; one the scratch budget cannot hold is refused before it reads anything.
+// A job of large inputs reads them through the local scratch: each copied once, in one copy from the store, read from the
+// disk, the job's directory gone with it; one the scratch budget cannot hold is refused before it reads anything; one on a
+// store on the local disk reads its inputs in place.
 //
 // THE ORACLE IS THE ROWS AND THE SCRATCH: every row read back, the bytes the job put on the scratch, the scratch empty after.
 using System;
@@ -9,6 +10,9 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Dataset;
+using Vorticity.IO;
+using Vorticity.ObjectStorage;
+using Vorticity.Tests.ObjectStorage;
 using Xunit;
 
 namespace Vorticity.Tests.Dataset;
@@ -40,6 +44,117 @@ public sealed partial class JobScratchTests
         finally
         {
             Directory.Delete(scratch, recursive: true);
+        }
+    }
+
+    /// <summary>The same job asks the store for each of its inputs once, a copy each, whichever pass reads it first.</summary>
+    [Fact]
+    public async Task ALargeJobAsksTheStoreForEachInputOnce()
+    {
+        string scratch = Scratch();
+        try
+        {
+            await using VortexSession session = VortexSession.Create(o => o.ScratchDirectory = scratch);
+            await using MemoryObjectStore memory = new MemoryObjectStore();
+            CopyCountingStore store = new CopyCountingStore(memory);
+            await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Row.Schema, Options(session), Ct);
+            await AppendAsync(dataset, appends: 8);
+
+            CompactionResult? job = await dataset.CompactAsync(cancellationToken: Ct);
+
+            Assert.NotNull(job);
+            Assert.Equal(job.ObjectsIn, store.Copies);
+            Assert.Equal(job.BytesIn, store.CopiedBytes);
+        }
+        finally
+        {
+            Directory.Delete(scratch, recursive: true);
+        }
+    }
+
+    /// <summary>
+    /// The same job over S3, of inputs twice as long, past the 4 MiB a read asks at most, asks for each input in one GET of
+    /// its whole length, whatever else it reads of them.
+    /// </summary>
+    [Fact]
+    public async Task ALargeJobOverS3AsksForEachInputInOneRequest()
+    {
+        string scratch = Scratch();
+        try
+        {
+            await using VortexSession session = VortexSession.Create(o => o.ScratchDirectory = scratch);
+            using S3Emulator emulator = new S3Emulator();
+            await using S3ObjectStore store = S3ReadTests.Store(emulator);
+            await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Row.Schema, Options(session), Ct);
+            await AppendAsync(dataset, appends: 8, perAppend: 32_768);
+            List<ObjectListing> inputs = [];
+            await foreach (ObjectListing listing in store.ListAsync("data/", null, Ct))
+            {
+                inputs.Add(listing);
+            }
+
+            int before = emulator.Log.Count;
+            CompactionResult? job = await dataset.CompactAsync(cancellationToken: Ct);
+
+            Assert.NotNull(job);
+            Assert.Equal(inputs.Count, job.ObjectsIn);
+            string[] asked = [.. emulator.Log.Skip(before)];
+            foreach (ObjectListing input in inputs)
+            {
+                Assert.True(input.Head.Length > 4 << 20, $"{input.Key} holds {input.Head.Length} bytes");
+                Assert.Single(asked, line => line == $"GET /{input.Key} bytes=0-{input.Head.Length - 1}");
+            }
+        }
+        finally
+        {
+            Directory.Delete(scratch, recursive: true);
+        }
+    }
+
+    /// <summary>The same job on a store on the local disk reads its inputs where they lie: a copy would only move them on the same disk.</summary>
+    [Fact]
+    public async Task AJobOnALocalDiskReadsItsInputsInPlace()
+    {
+        string scratch = Scratch();
+        string root = Scratch();
+        try
+        {
+            await using VortexSession session = VortexSession.Create(o => o.ScratchDirectory = scratch);
+            await using FileObjectStore store = new FileObjectStore(root);
+            await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Row.Schema, Options(session), Ct);
+            List<Row> all = await AppendAsync(dataset, appends: 8);
+
+            CompactionResult? job = await dataset.CompactAsync(cancellationToken: Ct);
+
+            Assert.NotNull(job);
+            Assert.True(job.BytesIn >= JobInputs.FromBytes, $"the job read {job.BytesIn} bytes");
+            Assert.Equal(0, job.ScratchBytes);
+            Assert.Empty(Directory.EnumerateFileSystemEntries(scratch));
+            Assert.Equal(all.OrderBy(r => r.Sequence), (await dataset.Scan<Row>().ToRecordsAsync(Ct).ToListAsync(Ct)).OrderBy(r => r.Sequence));
+        }
+        finally
+        {
+            Directory.Delete(scratch, recursive: true);
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    /// <summary>A store that counts the copies asked of it and their bytes, each handed to the store under it.</summary>
+    private sealed class CopyCountingStore(IObjectStore inner) : ForwardingStore(inner), IObjectStore
+    {
+        private int _copies;
+        private long _bytes;
+
+        internal int Copies => Volatile.Read(ref _copies);
+
+        internal long CopiedBytes => Interlocked.Read(ref _bytes);
+
+        public async ValueTask<long> CopyToAsync(string key, long offset, long length, Stream destination, string? ifToken, CancellationToken cancellationToken)
+        {
+            Interlocked.Increment(ref _copies);
+            long copied = await Inner.CopyToAsync(key, offset, length, destination, ifToken, cancellationToken);
+            Interlocked.Add(ref _bytes, copied);
+            return copied;
         }
     }
 
@@ -89,15 +204,15 @@ public sealed partial class JobScratchTests
         },
     };
 
-    /// <summary><paramref name="appends"/> appends of 16 384 rows each, every row with 192 characters of random text, which compress little.</summary>
-    private static async Task<List<Row>> AppendAsync(VortexDataset dataset, int appends)
+    /// <summary><paramref name="appends"/> appends of <paramref name="perAppend"/> rows each, every row with 192 characters of random text, which compress little.</summary>
+    private static async Task<List<Row>> AppendAsync(VortexDataset dataset, int appends, int perAppend = 16_384)
     {
         List<Row> all = [];
         byte[] noise = new byte[144];
         Random random = new Random(53);
         for (int a = 0; a < appends; a++)
         {
-            Row[] rows = new Row[16_384];
+            Row[] rows = new Row[perAppend];
             for (int i = 0; i < rows.Length; i++)
             {
                 random.NextBytes(noise);

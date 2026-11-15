@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
+using System.IO;
 using System.Net;
 using System.Net.Http;
 using System.Runtime.CompilerServices;
@@ -280,6 +281,84 @@ public sealed partial class S3ObjectStore : IObjectStore, IUploadService
         }
 
         return ValueTask.CompletedTask;
+    }
+
+    /// <inheritdoc/>
+    /// <remarks>
+    /// One GetObject of the whole range, its body written to <paramref name="destination"/> as it arrives; a body cut short is
+    /// asked again from where it stopped, under the transport's retries, of the object its first answer came from.
+    /// </remarks>
+    public async ValueTask<long> CopyToAsync(string key, long offset, long length, Stream destination, string? ifToken, CancellationToken cancellationToken)
+    {
+        CheckKey(key);
+        ArgumentNullException.ThrowIfNull(destination);
+        ArgumentOutOfRangeException.ThrowIfNegative(offset);
+        ArgumentOutOfRangeException.ThrowIfNegative(length);
+        ThrowIfDisposed();
+        if (length == 0)
+        {
+            return 0;
+        }
+
+        CopyProgress progress = new CopyProgress { Token = ifToken };
+        return await _transport.SendAsync(
+            "GetObject",
+            new CopyRequest(this, key, offset, length, destination, progress),
+            static (s, ct) => s.Store.BuildCopyAsync(s, ct),
+            static (response, s, ct) => s.Store.ConsumeCopyAsync(response, s, ct),
+            idempotent: true,
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    private async ValueTask<HttpRequestMessage> BuildCopyAsync(CopyRequest s, CancellationToken cancellationToken)
+    {
+        Target target = await TargetAsync(cancellationToken).ConfigureAwait(false);
+        string path = target.PathPrefix + "/" + UriEncoding.Path(s.Key);
+        HttpRequestMessage request = new HttpRequestMessage(HttpMethod.Get, new Uri(target.Base + path, in Verbatim));
+        request.Headers.TryAddWithoutValidation("Range", string.Create(CultureInfo.InvariantCulture, $"bytes={s.Offset + s.Progress.Written}-{s.Offset + s.Length - 1}"));
+        if (s.Progress.Token is { } token)
+        {
+            request.Headers.TryAddWithoutValidation("If-Match", token);
+        }
+
+        await SignAsync(request, target, path, string.Empty, SigV4Signer.EmptyPayloadHash, cancellationToken).ConfigureAwait(false);
+        return request;
+    }
+
+    private async ValueTask<long> ConsumeCopyAsync(HttpResponseMessage response, CopyRequest s, CancellationToken cancellationToken)
+    {
+        long from = s.Offset + s.Progress.Written;
+        HttpStatusCode status = response.StatusCode;
+        if (status == HttpStatusCode.RequestedRangeNotSatisfiable)
+        {
+            (ServiceError _, long? actual) = await ReadErrorDetailAsync(response, cancellationToken).ConfigureAwait(false);
+            throw StoreFailures.PastEnd(s.Key, from, HttpAnswers.ContentRange(response)?.Total ?? actual ?? -1);
+        }
+
+        if (status is not (HttpStatusCode.PartialContent or HttpStatusCode.OK))
+        {
+            throw await FailureAsync(response, "GetObject", s.Key, s.Progress.Token, cancellationToken).ConfigureAwait(false);
+        }
+
+        long announced = response.Content.Headers.ContentLength
+            ?? throw new ObjectStoreException($"GetObject on '{s.Key}' was answered without a Content-Length.");
+        (long first, long total) = status == HttpStatusCode.PartialContent
+            ? HttpAnswers.ContentRange(response) ?? throw new ObjectStoreException($"GetObject on '{s.Key}' was answered with a partial body and no Content-Range.")
+            : from == 0 ? (0, announced) : throw new ObjectStoreException($"GetObject on '{s.Key}' was answered with the whole object where bytes from {from} were asked: the service ignores ranges.");
+        if (first != from)
+        {
+            throw new ObjectStoreException($"GetObject on '{s.Key}' was answered with bytes from {first} where {from} was asked.");
+        }
+
+        s.Progress.Token ??= HttpAnswers.ETagOf(response, s.Key, null);
+        long end = Math.Min(s.Offset + s.Length, total);
+        await _transport.CopyBodyAsync(response, s.Into, Math.Min(announced, end - from), s.Progress, cancellationToken).ConfigureAwait(false);
+        if (s.Offset + s.Progress.Written < end)
+        {
+            throw new StoreRetryException($"the body of GetObject on '{s.Key}' ended at {s.Offset + s.Progress.Written} of {end} bytes", RetryBudget.RetryCost);
+        }
+
+        return s.Progress.Written;
     }
 
     private ValueTask<ObjectRead> ReadCoreAsync(string key, long offset, Memory<byte> destination, string? ifToken, CancellationToken cancellationToken)
@@ -760,6 +839,8 @@ public sealed partial class S3ObjectStore : IObjectStore, IUploadService
     /// <summary>A read: from <see cref="Offset"/>, or the suffix the destination holds when it is negative.</summary>
     /// <summary>A read's request; with <paramref name="IfPresent"/>, a 404 is answered <see cref="StoreReads.Absent"/> rather than thrown.</summary>
     private readonly record struct ReadRequest(S3ObjectStore Store, string Key, long Offset, Memory<byte> Destination, string? IfToken, bool IfPresent = false);
+
+    private readonly record struct CopyRequest(S3ObjectStore Store, string Key, long Offset, long Length, Stream Into, CopyProgress Progress);
 
     private readonly record struct ListRequest(S3ObjectStore Store, string Prefix, string? StartAfter, string? Continuation, List<ObjectListing> Page);
 

@@ -4,18 +4,17 @@ using System.Globalization;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
-using Microsoft.Win32.SafeHandles;
 using Vorticity.Aggregating;
-using Vorticity.Buffers;
 using Vorticity.IO;
 
 namespace Vorticity.Dataset;
 
 /// <summary>
 /// The inputs of one compaction job, each copied once to the local scratch and read from there: the store is asked for
-/// each object once, in one stream, and the job reads its segments from the disk, a window at a time, rather than hold
-/// them. The bytes stay as the store holds them, sealed when the dataset seals them, and are decrypted segment by segment
-/// as they are read: nothing in clear reaches the disk.
+/// each object once, in one stream (<see cref="IObjectStore.CopyToAsync"/>), and the job reads its segments from the disk,
+/// a window at a time, rather than hold them. The bytes stay as the store holds them, sealed when the dataset seals them,
+/// and are decrypted segment by segment as they are read: nothing in clear reaches the disk. A store on a local disk, or in
+/// memory, is read in place: a copy would only move bytes to the disk they lie on, or that the process holds already.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -34,9 +33,6 @@ internal sealed class JobInputs : IAsyncDisposable
     /// <summary>🧪 The bytes of a job's inputs from which they are read through the scratch: below, from the store, as before. Provisional, to be measured.</summary>
     internal const long FromBytes = 16L << 20;
 
-    /// <summary>The bytes a copy to the scratch moves at a time, through one block of the job's inputs.</summary>
-    private const int CopyBytes = 4 << 20;
-
     /// <summary>The prefix of a job's directory in the scratch.</summary>
     private const string DirectoryPrefix = "vorticity-job-";
 
@@ -44,18 +40,16 @@ internal sealed class JobInputs : IAsyncDisposable
     private readonly string _directory;
     private readonly IObjectStore _source;
     private readonly ObjectCache _cache;
-    private readonly MemoryAccount _account;
     private readonly ScratchBudget? _budget;
     private readonly long _reserved;
     private readonly Lock _gate = new Lock();
     private readonly Dictionary<string, Task> _copies = new(StringComparer.Ordinal);
     private long _copied;
 
-    private JobInputs(VortexDataset dataset, string directory, MemoryAccount account, ScratchBudget? budget, long reserved)
+    private JobInputs(VortexDataset dataset, string directory, ScratchBudget? budget, long reserved)
     {
         _snapshot = dataset.Snapshot;
         _directory = directory;
-        _account = account;
         _budget = budget;
         _reserved = reserved;
 
@@ -69,15 +63,19 @@ internal sealed class JobInputs : IAsyncDisposable
     /// <summary>The bytes copied to the scratch.</summary>
     internal long CopiedBytes => Interlocked.Read(ref _copied);
 
+    /// <summary>The store's own bytes: under a sealed dataset, those under its sealing, which the copy keeps sealed.</summary>
+    private static IObjectStore StoreOf(VortexDataset dataset) => dataset.Store is SealedObjectStore sealedStore ? sealedStore.Inner : dataset.Store;
+
     /// <summary>
     /// The inputs of <paramref name="job"/> of <paramref name="dataset"/> read through the scratch, <paramref name="bytes"/>
-    /// of them read whole, their copies counted under <paramref name="account"/>; null for a job that reads less than
-    /// <see cref="FromBytes"/> of them whole, which reads from the store.
+    /// of them read whole; null for a job that reads less than <see cref="FromBytes"/> of them whole, or whose store lies on
+    /// a local disk or in memory, which reads from the store.
     /// </summary>
     /// <exception cref="VortexMemoryException">No scratch on a disk, or not room enough there for the job's inputs.</exception>
-    internal static JobInputs? For(VortexDataset dataset, CompactionJob job, long bytes, MemoryAccount account)
+    internal static JobInputs? For(VortexDataset dataset, CompactionJob job, long bytes)
     {
-        if (bytes < FromBytes)
+        CostProfile profile = StoreOf(dataset).CostProfile;
+        if (bytes < FromBytes || profile == CostProfile.LocalDisk || profile == CostProfile.Memory)
         {
             return null;
         }
@@ -108,7 +106,7 @@ internal sealed class JobInputs : IAsyncDisposable
 
         string directory = Path.Combine(scratch, string.Create(CultureInfo.InvariantCulture, $"{DirectoryPrefix}{Environment.ProcessId}-{Guid.NewGuid():N}"));
         Directory.CreateDirectory(directory);
-        return new JobInputs(dataset, directory, account, budget, budget is null ? 0 : bytes);
+        return new JobInputs(dataset, directory, budget, budget is null ? 0 : bytes);
     }
 
     /// <summary>
@@ -148,35 +146,26 @@ internal sealed class JobInputs : IAsyncDisposable
         }
     }
 
-    /// <summary>Streams the object <paramref name="key"/>, <paramref name="length"/> bytes, from the store to its file in the job's directory.</summary>
+    /// <summary>
+    /// Streams the object <paramref name="key"/>, <paramref name="length"/> bytes, from the store to its file in the job's
+    /// directory: one request a store that streams answers, where a read of 4 MiB at a time cost 256 requests an object of
+    /// a gigabyte.
+    /// </summary>
     private async Task CopyOnceAsync(string key, long length, CancellationToken cancellationToken)
     {
         string path = Path.GetFullPath(Path.Combine(_directory, key.Replace('/', Path.DirectorySeparatorChar)));
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-        BlockOwner block = _account.Rent((int)Math.Min(CopyBytes, Math.Max(length, 1)), 64);
-        try
+        FileStream file = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None, bufferSize: 0, FileOptions.Asynchronous | FileOptions.SequentialScan);
+        await using (file.ConfigureAwait(false))
         {
-            using SafeFileHandle file = System.IO.File.OpenHandle(path, FileMode.Create, FileAccess.Write, FileShare.None);
-            long offset = 0;
-            while (offset < length)
+            long copied = await _source.CopyToAsync(key, 0, length, file, null, cancellationToken).ConfigureAwait(false);
+            if (copied < length)
             {
-                Memory<byte> into = block.WritableMemory(0, (int)Math.Min(block.Length, length - offset));
-                ObjectRead read = await _source.ReadAsync(key, offset, into, null, cancellationToken).ConfigureAwait(false);
-                if (read.BytesRead <= 0)
-                {
-                    throw new ObjectNotFoundException($"'{key}' ended at {offset} of the {length} bytes its entry names.");
-                }
-
-                await RandomAccess.WriteAsync(file, into[..read.BytesRead], offset, cancellationToken).ConfigureAwait(false);
-                offset += read.BytesRead;
+                throw new ObjectNotFoundException($"'{key}' ended at {copied} of the {length} bytes its entry names.");
             }
+        }
 
-            Interlocked.Add(ref _copied, length);
-        }
-        finally
-        {
-            block.Release();
-        }
+        Interlocked.Add(ref _copied, length);
     }
 
     /// <summary>Removes the directories of jobs a process left behind when it died, once a day old.</summary>
