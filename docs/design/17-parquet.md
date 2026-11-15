@@ -378,7 +378,7 @@ Where the bytes go is decided by the page:
 | the dictionary page | once per column chunk, into a buffer the split keeps |
 
 A v2 page's levels are never decompressed: the standard keeps them outside the compressed section.
-Every buffer comes from the session's pool, 64-byte aligned, with 64 bytes of slack past its end, so
+Every buffer comes from the library's pool, 64-byte aligned, with 64 bytes of slack past its end, so
 a kernel may load a whole vector past the last value. A page read in place from a mapped file has
 slack of its own, since a valid file holds its footer and eight more bytes after its last page; a
 page that ends less than 64 bytes before the end of the file is decoded on the kernels' exact path.

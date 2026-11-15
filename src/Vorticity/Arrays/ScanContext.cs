@@ -106,7 +106,7 @@ internal sealed class ScanContext : IDisposable
         // takes the hint nor gives one.
         _notesTrees = capacity >= ScanCapacity;
         _scratchNodes = new ArrayNodeArena(capacity, _notesTrees ? file.LargestArrayTree : 0);
-        _batchCanonical = retaining ? new RetainingArena(capacity) : new CanonicalArena(capacity);
+        _batchCanonical = retaining ? new RetainingArena(MemoryAccount.Unassigned, capacity) : new CanonicalArena(capacity, MemoryAccount.Unassigned);
 
         // Deliberately not sized from the arena capacity. A batch registers one segment per leaf it
         // reads, which the set's own default already covers, so widening it to the arena capacity
@@ -156,7 +156,7 @@ internal sealed class ScanContext : IDisposable
 
         Scalars = new ScalarStore();
         _scratchNodes = new ArrayNodeArena();
-        _batchCanonical = new CanonicalArena();
+        _batchCanonical = new CanonicalArena(64, MemoryAccount.Unassigned);
         Segments = new SegmentRequestSet();
         Decode = new ArrayDecodeContext(this);
     }
@@ -317,6 +317,23 @@ internal sealed class ScanContext : IDisposable
 
     /// <summary>The batch's own arena, which <see cref="ResetBatch"/> clears.</summary>
     private readonly CanonicalArena _batchCanonical;
+
+    /// <summary>
+    /// Whom the context's blocks are counted for from now on, its batch's, its retained chunks' and its slices': the scan it
+    /// serves, set as a scan takes the context. A block rented before keeps the account it was rented under.
+    /// </summary>
+    internal MemoryAccount Account
+    {
+        get => _batchCanonical.Account;
+        set
+        {
+            _batchCanonical.Account = value;
+            if (_memory?.Slice is { } slice)
+            {
+                slice.Account = value;
+            }
+        }
+    }
 
     /// <summary>
     /// Set while a chunk is being decoded straight into the arena that will retain it: the entry it
@@ -1541,7 +1558,7 @@ internal sealed class ScanContext : IDisposable
             "No child is claimed on this scan context: a child's decode follows a miss of TryGetRetainedChild.");
         _childClaim = null;
         _child = claim;
-        CanonicalArena arena = claim.Arena ??= new RetainingArena();
+        CanonicalArena arena = claim.Arena ??= new RetainingArena(Account);
         claim.Depend(Segments.OwnerHolding(Nodes.FirstBlobBuffer()));
         return arena;
     }
@@ -1676,7 +1693,7 @@ internal sealed class ScanContext : IDisposable
 
         // The arena is made for the first decode the entry holds, not for the claim: a claim given
         // back without a decode, an answer an encoding declined, never needs one.
-        CanonicalArena arena = claim.Arena ??= new RetainingArena();
+        CanonicalArena arena = claim.Arena ??= new RetainingArena(Account);
 
         // What the decode views is the blob in the node arena, which a flat reader loads just
         // before it begins; a child decoded inside the redirect notes its own segment as it loads.
@@ -1733,7 +1750,7 @@ internal sealed class ScanContext : IDisposable
             return false;
         }
 
-        memory.Slice ??= new CanonicalArena();
+        memory.Slice ??= new CanonicalArena(64, Account);
         memory.SliceBuilding = _building;
         memory.Slicing = true;
         return true;

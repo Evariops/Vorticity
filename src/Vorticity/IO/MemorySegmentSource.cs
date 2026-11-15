@@ -22,8 +22,8 @@ namespace Vorticity.IO;
 /// </para>
 /// <para>
 /// The caller keeps the memory valid until the source and every lease from it are disposed. To spare
-/// the one copy, hand the source memory on a 64-byte boundary, as <see cref="AlignedMemoryPool"/>
-/// rents it.
+/// the one copy, hand the source memory on a 64-byte boundary, as every block of the library's pool
+/// lies on.
 /// </para>
 /// </remarks>
 public sealed class MemorySegmentSource : ISegmentSource, ISegmentReader

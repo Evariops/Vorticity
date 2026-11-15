@@ -26,14 +26,14 @@ namespace Vorticity.Parquet.Writing;
 /// <para>
 /// The values are the leaf's rows of the entries that reach it, in entry order: a range of the leaf
 /// when its lists lie back to back, as a list's elements mostly do, which the column writer then
-/// stages without gathering them. The entries live in blocks of the engine's pool, kept from one
-/// block of rows to the next and given back when the writer is.
+/// stages without gathering them. The entries live in blocks of the pool counted for the writer, kept
+/// from one block of rows to the next and given back when the writer is.
 /// </para>
 /// </remarks>
-internal sealed class Shredder(BlockPool pool) : IDisposable
+internal sealed class Shredder(MemoryAccount account) : IDisposable
 {
-    private Entries _current = new(pool);
-    private Entries _next = new(pool);
+    private Entries _current = new(account);
+    private Entries _next = new(account);
     private BlockOwner? _valueBlock;
 
     /// <summary>A list view's offsets and sizes widened, when they are of two types no shape reads as they lie.</summary>
@@ -373,7 +373,7 @@ internal sealed class Shredder(BlockPool pool) : IDisposable
             int size = Math.Max(bytes, 2 * (_valueBlock?.Length ?? 2048));
             _valueBlock?.Dispose();
             _valueBlock = null;
-            _valueBlock = pool.Rent(MemoryAccount.Unassigned,size, 64);
+            _valueBlock = account.Rent(size, 64);
         }
 
         Span<int> values = MemoryMarshal.Cast<byte, int>(_valueBlock.WritableSpan);
@@ -424,7 +424,7 @@ internal sealed class Shredder(BlockPool pool) : IDisposable
     }
 
     /// <summary>Entries' levels and rows, in one block of the pool: repetition levels, definition levels, rows.</summary>
-    private sealed class Entries(BlockPool pool) : IDisposable
+    private sealed class Entries(MemoryAccount account) : IDisposable
     {
         private BlockOwner? _block;
         private int _capacity;
@@ -447,7 +447,7 @@ internal sealed class Shredder(BlockPool pool) : IDisposable
             int capacity = (Math.Max(count, Math.Max(2 * _capacity, 1024)) + 63) & ~63;
             _block?.Dispose();
             _block = null;
-            _block = pool.Rent(MemoryAccount.Unassigned,checked(capacity * (2 + sizeof(int))), 64);
+            _block = account.Rent(checked(capacity * (2 + sizeof(int))), 64);
             _capacity = capacity;
         }
 

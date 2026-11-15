@@ -85,12 +85,6 @@ Vorticity:     property long Groups { get; }
 Vorticity: sealed class Vorticity.AggregationPartial
 Vorticity:     method AggregationPartial FromBytes(ReadOnlyMemory<byte>)
 Vorticity:     property ReadOnlyMemory<byte> Bytes { get; }
-Vorticity: sealed class Vorticity.AlignedMemoryPool : MemoryPool<byte>
-Vorticity:     ctor AlignedMemoryPool(int = default, long = default)
-Vorticity:     method IMemoryOwner<byte> Rent(int = default)
-Vorticity:     method void Dispose(bool)
-Vorticity:     property AlignedMemoryPool Shared { get; }
-Vorticity:     property int MaxBufferSize { get; }
 Vorticity: ref struct Vorticity.BatchView
 Vorticity:     method Column<T> Column<T>(int)
 Vorticity:     method Column<T> Column<T>(string)
@@ -2892,7 +2886,6 @@ Vorticity:     method void ReleaseMappedFiles()
 Vorticity:     property VortexSession Default { get; }
 Vorticity:     property VortexSessionOptions Options { get; }
 Vorticity: sealed class Vorticity.VortexSessionOptions
-Vorticity:     property MemoryPool<byte> MemoryPool { get; set; }
 Vorticity:     property ObjectStoreRegistry ObjectStores { get; }
 Vorticity:     property QueryMemoryBudget JobMemoryBudget { get; set; }
 Vorticity:     property QueryMemoryBudget MemoryBudget { get; set; }

@@ -81,6 +81,9 @@ internal sealed class ExternalSort : IAsyncDisposable
         _batchRows = batchRows;
     }
 
+    /// <summary>Whom the sort's rows and the batches it delivers are counted for: its query, until the query's memory is given back.</summary>
+    private MemoryAccount Account => QueryMemory.AccountOf(_memory);
+
     /// <summary>
     /// The rows of <paramref name="batch"/>, a struct of the sort's columns, gathered; the rows gathered
     /// before written as a run first when the memory holds them no more.
@@ -175,8 +178,8 @@ internal sealed class ExternalSort : IAsyncDisposable
         }
 
         VortexSessionOptions options = _session.Options;
-        _store = (StructStore)ColumnStores.Create(_dtype, options.EnginePool, options.Extensions);
-        _arena = new CanonicalArena(64, options.EnginePool);
+        _store = (StructStore)ColumnStores.Create(_dtype, Account, options.Extensions);
+        _arena = new CanonicalArena(64, Account);
         return _store;
     }
 
@@ -348,9 +351,9 @@ internal sealed class ExternalSort : IAsyncDisposable
                 _positions = sort.Ranked(_root, _rows, cancellationToken);
                 _next = 0;
                 VortexSessionOptions options = sort._session.Options;
-                _out = (StructStore)ColumnStores.Create(sort._deliveredType, options.EnginePool, options.Extensions);
-                _outArena = new CanonicalArena(64, options.EnginePool);
-                _cut = new CanonicalArena(64, options.EnginePool);
+                _out = (StructStore)ColumnStores.Create(sort._deliveredType, sort.Account, options.Extensions);
+                _outArena = new CanonicalArena(64, sort.Account);
+                _cut = new CanonicalArena(64, sort.Account);
             }
 
             if (_next >= _rows)
@@ -408,9 +411,9 @@ internal sealed class ExternalSort : IAsyncDisposable
         internal async ValueTask OpenAsync()
         {
             VortexSessionOptions options = sort._session.Options;
-            _out = (StructStore)ColumnStores.Create(sort._deliveredType, options.EnginePool, options.Extensions);
-            _outArena = new CanonicalArena(64, options.EnginePool);
-            _cut = new CanonicalArena(64, options.EnginePool);
+            _out = (StructStore)ColumnStores.Create(sort._deliveredType, sort.Account, options.Extensions);
+            _outArena = new CanonicalArena(64, sort.Account);
+            _cut = new CanonicalArena(64, sort.Account);
             for (int r = 0; r < sort._runs.Count; r++)
             {
                 VortexFile file = await sort._session.OpenAsync(sort._runs[r], cancellationToken: cancellationToken).ConfigureAwait(false);

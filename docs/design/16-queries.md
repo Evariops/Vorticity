@@ -1332,7 +1332,7 @@ the parts' batches, each batch holding at most one part's groups. On 10⁷ keys,
 quarter sooner at one lane and a third sooner at fourteen, where the whole result takes 0.58 of the
 time, its batches built on every lane. The lanes' tables merged in parts ([the merge](#the-merge)) are
 delivered the same way, each part built by whoever merged it. A part keeps what its table held of the
-query's memory until the reader is done with its batches, which the session's pool holds outside any
+query's memory until the reader is done with its batches, which the library's pool holds outside any
 query's count. At fourteen lanes, with its batches no longer built on the reader's thread alone once
 the merge is done, a million keys took 0.83 of the time and four aggregates 0.68.
 

@@ -31,10 +31,22 @@ internal abstract class MemoryAccount
     internal static MemoryAccount Kept { get; } = new Uncounted("kept memory");
 
     /// <summary>
-    /// The rents whose account the refactoring has yet to name (PLAN-MEMORY, step 3): counted nowhere, as every rent was
-    /// before it. The residue ratchet holds its uses to zero by the end of the step.
+    /// The blocks a caller owns: the batches it asked to keep past the scan that made them (<c>RecordBatch.Owned</c>),
+    /// counted nowhere, as a result's batches are once delivered.
+    /// </summary>
+    internal static MemoryAccount Caller { get; } = new Uncounted("caller's");
+
+    /// <summary>
+    /// The rents whose account the refactoring has yet to name (PLAN-MEMORY, steps 3 to 6): counted nowhere, as every rent
+    /// was before it. The residue ratchet holds its uses to zero by the end of the plan.
     /// </summary>
     internal static MemoryAccount Unassigned { get; } = new Uncounted("unassigned");
+
+    /// <summary>
+    /// The pool every account rents from, the process's one: reached through the accounts alone, so that no block leaves it
+    /// without one, and here for what reads its state, the memory report and the tests.
+    /// </summary>
+    internal static BlockPool Pool => BlockPool.Shared;
 
     /// <summary>Takes <paramref name="bytes"/>, reserved and measured; false, and nothing taken, when the account refuses them.</summary>
     internal abstract bool TryTake(long bytes);
@@ -50,7 +62,7 @@ internal abstract class MemoryAccount
     /// bytes counted here until its last holder gives it back.
     /// </summary>
     /// <exception cref="VortexMemoryException">The account refuses the block's bytes.</exception>
-    internal BlockOwner Rent(int length, int alignment) => BlockPool.Shared.Rent(this, length, alignment);
+    internal BlockOwner Rent(int length, int alignment) => Pool.Rent(this, length, alignment);
 
     /// <summary>An account that counts nothing: the memory the process keeps, and the rents not yet given theirs.</summary>
     private sealed class Uncounted(string name) : MemoryAccount

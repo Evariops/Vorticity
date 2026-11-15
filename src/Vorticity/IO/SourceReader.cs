@@ -24,13 +24,11 @@ internal sealed class SourceReader : ISegmentReader
 {
     private readonly ISegmentSource _source;
     private readonly bool _ownsSource;
-    private readonly BlockPool _pool;
 
-    internal SourceReader(ISegmentSource source, bool ownsSource, BlockPool pool)
+    internal SourceReader(ISegmentSource source, bool ownsSource)
     {
         _source = source;
         _ownsSource = ownsSource;
-        _pool = pool;
     }
 
     public ValueTask<long> GetLengthAsync(CancellationToken cancellationToken)
@@ -164,7 +162,7 @@ internal sealed class SourceReader : ISegmentReader
             pin.Dispose();
         }
 
-        BlockOwner block = _pool.Rent(MemoryAccount.Unassigned,length, VortexLimits.MaxAlignment);
+        BlockOwner block = MemoryAccount.Unassigned.Rent(length, VortexLimits.MaxAlignment);
         try
         {
             taken.Bytes.CopyTo(block.WritableSpan);

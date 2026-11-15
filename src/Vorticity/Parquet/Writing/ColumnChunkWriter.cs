@@ -232,7 +232,8 @@ internal sealed class ColumnChunkWriter : IDisposable
     private BlockBytes? _plain;
 
     /// <summary>The pool the writer's buffers are of.</summary>
-    private readonly BlockPool _pool;
+    // Whom the writer's blocks are counted for: the Parquet writer this column belongs to.
+    private readonly MemoryAccount _account;
 
     /// <summary>
     /// The encoding the caller pinned the column to, which the writer checked the column takes: a
@@ -283,12 +284,12 @@ internal sealed class ColumnChunkWriter : IDisposable
     /// <summary>The PLAIN values of a page's entries, its bounds' input.</summary>
     private BlockBytes? _entriesBounded;
 
-    internal ColumnChunkWriter(WriteColumn column, CompressionCodec codec, int level, Compressors? compressors, int blockRows, CompressionProfile profile, BlockPool pool, double bloomRate = 0, int rowGroupRows = 0)
+    internal ColumnChunkWriter(WriteColumn column, CompressionCodec codec, int level, Compressors? compressors, int blockRows, CompressionProfile profile, MemoryAccount account, double bloomRate = 0, int rowGroupRows = 0)
     {
         _rowValidity = column.Nullable && !column.Nested;
         if (column.Nested)
         {
-            _shredder = new Shredder(pool);
+            _shredder = new Shredder(account);
             _repetitionLevels = new BlockBytes();
             _definitionLevels = new BlockBytes();
         }
@@ -301,13 +302,13 @@ internal sealed class ColumnChunkWriter : IDisposable
         _values = new BlockBytes();
         _levels = new BlockBytes();
         _compressed = new BlockBytes();
-        _chunk = new ChunkBytes(pool);
+        _chunk = new ChunkBytes(account);
         _entries = new BlockBytes();
         _codes = new BlockBytes();
         _page = new BlockBytes();
         _dictionaryPage = new BlockBytes();
         _firstHeader = new BlockBytes();
-        _pool = pool;
+        _account = account;
         _measured = new BlockBytes();
         _validity = new byte[(blockRows + 7) / 8 + 8];
         _mask = new ulong[(blockRows + 63) >> 6];
@@ -1001,7 +1002,7 @@ internal sealed class ColumnChunkWriter : IDisposable
             int grown = Math.Max(count, Math.Max(_blockRows, held * 2));
             block?.Dispose();
             block = null;
-            block = _pool.Rent(MemoryAccount.Unassigned,checked(grown * Unsafe.SizeOf<T>()), 64);
+            block = _account.Rent(checked(grown * Unsafe.SizeOf<T>()), 64);
         }
 
         return Held<T>(block)[..count];
@@ -1323,7 +1324,7 @@ internal sealed class ColumnChunkWriter : IDisposable
         {
             // Gathered in the column's own arena, over the batch's buffers: the columns of a block
             // stage side by side, and the batch's arena is read by all of them, written by none.
-            CanonicalArena gathered = _gathered ??= new CanonicalArena(4, _pool);
+            CanonicalArena gathered = _gathered ??= new CanonicalArena(4, _account);
             try
             {
                 int entries = CanonicalFilter.Apply(gathered, gathered.ReferenceFrom(arena, index), firsts[..found]);
@@ -2010,10 +2011,10 @@ internal sealed class ColumnChunkWriter : IDisposable
             _levels = levels.Length;
             _input = input.Length;
             int bound = PageCodecs.MaxCompressedLength(writer._codec, input.Length);
-            _source = writer._pool.Rent(MemoryAccount.Unassigned,Math.Max(1, _levels + _input), 64);
+            _source = writer._account.Rent(Math.Max(1, _levels + _input), 64);
             try
             {
-                _target = writer._pool.Rent(MemoryAccount.Unassigned,_levels + bound, 64);
+                _target = writer._account.Rent(_levels + bound, 64);
             }
             catch
             {

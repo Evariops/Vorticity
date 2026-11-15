@@ -172,31 +172,6 @@ public sealed class RecordBatchTests
     }
 
     [Fact]
-    public async Task AnOwnedBatchGivesItsBlocksBackWhenDisposedAndTheCollectorTakesOneDropped()
-    {
-        AlignedMemoryPool pool = new AlignedMemoryPool();
-        await using VortexSession session = VortexSession.Create(options => options.MemoryPool = pool);
-        using ColumnFixture f = new ColumnFixture();
-        int node = f.Int32Node(new int[100_000], Validity.NonNullable);
-
-        long parked = pool.Inner.ParkedBytes;
-        RecordBatch owned = RecordBatch.Own(f.Arena, node, 0, null, session, default, 0);
-        owned.Dispose();
-        Assert.InRange(pool.Inner.ParkedBytes - parked, 400_000L, long.MaxValue);
-
-        // A batch nobody disposes is garbage like any other object: its blocks are managed arrays, which the collector takes
-        // back with it.
-        WeakReference dropped = DropAnOwnedBatch(f.Arena, node, session);
-        GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true);
-        Assert.False(dropped.IsAlive);
-        GC.KeepAlive(pool);
-    }
-
-    [MethodImpl(MethodImplOptions.NoInlining)]
-    private static WeakReference DropAnOwnedBatch(CanonicalArena source, int node, VortexSession session) =>
-        new WeakReference(RecordBatch.Own(source, node, 0, null, session, default, 0));
-
-    [Fact]
     public void FieldNamesMayBeEmptyOrContainADot()
     {
         // types/struct_field_names does exactly this on purpose; the sidecar's dotted paths are

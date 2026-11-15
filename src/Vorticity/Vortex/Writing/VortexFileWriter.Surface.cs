@@ -77,7 +77,7 @@ public sealed partial class VortexFileWriter
     /// <summary>Keeps the schema instance the writer was created with.</summary>
     internal void Declare(VortexSchema schema) => _publicSchema = schema;
 
-    /// <summary>The writer's builder, over buffers from the session's pool; reusable, and cleared by each write.</summary>
+    /// <summary>The writer's builder, over buffers from the library's pool counted for the writer; reusable, and cleared by each write.</summary>
     /// <returns>The builder; every call returns the same one.</returns>
     /// <exception cref="ObjectDisposedException">The file is completed or abandoned.</exception>
     public ColumnsBuilder Builder()
@@ -597,6 +597,9 @@ public sealed partial class VortexFileWriter
 
         _uploadAbandoned?.Dispose();
         _uploadAbandoned = null;
+
+        // Last: what the writer's blocks still hold goes back to its budget, and a block a caller returns later is ignored.
+        Account.Dispose();
     }
 
     /// <summary>Takes the rows appended to the writer's builder, and seals them once they fill a chunk.</summary>
@@ -753,11 +756,11 @@ public sealed partial class VortexFileWriter
     }
 
     private StructStore Root() =>
-        _root ??= ColumnStores.Root(_schema, Session.Options.EnginePool, Session.Options.Extensions);
+        _root ??= ColumnStores.Root(_schema, Account, Session.Options.Extensions);
 
-    private CanonicalArena BuilderArena() => _builderArena ??= new CanonicalArena(64, Session.Options.EnginePool);
+    private CanonicalArena BuilderArena() => _builderArena ??= new CanonicalArena(64, Account);
 
-    private CanonicalArena Scratch() => _scratch ??= new CanonicalArena(64, Session.Options.EnginePool);
+    private CanonicalArena Scratch() => _scratch ??= new CanonicalArena(64, Account);
 
     /// <summary>Gives the builder's buffers back to the pool.</summary>
     private void ReleaseBuilders()

@@ -87,7 +87,7 @@ to keep. `BatchView.ToOwned()` does the same on the tool path.
 
 ## What the copy costs
 
-The batch is copied once, into buffers from the session's pool. The decoded buffers are not handed
+The batch is copied once, into buffers from the library's pool. The decoded buffers are not handed
 over directly because they live alongside the chunks the scan keeps across batches: a batch that took
 them would take the chunk with it, and the next batch of that chunk would have to decode it again.
 

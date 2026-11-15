@@ -539,7 +539,7 @@ internal sealed class GroupBatches : IAsyncEnumerator<RecordBatch>
 
             _cancellationToken.ThrowIfCancellationRequested();
             _current?.Dispose();
-            CanonicalArena cut = _cut ??= new CanonicalArena(64, _query.Session.Options.EnginePool);
+            CanonicalArena cut = _cut ??= new CanonicalArena(64, QueryMemory.AccountOf(_outcome?.Memory));
             cut.ResetKeepingBlocks();
             int root = CanonicalSlice.SliceAcross(batch.Arena, cut, batch.RootIndex, from, until - from);
             _current = RecordBatch.Over(cut, root, first + from - _sortSkip, _current);
@@ -629,7 +629,7 @@ internal sealed class GroupBatches : IAsyncEnumerator<RecordBatch>
         }
 
         // A batch the window cuts: its records cut into an arena of the result's, over the store's buffers.
-        CanonicalArena cut = _cut ??= new CanonicalArena(64, _query.Session.Options.EnginePool);
+        CanonicalArena cut = _cut ??= new CanonicalArena(64, QueryMemory.AccountOf(_outcome?.Memory));
         cut.ResetKeepingBlocks();
         int root = CanonicalSlice.SliceAcross(slate.Arena, cut, slate.Root, from, until - from);
         _current = RecordBatch.Over(cut, root, start, _current);
@@ -689,7 +689,7 @@ internal sealed class GroupBatches : IAsyncEnumerator<RecordBatch>
         return false;
     }
 
-    /// <summary>The stores of the result's columns, made once per stream from the session's pool.</summary>
+    /// <summary>The stores of the result's columns, made once per stream, their blocks counted in the query until it is delivered.</summary>
     private StructStore Store()
     {
         if (_store is not null)
@@ -698,9 +698,10 @@ internal sealed class GroupBatches : IAsyncEnumerator<RecordBatch>
         }
 
         VortexSessionOptions options = _query.Host.Source.Session.Options;
+        MemoryAccount account = QueryMemory.AccountOf(_outcome?.Memory);
         DType dtype = VortexTypes.ToDType(_query.Schema, new DTypeArena());
-        _store = (StructStore)ColumnStores.Create(dtype, options.EnginePool, options.Extensions);
-        _arena = new CanonicalArena(ResultNodes(dtype.FieldCount), options.EnginePool);
+        _store = (StructStore)ColumnStores.Create(dtype, account, options.Extensions);
+        _arena = new CanonicalArena(ResultNodes(dtype.FieldCount), account);
         return _store;
     }
 
@@ -1207,8 +1208,9 @@ internal static class GroupSelection
                 }
 
                 VortexSessionOptions options = query.Session.Options;
-                store = (StructStore)ColumnStores.Create(VortexTypes.ToDType(VortexSchema.Create(fields), new DTypeArena()), options.EnginePool, options.Extensions);
-                arena = new CanonicalArena(GroupBatches.ResultNodes(built.Count), options.EnginePool);
+                MemoryAccount account = QueryMemory.AccountOf(memory);
+                store = (StructStore)ColumnStores.Create(VortexTypes.ToDType(VortexSchema.Create(fields), new DTypeArena()), account, options.Extensions);
+                arena = new CanonicalArena(GroupBatches.ResultNodes(built.Count), account);
                 for (int c = 0; c < built.Count; c++)
                 {
                     built[c].Append(outcome, store.Children[c], all);
@@ -1283,7 +1285,7 @@ internal static class GroupSelection
     internal static (Block<int> Groups, int Count) Filter(
         AggregationQuery query, AggregationOutcome outcome, GroupFilter filter, Block<int> groups, int count, CancellationToken cancellationToken)
     {
-        using GroupFilterRun run = new GroupFilterRun(query, filter);
+        using GroupFilterRun run = new GroupFilterRun(query, filter, outcome.Memory);
         Block<int> kept = Lent(outcome.Memory, count, counted: 0);
         groups.AsSpan(0, count).CopyTo(kept);
         return (kept, run.Keep(outcome, kept, count, cancellationToken));
@@ -1301,7 +1303,7 @@ internal static class GroupSelection
         private readonly FilterEvaluator _evaluator;
         private ScratchBlock<byte> _states;
 
-        internal GroupFilterRun(AggregationQuery query, GroupFilter filter)
+        internal GroupFilterRun(AggregationQuery query, GroupFilter filter, QueryMemory? memory)
         {
             _columns = new ResultColumn[filter.Fields.Length];
             VortexField[] fields = new VortexField[_columns.Length];
@@ -1312,8 +1314,9 @@ internal static class GroupSelection
             }
 
             VortexSessionOptions options = query.Session.Options;
-            _store = (StructStore)ColumnStores.Create(VortexTypes.ToDType(VortexSchema.Create(fields), new DTypeArena()), options.EnginePool, options.Extensions);
-            _arena = new CanonicalArena(GroupBatches.ResultNodes(fields.Length), options.EnginePool);
+            MemoryAccount account = QueryMemory.AccountOf(memory);
+            _store = (StructStore)ColumnStores.Create(VortexTypes.ToDType(VortexSchema.Create(fields), new DTypeArena()), account, options.Extensions);
+            _arena = new CanonicalArena(GroupBatches.ResultNodes(fields.Length), account);
             _evaluator = new FilterEvaluator(filter.Predicate);
         }
 

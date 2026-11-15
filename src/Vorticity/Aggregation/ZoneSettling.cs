@@ -476,7 +476,7 @@ internal sealed class ZoneSettling
             DTypes = types;
         }
 
-        internal CanonicalArena Arena { get; } = new CanonicalArena();
+        internal CanonicalArena Arena { get; } = new CanonicalArena(64, MemoryAccount.Unassigned);
 
         /// <summary>The arena of the dtypes below, kept with them.</summary>
         internal DTypeArena DTypes { get; }

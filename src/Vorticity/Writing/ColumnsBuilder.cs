@@ -4,7 +4,7 @@ using Vorticity.Writing;
 
 namespace Vorticity;
 
-/// <summary>Rows being assembled column by column, in buffers from the session's pool, before a writer encodes them.</summary>
+/// <summary>Rows being assembled column by column, in buffers from the library's pool, before a writer encodes them.</summary>
 /// <remarks>
 /// Reusable: a writer's <c>WriteAsync</c> takes the rows and clears the builder, keeping its buffers.
 /// Not thread-safe. Every column must hold the same number of rows when the builder is written.

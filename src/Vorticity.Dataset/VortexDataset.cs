@@ -957,7 +957,7 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
         Guid identity = Guid.NewGuid();
         string key = CommitKey.ForData(identity.ToString("N", CultureInfo.InvariantCulture));
         ObjectSegmentSink sink = new ObjectSegmentSink(
-            _store, key, _options.MaxObjectBytes, _options.Session.Options.MemoryPool, _options.StreamedObjectBytes, byteBound);
+            _store, key, _options.Session.Options.JobMemoryBudget ?? QueryMemoryBudget.Process, _options.MaxObjectBytes, _options.StreamedObjectBytes, byteBound);
 
         VortexWriteOptions write = _options.Write.WithIdentity(identity) with
         {
@@ -4312,7 +4312,7 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
         {
             if (!streamed)
             {
-                SourceReader held = new SourceReader(draft.Sink.Content(), ownsSource: true, _options.Session.Options.EnginePool);
+                SourceReader held = new SourceReader(draft.Sink.Content(), ownsSource: true);
                 (summaries, prefix, last) = await DescribeAsync(held, firstRow, draft, cancellationToken).ConfigureAwait(false);
             }
             else
@@ -4321,7 +4321,7 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
 
                 // A streamed object's tail, which the sink kept: its statistics are read out of it, with no request, unless
                 // its description reads before it, a key's bounds read from its rows.
-                if (draft.Sink.Tail(_options.Session.Options.EnginePool) is { } kept)
+                if (draft.Sink.Tail() is { } kept)
                 {
                     try
                     {

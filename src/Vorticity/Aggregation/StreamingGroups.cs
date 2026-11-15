@@ -577,7 +577,7 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
                 {
                     // The filter's columns, store and evaluator, kept from one closed batch to the next.
                     _filters ??= new GroupSelection.GroupFilterRun?[operators.Length];
-                    GroupSelection.GroupFilterRun run = _filters[o] ??= new GroupSelection.GroupFilterRun(_query, filter);
+                    GroupSelection.GroupFilterRun run = _filters[o] ??= new GroupSelection.GroupFilterRun(_query, filter, _memory);
                     count = run.Keep(_outcome!, _closed, count, _cancellationToken);
                     break;
                 }
@@ -679,8 +679,9 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
         }
 
         VortexSessionOptions options = _query.Session.Options;
-        _store = (StructStore)ColumnStores.Create(VortexTypes.ToDType(_query.Schema, new DTypeArena()), options.EnginePool, options.Extensions);
-        _arena = new CanonicalArena(64, options.EnginePool);
+        MemoryAccount account = QueryMemory.AccountOf(_memory);
+        _store = (StructStore)ColumnStores.Create(VortexTypes.ToDType(_query.Schema, new DTypeArena()), account, options.Extensions);
+        _arena = new CanonicalArena(64, account);
         return _store;
     }
 

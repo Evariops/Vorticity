@@ -478,8 +478,8 @@ internal sealed class EstimateRun
 
         VortexSessionOptions options = _question.Session.Options;
         DType dtype = VortexTypes.ToDType(VortexSchema.Create(fields), new DTypeArena());
-        StructStore store = (StructStore)ColumnStores.Create(dtype, options.EnginePool, options.Extensions);
-        CanonicalArena arena = new CanonicalArena(GroupBatches.ResultNodes(dtype.FieldCount), options.EnginePool);
+        StructStore store = (StructStore)ColumnStores.Create(dtype, MemoryAccount.Unassigned, options.Extensions);
+        CanonicalArena arena = new CanonicalArena(GroupBatches.ResultNodes(dtype.FieldCount), MemoryAccount.Unassigned);
         AggregationPartition scaled = new AggregationPartition(plan, new AggregateSlot?[plan.Aggregates.Length], _columns, _inputs, sorted: false);
         int[] place = new int[groups];
         try
@@ -895,8 +895,8 @@ internal sealed class EstimateQuery : ResultQuery
                 _columns = query.NewColumns();
                 VortexSessionOptions options = query.Session.Options;
                 DType dtype = VortexTypes.ToDType(query.Schema, new DTypeArena());
-                _store = (StructStore)ColumnStores.Create(dtype, options.EnginePool, options.Extensions);
-                _arena = new CanonicalArena(GroupBatches.ResultNodes(dtype.FieldCount), options.EnginePool);
+                _store = (StructStore)ColumnStores.Create(dtype, MemoryAccount.Unassigned, options.Extensions);
+                _arena = new CanonicalArena(GroupBatches.ResultNodes(dtype.FieldCount), MemoryAccount.Unassigned);
                 _order = new int[query._groups];
                 for (int g = 0; g < _order.Length; g++)
                 {

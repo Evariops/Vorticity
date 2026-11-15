@@ -617,7 +617,8 @@ internal static partial class DatasetCompactor
                 continue;
             }
 
-            CanonicalArena arena = new CanonicalArena(64, dataset.Session.Options.EnginePool);
+            // Reset in the finally below whatever happens: the process's account.
+            CanonicalArena arena = new CanonicalArena(64, QueryMemoryBudget.Process.Account);
             try
             {
                 DType type = schema.DType.GetField(field);

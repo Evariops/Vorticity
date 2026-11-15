@@ -1,8 +1,8 @@
 using System;
-using System.Buffers;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
+using Vorticity.Buffers;
 using Vorticity.Parquet;
 using Xunit;
 
@@ -47,14 +47,12 @@ public sealed class PagesOutTests : IDisposable
             await writer.CompleteAsync(Ct);
         }
 
-        // The pages are written by a session whose pool counts what it lends: the pipe's segments,
-        // since the batches come from another session and the column writers stage on the engine's.
-        CountingPool pool = new();
-        await using VortexSession session = VortexSession.Create(options => options.MemoryPool = pool);
+        // What the pipe rents of its own is its pool's count: its segments, which a copy of the pages would fill.
         string target = NewPath();
+        long rented;
         await using (ParquetFile file = await ParquetFile.OpenAsync(source, Ct))
         {
-            await using ParquetFileWriter writer = session.CreateParquetWriter(target, file.Schema, new ParquetWriteOptions { RowGroupRows = 65_536 });
+            await using ParquetFileWriter writer = VortexSession.Default.CreateParquetWriter(target, file.Schema, new ParquetWriteOptions { RowGroupRows = 65_536 });
             await foreach (RecordBatch batch in file.Scan().ToBatchesAsync(Ct))
             {
                 using (batch)
@@ -65,13 +63,14 @@ public sealed class PagesOutTests : IDisposable
 
             ParquetWriteReport report = await writer.CompleteAsync(Ct);
             Assert.Equal(5, report.RowGroupCount);
+            rented = ((AccountMemoryPool)writer.FilePipe!.Pool).Rented;
         }
 
         // Five row groups went out from the buffers they were compressed into; the pipe held the
         // magic and the tail. Copied, they would have taken the file's length of its segments.
         long length = new System.IO.FileInfo(target).Length;
         Assert.True(length > 2L << 20, $"{length} bytes");
-        Assert.True(pool.Rented <= 1L << 20, $"{pool.Rented} bytes rented for a file of {length}");
+        Assert.True(rented <= 1L << 20, $"{rented} bytes rented for a file of {length}");
 
         await using ParquetFile written = await ParquetFile.OpenAsync(target, Ct);
         Assert.Equal(300_000, written.RowCount);
@@ -256,26 +255,5 @@ public sealed class PagesOutTests : IDisposable
         string path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"vx-out-{Guid.NewGuid():N}.parquet");
         _paths.Add(path);
         return path;
-    }
-
-    /// <summary>The shared pool, counting the bytes it lends.</summary>
-    private sealed class CountingPool : MemoryPool<byte>
-    {
-        private long _rented;
-
-        internal long Rented => Interlocked.Read(ref _rented);
-
-        public override int MaxBufferSize => Shared.MaxBufferSize;
-
-        public override IMemoryOwner<byte> Rent(int minBufferSize = -1)
-        {
-            IMemoryOwner<byte> owner = Shared.Rent(minBufferSize);
-            Interlocked.Add(ref _rented, owner.Memory.Length);
-            return owner;
-        }
-
-        protected override void Dispose(bool disposing)
-        {
-        }
     }
 }

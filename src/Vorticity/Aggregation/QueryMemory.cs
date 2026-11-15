@@ -3,6 +3,7 @@ using System.Globalization;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Threading;
+using Vorticity.Buffers;
 
 namespace Vorticity.Aggregating;
 
@@ -39,6 +40,40 @@ internal sealed class QueryMemory : IDisposable
         _budget = budget;
         budget.Enter();
     }
+
+    // The account the query's blocks are counted in, made at the first block it rents.
+    private WorkAccount? _account;
+
+    /// <summary>
+    /// The account the query's blocks are counted in, its result's batches and what its sorts and tops build: under its
+    /// budget, given back whole with the rest of the query's memory, whatever a caller still holds of its result.
+    /// </summary>
+    internal WorkAccount Account
+    {
+        get
+        {
+            if (Volatile.Read(ref _account) is { } account)
+            {
+                return account;
+            }
+
+            WorkAccount made = new WorkAccount(_budget, "query");
+            WorkAccount? won = Interlocked.CompareExchange(ref _account, made, null);
+            if (won is null)
+            {
+                return made;
+            }
+
+            GC.SuppressFinalize(made);
+            return won;
+        }
+    }
+
+    /// <summary>
+    /// The account the blocks of the work <paramref name="memory"/> counts are rented under; for work no query's memory
+    /// counts yet, the account not yet named, until every query carries its memory down to its sources (PLAN-MEMORY, step 6).
+    /// </summary>
+    internal static MemoryAccount AccountOf(QueryMemory? memory) => memory?.Account ?? MemoryAccount.Unassigned;
 
     /// <summary>The bytes the query holds of its budget.</summary>
     internal long Held => Volatile.Read(ref _held);
@@ -255,6 +290,9 @@ internal sealed class QueryMemory : IDisposable
         {
             _budget.Measure(-measured);
         }
+
+        // The blocks' account closed: a result's batches are the caller's from now on, counted nowhere.
+        Volatile.Read(ref _account)?.Dispose();
 
         if (Interlocked.Exchange(ref _left, 1) == 0)
         {

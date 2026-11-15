@@ -5,7 +5,6 @@ Configure a session, share what is safe to share, and turn on parallelism where 
 ```csharp
 await using VortexSession session = VortexSession.Create(o =>
 {
-    o.MemoryPool = new AlignedMemoryPool();
     o.SegmentCache = new SegmentCache(256L * 1024 * 1024);
     o.MaxConcurrentReads = 32;
     o.MaxDegreeOfParallelism = 4;
@@ -35,14 +34,14 @@ A `VortexSession` holds what would otherwise be process-wide state, so a host de
 
 | option | default | what it governs |
 |---|---|---|
-| `MemoryPool` | `AlignedMemoryPool.Shared` | every batch and builder buffer, and the segments read by a source of yours. The file sources of the library read into `AlignedMemoryPool.Shared` |
 | `SegmentCache` | the process's, `SegmentCache.Shared`: a sixteenth of the memory the process may use, 1 GiB at most; none for a session with a `Keyring` | segments kept across scans, one budget for every file of the sessions that share it whose reads do I/O. A cache of 0 bytes keeps none |
 | `MaxConcurrentReads` | 128 | reads in flight across every scan of every file of the session whose reads do I/O |
 | `MaxDegreeOfParallelism` | 1 | how many chunks a scan decodes and aggregates at once, and how many threads a writer uses |
 | `IndexCacheBytes` | 64 MiB | decoded index runs kept per open file |
 | `MappedFileCacheCount` | 64 | files opened from a path that stay mapped after they are closed, so the next open reuses the mapping |
 | `MapFiles` | true | whether a file opened from a path is mapped by its first scan. When false, it is read positionally, and a file truncated during a scan fails the read instead of the process |
-| `MemoryBudget` | the process's | the memory the session's queries share with every session given the same `QueryMemoryBudget`: their group tables and their merges. Past it, a group by spills to `ScratchDirectory`, or fails with `VortexMemoryException` |
+| `MemoryBudget` | the process's | the memory the session's queries share with every session given the same `QueryMemoryBudget`: their group tables, their merges and the batches of their results until they are delivered. Past it, a group by spills to `ScratchDirectory`, or fails with `VortexMemoryException` |
+| `JobMemoryBudget` | the process's | the memory the session's writers and a dataset's jobs share with every session given the same `QueryMemoryBudget`: their builders, their pages and the bytes their pipes hold. Past it, a write fails with `VortexMemoryException` rather than the process being killed |
 | `ScratchDirectory` | the system's temporary directory, or the user's cache when that lies in memory | where a group by writes what its memory budget cannot hold, and where a sort and a writer write their runs. A file system in memory is refused: where `/tmp` is one, as on Ubuntu 26.04, the default is `$XDG_CACHE_HOME/vorticity`, or `~/.cache/vorticity`, which the `Vorticity` event source says once |
 | `ScratchBudget` | none, a tenth of the directory's free space is kept free | the scratch space the session's queries share with every session given the same `ScratchBudget`. Past it, `VortexMemoryException`, and no file is left behind |
 | `Extensions` | empty | extension types the session reads beyond the editions |
@@ -85,16 +84,18 @@ the system again, every page faulted anew: the declared spans and logs at a tent
 rate answered about half as many questions a second as once the blocks were kept. Sealing an hour
 at the design's rate peaks at 9.8 GB instead of 8.8.
 
-The blocks parked are managed arrays the runtime keeps pinned: they count in the managed heap, a heap dump shows them on the pinned object heap, and `vortex.memory.retained` tags them `pool` ([observability.md](observability.md#the-memory)). To bound what a session's batches, builders and decodes keep, give it a pool of its own:
+The blocks parked are managed arrays the runtime keeps pinned: they count in the managed heap, a heap dump shows them on the pinned object heap, and `vortex.memory.retained` tags them `pool` ([observability.md](observability.md#the-memory)). There is one pool in the process. What a session's work holds of it while it runs is counted in its budgets: a query's blocks under `MemoryBudget` until its result is delivered, a writer's under `JobMemoryBudget` until it is disposed. To bound them, give the session budgets of its own:
 
 ```csharp
 await using VortexSession session = VortexSession.Create(o =>
-    o.MemoryPool = new AlignedMemoryPool(maxRetainedBytes: 512L * 1024 * 1024));
+{
+    o.MemoryBudget = new QueryMemoryBudget(512L * 1024 * 1024);
+    o.JobMemoryBudget = new QueryMemoryBudget(256L * 1024 * 1024);
+});
 ```
 
-The reads of the library's own sources, its files, its object stores and its caches, still go through
-the process-wide pool, whose budgets grow with `Environment.ProcessorCount`, which a container's CPU
-limit lowers.
+What the pool keeps parked between rents is counted in no budget: it is the process's, and its
+budgets grow with `Environment.ProcessorCount`, which a container's CPU limit lowers.
 
 ## What is safe to share
 
@@ -224,8 +225,6 @@ an `await`. Do the columnar work, then await what you need, then let the loop mo
 
 * A batch's columns must not cross threads. Their spans point into buffers the scan reuses. To hand
   rows to another thread, take owned batches ([owned-batches.md](owned-batches.md)).
-* A `MemoryPool` other than an `AlignedMemoryPool` only serves the builders and the owned batches,
-  and the engine then decodes into `AlignedMemoryPool.Shared`.
 * Two hosts in one process that want different parallelism or caches need two sessions, not a
   setting changed between calls.
 * In a container, the free space a disk reports is not the real limit. A Kubernetes pod's writable

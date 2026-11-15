@@ -70,7 +70,7 @@ public class ArenaRentBenchmarks
     {
         _pool = BlockPool.Graded(32 * 1024 * 1024, 8, demandBudget: 1L << 30);
         _original = new ChainedBlocks(_pool);
-        _library = new CanonicalArena(64, _pool);
+        _library = new CanonicalArena(64, QueryMemoryBudget.Process.Account, _pool);
     }
 
     /// <summary>Gives every block back and frees the pool.</summary>

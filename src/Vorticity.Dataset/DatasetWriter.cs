@@ -73,6 +73,10 @@ public sealed class DatasetWriter
 
     // What the stores hold of the session's memory budget.
     private QueryMemory? _memory;
+
+    // The account its partitions' stores and its arenas are counted in, under the session's jobs' budget, the process's
+    // without one; closed when the writer is released, and by the collector for one never completed nor abandoned.
+    private readonly WorkAccount _account;
     private long _reserved;
 
     private long _rows;
@@ -81,6 +85,7 @@ public sealed class DatasetWriter
     internal DatasetWriter(VortexDataset dataset, DatasetSchema schema, IReadOnlyDictionary<string, VariantShredding>? shredded)
     {
         _dataset = dataset;
+        _account = new WorkAccount(dataset.Session.Options.JobMemoryBudget ?? QueryMemoryBudget.Process, "dataset writer");
         _schema = schema;
         _shredded = shredded;
         _bufferBytes = dataset.Options.AppendBufferBytes;
@@ -892,12 +897,12 @@ public sealed class DatasetWriter
     private StructStore NewStore()
     {
         VortexSessionOptions options = _dataset.Session.Options;
-        return ColumnStores.Root(_schema.DType, options.EnginePool, options.Extensions);
+        return ColumnStores.Root(_schema.DType, _account, options.Extensions);
     }
 
-    private CanonicalArena Arena() => _arena ??= new CanonicalArena(64, _dataset.Session.Options.EnginePool);
+    private CanonicalArena Arena() => _arena ??= new CanonicalArena(64, _account);
 
-    private CanonicalArena Scratch() => _scratch ??= new CanonicalArena(64, _dataset.Session.Options.EnginePool);
+    private CanonicalArena Scratch() => _scratch ??= new CanonicalArena(64, _account);
 
     private void ThrowIfDone() => ObjectDisposedException.ThrowIf(_done, this);
 
@@ -924,6 +929,7 @@ public sealed class DatasetWriter
         _memory?.Dispose();
         _memory = null;
         _reserved = 0;
+        _account.Dispose();
     }
 
     /// <summary>One partition's rows: its value, row-encoded, empty for the one partition, and the store that holds them.</summary>

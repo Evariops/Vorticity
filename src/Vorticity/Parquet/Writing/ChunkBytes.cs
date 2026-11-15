@@ -10,7 +10,7 @@ using Vorticity.Writing;
 namespace Vorticity.Parquet.Writing;
 
 /// <summary>
-/// A column chunk's pages while its row group is open: blocks of the engine's pool filled one after
+/// A column chunk's pages while its row group is open: blocks of the pool, counted for the writer, filled one after
 /// the other, lent to the sink one by one when the row group closes, and never copied to grow: over a
 /// file, the flush that closes the row group writes them where they lie.
 /// </summary>
@@ -25,7 +25,7 @@ internal sealed class ChunkBytes : IBufferWriter<byte>, IDisposable
     private const int FirstBlock = 64 * 1024;
     private const int LargestBlock = 1024 * 1024;
 
-    private readonly BlockPool _pool;
+    private readonly MemoryAccount _account;
     private readonly List<Block> _blocks = [];
 
     /// <summary>The block being filled; -1 before the first write.</summary>
@@ -33,7 +33,7 @@ internal sealed class ChunkBytes : IBufferWriter<byte>, IDisposable
 
     private long _length;
 
-    internal ChunkBytes(BlockPool pool) => _pool = pool;
+    internal ChunkBytes(MemoryAccount account) => _account = account;
 
     /// <summary>The bytes written since the last <see cref="Clear"/>.</summary>
     internal long Length => _length;
@@ -104,7 +104,7 @@ internal sealed class ChunkBytes : IBufferWriter<byte>, IDisposable
     {
         foreach (Block block in _blocks)
         {
-            _pool.Return(block.Owner);
+            block.Owner.Release();
         }
 
         _blocks.Clear();
@@ -132,7 +132,7 @@ internal sealed class ChunkBytes : IBufferWriter<byte>, IDisposable
         }
         else if (_blocks[_current].Capacity < size)
         {
-            _pool.Return(_blocks[_current].Owner);
+            _blocks[_current].Owner.Release();
             _blocks[_current] = Rent(wanted);
         }
 
@@ -141,7 +141,7 @@ internal sealed class ChunkBytes : IBufferWriter<byte>, IDisposable
 
     private Block Rent(int length)
     {
-        BlockOwner owner = _pool.Rent(MemoryAccount.Unassigned,length, VortexLimits.MaxAlignment);
+        BlockOwner owner = _account.Rent(length, VortexLimits.MaxAlignment);
         return new Block(owner, owner.WritableMemory(0, owner.Length));
     }
 

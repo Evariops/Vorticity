@@ -13,7 +13,6 @@ internal static class Threads
 
         await using VortexSession session = VortexSession.Create(o =>
         {
-            o.MemoryPool = new AlignedMemoryPool();
             o.SegmentCache = new SegmentCache(256L * 1024 * 1024);
             o.MaxConcurrentReads = 32;
             o.MaxDegreeOfParallelism = 4;

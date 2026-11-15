@@ -16,7 +16,6 @@ namespace Vorticity;
 /// <remarks>Set inside <see cref="VortexSession.Create"/>; frozen when it returns.</remarks>
 public sealed class VortexSessionOptions
 {
-    private MemoryPool<byte> _memoryPool = AlignedMemoryPool.Shared;
     private SegmentCache? _segmentCache;
     private SynopsisCache? _synopsisCache;
     private int _maxConcurrentReads = 128;
@@ -35,23 +34,6 @@ public sealed class VortexSessionOptions
 
     internal VortexSessionOptions()
     {
-    }
-
-    /// <summary>
-    /// Where the batches, the builders' buffers and the segments read through a caller's
-    /// <see cref="ISegmentSource"/> come from. The engine decodes into 64-byte aligned blocks,
-    /// so an <see cref="AlignedMemoryPool"/> serves it directly; another pool serves the builders and
-    /// the owned batches, and the engine falls back to <see cref="AlignedMemoryPool.Shared"/>.
-    /// </summary>
-    /// <remarks>
-    /// The sources of this library read segments into <see cref="AlignedMemoryPool.Shared"/>, whatever
-    /// the session's pool: a file opened from a path, a <see cref="FileSegmentSource"/>. A mapped file
-    /// or bytes in memory are read where they lie.
-    /// </remarks>
-    public MemoryPool<byte> MemoryPool
-    {
-        get => _memoryPool;
-        set => _memoryPool = Set(value ?? throw new ArgumentNullException(nameof(value)));
     }
 
     /// <summary>
@@ -316,9 +298,6 @@ public sealed class VortexSessionOptions
         { } given => given,
     };
 
-    /// <summary>The engine's pool: the aligned pool's own, or the shared one.</summary>
-    internal BlockPool EnginePool => _memoryPool is AlignedMemoryPool aligned ? aligned.Inner : BlockPool.Shared;
-
     internal void Freeze()
     {
         if ((_encryptFiles || _refusePlaintext) && _keyring is null)
@@ -454,7 +433,7 @@ public sealed class VortexSession : IAsyncDisposable
     {
         ArgumentNullException.ThrowIfNull(source);
         ThrowIfDisposed();
-        ISegmentReader reader = source as ISegmentReader ?? new SourceReader(source, ownsSource: true, Options.EnginePool);
+        ISegmentReader reader = source as ISegmentReader ?? new SourceReader(source, ownsSource: true);
         return OpenReaderAsync(reader, source.GetType().Name, options, cancellationToken);
     }
 
@@ -802,11 +781,6 @@ public sealed class VortexSession : IAsyncDisposable
 
         Mappings?.Clear();
         Keys?.Dispose();
-        if (Options.MemoryPool is AlignedMemoryPool aligned && !ReferenceEquals(aligned, AlignedMemoryPool.Shared))
-        {
-            aligned.Dispose();
-        }
-
         ReadGate.Dispose();
         await Options.ObjectStores.DisposeAsync().ConfigureAwait(false);
     }

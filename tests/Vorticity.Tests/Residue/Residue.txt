@@ -1,11 +1,8 @@
 # What the memory refactoring still has to take out (PLAN-MEMORY, section 7): a pattern, then its occurrences in
 # src, tests, bench (with samples and tools) and docs, separated by tabs. Lowered in the commit that takes some out,
 # removed at zero, never raised.
-MemoryAccount\.Unassigned	56	0	0	0
-\bEnginePool\b	58	5	0	0
-\bAlignedMemoryPool\b	17	6	1	8
-\bMemoryPool\b	17	4	1	4
-\bBlockPool\.Shared\b	11	22	13	0
+MemoryAccount\.Unassigned	37	0	0	0
+\bBlockPool\.Shared\b	9	22	9	0
 \bProcessors\b	5	0	0	0
 \bDemandBudget\b	2	0	0	0
 \bDemandClassBudget\b	2	0	0	0

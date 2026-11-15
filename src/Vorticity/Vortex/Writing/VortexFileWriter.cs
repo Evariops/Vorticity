@@ -684,7 +684,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     private System.Diagnostics.Activity? _activity;
 
     private VortexFileWriter(
-        ISegmentSink sink, DType schema, bool compress, VortexEdition target, int rowBlock,
+        VortexSession session, WorkAccount account, ISegmentSink sink, DType schema, bool compress, VortexEdition target, int rowBlock,
         long blockBytes, bool fileStatistics, WritePolicy indexes, int indexBudgetPerMille, IKeyEncoder? keyEncoder,
         int stringBoundBytes, Guid? identity, string? scratchDirectory, long scratchMemoryBytes, long wideRowsAbove,
         FenceShape fences, bool elementStatistics, IReadOnlyDictionary<string, EncodingHint>? hints, bool budgetSparesRequired,
@@ -693,6 +693,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         Func<string, IHashTap?>? hashTaps = null, long hashedUnitBytes = 0)
     {
         VortexRuntimeChecks.Require();
+        Session = session;
+        Account = account;
         _sink = sink;
         _meteredBytes = sink.Position;
         _activity = VortexTelemetry.StartWrite();
@@ -736,7 +738,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
         _indexes = IndexWriter.Asks(indexes) || carriesContents
             ? new IndexWriter(
-                indexes, schema, _isTabular, _fieldCount, indexBudgetPerMille, _blockRows, keyEncoder,
+                Account, indexes, schema, _isTabular, _fieldCount, indexBudgetPerMille, _blockRows, keyEncoder,
                 scratchDirectory, scratchMemoryBytes, wideRowsAbove, sealScratch, variantKeys, hashTaps, hashedUnitBytes)
             {
                 Fences = fences,
@@ -922,10 +924,11 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// <param name="schema">The file's dtype.</param>
     /// <param name="options">Write-time policy.</param>
     /// <param name="session">The session whose registered extensions the schema may name beyond the target edition; none when null.</param>
+    /// <param name="account">The writer's account, made already for the pipe it writes through; one of its own when null.</param>
     /// <returns>The writer. The caller completes and disposes it.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="sink"/> or <paramref name="options"/> is null.</exception>
     /// <exception cref="ArgumentException"><paramref name="schema"/> has not been set.</exception>
-    internal static VortexFileWriter Create(ISegmentSink sink, DType schema, VortexWriteOptions options, VortexSession? session = null)
+    internal static VortexFileWriter Create(ISegmentSink sink, DType schema, VortexWriteOptions options, VortexSession? session = null, WorkAccount? account = null)
     {
         ArgumentNullException.ThrowIfNull(sink);
         Validate(schema, options, session?.Options.Extensions);
@@ -950,8 +953,9 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         WritePolicy indexes = options.Profile == WriteProfile.Fastest ? WritePolicy.None : options.WritePolicy;
         ArgumentOutOfRangeException.ThrowIfNegative(options.IndexBudgetPerMille, nameof(options));
         ArgumentOutOfRangeException.ThrowIfNegative(options.StringBoundBytes, nameof(options));
+        VortexSession owner = session ?? VortexSession.Default;
         VortexFileWriter writer = new VortexFileWriter(
-            sink, schema, options.Compress, options.TargetEdition, rowBlock, blockBytes,
+            owner, account ?? AccountFor(owner), sink, schema, options.Compress, options.TargetEdition, rowBlock, blockBytes,
             options.FileStatistics, indexes, options.IndexBudgetPerMille, options.KeyEncoder,
             options.StringBoundBytes, options.Identity, options.ScratchDirectory, options.ScratchMemoryBytes,
             options.WideRowsAbove, options.Fences, options.ElementStatistics, options.EncodingHints, options.BudgetSparesRequired,
@@ -1225,17 +1229,20 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         ArgumentNullException.ThrowIfNull(path);
         Validate(schema, options, session.Options.Extensions);
         options = Identified(options, session);
-        FilePipeWriter pipe = FilePipeWriter.Create(path, session.Options.MemoryPool, options.Durable);
+
+        // One account for the writer and the pipe it writes through, whose segments are the writer's bytes in flight.
+        WorkAccount account = AccountFor(session);
+        FilePipeWriter pipe = FilePipeWriter.Create(path, new AccountMemoryPool(account), options.Durable);
         try
         {
-            VortexFileWriter writer = Create(SinkOver(pipe, session, options), schema, options, session);
+            VortexFileWriter writer = Create(SinkOver(pipe, session, options), schema, options, session, account);
             writer._filePipe = pipe;
-            writer.Session = session;
             return writer;
         }
         catch
         {
             pipe.Abandon();
+            account.Dispose();
             throw;
         }
     }
@@ -1246,7 +1253,6 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         options = Identified(options, session);
         VortexFileWriter writer = Create(SinkOver(sink, session, options), schema, options, session);
         writer._callerPipe = sink;
-        writer.Session = session;
         return writer;
     }
 
@@ -1275,7 +1281,18 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     }
 
     /// <summary>The session the writer belongs to.</summary>
-    internal VortexSession Session { get; private set; } = VortexSession.Default;
+    internal VortexSession Session { get; }
+
+    /// <summary>A writer's account in <paramref name="session"/>: under its jobs' budget, the process's without one (D3).</summary>
+    internal static WorkAccount AccountFor(VortexSession session) =>
+        new WorkAccount(session.Options.JobMemoryBudget ?? QueryMemoryBudget.Process, "writer");
+
+    /// <summary>
+    /// The account the writer's blocks are counted in, its builders' stores and arenas, its dictionaries', its indexes' and
+    /// its lanes': under its session's jobs' budget, the process's without one (D3). Closed when the writer is disposed, and
+    /// by the collector for a writer never disposed.
+    /// </summary>
+    internal WorkAccount Account { get; }
 
     /// <summary>
     /// Hands the writer the put that takes what it writes to a store, which completing the file awaits,
@@ -1308,9 +1325,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         string path, VortexWriteOptions? options, VortexSession session, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(path);
-        VortexFileWriter writer = await AppendAsync(path, options, null, session, cancellationToken).ConfigureAwait(false);
-        writer.Session = session;
-        return writer;
+        return await AppendAsync(path, options, null, session, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -2189,7 +2204,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// </summary>
     private ArrayBlobWriter.Workspace Blobs => _blobs ??= new ArrayBlobWriter.Workspace
     {
-        FrameRows = _rowBlock, GranuleRows = GranuleReadRows, SizeFirst = _sizeFirst, ZstdLevel = _zstdLevel,
+        FrameRows = _rowBlock, GranuleRows = GranuleReadRows, SizeFirst = _sizeFirst, ZstdLevel = _zstdLevel, Account = Account,
     };
 
     /// <summary>The writer's threads, or null when it has one.</summary>
@@ -3357,7 +3372,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
         _zoneSegments = new int[_fieldCount];
         _zoneMetadata = new byte[_fieldCount][];
-        ZoneMapWriter.Scratch scratch = ZoneMapWriter.Scratch.Take();
+        ZoneMapWriter.Scratch scratch = ZoneMapWriter.Scratch.Take(Account);
         try
         {
             for (int field = 0; field < _fieldCount; field++)

@@ -245,7 +245,7 @@ internal sealed class DictionaryPruning : IDisposable
         ParquetColumn column = file.Compiled.Columns[_filter.Columns[i]];
         DTypeArena types = new();
         return _readers[i] = new ColumnChunkReader(
-            column, VortexTypes.ToDType(column.Type, types), types.Bool(Nullability.NonNullable), file.Session.Options.EnginePool, file.Options.MaxDecompressedBytes)
+            column, VortexTypes.ToDType(column.Type, types), types.Bool(Nullability.NonNullable), MemoryAccount.Unassigned, file.Options.MaxDecompressedBytes)
         {
             VerifyChecksums = file.Options.VerifyChecksums,
             Counters = file.Counters,

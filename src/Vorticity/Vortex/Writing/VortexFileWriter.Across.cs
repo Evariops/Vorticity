@@ -4,6 +4,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
+using Vorticity.Buffers;
 using Vorticity.Editions;
 using Vorticity.Writing;
 
@@ -874,17 +875,18 @@ public sealed partial class VortexFileWriter
     /// <summary>
     /// What a thread compresses a column in: a blob workspace with a dtype arena of its own, an arena
     /// for what the schemes lay out, and the column's own dictionary of encoding ids; taken from the
-    /// process's spares for one column and given back after it.
+    /// process's spares for one column and given back after it. Kept between writers, its arenas count under the memory the
+    /// process keeps, and under the writer's account while a writer holds it.
     /// </summary>
     private sealed class CompressionLane
     {
-        private ArrayBlobWriter.Workspace _blobs = new ArrayBlobWriter.Workspace { OwnTypes = true };
+        private ArrayBlobWriter.Workspace _blobs = new ArrayBlobWriter.Workspace { OwnTypes = true, Account = MemoryAccount.Kept };
 
         private EncodingDictionary _encodings = new EncodingDictionary(ComponentKind.Array, EditionRegistry.Newest);
 
         internal ArrayBlobWriter.Workspace Blobs => _blobs;
 
-        internal CanonicalArena Arena { get; } = new CanonicalArena();
+        internal CanonicalArena Arena { get; } = new CanonicalArena(64, MemoryAccount.Kept);
 
         internal EncodingDictionary Encodings => _encodings;
 
@@ -899,7 +901,7 @@ public sealed partial class VortexFileWriter
                 lane._blobs = new ArrayBlobWriter.Workspace
                 {
                     FrameRows = writer._rowBlock, GranuleRows = writer.GranuleReadRows, SizeFirst = writer._sizeFirst,
-                    ZstdLevel = writer._zstdLevel, OwnTypes = true,
+                    ZstdLevel = writer._zstdLevel, OwnTypes = true, Account = writer.Account,
                 };
             }
 
@@ -908,6 +910,8 @@ public sealed partial class VortexFileWriter
                 lane._encodings = new EncodingDictionary(ComponentKind.Array, writer._arrayEncodings.Target);
             }
 
+            lane._blobs.Account = writer.Account;
+            lane.Arena.Account = writer.Account;
             return lane;
         }
 
@@ -919,6 +923,8 @@ public sealed partial class VortexFileWriter
         internal void Give()
         {
             Arena.Reset();
+            Arena.Account = MemoryAccount.Kept;
+            _blobs.Account = MemoryAccount.Kept;
             _encodings.Clear();
             _blobs.ReturnCompressors();
             if (!SpareSlots<CompressionLane>.Give(this))

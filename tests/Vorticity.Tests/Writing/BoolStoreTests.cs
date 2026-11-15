@@ -25,8 +25,7 @@ public sealed class BoolStoreTests
         {
             foreach (int length in new[] { 0, 1, 7, 8, 9, 63, 64, 65, 200 })
             {
-                BlockPool pool = new BlockPool();
-                BoolStore store = new BoolStore(new DTypeArena().Bool(Nullability.NonNullable), pool);
+                BoolStore store = new BoolStore(new DTypeArena().Bool(Nullability.NonNullable), TestAccount.Shared);
                 List<bool> expected = [];
                 for (int i = 0; i < before; i++)
                 {

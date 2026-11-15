@@ -65,7 +65,13 @@ internal sealed class ObjectSegmentSink : ISegmentSink, IAsyncDisposable
 
     /// <summary>The most bytes a streamed object takes, which the store sizes its parts from; -1 when unknown.</summary>
     private readonly long _bound;
+    // The chunks the sink holds and the segments its pipe streams through, counted under its account until it is released.
+    // Closed by Release, at the commit or the discard, not by DisposeAsync: disposed, the sink only stops taking writes, and
+    // its chunks wait for the commit that hands them to the store.
+#pragma warning disable CA2213
+    private readonly WorkAccount _account;
     private readonly MemoryPool<byte> _pool;
+#pragma warning restore CA2213
     private readonly List<IMemoryOwner<byte>> _chunks = [];
 
     /// <summary>
@@ -107,13 +113,19 @@ internal sealed class ObjectSegmentSink : ISegmentSink, IAsyncDisposable
 
     /// <summary>
     /// Opens a sink that will create <paramref name="key"/>; <paramref name="maxBytes"/> of 0 means
-    /// <see cref="DefaultMaxBytes"/>, <paramref name="streamedFrom"/> of 0
-    /// <see cref="DefaultStreamedFromBytes"/>, and a null <paramref name="pool"/> the shared aligned one.
-    /// A <paramref name="bound"/> is the most bytes the object takes if it streams, which the store sizes
-    /// its parts from (<see cref="ObjectBound"/>); -1 for none, the length then unknown to the store
-    /// until the end.
+    /// <see cref="DefaultMaxBytes"/>, and <paramref name="streamedFrom"/> of 0
+    /// <see cref="DefaultStreamedFromBytes"/>. A <paramref name="bound"/> is the most bytes the object takes
+    /// if it streams, which the store sizes its parts from (<see cref="ObjectBound"/>); -1 for none, the
+    /// length then unknown to the store until the end. What the sink holds counts under the process's memory
+    /// budget until it commits or is discarded.
     /// </summary>
-    public ObjectSegmentSink(IObjectStore store, string key, long maxBytes = 0, MemoryPool<byte>? pool = null, long streamedFrom = 0, long bound = -1)
+    public ObjectSegmentSink(IObjectStore store, string key, long maxBytes = 0, long streamedFrom = 0, long bound = -1)
+        : this(store, key, QueryMemoryBudget.Process, maxBytes, streamedFrom, bound)
+    {
+    }
+
+    /// <summary>A sink whose bytes count under <paramref name="budget"/>, a dataset's jobs' budget.</summary>
+    internal ObjectSegmentSink(IObjectStore store, string key, QueryMemoryBudget budget, long maxBytes = 0, long streamedFrom = 0, long bound = -1)
     {
         ArgumentNullException.ThrowIfNull(store);
         ObjectKey.Check(key);
@@ -125,7 +137,8 @@ internal sealed class ObjectSegmentSink : ISegmentSink, IAsyncDisposable
         _maxBytes = maxBytes == 0 ? DefaultMaxBytes : maxBytes;
         _streamedFrom = streamedFrom == 0 ? DefaultStreamedFromBytes : streamedFrom;
         _bound = bound < 0 ? -1 : Math.Max(bound, _streamedFrom);
-        _pool = pool ?? AlignedMemoryPool.Shared;
+        _account = new WorkAccount(budget, "segment sink");
+        _pool = new AccountMemoryPool(_account);
     }
 
     /// <summary>Whether the object passed the threshold and goes to the store as it is written: its bytes are not held.</summary>
@@ -306,9 +319,9 @@ internal sealed class ObjectSegmentSink : ISegmentSink, IAsyncDisposable
     /// nor beside them: the tail is an array of the shared pool, which they give back. A segment read before is the bytes
     /// copied out of it (<see cref="SourceReader"/> copies a lease over a managed array), and outlives the sink.
     /// </summary>
-    internal ISegmentReader? Tail(Buffers.BlockPool pool) =>
+    internal ISegmentReader? Tail() =>
         _pipe is not null && _tailFrom >= 0 && _tail is not null && !_released
-            ? new TailReader(new SourceReader(new TailSource(this), ownsSource: true, pool), _tailUsed)
+            ? new TailReader(new SourceReader(new TailSource(this), ownsSource: true), _tailUsed)
             : null;
 
     /// <summary>Adds <paramref name="data"/> to the tail's copy, which it gives up past <see cref="MostTailBytes"/>.</summary>
@@ -519,6 +532,7 @@ internal sealed class ObjectSegmentSink : ISegmentSink, IAsyncDisposable
 
         _chunks.Clear();
         ReleaseTail();
+        _account.Dispose();
     }
 
     /// <summary>One chunk of the sequence <see cref="Bytes"/> hands the store.</summary>

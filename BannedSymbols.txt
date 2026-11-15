@@ -49,3 +49,9 @@ M:System.GC.RemoveMemoryPressure(System.Int64); the library's memory is managed,
 # runtime's shared pool keeps arrays per type and per core, outside every count, and a private pool is one more such.
 P:System.Buffers.ArrayPool`1.Shared; rent a Block<T> from Blocks (Blocks.Rent, Blocks.Return), under the query's memory where one counts (Blocks.Rent(memory, ...)), or bytes from VortexBytePool.Instance; an array that holds references is owned by what lasts, or allocated.
 M:System.Buffers.ArrayPool`1.Create; rent from Blocks, which every array of the library comes from, rather than a pool of its own.
+# ---------------------------------------------------------------- accounts
+# A block of the pool is rented under the account of the work it serves (MemoryAccount): a query's, a scan's, a writer's,
+# the process's for what the library gives back itself. The arenas' constructors without an account are the tests' and
+# the tools': their blocks are the caller's, counted nowhere.
+M:Vorticity.Arrays.CanonicalArena.#ctor(System.Int32); name the account of the arena's work: new CanonicalArena(capacity, account).
+M:Vorticity.Arrays.RetainingArena.#ctor(System.Int32); name the account of the scan whose chunks it retains: new RetainingArena(account, capacity).

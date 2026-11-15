@@ -15,8 +15,8 @@ namespace Vorticity.Writing;
 /// <summary>A column every row of which is null.</summary>
 internal sealed class NullStore : ColumnStore
 {
-    internal NullStore(DType dtype, BlockPool pool)
-        : base(dtype, pool)
+    internal NullStore(DType dtype, MemoryAccount account)
+        : base(dtype, account)
     {
     }
 
@@ -48,8 +48,8 @@ internal sealed unsafe class FixedStore : ColumnStore
     private int _capacityBytes;
     private int _capacity;
 
-    internal FixedStore(DType dtype, BlockPool pool)
-        : base(dtype, pool)
+    internal FixedStore(DType dtype, MemoryAccount account)
+        : base(dtype, account)
     {
         if (dtype.Kind == DTypeKind.Decimal)
         {
@@ -256,7 +256,7 @@ internal sealed unsafe class FixedStore : ColumnStore
     {
         if (_owner is not null)
         {
-            Pool.Return(_owner);
+            _owner.Release();
             _owner = null;
         }
 
@@ -268,7 +268,7 @@ internal sealed unsafe class FixedStore : ColumnStore
 
     private void GrowTo(long values)
     {
-        Grow(Pool, ref _owner, ref _data, ref _capacityBytes, (long)Count * Width, values * Width);
+        Grow(Account, ref _owner, ref _data, ref _capacityBytes, (long)Count * Width, values * Width);
         _capacity = _capacityBytes / Width;
     }
 }
@@ -280,8 +280,8 @@ internal sealed unsafe class BoolStore : ColumnStore
     private byte* _bits;
     private int _capacityBytes;
 
-    internal BoolStore(DType dtype, BlockPool pool)
-        : base(dtype, pool)
+    internal BoolStore(DType dtype, MemoryAccount account)
+        : base(dtype, account)
     {
     }
 
@@ -413,7 +413,7 @@ internal sealed unsafe class BoolStore : ColumnStore
     {
         if (_owner is not null)
         {
-            Pool.Return(_owner);
+            _owner.Release();
             _owner = null;
         }
 
@@ -427,7 +427,7 @@ internal sealed unsafe class BoolStore : ColumnStore
         long bytes = (bits + 7L) >> 3;
         if (bytes > _capacityBytes)
         {
-            Grow(Pool, ref _owner, ref _bits, ref _capacityBytes, (Count + 7L) >> 3, bytes);
+            Grow(Account, ref _owner, ref _bits, ref _capacityBytes, (Count + 7L) >> 3, bytes);
         }
     }
 }
@@ -452,8 +452,8 @@ internal sealed unsafe class VarBinStore : ColumnStore
     private int _dataLength;
     private int _dataCommitted;
 
-    internal VarBinStore(DType dtype, BlockPool pool)
-        : base(dtype, pool)
+    internal VarBinStore(DType dtype, MemoryAccount account)
+        : base(dtype, account)
     {
         IsUtf8 = dtype.Kind == DTypeKind.Utf8;
     }
@@ -487,7 +487,7 @@ internal sealed unsafe class VarBinStore : ColumnStore
     {
         if (_capacity - Count < count)
         {
-            Grow(Pool, ref _viewsOwner, ref _views, ref _viewBytes, (long)Count * ViewSize, ((long)Count + count) * ViewSize);
+            Grow(Account, ref _viewsOwner, ref _views, ref _viewBytes, (long)Count * ViewSize, ((long)Count + count) * ViewSize);
             _capacity = _viewBytes / ViewSize;
         }
 
@@ -751,13 +751,13 @@ internal sealed unsafe class VarBinStore : ColumnStore
     {
         if (_viewsOwner is not null)
         {
-            Pool.Return(_viewsOwner);
+            _viewsOwner.Release();
             _viewsOwner = null;
         }
 
         if (_dataOwner is not null)
         {
-            Pool.Return(_dataOwner);
+            _dataOwner.Release();
             _dataOwner = null;
         }
 
@@ -821,7 +821,7 @@ internal sealed unsafe class VarBinStore : ColumnStore
     {
         if (Count == _capacity)
         {
-            Grow(Pool, ref _viewsOwner, ref _views, ref _viewBytes, (long)Count * ViewSize, ((long)Count + 1) * ViewSize);
+            Grow(Account, ref _viewsOwner, ref _views, ref _viewBytes, (long)Count * ViewSize, ((long)Count + 1) * ViewSize);
             _capacity = _viewBytes / ViewSize;
         }
     }
@@ -831,7 +831,7 @@ internal sealed unsafe class VarBinStore : ColumnStore
     {
         if (_dataCapacity - _dataLength < bytes)
         {
-            Grow(Pool, ref _dataOwner, ref _data, ref _dataCapacity, _dataLength, (long)_dataLength + bytes);
+            Grow(Account, ref _dataOwner, ref _data, ref _dataCapacity, _dataLength, (long)_dataLength + bytes);
         }
     }
 

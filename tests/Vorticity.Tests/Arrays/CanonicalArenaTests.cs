@@ -335,7 +335,7 @@ public sealed class CanonicalArenaTests
         // The pool hands back recycled blocks, never cleared. A decoder that writes only part of a
         // buffer would otherwise publish whatever the previous batch left there.
         BlockPool pool = new BlockPool();
-        CanonicalArena arena = new CanonicalArena(8, pool);
+        CanonicalArena arena = new CanonicalArena(8, TestAccount.Shared, pool);
 
         VortexBuffer first = arena.Allocate(256, 64, out Span<byte> firstSpan);
         Assert.Equal(256, first.Length);
@@ -374,7 +374,7 @@ public sealed class CanonicalArenaTests
     public void ResetClearsTheNodesAndReleasesTheRentedBlocks()
     {
         BlockPool pool = new BlockPool();
-        CanonicalArena arena = new CanonicalArena(8, pool);
+        CanonicalArena arena = new CanonicalArena(8, TestAccount.Shared, pool);
         arena.Allocate(128, 8);
         arena.AddNull(_types.Null(Nullability.Nullable), 1);
         Assert.Equal(1, arena.NodeCount);
@@ -396,7 +396,7 @@ public sealed class CanonicalArenaTests
         // a real, if small, per-batch allocation that belongs to the pool's policy and not to the
         // arena. This asserts the arena's own contribution, which is zero.
         BlockPool pool = new BlockPool(maxPooledLength: 1 << 20, maxPerBucket: 32);
-        CanonicalArena arena = new CanonicalArena(64, pool);
+        CanonicalArena arena = new CanonicalArena(64, TestAccount.Shared, pool);
         DType i32 = _types.Primitive(PType.I32, Nullability.NonNullable);
 
         for (int warm = 0; warm < 8; warm++)

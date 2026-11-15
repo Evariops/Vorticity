@@ -135,7 +135,7 @@ internal sealed class PartBuilder
         slate.Release();
     }
 
-    /// <summary>Every store in the pool let go, their buffers back in the session's pool: the result is done.</summary>
+    /// <summary>Every store in the pool let go, their buffers back in the library's pool: the result is done.</summary>
     internal void Release()
     {
         lock (_gate)
@@ -181,8 +181,10 @@ internal sealed class PartBuilder
             dtype = _dtype;
         }
 
+        // Made before the run makes the query's memory: the account not yet named until the query's account flows down
+        // with its spec (PLAN-MEMORY, step 6).
         VortexSessionOptions options = _query.Session.Options;
-        return new PartSlate((StructStore)ColumnStores.Create(dtype, options.EnginePool, options.Extensions), new CanonicalArena(64, options.EnginePool));
+        return new PartSlate((StructStore)ColumnStores.Create(dtype, MemoryAccount.Unassigned, options.Extensions), new CanonicalArena(64, MemoryAccount.Unassigned));
     }
 }
 

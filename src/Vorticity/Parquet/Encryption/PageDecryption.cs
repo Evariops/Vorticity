@@ -102,9 +102,9 @@ internal sealed class PageDecryption : IDisposable
 
     /// <summary>
     /// The body of the page whose header <see cref="Header"/> read last, decrypted from its module
-    /// <paramref name="module"/> into a block of <paramref name="pool"/>'s, which the caller owns.
+    /// <paramref name="module"/> into a block counted for <paramref name="account"/>, which the caller owns.
     /// </summary>
-    internal BlockOwner Body(in PageHeader header, ReadOnlySpan<byte> module, BlockPool pool)
+    internal BlockOwner Body(in PageHeader header, ReadOnlySpan<byte> module, MemoryAccount account)
     {
         int plain = module.Length - BodyOverhead;
         if (plain != header.CompressedPageSize)
@@ -112,7 +112,7 @@ internal sealed class PageDecryption : IDisposable
             ParquetThrow.Format($"An encrypted page holds {plain} bytes where its header, less the module's, declares {header.CompressedPageSize}.");
         }
 
-        BlockOwner owner = pool.Rent(MemoryAccount.Unassigned, Math.Max(plain, 1), 64);
+        BlockOwner owner = account.Rent(Math.Max(plain, 1), 64);
         try
         {
             if (_ctr)

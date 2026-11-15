@@ -558,30 +558,51 @@ internal partial class CanonicalArena
 
     private readonly BlockPool _pool;
 
-    /// <summary>The pool the arena rents its blocks from.</summary>
+    /// <summary>The pool the arena rents its blocks from: the library's, or a test's that observes its rents.</summary>
     internal BlockPool Pool => _pool;
 
-    /// <summary>Creates an arena backed by <see cref="BlockPool.Shared"/>.</summary>
+    /// <summary>
+    /// Whom the arena's blocks are counted for from now on: the work its nodes are built for, a scan's, a query's, a
+    /// writer's. A block rented before keeps the account it was rented under until it is given back.
+    /// </summary>
+    internal MemoryAccount Account { get; set; }
+
+    /// <summary>
+    /// Creates an arena whose blocks are its caller's, counted nowhere: for the tests, the benchmarks and the tools. Banned in
+    /// the library (<c>BannedSymbols.txt</c>), whose arenas name the account of their work.
+    /// </summary>
     /// <param name="initialCapacity">Hint for the record array's initial size. Must be positive.</param>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="initialCapacity"/> is not positive.</exception>
     public CanonicalArena(int initialCapacity = 64)
-        : this(initialCapacity, BlockPool.Shared)
+        : this(initialCapacity, MemoryAccount.Caller, BlockPool.Shared)
+    {
+    }
+
+    /// <summary>Creates an arena whose blocks come from the library's pool, counted for <paramref name="account"/>.</summary>
+    /// <param name="initialCapacity">Hint for the record array's initial size. Must be positive.</param>
+    /// <param name="account">Whom the arena's blocks are counted for.</param>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="initialCapacity"/> is not positive.</exception>
+    public CanonicalArena(int initialCapacity, MemoryAccount account)
+        : this(initialCapacity, account, BlockPool.Shared)
     {
     }
 
     /// <summary>Creates an arena backed by an explicit pool. Tests use this to observe rentals.</summary>
     /// <param name="initialCapacity">Hint for the record array's initial size. Must be positive.</param>
+    /// <param name="account">Whom the arena's blocks are counted for.</param>
     /// <param name="pool">The pool <see cref="Allocate(int, int)"/> rents from.</param>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="initialCapacity"/> is not positive.</exception>
-    /// <exception cref="ArgumentNullException"><paramref name="pool"/> is null.</exception>
-    public CanonicalArena(int initialCapacity, BlockPool pool)
+    /// <exception cref="ArgumentNullException"><paramref name="account"/> or <paramref name="pool"/> is null.</exception>
+    public CanonicalArena(int initialCapacity, MemoryAccount account, BlockPool pool)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(initialCapacity);
+        ArgumentNullException.ThrowIfNull(account);
         ArgumentNullException.ThrowIfNull(pool);
         _records = new CanonicalRecord[initialCapacity];
         _children = new int[initialCapacity];
         _dataBuffers = new VortexBuffer[8];
         _pool = pool;
+        Account = account;
     }
 
     /// <summary>
@@ -902,7 +923,7 @@ internal partial class CanonicalArena
             }
         }
 
-        BlockOwner rented = _pool.Rent(MemoryAccount.Unassigned, length, alignment);
+        BlockOwner rented = _pool.Rent(Account, length, alignment);
         if (!slab)
         {
             SetCursor(Behind(cursor, rented));

@@ -73,7 +73,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
 
     private readonly PType _ptype;
     private readonly DecimalStorageType _decimal;
-    private readonly BlockPool _pool;
+    private readonly MemoryAccount _account;
     private readonly long _cap;
     private readonly List<Page> _retired = [];
     private readonly Stack<Page> _free = [];
@@ -185,10 +185,10 @@ internal sealed partial class ColumnChunkReader : IDisposable
     /// <param name="leaf">The column.</param>
     /// <param name="type">The column's dtype where it sits in the schema read.</param>
     /// <param name="validityType">The dtype of a validity bitmap's node.</param>
-    /// <param name="pool">The pool pages decode into.</param>
+    /// <param name="account">Whom the blocks pages decode into are counted for: the scan that reads them.</param>
     /// <param name="cap">The most bytes a page may decode to.</param>
     /// <param name="nested">Whether the column is read by its levels, for the field above it to assemble.</param>
-    internal ColumnChunkReader(ParquetColumn leaf, DType type, DType validityType, BlockPool pool, long cap, bool nested = false)
+    internal ColumnChunkReader(ParquetColumn leaf, DType type, DType validityType, MemoryAccount account, long cap, bool nested = false)
     {
         if (!nested && (leaf.MaxRepetitionLevel > 0 || leaf.MaxDefinitionLevel > 1))
         {
@@ -203,7 +203,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
         _type = type;
         _values = type.Kind == DTypeKind.Extension ? type.StorageType : type;
         _validityType = validityType;
-        _pool = pool;
+        _account = account;
         _cap = cap;
         _ptype = leaf.Storage;
         switch (_form)
@@ -385,7 +385,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
             return Bytes(body, bytes);
         }
 
-        owner = decryption.Body(header, Bytes(body, bytes).Span, _pool);
+        owner = decryption.Body(header, Bytes(body, bytes).Span, _account);
         return owner.Buffer.Slice(0, header.CompressedPageSize);
     }
 
@@ -1115,7 +1115,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
         {
             block?.Dispose();
             block = null;
-            block = _pool.Rent(MemoryAccount.Unassigned,Math.Max(bytes, 1), 64);
+            block = _account.Rent(Math.Max(bytes, 1), 64);
         }
 
         return block.WritableSpan[..bytes];
@@ -1326,7 +1326,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
         }
 
         Cap(size);
-        BlockOwner values = _pool.Rent(MemoryAccount.Unassigned,size, 64);
+        BlockOwner values = _account.Rent(size, 64);
         try
         {
             Counters?.AddDecompression();
@@ -1419,8 +1419,8 @@ internal sealed partial class ColumnChunkReader : IDisposable
                 }
 
                 int values = ViewsAt(header);
-                BlockOwner block = _pool.Rent(MemoryAccount.Unassigned,size, 64);
-                BlockOwner? views = values == NoViews ? null : _pool.Rent(MemoryAccount.Unassigned,header.ValueCount * CanonicalSupport.ViewSize, 64);
+                BlockOwner block = _account.Rent(size, 64);
+                BlockOwner? views = values == NoViews ? null : _account.Rent(header.ValueCount * CanonicalSupport.ViewSize, 64);
                 AheadPage page = new(this, position, header, at, stored, _chunk.Slice(at + offset, stored - offset), _codec, block, lanes, size, views, values);
                 page.Queue();
                 Counters?.AddAhead();
@@ -1556,7 +1556,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
     /// <summary>A page its lane still decompresses, decompressed again into a block of the read's.</summary>
     private BlockOwner DecompressedAgain(AheadPage page)
     {
-        BlockOwner block = _pool.Rent(MemoryAccount.Unassigned,page.Size, 64);
+        BlockOwner block = _account.Rent(page.Size, 64);
         try
         {
             DecompressPage(page.Source.Span, block.WritableSpan);
@@ -1942,7 +1942,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
     /// <summary>A v1 page's levels in the deprecated BIT_PACKED encoding, into its validity; the rows that hold a value.</summary>
     private int LegacyLevels(Page page, ReadOnlySpan<byte> levels, int rows)
     {
-        BlockOwner bits = _pool.Rent(MemoryAccount.Unassigned,CanonicalSupport.BitmapByteCount(rows), 64);
+        BlockOwner bits = _account.Rent(CanonicalSupport.BitmapByteCount(rows), 64);
         int valid = LegacyBitPacked.ReadBits(levels, rows, bits.WritableSpan);
         if (valid == rows)
         {
@@ -1968,7 +1968,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
             return rows;
         }
 
-        BlockOwner bits = _pool.Rent(MemoryAccount.Unassigned,CanonicalSupport.BitmapByteCount(rows), 64);
+        BlockOwner bits = _account.Rent(CanonicalSupport.BitmapByteCount(rows), 64);
         int valid = new RleHybridDecoder(1).ReadBits(levels, bits.WritableSpan, 0, rows);
         if (valid == rows)
         {
@@ -2074,7 +2074,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
         else
         {
             Span<byte> into = Slots(page, rows * CanonicalSupport.ViewSize).WritableSpan;
-            BlockOwner dense = cut ?? _pool.Rent(MemoryAccount.Unassigned,Math.Max(valid, 1) * CanonicalSupport.ViewSize, 64);
+            BlockOwner dense = cut ?? _account.Rent(Math.Max(valid, 1) * CanonicalSupport.ViewSize, 64);
             try
             {
                 if (cut is null)
@@ -2160,7 +2160,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
             return Slots(page, page.Rows * _slot).WritableSpan[..(valid * _slot)];
         }
 
-        spread = _pool.Rent(MemoryAccount.Unassigned,Math.Max(valid, 1) * _slot, 64);
+        spread = _account.Rent(Math.Max(valid, 1) * _slot, 64);
         return spread.WritableSpan[..(valid * _slot)];
     }
 
@@ -2336,7 +2336,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
     private BlockOwner Slots(Page page, int bytes)
     {
         Cap(bytes);
-        BlockOwner owner = _pool.Rent(MemoryAccount.Unassigned,Math.Max(bytes, 1), 64);
+        BlockOwner owner = _account.Rent(Math.Max(bytes, 1), 64);
         page.Slots = owner;
         page.Values = owner.Buffer.Slice(0, bytes);
         return owner;
@@ -2452,7 +2452,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
             return;
         }
 
-        BlockOwner dense = _pool.Rent(MemoryAccount.Unassigned,Math.Max(valid, 1) * width, 64);
+        BlockOwner dense = _account.Rent(Math.Max(valid, 1) * width, 64);
         try
         {
             Span<byte> values = dense.WritableSpan[..(valid * width)];
@@ -2486,7 +2486,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
     /// </summary>
     private void Lengths(Page page, VortexBuffer values, BlockOwner? owner, int valid)
     {
-        BlockOwner lengths = _pool.Rent(MemoryAccount.Unassigned,Math.Max(valid, 1) * sizeof(int), 64);
+        BlockOwner lengths = _account.Rent(Math.Max(valid, 1) * sizeof(int), 64);
         try
         {
             Span<int> span = MemoryMarshal.Cast<byte, int>(lengths.WritableSpan)[..valid];
@@ -2513,7 +2513,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
     /// <summary>A DELTA_BYTE_ARRAY page rebuilt, each value from the one before it, into a heap the page keeps.</summary>
     private void Prefixed(Page page, ReadOnlySpan<byte> source, int valid)
     {
-        BlockOwner lengths = _pool.Rent(MemoryAccount.Unassigned,Math.Max(valid, 1) * sizeof(int) * 3, 64);
+        BlockOwner lengths = _account.Rent(Math.Max(valid, 1) * sizeof(int) * 3, 64);
         BlockOwner? heap = null;
         try
         {
@@ -2523,7 +2523,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
             Span<int> rebuilt = all.Slice(2 * valid, valid);
             long total = DeltaByteArrays.DecodePrefixes(source, prefixes, suffixes, out int suffixStart);
             Cap(total);
-            heap = _pool.Rent(MemoryAccount.Unassigned,(int)total + DeltaByteArrays.RebuildSlack, 64);
+            heap = _account.Rent((int)total + DeltaByteArrays.RebuildSlack, 64);
             DeltaByteArrays.Rebuild(source[suffixStart..], prefixes, suffixes, heap.WritableSpan, rebuilt);
             if (_views)
             {
@@ -2575,7 +2575,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
             return;
         }
 
-        BlockOwner dense = _pool.Rent(MemoryAccount.Unassigned,Math.Max(valid, 1) * _width, 64);
+        BlockOwner dense = _account.Rent(Math.Max(valid, 1) * _width, 64);
         try
         {
             Span<byte> values = dense.WritableSpan[..(valid * _width)];
@@ -2608,13 +2608,13 @@ internal sealed partial class ColumnChunkReader : IDisposable
         int rows = page.Rows;
         bool wide = _leaf.Physical == PhysicalType.Double;
         int width = wide ? sizeof(double) : sizeof(float);
-        BlockOwner scratch = _pool.Rent(MemoryAccount.Unassigned,Encodings.Alp.VectorSize(source) * width, 64);
+        BlockOwner scratch = _account.Rent(Encodings.Alp.VectorSize(source) * width, 64);
         BlockOwner? dense = null;
         try
         {
             Span<byte> into = page.Validity is null
                 ? Slots(page, rows * width).WritableSpan[..(rows * width)]
-                : (dense = _pool.Rent(MemoryAccount.Unassigned,Math.Max(valid, 1) * width, 64)).WritableSpan[..(valid * width)];
+                : (dense = _account.Rent(Math.Max(valid, 1) * width, 64)).WritableSpan[..(valid * width)];
             if (wide)
             {
                 Encodings.Alp.Decode(source, MemoryMarshal.Cast<byte, double>(into), MemoryMarshal.Cast<byte, ulong>(scratch.WritableSpan));
@@ -2659,7 +2659,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
             return;
         }
 
-        BlockOwner dense = _pool.Rent(MemoryAccount.Unassigned,CanonicalSupport.BitmapByteCount(Math.Max(valid, 1)), 64);
+        BlockOwner dense = _account.Rent(CanonicalSupport.BitmapByteCount(Math.Max(valid, 1)), 64);
         try
         {
             new RleHybridDecoder(1).ReadBits(runs, dense.WritableSpan, 0, valid);
@@ -2678,7 +2678,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
         int rows = page.Rows;
         BlockOwner views = Slots(page, rows * CanonicalSupport.ViewSize);
         Span<byte> into = views.WritableSpan;
-        BlockOwner? dense = page.Validity is null ? null : _pool.Rent(MemoryAccount.Unassigned,Math.Max(valid, 1) * CanonicalSupport.ViewSize, 64);
+        BlockOwner? dense = page.Validity is null ? null : _account.Rent(Math.Max(valid, 1) * CanonicalSupport.ViewSize, 64);
         try
         {
             Span<byte> cut = dense is null ? into : dense.WritableSpan[..(valid * CanonicalSupport.ViewSize)];
@@ -2744,7 +2744,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
             {
                 // A dictionary page has no flag that keeps it out of the codec: it is always compressed.
                 Cap(size);
-                BlockOwner values = _pool.Rent(MemoryAccount.Unassigned,size, 64);
+                BlockOwner values = _account.Rent(size, 64);
                 try
                 {
                     Counters?.AddDecompression();
@@ -2844,7 +2844,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
         }
 
         int width = source[0];
-        BlockOwner codes = _pool.Rent(MemoryAccount.Unassigned,valid * sizeof(uint), 64);
+        BlockOwner codes = _account.Rent(valid * sizeof(uint), 64);
         BlockOwner? dense = null;
         try
         {
@@ -2873,7 +2873,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
                 Span<byte> into = bits.WritableSpan;
                 into.Clear();
                 ReadOnlySpan<byte> entries = dictionary.Values.Span;
-                Span<byte> gathered = page.Validity is null ? into : (dense = _pool.Rent(MemoryAccount.Unassigned,CanonicalSupport.BitmapByteCount(valid), 64)).WritableSpan;
+                Span<byte> gathered = page.Validity is null ? into : (dense = _account.Rent(CanonicalSupport.BitmapByteCount(valid), 64)).WritableSpan;
                 gathered.Clear();
                 for (int i = 0; i < valid; i++)
                 {
@@ -2899,7 +2899,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
 
             ReadOnlySpan<byte> codeBytes = MemoryMarshal.AsBytes((ReadOnlySpan<uint>)span);
             BlockOwner slots = Slots(page, rows * _slot);
-            Span<byte> target = page.Validity is null ? slots.WritableSpan : (dense = _pool.Rent(MemoryAccount.Unassigned,valid * _slot, 64)).WritableSpan;
+            Span<byte> target = page.Validity is null ? slots.WritableSpan : (dense = _account.Rent(valid * _slot, 64)).WritableSpan;
             int bad = RowKernels.Gather(codeBytes, PType.U32, dictionary.Values.Span, _slot, dictionary.Rows, target[..(valid * _slot)], valid);
             if (bad >= 0)
             {
@@ -2936,7 +2936,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
 
         int rows = page.Rows;
         Cap((long)rows * sizeof(uint));
-        BlockOwner codes = _pool.Rent(MemoryAccount.Unassigned,Math.Max(rows * sizeof(uint), 1), 64);
+        BlockOwner codes = _account.Rent(Math.Max(rows * sizeof(uint), 1), 64);
         Span<byte> into = codes.WritableSpan[..(rows * sizeof(uint))];
         ReadOnlySpan<byte> source = MemoryMarshal.AsBytes(dense);
         if (page.Validity is null)

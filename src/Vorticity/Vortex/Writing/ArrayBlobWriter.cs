@@ -3099,6 +3099,29 @@ internal static class ArrayBlobWriter
         private ZstdCompressor? _columnZstd;
         private Workspace? _measure;
         private EncodingDictionary? _measureEncodings;
+        private MemoryAccount _account = null!;
+
+        /// <summary>
+        /// Whom the workspace's leaves are counted for: the writer or the indexer it serves, set again when a lane kept from
+        /// one writer serves the next. A block rented before keeps the account it was rented under.
+        /// </summary>
+        internal required MemoryAccount Account
+        {
+            get => _account;
+            set
+            {
+                _account = value;
+                if (_leaves is not null)
+                {
+                    _leaves.Account = value;
+                }
+
+                if (_measure is not null)
+                {
+                    _measure.Account = value;
+                }
+            }
+        }
 
         /// <summary>The builder, cleared by each blob as it starts.</summary>
         internal FlatBufferBuilder Builder { get; } = new FlatBufferBuilder();
@@ -3243,7 +3266,7 @@ internal static class ArrayBlobWriter
             // Never size first: what it measures is the plan every other profile writes.
             _measure ??= new Workspace
             {
-                FrameRows = FrameRows, GranuleRows = GranuleRows, OwnTypes = OwnTypes, ZstdLevel = ZstdLevel,
+                FrameRows = FrameRows, GranuleRows = GranuleRows, OwnTypes = OwnTypes, ZstdLevel = ZstdLevel, Account = Account,
             };
             _measure.ColumnLevel = ColumnLevel;
             if (_measureEncodings is null || _measureEncodings.Target != target)
@@ -3261,7 +3284,7 @@ internal static class ArrayBlobWriter
         /// The arena a shredded chunk lays each of its typed columns out in, alone, while the blob writes it, and empties
         /// before the next (<see cref="VariantShredder"/>).
         /// </summary>
-        internal CanonicalArena Leaves => _leaves ??= new CanonicalArena();
+        internal CanonicalArena Leaves => _leaves ??= new CanonicalArena(64, Account);
 
         /// <summary>
         /// The nodes of shredding <paramref name="plan"/>, which the workspace keeps from one chunk it shreds to the next

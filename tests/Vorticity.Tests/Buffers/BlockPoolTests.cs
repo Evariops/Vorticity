@@ -28,14 +28,14 @@ public sealed class BlockPoolTests
         BlockPool pool = new BlockPool(maxPerBucket: 4);
         try
         {
-            BlockOwner first = pool.Rent(TestAccount.Shared,1000, 64);
+            BlockOwner first = pool.Rent(TestAccount.Shared, 1000, 64);
             nint address = AddressOf(first);
             Assert.NotEqual(0, address);
 
             pool.Return(first);
             Assert.Equal(1, pool.ParkedCount(1000));
 
-            BlockOwner second = pool.Rent(TestAccount.Shared,1000, 64);
+            BlockOwner second = pool.Rent(TestAccount.Shared, 1000, 64);
 
             Assert.Same(first, second);
             Assert.Equal(address, AddressOf(second));
@@ -56,10 +56,10 @@ public sealed class BlockPoolTests
         BlockPool pool = new BlockPool();
         try
         {
-            BlockOwner first = pool.Rent(TestAccount.Shared,64, 64);
+            BlockOwner first = pool.Rent(TestAccount.Shared, 64, 64);
             pool.Return(first);
 
-            BlockOwner second = pool.Rent(TestAccount.Shared,64, 64);
+            BlockOwner second = pool.Rent(TestAccount.Shared, 64, 64);
             Assert.Same(first, second);
             Assert.Equal(1, second.RefCount);
 
@@ -86,11 +86,11 @@ public sealed class BlockPoolTests
         BlockPool pool = new BlockPool();
         try
         {
-            BlockOwner first = pool.Rent(TestAccount.Shared,64, 64);
+            BlockOwner first = pool.Rent(TestAccount.Shared, 64, 64);
             first.WritableSpan.Fill(0xA7);
             pool.Return(first);
 
-            BlockOwner second = pool.Rent(TestAccount.Shared,64, 64);
+            BlockOwner second = pool.Rent(TestAccount.Shared, 64, 64);
             Assert.Same(first, second);
             Assert.Equal(0xA7, second.Buffer.Span[0]);
             Assert.Equal(0xA7, second.Buffer.Span[63]);
@@ -111,11 +111,11 @@ public sealed class BlockPoolTests
         {
             // Everything at or below 4 KiB is one size class, so a 4096-byte read and a 1-byte
             // read are interchangeable.
-            BlockOwner big = pool.Rent(TestAccount.Shared,4096, 64);
+            BlockOwner big = pool.Rent(TestAccount.Shared, 4096, 64);
             nint address = AddressOf(big);
             pool.Return(big);
 
-            BlockOwner small = pool.Rent(TestAccount.Shared,1, 8);
+            BlockOwner small = pool.Rent(TestAccount.Shared, 1, 8);
 
             Assert.Equal(address, AddressOf(small));
             Assert.Equal(1, small.Length);
@@ -135,12 +135,12 @@ public sealed class BlockPoolTests
         BlockPool pool = new BlockPool();
         try
         {
-            BlockOwner small = pool.Rent(TestAccount.Shared,4096, 64);
+            BlockOwner small = pool.Rent(TestAccount.Shared, 4096, 64);
             pool.Return(small);
 
             // 4097 rounds to 8192: a different bucket, so the parked 4 KiB block is not eligible
             // and must not be handed out with a length beyond its capacity.
-            BlockOwner large = pool.Rent(TestAccount.Shared,4097, 64);
+            BlockOwner large = pool.Rent(TestAccount.Shared, 4097, 64);
 
             Assert.NotSame(small, large);
             Assert.Equal(8192, large.Capacity);
@@ -171,7 +171,7 @@ public sealed class BlockPoolTests
         BlockPool pool = new BlockPool();
         try
         {
-            BlockOwner owner = pool.Rent(TestAccount.Shared,500, alignment);
+            BlockOwner owner = pool.Rent(TestAccount.Shared, 500, alignment);
 
             Assert.Equal(VortexLimits.MaxAlignment, owner.Buffer.Alignment);
             Assert.True(owner.Buffer.IsAligned);
@@ -191,7 +191,7 @@ public sealed class BlockPoolTests
         BlockPool pool = new BlockPool(maxPooledLength: 4096, maxPerBucket: 4);
         try
         {
-            BlockOwner huge = pool.Rent(TestAccount.Shared,1_000_000, 64);
+            BlockOwner huge = pool.Rent(TestAccount.Shared, 1_000_000, 64);
 
             Assert.Equal(-1, huge.BucketIndex);
             Assert.Equal(1_000_000, huge.Length);
@@ -215,9 +215,9 @@ public sealed class BlockPoolTests
         BlockPool pool = new BlockPool(maxPerBucket: 2);
         try
         {
-            BlockOwner a = pool.Rent(TestAccount.Shared,1000, 64);
-            BlockOwner b = pool.Rent(TestAccount.Shared,1000, 64);
-            BlockOwner c = pool.Rent(TestAccount.Shared,1000, 64);
+            BlockOwner a = pool.Rent(TestAccount.Shared, 1000, 64);
+            BlockOwner b = pool.Rent(TestAccount.Shared, 1000, 64);
+            BlockOwner c = pool.Rent(TestAccount.Shared, 1000, 64);
 
             nint addressA = AddressOf(a);
             nint addressB = AddressOf(b);
@@ -231,8 +231,8 @@ public sealed class BlockPoolTests
             Assert.Equal(2, pool.ParkedCount(1000));
 
             // Exactly the two parked blocks come back; c's memory was released.
-            BlockOwner first = pool.Rent(TestAccount.Shared,1000, 64);
-            BlockOwner second = pool.Rent(TestAccount.Shared,1000, 64);
+            BlockOwner first = pool.Rent(TestAccount.Shared, 1000, 64);
+            BlockOwner second = pool.Rent(TestAccount.Shared, 1000, 64);
             HashSet<nint> recycled = [AddressOf(first), AddressOf(second)];
 
             Assert.Equal(2, recycled.Count);
@@ -254,7 +254,7 @@ public sealed class BlockPoolTests
         BlockPool pool = new BlockPool();
         try
         {
-            BlockOwner owner = pool.Rent(TestAccount.Shared,2048, 64);
+            BlockOwner owner = pool.Rent(TestAccount.Shared, 2048, 64);
             nint address = AddressOf(owner);
 
             owner.Retain();
@@ -268,7 +268,7 @@ public sealed class BlockPoolTests
             owner.Release();
             Assert.Equal(1, pool.ParkedCount(2048));
 
-            BlockOwner recycled = pool.Rent(TestAccount.Shared,2048, 64);
+            BlockOwner recycled = pool.Rent(TestAccount.Shared, 2048, 64);
             Assert.Equal(address, AddressOf(recycled));
             pool.Return(recycled);
         }
@@ -284,7 +284,7 @@ public sealed class BlockPoolTests
         BlockPool pool = new BlockPool();
         try
         {
-            BlockOwner owner = pool.Rent(TestAccount.Shared,1024, 64);
+            BlockOwner owner = pool.Rent(TestAccount.Shared, 1024, 64);
             nint address = AddressOf(owner);
 
             // This is the RecordBatch path: the batch releases every buffer it borrowed on
@@ -293,7 +293,7 @@ public sealed class BlockPoolTests
 
             Assert.Equal(1, pool.ParkedCount(1024));
 
-            BlockOwner recycled = pool.Rent(TestAccount.Shared,1024, 64);
+            BlockOwner recycled = pool.Rent(TestAccount.Shared, 1024, 64);
             Assert.Equal(address, AddressOf(recycled));
             pool.Return(recycled);
         }
@@ -309,7 +309,7 @@ public sealed class BlockPoolTests
         BlockPool pool = new BlockPool();
         try
         {
-            BlockOwner owner = pool.Rent(TestAccount.Shared,1024, 64);
+            BlockOwner owner = pool.Rent(TestAccount.Shared, 1024, 64);
             pool.Return(owner);
 
             Assert.Throws<ObjectDisposedException>(() => pool.Return(owner));
@@ -358,7 +358,7 @@ public sealed class BlockPoolTests
         BlockPool pool = new BlockPool();
         try
         {
-            Assert.Throws<VortexFormatException>(() => pool.Rent(TestAccount.Shared,length, alignment));
+            Assert.Throws<VortexFormatException>(() => pool.Rent(TestAccount.Shared, length, alignment));
         }
         finally
         {
@@ -372,7 +372,7 @@ public sealed class BlockPoolTests
         BlockPool pool = new BlockPool();
         try
         {
-            BlockOwner owner = pool.Rent(TestAccount.Shared,0, 64);
+            BlockOwner owner = pool.Rent(TestAccount.Shared, 0, 64);
 
             Assert.True(owner.Buffer.IsEmpty);
             Assert.Equal(4096, owner.Capacity);
@@ -415,7 +415,7 @@ public sealed class BlockPoolTests
     {
         BlockPool pool = new BlockPool(maxPerBucket: 0);
 
-        BlockOwner owner = pool.Rent(TestAccount.Shared,1024, 64);
+        BlockOwner owner = pool.Rent(TestAccount.Shared, 1024, 64);
         pool.Return(owner);
 
         Assert.Equal(0, pool.ParkedCount(1024));
@@ -429,11 +429,11 @@ public sealed class BlockPoolTests
 
         // Rent both before returning either: returning one and immediately renting again would
         // simply pop the block back out and park a single block twice.
-        BlockOwner a = pool.Rent(TestAccount.Shared,1000, 64);
-        BlockOwner b = pool.Rent(TestAccount.Shared,1000, 64);
+        BlockOwner a = pool.Rent(TestAccount.Shared, 1000, 64);
+        BlockOwner b = pool.Rent(TestAccount.Shared, 1000, 64);
         pool.Return(a);
         pool.Return(b);
-        pool.Return(pool.Rent(TestAccount.Shared,100_000, 64));
+        pool.Return(pool.Rent(TestAccount.Shared, 100_000, 64));
         Assert.Equal(2, pool.ParkedCount(1000));
         Assert.Equal(1, pool.ParkedCount(100_000));
 
@@ -443,7 +443,7 @@ public sealed class BlockPoolTests
         Assert.Equal(0, pool.ParkedCount(100_000));
 
         // Still usable afterwards.
-        BlockOwner owner = pool.Rent(TestAccount.Shared,1000, 64);
+        BlockOwner owner = pool.Rent(TestAccount.Shared, 1000, 64);
         Assert.Equal(1000, owner.Length);
         pool.Return(owner);
         pool.Trim();
@@ -455,7 +455,7 @@ public sealed class BlockPoolTests
         BlockPool pool = new BlockPool();
         try
         {
-            BlockOwner live = pool.Rent(TestAccount.Shared,1024, 64);
+            BlockOwner live = pool.Rent(TestAccount.Shared, 1024, 64);
             live.WritableSpan.Fill(0x7E);
 
             pool.Trim();
@@ -475,13 +475,13 @@ public sealed class BlockPoolTests
         BlockPool pool = new BlockPool(maxPerBucket: 4);
         try
         {
-            pool.Return(pool.Rent(TestAccount.Shared,4096, 64));
-            pool.Return(pool.Rent(TestAccount.Shared,65_536, 64));
+            pool.Return(pool.Rent(TestAccount.Shared, 4096, 64));
+            pool.Return(pool.Rent(TestAccount.Shared, 65_536, 64));
             pool.TrimIdle(now: 1_000, everything: false);
             Assert.Equal(1, pool.ParkedCount(4096));
             Assert.Equal(1, pool.ParkedCount(65_536));
 
-            pool.Return(pool.Rent(TestAccount.Shared,4096, 64));
+            pool.Return(pool.Rent(TestAccount.Shared, 4096, 64));
             pool.TrimIdle(now: 60_999, everything: false);
             Assert.Equal(1, pool.ParkedCount(65_536));
 
@@ -504,12 +504,12 @@ public sealed class BlockPoolTests
         BlockPool pool = new BlockPool(maxPerBucket: 4);
         try
         {
-            pool.Return(pool.Rent(TestAccount.Shared,4096, 64));
+            pool.Return(pool.Rent(TestAccount.Shared, 4096, 64));
             pool.TrimIdle(now: 0, everything: true);
             Assert.Equal(0, pool.ParkedCount(4096));
 
             // Still usable afterwards.
-            pool.Return(pool.Rent(TestAccount.Shared,4096, 64));
+            pool.Return(pool.Rent(TestAccount.Shared, 4096, 64));
             Assert.Equal(1, pool.ParkedCount(4096));
         }
         finally
@@ -522,17 +522,13 @@ public sealed class BlockPoolTests
     public void The_pools_the_library_rents_from_are_swept_by_a_full_collection()
     {
         BlockPool pool = new BlockPool(maxRetainedBytes: 1 << 20).Swept();
-        AlignedMemoryPool session = new AlignedMemoryPool();
         StrongBox<int> sweeps = BlockPool.WatchSweeps(pool);
-        StrongBox<int> shared = BlockPool.WatchSweeps(AlignedMemoryPool.Shared.Inner);
-        StrongBox<int> sessions = BlockPool.WatchSweeps(session.Inner);
+        StrongBox<int> shared = BlockPool.WatchSweeps(MemoryAccount.Pool);
         GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true);
         GC.WaitForPendingFinalizers();
         Assert.True(Volatile.Read(ref sweeps.Value) > 0, "a pool made swept");
         Assert.True(Volatile.Read(ref shared.Value) > 0, "the shared pool");
-        Assert.True(Volatile.Read(ref sessions.Value) > 0, "a session's pool");
         GC.KeepAlive(pool);
-        GC.KeepAlive(session);
     }
 
     [Fact]
@@ -589,7 +585,7 @@ public sealed class BlockPoolTests
                 for (int i = 0; i < 32; i++)
                 {
                     int length = 512 << (i & 3);
-                    BlockOwner owner = pool.Rent(TestAccount.Shared,length, 64);
+                    BlockOwner owner = pool.Rent(TestAccount.Shared, length, 64);
                     byte stamp = (byte)(worker + 1);
 
                     Span<byte> writable = owner.WritableSpan;
@@ -622,7 +618,7 @@ public sealed class BlockPoolTests
             long before = GC.GetAllocatedBytesForCurrentThread();
             for (int i = 0; i < held.Length; i++)
             {
-                held[i] = pool.Rent(TestAccount.Shared,block, 64);
+                held[i] = pool.Rent(TestAccount.Shared, block, 64);
             }
 
             long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
@@ -642,25 +638,25 @@ public sealed class BlockPoolTests
         try
         {
             // Past the classes, the block a read gets parks in the pool's one slot once given back.
-            BlockOwner first = pool.Rent(TestAccount.Shared,1_000_000, 64);
+            BlockOwner first = pool.Rent(TestAccount.Shared, 1_000_000, 64);
             Assert.Equal(1_000_000, first.Capacity);
             pool.Return(first);
             Assert.True(pool.KeepsOutsized);
 
             // A shorter outsized read takes it, as long as it asked; a second block given back while
             // the slot holds one is freed.
-            BlockOwner again = pool.Rent(TestAccount.Shared,900_000, 64);
+            BlockOwner again = pool.Rent(TestAccount.Shared, 900_000, 64);
             Assert.Equal(900_000, again.Length);
             Assert.Equal(1_000_000, again.Capacity);
             Assert.False(pool.KeepsOutsized);
-            BlockOwner other = pool.Rent(TestAccount.Shared,500_000, 64);
+            BlockOwner other = pool.Rent(TestAccount.Shared, 500_000, 64);
             Assert.Equal(500_000, other.Capacity);
             pool.Return(again);
             pool.Return(other);
             Assert.True(pool.KeepsOutsized);
 
             // A longer read frees the block kept and gets one of its own length.
-            BlockOwner longer = pool.Rent(TestAccount.Shared,2_000_000, 64);
+            BlockOwner longer = pool.Rent(TestAccount.Shared, 2_000_000, 64);
             Assert.Equal(2_000_000, longer.Capacity);
             Assert.False(pool.KeepsOutsized);
             pool.Return(longer);
@@ -672,7 +668,7 @@ public sealed class BlockPoolTests
             Assert.True(pool.KeepsOutsized);
             pool.TrimIdle(Environment.TickCount64 + 60_000, everything: false);
             Assert.False(pool.KeepsOutsized);
-            pool.Return(pool.Rent(TestAccount.Shared,1_000_000, 64));
+            pool.Return(pool.Rent(TestAccount.Shared, 1_000_000, 64));
             pool.TrimIdle(Environment.TickCount64, everything: true);
             Assert.False(pool.KeepsOutsized);
         }
@@ -725,7 +721,7 @@ public sealed class BlockPoolTests
             // Rented one at a time, the class never has more than one out, and one is all it holds.
             for (int i = 0; i < 20; i++)
             {
-                pool.Return(pool.Rent(TestAccount.Shared,block, 64));
+                pool.Return(pool.Rent(TestAccount.Shared, block, 64));
             }
 
             Assert.Equal(1, pool.ParkedCount(block));
@@ -743,7 +739,7 @@ public sealed class BlockPoolTests
         BlockOwner[] owners = new BlockOwner[count];
         for (int i = 0; i < count; i++)
         {
-            owners[i] = pool.Rent(TestAccount.Shared,length, 64);
+            owners[i] = pool.Rent(TestAccount.Shared, length, 64);
         }
 
         return owners;
@@ -787,11 +783,11 @@ public sealed class SharedPoolTests
     [Fact]
     public void The_shared_pool_rents_and_recycles()
     {
-        BlockOwner first = BlockPool.Shared.Rent(TestAccount.Shared,64 * 1024, 64);
+        BlockOwner first = BlockPool.Shared.Rent(TestAccount.Shared, 64 * 1024, 64);
         nint address = BlockPoolTests.AddressOf(first);
         BlockPool.Shared.Return(first);
 
-        BlockOwner second = BlockPool.Shared.Rent(TestAccount.Shared,64 * 1024, 64);
+        BlockOwner second = BlockPool.Shared.Rent(TestAccount.Shared, 64 * 1024, 64);
         Assert.Equal(address, BlockPoolTests.AddressOf(second));
         BlockPool.Shared.Return(second);
     }
@@ -808,7 +804,7 @@ public sealed class SharedPoolTests
         BlockOwner[] rented = new BlockOwner[ceiling + 1];
         for (int i = 0; i < rented.Length; i++)
         {
-            rented[i] = BlockPool.Shared.Rent(TestAccount.Shared,large, 64);
+            rented[i] = BlockPool.Shared.Rent(TestAccount.Shared, large, 64);
         }
 
         int before = BlockPool.Shared.ParkedCount(large);
@@ -828,7 +824,7 @@ public sealed class SharedPoolTests
     [Fact]
     public void The_shared_pool_gives_back_what_it_parks_when_a_process_budget_refuses()
     {
-        BlockOwner block = BlockPool.Shared.Rent(TestAccount.Shared,64 * 1024, 64);
+        BlockOwner block = BlockPool.Shared.Rent(TestAccount.Shared, 64 * 1024, 64);
         BlockPool.Shared.Return(block);
         Assert.True(BlockPool.Shared.ParkedBytes > 0);
 

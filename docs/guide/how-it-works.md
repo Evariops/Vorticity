@@ -84,7 +84,7 @@ be pushed down does not compile. The predicate is planned before a byte of data 
 statistics may settle it outright, the zone maps prune blocks, an index can prune more, and the plan
 lists the segments the remaining blocks need. Here that is 14 of 123 blocks and 13 segments.
 
-A pipeline then reads those segments and decodes them into buffers from the session's pool, a chunk
+A pipeline then reads those segments and decodes them into buffers from the library's pool, a chunk
 at a time for a plain read or a block at a time under a filter, overlapping the next decode with
 your work on the current batch. You get a `Columns<Reading>`, a `ref struct` over the decoded rows
 that stays valid until the next `MoveNextAsync`, and that the compiler keeps inside the loop body.

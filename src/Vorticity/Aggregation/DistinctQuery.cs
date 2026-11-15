@@ -630,7 +630,7 @@ internal sealed class DistinctBatches : IAsyncEnumerator<RecordBatch>
                 return true;
             }
 
-            CanonicalArena cut = _cut ??= new CanonicalArena(64, _query.Session.Options.EnginePool);
+            CanonicalArena cut = _cut ??= new CanonicalArena(64, QueryMemory.AccountOf(_memory));
             cut.ResetKeepingBlocks();
             int root = CanonicalSlice.SliceAcross(slate.Arena, cut, slate.Root, from, slate.Rows - from);
             _current = RecordBatch.Over(cut, root, 0, _current);
@@ -762,8 +762,9 @@ internal sealed class DistinctBatches : IAsyncEnumerator<RecordBatch>
         }
 
         VortexSessionOptions options = _query.Session.Options;
-        _store = (StructStore)ColumnStores.Create(VortexTypes.ToDType(_query.Schema, new DTypeArena()), options.EnginePool, options.Extensions);
-        _arena = new CanonicalArena(64, options.EnginePool);
+        MemoryAccount account = QueryMemory.AccountOf(_memory);
+        _store = (StructStore)ColumnStores.Create(VortexTypes.ToDType(_query.Schema, new DTypeArena()), account, options.Extensions);
+        _arena = new CanonicalArena(64, account);
         return _store;
     }
 
@@ -1130,7 +1131,8 @@ internal sealed class DistinctEmitter : CoreEmitter
         if (slate is null)
         {
             VortexSessionOptions options = _query.Session.Options;
-            slate = new PartSlate((StructStore)ColumnStores.Create(_dtype, options.EnginePool, options.Extensions), new CanonicalArena(64, options.EnginePool));
+            MemoryAccount account = QueryMemory.AccountOf(_memory);
+            slate = new PartSlate((StructStore)ColumnStores.Create(_dtype, account, options.Extensions), new CanonicalArena(64, account));
         }
 
         slate.Begin();

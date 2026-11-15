@@ -228,7 +228,7 @@ internal sealed class PartitionPostings : IDisposable
             Guid identity = Guid.NewGuid();
             UInt128 uid = VortexDataset.Uid(identity);
             string key = CommitKey.ForData(identity.ToString("N", System.Globalization.CultureInfo.InvariantCulture));
-            ObjectSegmentSink sink = new ObjectSegmentSink(dataset.Store, key, pool: dataset.Session.Options.MemoryPool);
+            ObjectSegmentSink sink = new ObjectSegmentSink(dataset.Store, key, dataset.Session.Options.JobMemoryBudget ?? QueryMemoryBudget.Process);
             using PartitionIndex.Writer writer = new PartitionIndex.Writer(sink);
             try
             {

@@ -185,7 +185,7 @@ public sealed partial class VortexFileWriter
         }
 
         // An arena of its own: the scratch one may hold the batch whose rows the column's first chunk takes.
-        CanonicalArena arena = _dictionaryArena ??= new CanonicalArena(64, Session.Options.EnginePool);
+        CanonicalArena arena = _dictionaryArena ??= new CanonicalArena(64, Account);
         try
         {
             using ArrayBlobWriter.BlobLease blob = ArrayBlobWriter.Write(

@@ -425,8 +425,8 @@ public sealed partial class ShreddedVariantWriteTests
                         int column = batch.Arena.GetNode(batch.RootIndex).GetFieldIndex(file.DType.IndexOfField(name));
                         foreach ((bool compress, int frameRows) in new[] { (true, 0), (true, 512), (false, 0) })
                         {
-                            using ArrayBlobWriter.Workspace whole = new ArrayBlobWriter.Workspace { FrameRows = frameRows };
-                            using ArrayBlobWriter.Workspace streamed = new ArrayBlobWriter.Workspace { FrameRows = frameRows };
+                            using ArrayBlobWriter.Workspace whole = new ArrayBlobWriter.Workspace { FrameRows = frameRows, Account = TestAccount.Shared };
+                            using ArrayBlobWriter.Workspace streamed = new ArrayBlobWriter.Workspace { FrameRows = frameRows, Account = TestAccount.Shared };
                             int shredded = VariantShredder.Shred(batch.Arena, new DTypeArena(), column, plan);
                             using ArrayBlobWriter.BlobLease expected = ArrayBlobWriter.Write(
                                 whole, batch.Arena, shredded, new EncodingDictionary(ComponentKind.Array, Vorticity.Editions.EditionRegistry.Newest), compress);

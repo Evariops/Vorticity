@@ -199,8 +199,8 @@ internal sealed class TopKeep : IDisposable
         _edgeStore?.Release();
         _edgeArena?.Reset();
         VortexSessionOptions options = _session.Options;
-        _edgeStore = (StructStore)ColumnStores.Create(_dtype, options.EnginePool, options.Extensions);
-        _edgeArena = new CanonicalArena(8, options.EnginePool);
+        _edgeStore = (StructStore)ColumnStores.Create(_dtype, QueryMemory.AccountOf(_memory), options.Extensions);
+        _edgeArena = new CanonicalArena(8, QueryMemory.AccountOf(_memory));
         StoreRows.Append(_edgeStore, arena, CanonicalFilter.Apply(arena, root, [row]), validated: true);
         _edgeStore.Commit();
         _edgeRoot = _edgeStore.Build(_edgeArena, 1);
@@ -273,7 +273,8 @@ internal sealed class TopKeep : IDisposable
     private (StructStore Store, CanonicalArena Arena) Create()
     {
         VortexSessionOptions options = _session.Options;
-        return ((StructStore)ColumnStores.Create(_dtype, options.EnginePool, options.Extensions), new CanonicalArena(64, options.EnginePool));
+        MemoryAccount account = QueryMemory.AccountOf(_memory);
+        return ((StructStore)ColumnStores.Create(_dtype, account, options.Extensions), new CanonicalArena(64, account));
     }
 
     /// <summary>What the store holds, reserved under the query's memory: its buffers grown by doubling.</summary>

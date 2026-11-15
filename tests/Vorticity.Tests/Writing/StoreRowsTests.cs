@@ -43,8 +43,8 @@ public sealed partial class StoreRowsTests
         {
             VortexSessionOptions options = VortexSession.Default.Options;
             DType dtype = VortexTypes.ToDType(VortexType.Variant.Nullable, new DTypeArena());
-            ColumnStore whole = ColumnStores.Create(dtype, options.EnginePool, options.Extensions);
-            ColumnStore odd = ColumnStores.Create(dtype, options.EnginePool, options.Extensions);
+            ColumnStore whole = ColumnStores.Create(dtype, TestAccount.Shared, options.Extensions);
+            ColumnStore odd = ColumnStores.Create(dtype, TestAccount.Shared, options.Extensions);
             List<int> oddRows = [];
             int seen = 0;
             await using VortexFile file = await VortexFile.OpenAsync(path, Ct);
@@ -104,12 +104,12 @@ public sealed partial class StoreRowsTests
         int valid = arena.AddBool(types.Bool(Nullability.NonNullable), texts.Length, Validity.NonNullable, bits, 0);
         int node = arena.AddVarBinView(utf8, texts.Length, Validity.Bitmap(valid), views, []);
         VortexSessionOptions options = VortexSession.Default.Options;
-        ColumnStore store = ColumnStores.Create(utf8, options.EnginePool, options.Extensions);
+        ColumnStore store = ColumnStores.Create(utf8, TestAccount.Shared, options.Extensions);
         try
         {
             Assert.Throws<VortexSchemaException>(() => StoreRows.Append(store, arena, node));
             Assert.Equal(4, store.Rows);
-            CanonicalArena built = new CanonicalArena(16, options.EnginePool);
+            CanonicalArena built = new CanonicalArena(16, TestAccount.Shared);
             try
             {
                 // No words, every row valid.
@@ -143,7 +143,7 @@ public sealed partial class StoreRowsTests
     /// <summary>What <paramref name="store"/> holds, built into an arena and read back as variants.</summary>
     private static List<string?> Read(ColumnStore store)
     {
-        CanonicalArena arena = new CanonicalArena(16, VortexSession.Default.Options.EnginePool);
+        CanonicalArena arena = new CanonicalArena(16, TestAccount.Shared);
         try
         {
             int rows = store.Rows;

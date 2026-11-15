@@ -152,7 +152,7 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable, IOrderedKeys
         }
         else
         {
-            _windows ??= new CanonicalArena();
+            _windows ??= new CanonicalArena(64, Vorticity.Buffers.MemoryAccount.Unassigned);
             _window = batch.Window(chosen.Row, count, _windows, _window);
             _current = _window;
         }

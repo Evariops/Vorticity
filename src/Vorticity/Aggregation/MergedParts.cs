@@ -429,7 +429,7 @@ internal sealed class MergedParts : ResultParts
     /// <summary>
     /// The part merged, then built into its batches and let go; the lanes' tables once the last part is
     /// merged. What its table held of the query's memory stays held until the reader is done with its
-    /// batches, which the session's pool holds outside any query's count.
+    /// batches, which the library's pool holds outside any query's count.
     /// </summary>
     private async ValueTask<Built> BuildAsync(int part, CancellationToken cancellationToken)
     {

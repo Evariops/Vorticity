@@ -62,7 +62,7 @@ implement its interface by hand without referencing the generator.
 
 | owned | why |
 |---|---|
-| the memory pool, 64-byte aligned by default (`AlignedMemoryPool`) | every batch, segment and builder buffer comes from it, and disposing the session returns everything |
+| the memory budgets, `MemoryBudget` and `JobMemoryBudget` | every block a query or a writer of the session rents from the process's one pool is counted in the account of its work, under one of them, and refused past it with a `VortexMemoryException` |
 | the segment cache | one budget for every file of the session, for sources that do I/O; by default the process's, which every session given none shares, but a session that holds keys, whose plaintext stays its own |
 | the bound on reads in flight, `MaxConcurrentReads` | an object store sees at most that many requests from the process |
 | the degree of parallelism, `MaxDegreeOfParallelism`, 1 by default | where every scan and writer of the session starts (see [parallelism](09-contracts.md#2-parallelism)) |

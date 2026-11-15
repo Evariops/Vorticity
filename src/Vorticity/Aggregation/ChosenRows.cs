@@ -211,8 +211,8 @@ internal sealed class ChosenRows(VortexType type) : ChosenValues
         if (_store is null)
         {
             VortexSessionOptions options = session.Options;
-            _store = ColumnStores.Create(VortexTypes.ToDType(type.Nullable, new DTypeArena()), options.EnginePool, options.Extensions);
-            _arena = new CanonicalArena(16, options.EnginePool);
+            _store = ColumnStores.Create(VortexTypes.ToDType(type.Nullable, new DTypeArena()), QueryMemory.AccountOf(memory), options.Extensions);
+            _arena = new CanonicalArena(16, QueryMemory.AccountOf(memory));
         }
 
         // Each fetch keeps its own rows: the store emptied, its buffers kept, none of its rows accepted.

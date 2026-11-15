@@ -18,7 +18,6 @@ public sealed class ObjectSegmentSinkTailTests
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
         await using MemoryObjectStore store = new MemoryObjectStore();
-        BlockPool pool = new BlockPool();
         ObjectSegmentSink sink = new ObjectSegmentSink(store, "data/tail.vortex", streamedFrom: 1 << 10);
         byte[] body = new byte[8 << 10];
         byte[] tail = new byte[1 << 10];
@@ -37,7 +36,7 @@ public sealed class ObjectSegmentSinkTailTests
         sink.KeepTail();
         await sink.WriteAsync(tail, ct);
 
-        ISegmentReader? reader = sink.Tail(pool);
+        ISegmentReader? reader = sink.Tail();
         Assert.NotNull(reader);
         SegmentOwner segment = await reader!.ReadRangeAsync(body.Length + 256, 512, 1, ct);
         try

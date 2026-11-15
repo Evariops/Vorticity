@@ -43,6 +43,15 @@ public sealed class ParquetFileWriter : IAsyncDisposable
     private static readonly string CreatedBy = CreatedByOf(typeof(ParquetFileWriter).Assembly);
 
     private readonly VortexSession _session;
+
+    /// <summary>The pipe over the file this writer created; null over a caller's sink.</summary>
+    internal FilePipeWriter? FilePipe => _filePipe;
+
+    /// <summary>
+    /// The account the writer's blocks are counted in, its pages', its stores' and its arenas': under its session's jobs'
+    /// budget, the process's without one. Closed when the writer is released, and by the collector for one never disposed.
+    /// </summary>
+    internal WorkAccount Account { get; }
     private readonly DType _dtype;
 
     /// <summary>Whether the root is a struct of the columns: one whose root is not is its one column, with no struct level above it.</summary>
@@ -120,6 +129,7 @@ public sealed class ParquetFileWriter : IAsyncDisposable
         WriteSchema map,
         ParquetWriteOptions options,
         VortexSession session,
+        WorkAccount account,
         PipeSegmentSink sink,
         FilePipeWriter? filePipe,
         PipeWriter? callerPipe)
@@ -131,6 +141,7 @@ public sealed class ParquetFileWriter : IAsyncDisposable
         _map = map;
         _options = options;
         _session = session;
+        Account = account;
         _sink = sink;
         _filePipe = filePipe;
         _callerPipe = callerPipe;
@@ -161,7 +172,7 @@ public sealed class ParquetFileWriter : IAsyncDisposable
                 hints.Remove(path);
                 keys.Remove(path);
                 _columns[i] = new ColumnChunkWriter(
-                    column, (CompressionCodec)codec.Compression, codec.Level, CompressorsOf(codec), options.BlockRows, options.Profile, session.Options.EnginePool, rate, options.RowGroupRows)
+                    column, (CompressionCodec)codec.Compression, codec.Level, CompressorsOf(codec), options.BlockRows, options.Profile, Account, rate, options.RowGroupRows)
                 {
                     WriteChecksums = options.WriteChecksums,
                     PageBytes = options.PageBytes,
@@ -208,14 +219,18 @@ public sealed class ParquetFileWriter : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(schema);
         options.Validate();
         WriteSchema map = WriteSchema.Map(schema);
-        FilePipeWriter pipe = FilePipeWriter.Create(path, session.Options.MemoryPool, options.Durable);
+
+        // One account for the writer and the pipe it writes through, whose segments are the writer's bytes in flight.
+        WorkAccount account = VortexFileWriter.AccountFor(session);
+        FilePipeWriter pipe = FilePipeWriter.Create(path, new AccountMemoryPool(account), options.Durable);
         try
         {
-            return new ParquetFileWriter(schema, map, options, session, new PipeSegmentSink(pipe), pipe, null);
+            return new ParquetFileWriter(schema, map, options, session, account, new PipeSegmentSink(pipe), pipe, null);
         }
         catch
         {
             pipe.Abandon();
+            account.Dispose();
             throw;
         }
     }
@@ -226,10 +241,10 @@ public sealed class ParquetFileWriter : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(sink);
         ArgumentNullException.ThrowIfNull(schema);
         options.Validate();
-        return new ParquetFileWriter(schema, WriteSchema.Map(schema), options, session, new PipeSegmentSink(sink), null, sink);
+        return new ParquetFileWriter(schema, WriteSchema.Map(schema), options, session, VortexFileWriter.AccountFor(session), new PipeSegmentSink(sink), null, sink);
     }
 
-    /// <summary>The writer's builder, over buffers from the session's pool; reusable, and cleared by each write.</summary>
+    /// <summary>The writer's builder, over buffers from the library's pool counted for the writer; reusable, and cleared by each write.</summary>
     /// <returns>The builder; every call returns the same one.</returns>
     /// <exception cref="ObjectDisposedException">The file is completed or abandoned.</exception>
     public ColumnsBuilder Builder()
@@ -321,7 +336,7 @@ public sealed class ParquetFileWriter : IAsyncDisposable
         }
 
         int[] members = MembersOf<TRecord>();
-        CanonicalArena scratch = _scratch ??= new CanonicalArena(64, _session.Options.EnginePool);
+        CanonicalArena scratch = _scratch ??= new CanonicalArena(64, Account);
         try
         {
             return TakeScratchAsync(scratch, BatchIntake.Columns(scratch, columns, members, _dtype), cancellationToken);
@@ -370,7 +385,7 @@ public sealed class ParquetFileWriter : IAsyncDisposable
             return IngestAsync(batch.Arena, batch.RootIndex, cancellationToken);
         }
 
-        CanonicalArena scratch = _scratch ??= new CanonicalArena(64, _session.Options.EnginePool);
+        CanonicalArena scratch = _scratch ??= new CanonicalArena(64, Account);
         try
         {
             int root = BatchIntake.Selected(scratch, scratch.ReferenceFrom(batch.Arena, batch.RootIndex), batch.SelectionWords);
@@ -508,6 +523,9 @@ public sealed class ParquetFileWriter : IAsyncDisposable
             WorkFan.Return(fan);
             _fan = null;
         }
+
+        // Last: what the writer's blocks still hold goes back to its budget.
+        Account.Dispose();
     }
 
     /// <summary>
@@ -734,7 +752,7 @@ public sealed class ParquetFileWriter : IAsyncDisposable
         }
 
         root.Commit();
-        CanonicalArena arena = _arena ??= new CanonicalArena(64, _session.Options.EnginePool);
+        CanonicalArena arena = _arena ??= new CanonicalArena(64, Account);
         try
         {
             await IngestAsync(arena, root.BuildRoot(arena, root.Committed), cancellationToken).ConfigureAwait(false);
@@ -1040,7 +1058,7 @@ public sealed class ParquetFileWriter : IAsyncDisposable
     }
 
     private StructStore Root() =>
-        _root ??= ColumnStores.Root(_dtype, _session.Options.EnginePool, _session.Options.Extensions);
+        _root ??= ColumnStores.Root(_dtype, Account, _session.Options.Extensions);
 
     /// <summary>Gives the builder's buffers back to the pool.</summary>
     private void Release()
