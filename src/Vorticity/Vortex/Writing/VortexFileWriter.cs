@@ -484,6 +484,18 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// <summary>The rows past which the batches waiting go through the writer, as one.</summary>
     private const int StagedRows = 256;
 
+    /// <summary>
+    /// The rows from which a batch's ingest is spread over the writer's threads, a block's at most: what a batch that tops up
+    /// the block in transit holds, a block less the rows already there. At a block exactly, the batches a compaction's merge
+    /// gathers ingested on one thread, each a few rows short of it. A fan costs some ten microseconds, under a twentieth of
+    /// what this many rows cost its columns at half a microsecond a row (estimate, 2026-11-16).
+    /// </summary>
+    private const int AcrossRows = 1_024;
+
+    // The rows a batch waits below, and the waiting ones go through past, when the writer's caller says
+    // (VortexWriteOptions.StagedRows); 0 for the writer's own bounds.
+    private int _stagedRows;
+
     /// <summary>The bytes past which they go whatever their rows, so that batches of large values wait for few others.</summary>
     private const long StagedBytes = 64 << 10;
 
@@ -1034,6 +1046,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         }
 
         writer._groupRows = writer._gathering is null ? 0 : options.GatheredGroupRows;
+        writer._stagedRows = options.StagedRows;
 
         // A sheet of each column a sheet describes, fed as the column's indexes are.
         if (options.ColumnSheetBytes is not null && writer._isTabular)
@@ -1372,8 +1385,20 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         // tables, the indexes and the blob writer behind this line only ever meet canonical nodes.
         root = arena.DecodedTree(root);
 
+        // A batch that waits with the ones after it has its paths counted with them, as they go through together
+        // (UnstageAsync): a compaction's merge hands its writer a run of a few rows at a time, each of which was counted on a
+        // lane of its own.
+        if (Stages(rows, seal))
+        {
+            await WriteCountedAsync(arena, root, rows, seal, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        // The rows waiting go through first, counted first, the rows of each call following those of the call before.
+        await UnstageAsync(cancellationToken).ConfigureAwait(false);
+
         // The paths of the variant columns counted on another lane while the rows are taken, and done counting before the
-        // caller may reset the arena: the rows of each call follow those of the call before.
+        // caller may reset the arena.
         Task? counting = _census is null ? null : CountPathsAsync(arena, root, rows);
         try
         {
@@ -1520,10 +1545,12 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         // A small batch waits with the ones after it until together they make a batch worth the
         // work every batch costs below: its statistics, its chunk's sizing, its copy in transit,
         // and a node more to concatenate when its chunk goes out.
-        if (!seal && _rowBlock > 0 && rows < StageBelow(_fixedWidth))
+        if (Stages(rows, seal))
         {
             Staging staging = Stage(arena, root, rows);
-            if (staging.Rows >= StagedRows || staging.Bytes >= StagedBytes || CompletesABlock(staging))
+            if (_stagedRows > 0
+                ? staging.Rows >= _stagedRows
+                : staging.Rows >= StagedRows || staging.Bytes >= StagedBytes || CompletesABlock(staging))
             {
                 await UnstageAsync(cancellationToken).ConfigureAwait(false);
             }
@@ -1802,6 +1829,10 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// </summary>
     private static int StageBelow(bool fixedWidth) => fixedWidth ? 64 : 6;
 
+    /// <summary>Whether a batch of <paramref name="rows"/> rows waits with the ones after it rather than go through the writer alone.</summary>
+    private bool Stages(int rows, bool seal) =>
+        !seal && _rowBlock > 0 && rows < (_stagedRows > 0 ? _stagedRows : StageBelow(_fixedWidth));
+
     /// <summary>Whether every leaf of <paramref name="dtype"/> holds its values at a fixed width.</summary>
     private static bool FixedWidth(DType dtype)
     {
@@ -1870,7 +1901,26 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         staging.Bytes = 0;
         try
         {
-            await WriteDecodedAsync(context.Canonical, node, rows, seal: false, cancellationToken).ConfigureAwait(false);
+            // Their paths counted on another lane while they are taken, done before their arena is reset.
+            Task? counting = _census is null ? null : CountPathsAsync(context.Canonical, node, rows);
+            try
+            {
+                await WriteDecodedAsync(context.Canonical, node, rows, seal: false, cancellationToken).ConfigureAwait(false);
+            }
+            catch
+            {
+                if (counting is not null)
+                {
+                    await counting.ContinueWith(static _ => { }, TaskScheduler.Default).ConfigureAwait(false);
+                }
+
+                throw;
+            }
+
+            if (counting is not null)
+            {
+                await counting.ConfigureAwait(false);
+            }
         }
         finally
         {
@@ -1948,7 +1998,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         // its caller's thread: its two or three accumulators gained nothing spread (a million log
         // lines at eight lanes, 436 ms against 437 on one), and a helper that ends after the caller
         // moves the write onto its own thread, half the batches (8 ms of 448).
-        if ((_indexes is null or { AsksNothing: true } || _indexes.FeedsAcross) && rows >= _blockRows && _fieldCount > 1 && Fan is { } fan)
+        if ((_indexes is null or { AsksNothing: true } || _indexes.FeedsAcross) && rows >= Math.Min(_blockRows, AcrossRows) && _fieldCount > 1 && Fan is { } fan)
         {
             await IngestAcrossAsync(fan, arena, rows).ConfigureAwait(false);
             return;
@@ -1997,7 +2047,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// <summary>The items of an ingest across <paramref name="fan"/>'s threads, laid in its room: how many there are.</summary>
     private int ItemsOf(WorkFan fan, CanonicalArena arena)
     {
-        Span<int> items = fan.Items(_fieldCount * 4);
+        Span<int> items = fan.Items((_fieldCount * 4) + 1);
         return FeedItems(items, IngestItems(arena, items));
     }
 
@@ -2015,6 +2065,12 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                 {
                     items[count++] = field << 3;
                 }
+            }
+
+            // The composite keys, together an item past the columns'.
+            if (indexes.FeedsKeys)
+            {
+                items[count++] = _fieldCount << 3;
             }
         }
 
@@ -2061,21 +2117,41 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         IngestPart(entry >> 3, (ColumnWriter.IngestParts)(entry & 7), (CanonicalArena)fan.State!, fan.Value);
     }
 
-    /// <summary>Feeds column <paramref name="field"/>'s index builders the batch's <paramref name="rows"/>, block by block, closing each block as it fills.</summary>
+    /// <summary>
+    /// Feeds column <paramref name="field"/>'s index builders the batch's <paramref name="rows"/>, block by block, closing each
+    /// block as it fills; past the columns, the composite keys'.
+    /// </summary>
     private void FeedPart(int field, CanonicalArena arena, int rows)
     {
         IndexWriter indexes = _indexes!;
-        int node = _fieldNodes[field];
+        bool keys = field == _fieldCount;
+        int node = keys ? -1 : _fieldNodes[field];
         int filled = _blockFilled;
         for (int offset = 0; offset < rows;)
         {
             int take = Math.Min(_blockRows - filled, rows - offset);
-            indexes.Accumulate(field, arena, node, offset, take);
+            if (keys)
+            {
+                indexes.AccumulateKeys(arena, _fieldNodes, offset, take);
+            }
+            else
+            {
+                indexes.Accumulate(field, arena, node, offset, take);
+            }
+
             offset += take;
             filled += take;
             if (filled == _blockRows)
             {
-                indexes.CloseBlock(field);
+                if (keys)
+                {
+                    indexes.CloseKeysBlock();
+                }
+                else
+                {
+                    indexes.CloseBlock(field);
+                }
+
                 filled = 0;
             }
         }

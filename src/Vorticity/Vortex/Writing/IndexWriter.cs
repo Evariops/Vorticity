@@ -1000,24 +1000,45 @@ internal sealed class IndexWriter : IDisposable
     /// ingests the column, with those of the keys it shreds: once the first block is closed, which tells them once what the
     /// statistics say of it, and when no builder reads several columns at once, as a composite key's and a nested column's do.
     /// </summary>
-    internal bool FeedsAcross
+    /// <remarks>
+    /// A composite key reads several columns of the batch, and no more: it cuts them into an arena of its own and encodes them
+    /// there (<see cref="AccumulateKeys"/>), so it is an item of its own beside the columns' (<see cref="FeedsKeys"/>). Kept
+    /// on the ingest's own thread, it held a compaction's writer, whose objects index their key's prefix, to one core. A nested
+    /// column's builders are fed a column published again over the batch's arena, and stay there.
+    /// </remarks>
+    internal bool FeedsAcross => _firstBlockClosed && _nested is null;
+
+    /// <summary>Whether a composite key feeds a builder, which the ingest across the writer's threads feeds as an item of its own.</summary>
+    internal bool FeedsKeys
     {
         get
         {
-            if (!_firstBlockClosed || _nested is not null)
+            for (int slot = _fieldCount; slot < _builders.Length; slot++)
             {
-                return false;
-            }
-
-            for (int composite = _fieldCount; composite < _builders.Length; composite++)
-            {
-                if (_builders[composite].Count > 0 && _variants?[composite] is null)
+                if (_keyFields[slot] is not null && _builders[slot].Count > 0)
                 {
-                    return false;
+                    return true;
                 }
             }
 
-            return true;
+            return false;
+        }
+    }
+
+    /// <summary>Seals the open block of every composite key's builders, as <see cref="CloseBlock(int)"/> seals a column's.</summary>
+    internal void CloseKeysBlock()
+    {
+        for (int slot = _fieldCount; slot < _builders.Length; slot++)
+        {
+            if (_keyFields[slot] is null)
+            {
+                continue;
+            }
+
+            foreach (IndexBuilder builder in _builders[slot])
+            {
+                builder.CloseBlock();
+            }
         }
     }
 

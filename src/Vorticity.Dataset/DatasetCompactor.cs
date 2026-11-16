@@ -1824,56 +1824,14 @@ internal static partial class DatasetCompactor
             // The blocks the rows before these and these themselves closed, declared before their rows are written.
             _rows += batch.RowCount;
             Batches++;
-            if (_census is not { } census)
-            {
-                await output.Writer.WriteBatchAsync(batch, cancellationToken).ConfigureAwait(false);
-                return;
-            }
-
-            // Each row counted after the object's rows before it, at its place, which the groups of its rows tell apart: with
-            // lanes to spare, on another while the writer takes the same rows, the census reading them alone once their
-            // nodes are canonical; the census and its spans as counted in turn. Counted first, it held a merge of log
-            // records a fifth of its time.
-            // The stream's one array of countings, which each batch fills once the one before is counted; a run of a few rows,
-            // a merge of keys that interleave cutting one a row, counted in place, where a task a run cost more than it.
-            PathCensus.Counting[] ready = _ready ??= new PathCensus.Counting[census.Length];
-            for (int v = 0; v < census.Length; v++)
-            {
-                ready[v] = PathCensus.Prepare(batch, _variants![v]);
-            }
-
-            if (_dataset.Session.Options.MaxDegreeOfParallelism <= 1 || batch.RowCount < CountedApartRows)
-            {
-                Count(census, ready);
-                await output.Writer.WriteBatchAsync(batch, cancellationToken).ConfigureAwait(false);
-                return;
-            }
-
-            Task counting = Task.Run(() => Count(census, ready), cancellationToken);
-            try
-            {
-                await output.Writer.WriteBatchAsync(batch, cancellationToken).ConfigureAwait(false);
-            }
-            catch
-            {
-                await counting.ContinueWith(static _ => { }, TaskScheduler.Default).ConfigureAwait(false);
-                throw;
-            }
-
-            await counting.ConfigureAwait(false);
-
-            static void Count(PathCensus[] census, PathCensus.Counting[] ready)
-            {
-                for (int v = 0; v < census.Length; v++)
-                {
-                    census[v].Add(in ready[v]);
-                }
-            }
+            await output.Writer.WriteBatchAsync(batch, cancellationToken).ConfigureAwait(false);
         }
 
         /// <summary>
         /// The object being written, started when none is: one with a sparse index keeps a table of contents, and in a
-        /// partition value's rows shreds what they pay for, counting its paths as its rows come.
+        /// partition value's rows shreds what they pay for, its writer counting its paths as it takes its rows, for its path
+        /// directory, at the grain of its granules: counted here run by run, they held a merge's thread a fortieth of its
+        /// time, beside a writer that counts them a block at a time on its lanes (2026-11-16).
         /// </summary>
         private ObjectOutput Open()
         {
@@ -1885,10 +1843,9 @@ internal static partial class DatasetCompactor
             ValueShredding? shredding = Shreddings is { } shreddings ? shreddings[Math.Clamp(_value, 0, shreddings.Count - 1)] : null;
             output = _dataset.StartObjectUnder(
                 _schema, _inKeyOrder, _rowBound, contents: Keys is not null, synopses: Keys is not null, shredded: shredding?.Shredded,
-                variantChunks: shredding?.VariantChunks, byteBound: _byteBound, postings: Postings, budget: Budget);
+                variantChunks: shredding?.VariantChunks, byteBound: _byteBound, countsPaths: shredding is not null, postings: Postings, budget: Budget);
             _output = output;
             Postings?.BlocksOf(VortexDataset.Uid(output.Identity), output.Writer.BlockRows);
-            _census = shredding is null ? null : Census(output.Writer.BlockRows);
             foreach ((int field, ObjectDictionary dictionary, long rowBytes) in Dictionaries)
             {
                 output.Writer.TryDeclareDictionary(field, dictionary, _rowBound, rowBytes, sorted: field == SortedColumn);
@@ -1896,54 +1853,9 @@ internal static partial class DatasetCompactor
             return output;
         }
 
-        /// <summary>
-        /// A census for each variant column of the object about to be written, the columns found once a stream: each path
-        /// keeps the spans of rows its values lie in, at the grain of the groups its directory names.
-        /// </summary>
-        private PathCensus[] Census(int granuleRows)
-        {
-            _variants ??= VariantColumns(_schema.DType);
-            _groupRows = GroupRows(granuleRows);
-            PathCensus[] census = new PathCensus[_variants.Length];
-            for (int v = 0; v < census.Length; v++)
-            {
-                census[v] = new PathCensus(_dataset.Options.Write.StringBoundBytes, _groupRows);
-            }
-
-            return census;
-        }
-
-        /// <summary>
-        /// The rows of the groups an object's path directory names the paths of: a granule, so that the directory says the
-        /// granules each path has a value in, its presence (spec E, 3.1), which a question on the path reads alone.
-        /// </summary>
-        private static long GroupRows(int granuleRows) => Math.Max(granuleRows, 1);
-
-        /// <summary>
-        /// Declares to <paramref name="writer"/> each variant column's path directory, of what <paramref name="census"/>
-        /// counted, each path naming the groups of the object's rows that hold it.
-        /// </summary>
-        private void DeclareDirectories(VortexFileWriter writer, PathCensus[] census, ImmutableDictionary<string, VariantShredding> shredded)
-        {
-            for (int v = 0; v < census.Length; v++)
-            {
-                string name = _schema.DType.GetFieldName(_variants![v]);
-                writer.DeclareDirectory(name, VariantDirectory.From(census[v], shredded.GetValueOrDefault(name), _groupRows));
-            }
-        }
-
-        // The countings of a batch's variant columns, the stream's one array; the rows under which a batch is counted in
-        // place rather than beside its write.
-        private PathCensus.Counting[]? _ready;
-        private const int CountedApartRows = 64;
-
-        // The place among the shreddings of the value being written and its first key; the paths of the object being
-        // written, a census a variant column, the columns, and the rows of the groups its directory names.
+        // The place among the shreddings of the value being written and its first key.
         private int _value = -1;
         private byte[]? _valueKey;
-        private PathCensus[]? _census;
-        private int[]? _variants;
-        private long _groupRows;
 
         /// <summary>
         /// Records the first key of the rows written next, which starts the next partition value's shredding when they
@@ -1988,16 +1900,6 @@ internal static partial class DatasetCompactor
                 await using (output.Writer.ConfigureAwait(false))
                 {
                     _sorted?.Finish(output.Writer);
-                    if (_census is { } census)
-                    {
-                        _census = null;
-                        DeclareDirectories(output.Writer, census, Shreddings![Math.Clamp(_value, 0, Shreddings.Count - 1)].Shredded);
-                        foreach (PathCensus counted in census)
-                        {
-                            counted.Release();
-                        }
-                    }
-
                     await output.Writer.CompleteAsync(cancellationToken).ConfigureAwait(false);
                     ScratchBytes += output.Writer.ScratchBytes;
                     BatchesAcross += output.Writer.BatchesIngestedAcross;

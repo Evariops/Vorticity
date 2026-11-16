@@ -93,6 +93,16 @@ public sealed partial class DatasetGranuleStatsTests
             ColumnLocate?[] locates = await dataset.ReadLocatesAsync(held.Entry, fields, Ct);
             GranuleStats cut = stats[0]!;
             Console.WriteLine($"OBJECT: {held.Entry.Rows} rows, {cut.Count} granules, {store.Requests} requests for every column's statistics and locates");
+
+            // An object of fewer than four granules, the last one, whose rows the writer's rolls decide: three granules in four
+            // are every one there, each value lies everywhere and keeps a locate all the same, which the index of its partition
+            // reads, and its few rows hold no granule of one value. What follows is said of the others.
+            if (cut.Count < 4)
+            {
+                objects--;
+                continue;
+            }
+
             Event[] stored = await RowsAsync(dataset, held.Entry);
             granules += cut.Count;
             foreach ((int field, IndexSegment region) in contents.GranuleStats)

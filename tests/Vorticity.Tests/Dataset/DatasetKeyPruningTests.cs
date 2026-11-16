@@ -122,7 +122,10 @@ public sealed partial class DatasetKeyPruningTests
             {
                 SortKey = [LayoutValue.Column(nameof(Row.Service)), LayoutValue.Column(nameof(Row.At)).Truncate(CalendarUnit.Hour)],
                 IndexedPrefix = 1,
-                ObjectBytes = 256 << 10,
+
+                // Objects of an eighth of the rows or so, so that some hold one service's rows alone wherever the writer
+                // rolls them: at a quarter, one service's rows held no object whole when the rolls moved by a few rows.
+                ObjectBytes = 128 << 10,
             },
             ContentsObjectBytes = 0,
             ChunkBytes = 64 << 10,
