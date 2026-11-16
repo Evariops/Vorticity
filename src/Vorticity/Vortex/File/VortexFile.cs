@@ -1793,8 +1793,8 @@ public sealed partial class VortexFile : IAsyncDisposable
     }
 
     /// <summary>
-    /// Releases the tail buffer and disposes the segment source the file owns, which is every
-    /// source handed to an open. Idempotent. A file of its session must be disposed before the
+    /// Releases the tail buffer and the index runs the file decoded, and disposes the segment source the file owns, which
+    /// is every source handed to an open. Idempotent. A file of its session must be disposed before the
     /// session is.
     /// </summary>
     /// <returns>A task that completes when the file is closed.</returns>
@@ -1807,6 +1807,11 @@ public sealed partial class VortexFile : IAsyncDisposable
 
         Session.Detach(this);
         _tail.Release();
+        if (Volatile.Read(ref _decoded) is { } decoded && Volatile.Read(ref decoded.Runs) is { } runs)
+        {
+            runs.Release();
+        }
+
         if (Volatile.Read(ref _indexState) is { } indexes)
         {
             await DisposeIndexSourcesAsync(indexes.Origins).ConfigureAwait(false);

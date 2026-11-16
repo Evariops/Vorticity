@@ -388,20 +388,28 @@ internal sealed partial class SortedRunsSource
             }
         }
 
-        int[] offsets = new int[kept.Count + 1];
+        // A dictionary's segment is the run's own, kept by no file: its blocks are left to the collector with it.
+        Block<int> offsets = Blocks.RentCleared<int>(kept.Count + 1);
+        Span<int> at = offsets.AsSpan();
         for (int k = 0; k < kept.Count; k++)
         {
-            offsets[k + 1] = offsets[k] + (starts[kept[k] + 1] - starts[kept[k]]);
+            at[k + 1] = at[k] + (starts[kept[k] + 1] - starts[kept[k]]);
         }
 
-        byte[] keys = new byte[offsets[^1]];
+        Block<byte> keys = Blocks.Rent<byte>(at[^1]);
         for (int k = 0; k < kept.Count; k++)
         {
-            int at = starts[kept[k]];
-            unsorted.AsSpan(at, starts[kept[k] + 1] - at).CopyTo(keys.AsSpan(offsets[k]));
+            int start = starts[kept[k]];
+            unsorted.AsSpan(start, starts[kept[k] + 1] - start).CopyTo(keys.AsSpan(at[k]));
         }
 
-        return new RunSegment(keys, bytes ? offsets : null, null, kept.Count);
+        if (!bytes)
+        {
+            Blocks.Return(offsets);
+            offsets = default;
+        }
+
+        return new RunSegment(keys, offsets, default, kept.Count);
     }
 
     /// <summary>A dictionary's keys, by index into their concatenated bytes, in the key order.</summary>
@@ -430,10 +438,7 @@ internal sealed partial class SortedRunsSource
         }
     }
 
-    private static ReadOnlySpan<byte> KeyBytesAt(RunSegment segment, KeyLayout layout, int index) =>
-        segment.Offsets is { } offsets
-            ? segment.Keys.AsSpan(offsets[index], offsets[index + 1] - offsets[index])
-            : segment.Keys.AsSpan(index * layout.Width, layout.Width);
+    private static ReadOnlySpan<byte> KeyBytesAt(RunSegment segment, KeyLayout layout, int index) => segment.KeyAt(index, layout.Width);
 
     /// <summary>
     /// The flat chunks of a column, each with its first row, or null when the column is not stored

@@ -557,8 +557,8 @@ internal sealed partial class SortedRunsSource : KeySource
         RunSegment segment = run.Current!;
         int at = (int)(run.Position - run.CurrentStart);
         int edge = forward ? segment.Count - 1 : 0;
-        int past = segment.Offsets is { } offsets
-            ? KeyGallop.Past(new ByteKeys(segment.Keys, offsets, key), at, edge, forward)
+        int past = !segment.Offsets.IsDefault
+            ? KeyGallop.Past(new ByteKeys(segment.Keys, segment.Offsets, key), at, edge, forward)
             : KeyGallop.Past(new FixedKeys(segment.Keys, _layout.Width, key), at, edge, forward);
         return past < 0 ? Unknown : run.CurrentStart + past;
     }
@@ -1270,8 +1270,8 @@ internal sealed partial class SortedRunsSource : KeySource
         DType u32 = types.Primitive(PType.U32, Nullability.NonNullable);
 
         CanonicalNode keyNode = context.Canonical.GetNode(DecodeRoot(context, keyBlob, keyType, entries));
-        byte[] keys;
-        int[]? offsets = null;
+        Block<byte> keys;
+        Block<int> offsets = default;
         if (_layout.Shape == KeyShape.Bytes)
         {
             if (keyNode.Kind != CanonicalKind.VarBinView || keyNode.Length != entries)
@@ -1279,18 +1279,20 @@ internal sealed partial class SortedRunsSource : KeySource
                 throw Malformed("its keys do not decode to one string per entry");
             }
 
-            offsets = new int[entries + 1];
+            offsets = Blocks.Rent<int>(entries + 1);
+            Span<int> starts = offsets.AsSpan();
+            starts[0] = 0;
             long total = 0;
             for (int i = 0; i < entries; i++)
             {
                 total += LiteralReader.ViewAt(keyNode, i).Length;
-                offsets[i + 1] = checked((int)total);
+                starts[i + 1] = checked((int)total);
             }
 
-            keys = new byte[total];
+            keys = Blocks.Rent<byte>(checked((int)total));
             for (int i = 0; i < entries; i++)
             {
-                LiteralReader.ViewAt(keyNode, i).CopyTo(keys.AsSpan(offsets[i]));
+                LiteralReader.ViewAt(keyNode, i).CopyTo(keys.AsSpan(starts[i]));
             }
         }
         else
@@ -1300,12 +1302,14 @@ internal sealed partial class SortedRunsSource : KeySource
                 throw Malformed("its keys do not decode to one value of the column's type per entry");
             }
 
-            keys = keyNode.Values.Span[..(entries * _layout.Width)].ToArray();
+            ReadOnlySpan<byte> values = keyNode.Values.Span[..(entries * _layout.Width)];
+            keys = Blocks.Rent<byte>(values.Length);
+            values.CopyTo(keys.AsSpan());
         }
 
         if (!HasRows)
         {
-            return new RunSegment(keys, offsets, null, entries);
+            return new RunSegment(keys, offsets, default, entries);
         }
 
         context.ResetBatch();
@@ -1319,8 +1323,9 @@ internal sealed partial class SortedRunsSource : KeySource
                 throw Malformed("its rows do not decode to one u64 per entry");
             }
 
-            ulong[] wide = wideNode.Values.Cast<ulong>()[..entries].ToArray();
-            foreach (ulong row in wide)
+            Block<ulong> wide = Blocks.Rent<ulong>(entries);
+            wideNode.Values.Cast<ulong>()[..entries].CopyTo(wide.AsSpan());
+            foreach (ulong row in wide.AsSpan())
             {
                 if (row >= (ulong)rowLimit)
                 {
@@ -1328,7 +1333,7 @@ internal sealed partial class SortedRunsSource : KeySource
                 }
             }
 
-            return new RunSegment(keys, offsets, null, entries, wide);
+            return new RunSegment(keys, offsets, default, entries, wide);
         }
 
         CanonicalNode rowNode = context.Canonical.GetNode(DecodeRoot(context, rowBlob, u32, entries));
@@ -1337,8 +1342,9 @@ internal sealed partial class SortedRunsSource : KeySource
             throw Malformed("its rows do not decode to one u32 per entry");
         }
 
-        uint[] rows = rowNode.Values.Cast<uint>()[..entries].ToArray();
-        foreach (uint row in rows)
+        Block<uint> rows = Blocks.Rent<uint>(entries);
+        rowNode.Values.Cast<uint>()[..entries].CopyTo(rows.AsSpan());
+        foreach (uint row in rows.AsSpan())
         {
             if (row >= rowLimit)
             {
@@ -1405,10 +1411,7 @@ internal sealed partial class SortedRunsSource : KeySource
     private static long RowAt(Run run, RunSegment segment, int index) =>
         segment.HasRows ? run.FirstRow + segment.RowAt(index) : run.Ordinal;
 
-    private ReadOnlySpan<byte> KeyAt(RunSegment segment, int index) =>
-        segment.Offsets is { } offsets
-            ? segment.Keys.AsSpan(offsets[index], offsets[index + 1] - offsets[index])
-            : segment.Keys.AsSpan(index * _layout.Width, _layout.Width);
+    private ReadOnlySpan<byte> KeyAt(RunSegment segment, int index) => segment.KeyAt(index, _layout.Width);
 
     /// <summary>Orders a key's bytes against a literal of the column's domain, in the total order.</summary>
     private int CompareKey(ReadOnlySpan<byte> entry, FilterLiteral key) =>
