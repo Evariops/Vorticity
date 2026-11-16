@@ -21,7 +21,7 @@ namespace Vorticity.Buffers;
 /// <para>
 /// Its length is the one asked for, never the block's rounded size: a table whose mask is its length
 /// minus one keeps that mask, whatever the size of its element. <see cref="Capacity"/> says how far
-/// the block goes, and <see cref="Blocks.Resize{T}"/> grows within it before it rents again.
+/// the block goes, and <see cref="Blocks.Resize{T}(ref Block{T}, int)"/> grows within it before it rents again.
 /// </para>
 /// <para>
 /// A copy of the struct is a second view of the same bytes, as a second reference to an array is:

@@ -530,7 +530,7 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
 
         (_measures, _kinds, _at, _stride) = Layout(live);
         _entryLimit = Math.Min(_limit, Math.Max(1_024, WordLimit / _stride));
-        _words = Blocks.Rent<long>(_entryValue.Length * _stride);
+        _words = Blocks.Rent<long>(_account, _entryValue.Length * _stride);
         for (int e = 0; e < _entries; e++)
         {
             _words[e * _stride] = old[e * oldStride];
@@ -546,7 +546,7 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
             }
         }
 
-        Blocks.Return(old);
+        Blocks.Return(_account, old);
     }
 
     internal override void Accumulate(CanonicalArena arena, int nodeIndex, int start, int count)
@@ -566,6 +566,28 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
             return;
         }
 
+        // What Finish refuses already, the values only growing: a number of more values than a few is carried by the other
+        // columns' counts and counted by none (Settle), and a column of more values than the object's rows can give
+        // RepeatShare each keeps no counts. Their entries would grow for nothing, until the first check: 4 to 8 MiB a column
+        // in a job of 100 000 rows of identifiers, which the writer's account, once it counted them, refused under a jobs'
+        // budget of 8 MiB (2026-11-16).
+        if (_number && _sheet.Distinct > FewValues)
+        {
+            Settle();
+            if (!_dropped)
+            {
+                Drop();
+            }
+
+            return;
+        }
+
+        if (_plan.RowBound > 0 && (long)_sheet.Distinct * RepeatShare > _plan.RowBound)
+        {
+            Drop();
+            return;
+        }
+
         // The measures these rows fold: those the plan still carries, the column itself aside.
         Relayout();
 
@@ -574,15 +596,15 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
         if (_rowEntries.Length < count)
         {
             int length = Blocks.Grown(count, _rowEntries.Length);
-            Blocks.Ensure(ref _rowEntries, length);
-            Blocks.Ensure(ref _rowIndexes, length);
+            Blocks.Ensure(_account, ref _rowEntries, length);
+            Blocks.Ensure(_account, ref _rowIndexes, length);
         }
 
         Span<int> entries = _rowEntries.AsSpan(0, count);
         Span<int> indexes = _rowIndexes.AsSpan(0, count);
         if (_distinct is not null && _batchEntries.Length < start + count)
         {
-            Blocks.Resize(ref _batchEntries, Blocks.Grown(start + count, _batchEntries.Length));
+            Blocks.Resize(_account, ref _batchEntries, Blocks.Grown(start + count, _batchEntries.Length));
         }
 
         Span<int> map = _entryOf;
@@ -794,12 +816,12 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
     /// <summary>Gives the entries' blocks and the rows' back to the pool, and keeps none: the counts hold no entry.</summary>
     private void ReleaseEntries()
     {
-        Blocks.Return(_entryValue);
-        Blocks.Return(_entryOf);
-        Blocks.Return(_rowEntries);
-        Blocks.Return(_rowIndexes);
-        Blocks.Return(_batchEntries);
-        Blocks.Return(_words);
+        Blocks.Return(_account, _entryValue);
+        Blocks.Return(_account, _entryOf);
+        Blocks.Return(_account, _rowEntries);
+        Blocks.Return(_account, _rowIndexes);
+        Blocks.Return(_account, _batchEntries);
+        Blocks.Return(_account, _words);
         _entries = 0;
         _entryValue = default;
         _words = default;
@@ -1020,7 +1042,31 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
     /// column keeps none, the fields of the measures their records carry, and whether a budget left values out; null for a
     /// column that keeps no counts.
     /// </summary>
+    /// <exception cref="VortexMemoryException">The writer's account refuses what the counts are ordered in.</exception>
     internal (byte[] Counts, byte[]? Sketches, int[] Measures, bool LeavesOut)? Finish()
+    {
+        // The arrays the counts are ordered in, some 24 bytes a value and an entry, counted in the writer's account while
+        // they live.
+        long ordering = (Math.Max((long)_sheet.Distinct, _entries) * FinishBytesPerValue) + ((long)_entries * sizeof(int));
+        if (!_account.TryTake(ordering))
+        {
+            throw _account.Refused(ordering);
+        }
+
+        try
+        {
+            return FinishCore();
+        }
+        finally
+        {
+            _account.Give(ordering);
+        }
+    }
+
+    /// <summary>The bytes <see cref="Finish"/> orders a value in: its number, its key's reference, its group and its start.</summary>
+    private const int FinishBytesPerValue = 24;
+
+    private (byte[] Counts, byte[]? Sketches, int[] Measures, bool LeavesOut)? FinishCore()
     {
         long valid = _sheet.Rows - _sheet.Nulls;
         int distinct = _sheet.Distinct;
@@ -1224,7 +1270,7 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
         {
             // Room for every value the sheet has numbered, fed the batch first.
             int held = _entryOf.Length;
-            Blocks.Grow(ref _entryOf, Blocks.Grown(Math.Max(id + 1, _sheet.Numbered), held));
+            Blocks.Grow(_account, ref _entryOf, Blocks.Grown(Math.Max(id + 1, _sheet.Numbered), held));
             _entryOf.AsSpan(held).Fill(-1);
         }
 
@@ -1253,8 +1299,8 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
             // Room at once for an entry of every value the sheet has numbered, fed the batch first, and for the nulls' and
             // the values left out's, as far as the entries kept go: the records grew by doubling, copied each time.
             int size = Blocks.Grown(Math.Min(_sheet.Numbered + 2, _entryLimit + 2), entry);
-            Blocks.Resize(ref _entryValue, size);
-            Blocks.Resize(ref _words, size * _stride);
+            Blocks.Resize(_account, ref _entryValue, size);
+            Blocks.Resize(_account, ref _words, size * _stride);
         }
 
         _entryValue[entry] = value;
@@ -1371,10 +1417,23 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
         Block<int> values = _entryValue;
         Block<long> words = _words;
 
-        // The entry each entry moves onto, for its sketches to follow once the entries have moved.
-        Block<int> to = Blocks.Rent<int>(Math.Max(total, 1));
-        _entryValue = Blocks.Rent<int>(values.Length);
-        _words = Blocks.Rent<long>(words.Length);
+        // The entry each entry moves onto, for its sketches to follow once the entries have moved. Each block counted in the
+        // writer's account, and those rented given back when the account refuses the next.
+        Block<int> to = Blocks.Rent<int>(_account, Math.Max(total, 1));
+        Block<int> entryValue = default;
+        try
+        {
+            entryValue = Blocks.Rent<int>(_account, values.Length);
+            _words = Blocks.Rent<long>(_account, words.Length);
+        }
+        catch (VortexMemoryException)
+        {
+            Blocks.Return(_account, entryValue);
+            Blocks.Return(_account, to);
+            throw;
+        }
+
+        _entryValue = entryValue;
         _entries = 0;
         _entryOf.AsSpan().Fill(-1);
         _nullEntry = -1;
@@ -1409,9 +1468,9 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
             sketches.Remap(to.AsSpan(0, total));
         }
 
-        Blocks.Return(to);
-        Blocks.Return(values);
-        Blocks.Return(words);
+        Blocks.Return(_account, to);
+        Blocks.Return(_account, values);
+        Blocks.Return(_account, words);
     }
 
     private void Drop()

@@ -239,6 +239,89 @@ internal static class Blocks
         Return(block);
     }
 
+    /// <summary>
+    /// A block of <paramref name="length"/> elements counted in <paramref name="account"/> at the bytes it holds, when they
+    /// reach a page, until <see cref="Return{T}(MemoryAccount, Block{T})"/> gives it back: what a writer's builders grow
+    /// their records in, refused as the account refuses rather than failing the heap. Counted nowhere, the entries of a
+    /// column's counts filled a heap held to 1.5 GiB, and the job died of an <see cref="OutOfMemoryException"/> rather
+    /// than giving way (2026-11-16).
+    /// </summary>
+    /// <exception cref="VortexMemoryException">The account refuses the block.</exception>
+    internal static Block<T> Rent<T>(MemoryAccount account, int length)
+        where T : unmanaged
+    {
+        long bytes = BytesFor<T>(length);
+        if (bytes >= LeastCounted && !account.TryTake(bytes))
+        {
+            throw account.Refused(bytes);
+        }
+
+        return Rent<T>(length);
+    }
+
+    /// <summary>A block <see cref="Rent{T}(MemoryAccount, int)"/> handed out, given back, its bytes given back to <paramref name="account"/>.</summary>
+    internal static void Return<T>(MemoryAccount account, Block<T> block)
+        where T : unmanaged
+    {
+        if (block.Bytes is { Length: >= (int)LeastCounted } bytes)
+        {
+            account.Give(bytes.Length);
+        }
+
+        Return(block);
+    }
+
+    /// <summary><see cref="Grow{T}(ref Block{T}, int)"/> for a block counted in <paramref name="account"/>.</summary>
+    /// <exception cref="VortexMemoryException">The account refuses the larger block: the block stays as it was.</exception>
+    internal static void Grow<T>(MemoryAccount account, ref Block<T> block, int length)
+        where T : unmanaged
+    {
+        if (length <= block.Capacity)
+        {
+            block = block.WithLength(length);
+            return;
+        }
+
+        Block<T> grown = Rent<T>(account, length);
+        block.AsSpan(0, Math.Min(block.Length, length)).CopyTo(grown.AsSpan());
+        Return(account, block);
+        block = grown;
+    }
+
+    /// <summary><see cref="Resize{T}(ref Block{T}, int)"/> for a block counted in <paramref name="account"/>.</summary>
+    /// <exception cref="VortexMemoryException">The account refuses the larger block: the block stays as it was.</exception>
+    internal static void Resize<T>(MemoryAccount account, ref Block<T> block, int length)
+        where T : unmanaged
+    {
+        int kept = block.Length;
+        Grow(account, ref block, length);
+        if (length > kept)
+        {
+            block.AsSpan(kept).Clear();
+        }
+    }
+
+    /// <summary><see cref="Ensure{T}(ref Block{T}, int)"/> for a block counted in <paramref name="account"/>.</summary>
+    /// <exception cref="VortexMemoryException">The account refuses the larger block: the block is empty then.</exception>
+    internal static void Ensure<T>(MemoryAccount account, ref Block<T> block, int length)
+        where T : unmanaged
+    {
+        if (length <= block.Length)
+        {
+            return;
+        }
+
+        if (length <= block.Capacity)
+        {
+            block = block.WithLength(block.Capacity);
+            return;
+        }
+
+        Return(account, block);
+        block = default;
+        block = Rent<T>(account, length);
+    }
+
     /// <summary>The bytes a block of <paramref name="length"/> elements holds: its class's size, or past the largest, its own.</summary>
     internal static long BytesFor<T>(int length)
         where T : unmanaged
