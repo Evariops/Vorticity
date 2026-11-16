@@ -297,6 +297,11 @@ internal sealed class BlockOwner : SegmentOwner
         if (Slabs.Cuts(capacity) && Slabs.TryTake(capacity) is (Slabs.Slab slab, byte[] slabArray, int start, bool made))
         {
             reused = !made;
+            if (made)
+            {
+                QueryMemoryBudget.SlabMade(Slabs.SlabBytes - capacity);
+            }
+
             return new BlockOwner(slabArray, start, capacity, length, VortexLimits.MaxAlignmentExponent, pool, bucketIndex, slab);
         }
 

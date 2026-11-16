@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
-using System.Globalization;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Threading;
@@ -51,9 +50,10 @@ internal sealed class BlockPool : IHeldMemory
     private const int MinBlockShift = 12; // log2(MinBlockSize)
 
     /// <summary>
-    /// 🧪 The bytes each class of the process's pool keeps whatever the registry asks: 64 blocks of 4 KiB, one of
-    /// 256 KiB, none larger. Provisional, calibrated by measurement with the other floors: what a question pays when the
-    /// blocks it rents were let go since the one before.
+    /// The bytes each class of the process's pool keeps whatever the registry asks: 64 blocks of 4 KiB, one of 256 KiB,
+    /// none larger. A question's 448 rents of 4 to 256 KiB took 25 to 27 µs from blocks parked in their classes, 64 to
+    /// 68 µs cut from a slab kept, 84 to 92 µs from new slabs (<c>--micro poolrent</c>, Apple M4 Pro, 2026-11-16): the
+    /// floors keep what the next question rents first, some 3.5 MiB across the classes.
     /// </summary>
     internal const int FloorBytesPerClass = 256 * 1024;
 
@@ -196,34 +196,44 @@ internal sealed class BlockPool : IHeldMemory
     /// <exception cref="VortexFormatException">
     /// <paramref name="length"/> is negative or <paramref name="alignment"/> is out of range.
     /// </exception>
-    /// <exception cref="VortexMemoryException">
-    /// The account refuses the block's capacity: the block goes back to the pool. Or the heap, held to its limit, has no room
-    /// for a block it would have to allocate.
-    /// </exception>
+    /// <exception cref="VortexMemoryException">The account refuses the block's capacity: the block goes back to the pool.</exception>
     public BlockOwner Rent(MemoryAccount account, int length, int alignment)
     {
+        // The account first: a block it refuses is never allocated. Allocated first, a block of 64 MiB a writer's budget would
+        // have refused failed the heap held to its limit (2026-11-16).
+        BlockOwner.CheckLengthAndAlignment(length, alignment);
+        int capacity = length > MaxPooledLength ? length : RoundedSize(length);
+        if (!account.TryTake(capacity))
+        {
+            throw account.Refused(capacity);
+        }
+
         BlockOwner owner;
         bool reused;
         try
         {
             owner = RentCore(length, alignment, out reused);
         }
-        catch (OutOfMemoryException full)
+        catch
         {
-            // The heap held to its limit has no room for the block, which the account would have counted: what the
-            // library does not count filled it. The work gives way as it does to its budget, the process stays whole.
-            throw new VortexMemoryException(
-                string.Create(CultureInfo.InvariantCulture, $"The heap has no room for a block of {length:N0} bytes: what the process holds besides the library's blocks fills its limit."),
-                full);
+            account.Give(capacity);
+            throw;
+        }
+
+        // The block kept past the classes may be longer than asked: the account takes the rest of it too.
+        if (owner.Capacity > capacity && !account.TryTake(owner.Capacity - capacity))
+        {
+            // Counted nowhere: the release parks it again.
+            account.Give(capacity);
+            owner.Release();
+            throw account.Refused(owner.Capacity);
         }
 
         // A block the pool kept, parked or free in a slab alive, is memory the heap holds already: the account that measures it
         // tells the process's budget, which no longer counts it with the rest of the process.
-        if (!account.TryTake(owner.Capacity, reused))
+        if (reused)
         {
-            // Counted nowhere yet: the release parks it, or lets it go, as any block given back.
-            owner.Release();
-            throw account.Refused(owner.Capacity);
+            account.Reused(owner.Capacity);
         }
 
         owner.Charge(account);
@@ -252,7 +262,6 @@ internal sealed class BlockPool : IHeldMemory
     /// <param name="reused">Whether the block's bytes were in the heap already: a block parked, or a piece of a slab alive.</param>
     private BlockOwner RentCore(int length, int alignment, out bool reused)
     {
-        BlockOwner.CheckLengthAndAlignment(length, alignment);
         reused = true;
 
         if (length > MaxPooledLength)

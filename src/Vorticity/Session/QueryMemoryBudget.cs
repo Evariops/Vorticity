@@ -26,19 +26,25 @@ namespace Vorticity;
 public sealed class QueryMemoryBudget
 {
     /// <summary>
-    /// 🧪 The share of the ceiling, one in this many, within which the reservations have the memory kept let go of that
-    /// much above its floors before they need it, and the least a reservation short of room has it let go of:
-    /// provisional, calibrated by measurement with the floors.
+    /// The share of the ceiling, one in this many, within which the reservations have the memory kept let go of that much
+    /// above its floors before they need it, and the least a reservation short of room has it let go of. A quarter, an
+    /// eighth and a sixteenth compacted the backlog bench in 53 to 56 s under 2 GiB, at a peak resident of 1 174, 1 191 and
+    /// 1 368 MiB (2026-11-16).
     /// </summary>
     private const int KeptMarginShare = 8;
 
     /// <summary>
-    /// 🧪 The share of a container's limit, one in this many, the process keeps as a margin: what the container uses past
-    /// its last reading, a timer's period at most. Provisional, calibrated by measurement.
+    /// The share of a container's limit, one in this many, the process keeps as a margin: what the container uses past
+    /// its last reading, a timer's period at most. What no reservation and no holder of kept memory counted grew by 155 MiB
+    /// in a second at most, while a backlog compacted under 2 GiB, whose eighth is 256 MiB, and by 150 MiB under 4 GiB
+    /// (measured 2026-11-16).
     /// </summary>
     private const int ContainerMarginShare = 8;
 
-    /// <summary>🧪 How often the process's budget reads its container's memory again, in milliseconds: provisional, to be measured.</summary>
+    /// <summary>
+    /// How often the process's budget reads its container's memory again, in milliseconds: within a second, what nothing
+    /// counts grows by less than the margin (<see cref="ContainerMarginShare"/>, measured 2026-11-16).
+    /// </summary>
     internal const int ContainerReadMilliseconds = 1_000;
 
     // What the process used against its limit at the last reading: a container's, or the limit the host set and the
@@ -46,9 +52,11 @@ public sealed class QueryMemoryBudget
     private static ContainerMemory? s_reading = VortexMemory.Read();
 
     /// <summary>
-    /// 🧪 The share of the process's limit, one in this many, the jobs' own budget holds by default (<see cref="Jobs"/>): what
-    /// the work got under a limit of 4 GiB, 1 660 MB of 3 584 MiB, when the jobs shared the queries' budget. Provisional,
-    /// calibrated by measurement.
+    /// The share of the process's limit, one in this many, the jobs' own budget holds by default (<see cref="Jobs"/>). A
+    /// backlog of 9 million metric records compacted in 6 jobs and 60 s under 2 GiB at a half, 10 jobs and 68 s at a third;
+    /// under 4 GiB, 3 jobs and 50 s, 5 jobs and 60 s. The whole limit made one job of 41 s under 4 GiB but 7 jobs and 93 s
+    /// under 2 GiB, the rest of the process held in what the collector leaves: a host whose process runs jobs alone gives
+    /// them more through <see cref="VortexSessionOptions.JobMemoryBudget"/> from 4 GiB up (measured 2026-11-16).
     /// </summary>
     internal const int JobsShare = 2;
 
@@ -62,8 +70,8 @@ public sealed class QueryMemoryBudget
     private long _peak;
     private int _active;
 
-    // A budget carved out of the process's limit, one in this many of it, read again as the limit moves; 0 for a ceiling of
-    // its own. What it reserves the process counts, and never refuses: its share is the guard.
+    // A budget whose ceiling is a share of the process's limit, one in this many of it, read again as the limit moves; 0 for
+    // a ceiling of its own. What it reserves asks the process too, as any budget's does.
     private readonly int _share;
 
     // Whether a reservation was refused since the budget was made: what tells a job that ran out of its budget.
@@ -74,12 +82,23 @@ public sealed class QueryMemoryBudget
     // whether a collection is being asked for, and the full collection after which the last one asked
     // for left the collector holding what it held.
     private long _measured;
-    private Rest _rest = new Rest(-1, -1, 0, 0, 0);
+    private Rest _rest = new Rest(-1, -1, -1, -1, 0, 0, 0);
     private long _pending;
 
-    // The bytes the pool kept, parked or free in its slabs, when the last full collection read the rest, that measured work
-    // took back since, less those it kept again: in the heap then, read as the rest's, measured now. Never below zero once
-    // read; the next full collection reads them where they are.
+    // The fewest bytes measured since the rest was last read from a collection: never more than what was measured when the
+    // collector ran, which happened since. The heap a collection read, less what is measured when the budget reads it, left
+    // the rest out by what the queries took between the two: 145 MiB in the heap, 227 measured by then, a rest read as none,
+    // and eight queries under a heap held to 512 MiB were granted what the next collection found taken (2026-11-16).
+    private long _measuredLow;
+
+    // Taken by every writer of the rest: a give-back that wrote the rest it read before a collection's was read put the
+    // collection's number back, and the next reservation read the same collection again, its let go and its reuse lost.
+    private readonly object _restGate = new object();
+
+    // The bytes measured work took back since the last full collection from what the pool keeps, parked or free in its slabs,
+    // less those it gave back for the pool to keep: the rest's no more, or the rest's again when below zero. Read as none
+    // below zero, the blocks a writer gave back went uncounted until the next collection, and a writer under a limit of 1 GiB
+    // was granted a block of 64 MiB the heap had no room for, beside 252 MiB of them (2026-11-16).
     private long _reused;
     private int _collecting;
     private int _futile = -1;
@@ -350,9 +369,10 @@ public sealed class QueryMemoryBudget
     }
 
     /// <summary>
-    /// 🧪 What the pool may keep past the room a hard budget's first soft parent leaves before a rent under it has the pool
-    /// let go of the rest: its floors, some 3.5 MiB, and room for the blocks a job gives back between two rents.
-    /// Provisional, calibrated by measurement.
+    /// What the pool may keep past the room a hard budget's first soft parent leaves before a rent under it has the pool
+    /// let go of the rest: its floors, some 3.5 MiB, and room for the blocks a job gives back between two rents. None,
+    /// 16 MiB and 64 MiB compacted the backlog bench in 52, 56 and 53 s under 2 GiB, at a peak resident of 1 251, 1 191 and
+    /// 1 216 MiB, and in 48, 49 and 52 s under 4 GiB (2026-11-16).
     /// </summary>
     private const long PoolSlackBytes = 16L << 20;
 
@@ -393,16 +413,6 @@ public sealed class QueryMemoryBudget
         {
             Volatile.Write(ref _refused, 1);
         }
-    }
-
-    /// <summary>
-    /// Counts <paramref name="bytes"/> a budget carved out of this one reserved, past its ceiling if need be: what the jobs'
-    /// share holds, which the queries see and which the limit already set aside.
-    /// </summary>
-    private void Carve(long bytes)
-    {
-        Raise(Interlocked.Add(ref _reserved, bytes));
-        _process?.Carve(bytes);
     }
 
     /// <summary>
@@ -450,11 +460,10 @@ public sealed class QueryMemoryBudget
             return false;
         }
 
-        if (_share > 0)
-        {
-            _process.Carve(bytes);
-        }
-        else if (!_process.Force(bytes))
+        // The jobs' share passed as any budget is, the process bounding it: carved out of the process with no refusal, an append
+        // of 324 000 rows under a limit of 1 GiB held 524 MiB of the share's 336, and a block of 64 MiB more failed the heap
+        // (2026-11-16).
+        if (!_process.Force(bytes))
         {
             return false;
         }
@@ -491,10 +500,27 @@ public sealed class QueryMemoryBudget
     internal void Measure(long delta)
     {
         QueryMemoryBudget process = Root;
-        Interlocked.Add(ref process._measured, delta);
+        long measured = Interlocked.Add(ref process._measured, delta);
         if (delta < 0)
         {
             Interlocked.Add(ref process._pending, -delta);
+            process.Lower(measured);
+        }
+    }
+
+    /// <summary>The bytes measured fell to <paramref name="measured"/>: the fewest since the rest was last read, when they are.</summary>
+    private void Lower(long measured)
+    {
+        long low = Volatile.Read(ref _measuredLow);
+        while (measured < low)
+        {
+            long seen = Interlocked.CompareExchange(ref _measuredLow, measured, low);
+            if (seen == low)
+            {
+                return;
+            }
+
+            low = seen;
         }
     }
 
@@ -508,10 +534,27 @@ public sealed class QueryMemoryBudget
     /// Counted as let go, each block a job rents and gives back again counted once more: 3.8 GB of rest were reckoned for a
     /// process of 1.4 GB, after a compaction under a limit of 4 GiB, and the next job was refused a block.
     /// </summary>
-    internal void Returned(long bytes) => Interlocked.Add(ref Root._measured, -bytes);
+    internal void Returned(long bytes)
+    {
+        QueryMemoryBudget process = Root;
+        process.Lower(Interlocked.Add(ref process._measured, -bytes));
+    }
 
     /// <summary>The array of a block of <paramref name="bytes"/> let go to the collector: in the heap until a collection takes it.</summary>
     internal static void BlockFreed(long bytes) => Interlocked.Add(ref Process._pending, bytes);
+
+    /// <summary>
+    /// A slab made for a rent, <paramref name="free"/> of its bytes past the rented piece: in the heap from now on and measured
+    /// by no work, the rest's as the blocks the pool keeps are, which the pieces cut from it later take back. Unknown until the
+    /// next full collection, the room of the slabs made since was taken back from a rest that never held it: a writer under a
+    /// limit of 1 GiB was granted a block of 64 MiB, the rest read at 52 MiB in a heap holding 161 past the work (2026-11-16).
+    /// </summary>
+    internal static void SlabMade(long free)
+    {
+        QueryMemoryBudget process = Process;
+        process.Observe();
+        process.Reuse(-free);
+    }
 
     /// <summary>
     /// A slab of <paramref name="bytes"/> let go with its last piece, a rented one given back: its free bytes,
@@ -560,11 +603,14 @@ public sealed class QueryMemoryBudget
         // Out of what the rest read in the heap, as it lived at the last full collection and as it grew since: taken from the
         // first alone, the bytes the uncertain part held stayed counted there as well as let go, and the budget read 1.2 GB
         // let go beside 726 MB uncertain in a heap of 1.5 GiB, and refused a job everything (2026-11-16).
-        Rest rest = Volatile.Read(ref _rest);
-        long fromLive = Math.Min(bytes, rest.Live);
-        long fromUncertain = Math.Min(bytes - fromLive, rest.Uncertain);
-        Volatile.Write(ref _rest, rest with { Live = rest.Live - fromLive, Uncertain = rest.Uncertain - fromUncertain });
-        Interlocked.Add(ref _pending, bytes);
+        lock (_restGate)
+        {
+            Rest rest = Volatile.Read(ref _rest);
+            long fromLive = Math.Min(bytes, rest.Live);
+            long fromUncertain = Math.Min(bytes - fromLive, rest.Uncertain);
+            Volatile.Write(ref _rest, rest with { Live = rest.Live - fromLive, Uncertain = rest.Uncertain - fromUncertain });
+            Interlocked.Add(ref _pending, bytes);
+        }
     }
 
     /// <summary>
@@ -574,8 +620,11 @@ public sealed class QueryMemoryBudget
     /// </summary>
     internal void Reuse(long bytes) => Interlocked.Add(ref _reused, bytes);
 
-    /// <summary>What the heap held past the measured work at the last full collection, less what the work took back from the pool since.</summary>
-    private long LiveOf(Rest rest) => Math.Max(0, rest.Live - Math.Max(0, Volatile.Read(ref _reused)));
+    /// <summary>
+    /// What the heap held past the measured work at the last full collection, less what the work took back from the pool
+    /// since, and more what it gave back for the pool to keep.
+    /// </summary>
+    private long LiveOf(Rest rest) => Math.Max(0, rest.Live - Volatile.Read(ref _reused));
 
     /// <summary>
     /// What the process's limit leaves the queries past the rest of its memory: the library's blocks are
@@ -604,43 +653,67 @@ public sealed class QueryMemoryBudget
     /// </remarks>
     private void Observe()
     {
-        Rest rest = Volatile.Read(ref _rest);
-        int full = GC.CollectionCount(2);
-        int any = GC.CollectionCount(0);
-        if (full == rest.Collections && any == rest.Ephemeral)
+        Rest seen = Volatile.Read(ref _rest);
+        if (GC.CollectionCount(2) == seen.Collections && GC.CollectionCount(0) == seen.Ephemeral)
         {
             return;
         }
 
-        if (full != rest.Collections)
+        lock (_restGate)
         {
-            Interlocked.Exchange(ref _pending, 0);
-            Interlocked.Exchange(ref _reused, 0);
+            Rest rest = Volatile.Read(ref _rest);
+            int full = GC.CollectionCount(2);
+            int any = GC.CollectionCount(0);
+            if (full == rest.Collections && any == rest.Ephemeral)
+            {
+                return;
+            }
+
+            // What was measured when the collector ran, at least: the fewest bytes measured since the rest was last read,
+            // before which no collection it reads now ran. The window starts again from what is measured now.
+            long measured = Volatile.Read(ref _measured);
+            long low = Math.Min(Interlocked.Exchange(ref _measuredLow, measured), measured);
+            Lower(Volatile.Read(ref _measured));
+
+            // A full collection is read once it is done. A background one is counted from its start, and the collector tells
+            // the one before's memory until it ends: read as the new one's, the let go and the reuse since were dropped, the
+            // room of four slabs made since among them, and the collection, marked read, was never read once done. A writer
+            // under a limit of 1 GiB was granted a block of 64 MiB in a heap that held 108 MiB more than the rest said
+            // (2026-11-16).
             GCMemoryInfo blocking = GC.GetGCMemoryInfo(GCKind.FullBlocking);
             GCMemoryInfo background = GC.GetGCMemoryInfo(GCKind.Background);
             GCMemoryInfo info = background.Index > blocking.Index ? background : blocking;
-            long inUse = info.HeapSizeBytes - info.FragmentedBytes;
-            Volatile.Write(ref _rest, new Rest(full, any, Math.Max(0, inUse - Volatile.Read(ref _measured)), 0, Math.Max(0, info.TotalCommittedBytes - inUse)));
-            return;
-        }
+            if (info.Index > rest.FullIndex)
+            {
+                Interlocked.Exchange(ref _pending, 0);
+                Interlocked.Exchange(ref _reused, 0);
+                long inUse = info.HeapSizeBytes - info.FragmentedBytes;
+                rest = new Rest(full, any, info.Index, info.Index, Math.Max(0, inUse - low), 0, Math.Max(0, info.TotalCommittedBytes - inUse));
+            }
 
-        // What the queries let go is in the heap or already taken: never more than the heap holds past what lived at the
-        // last full collection and what the tables hold. Bytes given back that the heap never held, a lane's working memory
-        // admitted and its reads ahead, counted all the same, and 15.7 GB of them piled up between two full collections at
-        // 16 clients under a gen0 budget of 128 MiB, for a heap of 1.3 GB: the queries were left nothing, and a query was
-        // refused the 64 KiB of a lane (2026-11-08).
-        GCMemoryInfo ephemeral = GC.GetGCMemoryInfo(GCKind.Ephemeral);
-        long inHeap = ephemeral.HeapSizeBytes - ephemeral.FragmentedBytes - Volatile.Read(ref _measured);
-        long live = LiveOf(rest);
-        long most = Math.Max(0, inHeap - live);
-        long pending = Volatile.Read(ref _pending);
-        if (pending > most)
-        {
-            Interlocked.Add(ref _pending, most - pending);
-            pending = most;
-        }
+            // What the queries let go is in the heap or already taken: never more than the heap holds past what lived at the
+            // last full collection and what the tables hold. Bytes given back that the heap never held, a lane's working
+            // memory admitted and its reads ahead, counted all the same, and 15.7 GB of them piled up between two full
+            // collections at 16 clients under a gen0 budget of 128 MiB, for a heap of 1.3 GB: the queries were left nothing,
+            // and a query was refused the 64 KiB of a lane (2026-11-08). A collection read before is not read again.
+            GCMemoryInfo ephemeral = GC.GetGCMemoryInfo(GCKind.Ephemeral);
+            if (ephemeral.Index > rest.Read)
+            {
+                long inHeap = ephemeral.HeapSizeBytes - ephemeral.FragmentedBytes - low;
+                long live = LiveOf(rest);
+                long most = Math.Max(0, inHeap - live);
+                long pending = Volatile.Read(ref _pending);
+                if (pending > most)
+                {
+                    Interlocked.Add(ref _pending, most - pending);
+                    pending = most;
+                }
 
-        Volatile.Write(ref _rest, rest with { Ephemeral = any, Uncertain = Math.Max(0, inHeap - pending - live) });
+                rest = rest with { Read = ephemeral.Index, Uncertain = Math.Max(0, inHeap - pending - live) };
+            }
+
+            Volatile.Write(ref _rest, rest with { Collections = full, Ephemeral = any });
+        }
     }
 
     /// <summary>
@@ -650,9 +723,8 @@ public sealed class QueryMemoryBudget
     /// or null when no collection would help. Each such collection gives back that much, which the
     /// queries must let go again before the next: a refusal fails a whole query, a collection does not.
     /// One whose collector kept what it held is not asked for again before the collector runs a full
-    /// collection of its own. A thread that finds one under way reserves against what it will leave,
-    /// the ceiling past what the heap holds live: it allocates once the collection is done, which
-    /// every thread waits for anyway.
+    /// collection of its own. A thread that finds one under way waits for it, which every thread that
+    /// allocates does anyway, and reserves against what it left.
     /// </summary>
     private long? Collect(long bytes)
     {
@@ -672,7 +744,17 @@ public sealed class QueryMemoryBudget
 
         if (Interlocked.Exchange(ref _collecting, 1) != 0)
         {
-            return ceiling - live;
+            // Reserved against the ceiling past what lived at the last full collection, as if the collection would take all
+            // the heap grew by since, eight queries under a heap held to 512 MiB reserved 276 MiB beside 235 MiB the
+            // collection found live, and the heap ran out (2026-11-16).
+            SpinWait waiting = default;
+            while (Volatile.Read(ref _collecting) != 0)
+            {
+                waiting.SpinOnce();
+            }
+
+            Observe();
+            return Available();
         }
 
         try
@@ -741,7 +823,7 @@ public sealed class QueryMemoryBudget
 
     /// <summary>
     /// The process's limit, less a margin for what the collector needs to work: an eighth of the
-    /// collector's limit, and in a container, read again as it runs, an eighth 🧪 of the container's when
+    /// collector's limit, and in a container, read again as it runs, an eighth of the container's when
     /// that is less, the container's use being measured rather than modelled. A limit the host set is
     /// taken as a container's is (<see cref="VortexMemory"/>).
     /// </summary>
@@ -758,10 +840,10 @@ public sealed class QueryMemoryBudget
     }
 
     /// <summary>
-    /// The rest of the process as read after a full collection: that collection's number, and the
-    /// count of collections of any generation since read; what its heap held past the queries' tables,
-    /// and what a collection of the youngest generations since saw held past that; what the collector
-    /// kept committed past its heap.
+    /// The rest of the process as read after a full collection: the counts of full collections and of collections of any
+    /// generation when it was last read; the index of the full collection it was read from, and of the last collection
+    /// of any kind; what its heap held past the queries' tables, and what a collection of the youngest generations since
+    /// saw held past that; what the collector kept committed past its heap.
     /// </summary>
-    private sealed record Rest(int Collections, int Ephemeral, long Live, long Uncertain, long Reclaimable);
+    private sealed record Rest(int Collections, int Ephemeral, long FullIndex, long Read, long Live, long Uncertain, long Reclaimable);
 }

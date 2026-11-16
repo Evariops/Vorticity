@@ -135,10 +135,10 @@ An append holds what its rows weigh in the writer's columns, which grow by doubl
 | Append | Under 1 GiB | Under 2 GiB | Under 4 GiB |
 |---|---|---|---|
 | 300 appends of 30 000 rows | 228 MiB resident, 72 MiB of blocks | 229 MiB, 72 MiB | 229 MiB, 72 MiB |
-| 30 appends of 324 000 rows | refused: no room for a block of 64 MiB | 1 152 MiB, 720 MiB | 1 816 MiB, 720 MiB |
+| 30 appends of 324 000 rows | refused: a block of 64 MiB past the limit | 1 152 MiB, 720 MiB | 1 816 MiB, 720 MiB |
 | the same while 8 scans read the dataset | refused | 1 253 MiB, 975 MiB | 1 949 MiB, 1 043 MiB |
 
-Appends of a few tens of thousands of rows, a flush of a few seconds, hold in a quarter of a gibibyte whatever the limit. An append of hundreds of thousands of rows needs a limit of 2 GiB: its columns end in blocks of 32 to 64 MiB, each an array of its own, which a heap held to 1 GiB, the caller's rows beside them, has no room for. The append then throws `VortexMemoryException` and commits nothing. Under a larger limit the process holds more, since the collector runs less often.
+Appends of a few tens of thousands of rows, a flush of a few seconds, hold in a quarter of a gibibyte whatever the limit. An append of hundreds of thousands of rows needs a limit of 2 GiB: its columns end in blocks of 32 to 64 MiB, each an array of its own, which a process held to 1 GiB, the caller's rows beside them, cannot take. The append's budget refuses the block before it is allocated: the append throws `VortexMemoryException` and commits nothing. Under a larger limit the process holds more, since the collector runs less often.
 
 ## Readers
 

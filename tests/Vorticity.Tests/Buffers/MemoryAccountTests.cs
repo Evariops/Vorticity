@@ -31,11 +31,13 @@ public sealed class MemoryAccountTests
     }
 
     [Fact]
-    public void ARefusedRentThrowsAndCountsNothingTheBlockBackInThePool()
+    public void ARefusedRentThrowsAndTakesNothingFromThePool()
     {
         BlockPool pool = new BlockPool(maxPerBucket: 4);
+        pool.Rent(MemoryAccount.Kept, 4096, 64).Release();
         Refusing account = new Refusing();
 
+        // The account is asked before the pool gives out a block: the block parked stays parked, and none is made.
         VortexMemoryException refused = Assert.Throws<VortexMemoryException>(() => pool.Rent(account, 4096, 64));
         Assert.Contains("4,096", refused.Message, System.StringComparison.Ordinal);
         Assert.Equal(1, pool.ParkedCount(4096));

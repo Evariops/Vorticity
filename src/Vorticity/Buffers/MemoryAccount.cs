@@ -46,10 +46,12 @@ internal abstract class MemoryAccount
     internal abstract bool TryTake(long bytes);
 
     /// <summary>
-    /// <see cref="TryTake(long)"/> for a block of the pool, <paramref name="reused"/> when the pool kept its bytes, parked or
-    /// free in a slab alive: memory the heap holds already, which an account that measures it tells the process's budget.
+    /// A block of <paramref name="bytes"/> taken came from what the pool kept, parked or free in a slab alive: memory the heap
+    /// holds already, which an account that measures it tells the process's budget.
     /// </summary>
-    internal virtual bool TryTake(long bytes, bool reused) => TryTake(bytes);
+    internal virtual void Reused(long bytes)
+    {
+    }
 
     /// <summary>Gives back <paramref name="bytes"/> taken; nothing once the account has given back everything at its end.</summary>
     internal abstract void Give(long bytes);
@@ -131,19 +133,12 @@ internal class BudgetAccount : MemoryAccount
     /// at the last full collection, as it reads the blocks the pool keeps. Counted there too, the blocks a job took back
     /// from the pool left it no room under a limit of 4 GiB, and a consolidation ran in two jobs (2026-11-16).
     /// </summary>
-    internal override bool TryTake(long bytes, bool reused)
+    internal override void Reused(long bytes)
     {
-        if (!TryTake(bytes))
-        {
-            return false;
-        }
-
-        if (reused && Measures)
+        if (Measures)
         {
             Budget.Root.Reuse(bytes);
         }
-
-        return true;
     }
 
     /// <summary>A block the pool keeps again, its bytes back with the rest of the process's.</summary>
