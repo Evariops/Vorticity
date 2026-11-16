@@ -37,6 +37,36 @@ public sealed partial class VariantKeysTests
         Random random = new Random(seed);
         string[] names = [.. Enumerable.Range(0, 40).Select(k => k % 7 == 0 ? $"a.rather.long.attribute.name.{k}" : $"k{k}")];
         Row[] rows = [.. Enumerable.Range(0, 5_000).Select(i => new Row(i, Draw(random, names)))];
+        await TogetherEqualsAloneAsync(rows, names);
+    }
+
+    /// <summary>
+    /// Rows that repeat a value one after the other, as a metric's series holds its attributes, which a read of the keys
+    /// together takes from the first row of their run: in runs of one to forty, nulls and absent rows among them, every key in
+    /// every class read together equals each read alone.
+    /// </summary>
+    [Theory]
+    [InlineData(3)]
+    [InlineData(4)]
+    public async Task KeysOfRowsThatRepeatReadTogetherEqualEachReadAlone(int seed)
+    {
+        Random random = new Random(seed);
+        string[] names = [.. Enumerable.Range(0, 40).Select(k => k % 7 == 0 ? $"a.rather.long.attribute.name.{k}" : $"k{k}")];
+        List<Row> rows = [];
+        while (rows.Count < 5_000)
+        {
+            Variant value = Draw(random, names);
+            for (int run = 1 + random.Next(random.Next(4) == 0 ? 1 : 40); run > 0; run--)
+            {
+                rows.Add(new Row(rows.Count, value));
+            }
+        }
+
+        await TogetherEqualsAloneAsync([.. rows], names);
+    }
+
+    private static async Task TogetherEqualsAloneAsync(Row[] rows, string[] names)
+    {
         string path = Path.Combine(Path.GetTempPath(), $"vorticity-variant-keys-{Guid.NewGuid():N}.vortex");
         try
         {

@@ -433,12 +433,19 @@ internal sealed class VariantFieldExpr : FieldExpr
         head.AsSpan().Fill(-1);
         Block<Note> notes = Blocks.Rent<Note>(Math.Max(rows, 16));
         Block<int> keyOfId = Blocks.Rent<int>(64);
+
+        // The row each row repeats the value of, under the same metadata, the first of their run; itself for a row read.
+        // Rented once a row repeats the one before: a metric's series holds the same attributes row after row, which were
+        // read again each, a fifth of a merge of metric records (2026-11-16).
+        Block<int> origin = default;
         int noted = 0;
         try
         {
             ReadOnlySpan<byte> lastMetadata = default;
             bool resolved = false;
             int ids = 0;
+            int previous = -1;
+            ReadOnlySpan<byte> previousValue = default;
             for (int row = 0; row < rows; row++)
             {
                 if (!Valid(valid, row) || !Valid(valueValid, row))
@@ -464,9 +471,25 @@ internal sealed class VariantFieldExpr : FieldExpr
 
                     lastMetadata = rowMetadata;
                     resolved = true;
+                    previous = -1;
                 }
 
                 ReadOnlySpan<byte> rowValue = Bytes(in values, valueViews, row);
+                if (previous >= 0 && rowValue.SequenceEqual(previousValue))
+                {
+                    if (origin.IsEmpty)
+                    {
+                        origin = Blocks.Rent<int>(rows);
+                        origin.AsSpan(0, rows).Fill(-1);
+                    }
+
+                    origin[row] = origin[previous] >= 0 ? origin[previous] : previous;
+                    previous = row;
+                    continue;
+                }
+
+                previous = row;
+                previousValue = rowValue;
                 if (rowValue.IsEmpty || (rowValue[0] & 0x03) != ParquetVariant.BasicObject)
                 {
                     continue;
@@ -508,6 +531,18 @@ internal sealed class VariantFieldExpr : FieldExpr
                     output.Write(note.Row, rowValue.Slice(note.Offset, note.Length), valueViews, rowValue);
                 }
 
+                // A row that repeats another takes its slot: a number, a bit, or a view of the same text where it lies.
+                if (!origin.IsEmpty)
+                {
+                    for (int row = 0; row < rows; row++)
+                    {
+                        if (origin[row] >= 0)
+                        {
+                            output.Repeat(row, origin[row]);
+                        }
+                    }
+                }
+
                 into[i] = output.Finish(arena, values);
             }
         }
@@ -515,6 +550,10 @@ internal sealed class VariantFieldExpr : FieldExpr
         {
             Blocks.Return(notes);
             Blocks.Return(keyOfId);
+            if (!origin.IsEmpty)
+            {
+                Blocks.Return(origin);
+            }
         }
     }
 
@@ -810,6 +849,37 @@ internal sealed class VariantFieldExpr : FieldExpr
             CanonicalSupport.WriteReferenceView(view, text.Length, text, buffer, offset + within);
         }
 
+        /// <summary>
+        /// Writes at <paramref name="row"/> what was written at <paramref name="from"/>, a row whose value it repeats: the same
+        /// number, the same bit, or a view of the same text where it lies, which a view may name from any row.
+        /// </summary>
+        internal void Repeat(int row, int from)
+        {
+            if (!Get(_validBits, from))
+            {
+                return;
+            }
+
+            switch (_read)
+            {
+                case VariantRead.Has or VariantRead.AsBool:
+                    if (Get(_into, from))
+                    {
+                        Set(_into, row);
+                    }
+
+                    break;
+                case VariantRead.AsString:
+                    _into.Slice(from * CanonicalSupport.ViewSize, CanonicalSupport.ViewSize).CopyTo(_into.Slice(row * CanonicalSupport.ViewSize, CanonicalSupport.ViewSize));
+                    break;
+                default:
+                    _into.Slice(from * sizeof(long), sizeof(long)).CopyTo(_into.Slice(row * sizeof(long), sizeof(long)));
+                    break;
+            }
+
+            Present(row);
+        }
+
         private void Present(int row)
         {
             Set(_validBits, row);
@@ -817,6 +887,8 @@ internal sealed class VariantFieldExpr : FieldExpr
         }
 
         private static void Set(Span<byte> bits, int row) => bits[row >> 3] |= (byte)(1 << (row & 7));
+
+        private static bool Get(ReadOnlySpan<byte> bits, int row) => (bits[row >> 3] & (1 << (row & 7))) != 0;
 
         /// <summary>The node of the column written.</summary>
         internal readonly int Finish(CanonicalArena arena, in CanonicalNode values)
