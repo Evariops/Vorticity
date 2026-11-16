@@ -1447,12 +1447,42 @@ internal static partial class DatasetCompactor
             ObjectLease lease = await memory.RentAsync(held.Entry, cancellationToken).ConfigureAwait(false);
             await using (lease.ConfigureAwait(false))
             {
-                await foreach (RecordBatch batch in RowsOfAsync(lease, held.Entry, schema, cancellationToken, variants, piece?.RowsOf(input, 0), account: memory.InputsAccount)
-                    .WithCancellation(cancellationToken).ConfigureAwait(false))
+                // A column whose directory tells its paths is not parsed: its rows give their count and their values' bytes
+                // alone, and the directory the rest. A piece reads a part of its inputs, which their directories do not tell.
+                VariantDirectory.DirectoryBody?[] directories = piece is null && schema.Holds(held.Entry)
+                    ? await DirectoriesAsync(lease, held.Entry, variants, cancellationToken).ConfigureAwait(false)
+                    : new VariantDirectory.DirectoryBody?[variants.Length];
+                try
                 {
+                    await foreach (RecordBatch batch in RowsOfAsync(lease, held.Entry, schema, cancellationToken, variants, piece?.RowsOf(input, 0), account: memory.InputsAccount)
+                        .WithCancellation(cancellationToken).ConfigureAwait(false))
+                    {
+                        for (int v = 0; v < variants.Length; v++)
+                        {
+                            if (directories[v] is null)
+                            {
+                                paths[v].Add(batch, v);
+                            }
+                            else
+                            {
+                                paths[v].AddRows(batch, v);
+                            }
+                        }
+                    }
+
                     for (int v = 0; v < variants.Length; v++)
                     {
-                        paths[v].Add(batch, v);
+                        if (directories[v] is { } directory)
+                        {
+                            paths[v].AddPaths(directory);
+                        }
+                    }
+                }
+                finally
+                {
+                    foreach (VariantDirectory.DirectoryBody? directory in directories)
+                    {
+                        directory?.Dispose();
                     }
                 }
             }
@@ -1503,6 +1533,69 @@ internal static partial class DatasetCompactor
 
     /// <summary>The paths of one input's rows of one partition value, counted: the value's first key there, the input, and each variant column's census.</summary>
     private sealed record ValueCount(byte[] First, int Input, PathCensus[] Paths);
+
+    /// <summary>
+    /// The path directory of each of the <paramref name="variants"/> columns of the input <paramref name="entry"/> names, read
+    /// from <paramref name="lease"/>, the job's own copy of it or its read of the store, when it tells every count a shredding
+    /// is chosen from (<see cref="PathCensus.Tells"/>); null for a column whose directory does not, or that has none. Counting
+    /// the rows of a merge of 66 appends of metric records again took a seventh of its processor, for what each append's
+    /// directory says (2026-11-16).
+    /// </summary>
+    private static async ValueTask<VariantDirectory.DirectoryBody?[]> DirectoriesAsync(
+        ObjectLease lease, ObjectEntry entry, int[] variants, CancellationToken cancellationToken)
+    {
+        VariantDirectory.DirectoryBody?[] directories = new VariantDirectory.DirectoryBody?[variants.Length];
+
+        // A copy written again lays its chunks its own way, where the regions of the object's table of contents are not.
+        if (entry.Contents?.PathDirectories is not { Count: > 0 } regions || lease.IsCopy)
+        {
+            return directories;
+        }
+
+        IO.ISegmentReader file = lease.File;
+
+        try
+        {
+            for (int v = 0; v < variants.Length; v++)
+            {
+                foreach ((int column, IndexSegment region) in regions)
+                {
+                    if (column != variants[v])
+                    {
+                        continue;
+                    }
+
+                    using Buffers.SegmentOwner bytes = await file
+                        .ReadAsync(new Serialization.Schemas.SegmentSpec(region.Offset, region.Length, region.AlignmentExponent, 0, 0), cancellationToken)
+                        .ConfigureAwait(false);
+                    if (region.Holds(bytes.Buffer.Span) && VariantDirectory.Open(bytes.Buffer.Span) is { } body)
+                    {
+                        if (PathCensus.Tells(body))
+                        {
+                            directories[v] = body;
+                        }
+                        else
+                        {
+                            body.Dispose();
+                        }
+                    }
+
+                    break;
+                }
+            }
+        }
+        catch
+        {
+            foreach (VariantDirectory.DirectoryBody? directory in directories)
+            {
+                directory?.Dispose();
+            }
+
+            throw;
+        }
+
+        return directories;
+    }
 
     /// <summary>
     /// The fields of <paramref name="schema"/> a first pass counts, ascending: those the partition and the key read and the
