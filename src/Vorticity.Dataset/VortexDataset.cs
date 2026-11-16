@@ -1231,8 +1231,10 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
             // A job's writer gathers its columns within its share of the jobs' budget, writing a chunk early past it.
             GatheredBytesCeiling = budget is null ? 0 : DatasetCompactor.GatherCeiling(this),
 
-            // And takes its merge's runs a block at a time, which its ingest then spreads over its lanes.
+            // And takes its merge's runs a block at a time, which its ingest then spreads over its lanes, and compresses a
+            // shredded variant's chunk while the blocks after it go through.
             StagedRows = budget is null ? 0 : Math.Max(_options.Write.BlockRows, 1),
+            CompressesShreddedAhead = budget is not null,
         };
 
         // The variant columns a job shreds, each in long chunks of its own; an append shreds the declared paths when its

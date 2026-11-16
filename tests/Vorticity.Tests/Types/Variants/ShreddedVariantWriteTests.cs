@@ -452,6 +452,68 @@ public sealed partial class ShreddedVariantWriteTests
     }
 
     /// <summary>
+    /// Shredded variant columns that gather to a target of their own and compress each chunk ahead of its writing
+    /// (<see cref="VortexWriteOptions.CompressesShreddedAhead"/>) write the same file on one thread and on four, of the size
+    /// of the file written without, which reads back every row: a chunk's blob goes out where the column's next chunk
+    /// reaches its target, whatever lane compressed it and whenever it ended, its new encoding ids made the file's then.
+    /// </summary>
+    [Fact]
+    public async Task ChunksCompressedAheadWriteTheSameFileOnOneThreadAndOnFour()
+    {
+        Random random = new Random(23);
+        Doc[] rows = [.. Enumerable.Range(0, 30_000).Select(i => new Doc(i, Document(random), random.Next(3) == 0 ? null : Document(random)))];
+        Dictionary<string, VariantShredding> shredding = new() { [nameof(Doc.Attributes)] = Shredding(random), [nameof(Doc.Extra)] = Shredding(random) };
+        string onePath = Path.Combine(Path.GetTempPath(), $"vorticity-ahead-{Guid.NewGuid():N}.vortex");
+        string fourPath = Path.Combine(Path.GetTempPath(), $"vorticity-ahead-{Guid.NewGuid():N}.vortex");
+        string plainPath = Path.Combine(Path.GetTempPath(), $"vorticity-ahead-{Guid.NewGuid():N}.vortex");
+        try
+        {
+            int one = await WriteGatheredAsync(rows, shredding, onePath, degree: 1, ahead: true);
+            int four = await WriteGatheredAsync(rows, shredding, fourPath, degree: 4, ahead: true);
+            _ = await WriteGatheredAsync(rows, shredding, plainPath, degree: 1, ahead: false);
+            Assert.True(one > 2, $"{one} chunks compressed ahead on one thread");
+            Assert.Equal(one, four);
+            byte[] bytes = await System.IO.File.ReadAllBytesAsync(onePath, Ct);
+            Assert.Equal(bytes, await System.IO.File.ReadAllBytesAsync(fourPath, Ct));
+            long plain = new FileInfo(plainPath).Length;
+            Assert.True(Math.Abs(bytes.Length - plain) <= plain / 50, $"{bytes.Length} bytes compressed ahead against {plain} without");
+            await using VortexFile file = await VortexFile.OpenAsync(fourPath, Ct);
+            List<Doc> read = await file.Scan<Doc>().ToRecordsAsync(Ct).ToListAsync(Ct);
+            Assert.Equal(rows.Length, read.Count);
+            for (int i = 0; i < rows.Length; i++)
+            {
+                Assert.Equal(rows[i].Id, read[i].Id);
+                Assert.True(rows[i].Attributes.Equals(read[i].Attributes), $"row {i}'s attributes");
+                Assert.True(Equals(rows[i].Extra, read[i].Extra), $"row {i}'s extra");
+            }
+        }
+        finally
+        {
+            System.IO.File.Delete(onePath);
+            System.IO.File.Delete(fourPath);
+            System.IO.File.Delete(plainPath);
+        }
+    }
+
+    /// <summary>Writes <paramref name="rows"/>, every column gathering chunks of 16 KiB, and returns the chunks compressed ahead.</summary>
+    private static async Task<int> WriteGatheredAsync(Doc[] rows, Dictionary<string, VariantShredding> shredding, string path, int degree, bool ahead)
+    {
+        VortexWriteOptions options = new VortexWriteOptions
+        {
+            Identity = new Guid("4d4d4d4d-4d4d-4d4d-8d4d-4d4d4d4d4d4d"),
+            BlockRows = 1_024,
+            ShreddedVariants = shredding,
+            DegreeOfParallelism = degree,
+            GatheredChunkBytes = 16 << 10,
+            CompressesShreddedAhead = ahead,
+        };
+        await using VortexFileWriter writer = VortexSession.Default.CreateWriter<Doc>(path, options);
+        await writer.WriteAsync<Doc>(rows, Ct);
+        await writer.CompleteAsync(Ct);
+        return writer.ChunksCompressedAhead;
+    }
+
+    /// <summary>
     /// Writes <paramref name="rows"/> whole in one chunk, then each variant column of the chunk under its shredding,
     /// compressed or not and in frames of a block or one, laid out whole and a column at a time: the two blobs are equal.
     /// </summary>

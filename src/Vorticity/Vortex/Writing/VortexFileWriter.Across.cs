@@ -245,6 +245,14 @@ public sealed partial class VortexFileWriter
     {
         for (int field = 0; field < _fieldCount; field++)
         {
+            // A chunk taken to compress ahead goes behind the column's chunk before it, which goes out now.
+            if (columns.TakeDetached(field) is { } detached)
+            {
+                await LandAheadAsync(field, cancellationToken).ConfigureAwait(false);
+                CompressAhead(detached);
+                continue;
+            }
+
             if (columns.GatheredOf(field) is not { } gathering)
             {
                 if (columns.Flushing)
@@ -317,6 +325,10 @@ public sealed partial class VortexFileWriter
 
         // Per column, the block bounds of its shredded keys in this chunk; null for a writer that counts none.
         private Indexes.ChunkBlockBounds?[]? _bounds;
+
+        // Per column, the chunk it took from its gathering to compress ahead (VortexFileWriter.CompressAhead), its target
+        // reached in this chunk of the file; null for none.
+        private AheadChunk?[] _detached = [];
         private int[] _gatheredFirst = [];
         private int[] _gatheredBlocks = [];
         private int[] _gatheredRows = [];
@@ -430,6 +442,7 @@ public sealed partial class VortexFileWriter
                 _gatheredFirst = new int[fields];
                 _gatheredBlocks = new int[fields];
                 _gatheredRows = new int[fields];
+                _detached = new AheadChunk?[fields];
                 for (int field = 0; field < fields; field++)
                 {
                     _fresh[field] = new string[4];
@@ -582,6 +595,18 @@ public sealed partial class VortexFileWriter
         /// <summary>The gathering column <paramref name="field"/> was given to in this chunk, or null.</summary>
         internal Gathering? GatheredOf(int field) => _gathered[field];
 
+        /// <summary>The chunk column <paramref name="field"/> took from its gathering in this chunk to compress ahead, given to the caller; null for none.</summary>
+        internal AheadChunk? TakeDetached(int field)
+        {
+            AheadChunk? chunk = field < _detached.Length ? _detached[field] : null;
+            if (chunk is not null)
+            {
+                _detached[field] = null;
+            }
+
+            return chunk;
+        }
+
         /// <summary>Whether column <paramref name="field"/> wrote a blob in this chunk: every column but one that only gathered.</summary>
         internal bool Wrote(int field) => _blobs[field].Length > 0;
 
@@ -698,6 +723,14 @@ public sealed partial class VortexFileWriter
                 writer.Gather(field, gathering, chunk!, _nodes[field], _rows, _blocks);
                 if (!writer.DueOrOver(gathering))
                 {
+                    return;
+                }
+
+                // A shredded variant's chunk is taken as it is and compressed ahead once the chunk's blobs go out, the
+                // column's chunk before it written first (WriteColumnBlobsAsync).
+                if (writer.CompressesAhead(field))
+                {
+                    _detached[field] = writer.Detach(field, gathering);
                     return;
                 }
             }
@@ -864,6 +897,17 @@ public sealed partial class VortexFileWriter
                 _blobs[field].Dispose();
                 _blobs[field] = default;
                 _ahead[field]?.Finish();
+            }
+
+            // A chunk taken to compress ahead that a failure kept from compressing gives its rows back.
+            for (int field = 0; field < _detached.Length; field++)
+            {
+                if (_detached[field] is { } detached)
+                {
+                    _writer?.Release(detached);
+                }
+
+                _detached[field] = null;
             }
 
             // A failed ingest across leaves counts behind; the next chunk starts from none. A flush ends
