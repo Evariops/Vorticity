@@ -93,6 +93,7 @@ public sealed partial class VariantKeysTests
                     {
                         int alone = paths[p].Apply(arena, variant);
                         Same(batch, alone, together[p], paths[p].Text + " " + paths[p].Read);
+                        Cleared(batch, together[p], paths[p].Text + " " + paths[p].Read);
                     }
 
                     checkedRows += batch.RowCount;
@@ -143,6 +144,31 @@ public sealed partial class VariantKeysTests
         }
 
         return Variant.Object([.. fields]);
+    }
+
+    /// <summary>
+    /// The slots of the rows the column at <paramref name="index"/> holds no value at are zero, as a column is before its rows
+    /// are written: a number's eight bytes, a view's sixteen.
+    /// </summary>
+    private static void Cleared(RecordBatch batch, int index, string what)
+    {
+        CanonicalNode node = batch.Arena.GetNode(index);
+        int width = node.Kind switch
+        {
+            CanonicalKind.VarBinView => 16,
+            CanonicalKind.Primitive => 8,
+            _ => 0,
+        };
+
+        ReadOnlySpan<byte> slots = width == 0 ? default : (width == 16 ? node.Views : node.Values).Span;
+        VortexColumn column = new VortexColumn(batch, index);
+        for (int row = 0; width > 0 && row < column.Length; row++)
+        {
+            if (!column.IsValid(row))
+            {
+                Assert.True(!slots.Slice(row * width, width).ContainsAnyExcept((byte)0), $"{what}: row {row} absent, its slot not cleared");
+            }
+        }
     }
 
     /// <summary>Whether the columns at <paramref name="left"/> and <paramref name="right"/> hold the same values, row for row.</summary>

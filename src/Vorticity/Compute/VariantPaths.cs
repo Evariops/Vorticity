@@ -963,6 +963,44 @@ internal sealed class VariantFieldExpr : FieldExpr
 
         private static bool Get(ReadOnlySpan<byte> bits, int row) => (bits[row >> 3] & (1 << (row & 7))) != 0;
 
+        /// <summary>
+        /// The first row from <paramref name="row"/> on whose bit is <paramref name="set"/>, <paramref name="end"/> for none: the
+        /// bits read sixty-four at a time, those past the bitmap's last byte read as clear.
+        /// </summary>
+        private static int Next(ReadOnlySpan<byte> bits, int row, int end, bool set)
+        {
+            ulong flip = set ? 0UL : ulong.MaxValue;
+            while (row < end)
+            {
+                int at = row >> 3;
+                ulong word;
+                if (bits.Length - at >= sizeof(ulong))
+                {
+                    word = BinaryPrimitives.ReadUInt64LittleEndian(bits[at..]);
+                }
+                else
+                {
+                    word = 0;
+                    for (int i = 0; at + i < bits.Length; i++)
+                    {
+                        word |= (ulong)bits[at + i] << (8 * i);
+                    }
+                }
+
+                // A bit set where the row's is the one looked for; past the rows, a clear bit looked for is found at
+                // or past the end, which the end bounds.
+                word = (word ^ flip) >> (row & 7);
+                if (word != 0)
+                {
+                    return Math.Min(row + System.Numerics.BitOperations.TrailingZeroCount(word), end);
+                }
+
+                row = (at + sizeof(ulong)) << 3;
+            }
+
+            return end;
+        }
+
         /// <summary>The node of the column written.</summary>
         internal readonly int Finish(CanonicalArena arena, in CanonicalNode values)
         {
@@ -971,15 +1009,17 @@ internal sealed class VariantFieldExpr : FieldExpr
                 return arena.AddBool(PresentType, _rows, Validity.NonNullable, _values, 0);
             }
 
-            // The slots of the rows absent cleared, as the column was before its rows were written.
+            // The slots of the rows absent cleared, as the column was before its rows were written: a run of them at once,
+            // found sixty-four rows at a time. A row at a time, a call each, took a seventh of a merge of log records, whose
+            // attributes shred hundreds of keys each held by a few rows in ten (2026-11-16).
             if (_width > 0 && _present < _rows)
             {
-                for (int row = 0; row < _rows; row++)
+                ReadOnlySpan<byte> bits = _validBits;
+                for (int row = Next(bits, 0, _rows, set: false); row < _rows;)
                 {
-                    if (!Get(_validBits, row))
-                    {
-                        _into.Slice(row * _width, _width).Clear();
-                    }
+                    int end = Next(bits, row, _rows, set: true);
+                    _into.Slice(row * _width, (end - row) * _width).Clear();
+                    row = end < _rows ? Next(bits, end, _rows, set: false) : _rows;
                 }
             }
 
