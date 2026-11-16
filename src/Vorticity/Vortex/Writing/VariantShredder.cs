@@ -105,7 +105,11 @@ internal static class VariantShredder
         {
             Plan = plan;
             _root = Group.For(plan);
+            _root.Attach(_replay);
         }
+
+        // What the last row read took, node by node, for the rows that repeat its value to take again without reading it.
+        private readonly Replay _replay = new Replay();
 
         /// <summary>The shredding the nodes are of.</summary>
         internal VariantShredding Plan { get; }
@@ -138,6 +142,12 @@ internal static class VariantShredder
             // a source's rows, which the slice's sort keeps together.
             ReadOnlySpan<byte> previous = default;
             int epoch = -1;
+
+            // A row whose value is the last row read's, under the same metadata, takes again what that row took, node by
+            // node, without reading it: a metric's series repeats its attributes row after row, which were read again each, a
+            // fifth of a merge of metric records (2026-11-16).
+            ReadOnlySpan<byte> lastValue = default;
+            int lastEpoch = -1;
             for (int row = 0; row < rows; row++)
             {
                 if (!ArenaWords.IsValid(arena, node, row))
@@ -153,8 +163,17 @@ internal static class VariantShredder
                     previous = metadataBytes;
                 }
 
+                if (epoch == lastEpoch && bytes.SequenceEqual(lastValue))
+                {
+                    _replay.Again(bytes, row);
+                    continue;
+                }
+
                 VariantDictionary dictionary = VariantDictionary.Read(metadataBytes);
+                _replay.Begin();
                 _root.Present(in dictionary, epoch, bytes, row);
+                lastEpoch = _replay.Whole ? epoch : -1;
+                lastValue = bytes;
             }
         }
 
@@ -303,6 +322,57 @@ internal static class VariantShredder
     /// One node of the shredding over a chunk's rows: what of each row that holds it the node does not take, its typed
     /// values, and the rows that hold it.
     /// </summary>
+    /// <summary>
+    /// The nodes a row reached as it was read, in order, each with where its value lies in the row's: what a row that repeats
+    /// the value takes again, node by node, each node its own part alone (<see cref="Group.Again"/>). A row whose object kept
+    /// keys of its own beside the shredded ones is not replayed: they are read from its fields, which a replay does not read.
+    /// </summary>
+    private sealed class Replay
+    {
+        private Group[] _groups = new Group[16];
+        private int[] _offsets = new int[16];
+        private int[] _lengths = new int[16];
+        private int _count;
+
+        /// <summary>Whether the row read last may be replayed.</summary>
+        internal bool Whole { get; private set; }
+
+        /// <summary>A row is read: what the row before reached is forgotten.</summary>
+        internal void Begin()
+        {
+            _count = 0;
+            Whole = true;
+        }
+
+        /// <summary><paramref name="group"/> took the value of <paramref name="length"/> bytes at <paramref name="offset"/> of the row's.</summary>
+        internal void Note(Group group, int offset, int length)
+        {
+            if (_count == _groups.Length)
+            {
+                Array.Resize(ref _groups, 2 * _count);
+                Array.Resize(ref _offsets, 2 * _count);
+                Array.Resize(ref _lengths, 2 * _count);
+            }
+
+            _groups[_count] = group;
+            _offsets[_count] = offset;
+            _lengths[_count] = length;
+            _count++;
+        }
+
+        /// <summary>The row read takes what a replay cannot take again.</summary>
+        internal void Break() => Whole = false;
+
+        /// <summary>Row <paramref name="row"/>, whose value <paramref name="value"/> is the last row read's, takes what it took.</summary>
+        internal void Again(ReadOnlySpan<byte> value, int row)
+        {
+            for (int i = 0; i < _count; i++)
+            {
+                _groups[i].Again(value.Slice(_offsets[i], _lengths[i]), row);
+            }
+        }
+    }
+
     private abstract class Group
     {
         /// <summary>What the node does not take of the rows that hold it: a value of another shape or class, an object's other keys.</summary>
@@ -310,6 +380,25 @@ internal static class VariantShredder
 
         /// <summary>The last row the node was handed, -1 before the first.</summary>
         internal int Last { get; private set; } = -1;
+
+        /// <summary>Where the node notes the rows it takes, for the rows that repeat their values; null for none.</summary>
+        private protected Replay? Record { get; private set; }
+
+        /// <summary>Has the node, and every node below it, note the values it takes in <paramref name="record"/>.</summary>
+        internal virtual void Attach(Replay record) => Record = record;
+
+        /// <summary>
+        /// Takes at row <paramref name="row"/> its own part of <paramref name="value"/>, the value it took at the row read last,
+        /// which this row repeats: a leaf what it took then, an object its row, its keys taking theirs by their own notes.
+        /// </summary>
+        internal virtual void Again(ReadOnlySpan<byte> value, int row)
+        {
+            Last = row;
+            Take(default, -1, value, row, 0);
+        }
+
+        /// <summary>Notes <paramref name="row"/> as the last the node took, as <see cref="Present"/> does.</summary>
+        private protected void Mark(int row) => Last = row;
 
         internal static Group For(VariantShredding plan) => plan.Kind switch
         {
@@ -329,17 +418,19 @@ internal static class VariantShredder
         }
 
         /// <summary>
-        /// Row <paramref name="row"/>, whose node holds <paramref name="value"/>, its keys named by <paramref name="dictionary"/>,
-        /// the same as every row of its run of <paramref name="epoch"/>; rows come in order.
+        /// Row <paramref name="row"/>, whose node holds <paramref name="value"/>, <paramref name="offset"/> bytes into the row's
+        /// value, its keys named by <paramref name="dictionary"/>, the same as every row of its run of <paramref name="epoch"/>;
+        /// rows come in order.
         /// </summary>
-        internal void Present(in VariantDictionary dictionary, int epoch, ReadOnlySpan<byte> value, int row)
+        internal void Present(in VariantDictionary dictionary, int epoch, ReadOnlySpan<byte> value, int row, int offset = 0)
         {
             Last = row;
-            Take(in dictionary, epoch, value, row);
+            Record?.Note(this, offset, value.Length);
+            Take(in dictionary, epoch, value, row, offset);
         }
 
         /// <summary>Takes what the node holds of row <paramref name="row"/>, as <see cref="Present"/> says.</summary>
-        protected abstract void Take(in VariantDictionary dictionary, int epoch, ReadOnlySpan<byte> value, int row);
+        protected abstract void Take(in VariantDictionary dictionary, int epoch, ReadOnlySpan<byte> value, int row, int offset);
 
         /// <summary>The dtype of the node's typed node.</summary>
         internal abstract DType TypedType(DTypeArena types);
@@ -374,7 +465,7 @@ internal static class VariantShredder
             _typed.Clear(arena);
         }
 
-        protected override void Take(in VariantDictionary dictionary, int epoch, ReadOnlySpan<byte> value, int row)
+        protected override void Take(in VariantDictionary dictionary, int epoch, ReadOnlySpan<byte> value, int row, int offset)
         {
             VariantScalar scalar = VariantScalar.Read(value);
             if (_typed.Takes(scalar.Kind))
@@ -481,7 +572,29 @@ internal static class VariantShredder
             }
         }
 
-        protected override void Take(in VariantDictionary dictionary, int epoch, ReadOnlySpan<byte> value, int row)
+        internal override void Attach(Replay record)
+        {
+            base.Attach(record);
+            foreach (Group field in _fields)
+            {
+                field.Attach(record);
+            }
+        }
+
+        /// <summary>The row's object takes its row again, its keys theirs by their own notes; any other value its value.</summary>
+        internal override void Again(ReadOnlySpan<byte> value, int row)
+        {
+            Mark(row);
+            if ((value[0] & 0x03) != ParquetVariant.BasicObject)
+            {
+                Values.Add(row, value);
+                return;
+            }
+
+            _objects.Add(row);
+        }
+
+        protected override void Take(in VariantDictionary dictionary, int epoch, ReadOnlySpan<byte> value, int row, int offset)
         {
             if ((value[0] & 0x03) != ParquetVariant.BasicObject)
             {
@@ -533,7 +646,9 @@ internal static class VariantShredder
                     Group field = _fields[key];
                     if (field.Last < row)
                     {
-                        field.Present(in dictionary, epoch, fields.ValueAt(i), row);
+                        ReadOnlySpan<byte> held = fields.ValueAt(i);
+                        int at = offset + (int)Unsafe.ByteOffset(ref MemoryMarshal.GetReference(value), ref MemoryMarshal.GetReference(held));
+                        field.Present(in dictionary, epoch, held, row, at);
                     }
                 }
                 else
@@ -542,8 +657,10 @@ internal static class VariantShredder
                 }
             }
 
+            // The keys kept apart are read from the row's fields, which a row that repeats it would not read.
             if (kept > 0)
             {
+                Record?.Break();
                 Values.AddObject(row, fields, _kept.AsSpan(0, kept));
             }
         }
@@ -627,7 +744,7 @@ internal static class VariantShredder
             _sizes.Clear(arena);
         }
 
-        protected override void Take(in VariantDictionary dictionary, int epoch, ReadOnlySpan<byte> value, int row)
+        protected override void Take(in VariantDictionary dictionary, int epoch, ReadOnlySpan<byte> value, int row, int offset)
         {
             if ((value[0] & 0x03) == ParquetVariant.BasicArray)
             {

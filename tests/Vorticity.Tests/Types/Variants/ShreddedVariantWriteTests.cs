@@ -61,6 +61,51 @@ public sealed partial class ShreddedVariantWriteTests
     }
 
     /// <summary>
+    /// Documents that repeat one after the other, as a metric's series holds its attributes, which the shredder takes again
+    /// without reading them: every shape of <see cref="ARandomShreddingReadsBackEveryDocument"/>, null rows and objects of
+    /// keys kept apart among them, in runs of one to forty, read back every document, over chunks of 512 rows on one lane or
+    /// four.
+    /// </summary>
+    [Theory]
+    [InlineData(11, 1)]
+    [InlineData(12, 4)]
+    [InlineData(13, 1)]
+    public async Task DocumentsThatRepeatReadBackEveryDocument(int seed, int degree)
+    {
+        Random random = new Random(seed);
+        List<Doc> drawn = [];
+        while (drawn.Count < 3_000)
+        {
+            Variant attributes = Document(random);
+            Variant? extra = random.Next(10) == 0 ? null : Document(random);
+            for (int run = 1 + random.Next(random.Next(4) == 0 ? 1 : 40); run > 0; run--)
+            {
+                drawn.Add(new Doc(drawn.Count, attributes, random.Next(30) == 0 ? null : extra));
+            }
+        }
+
+        Doc[] rows = [.. drawn];
+        Dictionary<string, VariantShredding> shredding = new()
+        {
+            [nameof(Doc.Attributes)] = Shredding(random),
+            [nameof(Doc.Extra)] = Shredding(random),
+        };
+
+        List<Doc> read = await RoundTripAsync(rows, shredding, degree);
+        Assert.Equal(rows.Length, read.Count);
+        for (int i = 0; i < rows.Length; i++)
+        {
+            Assert.Equal(rows[i].Id, read[i].Id);
+            Assert.True(rows[i].Attributes.Equals(read[i].Attributes), $"row {i}: {rows[i].Attributes.ToJson()} read as {read[i].Attributes.ToJson()}");
+            Assert.Equal(rows[i].Extra is null, read[i].Extra is null);
+            if (rows[i].Extra is { } extra)
+            {
+                Assert.True(extra.Equals(read[i].Extra!.Value), $"row {i}: {extra.ToJson()} read as {read[i].Extra!.Value.ToJson()}");
+            }
+        }
+    }
+
+    /// <summary>
     /// Two columns shredded alike, whose rows a scan puts back together by one plan kept from a batch to the next and
     /// from a column to the other, read back every document, over chunks of 512 rows on one lane or four.
     /// </summary>
