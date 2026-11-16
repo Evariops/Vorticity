@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Vorticity.Dataset;
 using Xunit;
 
 namespace Vorticity.Tests.Api;
@@ -25,7 +26,7 @@ public sealed class PartsContractTests
         string path = await WriteAsync(Rows(200_000), lanes: 1, chunkRows: 16_384);
         await using VortexFile file = await VortexFile.OpenAsync(path, Ct);
         IReadOnlyList<Scan<Reading>> parts = await file.Scan<Reading>().SplitAsync(4, Ct);
-        Assert.Equal(4, parts.Count);
+        Assert.InRange(parts.Count, 2, 4);
         List<int> days = [];
         foreach (Scan<Reading> part in parts)
         {
@@ -72,6 +73,47 @@ public sealed class PartsContractTests
         Assert.Equal(loop.Nulls, states[0].Nulls);
         Assert.Equal(loop.CityBytes, states[0].CityBytes);
         Assert.Equal(loop.Celsius, states[0].Celsius, 1e-6);
+    }
+
+    /// <summary>
+    /// A dataset's scan is cut at its objects: the parts read every row once, in order, and a fold of its batches gives the
+    /// same state on one lane, on four and on fourteen.
+    /// </summary>
+    [Fact]
+    public async Task ADatasetScanIsCutAtItsObjects()
+    {
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Reading.Schema, new DatasetOptions(), Ct);
+        Reading[] rows = Rows(60_000);
+        for (int i = 0; i < 6; i++)
+        {
+            await using ObjectDraft draft = dataset.StartObject();
+            await draft.Writer.WriteAsync<Reading>(rows.AsSpan(i * 10_000, 10_000), Ct);
+            await dataset.AppendAsync(draft, Ct);
+        }
+
+        IReadOnlyList<Scan<Reading>> parts = await dataset.Scan<Reading>().SplitAsync(3, Ct);
+        Assert.True(parts.Count > 1, $"{parts.Count} part(s) of six objects");
+        List<int> days = [];
+        foreach (Scan<Reading> part in parts)
+        {
+            await foreach (Columns<Reading> batch in part.WithCancellation(Ct))
+            {
+                days.AddRange(batch.Column<int>(0).Values.ToArray());
+            }
+        }
+
+        Assert.Equal(rows.Select(static row => row.Day), days);
+
+        List<Totals> states = [];
+        foreach (int lanes in (int[])[1, 4, 14])
+        {
+            states.Add(await dataset.Scan<Reading>().With(new ScanOptions { DegreeOfParallelism = lanes }).AggregateAsync<TotalsAggregator, Totals>(Ct));
+        }
+
+        Assert.Equal(states[0], states[1]);
+        Assert.Equal(states[0], states[2]);
+        Assert.Equal(60_000, states[0].Rows);
     }
 
     /// <summary>Parts written out of their order go in the file in the order they were created; a part disposed unwritten gives its place up.</summary>

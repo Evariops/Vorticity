@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
+using Vorticity.Aggregating;
 using Vorticity.Scanning;
 
 namespace Vorticity;
@@ -17,6 +18,12 @@ namespace Vorticity;
 /// </remarks>
 public sealed partial class Scan<TRecord>
 {
+    /// <summary>
+    /// The most parts a fold cuts a scan into: fixed, so that the parts, and the order their states merge in, are the same
+    /// at every degree. Four parts a lane at sixteen lanes, so that a lane on a slower core takes fewer.
+    /// </summary>
+    private const int FoldParts = 64;
+
     /// <summary>
     /// The scan cut into at most <paramref name="count"/> scans of disjoint rows that together read every row it reads, in
     /// the rows' order: each starts where every column the scan reads starts a chunk, so that a chunk is read by one part
@@ -34,13 +41,13 @@ public sealed partial class Scan<TRecord>
             throw new InvalidOperationException("A scan in a key's order, or of rows taken by index, is read whole: it is not split.");
         }
 
-        IReadOnlyList<RowRange>? ranges = count == 1 ? null : await _source.PartsAsync(Spec(), count, cancellationToken).ConfigureAwait(false);
-        if (ranges is not { Count: > 1 })
+        RowRange[] ranges = await AggregationPartials.RowPartsAsync(_source, Spec(), count, cancellationToken).ConfigureAwait(false);
+        if (ranges.Length <= 1)
         {
             return [this];
         }
 
-        Scan<TRecord>[] parts = new Scan<TRecord>[ranges.Count];
+        Scan<TRecord>[] parts = new Scan<TRecord>[ranges.Length];
         for (int i = 0; i < parts.Length; i++)
         {
             parts[i] = Part(ranges[i]);
@@ -54,6 +61,10 @@ public sealed partial class Scan<TRecord>
     /// cut into at the starts of its chunks, each part read and folded on a lane of the scan's degree, the states merged in
     /// the parts' order. The parts are the chunks', not the lanes': the state is the same, bit for bit, at every degree.
     /// </summary>
+    /// <remarks>
+    /// The rows are cut into <see cref="FoldParts"/> parts at most, whatever the degree, as a file's chunks and a dataset's
+    /// objects allow.
+    /// </remarks>
     /// <typeparam name="TAggregator">The aggregator.</typeparam>
     /// <typeparam name="TState">The aggregator's state.</typeparam>
     /// <param name="cancellationToken">Cancels the reads.</param>
@@ -62,7 +73,7 @@ public sealed partial class Scan<TRecord>
         where TAggregator : IBatchAggregator<TRecord, TState>
     {
         IReadOnlyList<Scan<TRecord>> parts = _orderPath is null && _take is null
-            ? await SplitAsync(int.MaxValue, cancellationToken).ConfigureAwait(false)
+            ? await SplitAsync(FoldParts, cancellationToken).ConfigureAwait(false)
             : [this];
         TState[] states = new TState[parts.Count];
         int degree = Math.Max(1, _options.DegreeOfParallelism > 0 ? _options.DegreeOfParallelism : _source.Session.Options.MaxDegreeOfParallelism);
