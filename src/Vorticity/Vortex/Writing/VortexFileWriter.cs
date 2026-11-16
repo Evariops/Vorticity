@@ -1777,6 +1777,10 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     {
         _gatherInIngest = GathersInIngest(rows);
         _ingestGathered = false;
+
+        // The column that writes early is chosen before the chunk's rows are gathered, wherever they are gathered: on one
+        // lane, the emission gathers them after the choice (EmitChunkAsync).
+        Over();
         try
         {
             await IngestAsync(arena, node).ConfigureAwait(false);
@@ -3086,7 +3090,10 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         CanonicalArena arena, int rootIndex, long rows, CancellationToken cancellationToken)
     {
         int blocks = ChunkBlocks(rows, _blockRows);
-        Over();
+        if (!_gatheredInIngest)
+        {
+            Over();
+        }
 
         // A column that would gather past int.MaxValue rows writes what it holds first, as the loop
         // below does it: a chunk that would make one do so is written on this thread.
