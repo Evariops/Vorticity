@@ -763,28 +763,33 @@ internal sealed class VariantFieldExpr : FieldExpr
         {
             _read = read;
             _rows = rows;
-            int width = read switch
+            _width = read switch
             {
                 VariantRead.AsString => CanonicalSupport.ViewSize,
                 VariantRead.AsBool or VariantRead.Has => 0,
                 _ => sizeof(long),
             };
 
-            // Cleared once, here: Allocate clears too, and a path of a few rows in ten took its column cleared twice, a tenth
-            // of a merge of log records that shreds a hundred keys.
-            if (width == 0)
+            // The bits cleared once, here: Allocate clears too, and a path of a few rows in ten took its column cleared twice, a
+            // tenth of a merge of log records that shreds a hundred keys. A column of numbers or views is not: each row present
+            // writes its slot whole, and the rows absent are cleared at the end (Finish), none for a key every row holds, where
+            // clearing every key's column of a batch took a fifteenth of a merge of metric records at fourteen lanes (2026-11-16).
+            if (_width == 0)
             {
                 _values = arena.AllocateUninitialized(Math.Max(CanonicalSupport.BitmapByteCount(rows), 1), 1, out _into);
+                _into.Clear();
             }
             else
             {
-                _values = arena.AllocateUninitialized(Math.Max(rows * width, width), 64, out _into);
+                _values = arena.AllocateUninitialized(Math.Max(rows * _width, _width), 64, out _into);
             }
 
             _validity = arena.AllocateUninitialized(Math.Max(CanonicalSupport.BitmapByteCount(rows), 1), 1, out _validBits);
-            _into.Clear();
             _validBits.Clear();
         }
+
+        // The bytes of a row's slot: a view's, a number's, or none for bits.
+        private readonly int _width;
 
         /// <summary>Writes the value <paramref name="found"/> at <paramref name="row"/>, when it is of the class read.</summary>
         internal void Write(int row, scoped ReadOnlySpan<byte> found, scoped ReadOnlySpan<byte> valueViews, scoped ReadOnlySpan<byte> rowValue)
@@ -837,6 +842,8 @@ internal sealed class VariantFieldExpr : FieldExpr
             Span<byte> view = _into.Slice(row * CanonicalSupport.ViewSize, CanonicalSupport.ViewSize);
             if (text.Length <= CanonicalSupport.MaxInlineViewLength)
             {
+                // The bytes past a short text are zero, which the slot, not cleared beforehand, does not hold.
+                view.Clear();
                 CanonicalSupport.WriteInlineView(view, text);
                 return;
             }
@@ -896,6 +903,18 @@ internal sealed class VariantFieldExpr : FieldExpr
             if (_read == VariantRead.Has)
             {
                 return arena.AddBool(PresentType, _rows, Validity.NonNullable, _values, 0);
+            }
+
+            // The slots of the rows absent cleared, as the column was before its rows were written.
+            if (_width > 0 && _present < _rows)
+            {
+                for (int row = 0; row < _rows; row++)
+                {
+                    if (!Get(_validBits, row))
+                    {
+                        _into.Slice(row * _width, _width).Clear();
+                    }
+                }
             }
 
             Validity validity = _present == _rows ? Validity.AllValid
