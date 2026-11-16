@@ -3588,8 +3588,9 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
     private readonly SynopsisMemo _synopses = new SynopsisMemo();
 
     /// <summary>
-    /// 🧪 The bytes of the indexes of the partitions this handle read, their directories, last bytes and pages, that it keeps
-    /// whatever the registry of kept memory asks (<see cref="PartitionIndexes"/>): provisional, calibrated by measurement.
+    /// The bytes of the indexes of the partitions this handle read, their directories, last bytes and pages, that it keeps
+    /// whatever the registry of kept memory asks (<see cref="PartitionIndexes"/>): with the handle's other floors, what forty
+    /// handles read was all kept after two turns of the slow timer (2026-11-16).
     /// </summary>
     internal const long PartitionIndexFloorBytes = 4L << 20;
 
@@ -4811,15 +4812,15 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
     /// <summary>The bytes a subtree's end is counted at in <see cref="_subtreeEnds"/>: its page's reference, its value and a slot.</summary>
     private const int SubtreeEndBytes = 96;
 
-    // The end of each subtree a keyless partitioned dataset's appends found (SubtreeEndAsync), by its page; 🧪 256 KiB kept
-    // whatever the registry of kept memory asks, provisional.
+    // The end of each subtree a keyless partitioned dataset's appends found (SubtreeEndAsync), by its page; 256 KiB kept
+    // whatever the registry of kept memory asks, some 2 700 subtrees at SubtreeEndBytes each.
     private readonly ClockMemo<PageReference, long> _subtreeEnds = ClockMemo<PageReference, long>.Kept(256L << 10);
 
     /// <summary>
     /// The entries of objects' index directories a lookup read, parsed, by object and region, which do not change: each
     /// locating index's entry of every object a lookup reached was read and parsed at every question, 15 % of what a search
-    /// of one identifier allocated. An entry weighs twice its bytes; 🧪 1 MiB of them kept whatever the registry of kept
-    /// memory asks, provisional.
+    /// of one identifier allocated. An entry weighs twice its bytes; 1 MiB of them kept whatever the registry of kept
+    /// memory asks.
     /// </summary>
     private readonly ClockMemo<(UInt128 Uid, ulong Offset), Indexes.IndexEntry> _indexEntries =
         ClockMemo<(UInt128 Uid, ulong Offset), Indexes.IndexEntry>.Kept(1L << 20);

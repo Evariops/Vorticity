@@ -69,13 +69,14 @@ internal interface IHeldMemory
 /// memory goes down to its floors within two turns. And when a reservation needs room, or the machine's memory load is
 /// high at a collection, everything above the floors goes, in the order of the kinds.
 /// </para>
-/// <para>
-/// 🧪 The timer's period, like the floors, is a provisional constant, calibrated with them by measurement.
-/// </para>
 /// </remarks>
 internal static class HeldMemory
 {
-    /// <summary>🧪 The period of the slow timer that lets go of what nothing used, in milliseconds: provisional, to be measured.</summary>
+    /// <summary>
+    /// The period of the slow timer that lets go of what nothing used, in milliseconds: an idle process is down to its floors
+    /// within a minute. A turn took 1.1 to 1.6 ms with 40 handles open, and their floors kept everything they read: the
+    /// questions asked after two turns made no request, where the first round made 160 (<c>--micro reader</c>, 2026-11-16).
+    /// </summary>
     internal const int RestTickMilliseconds = 30_000;
 
     private static readonly ConditionalWeakTable<IHeldMemory, object?> Holders = new ConditionalWeakTable<IHeldMemory, object?>();

@@ -41,8 +41,9 @@ internal static class Blocks
     private const int MaxShift = 30;
 
     /// <summary>
-    /// 🧪 The bytes each class keeps whatever the registry asks: 4 096 blocks of 16 bytes, one of 64 KiB, none larger.
-    /// Provisional, calibrated by measurement with the other floors.
+    /// The bytes each class keeps whatever the registry asks: 4 096 blocks of 16 bytes, one of 64 KiB, none larger.
+    /// 448 rents of 16 bytes to 64 KiB took 9 to 10 µs from blocks kept, 42 to 46 µs allocated anew
+    /// (<c>--micro poolrent</c>, Apple M4 Pro, 2026-11-16).
     /// </summary>
     internal const int FloorBytesPerClass = 64 * 1024;
 

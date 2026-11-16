@@ -85,8 +85,11 @@ In a container, the runtime measures the memory load against the container's mem
 
 Keeping every block given back serves 32 questions at once, which each hold dozens of blocks of the
 same few classes: with 1 GiB parked in all, one block in four was freed as it came back, and the
-next rent took it from the system again, every page faulted anew. The floors and the timer's period
-are provisional, to be calibrated by measurement.
+next rent took it from the system again, every page faulted anew. The floors keep what the next
+question rents first: on an Apple M4 Pro, the 448 rents of 4 to 256 KiB a question makes took 25 to
+27 µs from blocks parked, 64 to 68 µs cut from a slab kept and 84 to 92 µs from new slabs. A turn of
+the slow timer took 1.1 to 1.6 ms with 40 dataset handles open, whose floors kept everything they
+read: the questions asked after two turns made no request to the store.
 
 The blocks parked are managed arrays the runtime keeps pinned: they count in the managed heap, a heap dump shows them on the pinned object heap, and `vortex.memory.retained` tags them `pool` ([observability.md](observability.md#the-memory)). There is one pool in the process. What a session's work holds of it while it runs is counted in its budgets: a query's blocks under `MemoryBudget` until its result is delivered, a writer's under `JobMemoryBudget` until it is disposed. To bound them, give the session budgets of its own:
 

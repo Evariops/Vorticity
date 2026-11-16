@@ -79,8 +79,8 @@ internal sealed class SealedObjectStore : IObjectStore
     private readonly LinkedList<CommitLayout> _clock = new LinkedList<CommitLayout>();
 
     // The trailers of the data objects read with no open of them, by key, which the next such read opens from with no read
-    // of the envelope's end: a few hundred bytes each, what the object's envelope says, no plaintext; 🧪 the bytes kept
-    // whatever the registry of kept memory asks, provisional.
+    // of the envelope's end: a few hundred bytes each, what the object's envelope says, no plaintext; a mebibyte of them kept
+    // whatever the registry of kept memory asks, some three thousand objects.
     private readonly ClockMemo<string, byte[]> _trailers = ClockMemo<string, byte[]>.Kept(TrailerFloorBytes, StringComparer.Ordinal);
     private const long TrailerFloorBytes = 1L << 20;
 

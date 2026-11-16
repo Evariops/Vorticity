@@ -465,8 +465,10 @@ are open. Two floors are options:
 | `OpenObjectFloorBytes` | 8 MiB | the objects kept open: the tail each open read, and its footer as questions parse it, counted at six bytes a byte of footer (measured at five to seven) |
 | `PageFloorBytes` | 4 MiB | the tree pages kept from one version to the next |
 
-`MaxOpenObjects`, 4 096 by default, still bounds the objects kept open by count. The floors' defaults
-are provisional, to be calibrated by measurement. Up to version 0.12 the two options were ceilings,
+`MaxOpenObjects`, 4 096 by default, still bounds the objects kept open by count. Forty handles over
+sets of five datasets each kept 41 MiB in all at rest, about a mebibyte a handle, all within their
+floors: the questions asked after the process had let go of everything above them made no request to
+the store, where the first round made 160. Up to version 0.12 the two options were ceilings,
 `MaxOpenObjectBytes` and `PageCacheBytes`, which a process holding many handles had to lower.
 
 ## Versions

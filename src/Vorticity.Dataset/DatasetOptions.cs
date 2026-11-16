@@ -130,7 +130,11 @@ public sealed record DatasetOptions
     /// 90 KB for one of a few thousand, which a question that opens it again parses again: two to three times what the
     /// same question costs on the objects kept open.
     /// </summary>
-    /// <remarks>🧪 The default is provisional, to be calibrated by measurement.</remarks>
+    /// <remarks>
+    /// Forty handles over sets of five datasets each kept 41 MiB in all after two turns of the slow timer, about a mebibyte a
+    /// handle, under their floors: the questions asked then made no request to the store, where the first round made 160
+    /// (<c>vortex-queries --micro reader</c>, 2026-11-16).
+    /// </remarks>
     public long OpenObjectFloorBytes { get; init; } = 8L << 20;
 
     /// <summary>
@@ -144,7 +148,7 @@ public sealed record DatasetOptions
     /// <remarks>
     /// Beside them the handle keeps, whatever this says, what the reads opening the last sixteen versions it read or
     /// wrote brought back of their pages: the pages those versions wrote, which a later version names until a commit
-    /// rewrites them. 🧪 The default is provisional, to be calibrated by measurement.
+    /// rewrites them. The floors of forty handles kept what their questions read, as <see cref="OpenObjectFloorBytes"/> says.
     /// </remarks>
     public long PageFloorBytes { get; init; } = 4L << 20;
 

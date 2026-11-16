@@ -14,7 +14,10 @@ namespace Vorticity.Dataset;
 /// </remarks>
 internal sealed class SynopsisMemo
 {
-    /// <summary>🧪 The bytes the memo keeps whatever the registry asks: provisional, calibrated by measurement with the other floors.</summary>
+    /// <summary>
+    /// The bytes the memo keeps whatever the registry asks: with the handle's other floors, what forty handles read was all
+    /// kept after two turns of the slow timer (2026-11-16).
+    /// </summary>
     internal const long FloorBytes = 4L << 20;
 
     /// <summary>The largest synopsis the memo keeps, 16 MiB: one past it is parsed again at each asking rather than held.</summary>

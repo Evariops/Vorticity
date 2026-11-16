@@ -323,8 +323,8 @@ internal sealed class DatasetSnapshot
         }
     }
 
-    // 🧪 The bytes of the partition index entries a version keeps found whatever the registry asks (PartitionIndexAsync):
-    // provisional, calibrated by measurement with the other floors.
+    // The bytes of the partition index entries a version keeps found whatever the registry asks (PartitionIndexAsync): with
+    // the handle's other floors, what forty handles read was all kept after two turns of the slow timer (2026-11-16).
     private const long PartitionIndexEntriesFloorBytes = 1L << 20;
 
     // The partition index entries the version's questions found, by partition (PartitionIndexAsync).

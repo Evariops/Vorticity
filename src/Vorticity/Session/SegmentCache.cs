@@ -31,8 +31,10 @@ namespace Vorticity;
 public sealed class SegmentCache : IHeldMemory
 {
     /// <summary>
-    /// 🧪 The bytes a cache keeps whatever the registry of kept memory asks, its budget when that is less: provisional,
-    /// calibrated by measurement with the other floors. Rebuilding what a cache held costs the reads that filled it.
+    /// The bytes a cache keeps whatever the registry of kept memory asks, its budget when that is less. Rebuilding what a
+    /// cache held costs the reads that filled it. A question by service over a file of 4 million log records, 95 MB, made 489
+    /// requests the first time, left 2 MiB in the cache, far under the floor, and asked nothing of the store after two turns
+    /// of the slow timer (<c>vortex-queries --micro reader --file-rows</c>, 2026-11-16).
     /// </summary>
     internal const long FloorBytes = 64L << 20;
 

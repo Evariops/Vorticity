@@ -50,7 +50,11 @@ internal sealed class PredicatePages
         _wide = wide;
     }
 
-    /// <summary>🧪 The bytes a handle keeps of its filters' pages whatever the registry of kept memory asks, an eighth more for the wide notes: provisional.</summary>
+    /// <summary>
+    /// The bytes a handle keeps of its filters' pages whatever the registry of kept memory asks, an eighth more for the wide
+    /// notes: with the handle's other floors, what forty handles read was all kept after two turns of the slow timer
+    /// (2026-11-16).
+    /// </summary>
     internal const long FloorBytes = 2L << 20;
 
     /// <summary>

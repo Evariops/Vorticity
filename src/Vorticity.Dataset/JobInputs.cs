@@ -30,7 +30,12 @@ namespace Vorticity.Dataset;
 /// </remarks>
 internal sealed class JobInputs : IAsyncDisposable
 {
-    /// <summary>🧪 The bytes of a job's inputs from which they are read through the scratch: below, from the store, as before. Provisional, to be measured.</summary>
+    /// <summary>
+    /// The bytes of a job's inputs from which they are read through the scratch: below, from the store, as before. A
+    /// maintainer's 49 jobs of a few small objects each, all below it, made 2 443 requests in 35.3 s read from a store
+    /// answering in 20 ms, and 2 450 in 36.4 to 36.7 s through the scratch (<c>vortex-queries --micro maintainer --minutes 2</c>,
+    /// 2026-11-16): the copy saves a request only where an object takes several reads.
+    /// </summary>
     internal const long FromBytes = 16L << 20;
 
     /// <summary>The prefix of a job's directory in the scratch.</summary>
