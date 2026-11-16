@@ -531,15 +531,28 @@ internal sealed class VariantFieldExpr : FieldExpr
                     output.Write(note.Row, rowValue.Slice(note.Offset, note.Length), valueViews, rowValue);
                 }
 
-                // A row that repeats another takes its slot: a number, a bit, or a view of the same text where it lies.
+                // A row that repeats another takes its slot: a number, a bit, or a view of the same text where it lies; the
+                // rows that follow each other repeating the same row take it together, a series' run of a consolidation's
+                // inputs at once rather than a row and a key at a time.
                 if (!origin.IsEmpty)
                 {
-                    for (int row = 0; row < rows; row++)
+                    for (int row = 0; row < rows;)
                     {
-                        if (origin[row] >= 0)
+                        int from = origin[row];
+                        if (from < 0)
                         {
-                            output.Repeat(row, origin[row]);
+                            row++;
+                            continue;
                         }
+
+                        int end = row + 1;
+                        while (end < rows && origin[end] == from)
+                        {
+                            end++;
+                        }
+
+                        output.Repeat(row, end - row, from);
+                        row = end;
                     }
                 }
 
@@ -887,10 +900,63 @@ internal sealed class VariantFieldExpr : FieldExpr
             Present(row);
         }
 
+        /// <summary>
+        /// Takes at the <paramref name="count"/> rows from <paramref name="row"/> on, which repeat row
+        /// <paramref name="from"/>, that row's slot, as <see cref="Repeat(int, int)"/> takes it a row at a time: the slots
+        /// filled at once, the bits set by the byte.
+        /// </summary>
+        internal void Repeat(int row, int count, int from)
+        {
+            if (!Get(_validBits, from))
+            {
+                return;
+            }
+
+            switch (_read)
+            {
+                case VariantRead.Has or VariantRead.AsBool:
+                    if (Get(_into, from))
+                    {
+                        SetRange(_into, row, count);
+                    }
+
+                    break;
+                case VariantRead.AsString:
+                    MemoryMarshal.Cast<byte, Int128>(_into.Slice(row * CanonicalSupport.ViewSize, count * CanonicalSupport.ViewSize))
+                        .Fill(MemoryMarshal.Read<Int128>(_into.Slice(from * CanonicalSupport.ViewSize, CanonicalSupport.ViewSize)));
+                    break;
+                default:
+                    MemoryMarshal.Cast<byte, long>(_into.Slice(row * sizeof(long), count * sizeof(long)))
+                        .Fill(MemoryMarshal.Read<long>(_into.Slice(from * sizeof(long), sizeof(long))));
+                    break;
+            }
+
+            SetRange(_validBits, row, count);
+            _present += count;
+        }
+
         private void Present(int row)
         {
             Set(_validBits, row);
             _present++;
+        }
+
+        /// <summary>Sets the <paramref name="count"/> bits from <paramref name="row"/> on: the whole bytes among them at once.</summary>
+        private static void SetRange(Span<byte> bits, int row, int count)
+        {
+            int end = row + count;
+            while (row < end && (row & 7) != 0)
+            {
+                Set(bits, row++);
+            }
+
+            int whole = (end - row) >> 3;
+            bits.Slice(row >> 3, whole).Fill(0xFF);
+            row += whole << 3;
+            while (row < end)
+            {
+                Set(bits, row++);
+            }
         }
 
         private static void Set(Span<byte> bits, int row) => bits[row >> 3] |= (byte)(1 << (row & 7));
