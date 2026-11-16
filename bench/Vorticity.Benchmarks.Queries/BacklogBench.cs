@@ -55,18 +55,28 @@ internal static class BacklogBench
 
     private static ActivityListener ListenToPasses()
     {
-        const string Prefix = "vortex.dataset.compaction.";
+        const string Job = "vortex.dataset.compaction";
+        const string Prefix = Job + ".";
         ActivityListener listener = new ActivityListener
         {
             ShouldListenTo = static source => source.Name == VortexDiagnostics.ActivitySourceName,
             Sample = static (ref ActivityCreationOptions<ActivityContext> created) =>
-                created.Name.StartsWith(Prefix, StringComparison.Ordinal) ? ActivitySamplingResult.AllData : ActivitySamplingResult.None,
+                created.Name.StartsWith(Job, StringComparison.Ordinal) ? ActivitySamplingResult.AllData : ActivitySamplingResult.None,
             ActivityStopped = static activity =>
             {
                 lock (s_passes)
                 {
-                    string pass = activity.OperationName[Prefix.Length..];
-                    s_passes[pass] = s_passes.GetValueOrDefault(pass) + activity.Duration.TotalSeconds;
+                    if (activity.OperationName.Length > Prefix.Length)
+                    {
+                        string pass = activity.OperationName[Prefix.Length..];
+                        s_passes[pass] = s_passes.GetValueOrDefault(pass) + activity.Duration.TotalSeconds;
+                    }
+                    else if (activity.Status == ActivityStatusCode.Error)
+                    {
+                        // A job given up before its commit, its seconds lost: refused a block, the plan narrowed after it.
+                        s_passes[$"given up ({activity.StatusDescription}, {activity.GetTagItem("vortex.objects_in")} inputs)"] =
+                            s_passes.GetValueOrDefault($"given up ({activity.StatusDescription}, {activity.GetTagItem("vortex.objects_in")} inputs)") + activity.Duration.TotalSeconds;
+                    }
                 }
             },
         };
