@@ -349,6 +349,8 @@ await using VortexSession session = VortexSession.Create(options =>
 });
 ```
 
+What a maintainer catches up with is measured with `--micro backlog` (`bench/README.md`) on one core of an Apple M4 Pro. Under a limit of 2 GiB, a backlog of metric records of 25 GB, 4.2 billion rows in 13 000 appended objects, compacts in tier merges of 77 objects and 25 million rows each, 54 seconds a merge, about 460 000 rows a second, and the process's resident memory never passes 1.24 GiB. A backlog of 194 MB compacts in 50 seconds under 2 GiB, 48 under 4 GiB and 35 under 8 GiB. A job runs on one core, so the rate, not the memory, decides how large a backlog a maintainer catches up with, and how long its longest piece takes against the window.
+
 The vacuum stays for what the jobs do not delete: the objects of a job that died before its commit,
 what a closed handle left noted, and the commit objects. A maintainer's loop runs it every half
 window. If you compact by hand rather than with the loop, run it at a low pace, every few hours.
