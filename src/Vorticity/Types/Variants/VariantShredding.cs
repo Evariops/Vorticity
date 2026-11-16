@@ -50,12 +50,31 @@ internal enum VariantShreddingKind : byte
 /// </remarks>
 internal sealed class VariantShredding
 {
+    // An object's keys by the hash of their bytes, open addressing, -1 for an empty slot; empty otherwise. A shredder looks
+    // up each field of each row whose metadata differs from the row before's, which a log's rows each do: a search in the
+    // sorted keys compared bytes nine times a field over hundreds of keys, a twentieth of a merge of log records (2026-11-16).
+    private readonly int[] _table;
+    private readonly ShreddedKey[] _keys;
+
     private VariantShredding(VariantShreddingKind kind, ShreddedKey[] keys, VariantShredding? element, VariantClass @class)
     {
         Kind = kind;
-        Keys = keys;
+        Keys = _keys = keys;
         Element = element;
         Class = @class;
+        _table = keys.Length == 0 ? [] : new int[(int)System.Numerics.BitOperations.RoundUpToPowerOf2((uint)(keys.Length * 2))];
+        _table.AsSpan().Fill(-1);
+        int mask = _table.Length - 1;
+        for (int key = 0; key < keys.Length; key++)
+        {
+            int at = (int)System.IO.Hashing.XxHash3.HashToUInt64(keys[key].Utf8) & mask;
+            while (_table[at] >= 0)
+            {
+                at = (at + 1) & mask;
+            }
+
+            _table[at] = key;
+        }
     }
 
     /// <summary>What the node is.</summary>
@@ -110,28 +129,20 @@ internal sealed class VariantShredding
     /// <summary>The position of <paramref name="key"/> among <see cref="Keys"/>, or -1.</summary>
     internal int IndexOf(ReadOnlySpan<byte> key)
     {
-        int low = 0;
-        int high = Keys.Count - 1;
-        while (low <= high)
+        if (_table.Length == 0)
         {
-            int middle = (low + high) >>> 1;
-            int order = Keys[middle].Utf8.AsSpan().SequenceCompareTo(key);
-            if (order == 0)
-            {
-                return middle;
-            }
-
-            if (order < 0)
-            {
-                low = middle + 1;
-            }
-            else
-            {
-                high = middle - 1;
-            }
+            return -1;
         }
 
-        return -1;
+        int mask = _table.Length - 1;
+        for (int at = (int)System.IO.Hashing.XxHash3.HashToUInt64(key) & mask; ; at = (at + 1) & mask)
+        {
+            int held = _table[at];
+            if (held < 0 || _keys[held].Utf8.AsSpan().SequenceEqual(key))
+            {
+                return held;
+            }
+        }
     }
 }
 
