@@ -179,9 +179,10 @@ internal static partial class DatasetCompactor
         Math.Max(InputFloorBytes, OpenChunkBytes(dataset, schema, job));
 
     /// <summary>
-    /// 🧪 The fewest rows an input's batch holds, however tight the budget: under a block of 8 192 rows, the decoders
-    /// decode a range of a chunk all the same. Provisional: if a merge of batches of 1 024 rows takes more than twice the
-    /// time a row of batches of a block takes, the floor goes back to a block.
+    /// The fewest rows an input's batch holds, however tight the budget: under a block of 8 192 rows, the decoders decode a
+    /// range of a chunk all the same. The backlog bench's consolidation of 9 million rows merged 345 000 rows a second from 74
+    /// inputs under 2 GiB, at the narrowest batches the budget left it, and 263 000 from 300 inputs under 8 GiB, at a block
+    /// and more: no cost of the short batches showed beside the width's (2026-11-16).
     /// </summary>
     internal const int LeastBatchRows = 1_024;
 
@@ -347,11 +348,13 @@ internal static partial class DatasetCompactor
         Math.Min(Math.Min(TargetsBytes(dataset, schema, shreddings), job.Rows * RowBytes(dataset, job)), GatherCeiling(dataset));
 
     /// <summary>
-    /// 🧪 The share of the jobs' budget, one in this many, a job's writer gathers its columns in together, past which a column
-    /// writes its chunk early (<see cref="VortexWriteOptions.GatheredBytesCeiling"/>): the rest for its inputs. Provisional,
-    /// calibrated by measurement.
+    /// The share of the jobs' budget, one in this many, a job's writer gathers its columns in together, past which a column
+    /// writes its chunk early (<see cref="VortexWriteOptions.GatheredBytesCeiling"/>): the rest for its inputs. The backlog
+    /// bench, under 2 GiB: a half, 25 jobs in 60 s; a quarter, 17 in 55 s; an eighth, 11 in 49 s; a sixteenth, 8 in 48 s,
+    /// its object 2.3 % larger, its chunks written early. Under 4 GiB, 47 to 49 s down to an eighth, one job of 34 s at a
+    /// sixteenth (2026-11-16).
     /// </summary>
-    private const int GatherShare = 4;
+    private const int GatherShare = 8;
 
     /// <summary>What a job's writer gathers its columns in together at most: its share of the jobs' budget, a mebibyte at least.</summary>
     internal static long GatherCeiling(VortexDataset dataset) => Math.Max(1L << 20, JobBudget(dataset) / GatherShare);
