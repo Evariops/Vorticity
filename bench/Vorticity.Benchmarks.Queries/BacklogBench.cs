@@ -124,7 +124,7 @@ internal static class BacklogBench
     // stopAfter: the jobs the maintainer runs at most, -1 for all of them (--jobs N). keep: where the store the jobs left is
     // kept as a backlog of its own (--keep DIR), null for nowhere: a store a few jobs in, whose next job a run compacts alone
     // (--store DIR --compact-only --jobs 1), in seconds rather than the minutes the whole backlog takes.
-    internal static async Task<int> RunAsync(string root, int appends, int rows, int series, long memoryLimit, bool compactOnly, int latency, int scans = 0, bool buildOnly = false, long bytes = 0, int degree = 0, bool digest = false, bool logs = false, int stopAfter = -1, string? keep = null)
+    internal static async Task<int> RunAsync(string root, int appends, int rows, int series, long memoryLimit, bool compactOnly, int latency, int scans = 0, bool buildOnly = false, long bytes = 0, int degree = 0, bool digest = false, bool logs = false, int stopAfter = -1, string? keep = null, int repeat = 1, bool quickExit = false, bool bytesOf = false)
     {
         if (memoryLimit > 0)
         {
@@ -150,18 +150,55 @@ internal static class BacklogBench
         if (!compactOnly)
         {
             Fresh(backlog);
+            using Process builder = Process.GetCurrentProcess();
+            TimeSpan buildProcessor = builder.TotalProcessorTime;
+            long buildLanes = session.WriteLanes.HeldTicks;
             (long read, int made) = logs
                 ? await BuildLogsAsync(session, backlog, appends, rows, bytes)
                 : await BuildAsync(session, backlog, appends, rows, series, scans, bytes);
+            builder.Refresh();
             Console.WriteLine(string.Create(
                 CultureInfo.InvariantCulture,
-                $"backlog of {made} appends of {rows} rows, {BytesOf(backlog) / 1e6:F0} MB, built in {clock.Elapsed.TotalSeconds:F0} s, {scans} scans reading {read:N0} rows meanwhile; {sampler.Peaks()}; {Sampler.Now()}"));
+                $"backlog of {made} appends of {rows} rows, {BytesOf(backlog) / 1e6:F0} MB, built in {clock.Elapsed.TotalSeconds:F1} s, {(builder.TotalProcessorTime - buildProcessor).TotalSeconds:F1} s of processor, {(double)(session.WriteLanes.HeldTicks - buildLanes) / Stopwatch.Frequency:F1} s of write lanes, {(double)made * rows / Math.Max(clock.Elapsed.TotalSeconds, 1e-3):F0} rows a second, {scans} scans reading {read:N0} rows meanwhile; {sampler.Peaks()}; {Sampler.Now()}"));
             if (buildOnly)
             {
                 return 0;
             }
         }
 
+        // --repeat N: the same jobs N times over, each round on a fresh copy of the backlog, in this one process. The first
+        // round pays the JIT (a tenth of a twelve-second job), the last is what a maintainer that stays up pays; each round
+        // prints its jobs, tagged with its number. --quick-exit leaves as soon as the last round ends, for a profiler that
+        // samples it alone: the process says "round N starts" and waits a second and a half before the last round.
+        using Timer timeline = new Timer(
+            _ => Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"[{clock.Elapsed.TotalSeconds,5:F0} s] {Sampler.Now()}")),
+            null,
+            10_000,
+            10_000);
+        for (int round = 1; round <= Math.Max(1, repeat); round++)
+        {
+            bool last = round == Math.Max(1, repeat);
+            if (repeat > 1)
+            {
+                Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"round {round} starts"));
+                if (last)
+                {
+                    await Task.Delay(1_500);
+                }
+            }
+
+            await RoundAsync(round, last);
+        }
+
+        if (quickExit)
+        {
+            return 0;
+        }
+
+        return await RestAsync();
+
+        async Task RoundAsync(int round, bool last)
+        {
         // The backlog stays whole: the maintainer compacts a copy of it.
         Fresh(work);
         foreach (string file in Directory.EnumerateFiles(backlog, "*", SearchOption.AllDirectories))
@@ -173,11 +210,6 @@ internal static class BacklogBench
 
         sampler.Reset();
         clock.Restart();
-        using Timer timeline = new Timer(
-            _ => Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"[{clock.Elapsed.TotalSeconds,5:F0} s] {Sampler.Now()}")),
-            null,
-            10_000,
-            10_000);
 
         IObjectStore store = new LatencyObjectStore(new FileObjectStore(work)) { Latency = TimeSpan.FromMilliseconds(latency) };
         await using VortexDataset maintainer = await VortexDataset.OpenAsync(store, new DatasetOptions { Session = session, Encrypted = true });
@@ -218,13 +250,13 @@ internal static class BacklogBench
             refusals += Interlocked.Read(ref s_refused);
             Console.WriteLine(string.Create(
                 CultureInfo.InvariantCulture,
-                $"job {jobs}: {result.Trigger} L{result.FromLevel}->L{result.ToLevel}, {result.ObjectsIn} -> {result.ObjectsOut} objects ({result.ObjectsMoved} moved), {result.Rows:N0} rows, {result.BytesIn / 1e6:F1} -> {result.BytesOut / 1e6:F1} MB, blocks held {Mib(result.MemoryReserved)} MiB, {result.RangesAtOnce} at once, {Interlocked.Read(ref s_refused)} refused before, scratch {Mib(result.ScratchBytes)} MiB, {job.Elapsed.TotalSeconds:F1} s, {processorSeconds:F1} s of processor, {laneSeconds:F1} s of write lanes, {result.WriterBatches:N0} writer batches of {(double)result.Rows / Math.Max(1, result.WriterBatches):F0} rows, {result.WriterBatchesAcross:N0} across, {result.WriterBatchesFlown:N0} flown, {GC.CollectionCount(2) - fullCollections} full collections, {Slabs.Slab.Made - slabsMade} slabs made; passes: {PassesOfJob()}; {sampler.Peaks()}"));
+                $"{(repeat > 1 ? $"round {round} " : "")}job {jobs}: {result.Trigger} L{result.FromLevel}->L{result.ToLevel}, {result.ObjectsIn} -> {result.ObjectsOut} objects ({result.ObjectsMoved} moved), {result.Rows:N0} rows, {result.BytesIn / 1e6:F1} -> {result.BytesOut / 1e6:F1} MB, blocks held {Mib(result.MemoryReserved)} MiB, {result.RangesAtOnce} at once, {Interlocked.Read(ref s_refused)} refused before, scratch {Mib(result.ScratchBytes)} MiB, {job.Elapsed.TotalSeconds:F1} s, {processorSeconds:F1} s of processor, {laneSeconds:F1} s of write lanes, {result.WriterBatches:N0} writer batches of {(double)result.Rows / Math.Max(1, result.WriterBatches):F0} rows, {result.WriterBatchesAcross:N0} across, {result.WriterBatchesFlown:N0} flown, {GC.CollectionCount(2) - fullCollections} full collections, {Slabs.Slab.Made - slabsMade} slabs made; passes: {PassesOfJob()}; {sampler.Peaks()}"));
         }
 
         Console.WriteLine(string.Create(
             CultureInfo.InvariantCulture,
             $"done: {jobs} jobs in {clock.Elapsed.TotalSeconds:F0} s, {maintainer.ObjectCount} objects left, the most a job's blocks held {Mib(mostHeld)} MiB, {refusals} refused; read {bytesRead / 1e6:F0} MB and wrote {bytesWritten / 1e6:F0} MB of a backlog of {backlogBytes / 1e6:F0} MB, amplification {(double)bytesWritten / Math.Max(1, backlogBytes):F2}; {Sampler.Now()}"));
-        if (keep is not null)
+        if (keep is not null && last)
         {
             // The store as the jobs left it, a backlog of its own for a later run's --compact-only.
             string kept = Path.Combine(keep, "backlog");
@@ -239,11 +271,19 @@ internal static class BacklogBench
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"kept: {maintainer.ObjectCount} objects, {BytesOf(kept) / 1e6:F0} MB in {kept}"));
         }
 
-        if (digest)
+        if (digest && last)
         {
             Console.WriteLine(logs ? await DigestLogsAsync(maintainer) : await DigestAsync(maintainer));
         }
 
+        if (bytesOf && last)
+        {
+            Console.WriteLine(await BytesDigestAsync(maintainer));
+        }
+        }
+
+        async Task<int> RestAsync()
+        {
         // At rest: two turns of the slow timer, which an idle process gets within a minute, then a full collection. What the
         // library keeps then, what the questions are left, and the holes of the pinned heap, which a hard limit counts.
         HeldMemory.LetGoUnused(collection: false);
@@ -263,6 +303,7 @@ internal static class BacklogBench
             CultureInfo.InvariantCulture,
             $"rest: {Sampler.Now()}; pinned heap {Mib(pinned.SizeAfterBytes)} MiB, {Mib(pinned.FragmentationAfterBytes)} of it free"));
         return 0;
+        }
     }
 
     /// <summary>
@@ -381,6 +422,48 @@ internal static class BacklogBench
         }
 
         return (0, a);
+    }
+
+    /// <summary>
+    /// What the jobs wrote, byte for byte: each data object of the dataset's last version read through the dataset's own
+    /// store, decrypted, in frames of 4 MiB, each frame hashed and the frames' hashes hashed in turn; the objects' hashes
+    /// added and xored, since their keys change from one run to the next and the walk's order with them. Two runs that wrote
+    /// the same bytes print the same line, in a fraction of the time the rows' digest takes.
+    /// </summary>
+    private static async Task<string> BytesDigestAsync(VortexDataset dataset)
+    {
+        ulong sum = 0;
+        ulong xor = 0;
+        long total = 0;
+        int objects = 0;
+        byte[] frame = new byte[4 << 20];
+        await foreach (DataObject entry in dataset.ListObjectsAsync())
+        {
+            ulong running = 0;
+            long offset = 0;
+            while (true)
+            {
+                ObjectRead read = await dataset.Store.ReadAsync(entry.Key, offset, frame, null, CancellationToken.None);
+                if (read.BytesRead == 0)
+                {
+                    break;
+                }
+
+                running = (running * 0x9E3779B97F4A7C15UL) ^ Vorticity.Aggregating.CardinalitySlot.Hash(frame.AsSpan(0, read.BytesRead));
+                offset += read.BytesRead;
+                if (offset >= read.ObjectLength)
+                {
+                    break;
+                }
+            }
+
+            sum += running;
+            xor ^= running;
+            total += offset;
+            objects++;
+        }
+
+        return string.Create(CultureInfo.InvariantCulture, $"bytes: {objects} objects, {total:N0} bytes, sum {sum:x16}, xor {xor:x16}");
     }
 
     /// <summary>What a compacted backlog of log records holds, as <see cref="DigestAsync"/> says it of metric records.</summary>
