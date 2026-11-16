@@ -1183,24 +1183,9 @@ numbered by an `int`, and the tables double, so an open table holds at most 2Â²â
 
 #### The governor
 
-A query's memory is reserved from a budget: the process's by default, or a `QueryMemoryBudget` the
-host creates and gives to the sessions that share it, whose ceiling bounds their queries together. A
-query reserves in its budget, and the budget in the process's, whatever the sum of the ceilings the
-host sets. The process's ceiling is its limit (the managed heap's,
-`GC.GetGCMemoryInfo().TotalAvailableMemoryBytes`, minus an eighth for the garbage collector, and in a
-container seven eighths of the container's when that is less, read again as the process runs, the
-engine's blocks being managed and counted by the heap; a limit the host sets, `VortexMemory.SetLimit`
-or the `VORTICITY_MEMORY_LIMIT` variable, is taken as a container's of that size would be, the
-collector's heap held to three quarters of it as the runtime holds it in a container), minus the rest of the process: what its heap
-held beyond the queries' tables at the last full collection, what the collector kept committed beyond
-its heap, and what the queries released since; in a container, what the container measures beyond the
-reservations and the memory kept, when that is more. A limit of 4 GB is not 4 GB for the queries. A block
-given back is not released: the pool keeps it for the next rent, and what the pool keeps is read with the
-rest of the heap at the next collection. Counted as released, each block a job rented and gave back again
-counted once more, until 3.8 GB of rest were reckoned for a process of 1.4 GB and a job was refused its
-next block. The jobs' budget is carved out of the limit rather than reserved under this ceiling: half the
-limit by default, which the queries see reserved and the rest of the process never takes
-([the memory of a job](15-compaction.md#the-memory-of-a-job)).
+A query's memory is reserved from a budget: the process's by default, or a `QueryMemoryBudget` the host creates and gives to the sessions that share it, whose ceiling bounds their queries together. A query reserves in its budget, and the budget in the process's, whatever the sum of the ceilings the host sets. The process's ceiling is its limit (the managed heap's, `GC.GetGCMemoryInfo().TotalAvailableMemoryBytes`, minus an eighth for the garbage collector, and in a container seven eighths of the container's when that is less, read again as the process runs, the engine's blocks being managed and counted by the heap; a limit the host sets, `VortexMemory.SetLimit` or the `VORTICITY_MEMORY_LIMIT` variable, is taken as a container's of that size would be, the collector's heap held to three quarters of it as the runtime holds it in a container), minus the rest of the process: what its heap held beyond the work's blocks at the last full collection, what the collector kept committed beyond its heap, and what the work released since; in a container, what the container measures beyond the reservations and the memory kept, when that is more. A limit of 4 GB is not 4 GB for the queries.
+
+The rest is read from a collection once it is done. A background collection is counted from its start, and the collector tells the memory of the one before until it ends: read then, the rest dropped what the work had let go and taken back since, and the collection, marked read, was never read once done. The heap a collection read is taken less the fewest bytes the work measured since the reading before, never more than it measured when the collector ran: less what it measured when the budget read it, 145 MiB of heap and 227 measured by then, the rest was read as none. Between two collections the budget follows the pool: a block the work takes back from what the pool keeps, parked or free in a slab alive, is the work's and no more the rest's, a block it gives back for the pool to keep is the rest's again, and the room of a slab made for a rent is the rest's as the slab is made. A thread that finds a collection asked by another waits for it, as every thread that allocates does, and reserves against what it left: reserved against what lived at the last full collection, as if the collection would take everything the heap grew by since, eight queries under a heap held to 512 MiB reserved 276 MiB beside 235 MiB the collection found live, and the heap ran out. A block is reserved before the pool allocates it, so that a block the budget refuses never reaches the heap. The jobs' budget is half the limit by default, and each block a job rents asks the process too, which weighs it against the rest of its memory as it weighs a question's ([the memory of a job](15-compaction.md#the-memory-of-a-job)); past its share, a writer's block is bounded by the process's own ceiling, a sixteenth past it at most.
 
 A query reserves where its memory grows, at the moment it does: each array of a lane's tables before
 it is allocated (a doubling holding the old arrays next to the new ones for the copy, and no more),
@@ -1226,10 +1211,7 @@ collection that gives it back comes first, and before it the memory kept lets go
 above its floors, in a fixed order: the pool's blocks kept for the next rents, then the segments a
 cache keeps, then the objects a dataset keeps open, then its pages, for that collection to take.
 Reservations that come within an eighth of the ceiling have it let go of that much before they need
-it, once a collection at most. The background jobs reserve in `JobMemoryBudget`, by default their
-share carved out of the process's limit, one registry for the queries and the jobs; a host that wants
-them held to another gives the session a budget of its own, reserved in the process's budget too
-([memory of a job](15-compaction.md#the-memory-of-a-job)).
+it, once a collection at most. The background jobs reserve in `JobMemoryBudget`, by default their share of the process's limit, each block asking the process too, one registry for the queries and the jobs; a host that wants them held to another gives the session a budget of its own, reserved in the process's budget too ([memory of a job](15-compaction.md#the-memory-of-a-job)).
 In a container, the rest of the process is measured: what the container uses, less the file pages the
 kernel reclaims first, past what the budget and the memory kept account for, read again every second
 with the container's limit, whose margin is an eighth. Under a limit the host set, outside a container,

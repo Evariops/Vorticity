@@ -37,7 +37,7 @@ A `VortexSession` holds what would otherwise be process-wide state, so a host de
 | `SegmentCache` | the process's, `SegmentCache.Shared`, with no budget of its own: what the work leaves, given back above a floor when the work needs the room or no scan read it of late; none for a session with a `Keyring` | segments kept across scans, one budget for every file of the sessions that share it whose reads do I/O. A cache of 0 bytes keeps none |
 | `MaxConcurrentReads` | 128 | reads in flight across every scan of every file of the session whose reads do I/O |
 | `MaxDegreeOfParallelism` | 1 | how many chunks a scan decodes and aggregates at once, and how many threads a writer uses |
-| `IndexCacheBytes` | 64 MiB | decoded index runs kept per open file |
+| `IndexCacheBytes` | 64 MiB | decoded index runs kept per open file, in blocks of the pool given back when the file is disposed |
 | `MappedFileCacheCount` | 64 | files opened from a path that stay mapped after they are closed, so the next open reuses the mapping |
 | `MapFiles` | true | whether a file opened from a path is mapped by its first scan. When false, it is read positionally, and a file truncated during a scan fails the read instead of the process |
 | `MemoryBudget` | the process's | the memory the session's queries share with every session given the same `QueryMemoryBudget`: their group tables, their merges and the batches of their results until they are delivered. Past it, a group by spills to `ScratchDirectory`, or fails with `VortexMemoryException` |
@@ -51,6 +51,8 @@ The options are set inside `Create` and frozen when it returns. Setting one afte
 VortexSession.Create.` `VortexFile.OpenAsync(path)` uses `VortexSession.Default`, which is
 immutable: the shared pool, no cache, 128 reads in flight, no parallelism, and 64 closed files kept
 mapped.
+
+Up to version 0.13, `MemoryPool` took an `AlignedMemoryPool` or any `MemoryPool<byte>` for the session's buffers, and `AlignedMemoryPool` was public. Both are gone: every block the library rents comes from its one pool, which the memory limit governs ([The memory limit](#the-memory-limit)). A store, a sink or a transport written against the public surface rents its buffers from `VortexBytePool.Instance`, an `ArrayPool<byte>` over the same pool, kept and let go as the library's blocks are.
 
 A session is disposed after its files. Disposing it while one is still open throws
 `InvalidOperationException: The session still has 'readings.vortex' open; dispose every file before
@@ -101,8 +103,7 @@ await using VortexSession session = VortexSession.Create(o =>
 });
 ```
 
-What the pool keeps parked between rents is counted in no budget: it is the process's, and its
-budgets grow with `Environment.ProcessorCount`, which a container's CPU limit lowers.
+What the pool keeps parked between rents is counted in no budget: it is the process's, kept above its floors only for as long as rents take it, and read by the budgets with the rest of the process.
 
 ## The memory limit
 

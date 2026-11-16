@@ -621,6 +621,7 @@ outputs), and never merges two trees. Each operation carries its own answer to a
 | compaction, compaction on overlapping inputs | the second finds an input missing and abandons, and its outputs are garbage |
 | compaction, compaction into the same level from another one, on inputs they do not share | the second finds, inside the range of the sort key its sources span, an object of the level it writes that it did not read, and abandons, since its outputs would overlap it |
 | vacuum, anything | vacuum only deletes what no retained version references and what is older than the window ([lifecycle](#10-lifecycle)) |
+| a compaction's deletes, a reader of an older version | a job deletes the objects it replaced after its commit and never before, each once the version before the one that took it out is no longer retained, by the vacuum's own rule: a reader within the window still finds every object of its version ([15-compaction.md](15-compaction.md)) |
 | delete or update, append | the appended object is not among those the change read, so it stays and its rows are not touched |
 | delete or update, anything that rewrites or marks an object it read | an input is gone or its entry changed, so the replacement is abandoned and the change is worked out again on the version that won ([deleting rows](#12-deleting-and-updating-rows)) |
 | compaction, delete or update that marks one of its inputs | the entry the compaction read changed, so it abandons, since its outputs would bring the marked rows back, and they are garbage |
@@ -794,7 +795,7 @@ An open reads an object's last 64 KiB, and an object no larger comes whole with 
 
 ## 10. Lifecycle
 
-- Vacuum (`VacuumAsync`, explicit, never automatic) marks everything the retained versions reference
+- Vacuum (`VacuumAsync`, and the background loop's first loop of a dataset when nothing is due, every half of the retention window by default, `CompactionSchedule.VacuumEvery`, none on a store under retention locks) marks everything the retained versions reference
   (a subtree already seen is not walked again, so the versions cost their distinct pages), then
   deletes the unmarked commit objects and data objects older than the retention window, seven days by
   default (`DatasetOptions.RetentionWindow`), always keeping the latest version. What ages is the
