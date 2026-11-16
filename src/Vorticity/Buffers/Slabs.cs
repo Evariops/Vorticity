@@ -119,7 +119,7 @@ internal static class Slabs
     /// slab to a block of a few kilobytes that an array of its own would have fitted (2026-11-15). An allocation the
     /// collector refuses leaves the process whole: the block falls back to what it was before the slabs.
     /// </remarks>
-    internal static (Slab Slab, byte[] Array, int Offset)? TryTake(int bytes)
+    internal static (Slab Slab, byte[] Array, int Offset, bool Made)? TryTake(int bytes)
     {
         int order = BitOperations.Log2((uint)bytes) - PageShift;
         lock (Gate)
@@ -132,7 +132,7 @@ internal static class Slabs
                 {
                     int page = slab.TryTake(order);
                     Interlocked.Add(ref s_pieceBytes, bytes);
-                    return (slab, slab.Array, slab.Base + (page << PageShift));
+                    return (slab, slab.Array, slab.Base + (page << PageShift), false);
                 }
             }
 
@@ -149,7 +149,7 @@ internal static class Slabs
             s_slabs.Add(made);
             Interlocked.Add(ref s_heldBytes, SlabBytes);
             Interlocked.Add(ref s_pieceBytes, bytes);
-            return (made, made.Array, made.Base + (made.TryTake(order) << PageShift));
+            return (made, made.Array, made.Base + (made.TryTake(order) << PageShift), true);
         }
     }
 
@@ -157,7 +157,8 @@ internal static class Slabs
     /// Gives back the piece of <paramref name="bytes"/> at <paramref name="offset"/> in <paramref name="slab"/>: a slab
     /// whose pieces all came back is let go, its region free for the collector to take.
     /// </summary>
-    internal static void Give(Slab slab, int offset, int bytes)
+    /// <returns>Whether the slab was let go: the caller says what that gives the collector, once.</returns>
+    internal static bool Give(Slab slab, int offset, int bytes)
     {
         bool empty;
         lock (Gate)
@@ -172,10 +173,7 @@ internal static class Slabs
             }
         }
 
-        if (empty)
-        {
-            QueryMemoryBudget.BlockFreed(SlabBytes);
-        }
+        return empty;
     }
 
     /// <summary>

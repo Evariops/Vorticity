@@ -508,8 +508,9 @@ public sealed class BlockPoolTests
 
     /// <summary>
     /// Asked by the registry, a pool that keeps all gives back what it parks above its floors, the blocks of an array of
-    /// their own first, whose bytes reach the collector at once, up to the bytes asked; of another kind, nothing. A pool made
-    /// with a count per class keeps it.
+    /// their own first, whose bytes reach the collector at once, up to the bytes asked; of another kind, nothing. It says
+    /// given what leaves the heap: a piece of a slab that stays, only free in it, is no byte given. A pool made with a count
+    /// per class keeps it.
     /// </summary>
     [Fact]
     public void Giving_back_frees_the_blocks_of_an_array_of_their_own_first_above_the_floors()
@@ -529,8 +530,9 @@ public sealed class BlockPoolTests
             Assert.Equal(0, pool.ParkedCount(20 * megabyte));
             Assert.Equal(100, pool.ParkedCount(4096));
 
+            // The pages go back into their slabs, which other blocks of the process may keep: nothing or whole slabs given.
             int floor = BlockPool.FloorBytesPerClass / 4096;
-            Assert.Equal((100 - floor) * 4096L, pool.GiveBack(KeptKind.Blocks, long.MaxValue));
+            Assert.Equal(0, pool.GiveBack(KeptKind.Blocks, long.MaxValue) % Slabs.SlabBytes);
             Assert.Equal(floor, pool.ParkedCount(4096));
 
             Assert.Equal(0, counted.GiveBack(KeptKind.Blocks, long.MaxValue));
@@ -803,7 +805,7 @@ public sealed class SharedPoolTests
         long given = MemoryAccount.Pool.GiveBack(KeptKind.Blocks, 1);
 
         Slabs.Slab gone = Assert.Single(alone, slab => !Slabs.IsAlive(slab));
-        Assert.Equal(OnSlab(rented, gone) * (long)piece, given);
+        Assert.Equal(Slabs.SlabBytes, given);
         Assert.Equal(rented.Length - OnSlab(rented, gone), MemoryAccount.Pool.ParkedCount(piece));
         MemoryAccount.Pool.Trim();
     }

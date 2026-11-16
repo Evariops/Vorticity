@@ -45,8 +45,17 @@ internal abstract class MemoryAccount
     /// <summary>Takes <paramref name="bytes"/>, reserved and measured; false, and nothing taken, when the account refuses them.</summary>
     internal abstract bool TryTake(long bytes);
 
+    /// <summary>
+    /// <see cref="TryTake(long)"/> for a block of the pool, <paramref name="reused"/> when the pool kept its bytes, parked or
+    /// free in a slab alive: memory the heap holds already, which an account that measures it tells the process's budget.
+    /// </summary>
+    internal virtual bool TryTake(long bytes, bool reused) => TryTake(bytes);
+
     /// <summary>Gives back <paramref name="bytes"/> taken; nothing once the account has given back everything at its end.</summary>
     internal abstract void Give(long bytes);
+
+    /// <summary><see cref="Give(long)"/> for a block of the pool, <paramref name="kept"/> when the pool keeps its bytes, parked or free in a slab alive.</summary>
+    internal virtual void Give(long bytes, bool kept) => Give(bytes);
 
     /// <summary>The exception a rent of <paramref name="bytes"/> the account refused throws.</summary>
     internal abstract VortexMemoryException Refused(long bytes);
@@ -117,6 +126,40 @@ internal class BudgetAccount : MemoryAccount
         Budget.Returned(bytes);
     }
 
+    /// <summary>
+    /// A block the pool kept, measured from now on: no longer the rest of the process's, which the budget read in the heap
+    /// at the last full collection, as it reads the blocks the pool keeps. Counted there too, the blocks a job took back
+    /// from the pool left it no room under a limit of 4 GiB, and a consolidation ran in two jobs (2026-11-16).
+    /// </summary>
+    internal override bool TryTake(long bytes, bool reused)
+    {
+        if (!TryTake(bytes))
+        {
+            return false;
+        }
+
+        if (reused && Measures)
+        {
+            Budget.Root.Reuse(bytes);
+        }
+
+        return true;
+    }
+
+    /// <summary>A block the pool keeps again, its bytes back with the rest of the process's.</summary>
+    internal override void Give(long bytes, bool kept)
+    {
+        bool measured = Measures;
+        Give(bytes);
+        if (kept && measured)
+        {
+            Budget.Root.Reuse(-bytes);
+        }
+    }
+
+    /// <summary>Whether the account measures what it takes now: a work's, until it ends.</summary>
+    private protected virtual bool Measures => true;
+
     internal override VortexMemoryException Refused(long bytes)
     {
         QueryMemoryBudget process = QueryMemoryBudget.Process;
@@ -147,6 +190,9 @@ internal class WorkAccount : BudgetAccount, IDisposable
 
     /// <summary>The bytes the work's blocks hold now.</summary>
     internal long Held => Math.Max(0, Volatile.Read(ref _held));
+
+    /// <inheritdoc/>
+    private protected override bool Measures => Volatile.Read(ref _held) >= 0;
 
     internal override bool TryTake(long bytes)
     {

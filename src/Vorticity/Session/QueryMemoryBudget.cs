@@ -76,6 +76,11 @@ public sealed class QueryMemoryBudget
     private long _measured;
     private Rest _rest = new Rest(-1, -1, 0, 0, 0);
     private long _pending;
+
+    // The bytes the pool kept, parked or free in its slabs, when the last full collection read the rest, that measured work
+    // took back since, less those it kept again: in the heap then, read as the rest's, measured now. Never below zero once
+    // read; the next full collection reads them where they are.
+    private long _reused;
     private int _collecting;
     private int _futile = -1;
 
@@ -212,9 +217,9 @@ public sealed class QueryMemoryBudget
 
     /// <summary>
     /// The jobs' budget of every session given none of its own: <see cref="JobsShare"/>, one in this many, of the process's
-    /// limit as it stands, carved out of it. The process counts what the jobs reserve, so that the queries see it, and
-    /// refuses none of it: a job's room does not depend on what the rest of the process holds, which a job that just ended
-    /// leaves counted until the next collection.
+    /// limit as it stands. Each block a job takes asks the process too, which weighs it against the rest of its memory as
+    /// it weighs a question's, has the memory kept let go and the collector run before it refuses, and counts it so that
+    /// the questions see it. A writer's account that forces past its budget is counted there and never refused.
     /// </summary>
     internal static QueryMemoryBudget Jobs { get; } = new QueryMemoryBudget(JobsShare);
 
@@ -244,7 +249,7 @@ public sealed class QueryMemoryBudget
         get
         {
             Rest rest = Volatile.Read(ref _rest);
-            long modelled = rest.Live + rest.Uncertain + rest.Reclaimable + Volatile.Read(ref _pending);
+            long modelled = LiveOf(rest) + rest.Uncertain + rest.Reclaimable + Volatile.Read(ref _pending);
             return Volatile.Read(ref _containerTimer) is null ? modelled : Math.Max(modelled, Volatile.Read(ref _containerRest));
         }
     }
@@ -322,19 +327,18 @@ public sealed class QueryMemoryBudget
             return TryAdd(ref _reserved, bytes, Available());
         }
 
-        if (!TryAdd(ref _reserved, bytes, OwnCeiling))
+        // The peak raised once the parent granted the bytes too: raised before, a block the parent refused counted as held,
+        // and a job under a budget of 16 MiB was said to have held 20 MB (2026-11-16).
+        if (!TryAdd(ref _reserved, bytes, OwnCeiling, raise: false))
         {
             Refuse();
             return false;
         }
 
-        if (_share > 0)
-        {
-            // Carved out of the process's limit: counted there, never refused there.
-            _process.Carve(bytes);
-            return true;
-        }
-
+        // The jobs' share asks the process too, which weighs it against the rest of its memory as it weighs the questions':
+        // carved out of the limit and never refused there, the jobs given the whole limit filled it with the blocks they
+        // rented and those the pool parked for them, 1 222 MiB, and the writer's own arrays, which no account counts,
+        // found no room in a heap held to 1.5 GiB, at a new site each run (2026-11-16).
         if (!_process.TryReserve(bytes))
         {
             Interlocked.Add(ref _reserved, -bytes);
@@ -342,6 +346,7 @@ public sealed class QueryMemoryBudget
             return false;
         }
 
+        Raise(Volatile.Read(ref _reserved));
         return true;
     }
 
@@ -510,6 +515,17 @@ public sealed class QueryMemoryBudget
     internal static void BlockFreed(long bytes) => Interlocked.Add(ref Process._pending, bytes);
 
     /// <summary>
+    /// A slab of <paramref name="bytes"/> let go with its last piece, a rented one given back: its free bytes,
+    /// <paramref name="free"/>, the rest of the process's until now, and all of it in the heap until a collection takes it.
+    /// </summary>
+    internal static void SlabFreed(long free, long bytes)
+    {
+        QueryMemoryBudget process = Process;
+        process.LetGo(free);
+        Interlocked.Add(ref process._pending, bytes - free);
+    }
+
+    /// <summary>
     /// Once the reservations come within <see cref="KeptMarginShare"/> of what the limit leaves, has the memory kept let go
     /// of that share above its floors, before a reservation finds no room: once a collection at most, which the rest read
     /// after the next sees.
@@ -542,10 +558,25 @@ public sealed class QueryMemoryBudget
             return;
         }
 
+        // Out of what the rest read in the heap, as it lived at the last full collection and as it grew since: taken from the
+        // first alone, the bytes the uncertain part held stayed counted there as well as let go, and the budget read 1.2 GB
+        // let go beside 726 MB uncertain in a heap of 1.5 GiB, and refused a job everything (2026-11-16).
         Rest rest = Volatile.Read(ref _rest);
-        Volatile.Write(ref _rest, rest with { Live = Math.Max(0, rest.Live - bytes) });
+        long fromLive = Math.Min(bytes, rest.Live);
+        long fromUncertain = Math.Min(bytes - fromLive, rest.Uncertain);
+        Volatile.Write(ref _rest, rest with { Live = rest.Live - fromLive, Uncertain = rest.Uncertain - fromUncertain });
         Interlocked.Add(ref _pending, bytes);
     }
+
+    /// <summary>
+    /// The process's own: work that measures its blocks took <paramref name="bytes"/> back from what the pool kept, or gave
+    /// them back to it when negative. Until the next full collection reads them where they are, the rest no longer counts
+    /// them: they are the work's now.
+    /// </summary>
+    internal void Reuse(long bytes) => Interlocked.Add(ref _reused, bytes);
+
+    /// <summary>What the heap held past the measured work at the last full collection, less what the work took back from the pool since.</summary>
+    private long LiveOf(Rest rest) => Math.Max(0, rest.Live - Math.Max(0, Volatile.Read(ref _reused)));
 
     /// <summary>
     /// What the process's limit leaves the queries past the rest of its memory: the library's blocks are
@@ -585,6 +616,7 @@ public sealed class QueryMemoryBudget
         if (full != rest.Collections)
         {
             Interlocked.Exchange(ref _pending, 0);
+            Interlocked.Exchange(ref _reused, 0);
             GCMemoryInfo blocking = GC.GetGCMemoryInfo(GCKind.FullBlocking);
             GCMemoryInfo background = GC.GetGCMemoryInfo(GCKind.Background);
             GCMemoryInfo info = background.Index > blocking.Index ? background : blocking;
@@ -600,7 +632,8 @@ public sealed class QueryMemoryBudget
         // refused the 64 KiB of a lane (2026-11-08).
         GCMemoryInfo ephemeral = GC.GetGCMemoryInfo(GCKind.Ephemeral);
         long inHeap = ephemeral.HeapSizeBytes - ephemeral.FragmentedBytes - Volatile.Read(ref _measured);
-        long most = Math.Max(0, inHeap - rest.Live);
+        long live = LiveOf(rest);
+        long most = Math.Max(0, inHeap - live);
         long pending = Volatile.Read(ref _pending);
         if (pending > most)
         {
@@ -608,7 +641,7 @@ public sealed class QueryMemoryBudget
             pending = most;
         }
 
-        Volatile.Write(ref _rest, rest with { Ephemeral = any, Uncertain = Math.Max(0, inHeap - pending - rest.Live) });
+        Volatile.Write(ref _rest, rest with { Ephemeral = any, Uncertain = Math.Max(0, inHeap - pending - live) });
     }
 
     /// <summary>
@@ -624,17 +657,23 @@ public sealed class QueryMemoryBudget
     /// </summary>
     private long? Collect(long bytes)
     {
+        // A collection whose collector kept what it held is not asked for again, unless a sixteenth of the ceiling was let go
+        // since, which it takes whatever it keeps: told futile on what the collector kept committed alone, 100 MB, the next
+        // never came, while 1.1 GB of slabs let go waited for it, and a job was refused everything (2026-11-16).
         Rest rest = Volatile.Read(ref _rest);
-        long reclaimable = rest.Reclaimable + rest.Uncertain + Volatile.Read(ref _pending);
+        long pending = Volatile.Read(ref _pending);
+        long reclaimable = rest.Reclaimable + rest.Uncertain + pending;
         long ceiling = Ceiling;
-        if (reclaimable < Math.Max(bytes, ceiling / 16) || ReservedBytes + bytes > ceiling - rest.Live || GC.CollectionCount(2) == Volatile.Read(ref _futile))
+        long live = LiveOf(rest);
+        bool futile = GC.CollectionCount(2) == Volatile.Read(ref _futile) && pending < ceiling / 16;
+        if (reclaimable < Math.Max(bytes, ceiling / 16) || ReservedBytes + bytes > ceiling - live || futile)
         {
             return null;
         }
 
         if (Interlocked.Exchange(ref _collecting, 1) != 0)
         {
-            return ceiling - rest.Live;
+            return ceiling - live;
         }
 
         try
@@ -660,7 +699,7 @@ public sealed class QueryMemoryBudget
         return Available();
     }
 
-    private bool TryAdd(ref long reserved, long bytes, long ceiling)
+    private bool TryAdd(ref long reserved, long bytes, long ceiling, bool raise = true)
     {
         long now = Volatile.Read(ref reserved);
         while (true)
@@ -673,7 +712,11 @@ public sealed class QueryMemoryBudget
             long seen = Interlocked.CompareExchange(ref reserved, now + bytes, now);
             if (seen == now)
             {
-                Raise(now + bytes);
+                if (raise)
+                {
+                    Raise(now + bytes);
+                }
+
                 return true;
             }
 

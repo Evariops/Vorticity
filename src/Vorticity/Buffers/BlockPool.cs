@@ -203,9 +203,10 @@ internal sealed class BlockPool : IHeldMemory
     public BlockOwner Rent(MemoryAccount account, int length, int alignment)
     {
         BlockOwner owner;
+        bool reused;
         try
         {
-            owner = RentCore(length, alignment);
+            owner = RentCore(length, alignment, out reused);
         }
         catch (OutOfMemoryException full)
         {
@@ -216,7 +217,9 @@ internal sealed class BlockPool : IHeldMemory
                 full);
         }
 
-        if (!account.TryTake(owner.Capacity))
+        // A block the pool kept, parked or free in a slab alive, is memory the heap holds already: the account that measures it
+        // tells the process's budget, which no longer counts it with the rest of the process.
+        if (!account.TryTake(owner.Capacity, reused))
         {
             // Counted nowhere yet: the release parks it, or lets it go, as any block given back.
             owner.Release();
@@ -244,9 +247,13 @@ internal sealed class BlockPool : IHeldMemory
         void Released(BlockOwner owner);
     }
 
-    private BlockOwner RentCore(int length, int alignment)
+    /// <param name="length">The bytes asked.</param>
+    /// <param name="alignment">The alignment asked.</param>
+    /// <param name="reused">Whether the block's bytes were in the heap already: a block parked, or a piece of a slab alive.</param>
+    private BlockOwner RentCore(int length, int alignment, out bool reused)
     {
         BlockOwner.CheckLengthAndAlignment(length, alignment);
+        reused = true;
 
         if (length > MaxPooledLength)
         {
@@ -271,12 +278,12 @@ internal sealed class BlockPool : IHeldMemory
                     kept.FreeParked();
                 }
 
-                return BlockOwner.AllocatePooled(this, OutsizedBucket, capacity: length, length: length);
+                return BlockOwner.AllocatePooled(this, OutsizedBucket, capacity: length, length: length, out reused);
             }
 
             // Tagged with this pool but bucket -1, so Return() still accepts it and the block is
             // freed rather than retained.
-            return BlockOwner.AllocatePooled(this, bucketIndex: -1, capacity: length, length: length);
+            return BlockOwner.AllocatePooled(this, bucketIndex: -1, capacity: length, length: length, out reused);
         }
 
         int capacity = RoundedSize(length);
@@ -291,7 +298,7 @@ internal sealed class BlockPool : IHeldMemory
             return parked;
         }
 
-        return BlockOwner.AllocatePooled(this, index, capacity, length);
+        return BlockOwner.AllocatePooled(this, index, capacity, length, out reused);
     }
 
     /// <summary>
@@ -339,11 +346,12 @@ internal sealed class BlockPool : IHeldMemory
     /// which the next rents cut again without a new slab (<see cref="Slabs.FreeBytes"/>). So the process's pool lets go of
     /// the blocks of an array of their own first, then of every block it keeps on a slab that holds nothing else, the slab
     /// given back whole, then of the blocks of the slabs the fewest rented blocks hold: 2 MiB of blocks kept 960 MiB of slabs
-    /// alive after three jobs under 4 GiB, the blocks let go class by class wherever they lay (2026-11-15). Each block counts
-    /// its bytes as let go, as it did: counted only when its slab went, the bytes a budget asked back near its ceiling came
-    /// to nothing, and it asked again at each collection, 72 s for a backlog that took 52 under 2 GiB.
+    /// alive after three jobs under 4 GiB, the blocks let go class by class wherever they lay (2026-11-15). It says let go
+    /// what leaves the heap only: a block counted as let go when it went back free into a slab that stays, and the slab
+    /// counted again when it went, the budget read 1.7 GB let go in a heap of 1.5 GiB, and refused a job everything
+    /// (2026-11-16). What it frees into a slab, the next rent takes back, which its account tells the budget.
     /// </remarks>
-    /// <returns>The bytes let go.</returns>
+    /// <returns>The bytes that leave the heap at the next collection.</returns>
     public long GiveBack(KeptKind kind, long bytes)
     {
         if (kind != KeptKind.Blocks || bytes <= 0)
@@ -354,8 +362,7 @@ internal sealed class BlockPool : IHeldMemory
         long given = 0;
         if (Interlocked.Exchange(ref _outsized, null) is { } kept)
         {
-            given += kept.Capacity;
-            kept.FreeParked();
+            given += kept.FreeParked();
         }
 
         if (!_keepsOutsized)
@@ -363,7 +370,7 @@ internal sealed class BlockPool : IHeldMemory
             for (int i = _buckets.Length - 1; i >= 0 && given < bytes; i--)
             {
                 int size = MinBlockSize << i;
-                given += (long)Free(i, BlocksFor(bytes - given, size), aboveFloor: true) * size;
+                given += Free(i, BlocksFor(bytes - given, size), aboveFloor: true);
             }
 
             return given;
@@ -476,18 +483,21 @@ internal sealed class BlockPool : IHeldMemory
         }
     }
 
-    /// <summary>Lets go of the <paramref name="count"/> blocks of class <paramref name="index"/> taken out into <see cref="s_letting"/>: their bytes.</summary>
+    /// <summary>
+    /// Lets go of the <paramref name="count"/> blocks of class <paramref name="index"/> taken out into <see cref="s_letting"/>:
+    /// the bytes that leave the heap at the next collection, a slab's when its last piece goes, an array of its own's.
+    /// </summary>
     private long LetGo(int index, int count)
     {
-        long bytes = (long)count * (MinBlockSize << index);
-        Interlocked.Add(ref _parkedBytes, -bytes);
+        Interlocked.Add(ref _parkedBytes, -((long)count * (MinBlockSize << index)));
+        long given = 0;
         foreach (BlockOwner owner in s_letting)
         {
-            owner.FreeParked();
+            given += owner.FreeParked();
         }
 
         s_letting.Clear();
-        return bytes;
+        return given;
     }
 
     /// <summary>
@@ -591,19 +601,20 @@ internal sealed class BlockPool : IHeldMemory
     /// <summary>Whether the outsized slot keeps a block: for tests, as <see cref="ParkedCount"/> is.</summary>
     internal bool KeepsOutsized => Volatile.Read(ref _outsized) is not null;
 
-    /// <summary>Frees up to <paramref name="count"/> blocks class <paramref name="index"/> keeps parked, above its floor or all of them: how many.</summary>
-    private int Free(int index, int count, bool aboveFloor)
+    /// <summary>Frees up to <paramref name="count"/> blocks class <paramref name="index"/> keeps parked, above its floor or all of them: the bytes that leave the heap.</summary>
+    private long Free(int index, int count, bool aboveFloor)
     {
         Bucket bucket = _buckets[index];
         int freed = 0;
+        long given = 0;
         while (freed < count && bucket.TryTake(aboveFloor) is { } owner)
         {
             Interlocked.Add(ref _parkedBytes, -(MinBlockSize << index));
-            owner.FreeParked();
+            given += owner.FreeParked();
             freed++;
         }
 
-        return freed;
+        return given;
     }
 
     /// <summary>The blocks of <paramref name="size"/> bytes that hold <paramref name="bytes"/>, rounded up, <see cref="int.MaxValue"/> at most.</summary>

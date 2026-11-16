@@ -162,12 +162,8 @@ internal sealed class BlockOwner : SegmentOwner
     /// <inheritdoc/>
     protected override void FreeCore()
     {
-        if (_account is { } account)
-        {
-            _account = null;
-            account.Give(_capacity);
-        }
-
+        MemoryAccount? account = _account;
+        _account = null;
         BlockPool? pool = _pool;
         if (pool is not null)
         {
@@ -176,20 +172,34 @@ internal sealed class BlockOwner : SegmentOwner
 
         // A parked owner keeps its array for the next rent; any other lets it go: an array of its own to the collector, which
         // the process's budget counts as let go until a collection takes it, a piece back to its slab. One the pool lets go
-        // later is the registry's to count.
+        // later is the registry's to count. Parked, or back in a slab alive, its bytes stay in the heap, kept by the pool:
+        // the account says so, its block given back.
         if (pool is not null && pool.TryPark(this))
         {
+            account?.Give(_capacity, kept: true);
             return;
         }
 
-        if (Drop() && _slab is null)
+        account?.Give(_capacity, kept: _slab is not null);
+        if (Drop(out bool slabGone))
         {
-            QueryMemoryBudget.BlockFreed(_capacity);
+            if (_slab is null)
+            {
+                QueryMemoryBudget.BlockFreed(_capacity);
+            }
+            else if (slabGone)
+            {
+                SlabGone();
+            }
         }
     }
 
-    /// <summary>Lets go of the array of a block that the pool took out of a bucket.</summary>
-    internal void FreeParked() => _ = Drop();
+    /// <summary>
+    /// Lets go of the array of a block that the pool took out of a bucket: the bytes that leave the heap at the next
+    /// collection, the array's, or the slab's when this was its last piece out; none while the slab keeps another, the
+    /// piece only free in it. The caller counts them as let go, once.
+    /// </summary>
+    internal long FreeParked() => Drop(out bool slabGone) ? _slab is null ? _capacity : slabGone ? Slabs.SlabBytes : 0 : 0;
 
     /// <summary>Re-arms a parked owner for a new rental of <paramref name="length"/> bytes.</summary>
     /// <param name="length">The new segment length, at most <see cref="Capacity"/>.</param>
@@ -209,15 +219,17 @@ internal sealed class BlockOwner : SegmentOwner
     /// Lets the array go, once, or gives the piece back to its slab: whichever of a release and a trim comes first, the
     /// other finds nothing to drop.
     /// </summary>
+    /// <param name="slabGone">Whether the block was the last piece out of its slab, which went with it.</param>
     /// <returns>Whether this call let it go.</returns>
-    private bool Drop()
+    private bool Drop(out bool slabGone)
     {
+        slabGone = false;
         if (Interlocked.Exchange(ref _array, null) is not null)
         {
             Interlocked.Add(ref s_liveBytes, -Math.Max(_capacity, 1));
             if (_slab is { } slab)
             {
-                Slabs.Give(slab, _offset, _capacity);
+                slabGone = Slabs.Give(slab, _offset, _capacity);
                 GC.SuppressFinalize(this);
             }
 
@@ -227,8 +239,20 @@ internal sealed class BlockOwner : SegmentOwner
         return false;
     }
 
+    /// <summary>
+    /// A rented piece of a slab back, the slab gone with it: the slab's free bytes the rest of the process held, and the
+    /// whole slab in the heap until a collection takes it.
+    /// </summary>
+    private void SlabGone() => QueryMemoryBudget.SlabFreed(Slabs.SlabBytes - _capacity, Slabs.SlabBytes);
+
     /// <summary>A piece of a slab its holder dropped without giving it back: back to its slab, which nothing else would give it.</summary>
-    ~BlockOwner() => Drop();
+    ~BlockOwner()
+    {
+        if (Drop(out bool slabGone) && slabGone)
+        {
+            SlabGone();
+        }
+    }
 
     /// <summary>The view of <paramref name="length"/> bytes of <paramref name="array"/> from <paramref name="offset"/>, which the pinned heap never moves.</summary>
     private static unsafe VortexBuffer BufferOf(byte[] array, int offset, int length, int alignmentExponent) =>
@@ -253,21 +277,30 @@ internal sealed class BlockOwner : SegmentOwner
         return (array, (int)(Alignment.AlignUp(address, alignment) - address));
     }
 
+    /// <summary>A block for a pool's class, of a piece of a slab or of an array of its own.</summary>
+    /// <param name="pool">The pool the block returns to.</param>
+    /// <param name="bucketIndex">Its class in the pool.</param>
+    /// <param name="capacity">Its bytes.</param>
+    /// <param name="length">The bytes asked.</param>
+    /// <param name="reused">Whether its bytes were in the heap already: a piece of a slab alive, rather than of a new slab or an array of its own.</param>
     internal static BlockOwner AllocatePooled(
         BlockPool pool,
         int bucketIndex,
         int capacity,
-        int length)
+        int length,
+        out bool reused)
     {
         // The pool always allocates at the 64-byte cap, whatever the caller asked for: a block
         // aligned to 64 satisfies every legal segment alignment, so buckets stay
         // alignment-agnostic and blocks are genuinely interchangeable. A class a slab cuts is a
         // piece of one, aligned to 64 as well.
-        if (Slabs.Cuts(capacity) && Slabs.TryTake(capacity) is (Slabs.Slab slab, byte[] slabArray, int start))
+        if (Slabs.Cuts(capacity) && Slabs.TryTake(capacity) is (Slabs.Slab slab, byte[] slabArray, int start, bool made))
         {
+            reused = !made;
             return new BlockOwner(slabArray, start, capacity, length, VortexLimits.MaxAlignmentExponent, pool, bucketIndex, slab);
         }
 
+        reused = false;
         (byte[] array, int offset) = AllocRaw(capacity, VortexLimits.MaxAlignment);
         return new BlockOwner(array, offset, capacity, length, VortexLimits.MaxAlignmentExponent, pool, bucketIndex);
     }
