@@ -1,8 +1,10 @@
 // The memory the host holds the process to (VortexMemory): a size as a host writes it; a process held to 1 GiB by its
 // environment, whose collector's heap is held to three quarters of it and whose library works within what is left, and
-// whose compaction of a backlog runs to its end without its resident memory passing the limit; and limits set in turn,
-// one the heap already passes refused, one past the collector's own giving it back. A limit holds the whole process,
-// so each runs in a process of its own: the test assembly again, its one method.
+// whose appends, compaction of a backlog and group by that spills run to their end without its resident memory passing
+// the limit; limits set in turn, one the heap already passes refused, one past the collector's own giving it back; and a
+// variable that is no size, which fails each need of the limit alike. A limit holds the whole process, so each runs in a
+// process of its own: the test assembly again, its one method. The first is the work under a limit the CI runs on every
+// platform.
 using System;
 using System.Diagnostics;
 using System.Linq;
@@ -49,8 +51,8 @@ public sealed partial class MemoryLimitTests
 
     /// <summary>
     /// A process held to 1 GiB by <see cref="VortexMemory.LimitVariable"/>: the collector's heap to 768 MiB, the library to
-    /// an eighth less, a backlog of 120 small objects with variant columns consolidated to its end, and the resident memory
-    /// never past the limit.
+    /// an eighth less, a backlog of 120 small objects with variant columns consolidated to its end, a group by of every row
+    /// spilled under a budget of 4 MiB, and the resident memory never past the limit.
     /// </summary>
     [Fact]
     public async Task AProcessHeldToALimitCompactsItsBacklogWithinIt()
@@ -65,6 +67,35 @@ public sealed partial class MemoryLimitTests
     {
         string said = await RunChildAsync(nameof(LimitsSetInTurn), limit: null);
         Assert.Contains("ENDED", said, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A variable that is no count of bytes: each need of the limit fails with the same message, twice in one process, and a
+    /// limit set makes the variable moot.
+    /// </summary>
+    [Fact]
+    public async Task AVariableThatIsNoSizeFailsEachNeedOfTheLimitAlike()
+    {
+        string said = await RunChildAsync(nameof(AVariableThatIsNoSize), "4x");
+        Assert.Contains("ENDED", said, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AVariableThatIsNoSize()
+    {
+        Assert.SkipWhen(Environment.GetEnvironmentVariable(Child) is null, "The child of AVariableThatIsNoSizeFailsEachNeedOfTheLimitAlike, its variable '4x'.");
+        for (int i = 0; i < 2; i++)
+        {
+            InvalidOperationException limit = Assert.Throws<InvalidOperationException>(() => VortexMemory.LimitBytes);
+            Assert.Contains($"{VortexMemory.LimitVariable} is '4x'", limit.Message, StringComparison.Ordinal);
+            InvalidOperationException report = Assert.Throws<InvalidOperationException>(() => VortexDiagnostics.GetMemoryReport());
+            Assert.Equal(limit.Message, report.Message);
+        }
+
+        VortexMemory.SetLimit(long.MaxValue / 4);
+        Assert.Equal(long.MaxValue / 4, VortexMemory.LimitBytes);
+        Assert.True(VortexDiagnostics.GetMemoryReport().LimitBytes > 0);
+        Console.WriteLine("ENDED");
     }
 
     [Fact]
@@ -104,6 +135,34 @@ public sealed partial class MemoryLimitTests
         Assert.NotEmpty(await dataset.ConsolidateAsync(Ct));
         Assert.Equal(0, dataset.Levels[0].Entries);
         Assert.Equal(Appends * Rows, await dataset.Scan<Doc>().ToRecordsAsync(Ct).CountAsync(Ct));
+
+        // A group by of every row under a budget of 4 MiB: its groups spill to the scratch, and end exact.
+        string scratch = TestScratch.Create("vorticity-limit-spill-");
+        try
+        {
+            await using VortexSession spilling = VortexSession.Create(options =>
+            {
+                options.MaxDegreeOfParallelism = 4;
+                options.MemoryBudget = new QueryMemoryBudget(4L << 20);
+                options.ScratchDirectory = scratch;
+            });
+            await using VortexDataset read = await VortexDataset.OpenAsync(store, new DatasetOptions { Session = spilling }, Ct);
+            Vorticity.Aggregation grouped = read.Scan<Doc>().GroupBy(d => d.Sequence).Select(g => (g.Key, g.Count()));
+            long groups = 0;
+            await foreach (SequenceRows group in grouped.As<SequenceRows>().ToRecordsAsync(Ct))
+            {
+                Assert.Equal(1, group.Rows);
+                groups++;
+            }
+
+            Assert.Equal(Appends * Rows, groups);
+            Assert.True(grouped.Plan.LastRun!.SpilledRuns + (grouped.Plan.LastRun.Core?.SpilledParts ?? 0) > 0, "no run written");
+        }
+        finally
+        {
+            System.IO.Directory.Delete(scratch, recursive: true);
+        }
+
         Raise(peak, Environment.WorkingSet);
         long most = Volatile.Read(ref peak[0]);
         Assert.True(most <= 1L << 30, $"the process held {most >> 20} MiB under a limit of 1 024 MiB");
@@ -197,4 +256,7 @@ public sealed partial class MemoryLimitTests
 
     [VortexRecord]
     public partial record struct Doc(int Day, string Service, long Sequence, Variant Attributes);
+
+    [VortexRecord]
+    public partial record struct SequenceRows(long Sequence, long Rows);
 }

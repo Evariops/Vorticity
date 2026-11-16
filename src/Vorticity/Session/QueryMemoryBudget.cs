@@ -231,7 +231,8 @@ public sealed class QueryMemoryBudget
     /// 4 GB is not 4 GB for the queries. The jobs reserve in it too, unless a session gives them a budget
     /// of their own: one registry for both, and the shares the host sets.
     /// </summary>
-    internal static QueryMemoryBudget Process { get; } = new QueryMemoryBudget(ProcessLimit(), process: null);
+    /// <remarks>Its ceiling is read again at each use (<see cref="ProcessLimit"/>), never from what it was made with.</remarks>
+    internal static QueryMemoryBudget Process { get; } = new QueryMemoryBudget(0, process: null);
 
     /// <summary>
     /// The jobs' budget of every session given none of its own: <see cref="JobsShare"/>, one in this many, of the process's

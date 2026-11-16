@@ -43,20 +43,72 @@ public static class VortexMemory
     // Whether a limit set holds the collector's heap.
     private static bool s_heapHeld;
 
-    // Read when the library first needs a limit, before the process's budget is made: the budget reads it as it starts.
-    static VortexMemory()
+    // 1 once the variable was read and its limit held, or once a limit set made it moot.
+    private static int s_variableRead;
+
+    /// <summary>The limit the host set, through <see cref="SetLimit"/> or <see cref="LimitVariable"/>; null when it set none.</summary>
+    /// <exception cref="InvalidOperationException"><see cref="LimitVariable"/> is not a count of bytes.</exception>
+    public static long? LimitBytes
     {
-        if (Environment.GetEnvironmentVariable(LimitVariable) is { Length: > 0 } text)
+        get
         {
-            Hold(ParseBytes(text) ?? throw new InvalidOperationException($"{LimitVariable} is '{text}', which is not a count of bytes: 4294967296, 4096m and 4g are the same limit."));
+            ReadVariable();
+            return Volatile.Read(ref s_limit) is > 0 and long set ? set : null;
         }
     }
 
-    /// <summary>The limit the host set, through <see cref="SetLimit"/> or <see cref="LimitVariable"/>; null when it set none.</summary>
-    public static long? LimitBytes => Volatile.Read(ref s_limit) is > 0 and long set ? set : null;
-
     /// <summary>What the collector may commit now: a hard limit, its share of a container's limit, or the machine's memory.</summary>
-    internal static long CollectorBytes => Volatile.Read(ref s_collector);
+    /// <exception cref="InvalidOperationException"><see cref="LimitVariable"/> is not a count of bytes.</exception>
+    internal static long CollectorBytes
+    {
+        get
+        {
+            ReadVariable();
+            return Volatile.Read(ref s_collector);
+        }
+    }
+
+    /// <summary>
+    /// Holds the process to the limit <see cref="LimitVariable"/> names, the first time the library needs a limit and none
+    /// was set. A value that is no count of bytes fails that need, and each one after, with the same message: thrown from
+    /// the type's initializer, it left the type unusable, and its message behind a <see cref="TypeInitializationException"/>.
+    /// </summary>
+    /// <exception cref="InvalidOperationException"><see cref="LimitVariable"/> is not a count of bytes.</exception>
+    private static void ReadVariable()
+    {
+        if (Volatile.Read(ref s_variableRead) == 0 && VariableError() is { } error)
+        {
+            throw new InvalidOperationException(error);
+        }
+    }
+
+    /// <summary>
+    /// Holds the process to the limit <see cref="LimitVariable"/> names, once: what is wrong with its value, or null when it
+    /// names a count of bytes or nothing.
+    /// </summary>
+    private static string? VariableError()
+    {
+        lock (Gate)
+        {
+            if (s_variableRead != 0)
+            {
+                return null;
+            }
+
+            if (Environment.GetEnvironmentVariable(LimitVariable) is { Length: > 0 } text)
+            {
+                if (ParseBytes(text) is not long bytes)
+                {
+                    return $"{LimitVariable} is '{text}', which is not a count of bytes: 4294967296, 4096m and 4g are the same limit.";
+                }
+
+                HoldLocked(bytes);
+            }
+
+            Volatile.Write(ref s_variableRead, 1);
+            return null;
+        }
+    }
 
     /// <summary>
     /// Holds the process to <paramref name="bytes"/> from now on, as a container's limit of that size would: the collector's
@@ -73,27 +125,34 @@ public static class VortexMemory
         QueryMemoryBudget.Process.ReadMemory();
     }
 
-    /// <summary>Holds the collector's heap to its share of <paramref name="bytes"/>, then the library to the limit.</summary>
+    /// <summary>Holds the collector's heap to its share of <paramref name="bytes"/>, then the library to the limit: the variable's no more.</summary>
     private static void Hold(long bytes)
     {
         lock (Gate)
         {
-            long heap = bytes - (bytes / NativeShare);
-            if (heap < s_collectorAtStart)
-            {
-                HoldHeap(heap, bytes);
-                s_heapHeld = true;
-            }
-            else if (s_heapHeld)
-            {
-                // A limit whose heap passes the collector's own: the collector's own again.
-                HoldHeap(s_collectorAtStart, bytes);
-                s_heapHeld = false;
-            }
-
-            Volatile.Write(ref s_collector, GC.GetGCMemoryInfo().TotalAvailableMemoryBytes);
-            Volatile.Write(ref s_limit, bytes);
+            HoldLocked(bytes);
+            Volatile.Write(ref s_variableRead, 1);
         }
+    }
+
+    /// <summary>Under <see cref="Gate"/>: holds the collector's heap to its share of <paramref name="bytes"/>, then the library to the limit.</summary>
+    private static void HoldLocked(long bytes)
+    {
+        long heap = bytes - (bytes / NativeShare);
+        if (heap < s_collectorAtStart)
+        {
+            HoldHeap(heap, bytes);
+            s_heapHeld = true;
+        }
+        else if (s_heapHeld)
+        {
+            // A limit whose heap passes the collector's own: the collector's own again.
+            HoldHeap(s_collectorAtStart, bytes);
+            s_heapHeld = false;
+        }
+
+        Volatile.Write(ref s_collector, GC.GetGCMemoryInfo().TotalAvailableMemoryBytes);
+        Volatile.Write(ref s_limit, bytes);
     }
 
     /// <summary>
@@ -127,10 +186,16 @@ public static class VortexMemory
     /// What the process uses against its limit now: the container's reading, under the limit set when that is less; outside a
     /// container, the limit set and the process's resident memory. Null when nothing holds the process but the collector.
     /// </summary>
+    /// <remarks>
+    /// A variable that is no count of bytes leaves the process held by its container alone here: what fails is each need
+    /// of the limit, <see cref="LimitBytes"/> and the budgets', not the budget's type as it is made nor its timer.
+    /// </remarks>
     internal static ContainerMemory? Read()
     {
+        _ = VariableError();
         ContainerMemory? container = ContainerMemory.Read();
-        if (LimitBytes is not long set)
+        long set = Volatile.Read(ref s_limit);
+        if (set <= 0)
         {
             return container;
         }
