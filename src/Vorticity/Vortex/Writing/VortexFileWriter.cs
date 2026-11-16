@@ -2055,7 +2055,9 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         }
         finally
         {
-            context.Canonical.Reset();
+            // Its blocks kept for the rows staged next, which take the same sizes: each block back to the pool and rented
+            // again, through the budget each way, took 8 % of a merge's writer at degree 14.
+            context.Canonical.ResetKeepingBlocks();
         }
     }
 
