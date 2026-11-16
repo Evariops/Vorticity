@@ -32,7 +32,9 @@ namespace Vorticity.Benchmarks.Queries;
 /// <para>
 /// The records are a gauge's, as an ingestion of metrics writes them: a service, a metric, the hash of the series'
 /// attributes, an instant and a value, and two variant columns, the series' attributes and its service's resource
-/// attributes, constant along a series, which a job's decoders expand row by row.
+/// attributes, constant along a series, which a job's decoders expand row by row. With <c>--logs</c>, they are log records
+/// (<see cref="LogGeneratorV2"/>) in the order of their service and instant, whose attributes hardly repeat from one record
+/// to the next.
 /// </para>
 /// </remarks>
 internal static class BacklogBench
@@ -71,7 +73,7 @@ internal static class BacklogBench
         return listener;
     }
 
-    internal static async Task<int> RunAsync(string root, int appends, int rows, int series, long memoryLimit, bool compactOnly, int latency, int scans = 0, bool buildOnly = false, long bytes = 0, int degree = 0, bool digest = false)
+    internal static async Task<int> RunAsync(string root, int appends, int rows, int series, long memoryLimit, bool compactOnly, int latency, int scans = 0, bool buildOnly = false, long bytes = 0, int degree = 0, bool digest = false, bool logs = false)
     {
         if (memoryLimit > 0)
         {
@@ -97,7 +99,9 @@ internal static class BacklogBench
         if (!compactOnly)
         {
             Fresh(backlog);
-            (long read, int made) = await BuildAsync(session, backlog, appends, rows, series, scans, bytes);
+            (long read, int made) = logs
+                ? await BuildLogsAsync(session, backlog, appends, rows, bytes)
+                : await BuildAsync(session, backlog, appends, rows, series, scans, bytes);
             Console.WriteLine(string.Create(
                 CultureInfo.InvariantCulture,
                 $"backlog of {made} appends of {rows} rows, {BytesOf(backlog) / 1e6:F0} MB, built in {clock.Elapsed.TotalSeconds:F0} s, {scans} scans reading {read:N0} rows meanwhile; {sampler.Peaks()}; {Sampler.Now()}"));
@@ -171,7 +175,7 @@ internal static class BacklogBench
             $"done: {jobs} jobs in {clock.Elapsed.TotalSeconds:F0} s, {maintainer.ObjectCount} objects left, the most a job's blocks held {Mib(mostHeld)} MiB, {refusals} refused; read {bytesRead / 1e6:F0} MB and wrote {bytesWritten / 1e6:F0} MB of a backlog of {backlogBytes / 1e6:F0} MB, amplification {(double)bytesWritten / Math.Max(1, backlogBytes):F2}; {Sampler.Now()}"));
         if (digest)
         {
-            Console.WriteLine(await DigestAsync(maintainer));
+            Console.WriteLine(logs ? await DigestLogsAsync(maintainer) : await DigestAsync(maintainer));
         }
 
         // At rest: two turns of the slow timer, which an idle process gets within a minute, then a full collection. What the
@@ -267,6 +271,77 @@ internal static class BacklogBench
         await built.CancelAsync();
         await Task.WhenAll(readers);
         return (Interlocked.Read(ref read), a);
+    }
+
+    /// <summary>
+    /// A backlog of log records (<c>--logs</c>): <paramref name="appends"/> appends of <paramref name="rows"/> records each
+    /// (<see cref="LogGeneratorV2"/>), ten seconds apart, partitioned by day and in the order of their service and instant.
+    /// Their attributes hardly repeat from one record to the next, which a series' do: what the comparisons with the row
+    /// before cost where they find nothing.
+    /// </summary>
+    private static async Task<(long Read, int Appends)> BuildLogsAsync(VortexSession session, string root, int appends, int rows, long bytes)
+    {
+        IObjectStore store = new FileObjectStore(root);
+        DatasetOptions options = new DatasetOptions
+        {
+            Session = session,
+            Encrypted = true,
+            Layout = new DatasetLayout
+            {
+                Partition = LayoutValue.Column(nameof(LogRow.At)).Truncate(CalendarUnit.Day),
+                SortKey = [LayoutValue.Column(nameof(LogRow.ServiceName)), LayoutValue.Column(nameof(LogRow.At))],
+            },
+        };
+        await using VortexDataset writer = await VortexDataset.CreateAsync(store, LogRow.Schema, options);
+        LogGeneratorV2 generator = new LogGeneratorV2(31);
+        LogRow[] batch = new LogRow[rows];
+        int a = 0;
+        for (; bytes > 0 || a < appends; a++)
+        {
+            if (bytes > 0 && a % 50 == 0 && a > 0 && BytesOf(root) >= bytes)
+            {
+                break;
+            }
+
+            DateTimeOffset at = Start.AddSeconds(a * 10.0);
+            for (int i = 0; i < rows; i++)
+            {
+                batch[i] = generator.Next(at.AddTicks(i % TimeSpan.TicksPerSecond));
+            }
+
+            await using ObjectDraft draft = writer.StartObject();
+            await draft.Writer.WriteAsync<LogRow>(batch);
+            await writer.AppendAsync(draft);
+        }
+
+        return (0, a);
+    }
+
+    /// <summary>What a compacted backlog of log records holds, as <see cref="DigestAsync"/> says it of metric records.</summary>
+    private static async Task<string> DigestLogsAsync(VortexDataset dataset)
+    {
+        long rows = 0;
+        ulong sum = 0;
+        ulong xor = 0;
+        byte[] buffer = new byte[4096];
+        await foreach (LogRow row in dataset.Scan<LogRow>().ToRecordsAsync())
+        {
+            string text = string.Create(
+                CultureInfo.InvariantCulture,
+                $"{row.At.UtcTicks}\u0001{row.ServiceName}\u0001{row.SeverityNumber}\u0001{row.TraceId}\u0001{row.Attributes.ToJson()}");
+            int length = System.Text.Encoding.UTF8.GetMaxByteCount(text.Length);
+            if (length > buffer.Length)
+            {
+                buffer = new byte[length];
+            }
+
+            ulong hash = Vorticity.Aggregating.CardinalitySlot.Hash(buffer.AsSpan(0, System.Text.Encoding.UTF8.GetBytes(text, buffer)));
+            sum += hash;
+            xor ^= hash;
+            rows++;
+        }
+
+        return string.Create(CultureInfo.InvariantCulture, $"digest: {rows:N0} rows, sum {sum:x16}, xor {xor:x16}");
     }
 
     /// <summary>

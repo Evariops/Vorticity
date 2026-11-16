@@ -167,14 +167,14 @@ Dictionary<string, (string Help, Func<Task<int>> Run)> micros = new Dictionary<s
         Task.FromResult(PoolRentMicro.Run(rounds))),
     ["needles"] = ("what a needle's index weighs and what a probe costs, sorted run against a hashed index (NeedleMicro.cs)", () =>
         NeedleMicro.Run((int)Option(args, "--rows", 4_000_000), rounds)),
-    ["backlog"] = ("a maintainer back to a backlog of metric records, every append spanning every series, compacted job by job under --memory-limit SIZE (BacklogBench.cs)", () =>
+    ["backlog"] = ("a maintainer back to a backlog of metric records, every append spanning every series, or of log records with --logs, compacted job by job under --memory-limit SIZE (BacklogBench.cs)", () =>
         BacklogBench.RunAsync(
             Text(args, "--store") ?? BenchStores.Of("backlog"), (int)Option(args, "--appends", 300), (int)Option(args, "--rows", 30_000),
             (int)Option(args, "--series", 20_000),
             Text(args, "--memory-limit") is { } limit ? VortexMemory.ParseBytes(limit) ?? throw new ArgumentException($"--memory-limit {limit} is not a size: 2g, 2048m.") : 0,
             args.Contains("--compact-only"), (int)Option(args, "--latency", 0), (int)Option(args, "--scans", 0), args.Contains("--build-only"),
             Text(args, "--bytes") is { } size ? VortexMemory.ParseBytes(size) ?? throw new ArgumentException($"--bytes {size} is not a size: 25g, 512m.") : 0,
-            (int)Option(args, "--degree", 0), args.Contains("--digest"))),
+            (int)Option(args, "--degree", 0), args.Contains("--digest"), args.Contains("--logs"))),
     ["inputs"] = ("--store DIR: what the inputs of a merge hold while it reads them, 1 to 8 of a dataset's largest objects in lockstep (InputMemoryMicro.cs)", () =>
         InputMemoryMicro.Run(Text(args, "--store") ?? throw new ArgumentException("--micro inputs needs --store DIR, a dataset's directory."), (int)Option(args, "--objects", 8))),
     ["consolidation"] = ("--store DIR: what a consolidation holds apart from any other work, hours of log records left in level 0 consolidated on 1 lane and on 8 (ConsolidationMemoryMicro.cs)", () =>
