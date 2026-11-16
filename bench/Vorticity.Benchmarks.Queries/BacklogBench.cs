@@ -73,7 +73,10 @@ internal static class BacklogBench
         return listener;
     }
 
-    internal static async Task<int> RunAsync(string root, int appends, int rows, int series, long memoryLimit, bool compactOnly, int latency, int scans = 0, bool buildOnly = false, long bytes = 0, int degree = 0, bool digest = false, bool logs = false)
+    // stopAfter: the jobs the maintainer runs at most, -1 for all of them (--jobs N). keep: where the store the jobs left is
+    // kept as a backlog of its own (--keep DIR), null for nowhere: a store a few jobs in, whose next job a run compacts alone
+    // (--store DIR --compact-only --jobs 1), in seconds rather than the minutes the whole backlog takes.
+    internal static async Task<int> RunAsync(string root, int appends, int rows, int series, long memoryLimit, bool compactOnly, int latency, int scans = 0, bool buildOnly = false, long bytes = 0, int degree = 0, bool digest = false, bool logs = false, int stopAfter = -1, string? keep = null)
     {
         if (memoryLimit > 0)
         {
@@ -151,7 +154,7 @@ internal static class BacklogBench
             long slabsMade = Slabs.Slab.Made;
             int fullCollections = GC.CollectionCount(2);
             await maintainer.RefreshAsync();
-            CompactionResult? result = await maintainer.CompactAsync();
+            CompactionResult? result = jobs == stopAfter ? null : await maintainer.CompactAsync();
             if (result is null)
             {
                 break;
@@ -173,6 +176,21 @@ internal static class BacklogBench
         Console.WriteLine(string.Create(
             CultureInfo.InvariantCulture,
             $"done: {jobs} jobs in {clock.Elapsed.TotalSeconds:F0} s, {maintainer.ObjectCount} objects left, the most a job's blocks held {Mib(mostHeld)} MiB, {refusals} refused; read {bytesRead / 1e6:F0} MB and wrote {bytesWritten / 1e6:F0} MB of a backlog of {backlogBytes / 1e6:F0} MB, amplification {(double)bytesWritten / Math.Max(1, backlogBytes):F2}; {Sampler.Now()}"));
+        if (keep is not null)
+        {
+            // The store as the jobs left it, a backlog of its own for a later run's --compact-only.
+            string kept = Path.Combine(keep, "backlog");
+            Fresh(kept);
+            foreach (string file in Directory.EnumerateFiles(work, "*", SearchOption.AllDirectories))
+            {
+                string target = Path.Combine(kept, Path.GetRelativePath(work, file));
+                Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+                System.IO.File.Copy(file, target);
+            }
+
+            Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"kept: {maintainer.ObjectCount} objects, {BytesOf(kept) / 1e6:F0} MB in {kept}"));
+        }
+
         if (digest)
         {
             Console.WriteLine(logs ? await DigestLogsAsync(maintainer) : await DigestAsync(maintainer));
