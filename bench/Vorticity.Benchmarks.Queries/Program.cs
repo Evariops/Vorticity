@@ -107,7 +107,7 @@ Dictionary<string, (string Help, Func<Task<int>> Run)> micros = new Dictionary<s
     ["reader"] = ("the memory of a reader, by sort: a handle on each dataset of tables kept under several retentions, asked as sets (MemoryScenarios.cs)", () =>
         MemoryScenarios.ReaderAsync(
             Text(args, "--store") ?? BenchStores.Of("memory-reader"), (int)Option(args, "--tables", 8), (int)Option(args, "--retentions", 5),
-            (int)Option(args, "--rows", 40_000), (int)Option(args, "--latency", 20))),
+            (int)Option(args, "--rows", 40_000), (int)Option(args, "--latency", 20), (int)Option(args, "--file-rows", 0))),
     ["lifecycle"] = ("what a row costs from its append to its last rewrite, and the objects a window finds (LifecycleBench.cs)", () =>
         LifecycleBench.Run(
             (int)Option(args, "--hours", 48), Option(args, "--rate", 20), (int)Option(args, "--writers", 4), (int)Option(args, "--batch", 30),
@@ -163,6 +163,8 @@ Dictionary<string, (string Help, Func<Task<int>> Run)> micros = new Dictionary<s
         ColumnBattery.Run(Option(args, "--hours", 4), Option(args, "--rate", 50), Text(args, "--only"), Text(args, "--trace"))),
     ["peercache"] = ("a question warm from the synopsis cache's own directory, and from another's of the same root (PeerCacheMicro.cs)", () =>
         PeerCacheMicro.Run(Text(args, "--store") ?? BenchStores.Of("peercache"), (int)Option(args, "--objects", 16), (int)Option(args, "--rows", 200_000), rounds)),
+    ["poolrent"] = ("what a question's rents of the pool cost, parked, cut from a slab kept, or from new slabs (PoolRentMicro.cs)", () =>
+        Task.FromResult(PoolRentMicro.Run(rounds))),
     ["needles"] = ("what a needle's index weighs and what a probe costs, sorted run against a hashed index (NeedleMicro.cs)", () =>
         NeedleMicro.Run((int)Option(args, "--rows", 4_000_000), rounds)),
     ["backlog"] = ("a maintainer back to a backlog of metric records, every append spanning every series, compacted job by job under --memory-limit SIZE (BacklogBench.cs)", () =>
@@ -261,6 +263,13 @@ if (Text(args, "--micro") is { } micro)
     {
         // --block-sites FILE: the blocks the run holds at its peak, by the site that rented them (BlockSites.cs).
         using BlockSites? sites = Text(args, "--block-sites") is { } path ? BlockSites.Watch(path) : null;
+
+        // --memory-limit SIZE: the process held to it, as a host sets it, for every micro but the backlog, which sets it itself.
+        if (micro != "backlog" && Text(args, "--memory-limit") is { } held)
+        {
+            VortexMemory.SetLimit(VortexMemory.ParseBytes(held) ?? throw new ArgumentException($"--memory-limit {held} is not a size: 2g, 2048m."));
+        }
+
         return await chosen.Run();
     }
 
