@@ -37,6 +37,9 @@ internal sealed class LaneBudget
     /// <summary>The lanes there are.</summary>
     internal int Lanes { get; }
 
+    /// <summary>The time the lanes were held, every lane's added up, in <see cref="Stopwatch"/> ticks: the degree the writes used.</summary>
+    internal long HeldTicks => Interlocked.Read(ref _held);
+
     /// <summary>Waits for a lane, and returns when it was taken, for <see cref="Exit"/>.</summary>
     internal async ValueTask<long> EnterAsync(CancellationToken cancellationToken)
     {

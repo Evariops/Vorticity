@@ -82,6 +82,12 @@ public sealed record CompactionResult
 
     /// <summary>Whether it was a piece of a consolidation, which leaves the partition's next keys in level 0 for the next job.</summary>
     internal bool Piece { get; init; }
+
+    /// <summary>The batches its rows reached the writers of its objects in, a call each: a diagnostic of how its merge cuts them.</summary>
+    internal long WriterBatches { get; init; }
+
+    /// <summary>Of <see cref="WriterBatches"/>, those the writers ingested on their lanes rather than on the job's thread.</summary>
+    internal long WriterBatchesAcross { get; init; }
 }
 
 /// <summary>Runs one compaction: a k-way merge of the inputs on the sort key when there is
@@ -574,11 +580,15 @@ internal static partial class DatasetCompactor
         int objectsOut = lateOutputs?.Written.Count ?? 0;
         long bytesOut = lateOutputs?.Bytes ?? 0;
         long scratch = (lateOutputs?.ScratchBytes ?? 0) + (postings?.ScratchBytes ?? 0) + memory.CopiedBytes;
+        long batches = lateOutputs?.Batches ?? 0;
+        long across = lateOutputs?.BatchesAcross ?? 0;
         foreach (ObjectStream outputs in streams)
         {
             objectsOut += outputs.Written.Count;
             bytesOut += outputs.Bytes;
             scratch += outputs.ScratchBytes;
+            batches += outputs.Batches;
+            across += outputs.BatchesAcross;
         }
 
         return new CompactionResult
@@ -598,6 +608,8 @@ internal static partial class DatasetCompactor
             ScratchBytes = scratch,
             Outcome = outcome,
             Piece = piece is { ToTheEnd: false },
+            WriterBatches = batches,
+            WriterBatchesAcross = across,
         };
     }
 
@@ -1622,6 +1634,12 @@ internal static partial class DatasetCompactor
         /// <summary>The bytes the writers of the objects it has sealed spilled to disk, their indexes' runs past their memory.</summary>
         internal long ScratchBytes { get; private set; }
 
+        /// <summary>The batches it handed its writers, one a call: what a merge cuts its rows into before they are written.</summary>
+        internal long Batches { get; private set; }
+
+        /// <summary>Of <see cref="Batches"/>, those the writers of the objects it sealed ingested on their lanes.</summary>
+        internal long BatchesAcross { get; private set; }
+
         /// <summary>Whether the object being written has reached the destination's size.</summary>
         internal bool WantsRoll => _output is not null && _output.Sink.Position + _output.Writer.HeldBytes >= _target;
 
@@ -1712,6 +1730,7 @@ internal static partial class DatasetCompactor
 
             // The blocks the rows before these and these themselves closed, declared before their rows are written.
             _rows += batch.RowCount;
+            Batches++;
             if (_census is not { } census)
             {
                 await output.Writer.WriteBatchAsync(batch, cancellationToken).ConfigureAwait(false);
@@ -1888,6 +1907,7 @@ internal static partial class DatasetCompactor
 
                     await output.Writer.CompleteAsync(cancellationToken).ConfigureAwait(false);
                     ScratchBytes += output.Writer.ScratchBytes;
+                    BatchesAcross += output.Writer.BatchesIngestedAcross;
                 }
 
                 written = await _dataset.SealAsync(output, _rows, _firstRow, cancellationToken).ConfigureAwait(false);
