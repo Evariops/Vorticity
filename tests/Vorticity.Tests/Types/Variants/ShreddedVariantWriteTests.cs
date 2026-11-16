@@ -495,6 +495,62 @@ public sealed partial class ShreddedVariantWriteTests
         }
     }
 
+    /// <summary>
+    /// Shredded variant columns whose keys a job's object indexes, each key's sheet, locates and statistics over the granules:
+    /// on four and eight threads, the keys of each column written in groups apart, each group on its own thread, the file is
+    /// the one written on one thread, byte for byte.
+    /// </summary>
+    [Theory]
+    [InlineData(4)]
+    [InlineData(8)]
+    public async Task KeysWrittenInGroupsApartWriteTheFileOfOneThread(int degree)
+    {
+        Random random = new Random(31);
+        Doc[] rows = [.. Enumerable.Range(0, 20_000).Select(i => new Doc(i, Document(random), random.Next(3) == 0 ? null : Document(random)))];
+        Dictionary<string, VariantShredding> shredding = new() { [nameof(Doc.Attributes)] = Shredding(random), [nameof(Doc.Extra)] = Shredding(random) };
+        string onePath = Path.Combine(Path.GetTempPath(), $"vorticity-keys-{Guid.NewGuid():N}.vortex");
+        string manyPath = Path.Combine(Path.GetTempPath(), $"vorticity-keys-{Guid.NewGuid():N}.vortex");
+        try
+        {
+            Assert.Equal(0, await WriteIndexedAsync(rows, shredding, onePath, degree: 1));
+            Assert.True(await WriteIndexedAsync(rows, shredding, manyPath, degree) > 0, "no batch wrote its keys apart");
+            Assert.Equal(await System.IO.File.ReadAllBytesAsync(onePath, Ct), await System.IO.File.ReadAllBytesAsync(manyPath, Ct));
+        }
+        finally
+        {
+            System.IO.File.Delete(onePath);
+            System.IO.File.Delete(manyPath);
+        }
+    }
+
+    /// <summary>
+    /// Writes <paramref name="rows"/> in blocks of 1 024 rows with what a job's object keeps of its shredded keys, and returns
+    /// the batches whose keys were written in groups apart.
+    /// </summary>
+    private static async Task<int> WriteIndexedAsync(Doc[] rows, Dictionary<string, VariantShredding> shredding, string path, int degree)
+    {
+        VortexWriteOptions options = new VortexWriteOptions
+        {
+            Identity = new Guid("5e5e5e5e-5e5e-4e5e-8e5e-5e5e5e5e5e5e"),
+            BlockRows = 1_024,
+            ShreddedVariants = shredding,
+            DegreeOfParallelism = degree,
+            CarriesContents = true,
+            ColumnSheetBytes = 0,
+            Counted = true,
+            Granulated = true,
+        };
+        await using VortexSession session = VortexSession.Create(o => o.MaxDegreeOfParallelism = degree);
+        await using VortexFileWriter writer = session.CreateWriter<Doc>(path, options);
+        for (int start = 0; start < rows.Length; start += 2_048)
+        {
+            await writer.WriteAsync<Doc>(rows.AsSpan(start, Math.Min(2_048, rows.Length - start)), Ct);
+        }
+
+        await writer.CompleteAsync(Ct);
+        return writer.BatchesKeysApart;
+    }
+
     /// <summary>Writes <paramref name="rows"/>, every column gathering chunks of 16 KiB, and returns the chunks compressed ahead.</summary>
     private static async Task<int> WriteGatheredAsync(Doc[] rows, Dictionary<string, VariantShredding> shredding, string path, int degree, bool ahead)
     {

@@ -155,6 +155,9 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// <summary>Batches whose columns were ingested on several threads.</summary>
     internal int BatchesIngestedAcross { get; private set; }
 
+    /// <summary>Batches whose variant columns' keys were written in groups apart, each on a thread of its own.</summary>
+    internal int BatchesKeysApart { get; private set; }
+
     /// <summary>
     /// Once the file is completed, the bytes from its first structure an open reads to its end: what an
     /// open asking for that many reads in one request. 0 before.
@@ -1051,6 +1054,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             built.BucketBits = options.HashedBucketBits;
             built.Streamer = writer.StreamPayloadsAsync;
             built.Lanes = writer._lanes > 1 ? writer._budget : null;
+            built.KeyLanes = writer._lanes;
         }
 
         foreach (KeyValuePair<string, int> level in options.ZstdLevels)
@@ -2237,11 +2241,87 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
     private async ValueTask IngestAcrossAsync(WorkFan fan, CanonicalArena arena, int rows)
     {
-        int count = ItemsOf(fan, arena);
-        await fan.RunAsync(this, count, arena, rows).ConfigureAwait(false);
+        if (_indexes is { AsksNothing: false, Streams: true } indexes && KeysApart(indexes) is int groups and > 0)
+        {
+            await IngestKeysApartAsync(fan, indexes, arena, rows, groups).ConfigureAwait(false);
+        }
+        else
+        {
+            int count = ItemsOf(fan, arena);
+            await fan.RunAsync(this, count, arena, rows).ConfigureAwait(false);
+        }
+
         _blockFilled = (_blockFilled + rows) % _blockRows;
         BatchesIngestedAcross++;
     }
+
+    /// <summary>An item that feeds a variant column's keys apart, its field in the low twenty bits and its part above them.</summary>
+    private const int KeysItem = 1 << 30;
+
+    /// <summary>The groups the keys of the variant columns are written in apart, all columns together; 0 for none.</summary>
+    private int KeysApart(IndexWriter indexes)
+    {
+        int groups = 0;
+        for (int field = 0; field < _fieldCount; field++)
+        {
+            groups += indexes.KeyGroups(field);
+        }
+
+        return groups;
+    }
+
+    /// <summary>
+    /// <see cref="IngestAcrossAsync"/> for a batch whose variant columns' keys are fed apart, in two turns of the fan. The first
+    /// takes the columns' statistics, and each such column's rows read once for all its keys (<see cref="IndexWriter.ReadKeys"/>);
+    /// the second, the columns' index builders, and each group of keys written from that read and its builders fed
+    /// (<see cref="IndexWriter.FeedKeys"/>), a group on each lane. A log's hundreds of keys, fed on the one thread that
+    /// ingested their column, held every block of a merge of log records at fourteen lanes.
+    /// </summary>
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
+    private async ValueTask IngestKeysApartAsync(WorkFan fan, IndexWriter indexes, CanonicalArena arena, int rows, int groups)
+    {
+        try
+        {
+            Span<int> items = fan.Items((_fieldCount * 5) + 1);
+            int count = IngestItems(arena, items);
+            for (int field = 0; field < _fieldCount; field++)
+            {
+                if (indexes.KeyGroups(field) > 0)
+                {
+                    items[count++] = KeysItem | field;
+                }
+            }
+
+            await fan.RunAsync(this, count, arena, rows).ConfigureAwait(false);
+            items = fan.Items(_fieldCount + 1 + groups);
+            count = FeedItems(items, 0);
+            for (int field = 0; field < _fieldCount; field++)
+            {
+                for (int group = 0; group < indexes.KeyGroups(field); group++)
+                {
+                    items[count++] = KeysItem | ((group + 1) << 20) | field;
+                }
+            }
+
+            _keysApart = true;
+            await fan.RunAsync(this, count, arena, rows).ConfigureAwait(false);
+            BatchesKeysApart++;
+        }
+        finally
+        {
+            _keysApart = false;
+            for (int field = 0; field < _fieldCount; field++)
+            {
+                if (indexes.KeyGroups(field) > 0)
+                {
+                    indexes.EndKeys(field);
+                }
+            }
+        }
+    }
+
+    // Whether the fan's turn feeds the variant columns' keys apart, which their columns' own items then leave out.
+    private bool _keysApart;
 
     /// <summary>The items of an ingest across <paramref name="fan"/>'s threads, laid in its room: how many there are.</summary>
     private int ItemsOf(WorkFan fan, CanonicalArena arena)
@@ -2307,6 +2387,22 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     void IFanWork.Run(WorkFan fan, int item)
     {
         int entry = fan.Item(item);
+        if ((entry & KeysItem) != 0)
+        {
+            int field = entry & 0xF_FFFF;
+            int part = (entry >> 20) & 0x3FF;
+            if (part == 0)
+            {
+                _indexes!.ReadKeys(field, (CanonicalArena)fan.State!, _fieldNodes[field], fan.Value, _blockFilled, _blockRows);
+            }
+            else
+            {
+                _indexes!.FeedKeys(field, part - 1, fan.Value, _blockFilled, _blockRows);
+            }
+
+            return;
+        }
+
         if ((entry & 7) == 0)
         {
             FeedPart(entry >> 3, (CanonicalArena)fan.State!, fan.Value);
@@ -2325,6 +2421,9 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         IndexWriter indexes = _indexes!;
         bool keys = field == _fieldCount;
         int node = keys ? -1 : _fieldNodes[field];
+
+        // A variant column whose keys go apart feeds its own builders alone.
+        bool apart = !keys && _keysApart && indexes.KeyGroups(field) > 0;
         int filled = _blockFilled;
         for (int offset = 0; offset < rows;)
         {
@@ -2335,7 +2434,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             }
             else
             {
-                indexes.Accumulate(field, arena, node, offset, take);
+                indexes.Accumulate(field, arena, node, offset, take, keys: !apart);
             }
 
             offset += take;
@@ -2348,7 +2447,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                 }
                 else
                 {
-                    indexes.CloseBlock(field);
+                    indexes.CloseBlock(field, keys: !apart);
                 }
 
                 filled = 0;

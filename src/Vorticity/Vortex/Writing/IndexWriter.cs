@@ -982,16 +982,168 @@ internal sealed class IndexWriter : IDisposable
     /// Hands rows <paramref name="start"/> to <paramref name="start"/> + <paramref name="count"/> of column
     /// <paramref name="field"/> to its builders, and each key the column shreds, read in its slot's class, to that slot's.
     /// </summary>
-    internal void Accumulate(int field, CanonicalArena arena, int nodeIndex, int start, int count)
+    /// <param name="field">The column.</param>
+    /// <param name="arena">The batch's arena.</param>
+    /// <param name="nodeIndex">The column's node.</param>
+    /// <param name="start">The first row.</param>
+    /// <param name="count">The rows.</param>
+    /// <param name="keys">
+    /// Whether the keys the column shreds are fed too; false where they are fed apart, read once and written in groups
+    /// (<see cref="ReadKeys"/>, <see cref="FeedKeys"/>).
+    /// </param>
+    internal void Accumulate(int field, CanonicalArena arena, int nodeIndex, int start, int count, bool keys = true)
     {
         foreach (IndexBuilder builder in _builders[field])
         {
             builder.Accumulate(arena, nodeIndex, start, count);
         }
 
-        if (_variantFeeds?[field] is { } feed && count > 0)
+        if (keys && _variantFeeds?[field] is { } feed && count > 0)
         {
             FeedVariant(feed, arena, nodeIndex, start, count);
+        }
+    }
+
+    /// <summary>
+    /// The number of groups the keys variant column <paramref name="field"/> shreds are written in apart, each on a lane of the
+    /// writer's (<see cref="FeedKeys"/>); 0 for a column whose keys are fed with it.
+    /// </summary>
+    internal int KeyGroups(int field) => _variantFeeds?[field]?.Groups ?? 0;
+
+    /// <summary>
+    /// The threads the keys of a variant column may be written on apart, the writer's lanes: its keys are dealt into as many
+    /// groups, a key to each in turn, and none is split below two keys read together. A log's attributes shred hundreds of
+    /// keys, whose columns and builders, fed on the one thread that ingests the column, held every block of a merge of log
+    /// records at fourteen lanes: 9.7 s of its 13.8 (2026-11-16).
+    /// </summary>
+    internal int KeyLanes
+    {
+        get => _keyLanes;
+        set
+        {
+            _keyLanes = value;
+            foreach (VariantFeed? feed in _variantFeeds ?? [])
+            {
+                feed?.Split(value);
+            }
+        }
+    }
+
+    private int _keyLanes = 1;
+
+    /// <summary>
+    /// The first part of feeding the keys variant column <paramref name="field"/> shreds, where they are written in groups
+    /// apart: on one thread, the batch's <paramref name="rows"/> read once for every key (<see cref="Compute.VariantFieldExpr.KeyReads.Read"/>),
+    /// and the nested paths fed; where the rows cannot be read so, every key fed here. The groups follow
+    /// (<see cref="FeedKeys"/>), then <see cref="EndKeys"/>.
+    /// </summary>
+    /// <param name="field">The variant column.</param>
+    /// <param name="arena">The batch's arena.</param>
+    /// <param name="nodeIndex">The column's node.</param>
+    /// <param name="rows">The batch's rows.</param>
+    /// <param name="filled">The rows of the open block before the batch's.</param>
+    /// <param name="blockRows">The rows of a block.</param>
+    internal void ReadKeys(int field, CanonicalArena arena, int nodeIndex, int rows, int filled, int blockRows)
+    {
+        VariantFeed feed = _variantFeeds![field]!;
+        CanonicalArena into = feed.Rows;
+        int variant = CanonicalSlice.SliceAcross(arena, into, nodeIndex, 0, rows);
+        int keyed = feed.Slots.Length - feed.Nested.Length;
+        Compute.VariantFieldExpr.KeyReads reads = feed.Reads!;
+        feed.Whole = !reads.Read(into, variant);
+        if (feed.Whole)
+        {
+            for (int i = 0; i < keyed; i++)
+            {
+                feed.Nodes[i] = reads.Paths[i].Apply(into, variant);
+            }
+        }
+
+        for (int n = 0; n < feed.Nested.Length; n++)
+        {
+            feed.Nodes[keyed + n] = feed.Nested[n].Apply(into, variant);
+        }
+
+        FeedSlots(feed, into, feed.Whole ? 0 : keyed, feed.Slots.Length, 1, rows, filled, blockRows);
+    }
+
+    /// <summary>
+    /// Writes group <paramref name="group"/>'s keys of variant column <paramref name="field"/> from the rows
+    /// <see cref="ReadKeys"/> read, each into the group's own arena, and feeds their builders block by block: the groups of a
+    /// column at once, each on its own thread, since no builder of a key reads another's.
+    /// </summary>
+    /// <param name="field">The variant column.</param>
+    /// <param name="group">The group.</param>
+    /// <param name="rows">The batch's rows.</param>
+    /// <param name="filled">The rows of the open block before the batch's.</param>
+    /// <param name="blockRows">The rows of a block.</param>
+    internal void FeedKeys(int field, int group, int rows, int filled, int blockRows)
+    {
+        VariantFeed feed = _variantFeeds![field]!;
+        if (feed.Whole)
+        {
+            return;
+        }
+
+        int keyed = feed.Slots.Length - feed.Nested.Length;
+        CanonicalArena into = feed.GroupRows(group);
+        try
+        {
+            for (int i = group; i < keyed; i += feed.Groups)
+            {
+                feed.Nodes[i] = feed.Reads!.Write(into, i);
+            }
+
+            FeedSlots(feed, into, group, keyed, feed.Groups, rows, filled, blockRows);
+        }
+        finally
+        {
+            into.Reset();
+        }
+    }
+
+    /// <summary>Ends the keys of variant column <paramref name="field"/> fed apart: the read given back, its rows let go.</summary>
+    internal void EndKeys(int field)
+    {
+        if (_variantFeeds?[field] is { } feed)
+        {
+            feed.Reads?.Release();
+            feed.Rows.Reset();
+        }
+    }
+
+    /// <summary>
+    /// Feeds the builders of the slots <paramref name="first"/>, <paramref name="first"/> + <paramref name="step"/>, and so on
+    /// below <paramref name="end"/> of <paramref name="feed"/> their columns over the batch's <paramref name="rows"/>, block by
+    /// block, closing each block as it fills; <paramref name="filled"/> rows of the open block came before the batch's.
+    /// </summary>
+    private void FeedSlots(VariantFeed feed, CanonicalArena arena, int first, int end, int step, int rows, int filled, int blockRows)
+    {
+        for (int offset = 0; offset < rows;)
+        {
+            int take = Math.Min(blockRows - filled, rows - offset);
+            for (int k = first; k < end; k += step)
+            {
+                foreach (IndexBuilder builder in _builders[feed.Slots[k]])
+                {
+                    builder.Accumulate(arena, feed.Nodes[k], offset, take);
+                }
+            }
+
+            offset += take;
+            filled += take;
+            if (filled == blockRows)
+            {
+                for (int k = first; k < end; k += step)
+                {
+                    foreach (IndexBuilder builder in _builders[feed.Slots[k]])
+                    {
+                        builder.CloseBlock();
+                    }
+                }
+
+                filled = 0;
+            }
         }
     }
 
@@ -1025,7 +1177,7 @@ internal sealed class IndexWriter : IDisposable
         }
     }
 
-    /// <summary>Seals the open block of every composite key's builders, as <see cref="CloseBlock(int)"/> seals a column's.</summary>
+    /// <summary>Seals the open block of every composite key's builders, as <see cref="CloseBlock(int, bool)"/> seals a column's.</summary>
     internal void CloseKeysBlock()
     {
         for (int slot = _fieldCount; slot < _builders.Length; slot++)
@@ -1100,14 +1252,16 @@ internal sealed class IndexWriter : IDisposable
     }
 
     /// <summary>Seals the open block of column <paramref name="field"/>'s builders and of the keys it shreds, past the first block of the file.</summary>
-    internal void CloseBlock(int field)
+    /// <param name="field">The column.</param>
+    /// <param name="keys">Whether the builders of the keys the column shreds close too; false where they are fed apart.</param>
+    internal void CloseBlock(int field, bool keys = true)
     {
         foreach (IndexBuilder builder in _builders[field])
         {
             builder.CloseBlock();
         }
 
-        foreach (int slot in _variantFeeds?[field]?.Slots ?? [])
+        foreach (int slot in (keys ? _variantFeeds?[field]?.Slots : null) ?? [])
         {
             foreach (IndexBuilder builder in _builders[slot])
             {
@@ -2351,6 +2505,7 @@ internal sealed class IndexWriter : IDisposable
                 int keyed = Array.FindIndex(held, slot => variants[slot]!.Value.Path.Steps.Length > 1) is int first and >= 0 ? first : held.Length;
                 Compute.VariantFieldExpr[] paths = Array.ConvertAll(held, slot => variants[slot]!.Value.Path);
                 feeds[field] = new VariantFeed(held, keyed == 0 ? null : new Compute.VariantFieldExpr.KeyReads(paths[..keyed]), paths[keyed..], _account);
+                feeds[field]!.Split(_keyLanes);
             }
         }
 
@@ -2380,10 +2535,42 @@ internal sealed class IndexWriter : IDisposable
         /// <summary>Where the keys' values are read into before their builders take them, emptied after each batch.</summary>
         internal CanonicalArena Rows => _rows ??= new CanonicalArena(64, account);
 
+        /// <summary>
+        /// The groups the top-level keys are written in apart, a key to each in turn (<see cref="FeedKeys"/>); 0 for keys fed
+        /// with their column.
+        /// </summary>
+        internal int Groups { get; private set; }
+
+        /// <summary>Whether the batch's rows could not be read once for every key, and <see cref="ReadKeys"/> fed them all.</summary>
+        internal bool Whole { get; set; }
+
+        // Each group's arena, which its keys' columns are written into, emptied after each batch.
+        private CanonicalArena?[] _groupRows = [];
+
+        /// <summary>Deals the top-level keys into at most <paramref name="lanes"/> groups; none below two keys read together.</summary>
+        internal void Split(int lanes)
+        {
+            int keyed = Reads?.Paths.Length ?? 0;
+            Groups = lanes > 1 && keyed >= 2 ? Math.Min(lanes, keyed) : 0;
+            if (_groupRows.Length < Groups)
+            {
+                Array.Resize(ref _groupRows, Groups);
+            }
+        }
+
+        /// <summary>Group <paramref name="group"/>'s arena.</summary>
+        internal CanonicalArena GroupRows(int group) => _groupRows[group] ??= new CanonicalArena(64, account);
+
         internal void Release()
         {
             _rows?.Reset();
             _rows = null;
+            Reads?.Release();
+            for (int g = 0; g < _groupRows.Length; g++)
+            {
+                _groupRows[g]?.Reset();
+                _groupRows[g] = null;
+            }
         }
     }
 

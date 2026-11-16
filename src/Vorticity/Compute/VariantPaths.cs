@@ -408,8 +408,7 @@ internal sealed class VariantFieldExpr : FieldExpr
     internal static void ApplyKeys(CanonicalArena arena, int node, KeyReads reads, Span<int> into)
     {
         VariantFieldExpr[] paths = reads.Paths;
-        CanonicalNode variant = arena.GetNode(node);
-        if (paths.Length < 2 || variant.Kind != CanonicalKind.Struct || variant.FieldCount != 2)
+        if (!reads.Read(arena, node))
         {
             for (int i = 0; i < paths.Length; i++)
             {
@@ -419,6 +418,27 @@ internal sealed class VariantFieldExpr : FieldExpr
             return;
         }
 
+        try
+        {
+            for (int i = 0; i < paths.Length; i++)
+            {
+                into[i] = reads.Write(arena, i);
+            }
+        }
+        finally
+        {
+            reads.Release();
+        }
+    }
+
+    /// <summary>
+    /// The first pass of <see cref="ApplyKeys"/> over the variant column's node <paramref name="node"/>, kept in
+    /// <paramref name="reads"/> for the second (<see cref="KeyReads.Read"/>): each key's notes, and the row each row repeats.
+    /// </summary>
+    /// <exception cref="VortexFormatException">A row is malformed.</exception>
+    private static void ReadKeys(CanonicalArena arena, int node, KeyReads reads)
+    {
+        CanonicalNode variant = arena.GetNode(node);
         int rows = variant.Length;
         int valueIndex = EncodedForms.Canonical(arena, variant.GetFieldIndex(1));
         int metadataIndex = EncodedForms.Canonical(arena, variant.GetFieldIndex(0));
@@ -439,6 +459,7 @@ internal sealed class VariantFieldExpr : FieldExpr
         // read again each, a fifth of a merge of metric records (2026-11-16).
         Block<int> origin = default;
         int noted = 0;
+        bool read = false;
         try
         {
             ReadOnlySpan<byte> lastMetadata = default;
@@ -521,68 +542,147 @@ internal sealed class VariantFieldExpr : FieldExpr
                 }
             }
 
-            for (int i = 0; i < paths.Length; i++)
-            {
-                Output output = new(arena, paths[i].Read, rows);
-                for (int n = head[reads.KeyOf[i]]; n >= 0; n = notes[n].Next)
-                {
-                    Note note = notes[n];
-                    ReadOnlySpan<byte> rowValue = Bytes(in values, valueViews, note.Row);
-                    output.Write(note.Row, rowValue.Slice(note.Offset, note.Length), valueViews, rowValue);
-                }
-
-                // A row that repeats another takes its slot: a number, a bit, or a view of the same text where it lies; the
-                // rows that follow each other repeating the same row take it together, a series' run of a consolidation's
-                // inputs at once rather than a row and a key at a time.
-                if (!origin.IsEmpty)
-                {
-                    for (int row = 0; row < rows;)
-                    {
-                        int from = origin[row];
-                        if (from < 0)
-                        {
-                            row++;
-                            continue;
-                        }
-
-                        int end = row + 1;
-                        while (end < rows && origin[end] == from)
-                        {
-                            end++;
-                        }
-
-                        output.Repeat(row, end - row, from);
-                        row = end;
-                    }
-                }
-
-                into[i] = output.Finish(arena, values);
-            }
+            reads.Hold(arena, valueIndex, rows, notes, origin);
+            read = true;
         }
         finally
         {
-            Blocks.Return(notes);
             Blocks.Return(keyOfId);
-            if (!origin.IsEmpty)
+            if (!read)
             {
-                Blocks.Return(origin);
+                Blocks.Return(notes);
+                if (!origin.IsEmpty)
+                {
+                    Blocks.Return(origin);
+                }
             }
         }
     }
 
+    /// <summary>
+    /// The second pass of <see cref="ApplyKeys"/> for path <paramref name="path"/> of <paramref name="reads"/>: its column over
+    /// the rows the first read, written into <paramref name="into"/> from its key's notes alone.
+    /// </summary>
+    private static int WriteKey(KeyReads reads, CanonicalArena into, int path)
+    {
+        CanonicalNode values = reads.Arena!.GetNode(reads.ValueIndex);
+        ReadOnlySpan<byte> valueViews = values.Views.Span;
+        int rows = reads.Rows;
+        Block<Note> notes = reads.Notes;
+        Output output = new(into, reads.Paths[path].Read, rows);
+        for (int n = reads.Heads[reads.KeyOf[path]]; n >= 0; n = notes[n].Next)
+        {
+            Note note = notes[n];
+            ReadOnlySpan<byte> rowValue = Bytes(in values, valueViews, note.Row);
+            output.Write(note.Row, rowValue.Slice(note.Offset, note.Length), valueViews, rowValue);
+        }
+
+        // A row that repeats another takes its slot: a number, a bit, or a view of the same text where it lies; the rows that
+        // follow each other repeating the same row take it together, a series' run of a consolidation's inputs at once rather
+        // than a row and a key at a time.
+        Block<int> origin = reads.Origin;
+        if (!origin.IsEmpty)
+        {
+            for (int row = 0; row < rows;)
+            {
+                int from = origin[row];
+                if (from < 0)
+                {
+                    row++;
+                    continue;
+                }
+
+                int end = row + 1;
+                while (end < rows && origin[end] == from)
+                {
+                    end++;
+                }
+
+                output.Repeat(row, end - row, from);
+                row = end;
+            }
+        }
+
+        return output.Finish(into, values);
+    }
+
     /// <summary>A field of a row's object a key asks for: its row, where it lies in the row's value, and the key's note before.</summary>
-    private readonly record struct Note(int Row, int Offset, int Length, int Next);
+    internal readonly record struct Note(int Row, int Offset, int Length, int Next);
 
     /// <summary>
     /// Paths that each read a key of the top-level object of the same variant column in its class, made ready once for
-    /// <see cref="ApplyKeys"/>: each key once, in a table by its bytes, and the key of each path. Read by one thread at a
-    /// time, whose pass it keeps the last note of each key for.
+    /// <see cref="ApplyKeys"/>: each key once, in a table by its bytes, and the key of each path. Its first pass over a batch
+    /// (<see cref="Read"/>) runs on one thread, and keeps the notes of each key; the paths' columns are then written from them
+    /// (<see cref="Write"/>), on as many threads as there are paths, each path into an arena of its own, until
+    /// <see cref="Release"/> ends the pass.
     /// </summary>
     internal sealed class KeyReads
     {
         // The keys by their numbers, and their numbers by the hash of their bytes, open addressing.
         private readonly byte[][] _keys;
         private readonly int[] _table;
+
+        /// <summary>The arena of the pass's rows, between <see cref="Read"/> and <see cref="Release"/>; null otherwise.</summary>
+        internal CanonicalArena? Arena { get; private set; }
+
+        /// <summary>The value column of the pass's rows, in <see cref="Arena"/>.</summary>
+        internal int ValueIndex { get; private set; }
+
+        /// <summary>The pass's rows.</summary>
+        internal int Rows { get; private set; }
+
+        /// <summary>Each key's fields the pass noted, chained from <see cref="Heads"/>.</summary>
+        internal Block<Note> Notes { get; private set; }
+
+        /// <summary>The row each row repeats the value of, the first of their run, -1 for a row read; empty when none repeats.</summary>
+        internal Block<int> Origin { get; private set; }
+
+        /// <summary>
+        /// The first pass over the variant column's node <paramref name="node"/> of <paramref name="arena"/>, which every path's
+        /// column is then written from (<see cref="Write"/>); false, and nothing read, when the paths are fewer than two or the
+        /// node is no struct of a metadata and a value, each path then read alone (<see cref="Apply"/>).
+        /// </summary>
+        /// <exception cref="VortexFormatException">A row is malformed.</exception>
+        internal bool Read(CanonicalArena arena, int node)
+        {
+            CanonicalNode variant = arena.GetNode(node);
+            if (Paths.Length < 2 || variant.Kind != CanonicalKind.Struct || variant.FieldCount != 2)
+            {
+                return false;
+            }
+
+            Release();
+            ReadKeys(arena, node, this);
+            return true;
+        }
+
+        /// <summary>
+        /// The column of path <paramref name="path"/> over the rows <see cref="Read"/> read, written into <paramref name="into"/>:
+        /// what <see cref="Apply"/> gives it. The pass's arena is read and not written, so that paths apart are written at
+        /// once, each into an arena of its own.
+        /// </summary>
+        internal int Write(CanonicalArena into, int path) => WriteKey(this, into, path);
+
+        /// <summary>Ends the pass <see cref="Read"/> began, its notes given back.</summary>
+        internal void Release()
+        {
+            if (Arena is null)
+            {
+                return;
+            }
+
+            Blocks.Return(Notes);
+            if (!Origin.IsEmpty)
+            {
+                Blocks.Return(Origin);
+            }
+
+            (Arena, Notes, Origin) = (null, default, default);
+        }
+
+        /// <summary>Keeps what the first pass read over the <paramref name="rows"/> of <paramref name="arena"/>, for <see cref="Write"/>.</summary>
+        internal void Hold(CanonicalArena arena, int valueIndex, int rows, Block<Note> notes, Block<int> origin) =>
+            (Arena, ValueIndex, Rows, Notes, Origin) = (arena, valueIndex, rows, notes, origin);
 
         internal KeyReads(VariantFieldExpr[] paths)
         {
