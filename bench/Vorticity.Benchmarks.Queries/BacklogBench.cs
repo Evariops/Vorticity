@@ -25,7 +25,9 @@ namespace Vorticity.Benchmarks.Queries;
 /// (<see cref="VortexMemory.SetLimit"/>): the collector's heap to three quarters of it, the jobs' budget to its share. <c>--series</c> sets the series (20 000), <c>--store DIR</c> where the dataset lies, and
 /// <c>--compact-only</c> compacts the backlog an earlier run left there, copied first so that it stays whole. With
 /// <c>--bytes SIZE</c>, such as <c>25g</c>, the appends go on until the backlog weighs that much, whatever <c>--appends</c>
-/// says. The last line says the refusals, the bytes the jobs read and wrote, and the bytes written over the backlog's.
+/// says. <c>--degree N</c> sets the lanes the session lends a job, one a core without it. Each job's line says its time and
+/// the processor time the process spent meanwhile, which says how many cores the job held. The last line says the refusals,
+/// the bytes the jobs read and wrote, and the bytes written over the backlog's.
 /// </para>
 /// <para>
 /// The records are a gauge's, as an ingestion of metrics writes them: a service, a metric, the hash of the series'
@@ -69,7 +71,7 @@ internal static class BacklogBench
         return listener;
     }
 
-    internal static async Task<int> RunAsync(string root, int appends, int rows, int series, long memoryLimit, bool compactOnly, int latency, int scans = 0, bool buildOnly = false, long bytes = 0)
+    internal static async Task<int> RunAsync(string root, int appends, int rows, int series, long memoryLimit, bool compactOnly, int latency, int scans = 0, bool buildOnly = false, long bytes = 0, int degree = 0, bool digest = false)
     {
         if (memoryLimit > 0)
         {
@@ -79,7 +81,16 @@ internal static class BacklogBench
         string backlog = Path.Combine(root, "backlog");
         string work = Path.Combine(root, "work");
         using VortexKeyring keyring = VortexKeyring.FromKeys(new VortexKey("backlog", new byte[32]));
-        await using VortexSession session = VortexSession.Create(options => options.Keyring = keyring);
+
+        // --degree N: the lanes the session lends a job, as a host sets them; the session's default, one a core, without it.
+        await using VortexSession session = VortexSession.Create(options =>
+        {
+            options.Keyring = keyring;
+            if (degree > 0)
+            {
+                options.MaxDegreeOfParallelism = degree;
+            }
+        });
         using Sampler sampler = new Sampler();
         Stopwatch clock = Stopwatch.StartNew();
 
@@ -117,7 +128,8 @@ internal static class BacklogBench
         await using VortexDataset maintainer = await VortexDataset.OpenAsync(store, new DatasetOptions { Session = session, Encrypted = true });
         Console.WriteLine(string.Create(
             CultureInfo.InvariantCulture,
-            $"maintainer on {maintainer.RowCount:N0} rows in {maintainer.ObjectCount} objects, lag {maintainer.Lag}; jobs' budget {Mib(QueryMemoryBudget.JobsOf(session).CeilingBytes)} MiB of a limit of {Mib(VortexDiagnostics.GetMemoryReport().LimitBytes)} MiB"));
+            $"maintainer on {maintainer.RowCount:N0} rows in {maintainer.ObjectCount} objects, lag {maintainer.Lag}; jobs' budget {Mib(QueryMemoryBudget.JobsOf(session).CeilingBytes)} MiB of a limit of {Mib(VortexDiagnostics.GetMemoryReport().LimitBytes)} MiB; degree {session.Options.MaxDegreeOfParallelism}"));
+        using Process process = Process.GetCurrentProcess();
         int jobs = 0;
         long mostHeld = 0;
         long backlogBytes = BytesOf(work);
@@ -129,6 +141,8 @@ internal static class BacklogBench
             sampler.Reset();
             Interlocked.Exchange(ref s_refused, 0);
             Stopwatch job = Stopwatch.StartNew();
+            process.Refresh();
+            TimeSpan processor = process.TotalProcessorTime;
             long slabsMade = Slabs.Slab.Made;
             int fullCollections = GC.CollectionCount(2);
             await maintainer.RefreshAsync();
@@ -139,18 +153,24 @@ internal static class BacklogBench
             }
 
             jobs++;
+            process.Refresh();
+            double processorSeconds = (process.TotalProcessorTime - processor).TotalSeconds;
             mostHeld = Math.Max(mostHeld, result.MemoryReserved);
             bytesRead += result.BytesIn;
             bytesWritten += result.BytesOut;
             refusals += Interlocked.Read(ref s_refused);
             Console.WriteLine(string.Create(
                 CultureInfo.InvariantCulture,
-                $"job {jobs}: {result.Trigger} L{result.FromLevel}->L{result.ToLevel}, {result.ObjectsIn} -> {result.ObjectsOut} objects ({result.ObjectsMoved} moved), {result.Rows:N0} rows, {result.BytesIn / 1e6:F1} -> {result.BytesOut / 1e6:F1} MB, blocks held {Mib(result.MemoryReserved)} MiB, {result.RangesAtOnce} at once, {Interlocked.Read(ref s_refused)} refused before, scratch {Mib(result.ScratchBytes)} MiB, {job.Elapsed.TotalSeconds:F1} s, {GC.CollectionCount(2) - fullCollections} full collections, {Slabs.Slab.Made - slabsMade} slabs made; {sampler.Peaks()}"));
+                $"job {jobs}: {result.Trigger} L{result.FromLevel}->L{result.ToLevel}, {result.ObjectsIn} -> {result.ObjectsOut} objects ({result.ObjectsMoved} moved), {result.Rows:N0} rows, {result.BytesIn / 1e6:F1} -> {result.BytesOut / 1e6:F1} MB, blocks held {Mib(result.MemoryReserved)} MiB, {result.RangesAtOnce} at once, {Interlocked.Read(ref s_refused)} refused before, scratch {Mib(result.ScratchBytes)} MiB, {job.Elapsed.TotalSeconds:F1} s, {processorSeconds:F1} s of processor, {GC.CollectionCount(2) - fullCollections} full collections, {Slabs.Slab.Made - slabsMade} slabs made; {sampler.Peaks()}"));
         }
 
         Console.WriteLine(string.Create(
             CultureInfo.InvariantCulture,
             $"done: {jobs} jobs in {clock.Elapsed.TotalSeconds:F0} s, {maintainer.ObjectCount} objects left, the most a job's blocks held {Mib(mostHeld)} MiB, {refusals} refused; read {bytesRead / 1e6:F0} MB and wrote {bytesWritten / 1e6:F0} MB of a backlog of {backlogBytes / 1e6:F0} MB, amplification {(double)bytesWritten / Math.Max(1, backlogBytes):F2}; {Sampler.Now()}"));
+        if (digest)
+        {
+            Console.WriteLine(await DigestAsync(maintainer));
+        }
 
         // At rest: two turns of the slow timer, which an idle process gets within a minute, then a full collection. What the
         // library keeps then, what the questions are left, and the holes of the pinned heap, which a hard limit counts.
@@ -245,6 +265,36 @@ internal static class BacklogBench
         await built.CancelAsync();
         await Task.WhenAll(readers);
         return (Interlocked.Read(ref read), a);
+    }
+
+    /// <summary>
+    /// What the compacted dataset holds, whatever order its rows come in: their count, and the sum and the exclusive or of a
+    /// hash of each, every field in it, the variants as their JSON. Two runs that wrote the same rows print the same line.
+    /// </summary>
+    private static async Task<string> DigestAsync(VortexDataset dataset)
+    {
+        long rows = 0;
+        ulong sum = 0;
+        ulong xor = 0;
+        byte[] buffer = new byte[4096];
+        await foreach (MetricRow row in dataset.Scan<MetricRow>().ToRecordsAsync())
+        {
+            string text = string.Create(
+                CultureInfo.InvariantCulture,
+                $"{row.TimeUnix.UtcTicks}\u0001{row.ServiceName}\u0001{row.MetricName}\u0001{row.AttributesHash}\u0001{BitConverter.DoubleToInt64Bits(row.Value)}\u0001{row.Attributes.ToJson()}\u0001{row.ResourceAttributes.ToJson()}");
+            int length = System.Text.Encoding.UTF8.GetMaxByteCount(text.Length);
+            if (length > buffer.Length)
+            {
+                buffer = new byte[length];
+            }
+
+            ulong hash = Vorticity.Aggregating.CardinalitySlot.Hash(buffer.AsSpan(0, System.Text.Encoding.UTF8.GetBytes(text, buffer)));
+            sum += hash;
+            xor ^= hash;
+            rows++;
+        }
+
+        return string.Create(CultureInfo.InvariantCulture, $"digest: {rows:N0} rows, sum {sum:x16}, xor {xor:x16}");
     }
 
     /// <summary>The bytes of every file under <paramref name="root"/>.</summary>

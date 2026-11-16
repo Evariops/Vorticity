@@ -173,7 +173,8 @@ Dictionary<string, (string Help, Func<Task<int>> Run)> micros = new Dictionary<s
             (int)Option(args, "--series", 20_000),
             Text(args, "--memory-limit") is { } limit ? VortexMemory.ParseBytes(limit) ?? throw new ArgumentException($"--memory-limit {limit} is not a size: 2g, 2048m.") : 0,
             args.Contains("--compact-only"), (int)Option(args, "--latency", 0), (int)Option(args, "--scans", 0), args.Contains("--build-only"),
-            Text(args, "--bytes") is { } size ? VortexMemory.ParseBytes(size) ?? throw new ArgumentException($"--bytes {size} is not a size: 25g, 512m.") : 0)),
+            Text(args, "--bytes") is { } size ? VortexMemory.ParseBytes(size) ?? throw new ArgumentException($"--bytes {size} is not a size: 25g, 512m.") : 0,
+            (int)Option(args, "--degree", 0), args.Contains("--digest"))),
     ["inputs"] = ("--store DIR: what the inputs of a merge hold while it reads them, 1 to 8 of a dataset's largest objects in lockstep (InputMemoryMicro.cs)", () =>
         InputMemoryMicro.Run(Text(args, "--store") ?? throw new ArgumentException("--micro inputs needs --store DIR, a dataset's directory."), (int)Option(args, "--objects", 8))),
     ["consolidation"] = ("--store DIR: what a consolidation holds apart from any other work, hours of log records left in level 0 consolidated on 1 lane and on 8 (ConsolidationMemoryMicro.cs)", () =>
