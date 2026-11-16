@@ -166,6 +166,31 @@ internal sealed class ChunkBlockBounds
             Note(row, Types.Variants.VariantScalar.Read(value));
         }
 
+        /// <summary>
+        /// Counts the value <paramref name="value"/> of the <paramref name="count"/> rows from <paramref name="row"/> on, the
+        /// value noted last, which they repeat: as <see cref="Again(int, ReadOnlySpan{byte})"/> counts each, a block at a time.
+        /// </summary>
+        internal void Again(int row, int count, ReadOnlySpan<byte> value)
+        {
+            while (count > 0)
+            {
+                int block = row / blockRows;
+                int inBlock = Math.Min(count, ((block + 1) * blockRows) - row);
+                if (block == _block)
+                {
+                    _values += inBlock;
+                }
+                else
+                {
+                    Note(row, Types.Variants.VariantScalar.Read(value));
+                    _values += inBlock - 1;
+                }
+
+                row += inBlock;
+                count -= inBlock;
+            }
+        }
+
         /// <summary>Counts the value <paramref name="scalar"/> of row <paramref name="row"/> of the chunk, a value of the key's class.</summary>
         internal void Note(int row, VariantScalar scalar)
         {

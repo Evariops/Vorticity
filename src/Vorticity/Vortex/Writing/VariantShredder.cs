@@ -145,9 +145,13 @@ internal static class VariantShredder
 
             // A row whose value is the last row read's, under the same metadata, takes again what that row took, node by
             // node, without reading it: a metric's series repeats its attributes row after row, which were read again each, a
-            // fifth of a merge of metric records (2026-11-16).
+            // fifth of a merge of metric records (2026-11-16). The rows that do so one after the other take it together, each
+            // node the run at once (Replay.Again): a consolidation's series holds a run a row of each of its inputs long, and
+            // each row's nodes taking it again one by one took half of the shredding.
             ReadOnlySpan<byte> lastValue = default;
             int lastEpoch = -1;
+            int runStart = 0;
+            int runCount = 0;
             for (int row = 0; row < rows; row++)
             {
                 if (!ArenaWords.IsValid(arena, node, row))
@@ -165,8 +169,21 @@ internal static class VariantShredder
 
                 if (epoch == lastEpoch && bytes.SequenceEqual(lastValue))
                 {
-                    _replay.Again(bytes, row);
+                    if (runCount > 0 && runStart + runCount != row)
+                    {
+                        _replay.Again(lastValue, runStart, runCount);
+                        runCount = 0;
+                    }
+
+                    runStart = runCount == 0 ? row : runStart;
+                    runCount++;
                     continue;
+                }
+
+                if (runCount > 0)
+                {
+                    _replay.Again(lastValue, runStart, runCount);
+                    runCount = 0;
                 }
 
                 VariantDictionary dictionary = VariantDictionary.Read(metadataBytes);
@@ -174,6 +191,11 @@ internal static class VariantShredder
                 _root.Present(in dictionary, epoch, bytes, row);
                 lastEpoch = _replay.Whole ? epoch : -1;
                 lastValue = bytes;
+            }
+
+            if (runCount > 0)
+            {
+                _replay.Again(lastValue, runStart, runCount);
             }
         }
 
@@ -324,7 +346,7 @@ internal static class VariantShredder
     /// </summary>
     /// <summary>
     /// The nodes a row reached as it was read, in order, each with where its value lies in the row's: what a row that repeats
-    /// the value takes again, node by node, each node its own part alone (<see cref="Group.Again"/>). A row whose object kept
+    /// the value takes again, node by node, each node its own part alone (<see cref="Group.Again(ReadOnlySpan{byte}, int)"/>). A row whose object kept
     /// keys of its own beside the shredded ones is not replayed: they are read from its fields, which a replay does not read.
     /// </summary>
     private sealed class Replay
@@ -371,6 +393,18 @@ internal static class VariantShredder
                 _groups[i].Again(value.Slice(_offsets[i], _lengths[i]), row);
             }
         }
+
+        /// <summary>
+        /// The <paramref name="count"/> rows from <paramref name="row"/> on, which follow each other and whose value
+        /// <paramref name="value"/> is the last row read's, take what it took, each node the run at once.
+        /// </summary>
+        internal void Again(ReadOnlySpan<byte> value, int row, int count)
+        {
+            for (int i = 0; i < _count; i++)
+            {
+                _groups[i].Again(value.Slice(_offsets[i], _lengths[i]), row, count);
+            }
+        }
     }
 
     private abstract class Group
@@ -395,6 +429,18 @@ internal static class VariantShredder
         {
             Last = row;
             Take(default, -1, value, row, 0);
+        }
+
+        /// <summary>
+        /// Takes at the <paramref name="count"/> rows from <paramref name="row"/> on, which follow each other and repeat the
+        /// row read last, its own part of <paramref name="value"/> again: a row at a time, but where a node takes a run at once.
+        /// </summary>
+        internal virtual void Again(ReadOnlySpan<byte> value, int row, int count)
+        {
+            for (int i = 0; i < count; i++)
+            {
+                Again(value, row + i);
+            }
         }
 
         /// <summary>Notes <paramref name="row"/> as the last the node took, as <see cref="Present"/> does.</summary>
@@ -495,6 +541,20 @@ internal static class VariantShredder
 
             _typed.Again(row);
             Bounds?.Again(row, value);
+        }
+
+        /// <summary>The run takes the typed column's last value again at once, and its blocks count it; a value kept whole a row at a time.</summary>
+        internal override void Again(ReadOnlySpan<byte> value, int row, int count)
+        {
+            if (!_typedLast)
+            {
+                base.Again(value, row, count);
+                return;
+            }
+
+            Mark(row + count - 1);
+            _typed.Again(row, count);
+            Bounds?.Again(row, count, value);
         }
 
         internal override DType TypedType(DTypeArena types) => _typed.Type(types);
@@ -611,6 +671,19 @@ internal static class VariantShredder
             }
 
             _objects.Add(row);
+        }
+
+        /// <summary>The run's objects take their rows at once; any other value a row at a time.</summary>
+        internal override void Again(ReadOnlySpan<byte> value, int row, int count)
+        {
+            if ((value[0] & 0x03) != ParquetVariant.BasicObject)
+            {
+                base.Again(value, row, count);
+                return;
+            }
+
+            Mark(row + count - 1);
+            _objects.AddSequence(row, count);
         }
 
         protected override void Take(in VariantDictionary dictionary, int epoch, ReadOnlySpan<byte> value, int row, int offset)
@@ -870,8 +943,19 @@ internal static class VariantShredder
             Repeat();
         }
 
+        /// <summary>Takes again at the <paramref name="count"/> rows from <paramref name="row"/> on the value taken last, which they repeat.</summary>
+        internal void Again(int row, int count)
+        {
+            Rows?.AddSequence(row, count);
+            Count += count;
+            Repeat(count);
+        }
+
         /// <summary>Takes the value taken last again.</summary>
         protected abstract void Repeat();
+
+        /// <summary>Takes the value taken last <paramref name="count"/> times again.</summary>
+        protected abstract void Repeat(int count);
 
         /// <summary>The dtype of the column.</summary>
         internal abstract DType Type(DTypeArena types);
@@ -904,6 +988,8 @@ internal static class VariantShredder
 
         protected override void Repeat() => _values.Add(_values.Last);
 
+        protected override void Repeat(int count) => _values.AddRepeated(_values.Last, count);
+
         protected override int Lay(CanonicalArena arena, DType dtype, int rows, Validity validity) =>
             arena.AddPrimitive(dtype, rows, validity, PType.I64, Fixed(arena, rows, Rows, _values));
     }
@@ -925,6 +1011,8 @@ internal static class VariantShredder
 
         protected override void Repeat() => _values.Add(_values.Last);
 
+        protected override void Repeat(int count) => _values.AddRepeated(_values.Last, count);
+
         protected override int Lay(CanonicalArena arena, DType dtype, int rows, Validity validity) =>
             arena.AddPrimitive(dtype, rows, validity, PType.F64, Fixed(arena, rows, Rows, _values));
     }
@@ -945,6 +1033,8 @@ internal static class VariantShredder
         protected override void Value(in VariantScalar scalar) => _values.Add(scalar.Integer != 0 ? (byte)1 : (byte)0);
 
         protected override void Repeat() => _values.Add(_values.Last);
+
+        protected override void Repeat(int count) => _values.AddRepeated(_values.Last, count);
 
         protected override int Lay(CanonicalArena arena, DType dtype, int rows, Validity validity)
         {
@@ -1002,6 +1092,15 @@ internal static class VariantShredder
         {
             _lengths.Add(_lastLength);
             _bytes.AddRange(_last.AsSpan(0, _lastLength));
+        }
+
+        protected override void Repeat(int count)
+        {
+            _lengths.AddRepeated(_lastLength, count);
+            for (int i = 0; i < count; i++)
+            {
+                _bytes.AddRange(_last.AsSpan(0, _lastLength));
+            }
         }
 
         protected override int Lay(CanonicalArena arena, DType dtype, int rows, Validity validity) =>
@@ -1266,6 +1365,51 @@ internal static class VariantShredder
                 _left -= take;
                 Count += take;
                 values = values[take..];
+            }
+        }
+
+        /// <summary>Appends <paramref name="value"/> <paramref name="count"/> times, a block's room at a time.</summary>
+        internal void AddRepeated(T value, int count)
+        {
+            while (count > 0)
+            {
+                if (_left == 0)
+                {
+                    Grow();
+                }
+
+                int take = Math.Min(_left, count);
+                new Span<T>(_next, take).Fill(value);
+                _next += take;
+                _left -= take;
+                Count += take;
+                count -= take;
+            }
+        }
+
+        /// <summary>Appends the <paramref name="count"/> integers from <paramref name="first"/> on, of a list of integers: rows that follow each other.</summary>
+        internal void AddSequence(int first, int count)
+        {
+            System.Diagnostics.Debug.Assert(typeof(T) == typeof(int), "A sequence is of rows.");
+            while (count > 0)
+            {
+                if (_left == 0)
+                {
+                    Grow();
+                }
+
+                int take = Math.Min(_left, count);
+                int* into = (int*)_next;
+                for (int i = 0; i < take; i++)
+                {
+                    into[i] = first + i;
+                }
+
+                _next += take;
+                _left -= take;
+                Count += take;
+                first += take;
+                count -= take;
             }
         }
 
