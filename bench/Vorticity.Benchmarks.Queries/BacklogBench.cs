@@ -23,7 +23,9 @@ namespace Vorticity.Benchmarks.Queries;
 /// <para>
 /// <c>--memory-limit SIZE</c>, such as <c>2g</c>, holds the process to that limit as a container's would
 /// (<see cref="VortexMemory.SetLimit"/>): the collector's heap to three quarters of it, the jobs' budget to its share. <c>--series</c> sets the series (20 000), <c>--store DIR</c> where the dataset lies, and
-/// <c>--compact-only</c> compacts the backlog an earlier run left there, copied first so that it stays whole.
+/// <c>--compact-only</c> compacts the backlog an earlier run left there, copied first so that it stays whole. With
+/// <c>--bytes SIZE</c>, such as <c>25g</c>, the appends go on until the backlog weighs that much, whatever <c>--appends</c>
+/// says. The last line says the refusals, the bytes the jobs read and wrote, and the bytes written over the backlog's.
 /// </para>
 /// <para>
 /// The records are a gauge's, as an ingestion of metrics writes them: a service, a metric, the hash of the series'
@@ -67,7 +69,7 @@ internal static class BacklogBench
         return listener;
     }
 
-    internal static async Task<int> RunAsync(string root, int appends, int rows, int series, long memoryLimit, bool compactOnly, int latency, int scans = 0, bool buildOnly = false)
+    internal static async Task<int> RunAsync(string root, int appends, int rows, int series, long memoryLimit, bool compactOnly, int latency, int scans = 0, bool buildOnly = false, long bytes = 0)
     {
         if (memoryLimit > 0)
         {
@@ -84,10 +86,10 @@ internal static class BacklogBench
         if (!compactOnly)
         {
             Fresh(backlog);
-            long read = await BuildAsync(session, backlog, appends, rows, series, scans);
+            (long read, int made) = await BuildAsync(session, backlog, appends, rows, series, scans, bytes);
             Console.WriteLine(string.Create(
                 CultureInfo.InvariantCulture,
-                $"backlog of {appends} appends of {rows} rows built in {clock.Elapsed.TotalSeconds:F0} s, {scans} scans reading {read:N0} rows meanwhile; {sampler.Peaks()}; {Sampler.Now()}"));
+                $"backlog of {made} appends of {rows} rows, {BytesOf(backlog) / 1e6:F0} MB, built in {clock.Elapsed.TotalSeconds:F0} s, {scans} scans reading {read:N0} rows meanwhile; {sampler.Peaks()}; {Sampler.Now()}"));
             if (buildOnly)
             {
                 return 0;
@@ -118,6 +120,10 @@ internal static class BacklogBench
             $"maintainer on {maintainer.RowCount:N0} rows in {maintainer.ObjectCount} objects, lag {maintainer.Lag}; jobs' budget {Mib(QueryMemoryBudget.JobsOf(session).CeilingBytes)} MiB of a limit of {Mib(VortexDiagnostics.GetMemoryReport().LimitBytes)} MiB"));
         int jobs = 0;
         long mostHeld = 0;
+        long backlogBytes = BytesOf(work);
+        long bytesRead = 0;
+        long bytesWritten = 0;
+        long refusals = 0;
         while (true)
         {
             sampler.Reset();
@@ -134,6 +140,9 @@ internal static class BacklogBench
 
             jobs++;
             mostHeld = Math.Max(mostHeld, result.MemoryReserved);
+            bytesRead += result.BytesIn;
+            bytesWritten += result.BytesOut;
+            refusals += Interlocked.Read(ref s_refused);
             Console.WriteLine(string.Create(
                 CultureInfo.InvariantCulture,
                 $"job {jobs}: {result.Trigger} L{result.FromLevel}->L{result.ToLevel}, {result.ObjectsIn} -> {result.ObjectsOut} objects ({result.ObjectsMoved} moved), {result.Rows:N0} rows, {result.BytesIn / 1e6:F1} -> {result.BytesOut / 1e6:F1} MB, blocks held {Mib(result.MemoryReserved)} MiB, {result.RangesAtOnce} at once, {Interlocked.Read(ref s_refused)} refused before, scratch {Mib(result.ScratchBytes)} MiB, {job.Elapsed.TotalSeconds:F1} s, {GC.CollectionCount(2) - fullCollections} full collections, {Slabs.Slab.Made - slabsMade} slabs made; {sampler.Peaks()}"));
@@ -141,7 +150,7 @@ internal static class BacklogBench
 
         Console.WriteLine(string.Create(
             CultureInfo.InvariantCulture,
-            $"done: {jobs} jobs in {clock.Elapsed.TotalSeconds:F0} s, {maintainer.ObjectCount} objects left, the most a job's blocks held {Mib(mostHeld)} MiB; {Sampler.Now()}"));
+            $"done: {jobs} jobs in {clock.Elapsed.TotalSeconds:F0} s, {maintainer.ObjectCount} objects left, the most a job's blocks held {Mib(mostHeld)} MiB, {refusals} refused; read {bytesRead / 1e6:F0} MB and wrote {bytesWritten / 1e6:F0} MB of a backlog of {backlogBytes / 1e6:F0} MB, amplification {(double)bytesWritten / Math.Max(1, backlogBytes):F2}; {Sampler.Now()}"));
 
         // At rest: two turns of the slow timer, which an idle process gets within a minute, then a full collection. What the
         // library keeps then, what the questions are left, and the holes of the pinned heap, which a hard limit counts.
@@ -169,7 +178,7 @@ internal static class BacklogBench
     /// readers scan the dataset in batches, each again and again from its latest version, as the readers of a pipeline's
     /// source would. The rows they read.
     /// </summary>
-    private static async Task<long> BuildAsync(VortexSession session, string root, int appends, int rows, int series, int scans)
+    private static async Task<(long Read, int Appends)> BuildAsync(VortexSession session, string root, int appends, int rows, int series, int scans, long bytes)
     {
         IObjectStore store = new FileObjectStore(root);
         DatasetOptions options = new DatasetOptions
@@ -212,8 +221,15 @@ internal static class BacklogBench
 
         MetricGenerator generator = new MetricGenerator(series, 31);
         MetricRow[] batch = new MetricRow[rows];
-        for (int a = 0; a < appends; a++)
+        int a = 0;
+        for (; bytes > 0 || a < appends; a++)
         {
+            // Past --bytes, the backlog is built: its size read every fifty appends.
+            if (bytes > 0 && a % 50 == 0 && a > 0 && BytesOf(root) >= bytes)
+            {
+                break;
+            }
+
             // An append is a flush of a few seconds: a point of each series it reaches, in arrival order.
             DateTimeOffset at = Start.AddSeconds(a * 10.0);
             for (int i = 0; i < rows; i++)
@@ -228,8 +244,12 @@ internal static class BacklogBench
 
         await built.CancelAsync();
         await Task.WhenAll(readers);
-        return Interlocked.Read(ref read);
+        return (Interlocked.Read(ref read), a);
     }
+
+    /// <summary>The bytes of every file under <paramref name="root"/>.</summary>
+    private static long BytesOf(string root) =>
+        Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories).Sum(file => new FileInfo(file).Length);
 
     private static void Fresh(string root)
     {
