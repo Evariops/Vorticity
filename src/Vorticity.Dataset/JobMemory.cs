@@ -25,12 +25,15 @@ internal sealed class JobMemory : IAsyncDisposable
     private readonly WorkAccount _inputs;
     private JobInputs? _copies;
 
-    /// <summary>The memory of a job of <paramref name="dataset"/>, under its session's jobs' budget.</summary>
-    internal JobMemory(VortexDataset dataset)
+    /// <summary>
+    /// The memory of a job of <paramref name="dataset"/>, under its session's jobs' budget: funded by <paramref name="grant"/>,
+    /// what the job reserved before it started (<see cref="QueryMemoryBudget.ReserveAsync"/>), which its blocks take first.
+    /// </summary>
+    internal JobMemory(VortexDataset dataset, MemoryGrant? grant = null)
     {
         _dataset = dataset;
         Jobs = QueryMemoryBudget.JobsOf(dataset.Session);
-        Job = Jobs.HardChild();
+        Job = grant is null ? Jobs.HardChild() : Jobs.HardChild(grant);
         Inputs = Job.HardChild();
         Writer = Job.HardChild();
         _inputs = new WorkAccount(Inputs, "compaction's inputs");
@@ -73,6 +76,12 @@ internal sealed class JobMemory : IAsyncDisposable
     internal long CopiedBytes => _copies?.CopiedBytes ?? 0;
 
     /// <summary>
+    /// What the jobs' budget leaves the job now: what the jobs running hold taken off, but what is left of the job's own grant,
+    /// which is its to use.
+    /// </summary>
+    internal long Room => Math.Max(0, Jobs.CeilingBytes - Jobs.ReservedBytes + Job.GrantLeft);
+
+    /// <summary>
     /// Reads the inputs of <paramref name="job"/> through the local scratch when they are large enough
     /// (<see cref="JobInputs.FromBytes"/>), each copied once as the first pass asks for it; but those it reads a part of,
     /// <paramref name="partly"/>, from the store, a range of their rows each time.
@@ -112,6 +121,9 @@ internal sealed class JobMemory : IAsyncDisposable
         }
 
         _inputs.Dispose();
+
+        // What is left of the job's grant goes back now, the waiting jobs served; what its blocks still hold, as they go.
+        Job.CloseGrant();
         Jobs.KeepPoolWithin();
     }
 }

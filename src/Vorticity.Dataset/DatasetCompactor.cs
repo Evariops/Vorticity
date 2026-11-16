@@ -172,7 +172,23 @@ internal static partial class DatasetCompactor
     private static async ValueTask<CompactionResult> RewriteAsync(
         VortexDataset dataset, CompactionJob job, CancellationToken cancellationToken)
     {
-        JobMemory memory = new JobMemory(dataset);
+        // What the job holds at least, reserved before it reads anything, while it holds nothing: when another job, a table's
+        // of the same process, holds the memory, it waits for it, and runs at its width, where a block refused at its start
+        // gave it up and the next plan narrowed it. Nothing reserved when nothing under the jobs' budget holds what would
+        // make room: the job starts as it did, and a refusal still narrows it.
+        QueryMemoryBudget jobs = QueryMemoryBudget.JobsOf(dataset.Session);
+        MemoryGrant? grant = await jobs.ReserveAsync(Math.Min(LeastBytes(dataset, job), JobBudget(dataset)), cancellationToken).ConfigureAwait(false);
+        JobMemory memory;
+        try
+        {
+            memory = new JobMemory(dataset, grant);
+        }
+        catch
+        {
+            grant?.Release();
+            throw;
+        }
+
         try
         {
             return await RewriteUnderAsync(dataset, job, memory, cancellationToken).ConfigureAwait(false);
@@ -1308,7 +1324,7 @@ internal static partial class DatasetCompactor
         }
 
         int most = Math.Min(Math.Max(1, dataset.Session.Options.MaxDegreeOfParallelism), job.Inputs.Count);
-        int admitted = (int)Math.Clamp(JobRoom(dataset) / perLane, 1, most);
+        int admitted = (int)Math.Clamp(memory.Room / perLane, 1, most);
 
         ParallelOptions lanes = new ParallelOptions
         {

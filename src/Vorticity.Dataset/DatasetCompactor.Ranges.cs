@@ -329,12 +329,6 @@ internal static partial class DatasetCompactor
         return GroupCore.Free(scratch) is long free ? free - (free / 10) : long.MaxValue;
     }
 
-    /// <summary>What the jobs' budget of the handle's session leaves now, what the jobs running hold taken off.</summary>
-    internal static long JobRoom(VortexDataset dataset)
-    {
-        QueryMemoryBudget jobs = QueryMemoryBudget.JobsOf(dataset.Session);
-        return Math.Max(0, jobs.CeilingBytes - jobs.ReservedBytes);
-    }
 
     /// <summary>
     /// What the writer of a job's objects holds, about: each column what it gathers before it writes a chunk, at most
@@ -827,7 +821,7 @@ internal static partial class DatasetCompactor
         // what the budget leaves once its writer and its open inputs are counted, so that one range alone fits it.
         int batchRows = InputBatchRows(dataset, schema, job, ranges.MostInputs, JobBudget(dataset), writer);
         long perRange = Math.Max(1, RangeBytes(dataset, schema, job, ranges, writer, batchRows));
-        int lanes = (int)Math.Clamp(JobRoom(dataset) / perRange, 1, count);
+        int lanes = (int)Math.Clamp(memory.Room / perRange, 1, count);
 
         // After a refusal, no more inputs open at once than the refused job held: its batches halved are what narrows it.
         if (dataset.JobSizingCap.Open is > 0 and int open)

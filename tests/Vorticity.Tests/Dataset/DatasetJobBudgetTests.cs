@@ -49,6 +49,46 @@ public sealed partial class DatasetJobBudgetTests
         }
     }
 
+    /// <summary>
+    /// The jobs' budget held by other work, a job of another table, as a consolidation starts: the job waits for the memory
+    /// rather than start and be refused a block, then runs once it is given back, with every input, narrowed by nothing.
+    /// </summary>
+    [Fact]
+    public async Task AJobWaitsForTheMemoryAnotherHoldsThenRunsAtItsWidth()
+    {
+        QueryMemoryBudget jobs = new QueryMemoryBudget(256L << 20);
+        Random random = new Random(17);
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexSession session = VortexSession.Create(options => options.JobMemoryBudget = jobs);
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Doc.Schema, new DatasetOptions
+        {
+            Session = session,
+            Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(Doc.Day)), SortKey = [LayoutValue.Column(nameof(Doc.Service))], CalmAfter = null },
+        }, Ct);
+        for (int a = 0; a < 4; a++)
+        {
+            Doc[] rows = [.. Enumerable.Range(a * 4_000, 4_000).Select(i => new Doc(0, $"svc-{random.Next(0, 60):D2}", i, Attributes(random)))];
+            await using ObjectDraft draft = dataset.StartObject();
+            await draft.Writer.WriteAsync<Doc>(rows, Ct);
+            await dataset.AppendAsync(draft, Ct);
+        }
+
+        // Another work holds all but a mebibyte, which measures an input but holds no job.
+        long held = jobs.CeilingBytes - (1L << 20);
+        Assert.True(jobs.TryReserve(held));
+        Task<IReadOnlyList<CompactionResult>> consolidating = dataset.ConsolidateAsync(Ct).AsTask();
+        await Task.Delay(500, Ct);
+        Assert.False(consolidating.IsCompleted, "the job did not wait for the memory");
+        jobs.Release(held);
+
+        IReadOnlyList<CompactionResult> results = await consolidating.WaitAsync(TimeSpan.FromSeconds(60), Ct);
+        Assert.Single(results);
+        Assert.Equal(4, results[0].ObjectsIn);
+        Assert.Equal(0, dataset.JobWidthCap);
+        Assert.Equal(16_000, await dataset.Scan<Doc>().ToRecordsAsync(Ct).CountAsync(Ct));
+        Assert.Equal(0, jobs.ReservedBytes);
+    }
+
     private static async Task<List<Doc>> ConsolidateAsync(QueryMemoryBudget? jobs)
     {
         Random random = new Random(13);
