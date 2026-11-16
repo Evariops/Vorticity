@@ -190,7 +190,7 @@ public sealed partial class JobMemoryTests
         Assert.Throws<VortexMemoryException>(() => VortexDataset.Narrowed(shorter, same));
         VortexDataset.Narrowed(new JobTooWideException(job, 1, 8L << 20), same);
 
-        dataset.LearnJobCosts(1L << 20, 8_192, writerBytes: 0);
+        dataset.LearnJobCosts(1L << 20, 8_192, writerBytes: 0, width: int.MaxValue);
         Assert.Equal(0, dataset.JobWidthCap);
         Assert.Equal((0, 0), dataset.JobSizingCap);
     }

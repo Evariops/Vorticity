@@ -223,9 +223,12 @@ internal static partial class DatasetCompactor
     }
 
     /// <summary>
-    /// What the job holds at least, its inputs' batches at a block of 8 192 rows (<see cref="InputCost"/>): its level 0
-    /// inputs, which overlap and are all open at once, one input of the levels above, which are disjoint and open one after
-    /// another, and its writer (<see cref="WriterCost"/>).
+    /// What the job holds at least, its inputs' batches at the fewest rows a job reads them in (<see cref="LeastBatchRows"/>,
+    /// <see cref="InputCost"/>): its level 0 inputs, which overlap and are all open at once, one input of the levels above,
+    /// which are disjoint and open one after another, and its writer (<see cref="WriterCost"/>). Priced at a block of 8 192
+    /// rows, a consolidation of 194 inputs under 4 GiB was said not to fit, and its partition was merged by class first and
+    /// rewritten twice, 59 s, where the consolidation ran at smaller batches within its budget, 1 222 MiB of 1 344
+    /// (2026-11-16).
     /// </summary>
     internal static long LeastBytes(VortexDataset dataset, CompactionJob job)
     {
@@ -234,7 +237,7 @@ internal static partial class DatasetCompactor
         long above = 0;
         foreach (CompactionInput input in job.Inputs)
         {
-            long cost = InputCost(dataset, schema, input.Entry, 8_192);
+            long cost = InputCost(dataset, schema, input.Entry, LeastBatchRows);
             if (input.Level == 0)
             {
                 held += cost;

@@ -426,7 +426,13 @@ internal static partial class DatasetCompactor
         {
             KeyRanges? sideBySide = ranges ?? (piece is { Merged: > 1 } ? piece.Ranges : null);
             int open = sideBySide is null ? ran.Inputs.Count : Math.Max(1, sideBySide.MostInputs * atOnce);
-            dataset.LearnJobCosts(memory.InputsPeak / open, batchRows, memory.WriterPeak / atOnce);
+            int width = 0;
+            foreach (CompactionInput input in ran.Inputs)
+            {
+                width += input.Level == 0 ? 1 : 0;
+            }
+
+            dataset.LearnJobCosts(memory.InputsPeak / open, batchRows, memory.WriterPeak / atOnce, width);
         }
 
         // A piece takes out the objects of level 1 it read and those of level 0 it emptied, and puts back at level 0 those it

@@ -330,9 +330,17 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
 
     /// <summary>
     /// Keeps what a job that ran to its end measured: <paramref name="inputBytes"/> an input held at most, at batches of
-    /// <paramref name="batchRows"/> rows, and <paramref name="writerBytes"/> its writer; a job's width is no longer capped.
+    /// <paramref name="batchRows"/> rows, and <paramref name="writerBytes"/> its writer. A job is no longer capped, its width,
+    /// its batches and its inputs open at once, once a job of <paramref name="width"/> inputs of level 0, as wide as the cap
+    /// at least, ran to its end.
     /// </summary>
-    internal void LearnJobCosts(long inputBytes, int batchRows, long writerBytes)
+    /// <remarks>
+    /// A narrower job that ran proves nothing of the width a refusal capped: lifted by it, the next plan took the width again,
+    /// was refused again, and a backlog under 2 GiB ran 13 jobs, one refused in two, in 86 s (2026-11-16). Kept, the merges
+    /// after a refusal stay narrower, 17 jobs in 56 s, which read and write what 6 jobs did. Lifting the caps on batches and
+    /// inputs open at once on any job had the merges refused one in two again, 96 s.
+    /// </remarks>
+    internal void LearnJobCosts(long inputBytes, int batchRows, long writerBytes, int width)
     {
         if (inputBytes > 0)
         {
@@ -345,9 +353,12 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
             Volatile.Write(ref _writerJobBytes, writerBytes);
         }
 
-        Volatile.Write(ref _jobWidthCap, 0);
-        Volatile.Write(ref _jobBatchCap, 0);
-        Volatile.Write(ref _jobOpenCap, 0);
+        if (width >= Volatile.Read(ref _jobWidthCap))
+        {
+            Volatile.Write(ref _jobWidthCap, 0);
+            Volatile.Write(ref _jobBatchCap, 0);
+            Volatile.Write(ref _jobOpenCap, 0);
+        }
     }
 
     /// <summary>

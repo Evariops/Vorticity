@@ -71,7 +71,7 @@ public sealed partial class CompactionBlockBudgetTests
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Row.Schema, Options(session), Ct);
         List<Row> all = await AppendAsync(dataset, appends: 64, rows: 4_096);
         dataset.LearnDecodedRowBytes(1);
-        dataset.LearnJobCosts(DatasetCompactor.InputFloorBytes + 1, 8_192, 1);
+        dataset.LearnJobCosts(DatasetCompactor.InputFloorBytes + 1, 8_192, 1, width: int.MaxValue);
         int planned = (await dataset.PlanCompactionAsync(cancellationToken: Ct)).Job!.Inputs.Count;
         Assert.Equal(64, planned);
 
