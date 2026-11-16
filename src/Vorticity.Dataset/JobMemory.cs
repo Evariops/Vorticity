@@ -57,6 +57,47 @@ internal sealed class JobMemory : IAsyncDisposable
     /// <summary>Whether a block was refused to the job: its budget did not hold it.</summary>
     internal bool Refused => Job.WasRefused || Inputs.WasRefused || Writer.WasRefused;
 
+    /// <summary>
+    /// The rows of the batches the inputs the merge opens next read, once the job measured what the open ones hold
+    /// (<see cref="Reprice"/>); 0 before, when the plan's rows hold.
+    /// </summary>
+    internal int InputRows { get; private set; }
+
+    /// <summary>
+    /// Reprices the batches of the inputs a merge has yet to open, <paramref name="total"/> of them in all and
+    /// <paramref name="open"/> open, read at <paramref name="rows"/> rows: what the open ones hold now, an input's share of it
+    /// times the inputs to come, must leave the writer what it was priced at, <paramref name="writer"/>, under the job's
+    /// ceiling; the rows halve until it does, down to <paramref name="least"/>. A job priced by a guess, or by a measure of one
+    /// input of another shape, ran past the jobs' budget and was given up twice before a job of a fifth of its inputs ran
+    /// (2026-11-16): narrowed here as its inputs open, it runs at its width.
+    /// </summary>
+    internal void Reprice(int open, int total, int rows, long writer, int least)
+    {
+        if (open <= 0 || open >= total)
+        {
+            return;
+        }
+
+        int now = InputRows > 0 ? InputRows : rows;
+        long held = Inputs.ReservedBytes;
+        long perInput = held / open;
+        long room = Jobs.CeilingBytes - writer - held;
+        long needed = perInput * (total - open);
+        while (needed > room && now > least)
+        {
+            now /= 2;
+            needed /= 2;
+        }
+
+        InputRows = Math.Max(now, least);
+    }
+
+    /// <summary>Which budget refused the job a block, and what its inputs and its writer held at most, in MiB: for its activity.</summary>
+    internal string RefusalReason =>
+        string.Create(
+            System.Globalization.CultureInfo.InvariantCulture,
+            $"refused by the {(Inputs.WasRefused ? "inputs" : Writer.WasRefused ? "writer" : "job")}, inputs {Inputs.PeakBytes >> 20} MiB, writer {Writer.PeakBytes >> 20} MiB, batches of {Sizing.BatchRows} rows, {Sizing.Open} open");
+
     /// <summary>The most bytes its blocks held at once.</summary>
     internal long Peak => Job.PeakBytes;
 

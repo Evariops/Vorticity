@@ -205,6 +205,7 @@ public sealed partial class VortexFileWriter
     {
         int blocks = ChunkBlocks(rows, _blockRows);
         int firstBlock = _emittedBlocks;
+        Over();
         CanonicalNode root = arena.GetNode(rootIndex);
         for (int field = 0; field < _fieldCount; field++)
         {
@@ -903,9 +904,10 @@ public sealed partial class VortexFileWriter
             // A chunk taken to compress ahead that a failure kept from compressing gives its rows back.
             for (int field = 0; field < _detached.Length; field++)
             {
-                if (_detached[field] is { } detached)
+                if (_detached[field] is { } detached && _writer is { } writer)
                 {
-                    _writer?.Release(detached);
+                    Release(detached);
+                    writer.Uncount(detached);
                 }
 
                 _detached[field] = null;

@@ -109,9 +109,52 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable, IOrderedKeys
     /// </summary>
     internal long[]? Emitted { get; init; }
 
-    /// <summary>The run the merge is on: an input's batch, or a window of it.</summary>
+    /// <summary>
+    /// What the merge calls before an input's batch changes, an input taking its next one or going, with that batch's arena:
+    /// a writer that keeps windows on the runs it was handed copies them first (<see cref="CurrentRun"/>); null for none.
+    /// </summary>
+    internal Func<Vorticity.Arrays.CanonicalArena, ValueTask>? Releasing { get; set; }
+
+    /// <summary>The run the merge is on: an input's batch, or a window of it, cut when asked for.</summary>
     /// <exception cref="InvalidOperationException">The merge is not on a run.</exception>
-    internal RecordBatch Current => _current ?? throw new InvalidOperationException("The merge is not on a run.");
+    internal RecordBatch Current
+    {
+        get
+        {
+            if (_current is null && _emitting is { } chosen)
+            {
+                RecordBatch batch = chosen.Batch;
+                if (chosen.Row == 0 && _count == batch.RowCount)
+                {
+                    _current = batch;
+                }
+                else
+                {
+                    _windows ??= new Vorticity.Arrays.CanonicalArena(64, Account);
+                    _window = batch.Window(chosen.Row, _count, _windows, _window);
+                    _current = _window;
+                }
+            }
+
+            return _current ?? throw new InvalidOperationException("The merge is not on a run.");
+        }
+    }
+
+    /// <summary>The rows of the run the merge is on.</summary>
+    internal int CurrentRows => _emitting is not null ? _count : throw new InvalidOperationException("The merge is not on a run.");
+
+    /// <summary>
+    /// Where the run the merge is on lies: the arena and the root of its input's batch, and its first row there. Valid until
+    /// <see cref="Releasing"/> is called with that arena.
+    /// </summary>
+    internal (Vorticity.Arrays.CanonicalArena Arena, int Root, int Row) CurrentRun
+    {
+        get
+        {
+            MergeInput input = Emitting();
+            return (input.Batch.Arena, input.Batch.RootIndex, input.Row);
+        }
+    }
 
     /// <summary>The key of the run's row <paramref name="row"/>, row-encoded.</summary>
     public ReadOnlySpan<byte> KeyAt(int row)
@@ -167,18 +210,9 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable, IOrderedKeys
         {
             Interlocked.Add(ref emitted[chosen.Rank], count);
         }
-        RecordBatch batch = chosen.Batch;
-        if (chosen.Row == 0 && count == batch.RowCount)
-        {
-            _current = batch;
-        }
-        else
-        {
-            _windows ??= new CanonicalArena(64, Account);
-            _window = batch.Window(chosen.Row, count, _windows, _window);
-            _current = _window;
-        }
-
+        // The run's window is cut when a caller asks for it (Current): a writer that takes the run where it lies
+        // (CurrentRun) needs none.
+        _current = null;
         return true;
     }
 
@@ -339,7 +373,14 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable, IOrderedKeys
 
         Push(input);
         MostOpen = Math.Max(MostOpen, _open.Count);
+        Opened?.Invoke(_open.Count);
     }
+
+    /// <summary>
+    /// What the merge calls once an input is open and its first batch decoded, with the inputs open then: a job reprices the
+    /// batches of the inputs it has yet to open from what the open ones hold (<see cref="JobMemory.InputRows"/>); null for none.
+    /// </summary>
+    internal Action<int>? Opened { get; set; }
 
     /// <summary>The input holding the smallest key, and how many of its rows go before any other's.</summary>
     private (MergeInput Chosen, int Count) Choose()
@@ -664,6 +705,12 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable, IOrderedKeys
 
         public async ValueTask DisposeAsync()
         {
+            // A writer holding windows on the batch copies them before the batch goes with its scan.
+            if (_batch is { } last && _merge.Releasing is { } releasing)
+            {
+                await releasing(last.Arena).ConfigureAwait(false);
+            }
+
             _merge.GiveKeys(_keys);
             _keys = null;
             _batch = null;
@@ -686,6 +733,12 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable, IOrderedKeys
         /// </summary>
         private async ValueTask NextAsync()
         {
+            // A writer holding windows on the batch copies them before the scan takes its next one, which may reuse its arena.
+            if (_batch is { } last && _merge.Releasing is { } releasing)
+            {
+                await releasing(last.Arena).ConfigureAwait(false);
+            }
+
             _batch = null;
             _row = 0;
             _rows = 0;

@@ -153,6 +153,10 @@ internal static partial class DatasetCompactor
                     {
                         return false;
                     }
+
+                    // On to its second batch, so that the batch it decodes ahead (InputPrefetch) is counted too: an input of a
+                    // merge holds both, and a measure of the first alone priced it at half.
+                    _ = await merge.MoveNextAsync().ConfigureAwait(false);
                 }
             }
             catch (VortexMemoryException) when (memory.Refused && !cancellationToken.IsCancellationRequested)
@@ -885,7 +889,7 @@ internal static partial class DatasetCompactor
                 ObjectStream outputs = outputsOf(doublings);
                 try
                 {
-                    long merged = await MergeAsync(dataset, schema, job, outputs, null, null, batchRows, meter, memory, token, ranges, range, mine).ConfigureAwait(false);
+                    long merged = await MergeAsync(dataset, schema, job, outputs, null, null, batchRows, meter, memory, token, ranges, range, mine, writer * lanes).ConfigureAwait(false);
                     await outputs.FinishAsync(token).ConfigureAwait(false);
                     for (int i = 0; mine is not null && i < mine.Length; i++)
                     {

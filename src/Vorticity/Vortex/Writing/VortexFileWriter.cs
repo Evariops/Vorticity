@@ -405,9 +405,43 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// <summary>The canonical bytes the columns that gather hold together now, which lanes add to side by side.</summary>
     private long _gatheredHeld;
 
-    /// <summary>Whether <paramref name="gathering"/> writes what it holds: its target reached, or the columns together past their ceiling.</summary>
-    private bool DueOrOver(Gathering gathering) =>
-        gathering.Due || (_gatheredCeiling > 0 && Volatile.Read(ref _gatheredHeld) > _gatheredCeiling);
+    /// <summary>
+    /// Whether <paramref name="gathering"/> writes what it holds: its target reached, or the columns together past their
+    /// ceiling as they stood when the chunk began, and it the column that held the most then (<see cref="Over"/>).
+    /// </summary>
+    /// <remarks>
+    /// Read as the columns gathered, the total moved under the items of a chunk compressed side by side: which column
+    /// crossed the ceiling depended on the order the lanes took them, and an object's bytes changed by a few hundred from one
+    /// run to the next at one degree (2026-11-16). Taken before the chunk, the decision is the rows' alone.
+    /// </remarks>
+    private bool DueOrOver(Gathering gathering) => gathering.Due || ReferenceEquals(gathering, _over);
+
+    /// <summary>
+    /// The column that writes its chunk early in the chunk of the file under way: the one that held the most when the chunk
+    /// began, if the columns together then held past their ceiling; null otherwise. Set by <see cref="Over"/>.
+    /// </summary>
+    private Gathering? _over;
+
+    /// <summary>
+    /// Decides, before a chunk of the file is gathered, which column writes its chunk early (<see cref="_over"/>): from what
+    /// the columns and the chunks compressed ahead held then, the same whatever the lanes do next.
+    /// </summary>
+    private void Over()
+    {
+        _over = null;
+        if (_gatheredCeiling <= 0 || _gathering is not { } gathering || Volatile.Read(ref _gatheredHeld) <= _gatheredCeiling)
+        {
+            return;
+        }
+
+        foreach (Gathering? column in gathering)
+        {
+            if (column is { Rows: > 0 } && (_over is null || column.Held > _over.Held))
+            {
+                _over = column;
+            }
+        }
+    }
 
     /// <summary>The rows the columns that gather took since their chunks last ended together.</summary>
     private long _groupTaken;
@@ -1986,21 +2020,125 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     private bool CompletesABlock(Staging staging) =>
         !_automaticChunks && _pendingRows + staging.Rows >= _rowBlock && _pendingBytes + staging.Bytes >= _blockBytes;
 
-    /// <summary>Copies a small batch in with the ones waiting before it: in the staging the rows staged before last left, once landed.</summary>
-    private Staging Stage(CanonicalArena arena, int root, int rows)
+    /// <summary>
+    /// Takes rows <paramref name="row"/> to <paramref name="row"/> + <paramref name="rows"/> of node <paramref name="root"/> of
+    /// <paramref name="source"/>, a merge's input batch, in the key's order after the rows taken before: a merge's writer
+    /// (<see cref="VortexWriteOptions.StagedRows"/>) keeps a window on them and copies them when the block they complete goes
+    /// through, on that block's lane; any other writer takes them as a batch now. The source stays as it is until
+    /// <see cref="ReleaseAsync"/> says it will change.
+    /// </summary>
+    /// <remarks>
+    /// The merge's thread copied each run into the writer's staging as it chose it, beside choosing it: a ninth of a
+    /// consolidation's processor, on the chain every lane of the writer waited for (2026-11-16).
+    /// </remarks>
+    internal async ValueTask WriteRunAsync(CanonicalArena source, int root, int row, int rows, CancellationToken cancellationToken)
+    {
+        ThrowIfDone();
+        Carry();
+        await DrainAsync(cancellationToken).ConfigureAwait(false);
+        _acceptedRows += rows;
+        if (_stagedRows == 0 || _rowBlock == 0 || rows >= _stagedRows)
+        {
+            // A run of a block or more goes through as a batch of its own, as it did, once the rows staged before it went:
+            // nothing flies then, so the window is cut in the source itself, on the merge's thread alone. A level's objects,
+            // whose keys do not interleave, give runs of whole batches.
+            await UnstageAsync(cancellationToken).ConfigureAwait(false);
+            await WriteCoreAsync(source, CanonicalSlice.SliceAcross(source, source, root, row, rows), seal: false, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        RequireMatchingSchema(source.GetNode(root).DType);
+        await StartAsync(cancellationToken).ConfigureAwait(false);
+        while (rows > 0)
+        {
+            Staging staging = StagingOf();
+            int take = Math.Min(rows, _stagedRows - staging.Rows);
+
+            // The window's records are cut into the staging's own arena, which reads the source and writes nothing there,
+            // decoded there when the input delivered an encoded column, and a list's narrowed to the elements its rows name:
+            // a window shares its batch's elements whole, and was sized by them, so that a merge of histograms rolled its
+            // objects at a fifth of their target and wrote 4.5 times what it read (DatasetCompositeCompactionTests).
+            int window = staging.Windows.DecodedTree(CanonicalSlice.SliceAcross(source, staging.Windows, root, row, take));
+            if (_mayShareChildren)
+            {
+                window = ChunkCompactor.Compact(staging.Windows, window);
+            }
+            staging.Nodes.Add(~window);
+            staging.Sources.Add(source);
+            staging.Rows += take;
+            staging.Bytes += staging.Windows.NamedBytes(window);
+            row += take;
+            rows -= take;
+            if (staging.Rows >= _stagedRows)
+            {
+                await FlyAsync(cancellationToken).ConfigureAwait(false);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Copies every row the writer keeps a window on in <paramref name="source"/> before it changes: the block in flight
+    /// assembled first, then the windows of the rows staged since on that source copied into the staging, where the other
+    /// windows stay. A merge calls it before an input takes its next batch or goes.
+    /// </summary>
+    internal async ValueTask ReleaseAsync(CanonicalArena source)
+    {
+        if (_assembled is { } assembled)
+        {
+            await assembled.ConfigureAwait(false);
+        }
+
+        if (_staging is { } staging)
+        {
+            Own(staging, source);
+        }
+    }
+
+    /// <summary>Copies the windows of <paramref name="staging"/> on <paramref name="source"/>, or on every source when null, into its arena.</summary>
+    private void Own(Staging staging, CanonicalArena? source)
+    {
+        CanonicalArena into = staging.Context.Canonical;
+        List<int> nodes = staging.Nodes;
+        for (int i = 0; i < nodes.Count; i++)
+        {
+            if (nodes[i] < 0 && (source is null || ReferenceEquals(staging.Sources[i], source)))
+            {
+                // A text that repeats the row before's is copied once: the rows staged are sized by the bytes they name, and
+                // the writer copies each row's bytes again as it gathers them, before any encoder sizes them.
+                nodes[i] = Owned(into, staging.Windows, ~nodes[i], shareRepeats: true);
+                staging.Sources[i] = null;
+            }
+        }
+
+        if (source is null)
+        {
+            staging.Sources.Clear();
+            staging.Windows.Reset();
+        }
+    }
+
+    /// <summary>The staging the rows go into: the one under way, or the one the rows staged before last left, once landed.</summary>
+    private Staging StagingOf()
     {
         if (_staging is null)
         {
-            _staging = _landed ?? new Staging(TransitContexts.Rent(Account));
+            _staging = _landed ?? new Staging(TransitContexts.Rent(Account), new CanonicalArena(64, Account));
             _landed = null;
         }
 
-        Staging staging = _staging;
+        return _staging;
+    }
+
+    /// <summary>Copies a small batch in with the ones waiting before it: in the staging the rows staged before last left, once landed.</summary>
+    private Staging Stage(CanonicalArena arena, int root, int rows)
+    {
+        Staging staging = StagingOf();
         CanonicalArena into = staging.Context.Canonical;
         // A text that repeats the row before's is copied once: the rows staged are sized by the bytes they name, and the
         // writer copies each row's bytes again as it gathers them, before any encoder sizes them.
         int owned = Owned(into, arena, root, shareRepeats: true);
         staging.Nodes.Add(owned);
+        staging.Sources.Add(null);
         staging.Rows += rows;
         staging.Bytes += into.NamedBytes(owned);
         return staging;
@@ -2032,11 +2170,25 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         _staging = null;
         _flying = staging;
         BatchesFlown++;
+
+        // The windows the block holds on the merge's inputs are copied first, on the block's lane: an input that takes its
+        // next batch waits for that (ReleaseAsync), not for the block to go through.
+        TaskCompletionSource assembled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _assembled = assembled.Task;
         _flight = Task.Run(
             async () =>
             {
                 try
                 {
+                    try
+                    {
+                        Own(staging, null);
+                    }
+                    finally
+                    {
+                        assembled.TrySetResult();
+                    }
+
                     await WriteStagedAsync(staging, cancellationToken).ConfigureAwait(false);
                 }
                 finally
@@ -2046,6 +2198,9 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             },
             CancellationToken.None);
     }
+
+    /// <summary>Done once the block in flight copied the rows its windows hold on the merge's inputs; null when none flies.</summary>
+    private Task? _assembled;
 
     /// <summary>
     /// Waits for the rows in flight to have gone through, throwing what failed them, and keeps their staging for the rows
@@ -2101,6 +2256,9 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// <summary>Writes the small batches <paramref name="staging"/> holds, as one batch of all their rows, and drops them.</summary>
     private async ValueTask WriteStagedAsync(Staging staging, CancellationToken cancellationToken)
     {
+        // The rows still held as windows on a merge's inputs are copied now: going through on the caller's thread, a block
+        // was not assembled on a lane of its own.
+        Own(staging, null);
         ScanContext context = staging.Context;
         int rows = staging.Rows;
         int node = staging.Nodes.Count == 1
@@ -2108,6 +2266,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             : CanonicalConcat.Concat(
                 context.Decode, _schema, rows, System.Runtime.InteropServices.CollectionsMarshal.AsSpan(staging.Nodes));
         staging.Nodes.Clear();
+        staging.Sources.Clear();
         staging.Rows = 0;
         staging.Bytes = 0;
         try
@@ -2141,11 +2300,17 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         }
     }
 
-    /// <summary>The context small batches wait in, their nodes, their rows and their bytes.</summary>
-    private sealed class Staging(ScanContext context)
+    /// <summary>
+    /// The context small batches wait in, their nodes, their rows and their bytes. A node below zero is the complement of a
+    /// window of <see cref="Windows"/> on a merge's input, <see cref="Sources"/> its arena at the same place, null for a node
+    /// of the context's own.
+    /// </summary>
+    private sealed class Staging(ScanContext context, CanonicalArena windows)
     {
         internal readonly ScanContext Context = context;
+        internal readonly CanonicalArena Windows = windows;
         internal readonly List<int> Nodes = [];
+        internal readonly List<CanonicalArena?> Sources = [];
         internal int Rows;
         internal long Bytes;
     }
@@ -2739,6 +2904,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         CanonicalArena arena, int rootIndex, long rows, CancellationToken cancellationToken)
     {
         int blocks = ChunkBlocks(rows, _blockRows);
+        Over();
 
         // A column that would gather past int.MaxValue rows writes what it holds first, as the loop
         // below does it: a chunk that would make one do so is written on this thread.
@@ -3278,8 +3444,12 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         }
     }
 
-    /// <summary>Lets <paramref name="chunk"/>'s rows go, once: its context back to the process's, and what it held off the writer's ceiling.</summary>
-    private void Release(AheadChunk chunk)
+    /// <summary>
+    /// Lets <paramref name="chunk"/>'s rows go, once: its context back to the process's. What it held stays on the writer's
+    /// ceiling until it is written or given up (<see cref="Uncount"/>), at a point of the rows' own order: let go as its
+    /// compression ended, it moved the ceiling under the lanes, and the chunks after it with it.
+    /// </summary>
+    private static void Release(AheadChunk chunk)
     {
         if (chunk.Context is not { } context)
         {
@@ -3288,7 +3458,13 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
         chunk.Context = null;
         TransitContexts.Return(context);
+    }
+
+    /// <summary>Takes what <paramref name="chunk"/> held off the writer's ceiling, once.</summary>
+    private void Uncount(AheadChunk chunk)
+    {
         Interlocked.Add(ref _gatheredHeld, -chunk.Held);
+        chunk.Held = 0;
     }
 
     /// <summary>
@@ -3311,6 +3487,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     private async ValueTask LandAheadAsync(int field, AheadChunk chunk, CancellationToken cancellationToken)
     {
         _aheadBytes -= chunk.Counted;
+        Uncount(chunk);
         if (chunk.Compression is { } compression)
         {
             try
@@ -3386,6 +3563,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                 }
 
                 Release(chunk);
+                Uncount(chunk);
                 chunk.Blob.Dispose();
             }
 

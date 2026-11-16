@@ -196,7 +196,7 @@ internal static partial class DatasetCompactor
         catch (Exception failure) when (memory.Refused && failure is not JobTooWideException && !cancellationToken.IsCancellationRequested)
         {
             dataset.NarrowJobs(job.Inputs.Count, memory.InputsPeak, memory.Sizing, memory.WriterPeak);
-            throw new JobTooWideException(job, memory.Peak, memory.Jobs.CeilingBytes, failure) { Sizing = memory.Sizing };
+            throw new JobTooWideException(job, memory.Peak, memory.Jobs.CeilingBytes, failure) { Sizing = memory.Sizing, Reason = memory.RefusalReason };
         }
         finally
         {
@@ -375,7 +375,7 @@ internal static partial class DatasetCompactor
                         rows = merge
                             ? await MergeAsync(
                                 dataset, schema, ran, outputs, late, lateOutputs, batchRows, meter, memory, cancellationToken,
-                                piece?.Ranges, 0, piece?.Emitted).ConfigureAwait(false)
+                                piece?.Ranges, 0, piece?.Emitted, writer).ConfigureAwait(false)
                             : await ConcatenateAsync(dataset, schema, ran, outputs, memory, cancellationToken).ConfigureAwait(false);
                         await outputs.FinishAsync(cancellationToken).ConfigureAwait(false);
                         if (lateOutputs is not null)
@@ -949,7 +949,7 @@ internal static partial class DatasetCompactor
     /// </summary>
     private static IAsyncEnumerable<RecordBatch> RowsOfAsync(
         ObjectLease lease, ObjectEntry entry, DatasetSchema schema, CancellationToken cancellationToken, int[]? fields = null, RowRange? rows = null,
-        int batchRows = 0, Buffers.MemoryAccount? account = null)
+        int batchRows = 0, Buffers.MemoryAccount? account = null, int prefetch = 0)
     {
         // A job's input reads and decodes under the job's inputs' account (JobMemory), which never passes the jobs' budget.
         // Its batches hold its rows at most: an input of 1 924 rows in a merge of batches of 16 384 held 566 KB, a batch's
@@ -959,13 +959,13 @@ internal static partial class DatasetCompactor
         FieldMask projection = fields is null ? FieldMask.All : Layouts.FieldMasks.Of(fields);
         if (schema.ColumnsOf(file.DType, entry.Key) is not { } columns)
         {
-            ScanBuilder whole = file.ScanBuilder().WithAccount(account);
+            ScanBuilder whole = file.ScanBuilder().WithAccount(account).WithPrefetch(prefetch);
             return LiveRowsAsync(Ranged(Batched(fields is null ? whole : whole.ProjectMask(projection), batchRows), rows), entry, cancellationToken);
         }
 
         ObjectReadPlan read = columns.Read(null, projection);
         return ObjectColumns.ReshapeAsync(
-            LiveRowsAsync(Ranged(Batched(file.ScanBuilder().WithAccount(account).ProjectMask(read.Shape.Source).WithEncodings(false, false), batchRows), rows), entry, cancellationToken),
+            LiveRowsAsync(Ranged(Batched(file.ScanBuilder().WithAccount(account).WithPrefetch(prefetch).ProjectMask(read.Shape.Source).WithEncodings(false, false), batchRows), rows), entry, cancellationToken),
             read.Shape,
             null,
             0,
@@ -1123,21 +1123,35 @@ internal static partial class DatasetCompactor
         CancellationToken cancellationToken,
         KeyRanges? ranges = null,
         int range = 0,
-        long[]? emitted = null)
+        long[]? emitted = null,
+        long writer = 0)
     {
         KeyOrderedMerge merge = InputsMerged(dataset, schema, job, batchRows, cancellationToken, ranges: ranges, range: range, meter: meter, memory: memory, emitted: emitted);
         ValueCut? values = schema.Cut;
         long rows = 0;
+
+        // As its inputs open, the job reprices the batches of those still to open from what the open ones hold.
+        int atOnce = ranges is null ? OpenAtOnce(job) : ranges.MostInputs;
+        merge.Opened = open => memory.Reprice(open, atOnce, batchRows, writer, LeastBatchRows);
+
+        // The writers keep windows on the runs, which they copy before an input's batch changes.
+        merge.Releasing = lateOutputs is null
+            ? outputs.ReleaseAsync
+            : async source =>
+            {
+                await outputs.ReleaseAsync(source).ConfigureAwait(false);
+                await lateOutputs.ReleaseAsync(source).ConfigureAwait(false);
+            };
         await using (merge.ConfigureAwait(false))
         {
             while (await merge.MoveNextAsync().ConfigureAwait(false))
             {
-                RecordBatch run = merge.Current;
+                int count = merge.CurrentRows;
 
                 // The rows that came late lead the merge, keys ascending: those of the run go to level 0, kept apart.
                 // An object a partition value, so that each lies within the rows of its value, which a merge of neighbours
                 // there takes in with them.
-                int start = late?.End(merge, 0, run.RowCount) ?? 0;
+                int start = late?.End(merge, 0, count) ?? 0;
                 if (start > 0)
                 {
                     late!.Add(start);
@@ -1156,9 +1170,9 @@ internal static partial class DatasetCompactor
 
                 // An object holds the rows of one partition value: a run of several is written in parts, one a value,
                 // and a part of another value than the object's seals it. A key has one value, so no part splits a key.
-                for (int at = start, end; at < run.RowCount; at = end)
+                for (int at = start, end; at < count; at = end)
                 {
-                    end = values is null ? run.RowCount : values.EndOfValue(merge, at, run.RowCount);
+                    end = values is null ? count : values.EndOfValue(merge, at, count);
 
                     // A run that goes on with the key the object ends on, past its size: the rows of that key stay with it,
                     // and the next part starts where the key changes. An input runs through the rows of a key it shares
@@ -1180,7 +1194,7 @@ internal static partial class DatasetCompactor
                     await outputs.WriteAsync(merge, at, end, cancellationToken).ConfigureAwait(false);
                 }
 
-                rows += run.RowCount;
+                rows += count;
             }
         }
 
@@ -1216,6 +1230,14 @@ internal static partial class DatasetCompactor
 
         return high;
     }
+
+    /// <summary>
+    /// The batches a merge's input decodes ahead of the one the merge reads: one, decoded on a lane of its scan while the merge
+    /// takes the runs of the batch before, so that the merge's thread chooses runs rather than decodes them. A merge's thread
+    /// decoded every input's columns, their variants rebuilt, a tenth of a consolidation's processor on the chain every
+    /// lane of the writer waited for (2026-11-16). An input then holds two batches, which its measured price counts.
+    /// </summary>
+    private const int InputPrefetch = 1;
 
     /// <summary>
     /// The k-way merge of a job's inputs on the tree's order, the partition leading the key (<see cref="DatasetSchema.Tree"/>).
@@ -1275,9 +1297,10 @@ internal static partial class DatasetCompactor
             inputs.Select(static held => held.Object).ToAsyncEnumerable(),
             schema.Tree!,
             rankedTies: false,
+            // The rows of an input's batches read as it opens: the plan's, or fewer once the job repriced them (JobMemory.Reprice).
             (lease, entry) => meter is null
-                ? RowsOfAsync(lease, entry, schema, cancellationToken, fields, rows?[entry.Key], batchRows, account)
-                : MeteredAsync(RowsOfAsync(lease, entry, schema, cancellationToken, fields, rows?[entry.Key], batchRows, account), meter, cancellationToken),
+                ? RowsOfAsync(lease, entry, schema, cancellationToken, fields, rows?[entry.Key], RowsNow(), account, InputPrefetch)
+                : MeteredAsync(RowsOfAsync(lease, entry, schema, cancellationToken, fields, rows?[entry.Key], RowsNow(), account, InputPrefetch), meter, cancellationToken),
             opened: null,
             cancellationToken,
             ranges?.Low(range) ?? default,
@@ -1287,6 +1310,28 @@ internal static partial class DatasetCompactor
             Rent = memory is null ? null : memory.RentAsync,
             Emitted = emitted,
         };
+
+        int RowsNow() => memory is { InputRows: > 0 } repriced && batchRows > 0 ? Math.Min(batchRows, repriced.InputRows) : batchRows;
+    }
+
+    /// <summary>The inputs of <paramref name="job"/> a merge holds open at once: its level 0 inputs, which overlap, and one of the levels above, which are disjoint.</summary>
+    private static int OpenAtOnce(CompactionJob job)
+    {
+        int open = 0;
+        bool above = false;
+        foreach (CompactionInput input in job.Inputs)
+        {
+            if (input.Level == 0)
+            {
+                open++;
+            }
+            else
+            {
+                above = true;
+            }
+        }
+
+        return open + (above ? 1 : 0);
     }
 
     /// <summary>
@@ -1311,6 +1356,7 @@ internal static partial class DatasetCompactor
         int textBound = dataset.Options.Write.StringBoundBytes;
         List<ValueCount>?[] counts = new List<ValueCount>?[job.Inputs.Count];
         List<(byte[] First, PathCensus[] Paths)> added = [];
+        List<int> refused = [];
         int next = 0;
         Lock gate = new Lock();
 
@@ -1345,17 +1391,28 @@ internal static partial class DatasetCompactor
             };
             await Parallel.ForAsync(0, job.Inputs.Count, lanes, async (input, token) =>
             {
-                List<ValueCount> counted = await CountAsync(dataset, schema, job, input, variants, memory, piece, token).ConfigureAwait(false);
+                List<ValueCount> counted;
+                try
+                {
+                    counted = await CountAsync(dataset, schema, job, input, variants, memory, piece, token).ConfigureAwait(false);
+                }
+                catch (VortexMemoryException) when (memory.Refused && !token.IsCancellationRequested)
+                {
+                    // Refused beside the inputs the other lanes hold: counted again alone once they are done, rather than the
+                    // job given up and planned narrower (raph, 2026-11-16: short of memory, a work waits). The blocks the
+                    // count held went back as it unwound.
+                    lock (gate)
+                    {
+                        refused.Add(input);
+                    }
+
+                    return;
+                }
+
                 lock (gate)
                 {
                     counts[input] = counted;
-                    for (; next < counts.Length && counts[next] is { } ready; counts[next++] = null)
-                    {
-                        foreach (ValueCount count in ready)
-                        {
-                            Add(count);
-                        }
-                    }
+                    Drain();
                 }
             }).ConfigureAwait(false);
         }
@@ -1365,6 +1422,14 @@ internal static partial class DatasetCompactor
             {
                 budget.Exit(entered);
             }
+        }
+
+        // The inputs refused beside the others, each counted alone on the job's thread, in their order.
+        refused.Sort();
+        foreach (int input in refused)
+        {
+            counts[input] = await CountAsync(dataset, schema, job, input, variants, memory, piece, cancellationToken).ConfigureAwait(false);
+            Drain();
         }
 
         // The values in the key's order, the partition leading it: each a range of keys, which any of its first keys places.
@@ -1390,6 +1455,18 @@ internal static partial class DatasetCompactor
         }
 
         return shreddings;
+
+        // The inputs counted, added to their values in the inputs' order up to the first not counted yet.
+        void Drain()
+        {
+            for (; next < counts.Length && counts[next] is { } ready; counts[next++] = null)
+            {
+                foreach (ValueCount count in ready)
+                {
+                    Add(count);
+                }
+            }
+        }
 
         // An input's counts of a value added to its value's, censuses of their own, and given back for the next input.
         void Add(ValueCount count)
@@ -1496,7 +1573,10 @@ internal static partial class DatasetCompactor
                     : new VariantDirectory.DirectoryBody?[variants.Length];
                 try
                 {
-                    await foreach (RecordBatch batch in RowsOfAsync(lease, held.Entry, schema, cancellationToken, variants, piece?.RowsOf(input, 0), account: memory.InputsAccount)
+                    // In batches of the rows its lane was priced at (CensusRows): read at the scan's own size, a lane of log
+                    // records held a window of their attributes rebuilt, and the census of a tier merge of 23 inputs was refused
+                    // at 671 MiB of 672, twice, before a job of 5 ran (2026-11-16).
+                    await foreach (RecordBatch batch in RowsOfAsync(lease, held.Entry, schema, cancellationToken, variants, piece?.RowsOf(input, 0), CensusRows(dataset, job), memory.InputsAccount)
                         .WithCancellation(cancellationToken).ConfigureAwait(false))
                     {
                         for (int v = 0; v < variants.Length; v++)
@@ -1857,9 +1937,18 @@ internal static partial class DatasetCompactor
 
             _firstKey ??= merge.KeyAt(from).ToArray();
             _lastKeyLength = SortedRows.Keep(ref _lastKey, merge.KeyAt(to - 1));
-            RecordBatch run = merge.Current;
-            await WriteAsync(from == 0 && to == run.RowCount ? run : run.Window(from, to - from), cancellationToken).ConfigureAwait(false);
+
+            // The rows where they lie in the input's batch: the writer keeps a window on them and copies them with the block
+            // they fall in, on its lane, until the input's batch changes (ReleaseAsync).
+            (Vorticity.Arrays.CanonicalArena arena, int root, int row) = merge.CurrentRun;
+            _rows += to - from;
+            Batches++;
+            await output.Writer.WriteRunAsync(arena, root, row + from, to - from, cancellationToken).ConfigureAwait(false);
         }
+
+        /// <summary>Has the writer of the object being written copy the rows it keeps windows on in <paramref name="source"/>, which is about to change.</summary>
+        internal ValueTask ReleaseAsync(Vorticity.Arrays.CanonicalArena source) =>
+            _output is { } output ? output.Writer.ReleaseAsync(source) : ValueTask.CompletedTask;
 
         /// <summary>Writes <paramref name="batch"/>'s rows after those written: in no key's order, they index nothing.</summary>
         internal async ValueTask WriteAsync(RecordBatch batch, CancellationToken cancellationToken)

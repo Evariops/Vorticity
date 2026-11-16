@@ -41,6 +41,12 @@ internal sealed class JobTooWideException : Exception
     /// <summary>The job refused.</summary>
     internal CompactionJob Job { get; }
 
+    /// <summary>
+    /// Which of the job's budgets refused the block, and what its inputs and its writer held then, for the job's activity;
+    /// null when it was priced out before it read anything.
+    /// </summary>
+    internal string? Reason { get; init; }
+
     /// <summary>The rows of an input's batch and the inputs it held open at once when refused; 0 before it sized them.</summary>
     internal (int BatchRows, int Open) Sizing { get; init; }
 

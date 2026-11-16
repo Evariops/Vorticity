@@ -518,12 +518,14 @@ public sealed partial class VortexFileWriter
         if (_staging is { } staging)
         {
             TransitContexts.Return(staging.Context);
+            staging.Windows.Reset();
             _staging = null;
         }
 
         if (_landed is { } landed)
         {
             TransitContexts.Return(landed.Context);
+            landed.Windows.Reset();
             _landed = null;
         }
 
