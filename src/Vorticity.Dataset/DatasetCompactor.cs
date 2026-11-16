@@ -1326,26 +1326,46 @@ internal static partial class DatasetCompactor
         int most = Math.Min(Math.Max(1, dataset.Session.Options.MaxDegreeOfParallelism), job.Inputs.Count);
         int admitted = (int)Math.Clamp(memory.Room / perLane, 1, most);
 
-        ParallelOptions lanes = new ParallelOptions
+        // The job's thread, and beside it the lanes of the session's that are free now (LaneBudget), as many as the room
+        // admits: the job holds the session's degree with its writers' helpers and every other job's, where the census took
+        // its own threads past it.
+        Writing.LaneBudget budget = dataset.Session.WriteLanes;
+        List<long> held = [];
+        while (held.Count < admitted - 1 && budget.TryEnter(out long entered))
         {
-            MaxDegreeOfParallelism = admitted,
-            CancellationToken = cancellationToken,
-        };
-        await Parallel.ForAsync(0, job.Inputs.Count, lanes, async (input, token) =>
+            held.Add(entered);
+        }
+
+        try
         {
-            List<ValueCount> counted = await CountAsync(dataset, schema, job, input, variants, memory, piece, token).ConfigureAwait(false);
-            lock (gate)
+            ParallelOptions lanes = new ParallelOptions
             {
-                counts[input] = counted;
-                for (; next < counts.Length && counts[next] is { } ready; counts[next++] = null)
+                MaxDegreeOfParallelism = held.Count + 1,
+                CancellationToken = cancellationToken,
+            };
+            await Parallel.ForAsync(0, job.Inputs.Count, lanes, async (input, token) =>
+            {
+                List<ValueCount> counted = await CountAsync(dataset, schema, job, input, variants, memory, piece, token).ConfigureAwait(false);
+                lock (gate)
                 {
-                    foreach (ValueCount count in ready)
+                    counts[input] = counted;
+                    for (; next < counts.Length && counts[next] is { } ready; counts[next++] = null)
                     {
-                        Add(count);
+                        foreach (ValueCount count in ready)
+                        {
+                            Add(count);
+                        }
                     }
                 }
+            }).ConfigureAwait(false);
+        }
+        finally
+        {
+            foreach (long entered in held)
+            {
+                budget.Exit(entered);
             }
-        }).ConfigureAwait(false);
+        }
 
         // The values in the key's order, the partition leading it: each a range of keys, which any of its first keys places.
         added.Sort(static (left, right) => left.First.AsSpan().SequenceCompareTo(right.First));

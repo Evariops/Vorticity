@@ -39,11 +39,34 @@ public sealed partial class DatasetCompactionLanesTests
         }
     }
 
-    private static async Task<(List<long> Objects, List<Doc> Rows, long Flown)> ConsolidateAsync(int lanes)
+    /// <summary>
+    /// A consolidation on a session of four lanes, three of them held by other work: the job's census, its blocks and its
+    /// chunks go through on the one left and on its own thread, and it ends with the objects it writes on one lane.
+    /// </summary>
+    [Fact]
+    public async Task AConsolidationLeftOneLaneOfFourEndsWithTheObjectsOfOne()
+    {
+        (List<long> alone, List<Doc> aloneRows, _) = await ConsolidateAsync(lanes: 1);
+        (List<long> left, List<Doc> leftRows, _) = await ConsolidateAsync(lanes: 4, held: 3);
+        Assert.Equal(alone, left);
+        Assert.Equal(aloneRows.Count, leftRows.Count);
+        for (int i = 0; i < aloneRows.Count; i++)
+        {
+            Assert.Equal(aloneRows[i].Sequence, leftRows[i].Sequence);
+            Assert.True(aloneRows[i].Attributes.Equals(leftRows[i].Attributes), $"row {aloneRows[i].Sequence}");
+        }
+    }
+
+    private static async Task<(List<long> Objects, List<Doc> Rows, long Flown)> ConsolidateAsync(int lanes, int held = 0)
     {
         Random random = new Random(29);
         await using MemoryObjectStore store = new MemoryObjectStore();
         await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = lanes);
+        long[] taken = new long[held];
+        for (int i = 0; i < held; i++)
+        {
+            Assert.True(session.WriteLanes.TryEnter(out taken[i]));
+        }
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Doc.Schema, new DatasetOptions
         {
             Session = session,
@@ -67,12 +90,17 @@ public sealed partial class DatasetCompactionLanesTests
         IReadOnlyList<CompactionResult> results = await dataset.ConsolidateAsync(Ct);
         Assert.NotEmpty(results);
         List<long> objects = [];
-        await foreach (PositionedObject held in dataset.ScanBuilder().ObjectsAsync(Ct))
+        await foreach (PositionedObject positioned in dataset.ScanBuilder().ObjectsAsync(Ct))
         {
-            objects.Add(held.Entry.Rows);
+            objects.Add(positioned.Entry.Rows);
         }
 
         List<Doc> read = [.. (await dataset.Scan<Doc>().ToRecordsAsync(Ct).ToListAsync(Ct)).OrderBy(static row => row.Sequence)];
+        foreach (long entered in taken)
+        {
+            session.WriteLanes.Exit(entered);
+        }
+
         return (objects, read, results.Sum(static result => result.WriterBatchesFlown));
     }
 

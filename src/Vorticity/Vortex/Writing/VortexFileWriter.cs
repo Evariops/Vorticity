@@ -1497,8 +1497,44 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             return null;
         }
 
-        int slices = Math.Min(_lanes, rows / CensusSliceRows);
-        return slices <= 1 ? Task.Run(() => Count(census, ready, 0, rows)) : CountSlicesAsync(census, ready, rows, slices);
+        int slices = Math.Max(1, Math.Min(_lanes, rows / CensusSliceRows));
+        if (_budget is not { } budget)
+        {
+            return slices <= 1 ? Task.Run(() => Count(census, ready, 0, rows)) : CountSlicesAsync(census, ready, rows, slices, null);
+        }
+
+        // Each slice on a lane of the session's it holds, as many as are free; none free, the rows are counted here, where
+        // their tasks took threads past the session's degree.
+        long[] entered = new long[slices];
+        int lanes = 0;
+        while (lanes < slices && budget.TryEnter(out entered[lanes]))
+        {
+            lanes++;
+        }
+
+        if (lanes == 0)
+        {
+            Count(census, ready, 0, rows);
+            return null;
+        }
+
+        if (lanes == 1)
+        {
+            long lane = entered[0];
+            return Task.Run(() =>
+            {
+                try
+                {
+                    Count(census, ready, 0, rows);
+                }
+                finally
+                {
+                    budget.Exit(lane);
+                }
+            });
+        }
+
+        return CountSlicesAsync(census, ready, rows, lanes, (budget, entered));
 
         static void Count(PathCensus?[] census, PathCensus.Counting[] ready, int start, int count)
         {
@@ -1513,10 +1549,16 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// Counts <paramref name="rows"/> rows made ready in <paramref name="slices"/> slices on lanes of their own: the first into
     /// <paramref name="census"/>, each other into a census of its lane, cleared first, then merged into it in order.
     /// </summary>
-    private async Task CountSlicesAsync(PathCensus?[] census, PathCensus.Counting[] ready, int rows, int slices)
+    /// <param name="census">The censuses the rows count into, by column, null for a column counted by none.</param>
+    /// <param name="ready">The rows made ready for each column's census.</param>
+    /// <param name="rows">The rows.</param>
+    /// <param name="slices">The slices, a task each.</param>
+    /// <param name="lanes">The session's lanes each slice holds and gives back when counted, by slice; null outside a session.</param>
+    private async Task CountSlicesAsync(
+        PathCensus?[] census, PathCensus.Counting[] ready, int rows, int slices, (Writing.LaneBudget Budget, long[] Entered)? lanes)
     {
         Interlocked.Increment(ref CensusesSliced);
-        PathCensus?[][] lanes = _sliceCensus ??= new PathCensus?[census.Length][];
+        PathCensus?[][] sliced = _sliceCensus ??= new PathCensus?[census.Length][];
         for (int field = 0; field < census.Length; field++)
         {
             if (census[field] is null)
@@ -1524,16 +1566,16 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                 continue;
             }
 
-            PathCensus?[] held = lanes[field] ??= [];
-            if (held.Length < slices)
+            PathCensus?[] kept = sliced[field] ??= [];
+            if (kept.Length < slices)
             {
-                Array.Resize(ref held, slices);
-                lanes[field] = held;
+                Array.Resize(ref kept, slices);
+                sliced[field] = kept;
             }
 
             for (int slice = 1; slice < slices; slice++)
             {
-                held[slice] ??= new PathCensus(census[field]!.StringBoundBytes, CensusGroupRows);
+                kept[slice] ??= new PathCensus(census[field]!.StringBoundBytes, CensusGroupRows);
             }
         }
 
@@ -1545,20 +1587,30 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             int end = (int)((long)rows * (at + 1) / slices);
             counting[at] = Task.Run(() =>
             {
-                for (int field = 0; field < census.Length; field++)
+                try
                 {
-                    if (census[field] is not { } own)
+                    for (int field = 0; field < census.Length; field++)
                     {
-                        continue;
-                    }
+                        if (census[field] is not { } own)
+                        {
+                            continue;
+                        }
 
-                    PathCensus into = at == 0 ? own : lanes[field][at]!;
-                    if (at > 0)
+                        PathCensus into = at == 0 ? own : sliced[field][at]!;
+                        if (at > 0)
+                        {
+                            into.Clear();
+                        }
+
+                        into.Add(in ready[field], start, end - start);
+                    }
+                }
+                finally
+                {
+                    if (lanes is { } held)
                     {
-                        into.Clear();
+                        held.Budget.Exit(held.Entered[at]);
                     }
-
-                    into.Add(in ready[field], start, end - start);
                 }
             });
         }
@@ -1568,7 +1620,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         {
             for (int slice = 1; census[field] is { } own && slice < slices; slice++)
             {
-                own.Merge(lanes[field][slice]!);
+                own.Merge(sliced[field][slice]!);
             }
         }
     }
