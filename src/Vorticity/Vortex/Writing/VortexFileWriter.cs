@@ -1570,6 +1570,18 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         // and a node more to concatenate when its chunk goes out.
         if (Stages(rows, seal))
         {
+            // A merge's writer sends a block exactly, the run that crosses it cut there: a block goes out where it lies, where
+            // a batch a few rows past it left them in transit, and every batch after it was copied there whole behind them and
+            // concatenated again to go out.
+            if (_stagedRows > 0 && (_staging?.Rows ?? 0) + rows > _stagedRows)
+            {
+                int head = _stagedRows - (_staging?.Rows ?? 0);
+                _ = Stage(arena, CanonicalSlice.SliceAcross(arena, arena, root, 0, head), head);
+                await FlyAsync(cancellationToken).ConfigureAwait(false);
+                root = CanonicalSlice.SliceAcross(arena, arena, root, head, rows - head);
+                rows -= head;
+            }
+
             Staging staging = Stage(arena, root, rows);
             if (_stagedRows > 0 && staging.Rows >= _stagedRows)
             {
