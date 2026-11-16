@@ -48,6 +48,31 @@ public sealed partial class VariantBlockStatsTests
     }
 
     /// <summary>
+    /// Rows that repeat their whole attributes in runs of 37, across the blocks of a hundred, as a metric's series holds
+    /// them: the shredder takes a repeated row again without reading it, and the path's statistics are those of the declared
+    /// column still, block by block, the runs that cross a block's end counted in both.
+    /// </summary>
+    [Fact]
+    public async Task RowsThatRepeatAcrossBlocksKeepThePathsStatistics()
+    {
+        Doc[] rows = [.. Enumerable.Range(0, 2_000).Select(i => new Doc(i, i / 37 * 37, Variant.Object(
+            ("duration", Variant.From(i / 37 % 2 == 0 ? 5 : 900)),
+            ("flag", Variant.From(i / 37 % 3 == 0)),
+            ("route", Variant.From($"/r/{i / 370}")),
+            ("status", Variant.From((long)(i / 37 * 37))))))];
+        await using VortexFile file = await OpenAsync(await WriteAsync(rows));
+        foreach ((long low, long high) in new[] { (1_500L, long.MaxValue), (777L, 777L), (740L, 740L), (long.MinValue, 99L), (400L, 650L) })
+        {
+            ScanPlan declared = await file.Scan<Doc>().Where(r => r.Status >= low && r.Status <= high).ExplainAsync(analyze: true, Ct);
+            ScanPlan path = await file.Scan<Doc>().Where(r => r.Attributes["status"].AsInt64() >= low && r.Attributes["status"].AsInt64() <= high).ExplainAsync(analyze: true, Ct);
+            Assert.Equal((declared.Blocks, declared.LiveBlocks), (path.Blocks, path.LiveBlocks));
+            Assert.Equal(
+                await file.Scan<Doc>().Where(r => r.Status >= low && r.Status <= high).CountAsync(Ct),
+                await file.Scan<Doc>().Where(r => r.Attributes["status"].AsInt64() >= low && r.Attributes["status"].AsInt64() <= high).CountAsync(Ct));
+        }
+    }
+
+    /// <summary>
     /// A text and a flag that change from block to block refute blocks too: the route of five blocks,
     /// the flag set in every other block; a duration that spans its whole range in every block keeps
     /// no statistics, since they could refute nothing.

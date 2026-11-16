@@ -151,6 +151,21 @@ internal sealed class ChunkBlockBounds
             _maxTextCut = false;
         }
 
+        /// <summary>
+        /// Counts the value <paramref name="value"/> of row <paramref name="row"/> of the chunk, the value noted last, which the
+        /// row repeats: in the same block, one value more and no bound moved; in the next, as <see cref="Note"/> counts it.
+        /// </summary>
+        internal void Again(int row, ReadOnlySpan<byte> value)
+        {
+            if (row / blockRows == _block)
+            {
+                _values++;
+                return;
+            }
+
+            Note(row, Types.Variants.VariantScalar.Read(value));
+        }
+
         /// <summary>Counts the value <paramref name="scalar"/> of row <paramref name="row"/> of the chunk, a value of the key's class.</summary>
         internal void Note(int row, VariantScalar scalar)
         {

@@ -472,10 +472,29 @@ internal static class VariantShredder
             {
                 _typed.Add(row, in scalar);
                 Bounds?.Note(row, scalar);
+                _typedLast = true;
                 return;
             }
 
             Values.Add(row, value);
+            _typedLast = false;
+        }
+
+        // Whether the value taken last went to the typed column, which a row that repeats it takes again there.
+        private bool _typedLast;
+
+        /// <summary>The value taken last again, not read: the typed column's last value, or the value kept whole.</summary>
+        internal override void Again(ReadOnlySpan<byte> value, int row)
+        {
+            Mark(row);
+            if (!_typedLast)
+            {
+                Values.Add(row, value);
+                return;
+            }
+
+            _typed.Again(row);
+            Bounds?.Again(row, value);
         }
 
         internal override DType TypedType(DTypeArena types) => _typed.Type(types);
@@ -843,6 +862,17 @@ internal static class VariantShredder
             Value(in scalar);
         }
 
+        /// <summary>Takes again at row <paramref name="row"/> the value taken last, which the row repeats.</summary>
+        internal void Again(int row)
+        {
+            Rows?.Add(row);
+            Count++;
+            Repeat();
+        }
+
+        /// <summary>Takes the value taken last again.</summary>
+        protected abstract void Repeat();
+
         /// <summary>The dtype of the column.</summary>
         internal abstract DType Type(DTypeArena types);
 
@@ -872,6 +902,8 @@ internal static class VariantShredder
 
         protected override void Value(in VariantScalar scalar) => _values.Add((long)scalar.Integer);
 
+        protected override void Repeat() => _values.Add(_values.Last);
+
         protected override int Lay(CanonicalArena arena, DType dtype, int rows, Validity validity) =>
             arena.AddPrimitive(dtype, rows, validity, PType.I64, Fixed(arena, rows, Rows, _values));
     }
@@ -891,6 +923,8 @@ internal static class VariantShredder
 
         protected override void Value(in VariantScalar scalar) => _values.Add(scalar.Number);
 
+        protected override void Repeat() => _values.Add(_values.Last);
+
         protected override int Lay(CanonicalArena arena, DType dtype, int rows, Validity validity) =>
             arena.AddPrimitive(dtype, rows, validity, PType.F64, Fixed(arena, rows, Rows, _values));
     }
@@ -909,6 +943,8 @@ internal static class VariantShredder
         internal override DType Type(DTypeArena types) => types.Bool(Nullability.Nullable);
 
         protected override void Value(in VariantScalar scalar) => _values.Add(scalar.Integer != 0 ? (byte)1 : (byte)0);
+
+        protected override void Repeat() => _values.Add(_values.Last);
 
         protected override int Lay(CanonicalArena arena, DType dtype, int rows, Validity validity)
         {
@@ -935,6 +971,10 @@ internal static class VariantShredder
         private readonly Appended<int> _lengths = new Appended<int>();
         private readonly Appended<byte> _bytes = new Appended<byte>();
 
+        // The text taken last, which a row that repeats it takes again: its bytes in the list may lie across two blocks.
+        private byte[] _last = new byte[64];
+        private int _lastLength;
+
         internal override void Clear(CanonicalArena arena)
         {
             base.Clear(arena);
@@ -946,8 +986,22 @@ internal static class VariantShredder
 
         protected override void Value(in VariantScalar scalar)
         {
-            _lengths.Add(scalar.Bytes.Length);
-            _bytes.AddRange(scalar.Bytes);
+            ReadOnlySpan<byte> text = scalar.Bytes;
+            _lengths.Add(text.Length);
+            _bytes.AddRange(text);
+            if (_last.Length < text.Length)
+            {
+                _last = new byte[Math.Max(text.Length, 2 * _last.Length)];
+            }
+
+            text.CopyTo(_last);
+            _lastLength = text.Length;
+        }
+
+        protected override void Repeat()
+        {
+            _lengths.Add(_lastLength);
+            _bytes.AddRange(_last.AsSpan(0, _lastLength));
         }
 
         protected override int Lay(CanonicalArena arena, DType dtype, int rows, Validity validity) =>
@@ -1214,6 +1268,9 @@ internal static class VariantShredder
                 values = values[take..];
             }
         }
+
+        /// <summary>The value appended last; meaningless before one.</summary>
+        internal T Last => *(_next - 1);
 
         /// <summary>The values of block <paramref name="index"/>, the last one's as far as it is filled.</summary>
         internal ReadOnlySpan<T> Block(int index)
