@@ -319,7 +319,7 @@ internal sealed partial class GroupCore
     /// otherwise double some ten times, rehashing, through the part's first bursts. Its room is rounded
     /// up to a quarter of a power of two (<see cref="QuarterStep"/>). The rounding was made for arrays
     /// lent by exact length, where a part's exact count asked lengths no other part nor query asked
-    /// again (830 a query on q10); the pool's blocks, a power of two each, no longer need it.
+    /// again (830 a query on q10); the pool's classes, eight an octave past 64 KiB, hold its lengths.
     /// </summary>
     internal SubTable FirstTable(CorePart part, int entries)
     {

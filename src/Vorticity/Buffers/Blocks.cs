@@ -9,9 +9,10 @@ namespace Vorticity.Buffers;
 
 /// <summary>
 /// The pool's typed face: every array of elements that hold no reference the library rents, a table's,
-/// a decoder's, a writer's scratch, as a <see cref="Block{T}"/> over a block of bytes of a power-of-two
-/// size, from 16 bytes to a gigabyte. The bytes are the unit it keeps and counts, so a block given back
-/// by one type serves the next of another, and what it keeps is one number.
+/// a decoder's, a writer's scratch, as a <see cref="Block{T}"/> over a block of bytes of a class's size:
+/// powers of two from 16 bytes to 64 KiB, then eight sizes an octave up to a gigabyte. The bytes are the
+/// unit it keeps and counts, so a block given back by one type serves the next of another, and what it
+/// keeps is one number.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -39,6 +40,20 @@ internal static class Blocks
 
     /// <summary>The largest block kept: a gigabyte. A longer one is allocated at its length and let go when given back.</summary>
     private const int MaxShift = 30;
+
+    /// <summary>
+    /// The power of two past which the classes step by an eighth of their octave, <see cref="StepBits"/>: 64 KiB. Powers of
+    /// two all the way, a table a lane reserves at an eighth past its groups, 2 242 KiB, took a block of 4 MiB: a group by
+    /// of a million groups at 14 lanes allocated 30 % more than arrays of their length did, ran background collections they
+    /// did not, and took 8.2 ms where they took 7.4 (2026-11-16). An eighth an octave wastes an eighth of a block at most.
+    /// </summary>
+    private const int StepShift = 16;
+
+    /// <summary>The classes an octave holds past <see cref="StepShift"/>, as a power of two: eight.</summary>
+    private const int StepBits = 3;
+
+    /// <summary>The classes of powers of two, from 16 bytes to 2^<see cref="StepShift"/>.</summary>
+    private const int PowerClasses = StepShift - MinShift + 1;
 
     /// <summary>
     /// The bytes each class keeps whatever the registry asks: 4 096 blocks of 16 bytes, one of 64 KiB, none larger.
@@ -74,8 +89,8 @@ internal static class Blocks
             return new Block<T>(Outsized(bytes), length);
         }
 
-        int shift = ShiftOf((int)bytes);
-        return new Block<T>(s_classes[shift - MinShift].Take() ?? GC.AllocateUninitializedArray<byte>(1 << shift), length);
+        int index = ClassOf(bytes);
+        return new Block<T>(s_classes[index].Take() ?? GC.AllocateUninitializedArray<byte>((int)SizeOf(index)), length);
     }
 
     /// <summary><see cref="Rent{T}(int)"/>, every element zeroed.</summary>
@@ -117,7 +132,13 @@ internal static class Blocks
         }
 
         int length = bytes.Length;
-        if (length < 1 << MinShift || length > 1 << MaxShift || !BitOperations.IsPow2(length))
+        if (length < 1 << MinShift || length > 1 << MaxShift)
+        {
+            return;
+        }
+
+        int index = ClassOf(length);
+        if (SizeOf(index) != length)
         {
             return;
         }
@@ -127,7 +148,7 @@ internal static class Blocks
             bytes.AsSpan().Fill(0xDB);
         }
 
-        s_classes[BitOperations.Log2((uint)length) - MinShift].Give(bytes);
+        s_classes[index].Give(bytes);
     }
 
     /// <summary>
@@ -328,7 +349,7 @@ internal static class Blocks
         where T : unmanaged
     {
         long bytes = (long)Math.Max(length, 0) * Unsafe.SizeOf<T>();
-        return bytes == 0 ? 0 : bytes <= 1L << MaxShift ? 1L << ShiftOf((int)bytes) : bytes;
+        return bytes == 0 ? 0 : bytes <= 1L << MaxShift ? SizeOf(ClassOf(bytes)) : bytes;
     }
 
     /// <summary>The bytes the pool keeps for the next rents, each class read as it stands.</summary>
@@ -361,7 +382,7 @@ internal static class Blocks
         long given = 0;
         for (int i = s_classes.Length - 1; i >= 0 && given < bytes; i--)
         {
-            long size = 1L << (i + MinShift);
+            long size = SizeOf(i);
             given += s_classes[i].LetGo(BlockPool.BlocksFor(bytes - given, size), aboveFloor: true) * size;
         }
 
@@ -380,6 +401,36 @@ internal static class Blocks
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static int ShiftOf(int bytes) => bytes <= 1 << MinShift ? MinShift : BitOperations.Log2((uint)bytes - 1) + 1;
 
+    /// <summary>The class of the least block that holds <paramref name="bytes"/>, from 1 byte to a gigabyte.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static int ClassOf(long bytes)
+    {
+        if (bytes <= 1L << StepShift)
+        {
+            return ShiftOf((int)bytes) - MinShift;
+        }
+
+        // Past 2^s and up to 2^(s+1), by steps of an eighth of 2^s: the first that reaches the bytes.
+        int octave = BitOperations.Log2((ulong)(bytes - 1));
+        int stepShift = octave - StepBits;
+        int step = (int)((bytes - (1L << octave) + (1L << stepShift) - 1) >> stepShift);
+        return PowerClasses + ((octave - StepShift) << StepBits) + step - 1;
+    }
+
+    /// <summary>The bytes of a block of class <paramref name="index"/>.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static long SizeOf(int index)
+    {
+        if (index < PowerClasses)
+        {
+            return 1L << (index + MinShift);
+        }
+
+        int past = index - PowerClasses;
+        int octave = StepShift + (past >> StepBits);
+        return (1L << octave) + ((long)((past & ((1 << StepBits) - 1)) + 1) << (octave - StepBits));
+    }
+
     private static byte[] Outsized(long bytes) =>
         bytes <= Array.MaxLength
             ? GC.AllocateUninitializedArray<byte>((int)bytes)
@@ -392,10 +443,10 @@ internal static class Blocks
 
     private static Stack[] NewClasses()
     {
-        Stack[] classes = new Stack[MaxShift - MinShift + 1];
+        Stack[] classes = new Stack[PowerClasses + ((MaxShift - StepShift) << StepBits)];
         for (int i = 0; i < classes.Length; i++)
         {
-            int size = 1 << (i + MinShift);
+            int size = (int)SizeOf(i);
             classes[i] = new Stack(size, FloorBytesPerClass / size);
         }
 

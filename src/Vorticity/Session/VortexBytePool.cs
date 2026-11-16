@@ -11,8 +11,9 @@ namespace Vorticity;
 /// </summary>
 /// <remarks>
 /// <para>
-/// An array lent holds at least the bytes asked for, a power of two of them from 16 bytes to a gigabyte, and whatever its
-/// last renter left. Past a gigabyte, it is allocated at its length and let go when given back.
+/// An array lent holds at least the bytes asked for, a class's size of them, powers of two from 16 bytes to 64 KiB and then
+/// eight sizes an octave up to a gigabyte, and whatever its last renter left. Past a gigabyte, it is allocated at its length
+/// and let go when given back.
 /// </para>
 /// <para>
 /// The pool keeps what is given back for the next rent. It lets go of the arrays no rent took since the time before, after

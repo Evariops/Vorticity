@@ -206,7 +206,7 @@ public sealed class BlocksKeptTests
     }
 
     /// <summary>
-    /// A block of 3 MB asked is one of 4 MB, given back on another thread and taken again after a collection and a sweep of
+    /// A block of 3 MB asked is one of a class of its own, given back on another thread and taken again after a collection and a sweep of
     /// the memory kept: the same bytes, none made new, the class asked for since the last sweep keeping what it holds. In a
     /// process of its own: in the suite's, a full collection another test ran swept the pool between the return and the
     /// test's own sweep, which then found the block unused, and the rent made another.
@@ -242,9 +242,12 @@ public sealed class BlocksKeptTests
     public void ALargeBlockTakenAgain()
     {
         Assert.SkipWhen(Environment.GetEnvironmentVariable(Child) is null, "The child of A_large_block_given_back_on_another_thread_is_taken_again_past_a_collection_and_a_sweep.");
+        // Past 64 KiB, a class steps by an eighth of its octave: 3 MB is one of its own, and 3 MB and a byte the next, an
+        // eighth of 2 MiB larger.
         const int Asked = 3 << 20;
+        Assert.Equal((3 << 20) + (1 << 18), Blocks.Rent<byte>(Asked + 1).Bytes!.Length);
         Block<byte> first = Blocks.Rent<byte>(Asked);
-        Assert.Equal(4 << 20, first.Bytes!.Length);
+        Assert.Equal(3 << 20, first.Bytes!.Length);
         Thread other = new Thread(() => Blocks.Return(first));
         other.Start();
         other.Join();
